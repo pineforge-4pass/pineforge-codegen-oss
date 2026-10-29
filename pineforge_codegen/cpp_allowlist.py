@@ -47,6 +47,8 @@ REASONS: dict[str, str] = {
     "directive": "preprocessor directive is not part of codegen's fixed emitted set",
     "extern-c": "extern is only allowed as the generated C export block",
     "process": "process or system-call primitive is not allowed in generated C++",
+    "namespace": "namespace or mount primitive is not allowed in generated C++",
+    "thread": "thread creation is not allowed in generated C++",
     "dlopen": "dynamic loading is not allowed in generated C++",
     "file-io": "file I/O is not allowed in generated C++",
     "filesystem-stream": "standard file or filesystem streams are not allowed in generated C++",
@@ -169,6 +171,15 @@ _EXEC_NAMES = frozenset(
         "execvpe", "execveat",
     }
 )
+_NAMESPACE_NAMES = frozenset(
+    {
+        "unshare", "setns", "clone", "clone3", "mount", "umount", "umount2",
+        "pivot_root", "chroot", "prctl", "seccomp",
+    }
+)
+_THREAD_NAMES = frozenset(
+    {"pthread_create", "thrd_create", "__clone", "thread", "jthread", "async"}
+)
 _DL_NAMES = frozenset({"dlopen", "dlsym", "dlclose"})
 _FILE_IO_NAMES = frozenset(
     {"fopen", "freopen", "fdopen", "open", "openat"}
@@ -199,6 +210,9 @@ _LIBC_ADDRESS_NAMES = frozenset(
         "socket", "connect", "bind", "listen", "accept", "getaddrinfo",
         "open", "openat", "fopen", "freopen", "fdopen", "fclose", "mmap",
         "mprotect", "ptrace",
+        "unshare", "setns", "clone", "clone3", "mount", "umount", "umount2",
+        "pivot_root", "chroot", "prctl", "seccomp",
+        "pthread_create", "thrd_create", "__clone",
     }
 )
 
@@ -746,6 +760,10 @@ class _Tokenizer:
                 self._finding("reinterpret-cast", token.line, token.column)
             elif name in _PROCESS_NAMES or name in _EXEC_NAMES:
                 self._finding("process", token.line, token.column)
+            elif name in _NAMESPACE_NAMES:
+                self._finding("namespace", token.line, token.column)
+            elif name in _THREAD_NAMES:
+                self._finding("thread", token.line, token.column)
             elif name in _DL_NAMES:
                 self._finding("dlopen", token.line, token.column)
             elif name in _FILE_IO_NAMES:

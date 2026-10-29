@@ -86,6 +86,8 @@ accepted input (line endings, one-line field assignments, an unevaluated
 
 ### Changes since 1.7.0
 
+- The generated-C++ gate and identifier reservation now cover namespace, mount
+  and thread-creation names.
 - Preserve the calendar timestamp lambda's fixed body when a request
   expression also reads a mutable global, helper local, loop counter or tuple
   element whose name matches a body identifier, including history reads.
