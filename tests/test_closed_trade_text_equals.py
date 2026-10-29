@@ -98,20 +98,153 @@ def test_literal_comparison_emission(expression, expected, requested):
     _assert_retains_rows(cpp)
 
 
+_LOOP_COMPARISONS = [
+    # The int loop binder stays i; the single stored L matches once.
+    ('strategy.closedtrades.entry_id(i) == "L"',
+     'closed_trade_entry_id_equals(i, std::string_view("L", sizeof("L") - 1))',
+     "1\n"),
+    # Reversing equality keeps index i and the one matching stored L.
+    ('"L" == strategy.closedtrades.entry_id(i)',
+     'closed_trade_entry_id_equals(i, std::string_view("L", sizeof("L") - 1))',
+     "1\n"),
+    # Inequality negates the same index-i predicate; stored L gives zero hits.
+    ('strategy.closedtrades.entry_id(i) != "L"',
+     '!(closed_trade_entry_id_equals(i, std::string_view("L", sizeof("L") - 1)))',
+     "0\n"),
+    # Reversed inequality keeps the negation and also gives zero hits.
+    ('"L" != strategy.closedtrades.entry_id(i)',
+     '!(closed_trade_entry_id_equals(i, std::string_view("L", sizeof("L") - 1)))',
+     "0\n"),
+]
+
+_LOOP_SOURCE = (
+    "matches = 0\n"
+    "for i = 0 to strategy.closedtrades - 1\n"
+    "    if {expression}\n"
+    "        matches += 1\n"
+)
+
+# Bounds 0..closedtrades-1 keep the counted loop's direction, step and refresh.
+_LOOP_CPP = (
+    "        int _for_start_0 = (0);\n"
+    "        int _for_end_0 = ((((int)trades_.size()) - 1));\n"
+    "        int _for_step_0 = (1);\n"
+    "        if (_for_step_0 < 0) _for_step_0 = -_for_step_0;\n"
+    "        if (_for_step_0 == 0) _for_step_0 = 1;\n"
+    "        const bool _for_down_0 = (_for_start_0 > _for_end_0);\n"
+    "        for (int i = _for_start_0; "
+    "(_for_down_0 ? (i >= _for_end_0) : (i <= _for_end_0)); "
+    "i += (_for_down_0 ? -_for_step_0 : _for_step_0), "
+    "_for_end_0 = ((((int)trades_.size()) - 1))) {\n"
+)
+
+
+@pytest.mark.parametrize(
+    "expression, expected_cpp", [row[:2] for row in _LOOP_COMPARISONS],
+)
+def test_loop_variable_comparison_emission(expression, expected_cpp):
+    cpp = transpile(_HEADER + _LOOP_SOURCE.format(expression=expression))
+    assert _LOOP_CPP + f"            if ({expected_cpp}) {{\n" in cpp
+    assert cpp.count(expected_cpp) == 1
+    assert cpp.count("_equals(") == 1
+    assert "closed_trade_entry_id(" not in cpp
+    _assert_retains_rows(cpp)
+
+
+@pytest.mark.parametrize("source, expected_cpp", [
+    # Boolean and keeps the input gate and one equality helper under &&.
+    ('gate = input.bool(true, "Gate")\n'
+     'result = gate and strategy.closedtrades.entry_id(0) == "L"\n',
+     'result = (gate && closed_trade_entry_id_equals(0, std::string_view("L", sizeof("L") - 1)));'),
+    # Boolean or keeps the input gate and one equality helper under ||.
+    ('gate = input.bool(false, "Gate")\n'
+     'result = gate or strategy.closedtrades.entry_id(0) == "L"\n',
+     'result = (gate || closed_trade_entry_id_equals(0, std::string_view("L", sizeof("L") - 1)));'),
+    # A ternary uses the equality helper once as its condition before 1 and 0.
+    ('result = strategy.closedtrades.entry_id(0) == "L" ? 1 : 0\n',
+     'result = ((closed_trade_entry_id_equals(0, std::string_view("L", sizeof("L") - 1))) ? (1) : (0));'),
+    # An if statement tests the helper directly before assigning result.
+    ('result = 0\nif strategy.closedtrades.entry_id(0) == "L"\n    result := 1\n',
+     'if (closed_trade_entry_id_equals(0, std::string_view("L", sizeof("L") - 1))) {'),
+], ids=["and", "or", "ternary", "if"])
+def test_nested_comparison_emission(source, expected_cpp):
+    cpp = transpile(_HEADER + source)
+    assert expected_cpp in cpp
+    assert cpp.count(_FAST_CPP) == 1
+    assert cpp.count("_equals(") == 1
+    assert "closed_trade_entry_id(" not in cpp
+    _assert_retains_rows(cpp)
+
+
+@pytest.mark.parametrize("requested", [False, True], ids=["chart", "request"])
+def test_na_trade_index_reuses_typed_na_coercion(requested):
+    expression = 'strategy.closedtrades.entry_id(na) == "L"'
+    value = (f'request.security(syminfo.tickerid, "60", {expression})'
+             if requested else expression)
+    cpp = transpile(_HEADER + f"result = {value}\n")
+    # Bare na emits na<double>(), then the int slot directly selects na<int>().
+    expected = 'closed_trade_entry_id_equals(na<int>(), std::string_view("L", sizeof("L") - 1))'
+    target = "_req_sec_0" if requested else "result"
+    assert f"{target} = {expected};" in cpp
+    assert cpp.count(expected) == 1
+    assert cpp.count("_equals(") == 1
+    assert "closed_trade_entry_id(" not in cpp
+    _assert_retains_rows(cpp)
+
+
+@pytest.mark.parametrize("name, escaped, comparison, expected_cpp", [
+    # A host entry ID member reserves its name; the authored binding gets pf_safe_.
+    ("closed_trade_entry_id_equals", "pf_safe_closed_trade_entry_id_equals",
+     'strategy.closedtrades.entry_id(0) == "L"',
+     'closed_trade_entry_id_equals(0, std::string_view("L", sizeof("L") - 1))'),
+    # The exit ID member uses the same escape rule and still resolves its helper.
+    ("closed_trade_exit_id_equals", "pf_safe_closed_trade_exit_id_equals",
+     'strategy.closedtrades.exit_id(0) == "L"',
+     'closed_trade_exit_id_equals(0, std::string_view("L", sizeof("L") - 1))'),
+    # The entry comment member reserves its spelling independently of entry ID.
+    ("closed_trade_entry_comment_equals", "pf_safe_closed_trade_entry_comment_equals",
+     'strategy.closedtrades.entry_comment(0) == "L"',
+     'closed_trade_entry_comment_equals(0, std::string_view("L", sizeof("L") - 1))'),
+    # The exit comment member also escapes the authored binding and keeps its call.
+    ("closed_trade_exit_comment_equals", "pf_safe_closed_trade_exit_comment_equals",
+     'strategy.closedtrades.exit_comment(0) == "L"',
+     'closed_trade_exit_comment_equals(0, std::string_view("L", sizeof("L") - 1))'),
+])
+def test_authored_comparison_member_names_are_escaped(
+    name, escaped, comparison, expected_cpp,
+):
+    cpp = transpile(_HEADER + f"{name} = close\n"
+                    + f"copied = {name}\nresult = {comparison}\n")
+    assert re.search(rf"\b{escaped}\b", cpp)
+    assert f"{escaped} = current_bar_.close;" in cpp
+    assert f"copied = {escaped};" in cpp
+    assert not re.search(rf"^\s+{name} = ", cpp, re.M)
+    assert f"result = {expected_cpp};" in cpp
+    assert cpp.count(expected_cpp) == 1
+    assert cpp.count("_equals(") == 1
+    assert not re.search(r"\bclosed_trade_(?:entry|exit)_(?:id|comment)\(", cpp)
+    _assert_retains_rows(cpp)
+
+
 _FALLBACKS = [
     # The owning constructor still truncates this literal at its first NUL.
+    # Preserves existing behaviour; this makes no claim about Pine semantics.
     ('strategy.closedtrades.entry_id(0) == "L\0tail"',
      r'(closed_trade_entry_id(0) == std::string("L\000tail"))'),
     # The same NUL truncation remains when the literal is on the left.
+    # Preserves existing behaviour; this makes no claim about Pine semantics.
     ('"L\0tail" != strategy.closedtrades.entry_id(0)',
      r'(std::string("L\000tail") != closed_trade_entry_id(0))'),
     # Exit IDs with NUL literals still use their owning getter.
+    # Preserves existing behaviour; this makes no claim about Pine semantics.
     ('strategy.closedtrades.exit_id(0) == "\0"',
      r'(closed_trade_exit_id(0) == std::string("\000"))'),
     # Entry comments with NUL literals still use their owning getter.
+    # Preserves existing behaviour; this makes no claim about Pine semantics.
     ('strategy.closedtrades.entry_comment(0) != "\0"',
      r'(closed_trade_entry_comment(0) != std::string("\000"))'),
     # Exit comments with NUL literals still use their owning getter.
+    # Preserves existing behaviour; this makes no claim about Pine semantics.
     ('"\0" == strategy.closedtrades.exit_comment(0)',
      r'(std::string("\000") == closed_trade_exit_comment(0))'),
     # Two getters must both retain their independently owned strings.
@@ -214,6 +347,7 @@ _RUNTIME_ROWS = [
     # Truncation toward zero makes 0.75 read the one stored row at index 0.
     ('std::string("L")', '"L"', "0.75", "1010 1010 1010 1010\n"),
     # The unchanged owning NUL literal truncates to L, which equals the stored L.
+    # Preserves existing behaviour; this makes no claim about Pine semantics.
     ('std::string("L")', '"L\0tail"', "0", "1010 1010 1010 1010\n"),
 ]
 
@@ -240,6 +374,31 @@ public:
     }
 };
 '''
+
+
+@pytest.mark.parametrize("expression, expected_cpp, expected_stdout", _LOOP_COMPARISONS)
+def test_loop_variable_comparisons_execute_in_source_host(
+    expression, expected_cpp, expected_stdout,
+):
+    cpp = transpile(_HEADER + _LOOP_SOURCE.format(expression=expression))
+    assert _LOOP_CPP + f"            if ({expected_cpp}) {{\n" in cpp
+    assert cpp.count("_equals(") == 1
+    assert "closed_trade_entry_id(" not in cpp
+    _assert_retains_rows(cpp)
+    driver = (
+        '#include <iostream>\n#include <utility>\n' + _SEEDED_HOST
+        + r'''
+int main() {
+    Bar bars[] = {Bar{100.0, 100.0, 100.0, 100.0, 1.0, 60000}};
+    TextStrategy strategy{std::string("L")};
+    strategy.run(bars, 1);
+    if (!strategy.last_error().empty()) return 2;
+    if (strategy.trade_count() != 1) return 3;
+    std::cout << strategy.matches << "\n";
+}
+'''
+    )
+    assert _compile_and_run(cpp + driver) == expected_stdout
 
 
 @pytest.mark.parametrize("stored, literal, index, expected", _RUNTIME_ROWS)

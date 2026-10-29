@@ -20,11 +20,15 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
-## Unreleased
+## Unreleased (1.9.0)
 
 - Generated closed-trade text comparisons against a NUL-free string literal
-  call the engine's in-place comparison helpers. Every other shape keeps its
-  owning string emission. Requires the paired engine release with these helpers.
+  call the engine's in-place closed-trade comparison members, introduced in
+  the engine release after `v1.8.0`. Generated C++ using these members builds
+  only against that paired engine release. Every other shape keeps its owning
+  string emission.
+
+## Unreleased
 
 Planned as 1.8.0, a minor release of the exact engine/codegen pair, paired with
 engine `v1.8.0`. This entry records what changed in this repository since
