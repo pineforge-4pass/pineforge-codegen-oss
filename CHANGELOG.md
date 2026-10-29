@@ -28,7 +28,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
   only against that paired engine release. Every other shape keeps its owning
   string emission.
 
-## Unreleased
+## 1.8.0 — 2026-10-29
 
 Planned as 1.8.0, a minor release of the exact engine/codegen pair, paired with
 engine `v1.8.0`. This entry records what changed in this repository since
