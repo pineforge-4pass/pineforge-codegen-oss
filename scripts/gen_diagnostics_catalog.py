@@ -1034,6 +1034,43 @@ def dump(catalog: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+# The refusals of the generated-C++ allowlist (pineforge_codegen/cpp_allowlist.py),
+# raised by the translation pipeline with the checker's fixed reasons. Their
+# explanation and short sentence are authored here, once, and filled in only
+# while a code still has none.
+_ALLOWLIST_EXPLANATION = ("The translator checks the C++ it generates against a fixed allowlist "
+                          "and refuses output with this construct, which it never emits itself.")
+ALLOWLIST_USER_MESSAGES = {
+    "PF-E5053": "The generated C++ contains a #define outside the fixed set the translator emits.",
+    "PF-E5054": "The generated C++ contains an #include outside the allowed set.",
+    "PF-E5055": "The generated C++ contains an #undef outside the fixed set the translator emits.",
+    "PF-E5056": "The generated C++ contains a NUL byte.",
+    "PF-E5057": "The generated C++ contains a backslash outside a literal, comment or directive.",
+    "PF-E5058": "The generated C++ takes a pointer to a libc function.",
+    "PF-E5059": "The generated C++ contains a digit separator.",
+    "PF-E5060": "The generated C++ contains a digraph token.",
+    "PF-E5061": "The generated C++ uses dynamic loading.",
+    "PF-E5062": "The generated C++ accesses the environment outside the fixed timezone templates.",
+    "PF-E5063": "The generated C++ contains an extern outside the export block.",
+    "PF-E5064": "The generated C++ uses file input or output.",
+    "PF-E5065": "The generated C++ contains a non-ASCII identifier.",
+    "PF-E5066": "The generated C++ contains inline assembly.",
+    "PF-E5067": "The generated C++ contains a line splice.",
+    "PF-E5068": "The generated C++ uses a namespace or mount primitive.",
+    "PF-E5069": "The generated C++ contains a preprocessor directive outside the fixed set.",
+    "PF-E5070": "The generated C++ contains a preprocessor pragma.",
+    "PF-E5071": "The generated C++ uses a process or system-call primitive.",
+    "PF-E5072": "The generated C++ contains a raw string literal.",
+    "PF-E5073": "The generated C++ contains a reinterpret_cast.",
+    "PF-E5074": "The generated C++ uses a socket primitive.",
+    "PF-E5075": "The generated C++ uses a file or filesystem stream.",
+    "PF-E5076": "The generated C++ contains an unterminated string or character literal.",
+    "PF-E5077": "The generated C++ creates a thread.",
+    "PF-E5078": "The generated C++ contains a trigraph.",
+    "PF-E5079": "The generated C++ contains a user-defined numeric literal.",
+}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--write", action="store_true", help="add codes for new templates")
@@ -1058,6 +1095,11 @@ def main(argv=None) -> int:
             "The arguments to {name} do not match its Pine signature. "
             "In a switch arm PineForge only warns and keeps the arm''s lowering."
         )
+        for code, sentence in ALLOWLIST_USER_MESSAGES.items():
+            entry = catalog["codes"].get(code)
+            if entry is not None and not entry.get("user_message"):
+                entry["user_message"] = sentence
+                entry["explanation"] = entry["explanation"] or _ALLOWLIST_EXPLANATION
         pruned = prune(catalog, templates)
         if pruned:
             print(f"{len(pruned)} unpinned code(s) no source spells removed: {', '.join(pruned)}")
