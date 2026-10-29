@@ -7572,7 +7572,10 @@ class SecurityEmitter:
                 # (current value not yet pushed — push happens after this assign).
                 return f"{hist}[{idx_lit - 1}]"
 
-        if isinstance(expr_node, BinOp):
+        # A literal comparison uses the expression visitor's shared lowering
+        # below, with the same fallback frame and index bindings as a getter.
+        if (isinstance(expr_node, BinOp)
+                and self._closed_trade_text_equality_operands(expr_node) is None):
             left = self._build_security_expr(
                 sec_id, expr_node.left, ta_range, ta_results, resolving, security_mutable_names, helper_binding_stack, emitted_lines
             )

@@ -22,6 +22,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased
 
+- Generated closed-trade text comparisons against a NUL-free string literal
+  call the engine's in-place comparison helpers. Every other shape keeps its
+  owning string emission. Requires the paired engine release with these helpers.
+
 Planned as 1.8.0, a minor release of the exact engine/codegen pair, paired with
 engine `v1.8.0`. This entry records what changed in this repository since
 1.7.0 and nothing else: the behaviour changes, the CHANGELOG-only change and

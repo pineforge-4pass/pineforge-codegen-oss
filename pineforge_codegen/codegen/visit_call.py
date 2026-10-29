@@ -3597,14 +3597,7 @@ class CallVisitor:
         if isinstance(node.callee, MemberAccess):
             inner = node.callee.object
             if isinstance(inner, MemberAccess) and inner.member in ("closedtrades", "opentrades"):
-                # The engine's accessors take an ``int`` trade index; a
-                # double-valued Pine expression narrows into it.
-                idx = (
-                    self._coerce_int_slot(
-                        self._visit_expr(node.args[0]), node.args[0], "int",
-                    )
-                    if node.args else "0"
-                )
+                idx = self._trade_index_cpp(node)
                 is_open = inner.member == "opentrades"
                 if not is_open:
                     # Closed-trade accessors require the resident trade rows;
@@ -3656,6 +3649,17 @@ class CallVisitor:
         raise ValueError(
             f"codegen: unhandled strategy.{func_name}(...) — analyzer should "
             f"have rejected. Add a handler above or extend STRATEGY_FUNCTIONS."
+        )
+
+    def _trade_index_cpp(self, node: FuncCall) -> str:
+        """The shared index slot of owning getters and in-place comparisons."""
+        # The engine's accessors take an int; preserve na when narrowing a
+        # double-valued Pine expression, and evaluate the expression once.
+        return (
+            self._coerce_int_slot(
+                self._visit_expr(node.args[0]), node.args[0], "int",
+            )
+            if node.args else "0"
         )
 
     # TradingView's parameter order of color.from_gradient.
