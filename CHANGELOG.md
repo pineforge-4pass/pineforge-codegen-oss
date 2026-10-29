@@ -86,6 +86,9 @@ accepted input (line endings, one-line field assignments, an unevaluated
 
 ### Changes since 1.7.0
 
+- Translation now refuses a script whose generated C++ contains a construct
+  outside the allowlist, reporting the fixed reason without changing accepted
+  scripts or their generated C++.
 - The generated-C++ gate and identifier reservation now cover namespace, mount
   and thread-creation names.
 - Preserve the calendar timestamp lambda's fixed body when a request
