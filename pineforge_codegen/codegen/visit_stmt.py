@@ -618,7 +618,7 @@ class StmtVisitor:
                 if info.get("is_series"):
                     lines.append(f"{pad}    {target_expr}.update({init_cpp});")
                 else:
-                    lines.append(f"{pad}    {target_expr} = {init_cpp};")
+                    lines.append(f"{pad}    {self._array_journal_initializer(target_expr, init_cpp)}")
                 lines.append(f"{pad}    {flag_expr} = true;")
                 lines.append(f"{pad}}}")
             return
@@ -1204,7 +1204,7 @@ class StmtVisitor:
             int_slot = self._int_slot_cpp_type(target_name)
             if node.op == ":=":
                 val_cpp = self._coerce_int_slot(val_cpp, node.value, int_slot)
-                lines.append(f"{pad}{safe} = {val_cpp};")
+                lines.append(f"{pad}{self._array_journal_initializer(safe, val_cpp)}")
             else:
                 rhs = self._compound_assign_rhs(safe, node.op, val_cpp)
                 if rhs is not None:
@@ -2083,7 +2083,7 @@ class StmtVisitor:
             return
         if reset:
             pad = "    " * indent
-            lines.append(f"{pad}{target} = {self._na_value_for_type(value_cpp)};")
+            lines.append(f"{pad}{self._array_journal_initializer(target, self._na_value_for_type(value_cpp))}")
         visit(node, lines, indent, value_target=(target, target_cpp_type))
 
     def _unmatched_arm_na(self, target: str) -> str | None:
@@ -2317,7 +2317,7 @@ class StmtVisitor:
                         self._int_slot_cpp_type(None, target_cpp_type),
                     )
                     pad = "    " * indent
-                    lines.append(f"{pad}{target} = {cpp};")
+                    lines.append(f"{pad}{self._array_journal_initializer(target, cpp)}")
                 elif isinstance(stmt, IfStmt):
                     # Nested if expression
                     self._visit_if_switch_expr(
@@ -2349,7 +2349,7 @@ class StmtVisitor:
                         self._int_slot_cpp_type(None, target_cpp_type),
                     )
                     pad = "    " * indent
-                    lines.append(f"{pad}{target} = {cpp};")
+                    lines.append(f"{pad}{self._array_journal_initializer(target, cpp)}")
                 elif isinstance(stmt, (ForStmt, ForInStmt, WhileStmt)):
                     self._emit_loop_with_assign(
                         stmt, target, lines, indent,
@@ -2423,7 +2423,7 @@ class StmtVisitor:
                 emit_implicit_na_fallback()
             elif self._unmatched_arm_na(target) is not None:
                 lines.append(f"{pad}else {{")
-                lines.append(f"{pad}    {target} = {self._unmatched_arm_na(target)};")
+                lines.append(f"{pad}    {self._array_journal_initializer(target, self._unmatched_arm_na(target))}")
                 lines.append(f"{pad}}}")
         elif isinstance(node, SwitchStmt):
             if node.expr:
@@ -2487,7 +2487,7 @@ class StmtVisitor:
                 na_value = self._unmatched_arm_na(target)
                 if node.cases:
                     lines.append(f"{pad}else {{")
-                    lines.append(f"{pad}    {target} = {na_value};")
+                    lines.append(f"{pad}    {self._array_journal_initializer(target, na_value)}")
                     lines.append(f"{pad}}}")
                 else:
-                    lines.append(f"{pad}{target} = {na_value};")
+                    lines.append(f"{pad}{self._array_journal_initializer(target, na_value)}")
