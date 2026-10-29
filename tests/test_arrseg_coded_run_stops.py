@@ -130,9 +130,9 @@ int main() {
     assert(Traits::reference(nullptr).is_na());
     Value current(std::vector<double>{2.0});
     _PFCollectionHistory<Value> history;
-    history.open(current, true);
+    history.open_slot(current, true);
     history.close(current);
-    history.open(current, true);
+    history.open_slot(current, true);
     assert(!history.is_na(1));
     assert(history.is_na(20));
     assert(!history.is_na(0, current));

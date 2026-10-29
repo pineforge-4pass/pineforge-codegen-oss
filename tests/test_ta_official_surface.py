@@ -155,6 +155,14 @@ def test_pivot_point_levels_global_initializes_as_vector():
             "return na<double>();") in cpp
 
 
+def test_pivot_point_levels_helper_uses_open_price_parameter():
+    cpp = transpile(_pine('levels = ta.pivot_point_levels("Traditional", true)'))
+    # The anchored helper defines compute and recompute with the same OHLC parameters.
+    assert cpp.count("double open_price, double high, double low, double close) {") == 2
+    # The fallback leaves its opening-price parameter unnamed, so no helper declares open.
+    assert "double open," not in cpp
+
+
 def test_pivot_point_levels_developing_and_kwargs_use_runtime_ohlc_shape():
     positional = transpile(_pine('levels = ta.pivot_point_levels("Traditional", true, false)'))
     keyword = transpile(_pine('levels = ta.pivot_point_levels(type="Traditional", anchor=true, developing=false)'))

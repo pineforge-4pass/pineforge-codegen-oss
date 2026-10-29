@@ -30,8 +30,9 @@ from ..analyzer import (
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
-from ..limits import TimeBudget, iter_ast_nodes
+from ..limits import TimeBudget, iter_ast_nodes, syntax_children
 from ..matrix_overloads import matrix_sum_has_rhs
+from . import graph_journal
 from ..session_reads import emitted_session_reads
 from ..block_locals import block_declarations, decl_key
 from ..pine_spelling import (
@@ -76,6 +77,9 @@ from .tables import (
     COLOR_CONST_MAP,
     ARRAY_NEW_CTORS,
     ARRAY_METHODS,
+    ARRAY_JOURNAL_DELTA_METHODS,
+    ARRAY_JOURNAL_FULL_METHODS,
+    ARRAY_JOURNAL_READ_METHODS,
     MAP_METHODS,
     MATRIX_METHODS,
     MATRIX_METHOD_KWARGS,
@@ -120,6 +124,155 @@ private:
 
     std::shared_ptr<std::vector<T>> owned_;
     std::vector<T>* data_ = nullptr;
+};
+"""
+
+ARRAY_JOURNAL_CPP = r"""
+class @JOURNAL@ {
+    struct Entry {
+        const void* owner;
+        uint64_t generation;
+        bool committed;
+        std::function<void()> undo;
+    };
+    std::vector<Entry> entries_;
+    uint64_t generation_ = 0;
+    bool active_ = false;
+    bool replaying_ = false;
+    bool recording() const { return active_ && !replaying_; }
+    template <typename T, typename F>
+    size_t append(std::vector<T>& array, F&& undo, bool committed) {
+        entries_.push_back(Entry{&array, generation_, committed,
+                                std::forward<F>(undo)});
+        return entries_.size() - 1;
+    }
+public:
+    struct Token { const void* owner; uint64_t generation; };
+    @JOURNAL@() = default;
+    @JOURNAL@(const @JOURNAL@&) = delete;
+    @JOURNAL@& operator=(const @JOURNAL@&) = delete;
+    @JOURNAL@(@JOURNAL@&&) = delete;
+    @JOURNAL@& operator=(@JOURNAL@&&) = delete;
+
+    uint64_t next_generation() const {
+        if (generation_ == std::numeric_limits<uint64_t>::max())
+            throw std::overflow_error("Array checkpoint generation exhausted");
+        return generation_ + 1;
+    }
+    void begin(uint64_t generation) noexcept {
+        entries_.clear();
+        generation_ = generation;
+        active_ = true;
+    }
+    void reset_for_run() noexcept {
+        entries_.clear();
+        active_ = false;
+        replaying_ = false;
+    }
+    bool empty() const { return entries_.empty(); }
+    template <typename T>
+    void validate(const Token& token, const std::vector<T>& array) const {
+        if (!active_ || token.owner != &array || token.generation != generation_)
+            throw std::logic_error("Invalid array checkpoint owner or generation");
+    }
+    void restore() {
+        struct ReplayGuard {
+            bool& flag;
+            explicit ReplayGuard(bool& value) : flag(value) { flag = true; }
+            ~ReplayGuard() { flag = false; }
+        } guard(replaying_);
+        while (!entries_.empty()) {
+            auto& entry = entries_.back();
+            if (entry.generation != generation_)
+                throw std::logic_error("Invalid array undo generation");
+            if (entry.committed) entry.undo();
+            entries_.pop_back();
+        }
+    }
+    template <typename T>
+    void save_set(std::vector<T>& array, size_t index) {
+        if (!recording()) return;
+        T old = array[index];
+        append(array, [owner = &array, index, old = std::move(old)]() {
+            (*owner)[index] = old;
+        }, true);
+    }
+    template <typename T>
+    void save_remove(std::vector<T>& array, size_t index) {
+        if (!recording()) return;
+        T old = array[index];
+        append(array, [owner = &array, index, old = std::move(old)]() {
+            owner->insert(owner->begin() + index, old);
+        }, true);
+    }
+    template <typename T>
+    void save_full(std::vector<T>& array) {
+        if (!recording()) return;
+        append(array, [owner = &array, old = array]() mutable {
+            owner->swap(old);
+        }, true);
+    }
+    template <typename T, typename V>
+    void push(std::vector<T>& array, V&& value) {
+        if (!recording()) {
+            array.push_back(std::forward<V>(value));
+            return;
+        }
+        const size_t size = array.size();
+        const size_t entry = append(array, [owner = &array, size]() {
+            owner->resize(size);
+        }, false);
+        array.push_back(std::forward<V>(value));
+        entries_[entry].committed = true;
+    }
+    template <typename T, typename I, typename V>
+    typename std::vector<T>::iterator insert(std::vector<T>& array, I position, V&& value) {
+        if (!recording()) {
+            return array.insert(position, std::forward<V>(value));
+        }
+        if constexpr (std::is_same_v<T, std::string>) {
+            // A throwing element copy must remain recoverable after any partial insertion.
+            save_full(array);
+            return array.insert(position, std::forward<V>(value));
+        }
+        const size_t index = position - array.begin();
+        const size_t entry = append(array, [owner = &array, index]() {
+            owner->erase(owner->begin() + index);
+        }, false);
+        auto result = array.insert(position, std::forward<V>(value));
+        entries_[entry].committed = true;
+        return result;
+    }
+    template <typename T, typename V>
+    void replace(std::vector<T>& array, V&& value) {
+        save_full(array);
+        array = std::forward<V>(value);
+    }
+    template <typename T>
+    void clear(std::vector<T>& array) {
+        save_full(array);
+        array.clear();
+    }
+    template <typename T, typename I, typename V>
+    void fill(std::vector<T>& array, I first, I last, const V& value) {
+        save_full(array);
+        std::fill(first, last, value);
+    }
+    template <typename T, typename I, typename... C>
+    void sort(std::vector<T>& array, I first, I last, C... compare) {
+        save_full(array);
+        std::sort(first, last, compare...);
+    }
+    template <typename T, typename I>
+    void reverse(std::vector<T>& array, I first, I last) {
+        save_full(array);
+        std::reverse(first, last);
+    }
+    template <typename T, typename I, typename R>
+    typename std::vector<T>::iterator concat(std::vector<T>& array, I position, R first, R last) {
+        save_full(array);
+        return array.insert(position, first, last);
+    }
 };
 """
 
@@ -4535,6 +4688,264 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         except Exception:
             return None
 
+    def _prepare_array_journal(self) -> None:
+        self._plan_array_mutations()
+
+    def _plan_array_mutations(self, sharing=None) -> None:
+        """Prove complete write coverage before choosing any payload tokens.
+
+        Unique declarations plus exact call-node identities keep this separate
+        from the emitter's name-based dispatch. A bounded syntax/dependency
+        graph includes callable bodies and traces without expanding call paths.
+        Unproved storage, escapes and requested dependencies stay eager.
+        """
+        if sharing is None:
+            self._array_journal_members: dict[str, VarDecl] = {}
+            self._array_journal_calls: dict[int, str] = {}
+        if self._uses_map or self._uses_matrix or self._udt_defs:
+            return
+        from .capabilities import STRATEGY_PARAMETERS
+        position = STRATEGY_PARAMETERS.index("calc_on_order_fills")
+        enabled = False
+        for statement in self.ctx.ast.body:
+            if isinstance(statement, StrategyDecl):
+                flag = statement.kwargs.get("calc_on_order_fills")
+                if flag is None and len(statement.args) > position:
+                    flag = statement.args[position]
+                enabled = isinstance(flag, BoolLiteral) and flag.value is True
+        if not enabled and sharing is None:
+            return
+
+        roots = [self.ctx.ast]
+        roots.extend(pragma.expr_node for pragma in (self.ctx.pf_trace_pragmas or []))
+        roots.extend(fi.node for fi in self.ctx.func_infos if fi.node is not None)
+        nodes: dict[int, ASTNode] = {}
+        parents: dict[int, ASTNode | None] = {}
+        owners: dict[int, str | None] = {}
+        graph: dict[object, list] = {}
+        function_keys = {id(fi.node): fi.name for fi in self.ctx.func_infos if fi.node is not None}
+        plain_functions = {fi.node.name: fi.name for fi in self.ctx.func_infos
+                           if fi.node is not None and not fi.is_udt_method}
+        call_graph: dict[str | None, set[str]] = {}
+        for function in self.ctx.func_infos:
+            if function.node is not None:
+                for spelling in {function.name, function.name.rsplit(".", 1)[-1]}:
+                    graph.setdefault(("call", spelling), []).append(id(function.node))
+        bindings: dict[str, list] = {}
+        ambiguous_names: set[str] = set()
+        mutable_targets: set[int] = set()
+        methods: set[str] = set()
+        requests: list[int] = []
+        stack = [(root, None, root, None) for root in reversed(roots)]
+        while stack:
+            node, parent, top, owner = stack.pop()
+            key = id(node)
+            if key in nodes:
+                if isinstance(node, Identifier) and parents[key] is not parent:
+                    ambiguous_names.add(node.name)
+                continue
+            # Hitting the optimization budget retains the existing compiler
+            # path; it never introduces a new refusal for a valid source.
+            if len(nodes) >= 100_000:
+                return
+            if self._budget is not None:
+                self._budget.check(phase=Phase.CODEGEN)
+            nodes[key], parents[key], owners[key] = node, parent, owner
+            children = list(syntax_children(node))
+            if isinstance(node, (FuncDef, MethodDef)):
+                children.extend(default for default in (node.annotations or {}).get("param_defaults", ())
+                                if isinstance(default, ASTNode))
+            graph[key] = [id(child) for child in children]
+            names = []
+            if isinstance(node, VarDecl):
+                names = [node.name]
+            elif isinstance(node, TupleAssign):
+                names = node.names
+            elif isinstance(node, (FuncDef, MethodDef)):
+                names = [node.name, *node.params]
+                owner = function_keys.get(key, node.name)
+                if isinstance(node, MethodDef):
+                    owner = f"{node.type_name}.{node.name}"
+                    methods.add(node.name)
+            elif isinstance(node, ForStmt):
+                names = [node.var]
+            elif isinstance(node, ForInStmt):
+                names = node.vars or [node.var]
+            for name in names:
+                if name:
+                    bindings.setdefault(self._safe_name(name), []).append(node)
+            if owner is None:
+                writes = []
+                if isinstance(node, VarDecl):
+                    writes = [node.name]
+                elif isinstance(node, TupleAssign):
+                    writes = node.names
+                elif isinstance(node, Assignment) and isinstance(node.target, Identifier):
+                    writes = [node.target.name]
+                for name in writes:
+                    graph.setdefault(("value", name), []).append(id(top))
+            if isinstance(node, Identifier):
+                graph[key].append(("value", node.name))
+            if isinstance(node, Assignment):
+                target = node.target
+                while isinstance(target, (MemberAccess, Subscript)):
+                    mutable_targets.add(id(target))
+                    target = target.object
+                mutable_targets.add(id(target))
+            if isinstance(node, FuncCall):
+                name, namespace = self._resolve_callee(node.callee)
+                graph[key].append(("call", name))
+                if namespace == "request":
+                    requests.append(key)
+                bound = self.ctx.func_call_cs_map.get(key)
+                function = self._func_info_map.get(bound[0] if bound else name)
+                if function is not None and function.node is not None:
+                    graph[key].append(id(function.node))
+                target = (bound[0] if bound else
+                          plain_functions.get(name) if isinstance(node.callee, Identifier) else None)
+                if target is not None:
+                    call_graph.setdefault(owner, set()).add(target)
+            for child in reversed(children):
+                stack.append((child, node, child if isinstance(node, Program) else top, owner))
+
+        requested: set[object] = set()
+        pending: list[object] = list(requests)
+        while pending:
+            key = pending.pop()
+            if key in requested:
+                continue
+            requested.add(key)
+            pending.extend(graph.get(key, ()))
+
+        live: set[str | None] = set()
+        pending_owners: list[str | None] = [None]
+        while pending_owners:
+            owner = pending_owners.pop()
+            if owner in live or owner in self._dead_func_names:
+                continue
+            live.add(owner)
+            pending_owners.extend(call_graph.get(owner, ()))
+
+        history_names = {value.name for value in self.ctx.collection_history.values()}
+        # Sharing may reject every owner; discovery must not register unrelated
+        # history bindings earlier than the original emission path would.
+        history_values = (self._array_history_value_names(register=False)
+                          if sharing is not None else None)
+        metadata = self.ctx.var_member_metadata_by_node
+        candidates: dict[str, VarDecl] = {}
+        for declaration in self.ctx.ast.body:
+            if not isinstance(declaration, VarDecl) or not declaration.is_var or declaration.is_varip:
+                continue
+            name = declaration.name
+            safe = self._safe_name(name)
+            meta = metadata.get(id(declaration))
+            spec = self._global_collection_types.get(name)
+            if (meta is None or meta[0] is not declaration or meta[1] != name or meta[4]
+                    or len(bindings.get(safe, ())) != 1
+                    or bindings[safe][0] is not declaration
+                    or name in ambiguous_names
+                    or (name in history_names if sharing is None else not sharing.candidate(declaration))
+                    or (sharing is not None and safe in self._array_journal_members)
+                    or name in self.ctx.series_vars
+                    or safe in self._series_var_member_names
+                    or (isinstance(declaration.value, (IfStmt, SwitchStmt))
+                        and id(declaration) not in self._runtime_scalar_var_init_by_node)
+                    or spec is None or spec.kind != "array" or spec.element is None
+                    or spec.element.kind != "primitive"
+                    or spec.element.name not in {"int", "int64", "float", "bool", "string", "color"}
+                    or ("value", name) in requested
+                    or name in (self._array_history_value_names() if sharing is None else history_values)):
+                continue
+            candidates[name] = declaration
+        if not candidates:
+            return
+
+        changing = ARRAY_JOURNAL_DELTA_METHODS | ARRAY_JOURNAL_FULL_METHODS
+        covered = changing | ARRAY_JOURNAL_READ_METHODS
+        invalid: set[str] = set()
+        mutated: set[str] = set()
+        calls: dict[int, str] = {}
+        for key, node in nodes.items():
+            if not isinstance(node, Identifier) or node.name not in candidates:
+                continue
+            name = node.name
+            scope = self.ctx.identifier_binding_scopes.get(key)
+            if scope is not None and scope != "global":
+                invalid.add(name)
+                continue
+            parent = parents[key]
+            if sharing is not None:
+                handled, node, parent = sharing.use(node, parent, parents, mutable_targets)
+                if handled:
+                    continue
+            call = None
+            method = None
+            if (isinstance(parent, MemberAccess) and parent.object is node
+                    and isinstance(parents.get(id(parent)), FuncCall)):
+                call = parents[id(parent)]
+                if call.callee is parent and parent.member not in methods:
+                    method = parent.member
+            elif isinstance(parent, FuncCall):
+                func, namespace = self._resolve_callee(parent.callee)
+                receiver = parent.args[0] if parent.args else parent.kwargs.get("id")
+                if (namespace == "array" and self._safe_name("array") not in bindings
+                        and receiver is node):
+                    call, method = parent, func
+            elif isinstance(parent, Subscript) and parent.object is node:
+                # Only the existing current-element lowering is admitted.
+                if (parent.annotations or {}).get("pf_collection_history") is None:
+                    assignment = parents.get(id(parent))
+                    if isinstance(assignment, Assignment) and assignment.target is parent:
+                        if owners[key] in live:
+                            mutated.add(name)
+                    elif id(parent) in mutable_targets:
+                        invalid.add(name)
+                    continue
+            if call is None or method not in covered or id(call) in mutable_targets:
+                invalid.add(name)
+                continue
+            # Concat's existing self/overlap lowering has no proved iterator
+            # lifetime. Passing the root as its RHS is also an escape below.
+            if method == "concat":
+                rhs = call.args[1:] if parent is call else call.args
+                if not rhs or not isinstance(rhs[0], Identifier) or rhs[0].name == name:
+                    invalid.add(name)
+                    continue
+            calls[id(call)] = name
+            if method in changing and owners[key] in live:
+                mutated.add(name)
+
+        admitted = {name for name in candidates
+                    if (sharing is not None or name in mutated) and name not in invalid}
+        if not admitted:
+            return
+        if sharing is not None:
+            self._array_history_value_names()
+            sharing.admit(self, candidates, admitted, calls, bindings)
+            return
+        self._array_journal_members = {
+            self._safe_name(name): declaration for name, declaration in candidates.items()
+            if name in admitted
+        }
+        self._array_journal_calls = {key: name for key, name in calls.items() if name in admitted}
+        used = set(bindings) | self._all_member_names | set(self._enum_defs)
+        used.update(getattr(self, "_runtime_var_init_flag_used_names", ()))
+        used.update(instance["name"] for instance in self._fresh_instances)
+        used.update(self._func_safe_name(fi.name) for fi in self.ctx.func_infos)
+        used.update(self._session_history_member_names.values())
+        self._array_journal_cpp_name = self._allocate_generated_cpp_name("_PFArrayJournal", used)
+        self._array_journal_member_name = self._allocate_generated_cpp_name("_pf_array_journal", used)
+        self._array_journal_generation_name = self._allocate_generated_cpp_name("_pf_next_generation", used)
+        self._all_member_names.add(self._array_journal_member_name)
+
+    def _array_journal_initializer(self, member: str, value: str) -> str:
+        if member in getattr(self, "_array_journal_members", {}):
+            return f"this->{self._array_journal_member_name}.replace({member}, {value});"
+        writer = self._history_sharing_writer(member)
+        if writer is not None:
+            return f"{writer}.replace({member}, {value});"
+        return f"{member} = {value};"
+
     def generate(self) -> str:
         """Generate C++ source from the AnalyzerContext.
 
@@ -4592,6 +5003,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Pre-scan for strategy series vars
         self._prescan_strategy_series()
         self._prescan_session_history()
+        self._prepare_array_journal()
+        self._prepare_history_sharing()
+        graph_journal.prepare(self)
         self._security_ohlc_hist_fields_by_sec: dict[int, set[str]] = {}
         # A source input's selected series read at a history offset in a
         # payload: (key, default) -> (the input call, its history field).
@@ -4621,6 +5035,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 1. Includes
         self._emit_includes(lines)
+        if self._array_journal_members:
+            lines.append(graph_journal.runtime(self, ARRAY_JOURNAL_CPP).replace(
+                "@JOURNAL@", self._array_journal_cpp_name))
 
         # 1b. User-defined object handles and backing records.
         #
@@ -4885,6 +5302,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         lines.append("class GeneratedStrategy : public pineforge::source::PineStrategyHost {")
         lines.append("public:")
         _script_state_decl_start = len(lines)
+        if self._array_journal_members:
+            lines.append(f"    {self._array_journal_cpp_name} {self._array_journal_member_name};")
 
         # One strategy-local undo coordinator gives every UDT arena a single
         # reverse first-touch order. This is required when records from distinct
@@ -5442,9 +5861,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 8e. The copies an array or a matrix variable's executions left
         #     (pineforge_codegen/collection_history.py).
+        self._emit_history_version_clock(lines)
         for variable in self._collection_history_variables():
             lines.append(
-                f"    _PFCollectionHistory<{self._collection_history_cpp_type(variable)}> "
+                f"    {self._collection_history_class(variable)}<{self._collection_history_cpp_type(variable)}> "
                 f"{self._collection_history_member(variable)}"
                 f"{self._collection_history_capacity(variable)};"
             )

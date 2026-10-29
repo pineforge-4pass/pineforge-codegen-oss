@@ -132,6 +132,8 @@ all tables it needs come from ``codegen/tables.py``, AST classes from
 
 from __future__ import annotations
 
+from . import graph_journal
+
 from ..ast_nodes import (
     ASTNode,
     Assignment,
@@ -191,6 +193,7 @@ from .tables import (
     STR_ARGS_READ_REPEATEDLY,
     STR_FUNC_MAP,
     TIME_FIELD_EXPRS,
+    TIMESTAMP_CALENDAR_BODY,
     _math_minmax_na_expr,
     _math_round_digits_expr,
     _matrix_functional_receiver,
@@ -307,33 +310,7 @@ def _timestamp_calendar_lambda(tz: str, yr: str, mo: str, dy: str,
         f"std::string _tz = pineforge::normalize_timezone_for_posix(({tz})); "
         f"int _yr = ({yr}); int _mo = ({mo}); int _dy = ({dy}); "
         f"int _hr = ({hr}); int _min = ({mn}); int _sc = ({sc}); "
-        f"static thread_local std::string _last_tz; "
-        f"static thread_local int _last_yr = -1, _last_mo = -1, _last_dy = -1, _last_hr = -1, _last_min = -1, _last_sc = -1; "
-        f"static thread_local int64_t _last_res = -1; "
-        f"if (_last_res != -1 && _last_tz == _tz && _last_yr == _yr && _last_mo == _mo && _last_dy == _dy && _last_hr == _hr && _last_min == _min && _last_sc == _sc) {{ "
-        f"return _last_res; "
-        f"}} "
-        f"struct tm t = {{}}; "
-        f"t.tm_year = _yr - 1900; t.tm_mon = _mo - 1; "
-        f"t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
-        f"t.tm_isdst = -1; "
-        f"int64_t _res; "
-        f"if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") {{ "
-        f"_res = (int64_t)timegm(&t) * 1000; "
-        f"}} else {{ "
-        f"static std::mutex _pf_ts_mu; "
-        f"std::lock_guard<std::mutex> _pf_ts_mu_lock(_pf_ts_mu); "
-        f"const char* _old = std::getenv(\"TZ\"); "
-        f"std::string _old_tz = _old ? _old : \"\"; bool _had_old = (_old != nullptr); "
-        f"::setenv(\"TZ\", _tz.c_str(), 1); ::tzset(); "
-        f"_res = (int64_t)mktime(&t) * 1000; "
-        f"if (_had_old) {{ ::setenv(\"TZ\", _old_tz.c_str(), 1); }} "
-        f"else {{ ::unsetenv(\"TZ\"); }} ::tzset(); "
-        f"}} "
-        f"_last_tz = _tz; _last_yr = _yr; _last_mo = _mo; _last_dy = _dy; _last_hr = _hr; _last_min = _min; _last_sc = _sc; "
-        f"_last_res = _res; "
-        f"return _res; "
-        f"}}()"
+        + TIMESTAMP_CALENDAR_BODY
     )
 
 
@@ -1088,6 +1065,7 @@ class CallVisitor:
 
     def _map_param_method_expr(
         self, map_expr: str, method: str, arg_nodes: list, spec: TypeSpec,
+        node=None,
     ) -> str:
         """Lower one map operation with receiver-first, ordered single use.
 
@@ -1107,6 +1085,7 @@ class CallVisitor:
             # ``_wide_int_arith_cpp``) narrows na-preserving into the int
             # value (quirk 9), as an int array's element does.
             args[-1] = na_preserving_int_cast(args[-1], "int")
+        map_expr = graph_journal.receiver(self, map_expr, "map", method, node)
         occupied = "\n".join((map_expr, *args))
         counter = getattr(self, "_map_param_arg_counter", 0)
         bindings: list[tuple[str, str]] = []
@@ -1711,6 +1690,7 @@ class CallVisitor:
                     callee.member,
                     arg_nodes,
                     recv_spec,
+                    node,
                 )
             if recv_spec is not None and recv_spec.kind == "udt" and recv_spec.name:
                 mk = f"{recv_spec.name}.{callee.member}"
@@ -1848,6 +1828,7 @@ class CallVisitor:
                             meth,
                             arg_nodes,
                             recv_spec,
+                            node,
                         )
                     raw_args = [self._visit_expr(a) for a in node.args]
                     if recv_spec is not None and recv_spec.kind == "array" and meth in ARRAY_METHODS:
@@ -1931,7 +1912,7 @@ class CallVisitor:
                             allow_keywords=True,
                         )
                         return self._map_param_method_expr(
-                            m, meth_raw, arg_nodes, param_spec
+                            m, meth_raw, arg_nodes, param_spec, node
                         )
                     recv_spec = self._collection_spec_for_name(oname)
                     # Resolve the lexical TypeSpec once and route by its exact
@@ -1951,7 +1932,7 @@ class CallVisitor:
                             allow_keywords=False,
                         )
                         return self._map_param_method_expr(
-                            m, meth_raw, arg_nodes, recv_spec
+                            m, meth_raw, arg_nodes, recv_spec, node
                         )
                     if (
                         recv_spec is not None
@@ -2177,7 +2158,7 @@ class CallVisitor:
                 allow_keywords=False,
             )
             return self._map_param_method_expr(
-                m, func_name, arg_nodes, namespace_spec
+                m, func_name, arg_nodes, namespace_spec, node
             )
 
         # map.method(m, args...) — functional form
@@ -2199,7 +2180,7 @@ class CallVisitor:
                 m = self._visit_expr(node.args[0])
                 spec = self._type_spec_from_expr(node.args[0]) if node.args else None
                 return self._map_param_method_expr(
-                    m, func_name, list(node.args[1:]), spec
+                    m, func_name, list(node.args[1:]), spec, node
                 )
             return "0"
 

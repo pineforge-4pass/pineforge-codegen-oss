@@ -36,6 +36,8 @@ from __future__ import annotations
 import contextlib
 import re
 
+from . import graph_journal
+
 from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall, FuncDef,
     Identifier, IfStmt,
@@ -72,6 +74,9 @@ from .tables import (
     TA_RETURNS_BOOL,
     _matrix_functional_receiver,
     checked_array_slice,
+    ARRAY_JOURNAL_DELTA_METHODS,
+    ARRAY_JOURNAL_FULL_METHODS,
+    journal_array_method,
 )
 
 # Collection (array / map / matrix) methods that MUTATE the receiver in place.
@@ -2028,6 +2033,7 @@ class TypeInferer:
         receiver_node = (_matrix_functional_receiver(method, node)
                          if functional else node.callee.object)
         receiver = self._checked_matrix_history_receiver(receiver, receiver_node)
+        receiver = graph_journal.receiver(self, receiver, "matrix", method, node)
         if method in ("add_row", "add_col") and len(arguments) == 2 and arguments[0] is None:
             # Only ``array_id`` is written (``m.add_row(array_id = a)``): the
             # call is the array-only form, which appends it.
@@ -2220,9 +2226,13 @@ class TypeInferer:
                      else ARRAY_METHODS)
 
             def lower_receiver(recv: str) -> str:
+                adapter = self._array_write_adapter(node, method)
                 lowered = evaluate_args_once(
                     bound_args, ARRAY_ARGS_READ_REPEATEDLY.get(method, ()),
-                    lambda a: table[method](recv, a), "_pf_array_a",
+                    lambda a: journal_array_method(
+                        recv, method, a, adapter,
+                        normalize_negative=not self._pine_v5_body,
+                    ) if adapter is not None else table[method](recv, a), "_pf_array_a",
                 )
                 for token, original in reversed(arg_bindings):
                     lowered = (

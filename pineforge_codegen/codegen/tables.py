@@ -70,6 +70,66 @@ TIME_FIELD_EXPRS = {
 }
 
 
+# These suffixes contain only emitter-owned code. Keep the argument
+# initializers outside them so requested-context rewrites still reach the
+# user's expressions without capturing the lambdas' local bindings.
+TIMESTAMP_CALENDAR_BODY = (
+    "static thread_local std::string _last_tz; "
+    "static thread_local int _last_yr = -1, _last_mo = -1, _last_dy = -1, _last_hr = -1, _last_min = -1, _last_sc = -1; "
+    "static thread_local int64_t _last_res = -1; "
+    "if (_last_res != -1 && _last_tz == _tz && _last_yr == _yr && _last_mo == _mo && _last_dy == _dy && _last_hr == _hr && _last_min == _min && _last_sc == _sc) { "
+    "return _last_res; "
+    "} "
+    "struct tm t = {}; "
+    "t.tm_year = _yr - 1900; t.tm_mon = _mo - 1; "
+    "t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
+    "t.tm_isdst = -1; "
+    "int64_t _res; "
+    "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") { "
+    "_res = (int64_t)timegm(&t) * 1000; "
+    "} else { "
+    "static std::mutex _pf_ts_mu; "
+    "std::lock_guard<std::mutex> _pf_ts_mu_lock(_pf_ts_mu); "
+    "const char* _old = std::getenv(\"TZ\"); "
+    "std::string _old_tz = _old ? _old : \"\"; bool _had_old = (_old != nullptr); "
+    "::setenv(\"TZ\", _tz.c_str(), 1); ::tzset(); "
+    "_res = (int64_t)mktime(&t) * 1000; "
+    "if (_had_old) { ::setenv(\"TZ\", _old_tz.c_str(), 1); } "
+    "else { ::unsetenv(\"TZ\"); } ::tzset(); "
+    "} "
+    "_last_tz = _tz; _last_yr = _yr; _last_mo = _mo; _last_dy = _dy; _last_hr = _hr; _last_min = _min; _last_sc = _sc; "
+    "_last_res = _res; "
+    "return _res; "
+    "}()"
+)
+
+_TZ_TIME_FIELD_BODY = (
+    "struct tm tm_buf; "
+    "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") { "
+    "gmtime_r(&_secs, &tm_buf); "
+    "} else { "
+    "static std::mutex _pf_tz_mu; "
+    "std::lock_guard<std::mutex> _pf_tz_lock(_pf_tz_mu); "
+    "const char* _old = std::getenv(\"TZ\"); "
+    "std::string _old_tz = _old ? _old : \"\"; bool _had_old = (_old != nullptr); "
+    "::setenv(\"TZ\", _tz.c_str(), 1); ::tzset(); "
+    "localtime_r(&_secs, &tm_buf); "
+    "if (_had_old) { ::setenv(\"TZ\", _old_tz.c_str(), 1); } "
+    "else { ::unsetenv(\"TZ\"); } ::tzset(); "
+    "} "
+)
+
+# Retain recognition of the time-field template for direct callers; it is
+# not emitted today because time fields use the engine's pine_<field>().
+TIMEZONE_LAMBDA_BODIES = (
+    TIMESTAMP_CALENDAR_BODY,
+    *(
+        _TZ_TIME_FIELD_BODY + f"return {field_expr}; }}()"
+        for field_expr in TIME_FIELD_EXPRS.values()
+    ),
+)
+
+
 def tz_time_field_lambda(field_expr: str, ts_arg: str, tz_arg: str) -> str:
     """Inline C++ lambda decomposing a Unix-ms timestamp in a timezone.
 
@@ -83,21 +143,7 @@ def tz_time_field_lambda(field_expr: str, ts_arg: str, tz_arg: str) -> str:
         "[&]() -> int { "
         f"std::string _tz = pineforge::normalize_timezone_for_posix(({tz_arg})); "
         f"time_t _secs = (time_t)(({ts_arg}) / 1000); "
-        "struct tm tm_buf; "
-        "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") { "
-        "gmtime_r(&_secs, &tm_buf); "
-        "} else { "
-        "static std::mutex _pf_tz_mu; "
-        "std::lock_guard<std::mutex> _pf_tz_lock(_pf_tz_mu); "
-        "const char* _old = std::getenv(\"TZ\"); "
-        "std::string _old_tz = _old ? _old : \"\"; bool _had_old = (_old != nullptr); "
-        "::setenv(\"TZ\", _tz.c_str(), 1); ::tzset(); "
-        "localtime_r(&_secs, &tm_buf); "
-        "if (_had_old) { ::setenv(\"TZ\", _old_tz.c_str(), 1); } "
-        "else { ::unsetenv(\"TZ\"); } ::tzset(); "
-        "} "
-        f"return {field_expr}; "
-        "}()"
+        + _TZ_TIME_FIELD_BODY + f"return {field_expr}; }}()"
     )
 
 
@@ -665,7 +711,8 @@ def _checked_array_range_prelude(*, method: str, reject_inverted: bool = True) -
     )
 
 
-def _checked_array_insert(a: str, args: list[str], normalize_negative: bool = True) -> str:
+def _checked_array_insert(a: str, args: list[str], normalize_negative: bool = True,
+                          journal: str | None = None) -> str:
     """``array.insert(id, index, value)`` — index is an INSERTION point.
 
     ``index == size`` appends, so the bound is ``index <= size``; a negative
@@ -673,20 +720,27 @@ def _checked_array_insert(a: str, args: list[str], normalize_negative: bool = Tr
     """
     check = _checked_array_index_prelude(method="insert", allow_size=True,
                                          normalize_negative=normalize_negative)
+    write = (
+        f"{journal}.insert(__pf_array, __pf_array.begin()+(size_t)__pf_array_index, "
+        "__pf_array_value); "
+        if journal else
+        "__pf_array.insert(__pf_array.begin()+(size_t)__pf_array_index, "
+        "__pf_array_value); "
+    )
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_value){ "
         "return [&](auto&& __pf_array_value){ "
         f"{check}"
-        "__pf_array.insert(__pf_array.begin()+(size_t)__pf_array_index, "
-        "__pf_array_value); "
+        f"{write}"
         f"}}(({args[1]})); }}(({args[0]})); }}(({a}))"
     )
 
 
-def _checked_array_fill_range(a: str, args: list[str]) -> str:
+def _checked_array_fill_range(a: str, args: list[str], journal: str | None = None) -> str:
     """``array.fill(id, value, index_from, index_to)`` — bounded range fill."""
     check = _checked_array_range_prelude(method="fill", reject_inverted=False)
+    fill = f"{journal}.fill(__pf_array, " if journal else "std::fill("
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_array_value){ "
@@ -694,7 +748,7 @@ def _checked_array_fill_range(a: str, args: list[str]) -> str:
         "return [&](auto&& __pf_raw_index_to_value){ "
         f"{check}"
         "if(__pf_array_index_from<__pf_array_index_to) "
-        "std::fill(__pf_array.begin()+(size_t)__pf_array_index_from, "
+        f"{fill}__pf_array.begin()+(size_t)__pf_array_index_from, "
         "__pf_array.begin()+(size_t)__pf_array_index_to, __pf_array_value); "
         f"}}(({args[2]})); }}(({args[1]})); }}(({args[0]})); }}(({a}))"
     )
@@ -733,20 +787,25 @@ def _checked_array_get(a: str, args: list[str], normalize_negative: bool = True)
     )
 
 
-def _checked_array_set(a: str, args: list[str], normalize_negative: bool = True) -> str:
+def _checked_array_set(a: str, args: list[str], normalize_negative: bool = True,
+                       journal: str | None = None) -> str:
     check = _checked_array_index_prelude(method="set", normalize_negative=normalize_negative)
+    capture = f"{journal}.save_set(__pf_array, (size_t)__pf_array_index); " if journal else ""
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_value){ "
         "return [&](auto&& __pf_array_value){ "
         f"{check}"
+        f"{capture}"
         "__pf_array[(size_t)__pf_array_index]=__pf_array_value; "
         f"}}(({args[1]})); }}(({args[0]})); }}(({a}))"
     )
 
 
-def _checked_array_remove(a: str, args: list[str], normalize_negative: bool = True) -> str:
+def _checked_array_remove(a: str, args: list[str], normalize_negative: bool = True,
+                          journal: str | None = None) -> str:
     check = _checked_array_index_prelude(method="remove", normalize_negative=normalize_negative)
+    capture = f"{journal}.save_remove(__pf_array, (size_t)__pf_array_index); " if journal else ""
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_value){ "
@@ -755,6 +814,7 @@ def _checked_array_remove(a: str, args: list[str], normalize_negative: bool = Tr
         "std::decay_t<decltype(__pf_array)>::value_type; "
         "__pf_array_value_type __pf_array_value="
         "__pf_array[(size_t)__pf_array_index]; "
+        f"{capture}"
         "__pf_array.erase(__pf_array.begin()+(size_t)__pf_array_index); "
         "return __pf_array_value; "
         f"}}(({args[0]})); }}(({a}))"
@@ -776,13 +836,15 @@ def _checked_array_end_get(a: str, method: str) -> str:
     )
 
 
-def _checked_array_end_remove(a: str, method: str) -> str:
+def _checked_array_end_remove(a: str, method: str, journal: str | None = None) -> str:
     access = "back" if method == "pop" else "front"
     mutation = (
         "__pf_array.pop_back();"
         if method == "pop"
         else "__pf_array.erase(__pf_array.begin());"
     )
+    index = "__pf_array.size()-1" if method == "pop" else "0"
+    capture = f"{journal}.save_remove(__pf_array, {index}); " if journal else ""
     return (
         "[&](auto&& __pf_array){ "
         f'if(__pf_array.empty()) _PF_ARRAY_STOP("empty_array_access", "{method}", "Cannot use {method}() '
@@ -790,6 +852,7 @@ def _checked_array_end_remove(a: str, method: str) -> str:
         "using __pf_array_value_type=typename "
         "std::decay_t<decltype(__pf_array)>::value_type; "
         f"__pf_array_value_type __pf_array_value=__pf_array.{access}(); "
+        f"{capture}"
         f"{mutation} return __pf_array_value; }}(({a}))"
     )
 
@@ -886,6 +949,56 @@ ARRAY_METHODS = {
     "binary_search_rightmost": lambda a, args: f"[&](){{ auto __pf_it=std::upper_bound({a}.begin(),{a}.end(),{args[0]}); return (__pf_it!={a}.begin()&&*(__pf_it-1)=={args[0]})?(double)(__pf_it-{a}.begin()-1):(double)(__pf_it-{a}.begin()); }}()",
     "sort_indices": lambda a, args: f"[&](){{ std::vector<double> __pf_idx({a}.size()); std::iota(__pf_idx.begin(),__pf_idx.end(),0); std::sort(__pf_idx.begin(),__pf_idx.end(),[&](int __pf_i,int __pf_j){{return {a}[__pf_i]<{a}[__pf_j];}}); return __pf_idx; }}()",
 }
+
+# Closed coverage for stable primitive roots. Unknown operations must retain
+# eager checkpoints, even if a future dispatch table happens to accept them.
+# String insertions use a full preimage when their element copy can throw.
+ARRAY_JOURNAL_DELTA_METHODS = frozenset({
+    "push", "pop", "set", "insert", "remove", "unshift", "shift",
+})
+ARRAY_JOURNAL_FULL_METHODS = frozenset({"clear", "fill", "sort", "reverse", "concat"})
+ARRAY_JOURNAL_READ_METHODS = frozenset({
+    "get", "first", "last", "size", "includes", "indexof", "lastindexof",
+    "copy", "slice", "sum", "avg", "min", "max", "range", "every", "some",
+    "stdev", "variance", "median", "mode", "percentile_linear_interpolation",
+    "percentile_nearest_rank", "percentrank", "abs", "join", "standardize",
+    "covariance", "binary_search", "binary_search_leftmost",
+    "binary_search_rightmost", "sort_indices",
+})
+
+
+def journal_array_method(a: str, method: str, args: list[str], journal: str,
+                         *, normalize_negative: bool = True) -> str:
+    """Instrument the existing mutation boundary without changing its checks."""
+    indexed = {"set": _checked_array_set, "insert": _checked_array_insert,
+               "remove": _checked_array_remove}
+    if method in indexed:
+        return indexed[method](a, args, normalize_negative, journal)
+    if method in {"pop", "shift"}:
+        return _checked_array_end_remove(a, method, journal)
+    if method == "push":
+        return f"{journal}.push({a}, {args[0]})"
+    if method == "unshift":
+        return f"{journal}.insert({a}, {a}.begin(), {args[0]})"
+    if method == "clear":
+        return f"{journal}.clear({a})"
+    if method == "fill":
+        if len(args) == 1:
+            return f"{journal}.fill({a}, {a}.begin(), {a}.end(), {args[0]})"
+        return _checked_array_fill_range(
+            a, args + [f"(int){a}.size()"] if len(args) == 2 else args, journal)
+    if method == "sort":
+        ascending = f"{journal}.sort({a}, {a}.begin(), {a}.end())"
+        if not args:
+            return ascending
+        return (f'[&](){{ if (({args[0]}) == "descending") '
+                f"{journal}.sort({a}, {a}.begin(), {a}.end(), std::greater<>()); "
+                f"else {ascending}; }}()")
+    if method == "reverse":
+        return f"{journal}.reverse({a}, {a}.begin(), {a}.end())"
+    if method == "concat":
+        return f"{journal}.concat({a}, {a}.end(), {args[0]}.begin(), {args[0]}.end())"
+    raise AssertionError(f"unclassified array mutation: {method}")
 
 # The ARRAY_METHODS arguments (receiver excluded) a template reads more than
 # once, or once per loop iteration: evaluate_args_once binds each that is not
