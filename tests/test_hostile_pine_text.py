@@ -337,7 +337,8 @@ def _expect_case_failure(case_body, name: str) -> None:
     # pipeline itself now refuses generated C++ that has allowlist findings;
     # that refusal (and only that: every diagnostic one of the allowlist's
     # fixed reasons) is the same defence firing earlier, so it counts as the
-    # kill for every case.
+    # kill for every case. The ASCII invariant of the emitter's last pass (a
+    # fixed-message AssertionError) is likewise the same defence firing later.
     pattern = re.escape(name) + r": (generated C\+\+|decoded|emitted)"
     if name == "name_collision":
         pattern += r"|duplicate generated script-state member: pf_safe_"
@@ -347,7 +348,11 @@ def _expect_case_failure(case_body, name: str) -> None:
         assert is_allowlist_refusal(error), f"{name}: unrelated compile error {error}"
         return
     except AssertionError as error:
-        assert re.search(pattern, str(error)), f"{name}: unrelated assertion {error}"
+        # The emitter's final ASCII check also kills a weakened escaper that
+        # lets a non-ASCII code point through (its message is fixed).
+        assert (re.search(pattern, str(error))
+                or re.fullmatch(r"non-ASCII C\+\+ code point U\+[0-9A-F]{4} at line [0-9]+", str(error))
+                ), f"{name}: unrelated assertion {error}"
         return
     pytest.fail(f"{name}: the weakened control was not killed")
 

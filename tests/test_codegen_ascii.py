@@ -341,10 +341,14 @@ def test_unicode_type_and_field_names_are_encoded_as_complete_tokens():
                     "point = \u0394.new(close)\nvalue = point.\u03b3()\nplot(value)\n")
     assert cpp.isascii()
     code = code_only(cpp)
-    # Delta is CE 94, beta is CE B2, and the method token is "_udt_" + delta + "_" + gamma.
+    # Delta is CE 94, beta is CE B2. The method name is composed as "_udt_" +
+    # receiver + "_" + method and encoded as one fragment: each non-ASCII code
+    # point becomes "_u" + six hex digits + "_" (delta U+0394 -> "_u000394_",
+    # gamma U+03B3 -> "_u0003b3_"), so the token is "_udt_" "_u000394_" "_"
+    # "_u0003b3_".
     assert "struct pf_utf8_ce94 {" in code
     assert "double pf_utf8_ceb2 =" in code
-    assert "pf_utf8_5f7564745fce945fceb3(" in code
+    assert "_udt__u000394___u0003b3_(" in code
 
 
 @pytest.mark.parametrize("name,emitted,expected_bytes", NAMES)
@@ -366,8 +370,10 @@ def test_unicode_library_export_and_literal_are_encoded_after_inlining():
                'export \u03b1() => "\u00e9"\n')
     cpp = transpile(source, libraries={"pftest/Words/1": library})
     assert cpp.isascii()
-    # Words_v1__ followed by U+03B1 is 57 6F 72 64 73 5F 76 31 5F 5F CE B1.
-    assert "pf_utf8_576f7264735f76315f5fceb1(" in code_only(cpp)
+    # The inlined export is named "Words_v1__" followed by U+03B1; the shared
+    # fragment encoder keeps the ASCII part and spells the alpha as
+    # "_u0003b1_", so the token is "Words_v1__" "_u0003b1_".
+    assert "Words_v1___u0003b1_(" in code_only(cpp)
     assert _literal(cpp, r"\303\251")[1] == "\u00e9"
 
 
