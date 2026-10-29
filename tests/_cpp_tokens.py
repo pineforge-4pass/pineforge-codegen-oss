@@ -9,10 +9,25 @@ from __future__ import annotations
 
 import re
 
+from pineforge_codegen.cpp_allowlist import REASONS
+from pineforge_codegen.errors import CompileError, Level, Phase
+
 _SIMPLE_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'",
                    "?": "?", "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
 _RAW_START = re.compile(r'(?:u8|u|U|L)?R"([^ ()\\\t\r\n]{0,16})\(')
 _QUOTED_START = re.compile(r'''(?:u8|u|U|L)?(["'])''')
+
+
+def is_allowlist_refusal(error: CompileError) -> bool:
+    """True when ``error`` is the translation pipeline refusing generated C++
+    for allowlist findings and nothing else: every diagnostic is a code-phase
+    error whose message is one of the allowlist's fixed reasons. A parser,
+    analyzer or support error never qualifies."""
+    reasons = set(REASONS.values())
+    return bool(error.diagnostics) and all(
+        d.level == Level.ERROR and d.phase == Phase.CODEGEN and d.message in reasons
+        for d in error.diagnostics
+    )
 
 
 def regions(cpp: str) -> list[tuple[str, int, int, str]]:

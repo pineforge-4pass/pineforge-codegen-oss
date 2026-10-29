@@ -14,11 +14,12 @@ import re
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError
 from pineforge_codegen.codegen.helpers import NamingHelper
 from pineforge_codegen.codegen.input import InputHelper
 from pineforge_codegen.cpp_allowlist import check_generated_cpp
 
-from tests._cpp_tokens import code_only, regions, string_values
+from tests._cpp_tokens import code_only, is_allowlist_refusal, regions, string_values
 
 
 PRELUDE = '//@version=6\nstrategy("Text boundaries")\n'
@@ -332,12 +333,23 @@ def _expect_case_failure(case_body, name: str) -> None:
     # A parser exception or an internal AssertionError cannot count as a kill,
     # with one exception: the emitter's own duplicate script-state member
     # invariant is the defence that catches a weakened name allocator, so it
-    # counts as the kill for the name-collision case only.
+    # counts as the kill for the name-collision case only. The translation
+    # pipeline itself now refuses generated C++ that has allowlist findings;
+    # that refusal (and only that: every diagnostic one of the allowlist's
+    # fixed reasons) is the same defence firing earlier, so it counts as the
+    # kill for every case.
     pattern = re.escape(name) + r": (generated C\+\+|decoded|emitted)"
     if name == "name_collision":
         pattern += r"|duplicate generated script-state member: pf_safe_"
-    with pytest.raises(AssertionError, match=pattern):
+    try:
         case_body()
+    except CompileError as error:
+        assert is_allowlist_refusal(error), f"{name}: unrelated compile error {error}"
+        return
+    except AssertionError as error:
+        assert re.search(pattern, str(error)), f"{name}: unrelated assertion {error}"
+        return
+    pytest.fail(f"{name}: the weakened control was not killed")
 
 
 def _paired_control(monkeypatch, owner, method, weakened, case_body, name: str) -> None:

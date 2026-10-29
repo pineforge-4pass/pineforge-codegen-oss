@@ -27,11 +27,12 @@ from pineforge_codegen.codegen.tables import TIME_FIELD_EXPRS
 from pineforge_codegen.codegen.visit_call import CallVisitor
 from pineforge_codegen.codegen.visit_expr import ExprVisitor
 from pineforge_codegen.cpp_allowlist import check_generated_cpp
+from pineforge_codegen.errors import CompileError
 from pineforge_codegen.lexer import Lexer, TokenType
 from pineforge_codegen.library_modules import LibraryModule
 from pineforge_codegen.parser import Parser
 
-from tests._cpp_tokens import code_only, regions
+from tests._cpp_tokens import code_only, is_allowlist_refusal, regions
 
 
 PRELUDE = '//@version=6\nstrategy("Text channels")\n'
@@ -54,12 +55,21 @@ def _paired_control(monkeypatch, owner, method, weakened, case_body, name):
     with monkeypatch.context() as patch:
         patch.setattr(owner, method, weakened)
         # Only the named output assertion can kill a control; exceptions and
-        # unrelated internal assertions must fail the test.
-        with pytest.raises(
-            AssertionError,
-            match=re.escape(name) + r": (emitted|generated C\+\+)",
-        ):
+        # unrelated internal assertions must fail the test. The one exception
+        # is the translation pipeline refusing the weakened output for
+        # allowlist findings (every diagnostic one of the allowlist's fixed
+        # reasons): the same defence firing earlier.
+        try:
             case_body()
+        except CompileError as error:
+            assert is_allowlist_refusal(error), f"{name}: unrelated compile error {error}"
+            return
+        except AssertionError as error:
+            assert re.search(re.escape(name) + r": (emitted|generated C\+\+)", str(error)), (
+                f"{name}: unrelated assertion {error}"
+            )
+            return
+        pytest.fail(f"{name}: the weakened control was not killed")
 
 
 def _substitute_token(monkeypatch, authored: str) -> None:
