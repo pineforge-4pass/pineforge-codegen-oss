@@ -181,7 +181,9 @@ class CallHandlers:
             )
             if (self._selection_node_is_na(expr.true_val)
                     or self._selection_node_is_na(expr.false_val)):
-                return unify_pine_types(true_type, false_type)
+                result_type = unify_pine_types(true_type, false_type)
+                self._check_bool_na_ternary(expr, result_type)
+                return result_type
             if true_type == false_type:
                 return true_type
             if PineType.STRING in {true_type, false_type}:
@@ -1194,6 +1196,10 @@ class CallHandlers:
 
     def _handle_input_member_call(self, member: str, node: FuncCall) -> PineType:
         """Handle input.int(), input.float(), etc."""
+        if member == "bool" and not self._in_v5_library_definition(node):
+            default = node.args[0] if node.args else node.kwargs.get("defval")
+            if isinstance(default, NaLiteral):
+                self._bool_na_error(default.loc)
         for arg in node.args:
             self._visit(arg)
         for val in node.kwargs.values():
@@ -1767,6 +1773,7 @@ class CallHandlers:
                 if id(arg) not in visited_types:
                     visited_types[id(arg)] = self._visit(arg)
 
+        self._check_bool_na_parameters(func_def, bound_args)
         param_types = [
             visited_types.get(id(arg), PineType.UNKNOWN)
             if arg is not None
@@ -2043,4 +2050,6 @@ class CallHandlers:
             },
         )
 
+        if return_type == PineType.NA:
+            self._na_return_callables[id(node)] = func_def
         return return_type
