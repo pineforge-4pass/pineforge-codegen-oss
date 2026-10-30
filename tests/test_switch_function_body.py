@@ -134,9 +134,9 @@ _CASES = {
         first -= 3.0
         first
     1 =>
-        second = 5.0
-        second += 1.0
-        second / 3.0
+        middle = 5.0
+        middle += 1.0
+        middle / 3.0
     =>
         third = 8.0
         third - 5.0
@@ -148,7 +148,7 @@ _CASES = {
     "comma_arms": _Case(
         _source('''f(int x) => switch x
     0 => first = 4.0, first - 3.0
-    1 => second = 6.0, second / 3.0
+    1 => middle = 6.0, middle / 3.0
     => third = 8.0, third - 5.0
 '''),
         "double f(",
