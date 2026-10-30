@@ -43,6 +43,13 @@ supported as exact pairs; on the 0.x line they are independent. See the
   non-ASCII identifier characters become encoded tokens and string bytes become
   octal escapes, with the same bytes at run time. A script with non-ASCII text
   generates different C++ text.
+- The fallback renderer for a runtime technical-analysis length expression no
+  longer rewrites text inside a string literal. It substituted identifier-shaped
+  words everywhere in the expression, so a literal that spelled an input
+  variable's name or a known string constant's name received that value's
+  rendering and could close the literal early; it now substitutes identifier
+  tokens only. The fallback is not reached by any script accepted so far, so no
+  translated output changes.
 
 ## Unreleased (1.9.0)
 
