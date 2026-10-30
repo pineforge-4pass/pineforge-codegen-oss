@@ -8,6 +8,7 @@ from pineforge_codegen import transpile
 from pineforge_codegen.analyzer.types import TypeHelper
 from pineforge_codegen.ast_nodes import BoolLiteral, NumberLiteral, Ternary
 from pineforge_codegen.codegen.types import TypeInferer
+from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._compile import compile_cpp, have_compile_env
 
 
@@ -79,28 +80,6 @@ _SELECTION_ROWS = [
         ),
         "double choose_float_na_second(",
         # Hand-derived: a float array element and na produce a Pine float.
-    ),
-    (
-        "bool-na-first",
-        _selection_body(
-            "choose_bool_na_first",
-            "values = array.from(true)",
-            "values.shift()",
-            True,
-        ),
-        "bool choose_bool_na_first(",
-        # Hand-derived: a bool array element and na produce a Pine bool.
-    ),
-    (
-        "bool-na-second",
-        _selection_body(
-            "choose_bool_na_second",
-            "values = array.from(true)",
-            "values.shift()",
-            False,
-        ),
-        "bool choose_bool_na_second(",
-        # Hand-derived: a bool array element and na produce a Pine bool.
     ),
     (
         "string-na-first",
@@ -282,6 +261,37 @@ def test_na_adopts_each_value_family(
     cpp = transpile(_script(body))
     assert expected_signature in cpp
     compile_cpp(cpp, label=label)
+
+
+@pytest.mark.parametrize(
+    "body,line,col",
+    [
+        pytest.param(
+            _selection_body(
+                "choose_bool_na_first", "values = array.from(true)", "values.shift()", True,
+            ),
+            5, 14,  # Four spaces and choose ? put the true-arm na at column 14.
+            id="bool-na-first",
+        ),
+        pytest.param(
+            _selection_body(
+                "choose_bool_na_second", "values = array.from(true)", "values.shift()", False,
+            ),
+            5, 31,  # The values.shift() true arm puts the false-arm na at column 31.
+            id="bool-na-second",
+        ),
+    ],
+)
+def test_na_adopts_each_value_family_refuses_bool_na(body: str, line: int, col: int) -> None:
+    # A bool cannot be na in Pine v6, even when read from an array.
+    with pytest.raises(CompileError) as caught:
+        transpile(_script(body))
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.phase == Phase.ANALYZER
+    assert diagnostic.code == "PF-E2043"
+    assert (diagnostic.location.line, diagnostic.location.col) == (line, col)
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,4 @@
-"""Pine v6 refuses bare na in bool declarations and bool ternary arms."""
+"""Pine v6 refuses bare na in bool declarations, values and ternary arms."""
 
 from __future__ import annotations
 
@@ -218,6 +218,37 @@ def test_bool_declaration_refuses_bare_na(
 
 
 @pytest.mark.parametrize(
+    "body,line,col,end_col",
+    [
+        pytest.param(
+            "bool b = false\nb := na\nplot(b ? 1 : 0)\n",
+            4, 1, 8,  # b := na spans columns 1 through 7 on the second body line.
+            id="bool-reassignment",
+        ),
+        pytest.param(
+            "choose(bool b = na) => b\nx = choose()\nplot(x ? 1 : 0)\n",
+            3, 17, 19,  # The parameter's na default spans columns 17 through 18.
+            id="bool-parameter-default",
+        ),
+    ],
+)
+def test_bool_value_refuses_bare_na(body: str, line: int, col: int, end_col: int) -> None:
+    # A bool cannot be na in Pine v6, including assignments and parameter defaults.
+    with pytest.raises(CompileError) as caught:
+        transpile(HEADER + body, filename="boolean.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.phase == Phase.ANALYZER
+    assert diagnostic.code == "PF-E2044"
+    assert diagnostic.args == {}
+    assert diagnostic.message == "Invalid bool value: a bool cannot be na in Pine v6."
+    assert diagnostic.location.file == "boolean.pine"
+    assert (diagnostic.location.line, diagnostic.location.col) == (line, col)
+    assert diagnostic.location.end_col == end_col
+
+
+@pytest.mark.parametrize(
     "body",
     [
         # A string arm gives bare na its nullable string type.
@@ -302,13 +333,6 @@ def test_bool_declaration_refuses_bare_na(
         ),
         # bool(na) remains an explicit cast rather than a bare initializer.
         pytest.param("bool b = bool(na)\nplot(b ? 1 : 0)\n", id="bool-cast-initializer"),
-        # A bool reassignment keeps its existing typed-na lowering.
-        pytest.param("bool b = false\nb := na\nplot(b ? 1 : 0)\n", id="bool-reassignment"),
-        # A parameter default is not a variable declaration.
-        pytest.param(
-            "choose(bool b = na) => b\nx = choose()\nplot(x ? 1 : 0)\n",
-            id="bool-parameter-default",
-        ),
         # Testing a bool with na() stays outside the two refusal rules.
         pytest.param("bool b = false\nx = na(b)\nplot(x ? 1 : 0)\n", id="na-of-bool"),
         # Replacing a bool with nz() stays outside the two refusal rules.
