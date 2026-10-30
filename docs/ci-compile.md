@@ -35,19 +35,27 @@ Missing g++, engine headers, or Eigen fails the compile helper, including its
 collection-time availability guard. Local runs without the flag retain the
 existing opt-in skips.
 
-The compile job checks out `pineforge-4pass/pineforge-engine` at `main`, as
-CONTRIBUTING.md specifies for codegen development, and initializes the engine's
-pinned corpus submodule. It uses the existing read-only Actions token, disables
-credential persistence, and installs Ubuntu's `g++` and `libeigen3-dev`.
+The compile job reads `ci/engine-pin` and initializes the engine's pinned corpus
+submodule. The first line of that file is the engine commit for the entire
+`compile` job and for the SHAs recorded in its reports. The job verifies that
+the checkout SHA matches the pin before running tests. It uses the existing
+read-only Actions token, disables credential persistence, and installs Ubuntu's
+`g++` and `libeigen3-dev`.
 `tests/_compile.py` already resolves or synthesizes the generated version
 header from that engine source tree; a runtime build is unnecessary for a
 syntax-only check. The checkout SHA and submodule state appear in the job log.
 Released codegen still requires its exact matching engine release; this
 development job does not establish a release pair.
 
-Pairing each PR with engine `main` is by design. Recorded engine and corpus SHAs
-identify the engine and corpus used by each result. The first result that counts
-is the one on the final engine `main`.
+`ci/engine-pin` is one lowercase 40-hex line. Bumping it is a normal reviewed
+commit made by the owner who syncs codegen to a newer engine. If the newer
+engine drifts from codegen, that same commit fixes the drift; for example,
+missing host members such as `initial_capital` and `replace` can be regenerated
+with `scripts/gen_host_members.py`. The scheduled Engine drift workflow checks
+engine `main` separately and tells the owner when a pin bump is due.
+
+Recorded engine and corpus SHAs identify the engine and corpus used by each
+result, while `engine_pin` identifies the committed pairing target.
 
 The sweeps cover every `.pine` under `tests/fixtures` and `tests/gate-corpus`,
 plus every recursive `strategy.pine` in the paired engine corpus.
@@ -91,13 +99,15 @@ sweep module that writes these files:
   including the registered failure and #281 cases 2–3.
 - `front-end-rejections.txt`: sources rejected before producing C++.
 - `results.json`: per-source outcomes, compiler seconds, shard identity,
-  sweep wall time, `engine_sha` and `corpus_sha`.
-- `pairing.txt`: one line with `PINEFORGE_ENGINE_SHA` and `PINEFORGE_CORPUS_SHA`.
+  sweep wall time, `engine_sha`, `corpus_sha` and `engine_pin`.
+- `pairing.txt`: one line with `PINEFORGE_ENGINE_SHA`,
+  `PINEFORGE_CORPUS_SHA` and `engine_pin`.
 
 The prerequisite step exports both checkout SHAs through `GITHUB_ENV`.
-With `PINEFORGE_REQUIRE_COMPILE=1`, a missing SHA or a value other than 40 hex
-characters fails sweep setup. Optional runs record `unrecorded` for an unavailable
-or malformed SHA.
+With `PINEFORGE_REQUIRE_COMPILE=1`, a missing or malformed pin, a missing SHA,
+or a value other than 40 hex characters fails sweep setup; the engine SHA must
+also equal the pin. Optional runs record `unrecorded` for the pin and for an
+unavailable or malformed SHA.
 
 The required `test-check` depends on the full pytest and compile matrices.
 An unexpected compile failure, strict XPASS, missing required input, or failed
@@ -137,10 +147,10 @@ One option is an approved protected acquisition job with a short-lived token
 limited to contents-read on the engine and corpus, exporting source artifacts
 to the matrix; this needs confirmed installation access and environment
 policy. Another is a public, versioned header/corpus artifact, which needs a
-publisher and integrity/version metadata. No new secret, permission or pin
-file is introduced by this change.
+publisher and integrity/version metadata. No new secret or permission is
+introduced by this change.
 
-Of the CI workflows, only Test is changed. The separate Pyodide Gate and
+The Test and Engine drift workflows are changed. The separate Pyodide Gate and
 Release workflows still need their own compile dependency; their workflow
 files were outside this lane's edit allowlist. Header-only CI also does not
 replace the engine-enabled runtime and corpus validation required by

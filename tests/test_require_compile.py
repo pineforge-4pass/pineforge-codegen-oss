@@ -14,6 +14,7 @@ import pytest
 
 
 HELPER = Path(__file__).resolve().parent / "_compile.py"
+ENGINE_PIN_VALUE = "1065942c812ad4e2f15274284a26209fdf237190"
 
 
 def _checked_path(path: Path) -> Path:
@@ -106,19 +107,33 @@ def test_control_crash_is_a_nonzero_failed_result(tmp_path):
 
 def _pairing_values(tmp_path: Path) -> dict[str, str]:
     return {
-        name: hashlib.sha1(f"{tmp_path}/{name}".encode("utf-8")).hexdigest()
-        for name in ("PINEFORGE_ENGINE_SHA", "PINEFORGE_CORPUS_SHA")
+        "PINEFORGE_ENGINE_SHA": ENGINE_PIN_VALUE,
+        "PINEFORGE_CORPUS_SHA": hashlib.sha1(
+            f"{tmp_path}/PINEFORGE_CORPUS_SHA".encode("utf-8")
+        ).hexdigest(),
     }
 
 
 def _run_pairing_control(
     tmp_path: Path, pairing: dict[str, str], *, required: bool, crash: bool = False,
+    pin_contents: str | None = None,
 ):
     root = _checked_path(HELPER.parent.parent)
     sweep = _checked_path(HELPER.parent / "test_translate_implies_compile.py")
     helper = _checked_path(HELPER)
     corpus_helper = _checked_path(HELPER.parent / "test_compile_corpus.py")
-    inputs = [helper, corpus_helper, sweep]
+    sweep_module = _checked_path(
+        tmp_path / "pairing-repo/tests/test_translate_implies_compile.py"
+    )
+    pin_path = _checked_path(tmp_path / "pairing-repo/ci/engine-pin")
+    sweep_module.parent.mkdir(parents=True)
+    pin_path.parent.mkdir(parents=True)
+    pin_contents = f"{ENGINE_PIN_VALUE}\n" if pin_contents is None else pin_contents
+    print("Pairing control copied inputs:", sweep, sweep_module, pin_path,
+          sep="\n", flush=True)
+    sweep_module.write_text(sweep.read_text(encoding="utf-8"), encoding="utf-8")
+    pin_path.write_text(pin_contents, encoding="utf-8")
+    inputs = [helper, corpus_helper, sweep, sweep_module, pin_path]
     for variable in (
         "PINEFORGE_ENGINE_INCLUDE", "PINEFORGE_EIGEN_INCLUDE",
         "PINEFORGE_GENERATED_INCLUDE", "PINEFORGE_ENGINE_LIB", "PINEFORGE_ENGINE_CORPUS",
@@ -152,8 +167,12 @@ def _run_pairing_control(
         "import sys\n"
         "from pathlib import Path\n"
         f"sys.path.insert(0, {str(root)!r})\n"
-        "import tests.test_translate_implies_compile as sweep\n"
-        "sweep_results = sweep.sweep_results\n"
+        "import importlib.util\n"
+        f"spec = importlib.util.spec_from_file_location('pairing_sweep', {str(sweep_module)!r})\n"
+        "sweep = importlib.util.module_from_spec(spec)\n"
+        "assert spec.loader is not None\n"
+        "spec.loader.exec_module(sweep)\n"
+        + "sweep_results = sweep.sweep_results\n"
         "def test_probe(sweep_results):\n"
         + "".join(f"    {line}\n" for line in body.splitlines()),
         encoding="utf-8",
@@ -178,6 +197,7 @@ def _run_pairing_control(
                 engine / "pineforge/engine.hpp", eigen / "Eigen/Dense",
                 report / "results.json", report / "pairing.txt",
                 report / "compile-failures.txt", report / "front-end-rejections.txt"]
+    followed.extend([sweep_module, pin_path])
     if _compile._GENERATED_INC is not None:
         generated = _checked_path(_compile._GENERATED_INC)
         env["PINEFORGE_GENERATED_INCLUDE"] = str(generated)
@@ -221,6 +241,50 @@ def test_required_pairing_rejects_missing_or_malformed_sha(tmp_path, variable, b
     assert case.find("skipped") is None, output
 
 
+def test_required_pairing_accepts_an_engine_sha_matching_the_pin(tmp_path):
+    pairing = _pairing_values(tmp_path)
+    result, case, _ = _run_pairing_control(tmp_path, pairing, required=True)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert case.find("error") is None, output
+    assert case.find("failure") is None, output
+    assert case.find("skipped") is None, output
+
+
+def test_required_pairing_rejects_an_engine_sha_different_from_the_pin(tmp_path):
+    pairing = _pairing_values(tmp_path)
+    pin = pairing["PINEFORGE_ENGINE_SHA"]
+    different = "0" * 40 if pin != "0" * 40 else "1" * 40
+    pairing["PINEFORGE_ENGINE_SHA"] = different
+    result, case, _ = _run_pairing_control(tmp_path, pairing, required=True)
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    error = case.find("error")
+    assert error is not None, output
+    message = error.get("message", "")
+    assert different in message, output
+    assert pin in message, output
+    assert case.find("failure") is None, output
+    assert case.find("skipped") is None, output
+
+
+def test_required_pairing_rejects_a_malformed_pin_file(tmp_path):
+    pairing = _pairing_values(tmp_path)
+    result, case, _ = _run_pairing_control(
+        tmp_path, pairing, required=True, pin_contents="not-a-40-hex-pin\n",
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    error = case.find("error")
+    assert error is not None, output
+    assert (
+        "PINEFORGE_REQUIRE_COMPILE=1: ci/engine-pin must contain exactly one line "
+        "of 40 lowercase hex characters"
+    ) in error.get("message", ""), output
+    assert case.find("failure") is None, output
+    assert case.find("skipped") is None, output
+
+
 @pytest.mark.parametrize("recorded", [False, True], ids=["unrecorded", "recorded"])
 def test_pairing_report_reads_both_environment_values(tmp_path, recorded):
     pairing = _pairing_values(tmp_path) if recorded else {}
@@ -233,11 +297,14 @@ def test_pairing_report_reads_both_environment_values(tmp_path, recorded):
     payload = json.loads((report / "results.json").read_text(encoding="utf-8"))
     engine = pairing.get("PINEFORGE_ENGINE_SHA", "unrecorded")
     corpus = pairing.get("PINEFORGE_CORPUS_SHA", "unrecorded")
+    engine_pin = engine if recorded else "unrecorded"
     assert payload.get("engine_sha") == engine
     assert payload.get("corpus_sha") == corpus
+    assert payload.get("engine_pin") == engine_pin
     assert [row["outcome"] for row in payload["results"]] == ["compiled"]
     assert (report / "pairing.txt").read_text(encoding="utf-8") == (
-        f"PINEFORGE_ENGINE_SHA={engine} PINEFORGE_CORPUS_SHA={corpus}\n"
+        f"PINEFORGE_ENGINE_SHA={engine} PINEFORGE_CORPUS_SHA={corpus} "
+        f"engine_pin={engine_pin}\n"
     )
 
 
@@ -257,3 +324,4 @@ def test_pairing_control_crash_is_a_nonzero_failed_result(tmp_path):
     assert payload["results"] == []
     assert payload.get("engine_sha") == pairing["PINEFORGE_ENGINE_SHA"]
     assert payload.get("corpus_sha") == pairing["PINEFORGE_CORPUS_SHA"]
+    assert payload.get("engine_pin") == pairing["PINEFORGE_ENGINE_SHA"]

@@ -111,6 +111,25 @@ def _read_rejection_baseline(path: Path) -> set[str]:
 
 
 def _pairing() -> dict[str, str]:
+    required = os.environ.get("PINEFORGE_REQUIRE_COMPILE") == "1"
+    engine_pin = "unrecorded"
+    if required:
+        pin_path = _checked_path(ROOT / "ci/engine-pin")
+        try:
+            pin_contents = pin_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            pytest.fail(
+                f"PINEFORGE_REQUIRE_COMPILE=1: ci/engine-pin cannot be read: {error}",
+                pytrace=False,
+            )
+        if not re.fullmatch(r"[0-9a-f]{40}\n", pin_contents):
+            pytest.fail(
+                "PINEFORGE_REQUIRE_COMPILE=1: ci/engine-pin must contain exactly "
+                "one line of 40 lowercase hex characters",
+                pytrace=False,
+            )
+        engine_pin = pin_contents[:-1]
+
     pairing = {}
     for key, variable in (
         ("engine_sha", "PINEFORGE_ENGINE_SHA"), ("corpus_sha", "PINEFORGE_CORPUS_SHA"),
@@ -125,6 +144,13 @@ def _pairing() -> dict[str, str]:
             )
         else:
             pairing[key] = "unrecorded"
+        if required and key == "engine_sha" and pairing[key] != engine_pin:
+            pytest.fail(
+                f"PINEFORGE_REQUIRE_COMPILE=1: {variable} {pairing[key]} does not "
+                f"match ci/engine-pin {engine_pin}",
+                pytrace=False,
+            )
+    pairing["engine_pin"] = engine_pin
     return pairing
 
 
@@ -258,7 +284,8 @@ def sweep_results(tmp_path_factory):
     }, indent=2) + "\n", encoding="utf-8")
     (destination / "pairing.txt").write_text(
         f"PINEFORGE_ENGINE_SHA={pairing['engine_sha']} "
-        f"PINEFORGE_CORPUS_SHA={pairing['corpus_sha']}\n",
+        f"PINEFORGE_CORPUS_SHA={pairing['corpus_sha']} "
+        f"engine_pin={pairing['engine_pin']}\n",
         encoding="utf-8",
     )
     print(f"Fixture compile report: {destination / 'compile-failures.txt'}")

@@ -33,6 +33,24 @@ SUITE_SCRIPT = (
 MATRIX_MESSAGE = (
     "compile must have sweep-0 through sweep-3 and suite-0 through suite-3 exactly once"
 )
+PIN_STEP = (
+    "      - name: Read the engine pin\n"
+    "        id: pin\n"
+    "        shell: bash\n"
+    "        run: |\n"
+    "          set -euo pipefail\n"
+    "          pin=$(cat ci/engine-pin)\n"
+    "          if [[ \"$(wc -l < ci/engine-pin)\" -ne 1 ]]; then\n"
+    "            echo \"::error::ci/engine-pin must contain exactly one line of 40 lowercase hex characters\"\n"
+    "            exit 1\n"
+    "          fi\n"
+    "          if [[ ! \"$pin\" =~ ^[0-9a-f]{40}$ ]]; then\n"
+    "            echo \"::error::ci/engine-pin must contain exactly one line of 40 lowercase hex characters\"\n"
+    "            exit 1\n"
+    "          fi\n"
+    "          printf 'sha=%s\\n' \"$pin\" >> \"$GITHUB_OUTPUT\"\n"
+)
+PIN_EQUALITY = '          if [[ "$PINEFORGE_ENGINE_SHA" != "${{ steps.pin.outputs.sha }}" ]]; then\n'
 
 
 def _job(workflow: str, name: str) -> str:
@@ -104,11 +122,26 @@ def _assert_compile_contract(workflow: str) -> None:
         assert f"      {variable}: ${{{{ github.workspace }}}}/.ci/pineforge-engine/{suffix}\n" in job
     assert "      PINEFORGE_EIGEN_INCLUDE: /usr/include/eigen3\n" in job
     assert "      CXX: /usr/bin/g++\n" in job
-    checkout = _step(job, "Check out paired engine main and its pinned corpus")
+    steps = job.split("    steps:\n", 1)[1]
+    pin_offset = steps.find(PIN_STEP)
+    checkout_step = "      - name: Check out paired engine pin and its pinned corpus\n"
+    assert pin_offset >= 0 and steps[pin_offset + len(PIN_STEP):].startswith(checkout_step), (
+        "compile must read the engine pin first"
+    )
+    pin_step = _step(job, "Read the engine pin")
+    assert "        id: pin\n" in pin_step
+    assert "          pin=$(cat ci/engine-pin)\n" in pin_step
+    assert '          if [[ "$(wc -l < ci/engine-pin)" -ne 1 ]]; then\n' in pin_step
+    assert "          if [[ ! \"$pin\" =~ ^[0-9a-f]{40}$ ]]; then\n" in pin_step
+    assert "          printf 'sha=%s\\n' \"$pin\" >> \"$GITHUB_OUTPUT\"\n" in pin_step
+    checkout = _step(job, "Check out paired engine pin and its pinned corpus")
     assert "          repository: pineforge-4pass/pineforge-engine\n" in checkout, (
         "compile must check out the paired engine"
     )
-    assert "          ref: main\n" in checkout
+    assert "          ref: ${{ steps.pin.outputs.sha }}\n" in checkout, (
+        "compile must check out the committed engine pin"
+    )
+    assert "          ref: main\n" not in checkout
     assert "          path: .ci/pineforge-engine\n" in checkout
     assert "          submodules: true\n" in checkout, "compile must check out the corpus submodule"
     assert job.count("          persist-credentials: false\n") == 2
@@ -122,6 +155,9 @@ def _assert_compile_contract(workflow: str) -> None:
         'test -x "$CXX"',
     ):
         assert check in install
+    assert PIN_EQUALITY in install, (
+        "compile must verify the checked-out engine SHA against the pin"
+    )
     matrix = re.search(r"^      matrix:\n(.*?)(?=^    env:)", job, re.M | re.S)
     assert matrix is not None, "compile must declare its eight-part matrix"
     assert matrix[1] == (
@@ -351,6 +387,14 @@ def test_pr_workflow_exports_the_swept_pairing():
     _assert_pairing_exports(WORKFLOW.read_text(encoding="utf-8"))
 
 
+def test_engine_pin_is_exactly_one_lowercase_40_hex_line():
+    pin = (ROOT / "ci/engine-pin").read_text(encoding="utf-8")
+    assert re.fullmatch(r"[0-9a-f]{40}\n", pin), (
+        "ci/engine-pin must contain exactly one 40-hex lowercase line"
+    )
+    assert pin == "1065942c812ad4e2f15274284a26209fdf237190\n"
+
+
 @pytest.mark.parametrize("variable,checkout", [
     ("PINEFORGE_ENGINE_SHA", ".ci/pineforge-engine"),
     ("PINEFORGE_CORPUS_SHA", ".ci/pineforge-engine/corpus"),
@@ -388,6 +432,11 @@ def test_pairing_workflow_controls_reject_an_unrecorded_or_literal_sha(variable,
     "repository-relative paths, and selects the files at indices K modulo 4.",
     "The excluded files are `tests/test_translate_implies_compile.py`, "
     "`tests/test_require_compile.py`, and `tests/test_ci_compile_contract.py`.",
+    "The compile job reads `ci/engine-pin` and initializes the engine's pinned corpus "
+    "submodule.",
+    "`ci/engine-pin` is one lowercase 40-hex line.",
+    "The scheduled Engine drift workflow checks engine `main` separately and tells "
+    "the owner when a pin bump is due.",
     "The sweeps cover every `.pine` under `tests/fixtures` and `tests/gate-corpus`, "
     "plus every recursive `strategy.pine` in the paired engine corpus.",
     "Tests that transpile inline strings elsewhere are not swept.",
@@ -414,6 +463,30 @@ def test_workflow_has_no_time_limits_failure_bypasses_or_cancellation():
 
 def test_pr_workflow_requires_the_paired_compile_sweep():
     _assert_compile_contract(WORKFLOW.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("mutation,message", [
+    (
+        ("          ref: ${{ steps.pin.outputs.sha }}\n", "          ref: main\n"),
+        "compile must check out the committed engine pin",
+    ),
+    (
+        (PIN_EQUALITY, '          if [[ "$PINEFORGE_ENGINE_SHA" == "${{ steps.pin.outputs.sha }}" ]]; then\n'),
+        "compile must verify the checked-out engine SHA against the pin",
+    ),
+    (
+        (PIN_STEP, ""),
+        "compile must read the engine pin first",
+    ),
+])
+def test_compile_pin_controls_reject_reverted_rules(mutation, message):
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    _assert_compile_contract(workflow)
+    old, new = mutation
+    assert workflow.count(old) == 1, "pin mutation must target the shipped workflow once"
+    mutated = workflow.replace(old, new, 1)
+    with pytest.raises(AssertionError, match=re.escape(message)):
+        _assert_compile_contract(mutated)
 
 
 @pytest.mark.parametrize("job_name,old,new,message", [
