@@ -23,11 +23,8 @@ NOTE_CODES = set(DELTA["severity_changes"])
 BEFORE = json.loads((FIXTURES / "catalog.before.json").read_text())["codes"]
 PRODUCT_BEFORE = json.loads((FIXTURES / "product.before.json").read_text())
 # Codes added after this snapshot: the import refusals with a hint (PF-E2040,
-# PF-E2041); the bool-cannot-be-na errors (PF-E2042 to PF-E2044); the
-# continuation and indentation errors (PF-E0038, PF-E0039) and the int/float
-# and numeric-condition errors (PF-E2045, PF-E2046).
-CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E2040", "PF-E2041", "PF-E2042",
-                     "PF-E2043", "PF-E2044", "PF-E2045", "PF-E2046"}
+# PF-E2041) and the bool-cannot-be-na errors (PF-E2042 to PF-E2044).
+CATALOG_ADDITIONS = {"PF-E2040", "PF-E2041", "PF-E2042", "PF-E2043", "PF-E2044"}
 # The support checker warns, inside a switch arm, what it refuses elsewhere:
 # PF-W1nnn is PF-E1nnn there. Read off the live catalog, so a twin added later
 # is covered by the sentence tests below without an edit here.
