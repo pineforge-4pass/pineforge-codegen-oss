@@ -37,7 +37,7 @@ from ..session_reads import emitted_session_reads
 from ..block_locals import block_declarations, decl_key
 from ..pine_spelling import (
     blank_string_literals, input_call_spans, pine_string_literal,
-    spell_input_call, sub_identifiers,
+    spell_input_call, sub_identifiers, sub_outside_literals,
 )
 
 
@@ -6518,18 +6518,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # double-call ``tf_to_seconds(script_tf_)()``. Property-form members
         # (``timeframe.isdaily``) never carry ``()`` so the optional group is
         # a no-op for them.
-        expr = re.sub(r"\btimeframe\.(\w+)(?:\(\))?", _tf_rep, expr)
+        expr = sub_outside_literals(r"\btimeframe\.(\w+)(?:\(\))?", _tf_rep, expr)
 
         # 2) math.<member> -> C++ (constants + std::* functions).
         def _math_rep(p: re.Match) -> str:
             mem = p.group(1)
             return self._MATH_MEMBER_CPP.get(mem, p.group(0))
-        expr = re.sub(r"\bmath\.(\w+)", _math_rep, expr)
+        expr = sub_outside_literals(r"\bmath\.(\w+)", _math_rep, expr)
 
         # 3) Pine word-logical operators -> C++ operators (after timeframe/math
         # substitution so we don't rewrite inside their C++ expansions).
         for pine_op, cpp_op in self._PINE_LOGICAL_OPS.items():
-            expr = re.sub(rf"\b{pine_op}\b", cpp_op, expr)
+            expr = sub_outside_literals(rf"\b{pine_op}\b", cpp_op, expr)
 
         # 4) Substitute input-backed vars with override-aware get_input_*()
         # reads, and inline known compile-time consts (non-input) as literals.

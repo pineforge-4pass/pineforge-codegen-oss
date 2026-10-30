@@ -71,6 +71,7 @@ from ..ast_nodes import (
     Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..method_binding import bind_function_defaults
+from ..pine_spelling import sub_outside_literals
 from ..external_requests import FEED_LOWERING, LOWERING_ANNOTATION
 from ..security_contexts import CONTEXT_ANNOTATION, DEAD_ANNOTATION
 from ..symbols import PineType
@@ -1524,7 +1525,7 @@ class CallHandlers:
                 result = arg
                 for param, value in sorted(
                         pmap.items(), key=lambda item: len(item[0]), reverse=True):
-                    result = re.sub(rf'\b{re.escape(param)}\b', value, result)
+                    result = sub_outside_literals(rf'\b{re.escape(param)}\b', value, result)
                 return result
 
             def _expand_locals(arg: str) -> str:
@@ -1537,7 +1538,7 @@ class CallHandlers:
                         if name in local_defs:
                             return "(" + local_defs[name] + ")"
                         return name
-                    expanded = re.sub(r"[A-Za-z_][A-Za-z_0-9]*", _rep, arg)
+                    expanded = sub_outside_literals(r"[A-Za-z_][A-Za-z_0-9]*", _rep, arg)
                     if expanded == arg:
                         break
                     arg = expanded

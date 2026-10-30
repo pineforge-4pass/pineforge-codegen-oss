@@ -50,6 +50,16 @@ supported as exact pairs; on the 0.x line they are independent. See the
   rendering and could close the literal early; it now substitutes identifier
   tokens only. The fallback is not reached by any script accepted so far, so no
   translated output changes.
+- A string literal inside the length argument of a technical-analysis call is
+  no longer rewritten when the call sits in a user function. The function's
+  parameter substitution and local-variable expansion replaced identifier-shaped
+  words everywhere in the argument text, so `ta.sma(close, mode == "fast" ? fast : 10)`
+  inside `smooth(int fast)` called as `smooth(5)` compared `mode` with `"5"`
+  instead of `"fast"` and chose the wrong length. Both now substitute outside
+  string literals only, and so do the three earlier passes of the fallback
+  renderer (`timeframe.` members, `math.` members and the words `and`, `or`,
+  `not`), which changed the text of a literal such as `"buy and hold"`. A script
+  without a string literal in such an argument generates the same C++ as before.
 
 ## Unreleased (1.9.0)
 
