@@ -58,7 +58,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
   instead of `"fast"` and chose the wrong length. Both now substitute outside
   string literals only, and so do the three earlier passes of the fallback
   renderer (`timeframe.` members, `math.` members and the words `and`, `or`,
-  `not`), which changed the text of a literal such as `"buy and hold"`. A script
+  `not`), which changed the text of a literal such as `"buy and hold"`
+  (the fallback renderer). A script
   without a string literal in such an argument generates the same C++ as before.
 - A script that loops over every closed trade on every bar to sum profits
   under entry-id or profit conditions now generates a resumable fold: settled
