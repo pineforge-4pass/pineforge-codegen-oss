@@ -1272,12 +1272,14 @@ class Parser:
 
         Use the block's statement parser and flattening so commas never move
         a statement outside the callable's scope. A lone expression keeps its
-        historical ``is_single_expr=True`` representation.
+        historical ``is_single_expr=True`` representation. An ``if`` opened
+        after the arrow uses the same bare IfStmt as an indented function
+        body, including its branch types and implicit na.
         """
         body: list = []
         self._extend_statement_list(body, self._parse_statement())
-        if len(body) == 1 and isinstance(body[0], (IfStmt, SwitchStmt)):
-            # A selection directly after the arrow was already an expression.
+        if len(body) == 1 and isinstance(body[0], SwitchStmt):
+            # A switch directly after the arrow was already an expression.
             body = [ExprStmt(expr=body[0])]
         return body, len(body) == 1 and isinstance(body[0], ExprStmt)
 
