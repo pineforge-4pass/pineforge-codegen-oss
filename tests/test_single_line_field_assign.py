@@ -112,6 +112,7 @@ f() => value := 1
     with pytest.raises(CompileError) as error:
         transpile(source)
     assert error.value.diagnostics[0].phase is Phase.ANALYZER
+    assert error.value.diagnostics[0].code == "PF-E2020"
     assert "Undefined variable: 'value'" in error.value.diagnostics[0].message
 
 
@@ -121,6 +122,7 @@ def test_undefined_assignment_after_field_assignment_is_diagnosed() -> None:
     with pytest.raises(CompileError) as error:
         transpile(source)
     assert error.value.diagnostics[0].phase is Phase.ANALYZER
+    assert error.value.diagnostics[0].code == "PF-E2020"
     assert "Undefined variable: 'x'" in error.value.diagnostics[0].message
 
 
