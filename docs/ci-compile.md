@@ -15,21 +15,36 @@ syntax-only check. The checkout SHA and submodule state appear in the job log.
 Released codegen still requires its exact matching engine release; this
 development job does not establish a release pair.
 
-`tests/test_translate_implies_compile.py` recursively discovers every `.pine`
-under `tests/fixtures` and `tests/gate-corpus`, including community repros.
+Pairing each PR with engine `main` is by design. Recorded engine and corpus SHAs
+identify the engine and corpus used by each result. The first result that counts
+is the one on the final engine `main`.
+
+The sweeps cover every `.pine` under `tests/fixtures` and `tests/gate-corpus`,
+plus every recursive `strategy.pine` in the paired engine corpus.
+Tests that transpile inline strings elsewhere are not swept.
+`tests/test_translate_implies_compile.py` includes the community repros.
 It supplies the repository's synthetic library sources to importing fixtures.
-A second sweep recursively discovers the paired engine corpus's
-`strategy.pine` files, including the deeper directories the existing shallow
-corpus test misses. A missing or empty corpus fails required CI.
+The engine sweep includes the deeper directories the existing shallow corpus
+test misses. A missing or empty corpus fails required CI; the full corpus list
+must contain at least 312 strategies, checked before sharding.
 
 Only sources for which `transpile()` returns C++ enter the compile check.
-`CompileError` rejections, including expected-error fixtures and standalone
-library sources, are listed separately and receive no compiled credit.
+Ordinary-sweep `CompileError` rejections, including expected-error fixtures and
+standalone library sources, are listed separately and receive no compiled credit.
 Other front-end exceptions fail the test. The batch keeps compiling after
 compiler errors and asserts only after collecting every result.
 
-Each matrix job handles one of four deterministic shards with at most two
-concurrent syntax-only compilers; dedicated known-failure rows run in every job.
+The ordinary sweeps use `tests/front_end_rejection_baseline.txt` as a ratchet.
+A new rejection fails, as does a listed script in that shard that stops rejecting.
+Remove an entry when its script starts translating; add an entry only to record
+an explicitly reviewed rejection, using its exact report label in sorted order.
+Engine labels start with `engine-corpus/`; entries do not claim rejected scripts are wrong.
+
+Coverage is sharded by Python-version leg (3.11, 3.12, 3.13 and 3.14).
+Full coverage needs all four legs green. A re-run must include all four legs.
+Repository settings must require all four pytest legs.
+Each leg handles one of four deterministic shards with at most two concurrent
+syntax-only compilers; dedicated known-failure rows run in every job.
 `KNOWN_COMPILE_FAILURES` maps exact repository paths to compiler-failure reasons.
 Its sole entry is `tests/fixtures/drawing_lifetime/w9dg-label-collect/strategy.pine`.
 Both ordinary batches exclude registry paths; dedicated rows still compile them.
@@ -44,14 +59,22 @@ Each job uploads `compile-report-python-<version>` even when pytest fails:
 - `compile-failures.txt`: one path and first compiler error line per failure,
   including the registered failure and #281 cases 2–3.
 - `front-end-rejections.txt`: sources rejected before producing C++.
-- `results.json`: per-source outcomes, compiler seconds, shard identity and
-  sweep wall time.
+- `results.json`: per-source outcomes, compiler seconds, shard identity,
+  sweep wall time, `engine_sha` and `corpus_sha`.
+- `pairing.txt`: one line with `PINEFORGE_ENGINE_SHA` and `PINEFORGE_CORPUS_SHA`.
+
+The prerequisite step exports both checkout SHAs through `GITHUB_ENV`.
+With `PINEFORGE_REQUIRE_COMPILE=1`, a missing SHA or a value other than 40 hex
+characters fails sweep setup. Optional runs record `unrecorded` for an unavailable
+or malformed SHA.
 
 The unchanged required `test-check` depends on the full pytest matrix.
 An unexpected compile failure, strict XPASS, missing required input, or failed
 checkout therefore prevents that check from succeeding.
 
 On a CLOUD checkout with the paired compile environment already exported,
+also export `PINEFORGE_ENGINE_SHA` and `PINEFORGE_CORPUS_SHA` from the engine
+and corpus checkouts' respective `git rev-parse HEAD` results. Then
 these commands expose #281 without its markers and then exercise its strict
 expected failures. Run them as separate verification rows; the first is
 intentionally red before the CGI fixes:
@@ -92,7 +115,7 @@ policy. Another is a public, versioned header/corpus artifact, which needs a
 publisher and integrity/version metadata. No new secret, permission or pin
 file is introduced by this change.
 
-This change edits only the Test workflow. The separate Pyodide Gate and
+Of the CI workflows, only Test is changed. The separate Pyodide Gate and
 Release workflows still need their own compile dependency; their workflow
 files were outside this lane's edit allowlist. Header-only CI also does not
 replace the engine-enabled runtime and corpus validation required by

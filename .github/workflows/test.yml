@@ -340,7 +340,11 @@ jobs:
           test -f "$PINEFORGE_ENGINE_INCLUDE/pineforge/engine.hpp"
           test -f "$PINEFORGE_EIGEN_INCLUDE/Eigen/Dense"
           test -x "$CXX"
-          git -C .ci/pineforge-engine rev-parse HEAD
+          PINEFORGE_ENGINE_SHA=$(git -C .ci/pineforge-engine rev-parse HEAD)
+          PINEFORGE_CORPUS_SHA=$(git -C .ci/pineforge-engine/corpus rev-parse HEAD)
+          printf '%s\n' "$PINEFORGE_ENGINE_SHA" "$PINEFORGE_CORPUS_SHA"
+          printf 'PINEFORGE_ENGINE_SHA=%s\n' "$PINEFORGE_ENGINE_SHA" >> "$GITHUB_ENV"
+          printf 'PINEFORGE_CORPUS_SHA=%s\n' "$PINEFORGE_CORPUS_SHA" >> "$GITHUB_ENV"
           git -C .ci/pineforge-engine submodule status
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:

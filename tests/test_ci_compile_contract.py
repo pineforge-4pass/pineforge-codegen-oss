@@ -7,6 +7,7 @@ import pytest
 
 
 WORKFLOW = Path(__file__).resolve().parent.parent / ".github/workflows/test.yml"
+COMPILE_DOC = WORKFLOW.parent.parent.parent / "docs/ci-compile.md"
 
 
 def _job(workflow: str, name: str) -> str:
@@ -48,6 +49,62 @@ def _assert_compile_contract(workflow: str) -> None:
     assert "pytest" in re.search(
         r"^    needs: \[([^\]]+)\]$", _job(workflow, "test-check"), re.M,
     )[1].split(", ")
+
+
+def _assert_pairing_exports(workflow: str) -> None:
+    job = _job(workflow, "pytest")
+    install = re.search(
+        r"^      - name: Install compile-only prerequisites\n(.*?)(?=^      - |\Z)",
+        job, re.M | re.S,
+    )
+    assert install is not None, "missing compile prerequisite step"
+    for variable, checkout in (
+        ("PINEFORGE_ENGINE_SHA", ".ci/pineforge-engine"),
+        ("PINEFORGE_CORPUS_SHA", ".ci/pineforge-engine/corpus"),
+    ):
+        assert f"          {variable}=$(git -C {checkout} rev-parse HEAD)\n" in install[1], (
+            f"{variable} must come from the checked-out commit"
+        )
+        assert (
+            f'          printf \'{variable}=%s\\n\' "${variable}" >> "$GITHUB_ENV"\n'
+            in install[1]
+        ), f"{variable} must be exported through GITHUB_ENV"
+
+
+def test_pr_workflow_exports_the_swept_pairing():
+    _assert_pairing_exports(WORKFLOW.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("variable,checkout", [
+    ("PINEFORGE_ENGINE_SHA", ".ci/pineforge-engine"),
+    ("PINEFORGE_CORPUS_SHA", ".ci/pineforge-engine/corpus"),
+])
+def test_pairing_workflow_controls_reject_an_unrecorded_or_literal_sha(variable, checkout):
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    _assert_pairing_exports(workflow)
+    assignment = f"{variable}=$(git -C {checkout} rev-parse HEAD)"
+    export = f'printf \'{variable}=%s\\n\' "${variable}" >> "$GITHUB_ENV"'
+    assert workflow.count(assignment) == 1
+    assert workflow.count(export) == 1
+    with pytest.raises(AssertionError, match=f"{variable} must come from"):
+        _assert_pairing_exports(workflow.replace(assignment, f"{variable}={'a' * 40}", 1))
+    with pytest.raises(AssertionError, match=f"{variable} must be exported"):
+        _assert_pairing_exports(workflow.replace(export, f'printf "%s\\n" "${variable}"', 1))
+
+
+@pytest.mark.parametrize("claim", [
+    "Coverage is sharded by Python-version leg (3.11, 3.12, 3.13 and 3.14).",
+    "Full coverage needs all four legs green.",
+    "A re-run must include all four legs.",
+    "Repository settings must require all four pytest legs.",
+    "The sweeps cover every `.pine` under `tests/fixtures` and `tests/gate-corpus`, "
+    "plus every recursive `strategy.pine` in the paired engine corpus.",
+    "Tests that transpile inline strings elsewhere are not swept.",
+])
+def test_compile_docs_state_the_coverage_limits(claim):
+    print(f"Compile coverage documentation: {COMPILE_DOC}", flush=True)
+    document = " ".join(COMPILE_DOC.read_text(encoding="utf-8").split())
+    assert claim in document, f"missing compile coverage requirement: {claim}"
 
 
 def test_pr_workflow_requires_the_paired_compile_sweep():
