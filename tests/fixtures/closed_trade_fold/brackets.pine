@@ -1,0 +1,44 @@
+//@version=6
+strategy("Same bar bracket slices", initial_capital = 1000000, pyramiding = 2, process_orders_on_close = true, calc_on_order_fills = false)
+
+varip int actionBar = -1
+if actionBar != bar_index
+    actionBar := bar_index
+    if bar_index % 8 == 0
+        strategy.entry("Long", strategy.long, qty = 4)
+        strategy.entry("SpareLong", strategy.long, qty = 1)
+    if bar_index % 8 == 1
+        strategy.exit("LongFirst", "Long", limit = 101, qty_percent = 50, oca_name = "first")
+        strategy.exit("LongSecond", "Long", limit = 102, qty_percent = 50, oca_name = "second")
+    if bar_index % 8 == 4
+        strategy.entry("Short", strategy.short, qty = 4)
+        strategy.entry("SpareShort", strategy.short, qty = 1)
+    if bar_index % 8 == 5
+        strategy.exit("ShortFirst", "Short", limit = 99, qty_percent = 50, oca_name = "first")
+        strategy.exit("ShortSecond", "Short", limit = 98, qty_percent = 50, oca_name = "second")
+    if bar_index % 4 == 3
+        strategy.close_all(immediately = true, comment = "spare")
+
+int rows = 0
+float total = 0.0
+int positive = 0
+if strategy.closedtrades > 0
+    for i = 0 to strategy.closedtrades - 1
+        entryId = strategy.closedtrades.entry_id(i)
+        profit = strategy.closedtrades.profit(i)
+        rows += 1
+        total += profit
+        if profit > 0
+            positive += 1
+        // fold-body-end
+
+int sameBarPair = 0
+if strategy.closedtrades >= 2
+    last = strategy.closedtrades - 1
+    if strategy.closedtrades.exit_time(last) == strategy.closedtrades.exit_time(last - 1) and strategy.closedtrades.entry_time(last) == strategy.closedtrades.entry_time(last - 1)
+        sameBarPair := 1
+// @pf-trace rows=rows
+// @pf-trace total=total
+// @pf-trace positive=positive
+// @pf-trace closedCount=strategy.closedtrades
+// @pf-trace sameBarPair=sameBarPair

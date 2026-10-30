@@ -1,0 +1,96 @@
+//@version=6
+strategy("Closed trade comparisons", initial_capital = 1000000, process_orders_on_close = true, calc_on_order_fills = false)
+
+varip int actionBar = -1
+if actionBar != bar_index
+    actionBar := bar_index
+    if bar_index % 8 == 0
+        strategy.entry("Long", strategy.long, qty = 1)
+    if bar_index % 8 == 4
+        strategy.entry("Short", strategy.short, qty = 1)
+    if bar_index % 4 == 2
+        strategy.close_all()
+
+rows = -7
+int eqLong = 0
+int eqShort = 0
+int neLong = 0
+int neShort = 0
+int greater = 0
+int greaterEqual = 0
+int less = 0
+int lessEqual = 0
+int equal = 0
+int unequal = 0
+int reverseGreater = 0
+int reverseGreaterEqual = 0
+int reverseLess = 0
+int reverseLessEqual = 0
+int reverseEqual = 0
+int reverseUnequal = 0
+float profitTotal = -0.25
+literalTotal = 0.5
+float negativeZero = -0.0
+if strategy.closedtrades > 0
+    for tradeIndex = 0 to strategy.closedtrades - 1
+        string identity = strategy.closedtrades.entry_id(tradeIndex)
+        float amount = strategy.closedtrades.profit(tradeIndex)
+        rows += 1
+        profitTotal += amount
+        literalTotal += 0.125
+        negativeZero += 0.0
+        if identity == "Long"
+            eqLong += 1
+        if "Short" == identity
+            eqShort += 1
+        if identity != "Long"
+            neLong += 1
+        if "Short" != identity
+            neShort += 1
+        if amount > 0
+            greater += 1
+        if amount >= 0
+            greaterEqual += 1
+        if amount < 0
+            less += 1
+        if amount <= 0
+            lessEqual += 1
+        if amount == 0
+            equal += 1
+        if amount != 0
+            unequal += 1
+        if 0 > amount
+            reverseGreater += 1
+        if 0 >= amount
+            reverseGreaterEqual += 1
+        if 0 < amount
+            reverseLess += 1
+        if 0 <= amount
+            reverseLessEqual += 1
+        if 0 == amount
+            reverseEqual += 1
+        if 0 != amount
+            reverseUnequal += 1
+        // fold-body-end
+
+// @pf-trace rows=rows
+// @pf-trace eqLong=eqLong
+// @pf-trace eqShort=eqShort
+// @pf-trace neLong=neLong
+// @pf-trace neShort=neShort
+// @pf-trace greater=greater
+// @pf-trace greaterEqual=greaterEqual
+// @pf-trace less=less
+// @pf-trace lessEqual=lessEqual
+// @pf-trace equal=equal
+// @pf-trace unequal=unequal
+// @pf-trace reverseGreater=reverseGreater
+// @pf-trace reverseGreaterEqual=reverseGreaterEqual
+// @pf-trace reverseLess=reverseLess
+// @pf-trace reverseLessEqual=reverseLessEqual
+// @pf-trace reverseEqual=reverseEqual
+// @pf-trace reverseUnequal=reverseUnequal
+// @pf-trace profitTotal=profitTotal
+// @pf-trace literalTotal=literalTotal
+// @pf-trace negativeZero=negativeZero
+// @pf-trace closedCount=strategy.closedtrades

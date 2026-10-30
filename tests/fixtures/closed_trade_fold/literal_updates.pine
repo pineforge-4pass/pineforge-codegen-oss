@@ -1,0 +1,28 @@
+//@version=6
+strategy("Literal closed trade updates", initial_capital = 1000000, process_orders_on_close = true, calc_on_order_fills = false)
+
+varip int actionBar = -1
+if actionBar != bar_index
+    actionBar := bar_index
+    if bar_index % 8 == 0
+        strategy.entry("Long", strategy.long, qty = 1)
+    if bar_index % 8 == 4
+        strategy.entry("Short", strategy.short, qty = 1)
+    if bar_index % 4 == 2
+        strategy.close_all()
+
+int rows = 3
+float fraction = -0.25
+beforeRows = rows
+beforeFraction = fraction
+if strategy.closedtrades > 0
+    for i = 0 to strategy.closedtrades - 1
+        rows += 2
+        fraction += 0.125
+        // fold-body-end
+
+// @pf-trace rows=rows
+// @pf-trace fraction=fraction
+// @pf-trace beforeRows=beforeRows
+// @pf-trace beforeFraction=beforeFraction
+// @pf-trace closedCount=strategy.closedtrades

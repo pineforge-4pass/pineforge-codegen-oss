@@ -60,6 +60,14 @@ supported as exact pairs; on the 0.x line they are independent. See the
   renderer (`timeframe.` members, `math.` members and the words `and`, `or`,
   `not`), which changed the text of a literal such as `"buy and hold"`. A script
   without a string literal in such an argument generates the same C++ as before.
+- A script that loops over every closed trade on every bar to sum profits
+  under entry-id or profit conditions now generates a resumable fold: settled
+  closed trades are folded once into prefix sums and only the unsettled tail is
+  folded again each bar, in the plain loop's order, so every accumulated value
+  is identical bit for bit. The per-bar work grows with the trades closed at
+  the newest exit time and the trades closed since the previous bar, not with
+  the number of closed trades. A script that does not match the loop shape
+  generates the same C++ as before.
 
 ## Unreleased (1.9.0)
 
