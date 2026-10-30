@@ -27,6 +27,7 @@ from ..symbols import (
     SymbolTable,
     TypeSpec,
     method_receiver_type_name,
+    unify_pine_types,
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from ..limits import TimeBudget, iter_ast_nodes
@@ -349,6 +350,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # closed. Pine explicitly permits an untyped parameter to inherit a
         # different type at each written call site.
         self._callable_bound_param_types_by_node: dict[int, list[PineType]] = {}
+        # Diagnostic provenance only; never re-visit a condition's receiver.
+        self._na_return_callables: dict[int, FuncDef] = {}
         self._func_callsite_param_types: dict[
             tuple[str, int], list[PineType]
         ] = {}
@@ -4260,7 +4263,46 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return
         self._collection_types[name] = spec
 
+    def _in_v5_library_definition(self, node: ASTNode | None = None) -> bool:
+        """Imported v5 definitions retain their existing nullable bool lowering."""
+        version = (node.annotations or {}).get("pine_version") if node is not None else None
+        if version is not None:
+            return version == 5
+        owner = self._current_top_level_stmt
+        return owner is not None and (owner.annotations or {}).get("pine_version") == 5
+
+    def _bool_na_error(self, location: SourceLocation | None) -> None:
+        self._error(
+            "Invalid bool value: a bool cannot be na in Pine v6.",
+            location,
+        )
+
+    def _check_bool_na_parameters(
+        self, definition: FuncDef | MethodDef, values: list[ASTNode | None],
+    ) -> None:
+        """Check only explicitly bool parameters, after argument binding."""
+        if self._in_v5_library_definition(definition):
+            return
+        hints = (definition.annotations or {}).get("param_type_hints", ())
+        for hint, value in zip(hints, values):
+            if hint == "bool" and isinstance(value, NaLiteral):
+                self._bool_na_error(value.loc)
+
     def _visit_VarDecl(self, node: VarDecl) -> PineType:
+        if (node.type_hint == "bool"
+                and isinstance(node.value, NaLiteral)
+                and not self._in_v5_library_definition(node)):
+            location = node.loc
+            if (location is not None and node.value.loc is not None
+                    and location.line == node.value.loc.line):
+                location = SourceLocation(
+                    file=location.file, line=location.line, col=location.col,
+                    end_col=node.value.loc.end_col,
+                )
+            self._error(
+                "Invalid bool declaration: a bool cannot be na in Pine v6.",
+                location,
+            )
         outer_symbol = self._symbols.resolve(node.name)
         outer_spec = (
             getattr(outer_symbol, "type_spec", None)
@@ -4498,6 +4540,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     node.loc or node.target.loc,
                 )
             else:
+                if (node.op == ":="
+                        and sym.pine_type == PineType.BOOL
+                        and isinstance(node.value, NaLiteral)
+                        and not self._in_v5_library_definition(node)):
+                    location = node.loc or node.target.loc
+                    if (location is not None and node.value.loc is not None
+                            and location.line == node.value.loc.line):
+                        location = SourceLocation(
+                            file=location.file, line=location.line, col=location.col,
+                            end_col=node.value.loc.end_col,
+                        )
+                    self._bool_na_error(location)
                 if sym.scope == "global":
                     self._global_reassigned_names.add(node.target.name)
                     self._record_global_binding_stmt(
@@ -4727,6 +4781,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return sym.pine_type
 
     def _visit_FuncDef(self, node: FuncDef) -> PineType:
+        self._check_bool_na_parameters(
+            node, (node.annotations or {}).get("param_defaults", []),
+        )
         # Store the function def for later analysis
         self._func_defs[node.name] = node
 
@@ -5034,6 +5091,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # re-visit the call and duplicate stateful call sites.
             self._func_return_type_specs[node.name] = terminal_spec
 
+        if (
+            self._selection_contains_na(terminal_ret_expr)
+            and body_type in {PineType.NA, PineType.UNKNOWN, PineType.VOID}
+        ):
+            terminal_primitive_type = self._primitive_pine_type_from_spec(
+                terminal_direct_return_spec
+            )
+            if terminal_primitive_type != PineType.UNKNOWN:
+                body_type = terminal_primitive_type
+                self._func_return_type_specs[node.name] = (
+                    terminal_direct_return_spec
+                )
+
         # Store return type
         self._func_return_types[node.name] = body_type
 
@@ -5106,6 +5176,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
     def _visit_MethodDef(self, node) -> PineType:
         """Register a typed instance method under ``TypeName.methodName``."""
+        self._check_bool_na_parameters(
+            node, (node.annotations or {}).get("param_defaults", []),
+        )
         method_key = f"{node.type_name}.{node.name}"
         self._symbols.enter_scope(f"method_{node.type_name}_{node.name}")
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
@@ -5155,6 +5228,30 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 ret_type = self._statement_value_type(node.body[-1], ret_type)
             if terminal_ret_expr is not None:
                 terminal_spec = self._type_spec_from_expr(terminal_ret_expr)
+                nullable_selection = self._selection_contains_na(terminal_ret_expr)
+                terminal_needs_structured_return = (
+                    nullable_selection
+                    and ret_type in {PineType.NA, PineType.UNKNOWN, PineType.VOID}
+                )
+                terminal_primitive_type = self._primitive_pine_type_from_spec(
+                    terminal_spec
+                )
+                if (
+                    terminal_primitive_type != PineType.UNKNOWN
+                    and terminal_needs_structured_return
+                ):
+                    ret_type = terminal_primitive_type
+                if (
+                    terminal_spec is not None
+                    and (
+                        (terminal_spec.kind == "array" and nullable_selection)
+                        or (
+                            terminal_spec.kind == "primitive"
+                            and terminal_needs_structured_return
+                        )
+                    )
+                ):
+                    return_type_spec = terminal_spec
                 if terminal_spec is not None and terminal_spec.kind in ("map", "matrix"):
                     return_type_spec = terminal_spec
                 if terminal_spec is not None and terminal_spec.kind == "udt":
@@ -5314,15 +5411,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 )
                 self._block_node_stack.append(node.else_body)
                 try:
+                    else_type = PineType.VOID
                     for stmt in node.else_body:
-                        self._visit(stmt)
+                        else_type = self._visit(stmt)
                 finally:
                     self._block_node_stack.pop()
                     if else_scoped:
                         self._symbols.exit_scope()
+            else:
+                else_type = PineType.NA
         finally:
             self._global_scope = old_global
         # If used as expression (x = if ...), return last expr type
+        if self._selection_node_is_na(self._selection_terminal_expr(node.body)):
+            return unify_pine_types(PineType.NA, else_type)
         return body_type
 
     def _visit_ForStmt(self, node: ForStmt) -> PineType:
@@ -5469,6 +5571,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if node.expr:
                 self._visit(node.expr)
             result_type = PineType.VOID
+            branch_types: list[tuple[ASTNode | None, PineType]] = []
             for case_expr, case_body in node.cases:
                 if case_expr:
                     self._visit(case_expr)
@@ -5479,6 +5582,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 try:
                     for stmt in case_body:
                         result_type = self._visit(stmt)
+                    branch_types.append((
+                        self._selection_terminal_expr(case_body), result_type,
+                    ))
                 finally:
                     self._block_node_stack.pop()
                     if case_scoped:
@@ -5489,15 +5595,29 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 )
                 self._block_node_stack.append(node.default_body)
                 try:
+                    default_type = PineType.VOID
                     for stmt in node.default_body:
-                        self._visit(stmt)
+                        default_type = self._visit(stmt)
+                    branch_types.append((
+                        self._selection_terminal_expr(node.default_body),
+                        default_type,
+                    ))
                 finally:
                     self._block_node_stack.pop()
                     if default_scoped:
                         self._symbols.exit_scope()
+            else:
+                branch_types.append((None, PineType.NA))
         finally:
             self._global_scope = old_global
         # If used as expression (x = switch ...), return last expr type
+        if any(self._selection_node_is_na(arm) for arm, _ in branch_types):
+            concrete = [
+                ptype for arm, ptype in branch_types
+                if not self._selection_node_is_na(arm)
+            ]
+            if concrete and all(ptype == concrete[0] for ptype in concrete):
+                return concrete[0]
         return result_type
 
     def _visit_BreakStmt(self, node: BreakStmt) -> PineType:
@@ -5561,18 +5681,96 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return PineType.BOOL
         return operand_type
 
+    def _check_bool_na_ternary(self, node: Ternary, pine_type: PineType) -> None:
+        """Reject a bare na arm once its selection is known to be bool."""
+        if pine_type != PineType.BOOL or self._in_v5_library_definition(node):
+            return
+        for arm in (node.true_val, node.false_val):
+            if isinstance(arm, NaLiteral):
+                self._error(
+                    "Invalid ternary operator ?: a bool cannot be na in Pine v6.",
+                    arm.loc,
+                )
+
+    def _check_untyped_na_condition(
+        self, condition: ASTNode, condition_type: PineType,
+    ) -> None:
+        """A callable with only bare na returns cannot supply a bool condition."""
+        if (condition_type != PineType.NA
+                or not isinstance(condition, FuncCall)
+                or self._in_v5_library_definition(condition)):
+            return
+        definition = self._na_return_callables.get(id(condition))
+        if definition is None or self._in_v5_library_definition(definition):
+            return
+
+        def bare_return(expr: ASTNode | None) -> NaLiteral | None:
+            if isinstance(expr, NaLiteral):
+                return expr
+            if isinstance(expr, Ternary):
+                arms = [expr.true_val, expr.false_val]
+            elif isinstance(expr, IfStmt):
+                arms = [
+                    self._selection_terminal_expr(body)
+                    for body in (expr.body, expr.else_body) if body
+                ]
+            elif isinstance(expr, SwitchStmt):
+                arms = [
+                    self._selection_terminal_expr(body)
+                    for _, body in expr.cases
+                ]
+                if expr.default_body:
+                    arms.append(self._selection_terminal_expr(expr.default_body))
+            else:
+                return None
+            tokens = [bare_return(arm) for arm in arms]
+            return tokens[0] if tokens and all(tokens) else None
+
+        token = bare_return(self._selection_terminal_expr(definition.body))
+        if token is not None:
+            self._bool_na_error(token.loc)
+
     def _visit_Ternary(self, node: Ternary) -> PineType:
-        self._visit(node.condition)
+        condition_type = self._visit(node.condition)
+        self._check_untyped_na_condition(node.condition, condition_type)
         true_type = self._visit(node.true_val)
         false_type = self._visit(node.false_val)
-
-        # String type dominates
-        if true_type == PineType.STRING or false_type == PineType.STRING:
-            return PineType.STRING
-        # Promote types
-        if true_type == PineType.FLOAT or false_type == PineType.FLOAT:
-            return PineType.FLOAT
-        return true_type
+        if (self._selection_node_is_na(node.true_val)
+                or self._selection_node_is_na(node.false_val)):
+            result_type = unify_pine_types(true_type, false_type)
+        elif PineType.STRING in (true_type, false_type):
+            result_type = PineType.STRING
+        elif PineType.FLOAT in (true_type, false_type):
+            result_type = PineType.FLOAT
+        else:
+            result_type = true_type
+        structured_type = PineType.UNKNOWN
+        if (self._selection_contains_na(node)
+                and result_type in {PineType.NA, PineType.UNKNOWN, PineType.VOID}):
+            structured_type = self._primitive_pine_type_from_spec(
+                self._type_spec_from_expr(node)
+            )
+        if not self._in_v5_library_definition(node):
+            for arm, peer in (
+                (node.true_val, node.false_val),
+                (node.false_val, node.true_val),
+            ):
+                if not isinstance(arm, NaLiteral):
+                    continue
+                peer_is_bool = PineType.BOOL in (result_type, structured_type)
+                if not peer_is_bool and isinstance(peer, FuncCall):
+                    # The primitive call query types casts without visiting arguments.
+                    peer_is_bool = (
+                        self._callsite_primitive_expr_type(peer, {}) == PineType.BOOL
+                    )
+                if peer_is_bool:
+                    self._check_bool_na_ternary(node, PineType.BOOL)
+        if (
+            structured_type != PineType.UNKNOWN
+            and result_type in {PineType.NA, PineType.UNKNOWN, PineType.VOID}
+        ):
+            return structured_type
+        return result_type
 
     def _visit_FuncCall(self, node: FuncCall) -> PineType:
         # Determine what is being called
@@ -5665,6 +5863,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return self._visit(node.args[0])
 
             # General member call (e.g., array.push, etc.)
+            if (isinstance(obj, Identifier) and obj.name == "array"
+                    and member == "new"
+                    and self._template_args_from_call(node) == ["bool"]
+                    and not self._in_v5_library_definition(node)):
+                initial = (
+                    node.args[1] if len(node.args) > 1
+                    else node.kwargs.get("initial_value")
+                )
+                if isinstance(initial, NaLiteral):
+                    self._bool_na_error(initial.loc)
             receiver_pine_type = self._visit(obj)
             visited_member_arg_types: dict[int, PineType] = {}
             for arg in node.args:
@@ -5686,6 +5894,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     else None
                 )
                 if strict_binding is not None:
+                    if signature.declaration is not None:
+                        self._check_bool_na_parameters(
+                            signature.declaration,
+                            [obj, *strict_binding.args_by_param],
+                        )
                     # Defaults are real call-site expressions. Visit only the
                     # inserted nodes here; written actuals were visited above.
                     supplied_ids = {
@@ -5809,11 +6022,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             self._materialize_user_func_call_site_state(
                                 method_key, cs_idx, node
                             )
-                    return self._callsite_callable_return_type(
+                    return_type = self._callsite_callable_return_type(
                         method_info.node,
                         full_param_types,
                         method_info.return_type,
                     )
+                    if return_type == PineType.NA:
+                        self._na_return_callables[id(node)] = method_info.node
+                    return return_type
                 if signature is not None:
                     # The exact authored method exists later in source. Its
                     # body-derived return/effect metadata is intentionally not

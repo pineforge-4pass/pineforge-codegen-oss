@@ -1407,6 +1407,9 @@ class CallVisitor:
             if (arg is None or spec is None or spec.kind != "array"
                     or (index < len(params) and params[index] in series)):
                 continue
+            if self._is_na_expr(arg):
+                stage = True
+                continue
             kind = self._array_arg_kind(arg)
             if kind == "alias":
                 param = params[index] if index < len(params) else f"#{index + 1}"
@@ -1554,16 +1557,25 @@ class CallVisitor:
             if param_index < len(param_specs)
             else None
         )
-        if param_spec is not None and param_spec.kind in {"map", "matrix"}:
+        method_series = self.ctx.func_series_vars.get(func_info.name, set())
+        if (param_spec is not None
+                and (param_spec.kind in {"map", "matrix"}
+                     or (param_name not in method_series
+                         and self._selection_contains_na(arg_node)))):
             # Both UDT-method dispatch paths funnel through this helper after
-            # positional/keyword/default merging.  Lower a bare ``na`` (and
+            # positional/keyword/default merging. Lower a bare ``na`` (and
             # nullable selections containing it) against the declared exact
             # parameter type instead of the legacy numeric ``na<double>()``.
             return self._visit_rhs_value(
                 arg_node,
-                target_cpp_type=self._type_spec_to_cpp(param_spec),
+                target_cpp_type=(
+                    self._func_param_int_cpp_type(
+                        func_info, param_index,
+                        self._callable_target_callsite_idx(func_info, call_node),
+                    )
+                    or self._type_spec_to_cpp(param_spec)
+                ),
             )
-        method_series = self.ctx.func_series_vars.get(func_info.name, set())
         if param_name not in method_series:
             cpp = self._visit_expr(arg_node)
             int_cpp = self._func_param_int_cpp_type(
@@ -1605,7 +1617,11 @@ class CallVisitor:
                 and self._series_type_for(arg_name) == expected_cpp_type
             ):
                 return safe
-        expr_cpp = self._visit_expr(arg_node)
+        expr_cpp = (
+            self._visit_rhs_value(arg_node, target_cpp_type=expected_cpp_type)
+            if self._selection_contains_na(arg_node)
+            else self._visit_expr(arg_node)
+        )
         cpp_type = expected_cpp_type
         bridge_cpp = self._series_bridge_value_expr(expr_cpp, cpp_type)
         member = self._inline_history_member(
@@ -3111,7 +3127,11 @@ class CallVisitor:
                             == expected_cpp_type
                     ):
                         return safe
-                expr_cpp = self._visit_expr(arg_node)
+                expr_cpp = (
+                    self._visit_rhs_value(arg_node, target_cpp_type=expected_cpp_type)
+                    if self._selection_contains_na(arg_node)
+                    else self._visit_expr(arg_node)
+                )
                 cpp_t = expected_cpp_type
                 bridge_cpp = self._series_bridge_value_expr(
                     expr_cpp, cpp_t
@@ -3151,10 +3171,17 @@ class CallVisitor:
                 if arg_idx < len(param_specs):
                     param_spec = param_specs[arg_idx]
                     if (param_spec is not None
-                            and param_spec.kind in {"map", "matrix"}):
+                            and (param_spec.kind in {"map", "matrix"}
+                                 or self._selection_contains_na(arg_node))):
                         return self._visit_rhs_value(
                             arg_node,
-                            target_cpp_type=self._type_spec_to_cpp(param_spec),
+                            target_cpp_type=(
+                                self._func_param_int_cpp_type(
+                                    fi_lookup, arg_idx,
+                                    self._callable_target_callsite_idx(fi_lookup, node),
+                                )
+                                or self._type_spec_to_cpp(param_spec)
+                            ),
                         )
             return self._visit_expr(arg_node)
 

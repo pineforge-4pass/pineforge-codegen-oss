@@ -68,13 +68,13 @@ from typing import Any
 from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier,
     IfStmt, MemberAccess, NumberLiteral, StringLiteral, Subscript, SwitchStmt,
-    Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
+    Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, NaLiteral,
 )
 from ..method_binding import bind_function_defaults
 from ..pine_spelling import sub_outside_literals
 from ..external_requests import FEED_LOWERING, LOWERING_ANNOTATION
 from ..security_contexts import CONTEXT_ANNOTATION, DEAD_ANNOTATION
-from ..symbols import PineType
+from ..symbols import PineType, unify_pine_types
 from .. import signatures as sigs
 from .. import tv_input_choices as tv_in
 from .contracts import FixnanCallSite, FuncInfo, SecurityCallInfo, TACallSite
@@ -146,6 +146,8 @@ class CallHandlers:
             )
         if isinstance(expr, BoolLiteral):
             return PineType.BOOL
+        if isinstance(expr, NaLiteral):
+            return PineType.NA
         if isinstance(expr, StringLiteral):
             return PineType.STRING
         if isinstance(expr, UnaryOp):
@@ -177,6 +179,11 @@ class CallHandlers:
             false_type = self._callsite_primitive_expr_type(
                 expr.false_val, parameter_types
             )
+            if (self._selection_node_is_na(expr.true_val)
+                    or self._selection_node_is_na(expr.false_val)):
+                result_type = unify_pine_types(true_type, false_type)
+                self._check_bool_na_ternary(expr, result_type)
+                return result_type
             if true_type == false_type:
                 return true_type
             if PineType.STRING in {true_type, false_type}:
@@ -209,10 +216,13 @@ class CallHandlers:
     ) -> PineType:
         if not types or PineType.UNKNOWN in types:
             return PineType.UNKNOWN
-        first = types[0]
-        if all(value == first for value in types):
+        concrete = [value for value in types if value != PineType.NA]
+        if not concrete:
+            return PineType.NA
+        first = concrete[0]
+        if all(value == first for value in concrete):
             return first
-        if set(types).issubset({PineType.INT, PineType.FLOAT}):
+        if set(concrete).issubset({PineType.INT, PineType.FLOAT}):
             return PineType.FLOAT
         return PineType.UNKNOWN
 
@@ -1186,6 +1196,10 @@ class CallHandlers:
 
     def _handle_input_member_call(self, member: str, node: FuncCall) -> PineType:
         """Handle input.int(), input.float(), etc."""
+        if member == "bool" and not self._in_v5_library_definition(node):
+            default = node.args[0] if node.args else node.kwargs.get("defval")
+            if isinstance(default, NaLiteral):
+                self._bool_na_error(default.loc)
         for arg in node.args:
             self._visit(arg)
         for val in node.kwargs.values():
@@ -1759,6 +1773,7 @@ class CallHandlers:
                 if id(arg) not in visited_types:
                     visited_types[id(arg)] = self._visit(arg)
 
+        self._check_bool_na_parameters(func_def, bound_args)
         param_types = [
             visited_types.get(id(arg), PineType.UNKNOWN)
             if arg is not None
@@ -2035,4 +2050,6 @@ class CallHandlers:
             },
         )
 
+        if return_type == PineType.NA:
+            self._na_return_callables[id(node)] = func_def
         return return_type

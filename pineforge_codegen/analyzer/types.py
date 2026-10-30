@@ -46,7 +46,12 @@ from ..ast_nodes import (
 )
 from ..errors import Phase
 from ..matrix_overloads import matrix_sum_has_rhs
-from ..symbols import PineType, TypeSpec, method_receiver_type_name
+from ..symbols import (
+    PineType,
+    TypeSpec,
+    method_receiver_type_name,
+    unify_type_specs,
+)
 
 # Drawing-objects-as-data type names (spec §4.1). Defined locally — the
 # analyzer must not import from ``codegen`` (codegen imports analyzer, so the
@@ -249,29 +254,93 @@ class TypeHelper:
             or (isinstance(node, Identifier) and node.name == "na")
         )
 
-    def _nullable_collection_selection_spec(
+    @classmethod
+    def _selection_contains_na(cls, node: ASTNode | None) -> bool:
+        """Whether a selected value has a bare or implicit ``na`` arm."""
+        if cls._selection_node_is_na(node):
+            return True
+        if isinstance(node, Ternary):
+            return (cls._selection_contains_na(node.true_val)
+                    or cls._selection_contains_na(node.false_val))
+        if isinstance(node, IfStmt):
+            return any(cls._selection_contains_na(cls._selection_terminal_expr(body))
+                       for body in (node.body, node.else_body))
+        if isinstance(node, SwitchStmt):
+            return (
+                any(cls._selection_contains_na(cls._selection_terminal_expr(body))
+                    for _, body in node.cases)
+                or cls._selection_contains_na(
+                    cls._selection_terminal_expr(node.default_body)
+                )
+            )
+        return False
+
+    def _selection_type_spec(
         self,
         branches: list[tuple[ASTNode | None, TypeSpec | None]],
+        *,
+        nullable: bool | None = None,
     ) -> TypeSpec | None:
-        """Unify compatible map/matrix selection arms around typed ``na``.
-
-        A missing ``if``/``switch`` fallback is Pine's implicit ``na`` arm.
-        Every concrete arm must carry the same nullable collection TypeSpec;
-        an unknown or incompatible concrete arm fails closed.
-        """
-        concrete: list[TypeSpec] = []
+        """Keep exact collection joins; extend other families only around ``na``."""
+        if nullable is None:
+            nullable = any(self._selection_contains_na(node) for node, _ in branches)
+        result: TypeSpec | None = None
         for node, spec in branches:
             if self._selection_node_is_na(node):
                 continue
-            if spec is None or spec.kind not in {"map", "matrix"}:
+            if (nullable and spec is None
+                    and isinstance(node, (ColorLiteral, MemberAccess, FuncCall))
+                    and self._is_color_constructor(node)):
+                spec = TypeSpec.primitive("color")
+            if spec is None:
                 return None
-            concrete.append(spec)
-        if not concrete:
-            return None
-        first = concrete[0]
-        return first if all(spec == first for spec in concrete[1:]) else None
+            if not nullable and spec.kind not in {"map", "matrix"}:
+                return None
+            result = (
+                spec
+                if result is None
+                else unify_type_specs(result, spec)
+            )
+            if result is None:
+                return None
+        return result
 
-    def _type_spec_from_expr(self, value: ASTNode | None) -> TypeSpec | None:
+    def _ternary_type_specs(
+        self, value: Ternary,
+    ) -> dict[int, tuple[TypeSpec | None, bool]]:
+        """Derive arm specs and nullability once in the current lexical context."""
+        # Keep results within this query: a later query on the same AST can
+        # have different parameter, local or callable return types.
+        specs: dict[int, tuple[TypeSpec | None, bool]] = {}
+        pending = [(value, False)]
+        while pending:
+            node, ready = pending.pop()
+            if id(node) in specs:
+                continue
+            if isinstance(node, Ternary):
+                if not ready:
+                    pending.append((node, True))
+                    pending.append((node.false_val, False))
+                    pending.append((node.true_val, False))
+                    continue
+                true_spec, true_na = specs[id(node.true_val)]
+                false_spec, false_na = specs[id(node.false_val)]
+                nullable = true_na or false_na
+                spec = self._type_spec_from_expr(
+                    node, _ternary_arms=(true_spec, false_spec, nullable),
+                )
+            else:
+                spec = self._type_spec_from_expr(node)
+                nullable = self._selection_contains_na(node)
+            specs[id(node)] = (spec, nullable)
+        return specs
+
+    def _type_spec_from_expr(
+        self,
+        value: ASTNode | None,
+        *,
+        _ternary_arms: tuple[TypeSpec | None, TypeSpec | None, bool] | None = None,
+    ) -> TypeSpec | None:
         if value is None:
             return None
         budget = getattr(self, "_budget", None)
@@ -290,14 +359,15 @@ class TypeHelper:
         if isinstance(value, StringLiteral):
             return TypeSpec.primitive("string")
         if isinstance(value, Ternary):
-            true_spec = self._type_spec_from_expr(value.true_val)
-            false_spec = self._type_spec_from_expr(value.false_val)
-            collection_spec = self._nullable_collection_selection_spec([
+            if _ternary_arms is None:
+                return self._ternary_type_specs(value)[id(value)][0]
+            true_spec, false_spec, nullable = _ternary_arms
+            selection_spec = self._selection_type_spec([
                 (value.true_val, true_spec),
                 (value.false_val, false_spec),
-            ])
-            if collection_spec is not None:
-                return collection_spec
+            ], nullable=nullable)
+            if selection_spec is not None:
+                return selection_spec
 
             def direct_user_udt_ctor_name(node: ASTNode) -> str | None:
                 if not isinstance(node, FuncCall):
@@ -381,12 +451,12 @@ class TypeHelper:
             false_node = self._selection_terminal_expr(value.else_body)
             true_spec = self._type_spec_from_expr(true_node)
             false_spec = self._type_spec_from_expr(false_node)
-            collection_spec = self._nullable_collection_selection_spec([
+            selection_spec = self._selection_type_spec([
                 (true_node, true_spec),
                 (false_node, false_spec),
             ])
-            if collection_spec is not None:
-                return collection_spec
+            if selection_spec is not None:
+                return selection_spec
             true_is_na = (
                 isinstance(true_node, NaLiteral)
                 or (isinstance(true_node, Identifier)
@@ -428,7 +498,7 @@ class TypeHelper:
                 default_terminal,
                 self._type_spec_from_expr(default_terminal),
             ))
-            return self._nullable_collection_selection_spec(branches)
+            return self._selection_type_spec(branches)
         if isinstance(value, FuncCall):
             cal = value.callee
             func = cal.member if isinstance(cal, MemberAccess) else None

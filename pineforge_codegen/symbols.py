@@ -16,6 +16,17 @@ class PineType(Enum):
     UNKNOWN = "unknown"
 
 
+def unify_pine_types(left: PineType, right: PineType) -> PineType:
+    """Resolve a bare ``na`` against its peer, without promoting other pairs."""
+    if left == right:
+        return left
+    if left == PineType.NA:
+        return right
+    if right == PineType.NA:
+        return left
+    return PineType.UNKNOWN
+
+
 @dataclass(frozen=True)
 class TypeSpec:
     """Structured Pine type metadata for collections and UDTs.
@@ -59,6 +70,25 @@ class TypeSpec:
         if self.kind == "matrix" and self.element is not None:
             return f"matrix<{self.element}>"
         return self.name or self.kind
+
+
+def unify_type_specs(
+    left: TypeSpec | None,
+    right: TypeSpec | None,
+    *,
+    left_is_na: bool = False,
+    right_is_na: bool = False,
+) -> TypeSpec | None:
+    """Join structured types, with an explicit ``na`` arm adopting its peer."""
+    if left_is_na:
+        return right
+    if right_is_na:
+        return left
+    if left is None or right is None:
+        return None
+    if left == right:
+        return left
+    return None
 
 
 def method_receiver_type_name(spec: TypeSpec | None) -> str | None:
