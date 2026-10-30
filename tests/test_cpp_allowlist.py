@@ -10,6 +10,7 @@ same templates with any other spelling do not.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,107 @@ def test_libc_named_pine_variables_are_renamed():
     assert check_generated_cpp(cpp) == []
 
 
+@pytest.mark.parametrize(
+    "name,rule,escaped",
+    [
+        ("unshare", "namespace", "pf_safe_unshare"),  # Namespace creation.
+        ("setns", "namespace", "pf_safe_setns"),  # Namespace entry.
+        ("clone", "namespace", "pf_safe_clone"),  # Process or namespace creation.
+        ("clone3", "namespace", "pf_safe_clone3"),  # Process or namespace creation.
+        ("mount", "namespace", "pf_safe_mount"),  # Mount creation.
+        ("umount", "namespace", "pf_safe_umount"),  # Mount removal.
+        ("umount2", "namespace", "pf_safe_umount2"),  # Mount removal.
+        ("pivot_root", "namespace", "pf_safe_pivot_root"),  # Root mount change.
+        ("chroot", "namespace", "pf_safe_chroot"),  # Process root change.
+        ("prctl", "namespace", "pf_safe_prctl"),  # Process control.
+        ("seccomp", "namespace", "pf_safe_seccomp"),  # Process filtering.
+        ("pthread_create", "thread", "pf_safe_pthread_create"),  # POSIX threads.
+        ("thrd_create", "thread", "pf_safe_thrd_create"),  # C threads.
+        ("__clone", "thread", "pf_safe___clone"),  # Low-level thread creation.
+        ("thread", "thread", "pf_safe_thread"),  # Standard thread constructor.
+        ("jthread", "thread", "pf_safe_jthread"),  # Standard joining thread.
+        ("async", "thread", "pf_safe_async"),  # Standard asynchronous execution.
+    ],
+)
+def test_namespace_and_thread_names_are_reserved_and_refused(
+    name: str, rule: str, escaped: str
+):
+    # Calls, decayed names and globally qualified names select the fixed rule.
+    for source in (f"{name}();", f"auto p = {name};", f"::{name}();"):
+        findings = check_generated_cpp(source)
+        assert [finding.rule for finding in findings] == [rule], findings
+
+    # Object members and names inside literals or comments are inert.
+    for source in (
+        f"obj.{name};",
+        f"obj.{name}();",
+        f"ptr->{name}();",
+        f'const char* s = "{name}";',
+        f"// {name}\nint x = 0;",
+        f"/* {name} */ int x = 0;",
+    ):
+        assert check_generated_cpp(source) == []
+
+    # Both authored declarations use the literal escape listed for the name.
+    for body in (
+        f"{name} = close\nplot(close + {name})\n",
+        f"{name}(value) => value + 1.0\n"
+        f"result = {name}(close)\nplot(result)\n",
+    ):
+        cpp = transpile('//@version=6\nstrategy("names")\n' + body)
+        assert re.search(rf"\b{escaped}\b", cpp)
+        assert check_generated_cpp(cpp) == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "unshare",  # Address of the namespace-creation function.
+        "setns",  # Address of the namespace-entry function.
+        "clone",  # Address of the process-creation function.
+        "clone3",  # Address of the process-creation function.
+        "mount",  # Address of the mount-creation function.
+        "umount",  # Address of the mount-removal function.
+        "umount2",  # Address of the mount-removal function.
+        "pivot_root",  # Address of the root-mount function.
+        "chroot",  # Address of the process-root function.
+        "prctl",  # Address of the process-control function.
+        "seccomp",  # Address of the process-filtering function.
+        "pthread_create",  # Address of the POSIX thread-creation function.
+        "thrd_create",  # Address of the C thread-creation function.
+        "__clone",  # Address of the low-level thread-creation function.
+    ],
+)
+@pytest.mark.parametrize(
+    "qualifier",
+    [
+        "",  # The ampersand immediately precedes the function name.
+        "::",  # Global qualification leaves the function address unchanged.
+        "std::",  # Standard qualification leaves the function address unchanged.
+    ],
+)
+def test_namespace_and_thread_function_addresses_are_refused(
+    name: str, qualifier: str
+):
+    findings = check_generated_cpp(f"auto p = &{qualifier}{name};")
+    # Address checks precede the namespace and thread rules.
+    assert [finding.rule for finding in findings] == ["function-pointer"], findings
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "std::thread t;",  # Scope qualification does not exempt thread types.
+        "std::jthread t;",  # Scope qualification does not exempt joining threads.
+        "std::async([] {});",  # Scope qualification does not exempt async calls.
+    ],
+)
+def test_standard_thread_names_are_refused(source: str):
+    findings = check_generated_cpp(source)
+    # All three standard-library names select the thread rule after the colons.
+    assert [finding.rule for finding in findings] == ["thread"], findings
+
+
 def test_current_matrix_output_exercises_settings_and_run_stop_macros():
     source = (ROOT / "tests/fixtures/matrix_eigen_pca.pine").read_text(
         encoding="utf-8"
@@ -82,6 +184,8 @@ NEGATIVES = {
     "directive": "#line 41 \"strategy.pine\"\n",
     "extern-c": 'extern "C" void f();',
     "process": 'system("id");',
+    "namespace": "unshare(0);",  # Namespace creation selects its own rule.
+    "thread": "pthread_create(0, 0, 0, 0);",  # Thread creation selects its own rule.
     "dlopen": 'dlopen("libc.so.6", 1);',
     "file-io": 'fopen("/etc/passwd", "r");',
     "filesystem-stream": "std::ifstream stream;",

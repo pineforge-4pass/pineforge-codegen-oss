@@ -299,11 +299,10 @@ def _timestamp_calendar_lambda(tz: str, yr: str, mo: str, dy: str,
     explicit tz expression, the numeric form passes ``syminfo_.timezone``
     (Pine v6: "If the timezone argument is not specified, the function uses
     the exchange time zone (syminfo.timezone)"). UTC / "" / "Etc/UTC" stays on
-    the ``timegm`` fast path — byte-identical to the historical numeric
-    emission for UTC symbols; anything else takes the mutex-guarded
-    setenv+``mktime`` block with ``tm_isdst = -1`` so DST is resolved by the
-    tz database. A per-call-site thread_local memo keeps the setenv churn to
-    one flip per distinct (tz, fields) tuple.
+    the ``timegm`` fast path. Rejected zones also use UTC; accepted non-UTC
+    zones take the mutex-guarded setenv+``mktime`` block with ``tm_isdst = -1``
+    so DST is resolved by the tz database. A per-call-site thread_local memo
+    keeps the setenv churn to one flip per distinct (tz, fields) tuple.
     """
     return (
         f"[&]() -> int64_t {{ "
@@ -2493,6 +2492,7 @@ class CallVisitor:
         #   1-arg fallback.
         if (
             namespace is None
+            # Only the fixed calendar keys can select a pine_* callee.
             and func_name in TIME_FIELD_EXPRS
             and (node.args or node.kwargs)
         ):
@@ -2785,7 +2785,9 @@ class CallVisitor:
 
         # Unknown ta.* calls — safe fallback
         if namespace == "ta":
-            return f"na<double>() /* unsupported: ta.{func_name} */"
+            # C++ splices physical lines before recognizing comments.
+            comment_name = self._cpp_comment_escape(self._cpp_string_escape(func_name))
+            return f"na<double>() /* unsupported: ta.{comment_name} */"
 
         if namespace == "syminfo":
             if func_name in {"prefix", "ticker"}:
@@ -2813,7 +2815,8 @@ class CallVisitor:
                     "} else { return std::string(); } "
                     f"}})({symbol_expr})"
                 )
-            return f"na<double>() /* unsupported: syminfo.{func_name} */"
+            comment_name = self._cpp_comment_escape(self._cpp_string_escape(func_name))
+            return f"na<double>() /* unsupported: syminfo.{comment_name} */"
 
         # str.* fallback now handled by _visit_str_call above
 
@@ -3757,6 +3760,7 @@ class CallVisitor:
                     f"{color_alpha_cast('_pf_color_alpha', whole)}); }}()"
                 )
             return "0"
+        # These four fixed channel names are the only interpolated callees.
         if func_name in ("r", "g", "b", "t"):
             if args:
                 return f'pine_color::{func_name}({args[0]})'
@@ -3842,7 +3846,7 @@ class CallVisitor:
                         var = self._safe_name(val_arg.name)
                         n = len(tbl)
                         return (
-                            f"pine_enum_str_at({et}_str_values, {n}, {var})"
+                            f"pine_enum_str_at({self._safe_name(et)}_str_values, {n}, {var})"
                         )
             inferred = self._infer_type(val_arg) if val_arg is not None else ""
             if inferred == "std::string":
@@ -3923,7 +3927,8 @@ class CallVisitor:
                 args, STR_ARGS_READ_REPEATEDLY.get(func_name, ()),
                 STR_FUNC_MAP[func_name], "_pf_str_a")
 
-        return f'std::string("") /* unsupported: str.{func_name} */'
+        comment_name = self._cpp_comment_escape(self._cpp_string_escape(func_name))
+        return f'std::string("") /* unsupported: str.{comment_name} */'
 
     def _visit_math_call(self, func_name: str, node: FuncCall) -> str:
         args = _merge_kwargs(node.args, node.kwargs, sigs.get_param_names("math", func_name), self._visit_expr)
@@ -3959,7 +3964,8 @@ class CallVisitor:
                 return mapped.format(*args)
             return f"{mapped}({', '.join(args)})"
         # Unknown math.* — safe fallback
-        return f"0.0 /* unsupported: math.{func_name} */"
+        comment_name = self._cpp_comment_escape(self._cpp_string_escape(func_name))
+        return f"0.0 /* unsupported: math.{comment_name} */"
 
     # ------------------------------------------------------------------
     # Arg/kwarg resolution (PineScript parameter signatures)

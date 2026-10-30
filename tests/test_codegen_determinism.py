@@ -174,6 +174,23 @@ def test_synthetic_history_names_byte_identical_across_hash_seeds() -> None:
     assert len(set(outputs)) == 1
 
 
+def test_unicode_name_encoding_is_identical_across_hash_seeds() -> None:
+    fixture = (
+        '//@version=6\nstrategy("Unicode names")\n'
+        "\u03b1(float \u03b2) =>\n"
+        "    var float \u03b3 = \u03b2\n"
+        "    \u03b3 := nz(\u03b3[1], \u03b2) + 1.0\n"
+        "    \u03b3\n"
+        "pf_utf8_ceb3 = high\npf_utf8_ceb3_2 = low\n"
+        "left = \u03b1(close)\nright = \u03b1(open)\nplot(left + right)\n"
+    )
+    outputs = [_transpile_under_seed(seed, fixture) for seed in _SEEDS]
+    assert all(cpp.isascii() for cpp in outputs)
+    # Gamma is CE B3; its base and suffix 2 are authored, so every run uses suffix 3.
+    assert all("Series<double> pf_utf8_ceb3_3" in cpp for cpp in outputs)
+    assert len(set(outputs)) == 1
+
+
 _PERTURBED_CHILD = """
 import builtins
 import dataclasses

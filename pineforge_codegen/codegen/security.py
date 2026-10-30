@@ -3269,7 +3269,8 @@ class SecurityEmitter:
             if "{0}" in mapped:
                 return mapped.format(*args)
             return f"{mapped}({', '.join(args)})"
-        return f"0.0 /* unsupported: math.{func_name} */"
+        comment_name = self._cpp_comment_escape(self._cpp_string_escape(func_name))
+        return f"0.0 /* unsupported: math.{comment_name} */"
 
     def _security_timeframe_expr(self, sec_id: int) -> str:
         """C++ expression for the timeframe of a request.security evaluator."""

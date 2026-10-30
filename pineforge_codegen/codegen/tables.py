@@ -73,6 +73,7 @@ TIME_FIELD_EXPRS = {
 # These suffixes contain only emitter-owned code. Keep the argument
 # initializers outside them so requested-context rewrites still reach the
 # user's expressions without capturing the lambdas' local bindings.
+# Rejected zones use the existing UTC path before any environment access.
 TIMESTAMP_CALENDAR_BODY = (
     "static thread_local std::string _last_tz; "
     "static thread_local int _last_yr = -1, _last_mo = -1, _last_dy = -1, _last_hr = -1, _last_min = -1, _last_sc = -1; "
@@ -85,7 +86,8 @@ TIMESTAMP_CALENDAR_BODY = (
     "t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
     "t.tm_isdst = -1; "
     "int64_t _res; "
-    "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") { "
+    "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\" || "
+    "!pineforge::native_calendar::timezone_accepted(_tz)) { "
     "_res = (int64_t)timegm(&t) * 1000; "
     "} else { "
     "static std::mutex _pf_ts_mu; "
@@ -105,7 +107,8 @@ TIMESTAMP_CALENDAR_BODY = (
 
 _TZ_TIME_FIELD_BODY = (
     "struct tm tm_buf; "
-    "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") { "
+    "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\" || "
+    "!pineforge::native_calendar::timezone_accepted(_tz)) { "
     "gmtime_r(&_secs, &tm_buf); "
     "} else { "
     "static std::mutex _pf_tz_mu; "
@@ -134,8 +137,8 @@ def tz_time_field_lambda(field_expr: str, ts_arg: str, tz_arg: str) -> str:
     """Inline C++ lambda decomposing a Unix-ms timestamp in a timezone.
 
     UTC / "" / "Etc/UTC" stays on the cheap ``gmtime_r`` fast path (matching
-    the engine's ``_decompose_bar_time``); anything else takes a
-    mutex-guarded setenv+``localtime_r`` block, mirroring
+    the engine's ``_decompose_bar_time``), as do rejected zones. Accepted
+    non-UTC zones take a mutex-guarded setenv+``localtime_r`` block, mirroring
     ``pine_tz::ScopedTimezone`` (src/timezone.cpp) which is not exposed via
     any public ``<pineforge/...>`` header today.
     """

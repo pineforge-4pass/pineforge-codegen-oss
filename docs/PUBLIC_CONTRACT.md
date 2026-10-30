@@ -457,6 +457,11 @@ or generation error; its `diagnostics` attribute carries `Diagnostic` objects.
 1.5.0) notes; use `transpile_full()` to read them. The `diagnostics` of a
 `CompileError` can carry them beside its errors.
 
+`transpile()`, `transpile_full()` and `transpile_with_request_inventory()` check
+the generated C++ allowlist even with `check_support=False` and raise
+`CompileError` with at most 20 fixed reasons at `filename:1:1` when it reports
+findings.
+
 `libraries` maps a Pine library's import path to its source
 (`{"user/name/version": source_text}`); each import the script uses is inlined
 from it before the support check. With `None`, the default, the sources are

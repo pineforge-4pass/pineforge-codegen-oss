@@ -45,6 +45,7 @@ from ..ast_nodes import (
     Subscript, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..collection_history import history_annotation
+from ..cpp_names import cpp_identifier_fragment
 from ..errors import Phase
 from ..external_requests import UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
@@ -197,9 +198,10 @@ class TypeInferer:
 
     def _udt_record_cpp_type(self, type_name: str) -> str:
         """Generated backing-record type for one user-defined object type."""
-        return getattr(self, "_udt_record_cpp_names", {}).get(
-            type_name, f"_PFUdtRecord_{type_name}"
-        )
+        allocated = getattr(self, "_udt_record_cpp_names", {}).get(type_name)
+        if allocated is not None:
+            return allocated
+        return f"_PFUdtRecord_{cpp_identifier_fragment(type_name)}"
 
     def _udt_arena_member_name(self, type_name: str) -> str:
         """Per-strategy arena member owning one user-defined object's records."""
