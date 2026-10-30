@@ -118,6 +118,7 @@ class Token:
     line: int
     col: int
     end_col: int = 0
+    indent_width: int = 0
 
     def __post_init__(self) -> None:
         # Default end_col to col + len(value) if not explicitly set
@@ -246,6 +247,7 @@ class Lexer:
         self.col = 1
         self.tokens: list[Token] = []
         self.indent_stack: list[int] = [0]
+        self._indent_width = 0
         self.paren_depth = 0  # Track () and [] nesting to suppress NEWLINE/INDENT/DEDENT
         self._in_continuation = False  # True when current line is a continuation
         self._diagnostics: list[Diagnostic] = []
@@ -276,7 +278,9 @@ class Lexer:
     def _emit(self, tt: TokenType, value: str, line: int, col: int, end_col: int | None = None) -> None:
         if end_col is None:
             end_col = col + len(value)
-        self.tokens.append(Token(tt, value, line, col, end_col))
+        self.tokens.append(Token(
+            tt, value, line, col, end_col, indent_width=self._indent_width,
+        ))
 
     def _emit_diagnostic(self, message: str, line: int, col: int, end_col: int, hint: str | None = None) -> None:
         loc = SourceLocation(file=self.filename, line=line, col=col, end_col=end_col)
@@ -357,16 +361,17 @@ class Lexer:
             return
 
         # Indentation handling
-        indent_level = 0
         while not self._at_end() and self.source[self.pos] in (" ", "\t"):
-            ch = self._advance()
-            indent_level += 1
+            self._advance()
 
         raw = self.source[line_start: self.pos]
         if "\t" in raw:
-            indent_level = raw.count("\t")
+            self._indent_width = raw.count("\t") * 4
         else:
-            indent_level = len(raw) // 4
+            self._indent_width = len(raw)
+        # Keep the width that a function body can establish below one block
+        # level, while preserving the existing structural token stream.
+        indent_level = self._indent_width // 4
 
         # Operator-first line continuation: when a line *begins* with a binary
         # / ternary operator that cannot start a statement (e.g. ``? x``,
