@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 
 from pineforge_codegen import transpile
-from pineforge_codegen.ast_nodes import Assignment, ExprStmt, FuncDef, MemberAccess
+from pineforge_codegen.ast_nodes import (
+    Assignment, ExprStmt, FuncDef, MemberAccess, Subscript,
+)
 from pineforge_codegen.errors import CompileError, Phase
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
@@ -101,7 +103,7 @@ f(int value) => value + 1
     assert isinstance(function.body[0], ExprStmt)
 
 
-def test_plain_name_assignment_keeps_parser_rejection() -> None:
+def test_plain_name_assignment_keeps_undefined_variable_error() -> None:
     source = """//@version=6
 strategy("plain name assignment")
 f() => value := 1
@@ -109,24 +111,31 @@ f() => value := 1
 
     with pytest.raises(CompileError) as error:
         transpile(source)
-    assert error.value.diagnostics[0].phase is Phase.PARSER
-    assert "COLON_EQUALS" in error.value.diagnostics[0].message
+    assert error.value.diagnostics[0].phase is Phase.ANALYZER
+    assert "Undefined variable: 'value'" in error.value.diagnostics[0].message
 
 
-@pytest.mark.parametrize("definition", [
-    # A plain-name assignment after a field assignment keeps the old rejection:
-    # the comma loop must leave the operator for the caller's diagnostic.
-    "set(State s) => s.value := 1, x := 2",
-    # A history subscript is not an assignable target of a one-line body.
-    "set(State s) => s[1] := 2",
-])
-def test_non_field_assignment_targets_keep_parser_rejection(definition) -> None:
-    source = _function_source(definition)
+def test_undefined_assignment_after_field_assignment_is_diagnosed() -> None:
+    source = _function_source("set(State s) => s.value := 1, x := 2")
 
     with pytest.raises(CompileError) as error:
         transpile(source)
-    assert error.value.diagnostics[0].phase is Phase.PARSER
-    assert "COLON_EQUALS" in error.value.diagnostics[0].message
+    assert error.value.diagnostics[0].phase is Phase.ANALYZER
+    assert "Undefined variable: 'x'" in error.value.diagnostics[0].message
+
+
+def test_history_assignment_uses_the_block_statement_structure() -> None:
+    for definition in (
+        "set(State s) => s[1] := 2",
+        "set(State s) =>\n    s[1] := 2",
+    ):
+        program = _parse(_function_source(definition))
+        function = next(node for node in program.body if isinstance(node, FuncDef))
+        # The history target is one assignment, irrespective of body layout.
+        assert len(function.body) == 1
+        assert function.is_single_expr is False
+        assert isinstance(function.body[0], Assignment)
+        assert isinstance(function.body[0].target, Subscript)
 
 
 RUNTIME_INLINE ="""//@version=6

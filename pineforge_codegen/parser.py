@@ -1257,30 +1257,11 @@ class Parser:
             if self._check(TokenType.NEWLINE) or self._check(TokenType.DEDENT) or self._at_end():
                 return body
 
-    @staticmethod
-    def _is_field_target(expr) -> bool:
-        # The reporter's shape is a UDT field (``s.value := 1``). A history or
-        # array subscript is not an assignable target of a one-line body.
-        return isinstance(expr, MemberAccess)
-
-    def _parse_line_expr_or_assignment(
-        self, *, field_target_only: bool = False
-    ):
-        """Parse one expression or compound-assignment statement on a line.
-
-        ``_parse_arm_line`` accepts any assignment target because switch-arm
-        statements already have that contract.  An inline function body uses
-        the same expression/assignment shape but only promotes a
-        ``MemberAccess`` (UDT field) target to a statement.  Leaving an
-        assignment operator after any other target unconsumed preserves the
-        function parser's existing syntax error for ``f() => x := 1`` and
-        ``f(x) => x[1] := 2``.
-        """
+    def _parse_line_expr_or_assignment(self):
+        """Parse one expression or compound assignment in a switch arm."""
         start_tok = self._current()
         expr = self._parse_expression()
         if self._current().type in COMPOUND_ASSIGN_OPS:
-            if field_target_only and not self._is_field_target(expr):
-                return ExprStmt(expr=expr)
             op = COMPOUND_ASSIGN_OPS[self._advance().type]
             node = Assignment(target=expr, op=op, value=self._parse_expression())
             return self._set_loc(node, start_tok)
@@ -1289,33 +1270,16 @@ class Parser:
     def _parse_inline_func_body(self) -> tuple[list, bool]:
         """Parse a function or method body written after ``=>``.
 
-        A plain expression keeps the historical one-ExprStmt,
-        ``is_single_expr=True`` representation.  A field/element assignment
-        is a real statement and therefore uses the normal block representation
-        so the analyzer and code generator apply statement-tail semantics.
+        Use the block's statement parser and flattening so commas never move
+        a statement outside the callable's scope. A lone expression keeps its
+        historical ``is_single_expr=True`` representation.
         """
-        first = self._parse_line_expr_or_assignment(field_target_only=True)
-        if not isinstance(first, Assignment):
-            return [first], True
-
-        body = [first]
-        while self._match(TokenType.COMMA):
-            if (
-                self._check(TokenType.NEWLINE)
-                or self._check(TokenType.DEDENT)
-                or self._at_end()
-            ):
-                break
-            stmt = self._parse_line_expr_or_assignment(field_target_only=True)
-            if (
-                isinstance(stmt, ExprStmt)
-                and self._current().type in COMPOUND_ASSIGN_OPS
-            ):
-                # The next statement is a plain-name assignment.  Keep its
-                # operator for the caller's existing statement-end diagnostic.
-                break
-            body.append(stmt)
-        return body, False
+        body: list = []
+        self._extend_statement_list(body, self._parse_statement())
+        if len(body) == 1 and isinstance(body[0], (IfStmt, SwitchStmt)):
+            # A selection directly after the arrow was already an expression.
+            body = [ExprStmt(expr=body[0])]
+        return body, len(body) == 1 and isinstance(body[0], ExprStmt)
 
     def _arm_line_statement_ahead(self) -> bool:
         """Whether an arm line's next statement is one no expression starts:
@@ -1359,12 +1323,7 @@ class Parser:
         self._skip_newlines()
         while not self._check(TokenType.DEDENT) and not self._at_end():
             try:
-                stmt = self._parse_statement()
-                if stmt is not None:
-                    if isinstance(stmt, list):
-                        stmts.extend(stmt)
-                    else:
-                        stmts.append(stmt)
+                self._extend_statement_list(stmts, self._parse_statement())
                 self._expect_statement_end()
             except ParseError as error:
                 self._raise_syntax_error(error)
