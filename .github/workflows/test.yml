@@ -294,15 +294,54 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          - python-version: "3.11"
+            compile-shard: 0
+          - python-version: "3.12"
+            compile-shard: 1
+          - python-version: "3.13"
+            compile-shard: 2
+          - python-version: "3.14"
+            compile-shard: 3
     env:
       PF_CI_LABELS: '["self-hosted","pf-ci","pf-ci-x64"]'
       PYTHONHASHSEED: "0"
+      PINEFORGE_REQUIRE_COMPILE: "1"
+      PINEFORGE_ENGINE_INCLUDE: ${{ github.workspace }}/.ci/pineforge-engine/include
+      PINEFORGE_ENGINE_CORPUS: ${{ github.workspace }}/.ci/pineforge-engine/corpus
+      PINEFORGE_EIGEN_INCLUDE: /usr/include/eigen3
+      CXX: /usr/bin/g++
+      PINEFORGE_COMPILE_SHARD: ${{ matrix.compile-shard }}
+      PINEFORGE_COMPILE_SHARDS: "4"
+      PINEFORGE_COMPILE_REPORT_DIR: ${{ runner.temp }}/compile-report
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: "${{ github.event.pull_request.head.sha || github.sha }}"
           fetch-depth: 0
           persist-credentials: false
+      # CONTRIBUTING.md pairs codegen main with engine main. No additional
+      # token or permission: private source/corpus access fails this checkout
+      # and needs an owner-approved acquisition route (docs/ci-compile.md).
+      - name: Check out paired engine main and its pinned corpus
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pineforge-4pass/pineforge-engine
+          ref: main
+          path: .ci/pineforge-engine
+          submodules: true
+          persist-credentials: false
+      - name: Install compile-only prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends g++ libeigen3-dev
+          test -f "$PINEFORGE_ENGINE_INCLUDE/pineforge/engine.hpp"
+          test -f "$PINEFORGE_EIGEN_INCLUDE/Eigen/Dense"
+          test -x "$CXX"
+          git -C .ci/pineforge-engine rev-parse HEAD
+          git -C .ci/pineforge-engine submodule status
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
@@ -310,6 +349,13 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: Run test suite
         run: python -m pytest -q
+      - name: Retain fixture compile failures and measured sweep time
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: compile-report-python-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/compile-report
+          if-no-files-found: error
 
   test-check:
     needs: [authz, changes, workflow-lint, package-files, pytest]
