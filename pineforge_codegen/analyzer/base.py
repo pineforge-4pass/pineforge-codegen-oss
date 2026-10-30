@@ -138,6 +138,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._ast = ast
         self._filename = filename
         self._budget = budget
+        self._pine_version = 6
+        # A later reassignment also prevents an initializer from proving the
+        # type of a condition. Same-spelled bindings conservatively share this
+        # exclusion; their legacy emission types remain unchanged.
+        self._condition_reassigned_names = {
+            node.target.name
+            for node, _depth in iter_ast_nodes(ast)
+            if isinstance(node, Assignment) and isinstance(node.target, Identifier)
+        }
         # The functions that may be emitted once per call site for their
         # session.<flag>[k] reads; None: every one that reads a flag at an
         # offset (pineforge_codegen._generate passes none first, then each
@@ -469,6 +478,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 scope="global",
                 loc=dummy_loc,
             )
+            sym._pf_builtin_condition_type = ptype
             self._symbols.define(sym)
 
     def _ensure_pine_v6(self) -> None:
@@ -4311,6 +4321,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         )
         # Infer type from the value expression
         val_type = self._visit(node.value)
+        if (node.type_hint == "int"
+                and isinstance(node.value, NumberLiteral)
+                and isinstance(node.value.value, float)
+                and self._pine_version == 6):
+            self._error(
+                f"An int declaration cannot initialize '{node.name}' "
+                "with a float literal.",
+                node.loc,
+            )
         type_spec = self._type_spec_from_hint(node.type_hint) if node.type_hint else None
         if type_spec is None:
             type_spec = self._type_spec_from_expr(node.value)
@@ -4378,6 +4397,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             udt_type_name=udt_ctor,
             type_spec=type_spec,
         )
+        # Only an initializer with a numeric proof supplies validation facts.
+        # In particular, FLOAT from a call or an unknown identifier is not
+        # evidence that a condition is numeric.
+        numeric_type = self._numeric_condition_type(node.value)
+        if node.type_hint:
+            numeric_type = (
+                val_type
+                if numeric_type in (PineType.INT, PineType.FLOAT)
+                and val_type in (PineType.INT, PineType.FLOAT)
+                else PineType.UNKNOWN
+            )
+        sym._pf_numeric_condition_type = numeric_type
         # A direct persistent primitive in an ordinary UDF can safely shadow
         # a top-level map once post-analysis owner qualification gives it exact
         # storage.  Other scalar/map shadows still need the legacy fail-closed
@@ -4813,6 +4844,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 loc=loc,
                 type_spec=pspec,
             )
+            if pspec is not None and pspec.kind == "primitive":
+                sym._pf_numeric_condition_type = ptype
             setattr(sym, "_pf_parameter_owner", node.name)
             self._symbols.define(sym)
 
@@ -4822,7 +4855,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Visit body to discover return type
         body_type = PineType.VOID
         old_global = self._global_scope
+        old_pine_version = self._pine_version
         self._global_scope = False
+        self._pine_version = (node.annotations or {}).get("pine_version", 6)
         self._enclosing_func_params.append(set(node.params))
         self._enclosing_func_names.append(node.name)
         self._collection_scope_stack.append(node.name)
@@ -4834,6 +4869,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 body_type = self._statement_value_type(node.body[-1], body_type)
         finally:
             self._global_scope = old_global
+            self._pine_version = old_pine_version
             self._collection_scope_stack.pop()
             self._enclosing_func_params.pop()
             self._enclosing_func_names.pop()
@@ -5207,12 +5243,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 udt_type_name=udt_self,
                 type_spec=pspec,
             )
+            if pspec is not None and pspec.kind == "primitive":
+                sym._pf_numeric_condition_type = ptype
             setattr(sym, "_pf_parameter_owner", method_key)
             self._symbols.define(sym)
         ret_type = PineType.VOID
         ta_start = len(self._ta_call_sites)
         old_global = self._global_scope
+        old_pine_version = self._pine_version
         self._global_scope = False
+        self._pine_version = (node.annotations or {}).get("pine_version", 6)
         self._enclosing_func_params.append(set(node.params))
         self._enclosing_func_names.append(method_key)
         self._collection_scope_stack.append(method_key)
@@ -5270,6 +5310,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     return_type_spec = TypeSpec.udt(method_udt_return)
         finally:
             self._global_scope = old_global
+            self._pine_version = old_pine_version
             self._collection_scope_stack.pop()
             self._enclosing_func_params.pop()
             self._enclosing_func_names.pop()
@@ -5388,11 +5429,48 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._symbols.enter_scope(name)
         return scoped
 
+    def _numeric_condition_type(self, node: ASTNode) -> PineType:
+        """Prove numeric syntax without consulting legacy fallback types."""
+        if isinstance(node, Identifier):
+            sym = self._symbols.resolve(node.name)
+            binding_scope = self._identifier_binding_scopes.get(id(node))
+            if sym is not None and binding_scope is not None and sym.scope != binding_scope:
+                return PineType.UNKNOWN
+            builtin_type = getattr(sym, "_pf_builtin_condition_type", PineType.UNKNOWN)
+            if builtin_type in (PineType.INT, PineType.FLOAT):
+                return builtin_type
+            if node.name in self._condition_reassigned_names:
+                return PineType.UNKNOWN
+            return getattr(sym, "_pf_numeric_condition_type", PineType.UNKNOWN)
+        if isinstance(node, NumberLiteral):
+            return PineType.FLOAT if isinstance(node.value, float) else PineType.INT
+        if isinstance(node, UnaryOp) and node.op == "-":
+            return self._numeric_condition_type(node.operand)
+        if isinstance(node, BinOp) and node.op in ("+", "-", "*", "/", "%"):
+            left = self._numeric_condition_type(node.left)
+            right = self._numeric_condition_type(node.right)
+            if left in (PineType.INT, PineType.FLOAT) and right in (
+                PineType.INT, PineType.FLOAT,
+            ):
+                return (
+                    PineType.FLOAT if node.op == "/" or PineType.FLOAT in (left, right)
+                    else PineType.INT
+                )
+        return PineType.UNKNOWN
+
     def _visit_IfStmt(self, node: IfStmt) -> PineType:
         old_global = self._global_scope
         self._global_scope = False
         try:
             self._visit(node.condition)
+            condition_type = self._numeric_condition_type(node.condition)
+            if (condition_type in (PineType.INT, PineType.FLOAT)
+                    and self._pine_version == 6):
+                self._error(
+                    "An if condition must have bool type; "
+                    f"found {condition_type.value}.",
+                    node.condition.loc or node.loc,
+                )
             body_type = PineType.VOID
             body_scoped = self._enter_top_level_branch_scope(
                 node.body, "top_if"
