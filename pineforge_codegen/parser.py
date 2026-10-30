@@ -1277,16 +1277,13 @@ class Parser:
 
         Use the block's statement parser and flattening so commas never move
         a statement outside the callable's scope. A lone expression keeps its
-        historical ``is_single_expr=True`` representation. An ``if`` opened
-        after the arrow uses the same bare IfStmt as an indented function
-        body, including its branch types and implicit na.
+        historical ``is_single_expr=True`` representation. An ``if`` or
+        ``switch`` opened after the arrow stays a bare statement as in an
+        indented function body, including its branch types and implicit na.
         """
         first_token = self._current()
         body: list = []
         self._extend_statement_list(body, self._parse_statement())
-        if len(body) == 1 and isinstance(body[0], SwitchStmt):
-            # A switch directly after the arrow was already an expression.
-            body = [ExprStmt(expr=body[0])]
         if first_token.starts_indent_continuation and not self._check(TokenType.COMMA):
             # A wrapped arrow body ends at a real statement boundary; physical
             # line numbers cannot split adjacent expressions on its logical line.
