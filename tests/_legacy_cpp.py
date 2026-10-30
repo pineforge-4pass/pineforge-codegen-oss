@@ -160,6 +160,11 @@ def legacy_cpp(cpp: str) -> str:
     # additive. Historical lowering oracles intentionally ignore both so the
     # feature's ABI shape is covered by its own raw-output tests.
     cpp = without_trade_history_policy(cpp)
+    # The zone acceptance term of the timestamp and time-field lambdas is
+    # additive too: a zone the engine rejects now takes the UTC path, which
+    # historical lowering oracles do not model; its own rows pin it.
+    cpp = cpp.replace(
+        ' || !pineforge::native_calendar::timezone_accepted(_tz)', '')
     cpp = cpp.replace(
         '#if __has_include(<pineforge/checked_settings.hpp>)\n'
         '#include <pineforge/checked_settings.hpp>\n#endif\n', '')

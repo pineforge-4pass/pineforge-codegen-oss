@@ -6,9 +6,9 @@ import subprocess
 import pytest
 
 from pineforge_codegen import transpile
-from pineforge_codegen.codegen.helpers import NamingHelper
 from pineforge_codegen.pine_spelling import pine_string_literal
 from tests._compile import _COMPILER, compile_cpp
+from tests._cpp_tokens import string_values
 
 PRELUDE = '//@version=6\nstrategy("prefix probe")\n'
 SYMBOLS = [
@@ -31,10 +31,11 @@ def test_symbol_function_emits_its_symbol_argument(function, symbol, expected_pr
     if keyword:
         argument = "symbol=" + argument
     cpp = transpile(PRELUDE + f"prefixValue = syminfo.{function}({argument})\nplot(str.length(prefixValue))\n")
-    escaped = NamingHelper._cpp_string_escape(symbol)
     (expression,) = re.findall(r"^\s+prefixValue = ([^\n]+);", cpp, re.MULTILINE)
+    assert cpp.isascii()
     assert expression.startswith("([](const auto& _pf_symbol)")
-    assert expression.endswith(f')(std::string("{escaped}"))')
+    assert re.search(r'\)\(std::string\("(?:\\.|[^"\\])*"\)\)$', expression)
+    assert string_values(expression) == [symbol]
 
 
 @pytest.mark.parametrize("function", ["prefix", "ticker"])

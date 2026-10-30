@@ -1061,6 +1061,7 @@ class ExprVisitor:
                     # do not describe, so it keeps the predicates at the
                     # security bar's time, with a warning.
                     args = "(syminfo_.session, syminfo_.timezone, current_bar_.timestamp)"
+                    # The three literal members above close this callee set.
                     predicate = f"pine_session_{node.member}{args}"
                     if self._security_payload_depth:
                         if id(node) not in self._warned_security_session_sites:
@@ -1222,6 +1223,7 @@ class ExprVisitor:
                     or self._infer_type(node.object) == "ChartPoint"
                     or tuple_cpp == "ChartPoint"
                 )
+                # ChartPoint exposes only these three fixed C++ fields.
                 if point and node.member in ("time", "index", "price"):
                     safe = self._call_site_var_name(
                         node.object, self._safe_name(name)
@@ -1240,6 +1242,7 @@ class ExprVisitor:
             (recv_spec is not None and recv_spec.name == "chart.point")
             or self._infer_type(node.object) == "ChartPoint"
         )
+        # The expression receiver uses the same closed ChartPoint field set.
         if point and node.member in ("time", "index", "price"):
             return f"{obj}.{node.member}"
         full = f"{node.member}"

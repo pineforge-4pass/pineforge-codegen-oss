@@ -369,6 +369,8 @@ LIBC_RESERVED_NAMES = frozenset("""
     __asm __asm__ _Pragma
     system popen pclose fork vfork posix_spawn posix_spawnp syscall
     mmap mprotect ptrace
+    unshare setns clone clone3 mount umount umount2 pivot_root chroot prctl seccomp
+    pthread_create thrd_create __clone thread jthread async
     exec execl execle execlp execv execve execvp execvpe execveat
     dlopen dlsym dlclose
     fopen freopen fdopen fclose open openat

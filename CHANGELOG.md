@@ -20,6 +20,30 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## Unreleased (1.9.1)
+
+- Translation checks the generated C++ against a fixed allowlist and refuses a
+  script whose output contains a construct outside it, with a fixed reason and
+  no script text in the message (diagnostic codes `PF-E5053` through
+  `PF-E5079`). The allowlist now also refuses namespace, mount and
+  thread-creation names (`unshare`, `setns`, `clone`, `clone3`, `mount`,
+  `umount`, `umount2`, `pivot_root`, `chroot`, `prctl`, `seccomp`,
+  `pthread_create`, `thrd_create`, `__clone`, `thread`, `jthread`, `async`),
+  and an authored identifier spelled like one of these is renamed with the
+  usual escape prefix. A script that uses none of these names and no
+  non-ASCII text translates to the same C++ as before, except for the timestamp
+  change below.
+- Every generated timestamp and time-field lambda that takes a timezone asks
+  the engine whether the zone is accepted before it sets the process timezone;
+  a rejected zone is read as UTC instead of being set. The generated C++ of
+  every script that uses such a lambda changes by that one term, and the built
+  strategy calls an engine library function (declared in the engine since 1.8.0),
+  so it must be linked against the paired engine library.
+- Identifiers, strings and comments in generated C++ are spelled in ASCII:
+  non-ASCII identifier characters become encoded tokens and string bytes become
+  octal escapes, with the same bytes at run time. A script with non-ASCII text
+  generates different C++ text.
+
 ## Unreleased (1.9.0)
 
 - Generated closed-trade text comparisons against a NUL-free string literal

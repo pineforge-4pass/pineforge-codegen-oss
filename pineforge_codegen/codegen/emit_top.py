@@ -94,6 +94,7 @@ from ..ast_nodes import (
     MemberAccess, SwitchStmt, TupleAssign, TupleLiteral, VarDecl, WhileStmt,
 )
 from ..analyzer import FuncInfo
+from ..cpp_names import cpp_identifier_fragment
 from ..symbols import PineType, method_receiver_cpp_token
 from .tables import (
     BAR_SERIES_PUSH,
@@ -2174,8 +2175,9 @@ class TopLevelEmitter:
             return False
         return False
 
-    def _emit_udt_method_cpp_name(self, fi: FuncInfo) -> str:
-        """Stable C++ identifier for a typed instance method."""
+    @staticmethod
+    def _raw_udt_method_cpp_name(fi: FuncInfo) -> str:
+        """Compose a receiver's structural token and its Pine method name."""
         receiver_spec = (
             fi.param_type_specs[0]
             if getattr(fi, "param_type_specs", None)
@@ -2186,7 +2188,36 @@ class TopLevelEmitter:
             fi.udt_type_name,
         )
         base = fi.node.name if fi.node else ""
-        return self._func_safe_name(f"_udt_{receiver}_{base}")
+        return f"_udt_{receiver}_{base}"
+
+    def _emit_udt_method_cpp_name(self, fi: FuncInfo) -> str:
+        """Stable C++ identifier for a typed instance method."""
+        allocated = getattr(self, "_escaped_method_cpp_names", None)
+        if allocated is None:
+            # Reserve the existing ASCII spellings first, irrespective of
+            # declaration order. An encoded component may itself be an
+            # authored ASCII method or function name.
+            methods = [
+                (info.name, self._raw_udt_method_cpp_name(info))
+                for info in self.ctx.func_infos
+                if info.is_udt_method
+            ]
+            used = {name for _key, name in methods}
+            used.update(self._safe_name_occupied)
+            used.update(
+                self._safe_name(info.name)
+                for info in self.ctx.func_infos
+                if not info.is_udt_method
+            )
+            allocated = {}
+            for key, name in methods:
+                encoded = cpp_identifier_fragment(name)
+                allocated[key] = (
+                    name if encoded == name else
+                    self._allocate_generated_cpp_name(encoded, used)
+                )
+            self._escaped_method_cpp_names = allocated
+        return self._func_safe_name(allocated[fi.name])
 
     def _emit_func_def(self, fi: FuncInfo, lines: list[str], call_site_idx: int | None = None,
                        instance: dict | None = None) -> None:

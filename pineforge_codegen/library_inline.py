@@ -46,6 +46,7 @@ from .ast_nodes import (
     UnaryOp, VarDecl, WhileStmt,
 )
 from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+from .cpp_names import cpp_identifier_fragment
 from .library_modules import LibraryModule, parse_library_module
 from .limits import TimeBudget
 from .pine_libraries import LibraryResolveError, LibraryResolver, library_resolver
@@ -203,6 +204,9 @@ class _Linker:
                 stack.append(value)
 
     def _alloc(self, base: str) -> str:
+        # Every namespace, definition and local-name component reaches this
+        # boundary before it becomes an inlined binding.
+        base = cpp_identifier_fragment(base)
         name = base
         n = 2
         while name in self._allocated or name in self._taken:
@@ -218,6 +222,7 @@ class _Linker:
         return self._local_names[key]
 
     def _prefix(self, lib: LibraryModule) -> str:
+        """Internal module prefix; composed bindings are escaped by _alloc."""
         base = f"{lib.name}_v{lib.path.rsplit('/', 1)[1]}"
         prefix = f"{base}__"
         n = 2
