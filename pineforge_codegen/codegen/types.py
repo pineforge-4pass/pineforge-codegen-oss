@@ -50,7 +50,12 @@ from ..errors import Phase
 from ..external_requests import UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
 from ..matrix_overloads import matrix_sum_has_rhs
-from ..symbols import PineType, TypeSpec, method_receiver_type_name
+from ..symbols import (
+    PineType,
+    TypeSpec,
+    method_receiver_type_name,
+    unify_type_specs,
+)
 from .helpers import (
     NA_PRESERVING_INT_TYPES,
     evaluate_args_once,
@@ -1487,22 +1492,25 @@ class TypeInferer:
             or (isinstance(node, Identifier) and node.name == "na")
         )
 
-    def _nullable_collection_selection_spec(
+    def _selection_type_spec(
         self,
         branches: list[tuple[ASTNode | None, TypeSpec | None]],
     ) -> TypeSpec | None:
-        """Unify compatible map/matrix selection arms around typed ``na``."""
-        concrete: list[TypeSpec] = []
+        """Unify selection arms, with a concrete arm giving ``na`` its type."""
+        result: TypeSpec | None = None
         for node, spec in branches:
             if self._selection_node_is_na(node):
                 continue
-            if spec is None or spec.kind not in {"map", "matrix"}:
+            if spec is None:
                 return None
-            concrete.append(spec)
-        if not concrete:
-            return None
-        first = concrete[0]
-        return first if all(spec == first for spec in concrete[1:]) else None
+            result = (
+                spec
+                if result is None
+                else unify_type_specs(result, spec)
+            )
+            if result is None:
+                return None
+        return result
 
     def _type_spec_from_expr(self, node) -> TypeSpec | None:
         """Best-effort TypeSpec inference for an expression node.
@@ -1520,6 +1528,8 @@ class TypeInferer:
             return TypeSpec.primitive("float" if isinstance(node.value, float) else "int")
         if isinstance(node, BoolLiteral):
             return TypeSpec.primitive("bool")
+        if isinstance(node, ColorLiteral):
+            return TypeSpec.primitive("color")
         if isinstance(node, StringLiteral):
             return TypeSpec.primitive("string")
         if isinstance(node, Identifier):
@@ -1614,12 +1624,12 @@ class TypeInferer:
         if isinstance(node, Ternary):
             true_spec = self._type_spec_from_expr(node.true_val)
             false_spec = self._type_spec_from_expr(node.false_val)
-            collection_spec = self._nullable_collection_selection_spec([
+            selection_spec = self._selection_type_spec([
                 (node.true_val, true_spec),
                 (node.false_val, false_spec),
             ])
-            if collection_spec is not None:
-                return collection_spec
+            if selection_spec is not None:
+                return selection_spec
             if true_spec is not None and true_spec == false_spec:
                 return true_spec
             if (true_spec is not None
@@ -1638,12 +1648,12 @@ class TypeInferer:
             false_node = self._selection_terminal_expr(node.else_body)
             true_spec = self._type_spec_from_expr(true_node)
             false_spec = self._type_spec_from_expr(false_node)
-            collection_spec = self._nullable_collection_selection_spec([
+            selection_spec = self._selection_type_spec([
                 (true_node, true_spec),
                 (false_node, false_spec),
             ])
-            if collection_spec is not None:
-                return collection_spec
+            if selection_spec is not None:
+                return selection_spec
             true_is_na = (
                 isinstance(true_node, NaLiteral)
                 or (isinstance(true_node, Identifier)
@@ -1685,14 +1695,25 @@ class TypeInferer:
                 default_terminal,
                 self._type_spec_from_expr(default_terminal),
             ))
-            return self._nullable_collection_selection_spec(branches)
+            return self._selection_type_spec(branches)
         if isinstance(node, MemberAccess):
+            if (
+                isinstance(node.object, Identifier)
+                and node.object.name == "color"
+            ):
+                return TypeSpec.primitive("color")
             owner = self._type_spec_from_expr(node.object)
             if owner is not None and owner.kind == "udt" and owner.name:
                 return (self._udt_field_type_specs.get(owner.name) or {}).get(node.member)
             return None
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            if namespace == "color" and func_name in {
+                "new",
+                "rgb",
+                "from_gradient",
+            }:
+                return TypeSpec.primitive("color")
             if namespace is None:
                 func_info = self._func_info_map.get(func_name)
                 return_spec = getattr(func_info, "return_type_spec", None)
@@ -4102,9 +4123,7 @@ class TypeInferer:
                 return self._type_spec_to_cpp(spec)
         if isinstance(node, Ternary):
             ternary_spec = self._type_spec_from_expr(node)
-            if (ternary_spec is not None
-                    and ternary_spec.kind == "udt"
-                    and ternary_spec.name in DRAWING_TYPE_TO_CPP):
+            if ternary_spec is not None:
                 return self._type_spec_to_cpp(ternary_spec)
             tt = self._infer_type(node.true_val)
             ft = self._infer_type(node.false_val)
@@ -4123,9 +4142,7 @@ class TypeInferer:
         # the first branch / case; matches Pine semantics for ``x = if...``.
         if isinstance(node, IfStmt):
             block_spec = self._type_spec_from_expr(node)
-            if (block_spec is not None
-                    and block_spec.kind == "udt"
-                    and block_spec.name in DRAWING_TYPE_TO_CPP):
+            if block_spec is not None:
                 return self._type_spec_to_cpp(block_spec)
             if node.body:
                 last = node.body[-1]

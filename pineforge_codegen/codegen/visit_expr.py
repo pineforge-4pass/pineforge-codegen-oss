@@ -322,13 +322,23 @@ class ExprVisitor:
         while isinstance(links[-1].false_val, Ternary):
             links.append(links[-1].false_val)
         string_na = self._ternary_string_na(links)
+        ternary_spec = self._type_spec_from_expr(node)
+        ternary_cpp_type = (
+            self._type_spec_to_cpp(ternary_spec)
+            if ternary_spec is not None
+            else None
+        )
         array_history_type = self._array_history_value_expr_cpp_type(node)
         if len(links) < self._FLAT_TERNARY_CHAIN:
             c = self._coerce_bool_expr(
                 self._visit_expr(node.condition), node.condition
             )
-            t = self._ternary_arm(node.true_val, string_na)
-            f = self._ternary_arm(node.false_val, string_na)
+            t = self._ternary_arm(
+                node.true_val, string_na, ternary_cpp_type
+            )
+            f = self._ternary_arm(
+                node.false_val, string_na, ternary_cpp_type
+            )
             if array_history_type is not None:
                 t = (f"{array_history_type}{{}}" if self._is_na_expr(node.true_val)
                      else f"{array_history_type}({t})")
@@ -340,12 +350,16 @@ class ExprVisitor:
             c = self._coerce_bool_expr(
                 self._visit_expr(link.condition), link.condition
             )
-            t = self._ternary_arm(link.true_val, string_na)
+            t = self._ternary_arm(
+                link.true_val, string_na, ternary_cpp_type
+            )
             if array_history_type is not None:
                 t = (f"{array_history_type}{{}}" if self._is_na_expr(link.true_val)
                      else f"{array_history_type}({t})")
             arms.append(f"({c}) ? ({t}) : ")
-        tail = self._ternary_arm(links[-1].false_val, string_na)
+        tail = self._ternary_arm(
+            links[-1].false_val, string_na, ternary_cpp_type
+        )
         if array_history_type is not None:
             tail = (f"{array_history_type}{{}}" if self._is_na_expr(links[-1].false_val)
                     else f"{array_history_type}({tail})")
@@ -362,7 +376,17 @@ class ExprVisitor:
             return False
         return all(self._infer_type(arm) == "std::string" for arm in values)
 
-    def _ternary_arm(self, arm, string_na: bool) -> str:
+    def _ternary_arm(
+        self,
+        arm,
+        string_na: bool,
+        target_cpp_type: str | None = None,
+    ) -> str:
+        if target_cpp_type is not None and self._is_na_expr(arm):
+            return self._visit_rhs_value(
+                arm,
+                target_cpp_type=target_cpp_type,
+            )
         if string_na and self._is_na_expr(arm):
             return "na<std::string>()"
         return self._visit_expr(arm)
@@ -477,6 +501,11 @@ class ExprVisitor:
                 return f"{target_cpp_type}{{}}"
             if target_cpp_type in ("std::string", "int", "int64_t", "bool"):
                 return f"na<{target_cpp_type}>()"
+            if (
+                target_cpp_type is not None
+                and target_cpp_type.startswith("std::vector")
+            ):
+                return f"{target_cpp_type}{{}}"
         if (isinstance(value_node, Ternary)
                 and (self._is_nullable_collection_cpp_type(target_cpp_type)
                      or drawing_target is not None
@@ -1488,8 +1517,8 @@ class ExprVisitor:
             for operand in (node.left, node.right):
                 if isinstance(operand, BinOp) and operand.op == "*":
                     self._wide_int_products.add(id(operand))
-        left = self._visit_binop_operand(node.left, node.op)
-        right = self._visit_binop_operand(node.right, node.op)
+        left = self._visit_binop_operand(node.left, node.op, node.right)
+        right = self._visit_binop_operand(node.right, node.op, node.left)
         if (self._int_arith_leaves_int32(node)
                 and self._fold_int32_overflow_cpp(node.op, left, right) is None):
             # Both operands are 32-bit C++ ints and the value can leave
@@ -1506,10 +1535,16 @@ class ExprVisitor:
             lambda left, right: self._lower_binop(node, left, right),
         )
 
-    def _visit_binop_operand(self, operand, op: str) -> str:
+    def _visit_binop_operand(self, operand, op: str, other) -> str:
         """An operand's C++. An ordering comparison reads a
         ``_nonfinite_int_names`` name's infinity as the number TradingView
         orders it by (``_nonfinite_int_read``)."""
+        if self._is_na_expr(operand):
+            other_cpp_type = self._infer_type(other)
+            return self._visit_rhs_value(
+                operand,
+                target_cpp_type=other_cpp_type,
+            )
         if (op in self.NONFINITE_INT_ORDERING_OPS
                 and isinstance(operand, Identifier)
                 and operand.name in self._nonfinite_int_names()):

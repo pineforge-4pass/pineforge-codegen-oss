@@ -68,13 +68,14 @@ from typing import Any
 from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier,
     IfStmt, MemberAccess, NumberLiteral, StringLiteral, Subscript, SwitchStmt,
-    Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
+    Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, NaLiteral,
+    ColorLiteral,
 )
 from ..method_binding import bind_function_defaults
 from ..pine_spelling import sub_outside_literals
 from ..external_requests import FEED_LOWERING, LOWERING_ANNOTATION
 from ..security_contexts import CONTEXT_ANNOTATION, DEAD_ANNOTATION
-from ..symbols import PineType
+from ..symbols import PineType, unify_pine_types
 from .. import signatures as sigs
 from .. import tv_input_choices as tv_in
 from .contracts import FixnanCallSite, FuncInfo, SecurityCallInfo, TACallSite
@@ -146,6 +147,10 @@ class CallHandlers:
             )
         if isinstance(expr, BoolLiteral):
             return PineType.BOOL
+        if isinstance(expr, ColorLiteral):
+            return PineType.COLOR
+        if isinstance(expr, NaLiteral):
+            return PineType.NA
         if isinstance(expr, StringLiteral):
             return PineType.STRING
         if isinstance(expr, UnaryOp):
@@ -163,11 +168,12 @@ class CallHandlers:
             )
             if expr.op in {"==", "!=", ">", "<", ">=", "<=", "and", "or"}:
                 return PineType.BOOL
-            if left == PineType.STRING or right == PineType.STRING:
+            joined = unify_pine_types(left, right)
+            if joined == PineType.STRING:
                 return PineType.STRING
-            if expr.op == "/" or PineType.FLOAT in {left, right}:
+            if expr.op == "/" or joined == PineType.FLOAT:
                 return PineType.FLOAT
-            if left == PineType.INT and right == PineType.INT:
+            if joined == PineType.INT:
                 return PineType.INT
             return PineType.UNKNOWN
         if isinstance(expr, Ternary):
@@ -177,13 +183,7 @@ class CallHandlers:
             false_type = self._callsite_primitive_expr_type(
                 expr.false_val, parameter_types
             )
-            if true_type == false_type:
-                return true_type
-            if PineType.STRING in {true_type, false_type}:
-                return PineType.STRING
-            if PineType.FLOAT in {true_type, false_type}:
-                return PineType.FLOAT
-            return PineType.UNKNOWN
+            return unify_pine_types(true_type, false_type)
         if isinstance(expr, FuncCall):
             callee = expr.callee
             if isinstance(callee, Identifier):
@@ -209,12 +209,12 @@ class CallHandlers:
     ) -> PineType:
         if not types or PineType.UNKNOWN in types:
             return PineType.UNKNOWN
-        first = types[0]
-        if all(value == first for value in types):
-            return first
-        if set(types).issubset({PineType.INT, PineType.FLOAT}):
-            return PineType.FLOAT
-        return PineType.UNKNOWN
+        result = types[0]
+        for value in types[1:]:
+            result = unify_pine_types(result, value)
+            if result == PineType.UNKNOWN:
+                return PineType.UNKNOWN
+        return result
 
     def _apply_callsite_local_type_effects(
         self,

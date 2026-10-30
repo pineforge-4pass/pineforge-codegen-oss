@@ -1407,6 +1407,9 @@ class CallVisitor:
             if (arg is None or spec is None or spec.kind != "array"
                     or (index < len(params) and params[index] in series)):
                 continue
+            if self._is_na_expr(arg):
+                stage = True
+                continue
             kind = self._array_arg_kind(arg)
             if kind == "alias":
                 param = params[index] if index < len(params) else f"#{index + 1}"
@@ -1554,9 +1557,9 @@ class CallVisitor:
             if param_index < len(param_specs)
             else None
         )
-        if param_spec is not None and param_spec.kind in {"map", "matrix"}:
+        if param_spec is not None:
             # Both UDT-method dispatch paths funnel through this helper after
-            # positional/keyword/default merging.  Lower a bare ``na`` (and
+            # positional/keyword/default merging. Lower a bare ``na`` (and
             # nullable selections containing it) against the declared exact
             # parameter type instead of the legacy numeric ``na<double>()``.
             return self._visit_rhs_value(
@@ -3150,8 +3153,7 @@ class CallVisitor:
                 param_specs = getattr(fi_lookup, "param_type_specs", []) or []
                 if arg_idx < len(param_specs):
                     param_spec = param_specs[arg_idx]
-                    if (param_spec is not None
-                            and param_spec.kind in {"map", "matrix"}):
+                    if param_spec is not None:
                         return self._visit_rhs_value(
                             arg_node,
                             target_cpp_type=self._type_spec_to_cpp(param_spec),

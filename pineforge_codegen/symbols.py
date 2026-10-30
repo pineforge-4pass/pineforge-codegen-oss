@@ -16,6 +16,21 @@ class PineType(Enum):
     UNKNOWN = "unknown"
 
 
+def unify_pine_types(left: PineType, right: PineType) -> PineType:
+    """Join two coarse Pine types, letting a concrete type adopt ``na``."""
+    if left == right:
+        return left
+    if left == PineType.NA:
+        return right
+    if right == PineType.NA:
+        return left
+    if PineType.STRING in (left, right):
+        return PineType.STRING
+    if PineType.FLOAT in (left, right):
+        return PineType.FLOAT
+    return left
+
+
 @dataclass(frozen=True)
 class TypeSpec:
     """Structured Pine type metadata for collections and UDTs.
@@ -59,6 +74,32 @@ class TypeSpec:
         if self.kind == "matrix" and self.element is not None:
             return f"matrix<{self.element}>"
         return self.name or self.kind
+
+
+def unify_type_specs(
+    left: TypeSpec | None,
+    right: TypeSpec | None,
+    *,
+    left_is_na: bool = False,
+    right_is_na: bool = False,
+) -> TypeSpec | None:
+    """Join structured types, with an explicit ``na`` arm adopting its peer."""
+    if left_is_na:
+        return right
+    if right_is_na:
+        return left
+    if left is None or right is None:
+        return None
+    if left == right:
+        return left
+    if left.kind == "primitive" and right.kind == "primitive":
+        if left.name == "string" or right.name == "string":
+            return TypeSpec.primitive("string")
+        if left.name == "float" or right.name == "float":
+            return TypeSpec.primitive("float")
+        if left.name == right.name == "int":
+            return TypeSpec.primitive("int")
+    return None
 
 
 def method_receiver_type_name(spec: TypeSpec | None) -> str | None:

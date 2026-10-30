@@ -46,7 +46,12 @@ from ..ast_nodes import (
 )
 from ..errors import Phase
 from ..matrix_overloads import matrix_sum_has_rhs
-from ..symbols import PineType, TypeSpec, method_receiver_type_name
+from ..symbols import (
+    PineType,
+    TypeSpec,
+    method_receiver_type_name,
+    unify_type_specs,
+)
 
 # Drawing-objects-as-data type names (spec §4.1). Defined locally — the
 # analyzer must not import from ``codegen`` (codegen imports analyzer, so the
@@ -249,27 +254,25 @@ class TypeHelper:
             or (isinstance(node, Identifier) and node.name == "na")
         )
 
-    def _nullable_collection_selection_spec(
+    def _selection_type_spec(
         self,
         branches: list[tuple[ASTNode | None, TypeSpec | None]],
     ) -> TypeSpec | None:
-        """Unify compatible map/matrix selection arms around typed ``na``.
-
-        A missing ``if``/``switch`` fallback is Pine's implicit ``na`` arm.
-        Every concrete arm must carry the same nullable collection TypeSpec;
-        an unknown or incompatible concrete arm fails closed.
-        """
-        concrete: list[TypeSpec] = []
+        """Unify selection arms, with a concrete arm giving ``na`` its type."""
+        result: TypeSpec | None = None
         for node, spec in branches:
             if self._selection_node_is_na(node):
                 continue
-            if spec is None or spec.kind not in {"map", "matrix"}:
+            if spec is None:
                 return None
-            concrete.append(spec)
-        if not concrete:
-            return None
-        first = concrete[0]
-        return first if all(spec == first for spec in concrete[1:]) else None
+            result = (
+                spec
+                if result is None
+                else unify_type_specs(result, spec)
+            )
+            if result is None:
+                return None
+        return result
 
     def _type_spec_from_expr(self, value: ASTNode | None) -> TypeSpec | None:
         if value is None:
@@ -287,17 +290,19 @@ class TypeHelper:
             )
         if isinstance(value, BoolLiteral):
             return TypeSpec.primitive("bool")
+        if isinstance(value, ColorLiteral):
+            return TypeSpec.primitive("color")
         if isinstance(value, StringLiteral):
             return TypeSpec.primitive("string")
         if isinstance(value, Ternary):
             true_spec = self._type_spec_from_expr(value.true_val)
             false_spec = self._type_spec_from_expr(value.false_val)
-            collection_spec = self._nullable_collection_selection_spec([
+            selection_spec = self._selection_type_spec([
                 (value.true_val, true_spec),
                 (value.false_val, false_spec),
             ])
-            if collection_spec is not None:
-                return collection_spec
+            if selection_spec is not None:
+                return selection_spec
 
             def direct_user_udt_ctor_name(node: ASTNode) -> str | None:
                 if not isinstance(node, FuncCall):
@@ -381,12 +386,12 @@ class TypeHelper:
             false_node = self._selection_terminal_expr(value.else_body)
             true_spec = self._type_spec_from_expr(true_node)
             false_spec = self._type_spec_from_expr(false_node)
-            collection_spec = self._nullable_collection_selection_spec([
+            selection_spec = self._selection_type_spec([
                 (true_node, true_spec),
                 (false_node, false_spec),
             ])
-            if collection_spec is not None:
-                return collection_spec
+            if selection_spec is not None:
+                return selection_spec
             true_is_na = (
                 isinstance(true_node, NaLiteral)
                 or (isinstance(true_node, Identifier)
@@ -428,12 +433,14 @@ class TypeHelper:
                 default_terminal,
                 self._type_spec_from_expr(default_terminal),
             ))
-            return self._nullable_collection_selection_spec(branches)
+            return self._selection_type_spec(branches)
         if isinstance(value, FuncCall):
             cal = value.callee
             func = cal.member if isinstance(cal, MemberAccess) else None
             ns = cal.object.name if isinstance(cal, MemberAccess) and isinstance(cal.object, Identifier) else None
             targs = self._template_args_from_call(value)
+            if ns == "color" and func in {"new", "rgb", "from_gradient"}:
+                return TypeSpec.primitive("color")
             if isinstance(cal, MemberAccess):
                 typed_receiver_spec = self._type_spec_from_expr(cal.object)
                 typed_receiver_name = method_receiver_type_name(
@@ -701,6 +708,11 @@ class TypeHelper:
                 if udt_return in _DRAWING_TYPE_NAMES:
                     return TypeSpec.udt(udt_return)
         if isinstance(value, MemberAccess):
+            if (
+                isinstance(value.object, Identifier)
+                and value.object.name == "color"
+            ):
+                return TypeSpec.primitive("color")
             owner = self._type_spec_from_expr(value.object)
             if owner is not None and owner.kind == "udt" and owner.name:
                 return (self._udt_field_type_specs.get(owner.name) or {}).get(value.member)

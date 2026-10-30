@@ -27,6 +27,7 @@ from ..symbols import (
     SymbolTable,
     TypeSpec,
     method_receiver_type_name,
+    unify_pine_types,
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from ..limits import TimeBudget, iter_ast_nodes
@@ -5029,6 +5030,37 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # re-visit the call and duplicate stateful call sites.
             self._func_return_type_specs[node.name] = terminal_spec
 
+        terminal_needs_structured_return = body_type in {
+            PineType.NA,
+            PineType.UNKNOWN,
+            PineType.VOID,
+        }
+        terminal_primitive_type = self._primitive_pine_type_from_spec(
+            terminal_direct_return_spec
+        )
+        if (
+            terminal_primitive_type != PineType.UNKNOWN
+            and terminal_needs_structured_return
+        ):
+            body_type = terminal_primitive_type
+        if (
+            terminal_direct_return_spec is not None
+            and (
+                terminal_direct_return_spec.kind in {
+                    "array",
+                    "map",
+                    "matrix",
+                }
+                or (
+                    terminal_direct_return_spec.kind == "primitive"
+                    and terminal_needs_structured_return
+                )
+            )
+        ):
+            self._func_return_type_specs[node.name] = (
+                terminal_direct_return_spec
+            )
+
         # Store return type
         self._func_return_types[node.name] = body_type
 
@@ -5150,6 +5182,34 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 ret_type = self._statement_value_type(node.body[-1], ret_type)
             if terminal_ret_expr is not None:
                 terminal_spec = self._type_spec_from_expr(terminal_ret_expr)
+                terminal_needs_structured_return = ret_type in {
+                    PineType.NA,
+                    PineType.UNKNOWN,
+                    PineType.VOID,
+                }
+                terminal_primitive_type = self._primitive_pine_type_from_spec(
+                    terminal_spec
+                )
+                if (
+                    terminal_primitive_type != PineType.UNKNOWN
+                    and terminal_needs_structured_return
+                ):
+                    ret_type = terminal_primitive_type
+                if (
+                    terminal_spec is not None
+                    and (
+                        terminal_spec.kind in {
+                            "array",
+                            "map",
+                            "matrix",
+                        }
+                        or (
+                            terminal_spec.kind == "primitive"
+                            and terminal_needs_structured_return
+                        )
+                    )
+                ):
+                    return_type_spec = terminal_spec
                 if terminal_spec is not None and terminal_spec.kind in ("map", "matrix"):
                     return_type_spec = terminal_spec
                 if terminal_spec is not None and terminal_spec.kind == "udt":
@@ -5309,16 +5369,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 )
                 self._block_node_stack.append(node.else_body)
                 try:
+                    else_type = PineType.VOID
                     for stmt in node.else_body:
-                        self._visit(stmt)
+                        else_type = self._visit(stmt)
                 finally:
                     self._block_node_stack.pop()
                     if else_scoped:
                         self._symbols.exit_scope()
+            else:
+                else_type = PineType.NA
         finally:
             self._global_scope = old_global
         # If used as expression (x = if ...), return last expr type
-        return body_type
+        return unify_pine_types(body_type, else_type)
 
     def _visit_ForStmt(self, node: ForStmt) -> PineType:
         outer_symbol = self._symbols.resolve(node.var)
@@ -5463,7 +5526,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         try:
             if node.expr:
                 self._visit(node.expr)
-            result_type = PineType.VOID
+            branch_types: list[PineType] = []
             for case_expr, case_body in node.cases:
                 if case_expr:
                     self._visit(case_expr)
@@ -5472,8 +5535,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 )
                 self._block_node_stack.append(case_body)
                 try:
+                    case_type = PineType.VOID
                     for stmt in case_body:
-                        result_type = self._visit(stmt)
+                        case_type = self._visit(stmt)
+                    branch_types.append(case_type)
                 finally:
                     self._block_node_stack.pop()
                     if case_scoped:
@@ -5484,15 +5549,22 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 )
                 self._block_node_stack.append(node.default_body)
                 try:
+                    default_type = PineType.VOID
                     for stmt in node.default_body:
-                        self._visit(stmt)
+                        default_type = self._visit(stmt)
+                    branch_types.append(default_type)
                 finally:
                     self._block_node_stack.pop()
                     if default_scoped:
                         self._symbols.exit_scope()
+            else:
+                branch_types.append(PineType.NA)
         finally:
             self._global_scope = old_global
         # If used as expression (x = switch ...), return last expr type
+        result_type = branch_types[0] if branch_types else PineType.VOID
+        for branch_type in branch_types[1:]:
+            result_type = unify_pine_types(result_type, branch_type)
         return result_type
 
     def _visit_BreakStmt(self, node: BreakStmt) -> PineType:
@@ -5515,13 +5587,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _visit_BinOp(self, node: BinOp) -> PineType:
         left_type = self._visit(node.left)
         right_type = self._visit(node.right)
+        joined_type = unify_pine_types(left_type, right_type)
 
         # Comparison and logical operators return BOOL
         if node.op in ("==", "!=", ">", "<", ">=", "<=", "and", "or"):
             return PineType.BOOL
 
         # String concatenation: if either side is STRING, result is STRING
-        if left_type == PineType.STRING or right_type == PineType.STRING:
+        if joined_type == PineType.STRING:
             def _mark_string_param(expr) -> None:
                 if not isinstance(expr, Identifier):
                     return
@@ -5539,9 +5612,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return PineType.STRING
 
         # Arithmetic: promote to FLOAT if either side is FLOAT
-        if left_type == PineType.FLOAT or right_type == PineType.FLOAT:
+        if joined_type == PineType.FLOAT:
             return PineType.FLOAT
-        if left_type == PineType.INT and right_type == PineType.INT:
+        if joined_type == PineType.INT:
             return PineType.INT
 
         # Division always returns FLOAT
@@ -5560,14 +5633,22 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._visit(node.condition)
         true_type = self._visit(node.true_val)
         false_type = self._visit(node.false_val)
-
-        # String type dominates
-        if true_type == PineType.STRING or false_type == PineType.STRING:
-            return PineType.STRING
-        # Promote types
-        if true_type == PineType.FLOAT or false_type == PineType.FLOAT:
-            return PineType.FLOAT
-        return true_type
+        result_type = unify_pine_types(true_type, false_type)
+        structured_type = PineType.UNKNOWN
+        if result_type in {
+            PineType.NA,
+            PineType.UNKNOWN,
+            PineType.VOID,
+        }:
+            structured_type = self._primitive_pine_type_from_spec(
+                self._type_spec_from_expr(node)
+            )
+        if (
+            structured_type != PineType.UNKNOWN
+            and result_type in {PineType.NA, PineType.UNKNOWN, PineType.VOID}
+        ):
+            return structured_type
+        return result_type
 
     def _visit_FuncCall(self, node: FuncCall) -> PineType:
         # Determine what is being called

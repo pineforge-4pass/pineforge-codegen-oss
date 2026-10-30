@@ -461,15 +461,15 @@ class StmtVisitor:
         Declarations need the explicit hint before their lexical collection
         binding is activated; reassignments can use the active name registry,
         while UDT fields are resolved from the target expression itself.
-        Arrays are deliberately excluded until their runtime representation
-        can distinguish ``na`` from a valid empty ID.
+        Arrays use their value representation here, so a typed ``na`` arm
+        becomes the vector's default value.
         """
         spec = self._type_spec_from_hint_name(type_hint) if type_hint else None
         if spec is None and target_node is not None:
             spec = self._type_spec_from_expr(target_node)
         if spec is None and name is not None:
             spec = self._collection_spec_for_name(name)
-        if spec is None or spec.kind not in {"map", "matrix"}:
+        if spec is None or spec.kind not in {"array", "map", "matrix"}:
             return None
         return self._type_spec_to_cpp(spec)
 
@@ -861,6 +861,7 @@ class StmtVisitor:
                 cpp_type
                 if (cpp_type is not None
                     and (self._is_nullable_collection_cpp_type(cpp_type)
+                         or cpp_type.startswith("std::vector")
                          or cpp_type in DRAWING_TYPE_TO_CPP.values()
                          or cpp_type in self._udt_defs))
                 else self._nullable_collection_target_cpp_type(
@@ -2220,8 +2221,13 @@ class StmtVisitor:
             self._unmatched_value_na = (
                 target, self._na_value_for_type(slot_cpp_type))
         try:
+            effective_target_cpp_type = target_cpp_type or slot_cpp_type
             self._visit_if_switch_expr(
-                node, target, lines, indent, target_cpp_type=target_cpp_type,
+                node,
+                target,
+                lines,
+                indent,
+                target_cpp_type=effective_target_cpp_type,
             )
         finally:
             self._unmatched_value_na = saved
@@ -2463,8 +2469,12 @@ class StmtVisitor:
     ) -> None:
         """Emit an if/switch used as an expression, assigning to target."""
         pad = "    " * indent
-        nullable_collection_target = self._is_nullable_collection_cpp_type(
-            target_cpp_type
+        nullable_collection_target = (
+            self._is_nullable_collection_cpp_type(target_cpp_type)
+            or (
+                target_cpp_type is not None
+                and target_cpp_type.startswith("std::vector")
+            )
         )
 
         def emit_implicit_na_fallback() -> None:
