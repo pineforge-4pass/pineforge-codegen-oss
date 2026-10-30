@@ -346,6 +346,7 @@ jobs:
       PF_CI_LABELS: '["self-hosted","pf-ci","pf-ci-x64"]'
       PYTHONHASHSEED: "0"
       PINEFORGE_REQUIRE_COMPILE: "1"
+      PINEFORGE_ENGINE_PAIRING: "pinned"
       PINEFORGE_ENGINE_INCLUDE: ${{ github.workspace }}/.ci/pineforge-engine/include
       PINEFORGE_ENGINE_CORPUS: ${{ github.workspace }}/.ci/pineforge-engine/corpus
       PINEFORGE_EIGEN_INCLUDE: /usr/include/eigen3

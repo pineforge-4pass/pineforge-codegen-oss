@@ -8,6 +8,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/engine-drift.yml"
+DRIFT_DOC = ROOT / "docs/ci-engine-drift.md"
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 SETUP_PYTHON = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
 UPLOAD = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
@@ -24,6 +25,13 @@ def _job(workflow: str) -> str:
     return match[1]
 
 
+def _uses(step: str, action: str) -> bool:
+    """The step uses exactly this pinned action; a trailing version comment is allowed."""
+    return re.search(
+        rf"^        uses: {re.escape(action)}(?: # [^\n]*)?\n", step, re.M,
+    ) is not None
+
+
 def _step(job: str, name: str) -> str:
     match = re.search(
         rf"^      - name: {re.escape(name)}\n(.*?)(?=^      - |\Z)",
@@ -38,6 +46,10 @@ def _assert_drift_contract(workflow: str) -> None:
     trigger = re.search(r"^on:\n(.*?)(?=^permissions:)", workflow, re.M | re.S)
     assert trigger is not None, "missing workflow trigger"
     trigger_body = trigger[1]
+    # Checked first so the specific message names the forbidden events.
+    assert not re.search(r"^  (?:push|pull_request):", trigger_body, re.M), (
+        "engine drift must not run on repository or pull-request events"
+    )
     assert re.findall(r"^  ([a-z_]+):\n", trigger_body, re.M) == [
         "schedule", "workflow_dispatch",
     ], "engine drift must have only schedule and workflow_dispatch triggers"
@@ -46,9 +58,6 @@ def _assert_drift_contract(workflow: str) -> None:
         '    - cron: "17 4 * * *"\n',
     ]
     assert "  workflow_dispatch:\n" in trigger_body
-    assert not re.search(r"^  (?:push|pull_request):", trigger_body, re.M), (
-        "engine drift must not run on repository or pull-request events"
-    )
     assert "permissions:\n  contents: read\n" in workflow
     assert re.findall(r"^  [\w-]+:\n", workflow.split("jobs:\n", 1)[1], re.M) == [
         "  drift:\n",
@@ -64,13 +73,13 @@ def _assert_drift_contract(workflow: str) -> None:
     assert steps.startswith("      - name: Check out codegen\n")
 
     codegen = _step(job, "Check out codegen")
-    assert f"        uses: {CHECKOUT}\n" in codegen
+    assert _uses(codegen, CHECKOUT)
     assert "        ref:" not in codegen
     assert "          fetch-depth: 0\n" in codegen
     assert "          persist-credentials: false\n" in codegen
 
     engine = _step(job, "Check out engine main and its corpus")
-    assert f"        uses: {CHECKOUT}\n" in engine
+    assert _uses(engine, CHECKOUT)
     assert "          repository: pineforge-4pass/pineforge-engine\n" in engine
     assert "          ref: main\n" in engine, (
         "engine drift must keep the engine checkout floating"
@@ -81,6 +90,9 @@ def _assert_drift_contract(workflow: str) -> None:
 
     env = re.search(r"^    env:\n(.*?)(?=^    steps:)", job, re.M | re.S)
     assert env is not None
+    assert re.findall(
+        r'^      PINEFORGE_ENGINE_PAIRING: ([^\n]+)$', env[1], re.M
+    ) == ['"floating"'], "engine drift must use the floating engine pairing mode"
     assert '      PINEFORGE_REQUIRE_COMPILE: "1"\n' in env[1], (
         "engine drift must require compile inputs"
     )
@@ -103,7 +115,7 @@ def _assert_drift_contract(workflow: str) -> None:
     assert 'printf \'PINEFORGE_CORPUS_SHA=%s\\n\' "$PINEFORGE_CORPUS_SHA" >> "$GITHUB_ENV"' in install
 
     python = _step(job, "Set up Python")
-    assert f"        uses: {SETUP_PYTHON}\n" in python
+    assert _uses(python, SETUP_PYTHON)
     assert '          python-version: "3.12"\n' in python
     assert '        run: python -m pip install -e ".[dev]"\n' in _step(
         job, "Install with dev extras"
@@ -116,13 +128,13 @@ def _assert_drift_contract(workflow: str) -> None:
     summary = _step(job, "Report engine drift")
     assert "        if: always()\n" in summary
     assert "$GITHUB_STEP_SUMMARY" in summary
-    assert "$PINEFORGE_ENGINE_SHA" in summary
+    assert 'engine_sha="${PINEFORGE_ENGINE_SHA:-unrecorded}"' in summary
     assert "ci/engine-pin" in summary
     assert "steps.drift_tests.outcome" in summary
 
     artifact = _step(job, "Retain drift compile report")
     assert "        if: always()\n" in artifact
-    assert f"        uses: {UPLOAD}\n" in artifact
+    assert _uses(artifact, UPLOAD)
     assert "          name: compile-report-engine-drift\n" in artifact
     assert "          path: ${{ github.workspace }}/.ci/compile-report\n" in artifact
     assert "          if-no-files-found: error\n" in artifact
@@ -156,6 +168,11 @@ def test_engine_drift_workflow_has_the_scheduled_floating_pair():
         "",
         "engine drift must require compile inputs",
     ),
+    (
+        '      PINEFORGE_ENGINE_PAIRING: "floating"\n',
+        '      PINEFORGE_ENGINE_PAIRING: "pinned"\n',
+        "engine drift must use the floating engine pairing mode",
+    ),
 ])
 def test_engine_drift_workflow_mutations_are_rejected(old, new, message):
     workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -164,3 +181,11 @@ def test_engine_drift_workflow_mutations_are_rejected(old, new, message):
     mutated = workflow.replace(old, new, 1)
     with pytest.raises(AssertionError, match=re.escape(message)):
         _assert_drift_contract(mutated)
+
+
+def test_engine_drift_docs_describe_the_pairing_modes():
+    document = " ".join(DRIFT_DOC.read_text(encoding="utf-8").split())
+    assert (
+        "Required compile runs use `pinned`; only scheduled engine drift uses `floating`."
+        in document
+    )

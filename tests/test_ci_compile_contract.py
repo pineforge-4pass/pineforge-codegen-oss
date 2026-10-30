@@ -115,6 +115,9 @@ def _assert_compile_contract(workflow: str) -> None:
     assert '      PINEFORGE_REQUIRE_COMPILE: "1"\n' in job, (
         "compile must require compile inputs"
     )
+    assert re.findall(
+        r'^      PINEFORGE_ENGINE_PAIRING: ([^\n]+)$', job, re.M
+    ) == ['"pinned"'], "compile must use the pinned engine pairing mode"
     for variable, suffix in (
         ("PINEFORGE_ENGINE_INCLUDE", "include"),
         ("PINEFORGE_ENGINE_CORPUS", "corpus"),
@@ -434,6 +437,7 @@ def test_pairing_workflow_controls_reject_an_unrecorded_or_literal_sha(variable,
     "`tests/test_require_compile.py`, and `tests/test_ci_compile_contract.py`.",
     "The compile job reads `ci/engine-pin` and initializes the engine's pinned corpus "
     "submodule.",
+    "Required compile runs use `pinned`; only scheduled engine drift uses `floating`.",
     "`ci/engine-pin` is one lowercase 40-hex line.",
     "The scheduled Engine drift workflow checks engine `main` separately and tells "
     "the owner when a pin bump is due.",
@@ -493,6 +497,15 @@ def test_compile_pin_controls_reject_reverted_rules(mutation, message):
     (
         "compile", 'PINEFORGE_REQUIRE_COMPILE: "1"', 'PINEFORGE_REQUIRE_COMPILE: "0"',
         "compile must require compile inputs",
+    ),
+    (
+        "compile", '      PINEFORGE_ENGINE_PAIRING: "pinned"\n',
+        '      PINEFORGE_ENGINE_PAIRING: "floating"\n',
+        "compile must use the pinned engine pairing mode",
+    ),
+    (
+        "compile", '      PINEFORGE_ENGINE_PAIRING: "pinned"\n', "",
+        "compile must use the pinned engine pairing mode",
     ),
     (
         "compile", "repository: pineforge-4pass/pineforge-engine",

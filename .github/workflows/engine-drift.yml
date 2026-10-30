@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       PINEFORGE_REQUIRE_COMPILE: "1"
+      PINEFORGE_ENGINE_PAIRING: "floating"
       PINEFORGE_ENGINE_INCLUDE: ${{ github.workspace }}/.ci/pineforge-engine/include
       PINEFORGE_ENGINE_CORPUS: ${{ github.workspace }}/.ci/pineforge-engine/corpus
       PINEFORGE_EIGEN_INCLUDE: /usr/include/eigen3

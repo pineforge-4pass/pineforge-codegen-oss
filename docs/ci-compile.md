@@ -57,6 +57,11 @@ engine `main` separately and tells the owner when a pin bump is due.
 Recorded engine and corpus SHAs identify the engine and corpus used by each
 result, while `engine_pin` identifies the committed pairing target.
 
+`PINEFORGE_ENGINE_PAIRING` accepts `pinned` and `floating` in required compile runs.
+`pinned` requires the checked-out engine SHA to equal `ci/engine-pin`.
+`floating` keeps pin validation and records both SHAs while skipping only that equality.
+Required compile runs use `pinned`; only scheduled engine drift uses `floating`.
+
 The sweeps cover every `.pine` under `tests/fixtures` and `tests/gate-corpus`,
 plus every recursive `strategy.pine` in the paired engine corpus.
 Tests that transpile inline strings elsewhere are not swept.
@@ -99,15 +104,15 @@ sweep module that writes these files:
   including the registered failure and #281 cases 2–3.
 - `front-end-rejections.txt`: sources rejected before producing C++.
 - `results.json`: per-source outcomes, compiler seconds, shard identity,
-  sweep wall time, `engine_sha`, `corpus_sha` and `engine_pin`.
+  sweep wall time, `engine_sha`, `corpus_sha`, `engine_pin` and `pairing_mode`.
 - `pairing.txt`: one line with `PINEFORGE_ENGINE_SHA`,
-  `PINEFORGE_CORPUS_SHA` and `engine_pin`.
+  `PINEFORGE_CORPUS_SHA`, `engine_pin` and `pairing_mode`.
 
 The prerequisite step exports both checkout SHAs through `GITHUB_ENV`.
 With `PINEFORGE_REQUIRE_COMPILE=1`, a missing or malformed pin, a missing SHA,
-or a value other than 40 hex characters fails sweep setup; the engine SHA must
-also equal the pin. Optional runs record `unrecorded` for the pin and for an
-unavailable or malformed SHA.
+or a value other than 40 hex characters fails sweep setup. In `pinned` mode the
+engine SHA must also equal the pin; `floating` skips only that equality. Optional
+runs record `unrecorded` for the pin and for an unavailable or malformed SHA.
 
 The required `test-check` depends on the full pytest and compile matrices.
 An unexpected compile failure, strict XPASS, missing required input, or failed

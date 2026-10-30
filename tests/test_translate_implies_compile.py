@@ -112,6 +112,15 @@ def _read_rejection_baseline(path: Path) -> set[str]:
 
 def _pairing() -> dict[str, str]:
     required = os.environ.get("PINEFORGE_REQUIRE_COMPILE") == "1"
+    pairing_mode = "unrecorded"
+    if required:
+        pairing_mode = os.environ.get("PINEFORGE_ENGINE_PAIRING", "pinned")
+        if pairing_mode not in {"pinned", "floating"}:
+            pytest.fail(
+                "PINEFORGE_REQUIRE_COMPILE=1: PINEFORGE_ENGINE_PAIRING must be "
+                "either 'pinned' or 'floating'",
+                pytrace=False,
+            )
     engine_pin = "unrecorded"
     if required:
         pin_path = _checked_path(ROOT / "ci/engine-pin")
@@ -144,13 +153,19 @@ def _pairing() -> dict[str, str]:
             )
         else:
             pairing[key] = "unrecorded"
-        if required and key == "engine_sha" and pairing[key] != engine_pin:
+        if (
+            required
+            and pairing_mode == "pinned"
+            and key == "engine_sha"
+            and pairing[key] != engine_pin
+        ):
             pytest.fail(
                 f"PINEFORGE_REQUIRE_COMPILE=1: {variable} {pairing[key]} does not "
                 f"match ci/engine-pin {engine_pin}",
                 pytrace=False,
             )
     pairing["engine_pin"] = engine_pin
+    pairing["pairing_mode"] = pairing_mode
     return pairing
 
 
@@ -285,7 +300,8 @@ def sweep_results(tmp_path_factory):
     (destination / "pairing.txt").write_text(
         f"PINEFORGE_ENGINE_SHA={pairing['engine_sha']} "
         f"PINEFORGE_CORPUS_SHA={pairing['corpus_sha']} "
-        f"engine_pin={pairing['engine_pin']}\n",
+        f"engine_pin={pairing['engine_pin']} "
+        f"pairing_mode={pairing['pairing_mode']}\n",
         encoding="utf-8",
     )
     print(f"Fixture compile report: {destination / 'compile-failures.txt'}")

@@ -171,6 +171,7 @@ def _run_pairing_control(
         f"spec = importlib.util.spec_from_file_location('pairing_sweep', {str(sweep_module)!r})\n"
         "sweep = importlib.util.module_from_spec(spec)\n"
         "assert spec.loader is not None\n"
+        "sys.modules['pairing_sweep'] = sweep\n"
         "spec.loader.exec_module(sweep)\n"
         + "sweep_results = sweep.sweep_results\n"
         "def test_probe(sweep_results):\n"
@@ -251,7 +252,7 @@ def test_required_pairing_accepts_an_engine_sha_matching_the_pin(tmp_path):
     assert case.find("skipped") is None, output
 
 
-def test_required_pairing_rejects_an_engine_sha_different_from_the_pin(tmp_path):
+def test_required_unset_pairing_rejects_an_engine_sha_different_from_the_pin(tmp_path):
     pairing = _pairing_values(tmp_path)
     pin = pairing["PINEFORGE_ENGINE_SHA"]
     different = "0" * 40 if pin != "0" * 40 else "1" * 40
@@ -266,6 +267,88 @@ def test_required_pairing_rejects_an_engine_sha_different_from_the_pin(tmp_path)
     assert pin in message, output
     assert case.find("failure") is None, output
     assert case.find("skipped") is None, output
+
+
+def test_required_pinned_pairing_rejects_an_engine_sha_different_from_the_pin(tmp_path):
+    pairing = _pairing_values(tmp_path)
+    pin = pairing["PINEFORGE_ENGINE_SHA"]
+    different = "0" * 40 if pin != "0" * 40 else "1" * 40
+    pairing["PINEFORGE_ENGINE_SHA"] = different
+    pairing["PINEFORGE_ENGINE_PAIRING"] = "pinned"
+    result, case, _ = _run_pairing_control(tmp_path, pairing, required=True)
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    error = case.find("error")
+    assert error is not None, output
+    message = error.get("message", "")
+    assert different in message, output
+    assert pin in message, output
+    assert case.find("failure") is None, output
+    assert case.find("skipped") is None, output
+
+
+def test_required_floating_pairing_records_both_shas_and_passes_a_different_engine(
+    tmp_path,
+):
+    pairing = _pairing_values(tmp_path)
+    pin = pairing["PINEFORGE_ENGINE_SHA"]
+    different = "0" * 40 if pin != "0" * 40 else "1" * 40
+    pairing["PINEFORGE_ENGINE_SHA"] = different
+    pairing["PINEFORGE_ENGINE_PAIRING"] = "floating"
+    result, case, report = _run_pairing_control(tmp_path, pairing, required=True)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert case.find("error") is None, output
+    assert case.find("failure") is None, output
+    assert case.find("skipped") is None, output
+    payload = json.loads((report / "results.json").read_text(encoding="utf-8"))
+    assert payload["engine_sha"] == different
+    assert payload["corpus_sha"] == pairing["PINEFORGE_CORPUS_SHA"]
+    assert payload["engine_pin"] == pin
+    assert payload["pairing_mode"] == "floating"
+    assert (report / "pairing.txt").read_text(encoding="utf-8") == (
+        f"PINEFORGE_ENGINE_SHA={different} "
+        f"PINEFORGE_CORPUS_SHA={pairing['PINEFORGE_CORPUS_SHA']} "
+        f"engine_pin={pin} pairing_mode=floating\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_mode", ["", "off", "FLOATING", " floating"],
+    ids=["empty", "off", "uppercase", "leading-space"],
+)
+def test_required_pairing_rejects_an_unknown_mode(tmp_path, bad_mode):
+    pairing = _pairing_values(tmp_path)
+    pairing["PINEFORGE_ENGINE_PAIRING"] = bad_mode
+    result, case, _ = _run_pairing_control(tmp_path, pairing, required=True)
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    error = case.find("error")
+    assert error is not None, output
+    message = error.get("message", "")
+    assert "PINEFORGE_ENGINE_PAIRING" in message, output
+    assert "pinned" in message and "floating" in message, output
+    assert case.find("failure") is None, output
+    assert case.find("skipped") is None, output
+
+
+def test_non_required_pairing_mode_is_ignored_and_unrecorded(tmp_path):
+    pairing = {"PINEFORGE_ENGINE_PAIRING": "off"}
+    result, case, report = _run_pairing_control(tmp_path, pairing, required=False)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert case.find("error") is None, output
+    assert case.find("failure") is None, output
+    assert case.find("skipped") is None, output
+    payload = json.loads((report / "results.json").read_text(encoding="utf-8"))
+    assert payload["engine_sha"] == "unrecorded"
+    assert payload["corpus_sha"] == "unrecorded"
+    assert payload["engine_pin"] == "unrecorded"
+    assert payload["pairing_mode"] == "unrecorded"
+    assert (report / "pairing.txt").read_text(encoding="utf-8") == (
+        "PINEFORGE_ENGINE_SHA=unrecorded PINEFORGE_CORPUS_SHA=unrecorded "
+        "engine_pin=unrecorded pairing_mode=unrecorded\n"
+    )
 
 
 def test_required_pairing_rejects_a_malformed_pin_file(tmp_path):
@@ -301,10 +384,12 @@ def test_pairing_report_reads_both_environment_values(tmp_path, recorded):
     assert payload.get("engine_sha") == engine
     assert payload.get("corpus_sha") == corpus
     assert payload.get("engine_pin") == engine_pin
+    assert payload.get("pairing_mode") == ("pinned" if recorded else "unrecorded")
     assert [row["outcome"] for row in payload["results"]] == ["compiled"]
     assert (report / "pairing.txt").read_text(encoding="utf-8") == (
         f"PINEFORGE_ENGINE_SHA={engine} PINEFORGE_CORPUS_SHA={corpus} "
-        f"engine_pin={engine_pin}\n"
+        f"engine_pin={engine_pin} "
+        f"pairing_mode={'pinned' if recorded else 'unrecorded'}\n"
     )
 
 
@@ -325,3 +410,4 @@ def test_pairing_control_crash_is_a_nonzero_failed_result(tmp_path):
     assert payload.get("engine_sha") == pairing["PINEFORGE_ENGINE_SHA"]
     assert payload.get("corpus_sha") == pairing["PINEFORGE_CORPUS_SHA"]
     assert payload.get("engine_pin") == pairing["PINEFORGE_ENGINE_SHA"]
+    assert payload.get("pairing_mode") == "pinned"
