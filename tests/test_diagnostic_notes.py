@@ -27,7 +27,7 @@ PRODUCT_BEFORE = json.loads((FIXTURES / "product.before.json").read_text())
 # the bool-cannot-be-na errors (PF-E2042 to PF-E2044) and the int/float and
 # numeric-condition errors (PF-E2045, PF-E2046).
 CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E2040", "PF-E2041", "PF-E2042",
-                     "PF-E2043", "PF-E2044", "PF-E2045", "PF-E2046"}
+                     "PF-E2043", "PF-E2044", "PF-E2045", "PF-E2046", "PF-W1553"}
 # The support checker warns, inside a switch arm, what it refuses elsewhere:
 # PF-W1nnn is PF-E1nnn there. Read off the live catalog, so a twin added later
 # is covered by the sentence tests below without an edit here.
