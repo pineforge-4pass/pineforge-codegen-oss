@@ -469,6 +469,12 @@ read through the script's own requests manifest when `$PINEFORGE_PINE_LIBRARIES`
 and `$PINEFORGE_REQUESTS_ROOT` name one. An import with no source is refused by
 name, except one whose alias is `ta`, `math` or `str` and that names only that
 namespace's built-ins, which is a no-op.
+Library imports are supported only when the library source is supplied;
+otherwise compilation fails with the diagnostic above.
+Unresolved imports carry a hint about supplying or inlining the library source:
+`PF-E2040` without a resolver reason, `PF-E2041` with one. The message text and
+named arguments are unchanged. `PF-E2018` and `PF-E2019` remain catalog entries
+for the forms without a hint.
 
 `transpile_full()` runs the same translation once and returns these keys on
 success:

@@ -21,6 +21,8 @@ CASES = json.loads((FIXTURES / "interfaces.json").read_text())["cases"]
 DELTA = json.loads((FIXTURES / "delta.json").read_text())
 NOTE_CODES = set(DELTA["severity_changes"])
 BEFORE = json.loads((FIXTURES / "catalog.before.json").read_text())["codes"]
+# The import diagnostics with hints use the next two free analysis codes.
+CATALOG_ADDITIONS = {"PF-E2040", "PF-E2041"}
 PRODUCT_BEFORE = json.loads((FIXTURES / "product.before.json").read_text())
 # The support checker warns, inside a switch arm, what it refuses elsewhere:
 # PF-W1nnn is PF-E1nnn there. Read off the live catalog, so a twin added later
@@ -29,7 +31,7 @@ TWINS = sorted("PF-W" + code[4:] for code in diagnostics_catalog()["codes"] if c
 
 
 def _assert_catalog_delta(catalog):
-    assert set(catalog) == set(BEFORE)
+    assert set(catalog) == set(BEFORE) | CATALOG_ADDITIONS
     changed = set()
     for code, old in BEFORE.items():
         entry = dict(catalog[code])
@@ -56,7 +58,9 @@ def test_exact_catalog_delta_and_legacy_pin():
     _assert_catalog_delta(catalog)
     legacy = json.loads((FIXTURES / "diagnostic_codes_pin.legacy.json").read_text())["codes"]
     current = json.loads((FIXTURES.parent / "diagnostic_codes_pin.json").read_text())["codes"]
-    assert set(current) == set(legacy) == set(catalog)
+    assert set(legacy) == set(BEFORE)
+    assert set(current) == set(catalog)
+    assert set(current) - set(legacy) == CATALOG_ADDITIONS
     assert {code for code in legacy if legacy[code] != current[code]} == NOTE_CODES
     for code, entry in BEFORE.items():
         meaning = json.dumps([entry["severity"], entry["message"], entry.get("hint"),
@@ -72,6 +76,8 @@ def test_catalog_legacy_bytes_only_have_the_declared_delta():
         match = re.match(r'  "(PF-[EW][0-9]{4})": ', line)
         if match:
             code = match[1]
+            if code in CATALOG_ADDITIONS:
+                continue
             field = ', "user_message": ' + json.dumps(catalog[code]["user_message"], ensure_ascii=False)
             assert line.count(field) == 1
             line = line.replace(field, "")
