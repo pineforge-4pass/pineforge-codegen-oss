@@ -244,13 +244,15 @@ class Parser:
             location=self._loc(error.token), message=str(error),
         )]) from error
 
-    def _expect_statement_end(self) -> None:
+    def _expect_statement_end(self, *, allow_physical_line_break: bool = True) -> None:
         """A second expression on the same Pine line is a syntax error."""
         cur = self._current()
         if cur.type in (TokenType.NEWLINE, TokenType.DEDENT, TokenType.EOF_TOKEN):
             return
         previous = self.tokens[self.pos - 1]
-        if previous.type == TokenType.DEDENT or cur.line > previous.line:
+        if previous.type == TokenType.DEDENT or (
+            allow_physical_line_break and cur.line > previous.line
+        ):
             return
         raise ParseError(
             f"Unexpected token {cur.type.name}({cur.value!r}) after statement; "
@@ -1246,6 +1248,7 @@ class Parser:
         (``tests/fixtures/tail_f_tv``). A lone expression is the node an arm
         always held.
         """
+        first_token = self._current()
         body: list = []
         while True:
             if self._arm_line_statement_ahead():
@@ -1253,6 +1256,8 @@ class Parser:
             else:
                 body.append(self._parse_line_expr_or_assignment())
             if not self._match(TokenType.COMMA):
+                if first_token.starts_indent_continuation:
+                    self._expect_statement_end(allow_physical_line_break=False)
                 return body
             if self._check(TokenType.NEWLINE) or self._check(TokenType.DEDENT) or self._at_end():
                 return body
@@ -1276,11 +1281,16 @@ class Parser:
         after the arrow uses the same bare IfStmt as an indented function
         body, including its branch types and implicit na.
         """
+        first_token = self._current()
         body: list = []
         self._extend_statement_list(body, self._parse_statement())
         if len(body) == 1 and isinstance(body[0], SwitchStmt):
             # A switch directly after the arrow was already an expression.
             body = [ExprStmt(expr=body[0])]
+        if first_token.starts_indent_continuation and not self._check(TokenType.COMMA):
+            # A wrapped arrow body ends at a real statement boundary; physical
+            # line numbers cannot split adjacent expressions on its logical line.
+            self._expect_statement_end(allow_physical_line_break=False)
         return body, len(body) == 1 and isinstance(body[0], ExprStmt)
 
     def _arm_line_statement_ahead(self) -> bool:
