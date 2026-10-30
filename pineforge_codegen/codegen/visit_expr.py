@@ -110,7 +110,7 @@ from ..ast_nodes import (
     TupleLiteral,
     UnaryOp,
 )
-from .capabilities import STRATEGY_PARAMETERS
+from .strategy_declaration import DECLARATION_CONSTANTS, NamedConstant
 from .helpers import pine_index_int_cast, unary_sign_cpp
 from .types import COLLECTION_MUTATING_METHODS
 from .tables import (
@@ -681,26 +681,16 @@ class ExprVisitor:
             self._udt_assignment_target = previous_target
 
     def _strategy_account_currency_expr(self) -> str:
-        """Read the declaration's literal currency, or the chart's quote currency."""
+        """Read the resolved currency, or the chart's quote currency."""
         currency = None
-        position = STRATEGY_PARAMETERS.index("currency")
         for statement in self.ctx.ast.body:
             if isinstance(statement, StrategyDecl):
-                currency = statement.kwargs.get("currency")
-                if currency is None and len(statement.args) > position:
-                    currency = statement.args[position]
+                currency = (statement.annotations or {}).get(DECLARATION_CONSTANTS, {}).get("currency")
                 break
-        # Read the AST, not strategy_params: its literal extractor also spells
-        # an unresolved Identifier as a string. Declaration variables keep the
-        # existing fallback and unresolved capability receipt.
-        if isinstance(currency, StringLiteral):
-            if currency.value != "NONE":
-                return self._visit_expr(currency)
-        elif (isinstance(currency, MemberAccess)
-                and isinstance(currency.object, Identifier)
-                and currency.object.name == "currency"
-                and currency.member != "NONE"):
-            return self._visit_expr(currency)
+        if isinstance(currency, NamedConstant):
+            currency = currency.value
+        if isinstance(currency, str) and currency != "NONE":
+            return self._visit_expr(StringLiteral(value=currency))
         return "syminfo_.currency"
 
     def _visit_member_access(self, node: MemberAccess) -> str:

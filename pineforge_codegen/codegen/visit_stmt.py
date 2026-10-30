@@ -474,6 +474,9 @@ class StmtVisitor:
         return self._type_spec_to_cpp(spec)
 
     def _visit_var_decl(self, node: VarDecl, lines: list[str], pad: str) -> None:
+        from .strategy_declaration import DECLARATION_ONLY_CONSTANT
+        if (node.annotations or {}).get(DECLARATION_ONLY_CONSTANT):
+            return
         # An array or a matrix whose history the script reads: this execution
         # of its declaration opens a slot, after closing a sibling
         # declaration's (codegen/collection_history.py).

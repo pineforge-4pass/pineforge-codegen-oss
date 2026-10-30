@@ -2156,24 +2156,8 @@ class TopLevelEmitter:
         lines.append("")
 
     def _declares_bar_magnifier(self) -> bool:
-        """``strategy(use_bar_magnifier = true)``. The argument is a const
-        bool; one that is not a literal cannot be read here, so the TU does
-        not declare the magnifier and the codegen warns."""
-        from ..ast_nodes import BoolLiteral, StrategyDecl
-        for node in self._walk_ast(self.ctx.ast):
-            if not isinstance(node, StrategyDecl):
-                continue
-            value = node.kwargs.get("use_bar_magnifier")
-            if value is None or isinstance(value, BoolLiteral):
-                return value is not None and value.value is True
-            self._codegen_warning(
-                value,
-                "strategy(use_bar_magnifier=...) is not a literal bool: the "
-                "generated strategy does not declare the bar magnifier, so a host "
-                "runs it without one.",
-                hint="Write use_bar_magnifier = true or false.")
-            return False
-        return False
+        """Expose the resolved constant magnifier setting to the host."""
+        return self.ctx.strategy_params.get("use_bar_magnifier") is True
 
     @staticmethod
     def _raw_udt_method_cpp_name(fi: FuncInfo) -> str:
