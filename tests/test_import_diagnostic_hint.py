@@ -4,6 +4,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen.analyzer import Analyzer
+from pineforge_codegen.diagnostic_codes import classify, render_diagnostic
 from pineforge_codegen.errors import CompileError
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
@@ -16,6 +17,34 @@ HINT = (
     "Libraries are supported only when the library source is supplied: "
     "remove the import, or paste the library code into the script."
 )
+
+
+@pytest.mark.parametrize(
+    ("message", "args", "legacy_code", "hinted_code"),
+    [
+        (
+            # The path-only refusal keeps its old code unless the hint is present.
+            "Import is not supported: 'user/lib/1'",
+            {"import_path": "user/lib/1"},
+            "PF-E2018",
+            "PF-E2040",
+        ),
+        (
+            # A resolver reason stays a separate argument in both code variants.
+            "Import is not supported: 'user/lib/1 as x': library source was not supplied",
+            {"import_path": "user/lib/1 as x", "reason": "library source was not supplied"},
+            "PF-E2019",
+            "PF-E2041",
+        ),
+    ],
+)
+def test_import_hint_uses_new_codes_and_keeps_legacy_rendering(
+    message: str, args: dict, legacy_code: str, hinted_code: str
+):
+    assert classify("error", message) == (legacy_code, args)
+    assert render_diagnostic(legacy_code, args) == (message, None)
+    assert classify("error", message, HINT) == (hinted_code, args)
+    assert render_diagnostic(hinted_code, args) == (message, HINT)
 
 
 @pytest.mark.parametrize(
@@ -54,6 +83,8 @@ def test_unresolved_imports_keep_message_and_add_hint(
     ]
     assert diagnostic.message == message
     assert diagnostic.hint == HINT
+    # The same message with a hint has a distinct, newly pinned identity.
+    assert diagnostic.code == "PF-E2040"
     # The import is the third source line and starts at column 1.
     assert (diagnostic.location.line, diagnostic.location.col) == (3, 1)
 
@@ -86,6 +117,8 @@ def test_configured_but_unpinned_import_keeps_reason_and_hint(
     ]
     assert diagnostic.message == expected
     assert diagnostic.hint == HINT
+    # A resolver reason selects the hinted template with two arguments.
+    assert diagnostic.code == "PF-E2041"
     # The import is the third source line and starts at column 1.
     assert (diagnostic.location.line, diagnostic.location.col) == (3, 1)
 
@@ -97,7 +130,8 @@ def test_resolved_library_import_is_still_accepted():
         + "x = S.scaled(close)\n"
         + "plot(x)\n"
     )
-    transpile(source, libraries=library_sources("pftest/Signals/1"))
+    # scaled reaches Base.twice through Signals, so both sources are required.
+    transpile(source, libraries=library_sources("pftest/Signals/1", "pftest/Base/1"))
 
 
 def test_builtin_namespace_noop_import_is_still_accepted():
@@ -121,4 +155,6 @@ def test_analyzer_import_visitor_keeps_the_hint():
     # The analyzer path sees the same source line and the same literal message.
     assert diagnostic.message == "Import is not supported: 'user/lib/1 as x'"
     assert diagnostic.hint == HINT
+    # Direct analysis classifies the same hinted template as the support check.
+    assert diagnostic.code == "PF-E2040"
     assert (diagnostic.location.line, diagnostic.location.col) == (3, 1)
