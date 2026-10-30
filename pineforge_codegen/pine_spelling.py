@@ -169,6 +169,24 @@ def sub_identifiers(text: str, repl: Callable[[re.Match], str]) -> str:
     return _STRING_OR_IDENT.sub(_one, text)
 
 
+def sub_outside_literals(
+    pattern: str | re.Pattern[str],
+    repl: str | Callable[[re.Match], str],
+    text: str,
+) -> str:
+    """``re.sub`` over text outside string literals; literals pass through."""
+    parts: list[str] = []
+    start = 0
+    for match in _STRING_OR_IDENT.finditer(text):
+        if match.group(0)[0] not in "\"'":
+            continue
+        parts.append(re.sub(pattern, repl, text[start:match.start()]))
+        parts.append(match.group(0))
+        start = match.end()
+    parts.append(re.sub(pattern, repl, text[start:]))
+    return "".join(parts)
+
+
 def input_call_spans(text: str) -> list[tuple[int, int]]:
     """``(start, end)`` of each ``input(...)`` / ``input.<type>(...)`` call in
     ``text``. Parentheses inside string literals do not count, and a call
