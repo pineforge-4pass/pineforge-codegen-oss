@@ -39,9 +39,11 @@ def _assert_compile_contract(workflow: str) -> None:
     assert shards == [("3.11", "0"), ("3.12", "1"), ("3.13", "2"), ("3.14", "3")]
     assert '      PINEFORGE_COMPILE_SHARDS: "4"\n' in job
     assert "      PINEFORGE_COMPILE_SHARD: ${{ matrix.compile-shard }}\n" in job
-    assert "      PINEFORGE_COMPILE_REPORT_DIR: ${{ runner.temp }}/compile-report\n" in job
+    # The job-level env cannot use the runner context (actionlint refuses it).
+    assert "runner." not in job.split("    steps:")[0]
+    assert "      PINEFORGE_COMPILE_REPORT_DIR: ${{ github.workspace }}/.ci/compile-report\n" in job
     assert "        if: ${{ always() }}\n" in job
-    assert "          path: ${{ runner.temp }}/compile-report\n" in job
+    assert "          path: ${{ github.workspace }}/.ci/compile-report\n" in job
     assert "          if-no-files-found: error\n" in job
     assert "pytest" in re.search(
         r"^    needs: \[([^\]]+)\]$", _job(workflow, "test-check"), re.M,
