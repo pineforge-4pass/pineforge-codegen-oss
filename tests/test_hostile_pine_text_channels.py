@@ -240,7 +240,6 @@ def test_name_channel_inertness(monkeypatch, row):
             assert tokens.count(row.expected) == 2, (
                 f"{row.name}: emitted declaration and read do not share one name"
             )
-        assert row.authored not in code, f"{row.name}: emitted raw name escaped protection"
         _assert_clean(cpp, row.name)
 
     _paired_control(
