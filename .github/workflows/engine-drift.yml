@@ -1,0 +1,88 @@
+name: Engine drift
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: drift
+    runs-on: ubuntu-24.04
+    env:
+      PINEFORGE_REQUIRE_COMPILE: "1"
+      PINEFORGE_ENGINE_INCLUDE: ${{ github.workspace }}/.ci/pineforge-engine/include
+      PINEFORGE_ENGINE_CORPUS: ${{ github.workspace }}/.ci/pineforge-engine/corpus
+      PINEFORGE_EIGEN_INCLUDE: /usr/include/eigen3
+      CXX: /usr/bin/g++
+      PINEFORGE_COMPILE_SHARD: "0"
+      PINEFORGE_COMPILE_SHARDS: "1"
+      PINEFORGE_COMPILE_REPORT_DIR: ${{ github.workspace }}/.ci/compile-report
+    steps:
+      - name: Check out codegen
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out engine main and its corpus
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pineforge-4pass/pineforge-engine
+          ref: main
+          path: .ci/pineforge-engine
+          submodules: true
+          persist-credentials: false
+      - name: Install compile-only prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends g++ libeigen3-dev
+          test -f "$PINEFORGE_ENGINE_INCLUDE/pineforge/engine.hpp"
+          test -f "$PINEFORGE_EIGEN_INCLUDE/Eigen/Dense"
+          test -x "$CXX"
+          PINEFORGE_ENGINE_SHA=$(git -C .ci/pineforge-engine rev-parse HEAD)
+          PINEFORGE_CORPUS_SHA=$(git -C .ci/pineforge-engine/corpus rev-parse HEAD)
+          printf '%s\n' "$PINEFORGE_ENGINE_SHA" "$PINEFORGE_CORPUS_SHA"
+          printf 'PINEFORGE_ENGINE_SHA=%s\n' "$PINEFORGE_ENGINE_SHA" >> "$GITHUB_ENV"
+          printf 'PINEFORGE_CORPUS_SHA=%s\n' "$PINEFORGE_CORPUS_SHA" >> "$GITHUB_ENV"
+          git -C .ci/pineforge-engine submodule status
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install with dev extras
+        run: python -m pip install -e ".[dev]"
+      - name: Run engine drift tests
+        id: drift_tests
+        run: python -m pytest -q tests/test_host_member_names.py tests/test_translate_implies_compile.py
+      - name: Report engine drift
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          engine_sha="${PINEFORGE_ENGINE_SHA:-unrecorded}"
+          engine_pin=$(cat ci/engine-pin)
+          if [[ "$engine_sha" == "$engine_pin" ]]; then
+            differs=false
+          else
+            differs=true
+          fi
+          {
+            echo "## Engine drift"
+            echo
+            echo "- Engine main SHA: \`$engine_sha\`"
+            echo "- Codegen pin: \`$engine_pin\`"
+            echo "- SHAs differ: \`$differs\`"
+            echo "- Result: \`${{ steps.drift_tests.outcome }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain drift compile report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: compile-report-engine-drift
+          path: ${{ github.workspace }}/.ci/compile-report
+          if-no-files-found: error
