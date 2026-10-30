@@ -1516,9 +1516,12 @@ class TypeInferer:
     def _selection_type_spec(
         self,
         branches: list[tuple[ASTNode | None, TypeSpec | None]],
+        *,
+        nullable: bool | None = None,
     ) -> TypeSpec | None:
         """Keep exact collection joins; extend other families only around ``na``."""
-        nullable = any(self._selection_contains_na(node) for node, _ in branches)
+        if nullable is None:
+            nullable = any(self._selection_contains_na(node) for node, _ in branches)
         result: TypeSpec | None = None
         for node, spec in branches:
             if self._selection_node_is_na(node):
@@ -1540,7 +1543,42 @@ class TypeInferer:
                 return None
         return result
 
-    def _type_spec_from_expr(self, node) -> TypeSpec | None:
+    def _ternary_type_specs(
+        self, value: Ternary,
+    ) -> dict[int, tuple[TypeSpec | None, bool]]:
+        """Derive arm specs and nullability once in the current lexical context."""
+        # Keep results within this query: a later query on the same AST can
+        # have different parameter, local or callable return types.
+        specs: dict[int, tuple[TypeSpec | None, bool]] = {}
+        pending = [(value, False)]
+        while pending:
+            node, ready = pending.pop()
+            if id(node) in specs:
+                continue
+            if isinstance(node, Ternary):
+                if not ready:
+                    pending.append((node, True))
+                    pending.append((node.false_val, False))
+                    pending.append((node.true_val, False))
+                    continue
+                true_spec, true_na = specs[id(node.true_val)]
+                false_spec, false_na = specs[id(node.false_val)]
+                nullable = true_na or false_na
+                spec = self._type_spec_from_expr(
+                    node, _ternary_arms=(true_spec, false_spec, nullable),
+                )
+            else:
+                spec = self._type_spec_from_expr(node)
+                nullable = self._selection_contains_na(node)
+            specs[id(node)] = (spec, nullable)
+        return specs
+
+    def _type_spec_from_expr(
+        self,
+        node,
+        *,
+        _ternary_arms: tuple[TypeSpec | None, TypeSpec | None, bool] | None = None,
+    ) -> TypeSpec | None:
         """Best-effort TypeSpec inference for an expression node.
 
         Returns ``None`` when the node's type cannot be narrowed beyond
@@ -1648,12 +1686,13 @@ class TypeInferer:
                 return annotation["spec"]
             return None
         if isinstance(node, Ternary):
-            true_spec = self._type_spec_from_expr(node.true_val)
-            false_spec = self._type_spec_from_expr(node.false_val)
+            if _ternary_arms is None:
+                return self._ternary_type_specs(node)[id(node)][0]
+            true_spec, false_spec, nullable = _ternary_arms
             selection_spec = self._selection_type_spec([
                 (node.true_val, true_spec),
                 (node.false_val, false_spec),
-            ])
+            ], nullable=nullable)
             if selection_spec is not None:
                 return selection_spec
             if true_spec is not None and true_spec == false_spec:
@@ -3893,7 +3932,12 @@ class TypeInferer:
             return "std::vector<double>"
         return "double"
 
-    def _infer_type(self, node) -> str:
+    def _infer_type(
+        self,
+        node,
+        *,
+        _ternary_types: dict[int, tuple[TypeSpec | None, bool]] | None = None,
+    ) -> str:
         """Infer the C++ type for an expression node — workhorse used everywhere.
 
         Falls through a layered set of checks: literals first, then
@@ -4137,19 +4181,23 @@ class TypeInferer:
             if spec is not None:
                 return self._type_spec_to_cpp(spec)
         if isinstance(node, Ternary):
-            ternary_spec = self._type_spec_from_expr(node)
+            if _ternary_types is None:
+                _ternary_types = self._ternary_type_specs(node)
+            # Recursive arm queries share only this selection's lexical context.
+            ternary_spec, nullable = _ternary_types[id(node)]
             if (ternary_spec is not None
-                    and (self._selection_contains_na(node)
+                    and (nullable
                          or (ternary_spec.kind == "udt"
                              and ternary_spec.name in DRAWING_TYPE_TO_CPP))):
                 cpp_type = self._type_spec_to_cpp(ternary_spec)
                 if cpp_type == "int" and "int64_t" in (
-                    self._infer_type(node.true_val), self._infer_type(node.false_val),
+                    self._infer_type(node.true_val, _ternary_types=_ternary_types),
+                    self._infer_type(node.false_val, _ternary_types=_ternary_types),
                 ):
                     return "int64_t"
                 return cpp_type
-            tt = self._infer_type(node.true_val)
-            ft = self._infer_type(node.false_val)
+            tt = self._infer_type(node.true_val, _ternary_types=_ternary_types)
+            ft = self._infer_type(node.false_val, _ternary_types=_ternary_types)
             if tt.startswith("std::vector") or ft.startswith("std::vector"):
                 return tt if tt.startswith("std::vector") else ft
             if tt == "std::string" or ft == "std::string":

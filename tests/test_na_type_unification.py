@@ -5,6 +5,9 @@ from __future__ import annotations
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.analyzer.types import TypeHelper
+from pineforge_codegen.ast_nodes import BoolLiteral, NumberLiteral, Ternary
+from pineforge_codegen.codegen.types import TypeInferer
 from tests._compile import compile_cpp, have_compile_env
 
 
@@ -120,6 +123,14 @@ _SELECTION_ROWS = [
         ),
         "std::string choose_string_na_second(",
         # Hand-derived: a string array element and na produce a Pine string.
+    ),
+    (
+        "string-deep-na",
+        "choose_deep_string(bool choose) =>\n    "
+        + 'choose ? "x" : ' * 300
+        + "na\nselected = choose_deep_string(true)\n",
+        "std::string choose_deep_string(",
+        # Hand-derived: all 300 concrete arms are strings, so the terminal na is string.
     ),
     (
         "color-na-first",
@@ -271,6 +282,54 @@ def test_na_adopts_each_value_family(
     cpp = transpile(_script(body))
     assert expected_signature in cpp
     compile_cpp(cpp, label=label)
+
+
+@pytest.mark.parametrize(
+    "helper_class", [TypeHelper, TypeInferer], ids=["analyzer", "codegen"],
+)
+@pytest.mark.parametrize("nested_arm", ["true", "false"])
+def test_ternary_type_queries_visit_each_arm_once(
+    helper_class,
+    nested_arm: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value = NumberLiteral(value=65)
+    for index in range(64):
+        arm = NumberLiteral(value=index + 1)
+        value = Ternary(
+            condition=BoolLiteral(value=True),
+            true_val=value if nested_arm == "true" else arm,
+            false_val=arm if nested_arm == "true" else value,
+        )
+
+    nullability_checks = 0
+    joins = 0
+    original_contains_na = helper_class._selection_contains_na
+    original_selection_spec = helper_class._selection_type_spec
+
+    def contains_na(cls, node):
+        nonlocal nullability_checks
+        nullability_checks += 1
+        return original_contains_na(node)
+
+    def selection_spec(self, branches, **kwargs):
+        nonlocal joins
+        joins += 1
+        return original_selection_spec(self, branches, **kwargs)
+
+    monkeypatch.setattr(helper_class, "_selection_contains_na", classmethod(contains_na))
+    monkeypatch.setattr(helper_class, "_selection_type_spec", selection_spec)
+    helper = helper_class()
+    if helper_class is TypeInferer:
+        # Hand-derived: every value arm is an integer, so C++ inference returns int.
+        assert helper._infer_type(value) == "int"
+    else:
+        # Hand-derived: a primitive selection without na keeps the analyzer's absent spec.
+        assert helper._type_spec_from_expr(value) is None
+    # Hand-derived: 64 ternaries require 64 joins, independent of the nested arm.
+    assert joins == 64
+    # Hand-derived: 64 ternaries plus 65 terminal arms allow at most 129 structural checks.
+    assert nullability_checks <= 129
 
 
 def test_issue_shape_string_return_compiles() -> None:

@@ -278,9 +278,12 @@ class TypeHelper:
     def _selection_type_spec(
         self,
         branches: list[tuple[ASTNode | None, TypeSpec | None]],
+        *,
+        nullable: bool | None = None,
     ) -> TypeSpec | None:
         """Keep exact collection joins; extend other families only around ``na``."""
-        nullable = any(self._selection_contains_na(node) for node, _ in branches)
+        if nullable is None:
+            nullable = any(self._selection_contains_na(node) for node, _ in branches)
         result: TypeSpec | None = None
         for node, spec in branches:
             if self._selection_node_is_na(node):
@@ -302,7 +305,42 @@ class TypeHelper:
                 return None
         return result
 
-    def _type_spec_from_expr(self, value: ASTNode | None) -> TypeSpec | None:
+    def _ternary_type_specs(
+        self, value: Ternary,
+    ) -> dict[int, tuple[TypeSpec | None, bool]]:
+        """Derive arm specs and nullability once in the current lexical context."""
+        # Keep results within this query: a later query on the same AST can
+        # have different parameter, local or callable return types.
+        specs: dict[int, tuple[TypeSpec | None, bool]] = {}
+        pending = [(value, False)]
+        while pending:
+            node, ready = pending.pop()
+            if id(node) in specs:
+                continue
+            if isinstance(node, Ternary):
+                if not ready:
+                    pending.append((node, True))
+                    pending.append((node.false_val, False))
+                    pending.append((node.true_val, False))
+                    continue
+                true_spec, true_na = specs[id(node.true_val)]
+                false_spec, false_na = specs[id(node.false_val)]
+                nullable = true_na or false_na
+                spec = self._type_spec_from_expr(
+                    node, _ternary_arms=(true_spec, false_spec, nullable),
+                )
+            else:
+                spec = self._type_spec_from_expr(node)
+                nullable = self._selection_contains_na(node)
+            specs[id(node)] = (spec, nullable)
+        return specs
+
+    def _type_spec_from_expr(
+        self,
+        value: ASTNode | None,
+        *,
+        _ternary_arms: tuple[TypeSpec | None, TypeSpec | None, bool] | None = None,
+    ) -> TypeSpec | None:
         if value is None:
             return None
         budget = getattr(self, "_budget", None)
@@ -321,12 +359,13 @@ class TypeHelper:
         if isinstance(value, StringLiteral):
             return TypeSpec.primitive("string")
         if isinstance(value, Ternary):
-            true_spec = self._type_spec_from_expr(value.true_val)
-            false_spec = self._type_spec_from_expr(value.false_val)
+            if _ternary_arms is None:
+                return self._ternary_type_specs(value)[id(value)][0]
+            true_spec, false_spec, nullable = _ternary_arms
             selection_spec = self._selection_type_spec([
                 (value.true_val, true_spec),
                 (value.false_val, false_spec),
-            ])
+            ], nullable=nullable)
             if selection_spec is not None:
                 return selection_spec
 
