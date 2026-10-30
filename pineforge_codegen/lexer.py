@@ -118,6 +118,7 @@ class Token:
     line: int
     col: int
     end_col: int = 0
+    starts_indent_continuation: bool = False
 
     def __post_init__(self) -> None:
         # Default end_col to col + len(value) if not explicitly set
@@ -368,6 +369,14 @@ class Lexer:
         else:
             indent_level = len(raw) // 4
 
+        # A tab-free line one to three spaces past the logical line's block
+        # level continues that line, including after a header. Keep the stack
+        # unchanged so successive wrapped lines use the same base indentation.
+        continues_by_indent = (
+            "\t" not in raw
+            and 0 < len(raw) - 4 * self.indent_stack[-1] < 4
+        )
+
         # Operator-first line continuation: when a line *begins* with a binary
         # / ternary operator that cannot start a statement (e.g. ``? x``,
         # ``: y``, ``+ z``, ``and w``), it continues the previous logical line
@@ -380,12 +389,18 @@ class Lexer:
             not self._in_continuation
             and self._line_starts_with_continuation_op()
         )
-        if starts_with_cont_op and self.tokens and self.tokens[-1].type == TokenType.NEWLINE:
+        indent_join = False
+        if ((starts_with_cont_op or continues_by_indent)
+                and self.tokens and self.tokens[-1].type == TokenType.NEWLINE):
             self.tokens.pop()
+            indent_join = (
+                continues_by_indent
+                and not starts_with_cont_op
+                and not self._in_continuation
+            )
 
-        # If we're in a continuation (previous line ended with an operator),
-        # suppress INDENT/DEDENT — the indentation is cosmetic, not structural
-        if not self._in_continuation and not starts_with_cont_op:
+        # Continuation indentation is cosmetic, not structural.
+        if not self._in_continuation and not starts_with_cont_op and not continues_by_indent:
             current_indent = self.indent_stack[-1]
             if indent_level > current_indent:
                 self.indent_stack.append(indent_level)
@@ -401,6 +416,7 @@ class Lexer:
                     self._emit(TokenType.DEDENT, "", self.line, 1)
 
         # Tokens on this line
+        first_token = len(self.tokens)
         emitted_something = False
         while not self._at_end() and self.source[self.pos] != "\n":
             self._skip_whitespace_inline()
@@ -411,6 +427,9 @@ class Lexer:
                 break
             emitted_something = True
             self._read_token()
+
+        if indent_join and len(self.tokens) > first_token:
+            self.tokens[first_token].starts_indent_continuation = True
 
         if not self._at_end() and self.source[self.pos] == "\n":
             self._advance()
