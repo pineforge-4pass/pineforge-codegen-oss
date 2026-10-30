@@ -2321,11 +2321,15 @@ class CallVisitor:
         if namespace == "color":
             return self._visit_color_call(func_name, node)
 
-        # Bare color(...) cast (cosmetic). The engine has no color-cast helper
-        # and colors have no backtest-logic effect, so emit a benign default
-        # color (0 = na color, matching the color.new / from_gradient
-        # fallbacks). The support checker warns on this construct.
+        # A bare color(...) cast keeps the packed value and the color na.
+        # Reuse the integer-slot conversion so missing values survive both
+        # floating-point narrowing and integer-width changes.
         if namespace is None and func_name == "color" and func_name not in self._func_names:
+            arg = node.args[0] if node.args else node.kwargs.get("x")
+            if arg is not None:
+                return self._coerce_int_slot_with_cast(
+                    self._visit_expr(arg), arg, "int64_t",
+                )
             return "0"
 
         # Drawing-objects-as-data namespace-functional form (spec §4.3 form 1):
@@ -3738,11 +3742,9 @@ class CallVisitor:
     def _visit_color_call(self, func_name: str, node) -> str:
         """Emit color.* calls as integer representations."""
         if func_name == "from_gradient":
-            # Visual only: the colour it picks reaches no order, so the call
-            # yields the na colour. Its arguments still run once each, in
-            # parameter order, as on TradingView -- a stateful call in one
-            # (a user function keeping a series, a ta.* compute(), a counter)
-            # advances on every bar (lab tv probe pf-oi-from-gradient-args).
+            # Interpolation is approximated by transparent black (0), distinct
+            # from a missing color. Stateful arguments still run once each,
+            # in parameter order, so their histories and effects advance.
             arguments = _merge_kwargs(node.args, node.kwargs,
                                       list(self._FROM_GRADIENT_PARAMS), lambda a: a)
             effects = []

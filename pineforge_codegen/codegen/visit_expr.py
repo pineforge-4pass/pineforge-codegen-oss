@@ -975,8 +975,8 @@ class ExprVisitor:
                     return "false"
                 # Cosmetic / chart-only reads with no batch-mode value (theme
                 # colors, viewport bar times). The support checker warns on
-                # these (COSMETIC_MEMBERS); emit a benign default (0 = na color /
-                # epoch 0). They have no backtest-logic effect.
+                # these (COSMETIC_MEMBERS); emit a default (transparent black
+                # for theme colors, epoch 0 for viewport times).
                 if node.member in ("fg_color", "bg_color",
                                    "left_visible_bar_time",
                                    "right_visible_bar_time"):

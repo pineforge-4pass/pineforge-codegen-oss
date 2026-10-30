@@ -133,7 +133,7 @@ SUPPORTED_COLOR_CONST: frozenset[str] = frozenset(COLOR_CONST_MAP)
 SUPPORTED_COLOR_FUNC: frozenset[str] = frozenset({"new", "rgb", "r", "g", "b", "t"})
 # Cosmetic color builders with no backtest-logic effect. Warned (not rejected);
 # codegen evaluates the arguments (their side effects and history are
-# TradingView's) and emits a benign default color (0 = na color).
+# TradingView's) and emits transparent black (0) as a placeholder.
 # color.from_gradient is a charting/plot helper that only tints visual output.
 COSMETIC_COLOR_FUNC: frozenset[str] = frozenset({"from_gradient"})
 SUPPORTED_TIMEFRAME_FUNC: frozenset[str] = frozenset({"change", "in_seconds"})
@@ -305,12 +305,10 @@ NOT_YET_FUNC: dict[str, str] = {
 # cast moved to COSMETIC_BARE_FUNCS below.)
 UNSUPPORTED_BARE_FUNCS: dict[str, str] = {}
 
-# Bare (no-namespace) cosmetic casts with no backtest-logic effect. Warned
-# (not rejected); codegen emits a benign default. ``color(x)`` is a Pine color
-# cast — colors never affect trade logic, so codegen emits a default color
-# (0 = na color) and the strategy keeps running.
+# Bare casts retain their values: na() and channel reads can affect orders.
+# Keep warning that visual output is not rendered.
 COSMETIC_BARE_FUNCS: dict[str, str] = {
-    "color": "color(...) cast has no effect in PineForge backtests (visual only); it emits a default color.",
+    "color": "color(...) cast preserves color values and na; PineForge does not render visual output.",
 }
 
 # Whole namespaces with NO codegen support. Any call into one of these
@@ -1718,8 +1716,7 @@ class SupportChecker:
             self._visit_children(node)
             return
 
-        # Bare cosmetic casts (e.g. `color(na)` -> default color). No backtest
-        # effect; warn and let codegen emit a benign default color.
+        # Bare color casts preserve values while retaining the visual warning.
         if ns is None and name in COSMETIC_BARE_FUNCS:
             self._warn(node, COSMETIC_BARE_FUNCS[name])
             self._visit_children(node)
