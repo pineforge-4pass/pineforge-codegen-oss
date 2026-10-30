@@ -69,7 +69,6 @@ from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier,
     IfStmt, MemberAccess, NumberLiteral, StringLiteral, Subscript, SwitchStmt,
     Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, NaLiteral,
-    ColorLiteral,
 )
 from ..method_binding import bind_function_defaults
 from ..pine_spelling import sub_outside_literals
@@ -147,8 +146,6 @@ class CallHandlers:
             )
         if isinstance(expr, BoolLiteral):
             return PineType.BOOL
-        if isinstance(expr, ColorLiteral):
-            return PineType.COLOR
         if isinstance(expr, NaLiteral):
             return PineType.NA
         if isinstance(expr, StringLiteral):
@@ -168,12 +165,11 @@ class CallHandlers:
             )
             if expr.op in {"==", "!=", ">", "<", ">=", "<=", "and", "or"}:
                 return PineType.BOOL
-            joined = unify_pine_types(left, right)
-            if joined == PineType.STRING:
+            if left == PineType.STRING or right == PineType.STRING:
                 return PineType.STRING
-            if expr.op == "/" or joined == PineType.FLOAT:
+            if expr.op == "/" or PineType.FLOAT in {left, right}:
                 return PineType.FLOAT
-            if joined == PineType.INT:
+            if left == PineType.INT and right == PineType.INT:
                 return PineType.INT
             return PineType.UNKNOWN
         if isinstance(expr, Ternary):
@@ -183,7 +179,16 @@ class CallHandlers:
             false_type = self._callsite_primitive_expr_type(
                 expr.false_val, parameter_types
             )
-            return unify_pine_types(true_type, false_type)
+            if (self._selection_node_is_na(expr.true_val)
+                    or self._selection_node_is_na(expr.false_val)):
+                return unify_pine_types(true_type, false_type)
+            if true_type == false_type:
+                return true_type
+            if PineType.STRING in {true_type, false_type}:
+                return PineType.STRING
+            if PineType.FLOAT in {true_type, false_type}:
+                return PineType.FLOAT
+            return PineType.UNKNOWN
         if isinstance(expr, FuncCall):
             callee = expr.callee
             if isinstance(callee, Identifier):
@@ -209,12 +214,15 @@ class CallHandlers:
     ) -> PineType:
         if not types or PineType.UNKNOWN in types:
             return PineType.UNKNOWN
-        result = types[0]
-        for value in types[1:]:
-            result = unify_pine_types(result, value)
-            if result == PineType.UNKNOWN:
-                return PineType.UNKNOWN
-        return result
+        concrete = [value for value in types if value != PineType.NA]
+        if not concrete:
+            return PineType.NA
+        first = concrete[0]
+        if all(value == first for value in concrete):
+            return first
+        if set(concrete).issubset({PineType.INT, PineType.FLOAT}):
+            return PineType.FLOAT
+        return PineType.UNKNOWN
 
     def _apply_callsite_local_type_effects(
         self,

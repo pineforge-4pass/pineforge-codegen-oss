@@ -2514,10 +2514,9 @@ class TopLevelEmitter:
         else:
             ret_type = PINE_TYPE_TO_CPP.get(fi.return_type, "double")
         if return_udt:
-            # Keep the authored UDT spelling here for target typing; the
-            # expression visitor converts it to the escaped C++ handle name
-            # at the point it emits ``T{}``.
-            rhs_return_cpp_type = return_udt_name
+            # Use the generated handle name so an authored type cannot be
+            # confused with a drawing handle's C++ name.
+            rhs_return_cpp_type = self._safe_name(return_udt_name)
         elif (self._is_nullable_collection_cpp_type(ret_type)
               or ret_type in DRAWING_TYPE_TO_CPP.values()):
             rhs_return_cpp_type = ret_type

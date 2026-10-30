@@ -152,8 +152,8 @@ _SELECTION_ROWS = [
             True,
             prefix="type Box\n    float value\n",
         ),
-        "Box choose_box_na_first(",
-        # Hand-derived: a Box value and na produce a nullable Box handle.
+        "pf_safe_Box choose_box_na_first(",
+        # Hand-derived: Box and na retain the user handle, escaped past the drawing's Box.
     ),
     (
         "udt-na-second",
@@ -164,8 +164,8 @@ _SELECTION_ROWS = [
             False,
             prefix="type Box\n    float value\n",
         ),
-        "Box choose_box_na_second(",
-        # Hand-derived: a Box value and na produce a nullable Box handle.
+        "pf_safe_Box choose_box_na_second(",
+        # Hand-derived: Box and na retain the user handle, escaped past the drawing's Box.
     ),
     (
         "array-string-na-first",
@@ -333,9 +333,9 @@ else
     na
 """
     cpp = transpile(_script(source))
-    # Hand-derived: missing is vector<string>, and selected is string.
+    # Hand-derived: missing is vector<string>; the global string has an empty initial slot.
     assert "std::vector<std::string> missing;" in cpp
-    assert "std::string selected;" in cpp
+    assert 'std::string selected = std::string("");' in cpp
     compile_cpp(cpp, label="if-expression-target-types")
 
 

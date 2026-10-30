@@ -254,16 +254,44 @@ class TypeHelper:
             or (isinstance(node, Identifier) and node.name == "na")
         )
 
+    @classmethod
+    def _selection_contains_na(cls, node: ASTNode | None) -> bool:
+        """Whether a selected value has a bare or implicit ``na`` arm."""
+        if cls._selection_node_is_na(node):
+            return True
+        if isinstance(node, Ternary):
+            return (cls._selection_contains_na(node.true_val)
+                    or cls._selection_contains_na(node.false_val))
+        if isinstance(node, IfStmt):
+            return any(cls._selection_contains_na(cls._selection_terminal_expr(body))
+                       for body in (node.body, node.else_body))
+        if isinstance(node, SwitchStmt):
+            return (
+                any(cls._selection_contains_na(cls._selection_terminal_expr(body))
+                    for _, body in node.cases)
+                or cls._selection_contains_na(
+                    cls._selection_terminal_expr(node.default_body)
+                )
+            )
+        return False
+
     def _selection_type_spec(
         self,
         branches: list[tuple[ASTNode | None, TypeSpec | None]],
     ) -> TypeSpec | None:
-        """Unify selection arms, with a concrete arm giving ``na`` its type."""
+        """Keep exact collection joins; extend other families only around ``na``."""
+        nullable = any(self._selection_contains_na(node) for node, _ in branches)
         result: TypeSpec | None = None
         for node, spec in branches:
             if self._selection_node_is_na(node):
                 continue
+            if (nullable and spec is None
+                    and isinstance(node, (ColorLiteral, MemberAccess, FuncCall))
+                    and self._is_color_constructor(node)):
+                spec = TypeSpec.primitive("color")
             if spec is None:
+                return None
+            if not nullable and spec.kind not in {"map", "matrix"}:
                 return None
             result = (
                 spec
@@ -290,8 +318,6 @@ class TypeHelper:
             )
         if isinstance(value, BoolLiteral):
             return TypeSpec.primitive("bool")
-        if isinstance(value, ColorLiteral):
-            return TypeSpec.primitive("color")
         if isinstance(value, StringLiteral):
             return TypeSpec.primitive("string")
         if isinstance(value, Ternary):
@@ -439,8 +465,6 @@ class TypeHelper:
             func = cal.member if isinstance(cal, MemberAccess) else None
             ns = cal.object.name if isinstance(cal, MemberAccess) and isinstance(cal.object, Identifier) else None
             targs = self._template_args_from_call(value)
-            if ns == "color" and func in {"new", "rgb", "from_gradient"}:
-                return TypeSpec.primitive("color")
             if isinstance(cal, MemberAccess):
                 typed_receiver_spec = self._type_spec_from_expr(cal.object)
                 typed_receiver_name = method_receiver_type_name(
@@ -708,11 +732,6 @@ class TypeHelper:
                 if udt_return in _DRAWING_TYPE_NAMES:
                     return TypeSpec.udt(udt_return)
         if isinstance(value, MemberAccess):
-            if (
-                isinstance(value.object, Identifier)
-                and value.object.name == "color"
-            ):
-                return TypeSpec.primitive("color")
             owner = self._type_spec_from_expr(value.object)
             if owner is not None and owner.kind == "udt" and owner.name:
                 return (self._udt_field_type_specs.get(owner.name) or {}).get(value.member)

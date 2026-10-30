@@ -1492,16 +1492,44 @@ class TypeInferer:
             or (isinstance(node, Identifier) and node.name == "na")
         )
 
+    @classmethod
+    def _selection_contains_na(cls, node: ASTNode | None) -> bool:
+        """Whether a selected value has a bare or implicit ``na`` arm."""
+        if cls._selection_node_is_na(node):
+            return True
+        if isinstance(node, Ternary):
+            return (cls._selection_contains_na(node.true_val)
+                    or cls._selection_contains_na(node.false_val))
+        if isinstance(node, IfStmt):
+            return any(cls._selection_contains_na(cls._selection_terminal_expr(body))
+                       for body in (node.body, node.else_body))
+        if isinstance(node, SwitchStmt):
+            return (
+                any(cls._selection_contains_na(cls._selection_terminal_expr(body))
+                    for _, body in node.cases)
+                or cls._selection_contains_na(
+                    cls._selection_terminal_expr(node.default_body)
+                )
+            )
+        return False
+
     def _selection_type_spec(
         self,
         branches: list[tuple[ASTNode | None, TypeSpec | None]],
     ) -> TypeSpec | None:
-        """Unify selection arms, with a concrete arm giving ``na`` its type."""
+        """Keep exact collection joins; extend other families only around ``na``."""
+        nullable = any(self._selection_contains_na(node) for node, _ in branches)
         result: TypeSpec | None = None
         for node, spec in branches:
             if self._selection_node_is_na(node):
                 continue
+            if (nullable and spec is None
+                    and isinstance(node, (ColorLiteral, MemberAccess, FuncCall))
+                    and self._is_color_value(node)):
+                spec = TypeSpec.primitive("color")
             if spec is None:
+                return None
+            if not nullable and spec.kind not in {"map", "matrix"}:
                 return None
             result = (
                 spec
@@ -1528,8 +1556,6 @@ class TypeInferer:
             return TypeSpec.primitive("float" if isinstance(node.value, float) else "int")
         if isinstance(node, BoolLiteral):
             return TypeSpec.primitive("bool")
-        if isinstance(node, ColorLiteral):
-            return TypeSpec.primitive("color")
         if isinstance(node, StringLiteral):
             return TypeSpec.primitive("string")
         if isinstance(node, Identifier):
@@ -1697,23 +1723,12 @@ class TypeInferer:
             ))
             return self._selection_type_spec(branches)
         if isinstance(node, MemberAccess):
-            if (
-                isinstance(node.object, Identifier)
-                and node.object.name == "color"
-            ):
-                return TypeSpec.primitive("color")
             owner = self._type_spec_from_expr(node.object)
             if owner is not None and owner.kind == "udt" and owner.name:
                 return (self._udt_field_type_specs.get(owner.name) or {}).get(node.member)
             return None
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
-            if namespace == "color" and func_name in {
-                "new",
-                "rgb",
-                "from_gradient",
-            }:
-                return TypeSpec.primitive("color")
             if namespace is None:
                 func_info = self._func_info_map.get(func_name)
                 return_spec = getattr(func_info, "return_type_spec", None)
@@ -4123,8 +4138,16 @@ class TypeInferer:
                 return self._type_spec_to_cpp(spec)
         if isinstance(node, Ternary):
             ternary_spec = self._type_spec_from_expr(node)
-            if ternary_spec is not None:
-                return self._type_spec_to_cpp(ternary_spec)
+            if (ternary_spec is not None
+                    and (self._selection_contains_na(node)
+                         or (ternary_spec.kind == "udt"
+                             and ternary_spec.name in DRAWING_TYPE_TO_CPP))):
+                cpp_type = self._type_spec_to_cpp(ternary_spec)
+                if cpp_type == "int" and "int64_t" in (
+                    self._infer_type(node.true_val), self._infer_type(node.false_val),
+                ):
+                    return "int64_t"
+                return cpp_type
             tt = self._infer_type(node.true_val)
             ft = self._infer_type(node.false_val)
             if tt.startswith("std::vector") or ft.startswith("std::vector"):
@@ -4142,14 +4165,34 @@ class TypeInferer:
         # the first branch / case; matches Pine semantics for ``x = if...``.
         if isinstance(node, IfStmt):
             block_spec = self._type_spec_from_expr(node)
-            if block_spec is not None:
-                return self._type_spec_to_cpp(block_spec)
+            if (block_spec is not None
+                    and (self._selection_contains_na(node)
+                         or (block_spec.kind == "udt"
+                             and block_spec.name in DRAWING_TYPE_TO_CPP))):
+                cpp_type = self._type_spec_to_cpp(block_spec)
+                if cpp_type == "int" and any(
+                    self._infer_type(self._selection_terminal_expr(body)) == "int64_t"
+                    for body in (node.body, node.else_body) if body
+                ):
+                    return "int64_t"
+                return cpp_type
             if node.body:
                 last = node.body[-1]
                 if isinstance(last, ExprStmt):
                     return self._infer_type(last.expr)
             return "double"
         if isinstance(node, SwitchStmt):
+            if self._selection_contains_na(node):
+                block_spec = self._type_spec_from_expr(node)
+                if block_spec is not None:
+                    cpp_type = self._type_spec_to_cpp(block_spec)
+                    if cpp_type == "int" and any(
+                        self._infer_type(self._selection_terminal_expr(body)) == "int64_t"
+                        for body in [*(body for _, body in node.cases),
+                                     node.default_body] if body
+                    ):
+                        return "int64_t"
+                    return cpp_type
             if node.cases:
                 _, case_body = node.cases[0]
                 if case_body:

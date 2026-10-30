@@ -17,18 +17,14 @@ class PineType(Enum):
 
 
 def unify_pine_types(left: PineType, right: PineType) -> PineType:
-    """Join two coarse Pine types, letting a concrete type adopt ``na``."""
+    """Resolve a bare ``na`` against its peer, without promoting other pairs."""
     if left == right:
         return left
     if left == PineType.NA:
         return right
     if right == PineType.NA:
         return left
-    if PineType.STRING in (left, right):
-        return PineType.STRING
-    if PineType.FLOAT in (left, right):
-        return PineType.FLOAT
-    return left
+    return PineType.UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -92,13 +88,6 @@ def unify_type_specs(
         return None
     if left == right:
         return left
-    if left.kind == "primitive" and right.kind == "primitive":
-        if left.name == "string" or right.name == "string":
-            return TypeSpec.primitive("string")
-        if left.name == "float" or right.name == "float":
-            return TypeSpec.primitive("float")
-        if left.name == right.name == "int":
-            return TypeSpec.primitive("int")
     return None
 
 

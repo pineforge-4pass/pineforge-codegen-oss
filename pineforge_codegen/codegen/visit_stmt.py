@@ -2221,7 +2221,10 @@ class StmtVisitor:
             self._unmatched_value_na = (
                 target, self._na_value_for_type(slot_cpp_type))
         try:
-            effective_target_cpp_type = target_cpp_type or slot_cpp_type
+            effective_target_cpp_type = target_cpp_type
+            if (effective_target_cpp_type is None
+                    and self._selection_contains_na(node)):
+                effective_target_cpp_type = slot_cpp_type
             self._visit_if_switch_expr(
                 node,
                 target,

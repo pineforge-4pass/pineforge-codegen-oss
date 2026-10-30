@@ -322,10 +322,9 @@ class ExprVisitor:
         while isinstance(links[-1].false_val, Ternary):
             links.append(links[-1].false_val)
         string_na = self._ternary_string_na(links)
-        ternary_spec = self._type_spec_from_expr(node)
         ternary_cpp_type = (
-            self._type_spec_to_cpp(ternary_spec)
-            if ternary_spec is not None
+            self._infer_type(node)
+            if self._selection_contains_na(node)
             else None
         )
         array_history_type = self._array_history_value_expr_cpp_type(node)
@@ -467,11 +466,11 @@ class ExprVisitor:
         if spec is None and target_node is not None:
             spec = self._type_spec_from_expr(target_node)
         if spec is not None and spec.kind == "udt" and spec.name in self._udt_defs:
-            return spec.name
+            return self._safe_name(spec.name)
         if not target_name:
             return None
         udt_name = self._identifier_udt_type(target_name)
-        return udt_name if udt_name in self._udt_defs else None
+        return self._safe_name(udt_name) if udt_name in self._udt_defs else None
 
     def _visit_rhs_value(self, value_node, target_name: str | None = None,
                          target_cpp_type: str | None = None) -> str:
@@ -485,15 +484,25 @@ class ExprVisitor:
         ``na<double>()`` and fail to compile (no viable assignment/conversion).
         Every other RHS lowers unchanged.
         """
-        drawing_target = self._drawing_target_cpp_type(
-            target_name,
-            target_cpp_type,
+        udt_target = None
+        if (target_cpp_type in self._udt_defs
+                and target_cpp_type not in DRAWING_TYPE_TO_CPP.values()):
+            udt_target = self._safe_name(target_cpp_type)
+        elif target_cpp_type is not None:
+            udt_target = next(
+                (target_cpp_type for name in self._udt_defs
+                 if self._safe_name(name) == target_cpp_type),
+                None,
+            )
+        drawing_target = (
+            None if udt_target is not None
+            else self._drawing_target_cpp_type(target_name, target_cpp_type)
         )
         if self._is_na_expr(value_node):
+            if udt_target is not None:
+                return f"{udt_target}{{}}"
             if drawing_target is not None:
                 return f"{drawing_target}{{}}"
-            if target_cpp_type in self._udt_defs:
-                return f"{self._safe_name(target_cpp_type)}{{}}"
             if self._is_nullable_collection_cpp_type(target_cpp_type):
                 # Maps and matrices use default construction for a typed
                 # ``na`` ID. Their ``*.new`` factories create a valid ID,
@@ -509,14 +518,14 @@ class ExprVisitor:
         if (isinstance(value_node, Ternary)
                 and (self._is_nullable_collection_cpp_type(target_cpp_type)
                      or drawing_target is not None
-                     or target_cpp_type in self._udt_defs)):
+                     or udt_target is not None)):
             # C++ cannot deduce a common type for ``na<double>()`` and a
             # collection/drawing handle. Pine's ternary is target typed, so
             # propagate the exact declared/reassignment target into both arms.
             # Arrays and scalar ternaries retain the established generic path;
             # target typing is safe only for collections with nullable runtime
             # representations.
-            branch_target = drawing_target or target_cpp_type
+            branch_target = udt_target or drawing_target or target_cpp_type
             condition = self._visit_expr(value_node.condition)
             true_value = self._visit_rhs_value(
                 value_node.true_val,
