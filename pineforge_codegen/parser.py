@@ -1293,8 +1293,12 @@ class Parser:
         ``is_single_expr=True`` representation.  A field/element assignment
         is a real statement and therefore uses the normal block representation
         so the analyzer and code generator apply statement-tail semantics.
+        An ``if`` opened after the arrow uses the same bare IfStmt as an
+        indented function body, including its branch types and implicit na.
         """
         first = self._parse_line_expr_or_assignment(field_target_only=True)
+        if isinstance(first, ExprStmt) and isinstance(first.expr, IfStmt):
+            return [first.expr], False
         if not isinstance(first, Assignment):
             return [first], True
 
