@@ -4001,27 +4001,29 @@ class TypeInferer:
                 recv_spec = self._type_spec_from_expr(node.callee.object)
                 if recv_spec is not None and recv_spec.kind == "array" and member_name == "join":
                     return "std::string"
-                receiver_name = method_receiver_type_name(recv_spec)
-                if receiver_name is not None:
-                    fi_u = self._func_info_map.get(
-                        f"{receiver_name}.{member_name}"
+                # Keep expression storage aligned with call emission. The
+                # call visitor resolves scalar receivers through its fallback
+                # when a global binding's UDT tombstone hides its primitive.
+                _recv_spec, fi_u = self._typed_user_method_info(
+                    node.callee.object,
+                    member_name,
+                )
+                if fi_u is not None:
+                    call_site_idx = self._callable_target_callsite_idx(
+                        fi_u, node
                     )
-                    if fi_u is not None:
-                        call_site_idx = self._callable_target_callsite_idx(
-                            fi_u, node
-                        )
-                        if self._func_int_return_uses_wide_history(
-                            fi_u, call_site_idx=call_site_idx
-                        ):
-                            return "int64_t"
-                        if getattr(fi_u, "return_type_spec", None) is not None:
-                            return self._type_spec_to_cpp(fi_u.return_type_spec)
-                        return PINE_TYPE_TO_CPP.get(
-                            self._callsite_callable_return_pine_type(
-                                fi_u, call_site_idx
-                            ),
-                            "double",
-                        )
+                    if self._func_int_return_uses_wide_history(
+                        fi_u, call_site_idx=call_site_idx
+                    ):
+                        return "int64_t"
+                    if getattr(fi_u, "return_type_spec", None) is not None:
+                        return self._type_spec_to_cpp(fi_u.return_type_spec)
+                    return PINE_TYPE_TO_CPP.get(
+                        self._callsite_callable_return_pine_type(
+                            fi_u, call_site_idx
+                        ),
+                        "double",
+                    )
             if namespace is None and func_name in self._func_info_map:
                 fi_u = self._func_info_map[func_name]
                 call_site_idx = self._callable_target_callsite_idx(fi_u, node)

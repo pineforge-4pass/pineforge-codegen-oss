@@ -98,7 +98,7 @@ else
         "double unitsFor(",
         "41.5 41.5\nna 1\n41.5 41.5\nna 1\n",
     ),
-    # "ready" has five characters; an unmatched string branch is string na.
+    # Missing strings are empty here, so the blank value selects fallback 1.
     "string": _Case(
         _source(
             '''unitsFor(bool selected) => if selected
@@ -107,7 +107,7 @@ else
             units="na(candidate) ? 1 : str.length(candidate)",
         ),
         "std::string unitsFor(",
-        "ready 5\nna 1\nready 5\nna 1\n",
+        "ready 5\n 1\nready 5\n 1\n",
     ),
     # Pine v6 bool has no na: the unmatched branch is false, choosing 1.
     "bool": _Case(
@@ -185,7 +185,9 @@ _VALUE_DRIVER = r'''
 #include <type_traits>
 template <typename T>
 void print_value(const T& value) {
-    if constexpr (std::is_same_v<T, bool>) {
+    if constexpr (std::is_same_v<T, std::string>) {
+        std::cout << value;
+    } else if constexpr (std::is_same_v<T, bool>) {
         std::cout << value;
     } else if (is_na(value)) {
         std::cout << "na";
