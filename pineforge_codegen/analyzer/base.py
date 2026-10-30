@@ -3970,7 +3970,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
     def _visit_ImportStmt(self, node: ImportStmt) -> PineType:
         # Imported here: the support checker imports the analyzer package.
-        from ..support_checker import import_is_builtin_namespace_no_op, import_refusal
+        from ..support_checker import (
+            import_is_builtin_namespace_no_op,
+            import_refusal,
+            import_refusal_hint,
+        )
         if import_is_builtin_namespace_no_op(self._ast, node):
             return PineType.VOID
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
@@ -3979,6 +3983,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             phase=Phase.ANALYZER,
             location=loc,
             message=import_refusal(node),
+            hint=import_refusal_hint(),
         )
         raise CompileError([diag])
 
