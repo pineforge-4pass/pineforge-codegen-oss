@@ -70,7 +70,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the number of closed trades. A script that does not match the loop shape
   generates the same C++ as before.
 
-## Unreleased (1.9.0)
+## 1.9.0 — 2026-10-30
 
 - Generated closed-trade text comparisons against a NUL-free string literal
   call the engine's in-place closed-trade comparison members, introduced in
