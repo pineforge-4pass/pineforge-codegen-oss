@@ -7,6 +7,7 @@ import pytest
 from pineforge_codegen import transpile
 from tests._compile import run_emitted_tu
 from pineforge_codegen.codegen.capabilities import STRATEGY_PARAMETERS
+from pineforge_codegen.errors import CompileError
 
 
 def emitted_receipt(source):
@@ -225,14 +226,21 @@ if value > close
     assert receipt['unresolved'] == ['request.security[0].timeframe']
 
 
-def test_nonliteral_declaration_is_not_silently_defaulted():
-    receipt = emitted_receipt('''//@version=6
+def test_later_declaration_constant_is_a_located_error():
+    source = '''//@version=6
 strategy("unresolved declaration", calc_on_every_tick=TICK)
 const bool TICK = true
 strategy.entry("entry", strategy.long)
-''')
-    assert 'calc_on_every_tick' in receipt['unresolved']
-    assert receipt['declarations']['calc_on_every_tick'] != False
+'''
+    with pytest.raises(CompileError) as error:
+        transpile(source, filename="declaration.pine")
+    diagnostic, = error.value.diagnostics
+    assert diagnostic.code == "PF-E5082"
+    assert diagnostic.args == {"name": "calc_on_every_tick"}
+    assert diagnostic.message == "strategy(): setting 'calc_on_every_tick' must be a compile-time constant"
+    # TICK follows 54 characters on line two and is declared only afterward.
+    assert (diagnostic.location.line, diagnostic.location.col) == (2, 55)
+    assert diagnostic.location.file == "declaration.pine"
 
 
 @pytest.mark.parametrize(('name', 'value', 'expected'), [
@@ -259,11 +267,25 @@ def test_exact_review_positional_form():
     assert receipt['declarations']['calc_on_order_fills'] is True
 
 
-@pytest.mark.parametrize('declaration', ['strategy(TITLE)', 'strategy("t", pyramiding=COUNT)',
-                                       'strategy("t", "s", true, format.price, 2, scale.right, COUNT)'])
-def test_every_nonliteral_argument_is_unresolved(declaration):
-    receipt = emitted_receipt(f'//@version=6\n{declaration}\nconst string TITLE = "t"\nconst int COUNT = 1\nstrategy.entry("entry", strategy.long)')
-    assert receipt['unresolved'] == ['title' if declaration == 'strategy(TITLE)' else 'pyramiding']
+@pytest.mark.parametrize('declaration, name, message, column', [
+    ('strategy(TITLE)', 'title',
+     "strategy(): setting 'title' must be a compile-time constant", 10),  # Nine prefix characters precede TITLE.
+    ('strategy("t", pyramiding=COUNT)', 'pyramiding',
+     "strategy(): setting 'pyramiding' must be a compile-time constant", 26),  # Twenty-five characters precede COUNT.
+    ('strategy("t", "s", true, format.price, 2, scale.right, COUNT)', 'pyramiding',
+     "strategy(): setting 'pyramiding' must be a compile-time constant", 56),  # Fifty-five characters precede argument seven.
+])
+def test_forward_declaration_arguments_are_located_errors(declaration, name, message, column):
+    source = f'//@version=6\n{declaration}\nconst string TITLE = "t"\nconst int COUNT = 1\nstrategy.entry("entry", strategy.long)'
+    with pytest.raises(CompileError) as error:
+        transpile(source, filename="declaration.pine")
+    diagnostic, = error.value.diagnostics
+    assert diagnostic.code == "PF-E5082"
+    assert diagnostic.args == {"name": name}
+    assert diagnostic.message == message
+    # The directive occupies line one; each name is first read in line two.
+    assert (diagnostic.location.line, diagnostic.location.col) == (2, column)
+    assert diagnostic.location.file == "declaration.pine"
 
 
 @pytest.mark.parametrize('body', [

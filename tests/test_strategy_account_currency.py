@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError
 from tests._compile import run_emitted_tu
-from tests.test_strategy_capabilities import emitted_receipt
 
 
 _USDT_DRIVER = r'''
@@ -161,17 +161,17 @@ if account != 'USDT'
 ''')
 
 
-def test_nonliteral_currency_keeps_its_unresolved_declaration() -> None:
-    # Strategy declaration evaluation does not resolve variables. Preserve the
-    # capability receipt's unresolved marker and the existing symbol fallback.
+def test_later_account_currency_name_is_a_located_error() -> None:
     source = '''//@version=6
 strategy('Unresolved account currency', currency=ACCOUNT)
 string ACCOUNT = 'EUR'
-label_text = 'account ' + strategy.account_currency
-if label_text != 'account USDT'
-    runtime.error('unresolved currency fallback changed')
 '''
-    receipt = emitted_receipt(source)
-    assert receipt['declarations']['currency'] == 'ACCOUNT'
-    assert 'currency' in receipt['unresolved']
-    _run_on_usdt(source)
+    with pytest.raises(CompileError) as error:
+        transpile(source, filename="currency.pine")
+    diagnostic, = error.value.diagnostics
+    assert diagnostic.code == "PF-E5082"
+    assert diagnostic.args == {"name": "currency"}
+    assert diagnostic.message == "strategy(): setting 'currency' must be a compile-time constant"
+    # ACCOUNT follows 49 characters on line two and is declared only afterward.
+    assert (diagnostic.location.line, diagnostic.location.col) == (2, 50)
+    assert diagnostic.location.file == "currency.pine"

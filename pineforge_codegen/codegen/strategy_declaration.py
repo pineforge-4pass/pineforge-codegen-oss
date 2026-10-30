@@ -39,7 +39,7 @@ _ENUM_PARAMETERS = {
 }
 
 
-def _argument_error(node, filename, message):
+def _error(node, message, *, filename):
     raise CompileError([Diagnostic(
         level=Level.ERROR,
         phase=Phase.ANALYZER,
@@ -52,16 +52,18 @@ def strategy_arguments(node, filename="<input>"):
     """Bind positionals before keywords; a parameter can be supplied once."""
     expected_count, actual_count = len(STRATEGY_PARAMETERS), len(node.args)
     if actual_count > expected_count:
-        _argument_error(
-            node.args[expected_count], filename,
+        _error(
+            node.args[expected_count],
             f"strategy(): too many positional arguments (expected {expected_count}, got {actual_count})",
+            filename=filename,
         )
     arguments = dict(zip(STRATEGY_PARAMETERS, node.args))
     for name, argument in node.kwargs.items():
         if name in arguments:
-            _argument_error(
-                argument, filename,
+            _error(
+                argument,
                 f"strategy(): argument '{name}' passed both positionally and by keyword",
+                filename=filename,
             )
         arguments[name] = argument
     return arguments
@@ -162,9 +164,10 @@ def resolve_strategy_declarations(program, reassigned_names, filename, budget=No
             for name, argument in strategy_arguments(statement, filename).items():
                 value, proven = fold_constant_expression(argument, known_values, _NAMED_CONSTANTS)
                 if not proven:
-                    _argument_error(
-                        argument, filename,
+                    _error(
+                        argument,
                         f"strategy(): setting '{name}' must be a compile-time constant",
+                        filename=filename,
                     )
                 if isinstance(value, str) and not isinstance(argument, StringLiteral):
                     prefix = _ENUM_PARAMETERS.get(name)

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from pineforge_codegen import transpile, transpile_full
@@ -318,7 +322,7 @@ def test_nonconstant_settings_are_located_errors(name, form):
     assert diagnostic.level is Level.ERROR
     assert diagnostic.phase is Phase.ANALYZER
     assert name in diagnostic.message and "constant" in diagnostic.message
-    assert diagnostic.code == "PF-E5080"
+    assert diagnostic.code == "PF-E5082"
     assert diagnostic.args == {"name": name}
 
 
@@ -406,6 +410,65 @@ def test_declaration_binding_rejects_duplicate_and_excess_arguments(declaration,
     with pytest.raises(CompileError) as error:
         transpile(_source(declaration, body=""))
     assert fragment in str(error.value)
+
+
+def test_strategy_declaration_diagnostics_are_extracted():
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "gen_diagnostics_catalog.py"), "--list"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    extracted = {line.split(" || ", 1)[0] for line in result.stdout.splitlines()}
+    expected = {
+        "error strategy(): too many positional arguments (expected {expected_count}, got {actual_count})",  # Counts stay named.
+        "error strategy(): argument ''{name}'' passed both positionally and by keyword",  # ICU escapes both quotes.
+        "error strategy(): setting ''{name}'' must be a compile-time constant",  # Only the setting name varies.
+    }
+    assert expected <= extracted
+
+
+@pytest.mark.parametrize("declaration, code, message, arguments, line, column", [
+    ('strategy("Constants",\n    pyramiding=close)', "PF-E5082",
+     "strategy(): setting 'pyramiding' must be a compile-time constant",
+     {"name": "pyramiding"}, 3, 16),  # Four spaces and pyramiding= put close at column sixteen.
+    ('strategy("Duplicate",\n    title="Again")', "PF-E5081",
+     "strategy(): argument 'title' passed both positionally and by keyword",
+     {"name": "title"}, 3, 11),  # Four spaces and title= put the duplicate value at column eleven.
+    ("strategy(\n    " + ",\n    ".join(_POSITIONAL + ["false"]) + "\n)", "PF-E5080",
+     "strategy(): too many positional arguments (expected 34, got 35)",
+     {"expected_count": 34, "actual_count": 35}, 37, 5),  # After 34 slots, the extra value is on line 37.
+])
+def test_declaration_diagnostics_keep_codes_arguments_and_locations(
+    declaration, code, message, arguments, line, column,
+):
+    with pytest.raises(CompileError) as error:
+        transpile(_source(declaration, body=""), filename="settings.pine")
+    diagnostic, = error.value.diagnostics
+    assert diagnostic.code == code
+    assert diagnostic.args == arguments
+    assert diagnostic.message == message
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "settings.pine"
+    assert (diagnostic.location.line, diagnostic.location.col) == (line, column)
+
+
+@pytest.mark.parametrize("body, journal, token", [
+    ("var a = array.from(2, 5)\na.push(7)\n", "_pf_array_journal",
+     "{&this->a, _pf_next_generation}"),  # A direct array append enrolls its stable root.
+    ('var m = map.new<string, int>()\nm.put("a", 2)\n', "_pf_graph_journal",
+     "{&this->m, _pf_next_generation}"),  # A direct map write enrolls its stable root.
+])
+def test_true_constant_expression_enables_collection_journals(body, journal, token):
+    result = transpile_full(_source(
+        'strategy("Fill recalculation", calc_on_order_fills=1 == 1)', body=body,
+    ))
+    # One equals one, enabling fill recalculation and a journal token for the collection.
+    assert result["strategyParams"]["calc_on_order_fills"] is True
+    assert "cfg.calc_on_order_fills = true;" in _constructor(result["cpp"])
+    assert journal in result["cpp"]
+    assert token in result["cpp"]
 
 
 @pytest.mark.parametrize("value", ["true", "not false", "ENABLED"])
