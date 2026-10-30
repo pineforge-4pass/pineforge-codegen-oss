@@ -221,8 +221,7 @@ class Lexer:
     """Converts PineScript v6 source string into a list of tokens."""
 
     # These trailing tokens require another operand on the logical line.
-    # Outside parentheses/brackets, its next line must use continuation
-    # indentation rather than a block indentation.
+    # Outside parentheses/brackets these suppress the logical line boundary.
     CONTINUATION_TOKENS = {
         TokenType.AND, TokenType.OR,
         TokenType.PLUS, TokenType.MINUS, TokenType.STAR, TokenType.SLASH,
@@ -249,6 +248,7 @@ class Lexer:
         self.indent_stack: list[int] = [0]
         self.paren_depth = 0  # Track () and [] nesting to suppress NEWLINE/INDENT/DEDENT
         self._in_continuation = False  # True when current line is a continuation
+        self._logical_line_has_arrow = False
         self._diagnostics: list[Diagnostic] = []
         self._budget = budget
 
@@ -278,6 +278,8 @@ class Lexer:
         if end_col is None:
             end_col = col + len(value)
         self.tokens.append(Token(tt, value, line, col, end_col))
+        if tt == TokenType.FAT_ARROW:
+            self._logical_line_has_arrow = True
 
     def _emit_diagnostic(self, message: str, line: int, col: int, end_col: int, hint: str | None = None) -> None:
         loc = SourceLocation(file=self.filename, line=line, col=col, end_col=end_col)
@@ -373,7 +375,13 @@ class Lexer:
         # whether it is deeper or shallower than the current block. The stack
         # stays unchanged until a line with structural indentation arrives.
         continues_by_indent = "\t" not in raw and len(raw) % 4 != 0
-        if self._in_continuation and not continues_by_indent:
+        if (self._in_continuation
+                and self.indent_stack[-1] == 0
+                and not self._logical_line_has_arrow
+                and self.tokens[-1].type != TokenType.COMMA
+                and raw in ("", "    ")):
+            # The measured restriction is on top-level operands at zero or
+            # four spaces. Block and callable bodies retain their wraps.
             last_token = self.tokens[-1]
             self._emit_diagnostic(
                 "Line continuation outside parentheses or brackets requires "
@@ -405,6 +413,7 @@ class Lexer:
 
         # Continuation indentation is cosmetic, not structural.
         if not self._in_continuation and not starts_with_cont_op and not continues_by_indent:
+            self._logical_line_has_arrow = False
             current_indent = self.indent_stack[-1]
             if indent_level > current_indent:
                 if indent_level != current_indent + 1:
