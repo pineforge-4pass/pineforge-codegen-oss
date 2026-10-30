@@ -6555,7 +6555,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 return f'std::string("{self._cpp_string_escape(val)}")'
             return name
 
-        rewritten = ident_re.sub(_sub, expr)
+        # Identifier tokens only: a string literal's text is not identifiers
+        # (a literal that spells an input's or a constant's name stays as is).
+        rewritten = sub_identifiers(expr, _sub)
 
         # 5) Pine auto-converts floats to ints for TA lengths; C++ does not.
         # If any math.* function appears (returns double) OR a timeframe.*
