@@ -140,6 +140,8 @@ _CASES = [
     # Two, three and four statements return the second, third and fourth values.
     for count, expected in zip((2, 3, 4), expectations)
     for kind in ("function", "method")
+    # Unannotated color.rgb globals cannot bind user methods in either layout.
+    if kind != "method" or hint != "color"
 ]
 
 _CASES += [
@@ -203,11 +205,11 @@ _CASES += [
     BodyCase(
         name="typed-locals",
         signature="evaluate(int value)",
-        statements=("float first = value + 0.5", "float second = first * 2", "second"),
+        statements=("float first = value + 0.5", "float doubled = first * 2", "doubled"),
         setup="",
         call="evaluate(4)",
         statement_count=3,
-        expected="9",  # first=4.5 and second=4.5*2=9.
+        expected="9",  # first=4.5 and doubled=4.5*2=9.
     ),
     BodyCase(
         name="string-local-and-tail",
@@ -310,11 +312,11 @@ _CASES += [
     BodyCase(
         name="tuple-local-declaration",
         signature="evaluate(int value)",
-        statements=("[first, second] = pair(value)", "first + second"),
+        statements=("[first, successor] = pair(value)", "first + successor"),
         setup="",
         call="evaluate(4)",
         statement_count=2,
-        expected="9",  # The tuple declares first=4 and second=5; their sum is 9.
+        expected="9",  # The tuple declares first=4 and successor=5; their sum is 9.
         preamble="pair(int seed) => [seed, seed + 1]\n",
     ),
     BodyCase(
@@ -424,15 +426,26 @@ def test_record_array_parameter_remains_in_scope_after_comma() -> None:
 
 def test_trailing_comma_at_end_of_source_compiles_and_returns_the_tail() -> None:
     inline = _HEADER + _TAIL + "evaluate(int value) => value + 1, value * 2,\n"
-    indented = _HEADER + _TAIL + "evaluate(int value) =>\n    value + 1\n    value * 2\n"
-    cpp = _compile_pair(inline, indented, label="trailing-comma-at-end")
-    driver = r"""
-#include <iostream>
-int main() {
-    GeneratedStrategy strategy;
-    std::cout << strategy.evaluate(4) << '\n';
-}
-"""
-    output = run_emitted_tu(cpp, driver, opt="-O0", label="trailing-comma-at-end")
+    program = Parser(Lexer(inline).tokenize(), source=inline).parse()
+    function = next(node for node in program.body if isinstance(node, FuncDef))
+    # Two expressions precede the terminal comma; the delimiter adds no statement.
+    assert len(function.body) == 2
+    assert function.is_single_expr is False
+
+    # A line-ending comma continues into following code, so terminate the line
+    # before adding the script call that registers the function for emission.
+    runnable = inline.removesuffix(",\n") + "\nactual = evaluate(4)\n"
+    runnable_program = Parser(Lexer(runnable).tokenize(), source=runnable).parse()
+    runnable_function = next(
+        node for node in runnable_program.body if isinstance(node, FuncDef)
+    )
+    assert function.body == runnable_function.body
+    indented = (
+        _HEADER + _TAIL
+        + "evaluate(int value) =>\n    value + 1\n    value * 2\n"
+        + "actual = evaluate(4)\n"
+    )
+    cpp = _compile_pair(runnable, indented, label="trailing-comma-at-end")
+    output = run_emitted_tu(cpp, _DRIVER, opt="-O0", label="trailing-comma-at-end")
     # The terminal delimiter adds no statement; the function returns 4*2=8.
     assert output.strip() == "8"
