@@ -220,9 +220,9 @@ def _normalize_line_endings(source: str) -> str:
 class Lexer:
     """Converts PineScript v6 source string into a list of tokens."""
 
-    # Token types that indicate line continuation when they end a line.
-    # If a line ends with one of these, the next line is a continuation
-    # and its INDENT/DEDENT should be suppressed.
+    # These trailing tokens require another operand on the logical line.
+    # Outside parentheses/brackets, its next line must use continuation
+    # indentation rather than a block indentation.
     CONTINUATION_TOKENS = {
         TokenType.AND, TokenType.OR,
         TokenType.PLUS, TokenType.MINUS, TokenType.STAR, TokenType.SLASH,
@@ -369,13 +369,17 @@ class Lexer:
         else:
             indent_level = len(raw) // 4
 
-        # A tab-free line one to three spaces past the logical line's block
-        # level continues that line, including after a header. Keep the stack
-        # unchanged so successive wrapped lines use the same base indentation.
-        continues_by_indent = (
-            "\t" not in raw
-            and 0 < len(raw) - 4 * self.indent_stack[-1] < 4
-        )
+        # A tab-free nonmultiple of four continues the previous logical line,
+        # whether it is deeper or shallower than the current block. The stack
+        # stays unchanged until a line with structural indentation arrives.
+        continues_by_indent = "\t" not in raw and len(raw) % 4 != 0
+        if self._in_continuation and not continues_by_indent:
+            last_token = self.tokens[-1]
+            self._emit_diagnostic(
+                "Line continuation outside parentheses or brackets requires "
+                "space indentation that is not a multiple of four.",
+                last_token.line, last_token.end_col, last_token.end_col,
+            )
 
         # Operator-first line continuation: when a line *begins* with a binary
         # / ternary operator that cannot start a statement (e.g. ``? x``,
@@ -403,6 +407,12 @@ class Lexer:
         if not self._in_continuation and not starts_with_cont_op and not continues_by_indent:
             current_indent = self.indent_stack[-1]
             if indent_level > current_indent:
+                if indent_level != current_indent + 1:
+                    self._emit_diagnostic(
+                        "A block must begin exactly one indentation level "
+                        "deeper than its header.",
+                        self.line, self.col, self.col + 1,
+                    )
                 self.indent_stack.append(indent_level)
                 if len(self.indent_stack) - 1 > MAX_NESTING_DEPTH:
                     raise limit_error(
