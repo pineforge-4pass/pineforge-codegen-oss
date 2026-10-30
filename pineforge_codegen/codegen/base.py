@@ -2341,19 +2341,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return None
 
     def _compute_max_bars_back_cap(self) -> int | None:
-        """Scan the AST for max_bars_back directives (strategy() kwarg AND the
-        bare function call) and return the largest positive integer requested,
-        or None if none is present / none is a usable literal."""
+        """Combine the resolved declaration with literal max_bars_back calls."""
         ast = getattr(self.ctx, "ast", None)
         if ast is None:
             return None
         caps: list[int] = []
+        declared = self.ctx.strategy_params.get("max_bars_back")
+        if (type(declared) in (int, float) and declared > 0
+                and (type(declared) is int or declared.is_integer())):
+            caps.append(int(declared))
         for node in self._walk_ast(ast):
-            if isinstance(node, StrategyDecl):
-                val = self._int_literal_value(node.kwargs.get("max_bars_back"))
-                if val is not None and val > 0:
-                    caps.append(val)
-            elif (
+            if (
                 isinstance(node, FuncCall)
                 and isinstance(node.callee, Identifier)
                 and node.callee.name == "max_bars_back"
@@ -4707,15 +4705,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._array_journal_calls: dict[int, str] = {}
         if self._uses_map or self._uses_matrix or self._udt_defs:
             return
-        from .capabilities import STRATEGY_PARAMETERS
-        position = STRATEGY_PARAMETERS.index("calc_on_order_fills")
-        enabled = False
-        for statement in self.ctx.ast.body:
-            if isinstance(statement, StrategyDecl):
-                flag = statement.kwargs.get("calc_on_order_fills")
-                if flag is None and len(statement.args) > position:
-                    flag = statement.args[position]
-                enabled = isinstance(flag, BoolLiteral) and flag.value is True
+        enabled = self.ctx.strategy_params.get("calc_on_order_fills") is True
         if not enabled and sharing is None:
             return
 

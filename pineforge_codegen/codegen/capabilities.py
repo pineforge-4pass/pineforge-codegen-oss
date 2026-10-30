@@ -3,21 +3,11 @@
 import json
 import math
 
-from ..ast_nodes import BoolLiteral, FuncCall, Identifier, MemberAccess, NumberLiteral, StrategyDecl, StringLiteral, Subscript, UnaryOp, VarDecl
+from ..ast_nodes import BoolLiteral, FuncCall, Identifier, MemberAccess, NaLiteral, NumberLiteral, StrategyDecl, StringLiteral, Subscript, UnaryOp, VarDecl
 from ..external_requests import CAPABILITY_UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
-
-
-STRATEGY_PARAMETERS = (
-    "title", "shorttitle", "overlay", "format", "precision", "scale", "pyramiding",
-    "calc_on_order_fills", "calc_on_every_tick", "max_bars_back",
-    "backtest_fill_limits_assumption", "default_qty_type", "default_qty_value",
-    "initial_capital", "currency", "slippage", "commission_type", "commission_value",
-    "process_orders_on_close", "close_entries_rule", "margin_long", "margin_short",
-    "explicit_plot_zorder", "max_lines_count", "max_labels_count", "max_boxes_count",
-    "calc_bars_count", "risk_free_rate", "use_bar_magnifier", "fill_orders_on_standard_ohlc",
-    "max_polylines_count", "dynamic_requests", "behind_chart", "calc_on_every_history_tick",
-)
+from ..signatures import STRATEGY_PARAMETERS
+from .strategy_declaration import DECLARATION_VALUES, strategy_arguments
 
 
 DECLARATION_DEFAULTS = {
@@ -138,15 +128,14 @@ def capabilities_documents(emitter) -> tuple[str, str]:
     order_settings = {}
     for node, _depth in iter_ast_nodes(emitter.ctx.ast):
         if isinstance(node, StrategyDecl):
-            arguments = {STRATEGY_PARAMETERS[index] if index < len(STRATEGY_PARAMETERS)
-                         else f"strategy() positional argument {index + 1}": argument
-                         for index, argument in enumerate(node.args)}
-            unresolved.extend(arguments.keys() & node.kwargs.keys())
-            arguments.update(node.kwargs)
-            order_settings.update({name: _literal(argument)[0] for name, argument in arguments.items()
+            arguments = strategy_arguments(node)
+            resolved = (node.annotations or {}).get(DECLARATION_VALUES, {})
+            order_settings.update({name: resolved.get(name, _literal(argument)[0]) for name, argument in arguments.items()
                                    if name in ORDER_SETTINGS})
             for name, argument in arguments.items():
                 value, valid = _literal(argument)
+                if name in resolved and not isinstance(argument, NaLiteral):
+                    value, valid = resolved[name], True
                 default = DECLARATION_DEFAULTS.get(name)
                 if name in DECLARATION_DEFAULTS:
                     valid &= type(value) is type(default)

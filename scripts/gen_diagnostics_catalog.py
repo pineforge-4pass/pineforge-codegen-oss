@@ -1071,6 +1071,26 @@ ALLOWLIST_USER_MESSAGES = {
 }
 
 
+# Declaration presentation follows the extracted template through code allocation.
+STRATEGY_DECLARATION_PRESENTATION = {
+    "strategy(): too many positional arguments (expected {expected_count}, got {actual_count})": (
+        "A strategy declaration has more positional values than its signature accepts. "
+        "Remove the extra values or use the declared parameter names.",
+        "The strategy declaration has too many positional arguments.",
+    ),
+    "strategy(): argument ''{name}'' passed both positionally and by keyword": (
+        "A strategy declaration supplies the same parameter by position and by name. "
+        "Supply each parameter only once.",
+        "Strategy argument ''{name}'' is supplied twice.",
+    ),
+    "strategy(): setting ''{name}'' must be a compile-time constant": (
+        "A strategy declaration setting depends on a series, input, mutable variable or unresolved name. "
+        "Supply a literal or an expression over earlier constants.",
+        "Strategy setting ''{name}'' must be a compile-time constant.",
+    ),
+}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--write", action="store_true", help="add codes for new templates")
@@ -1100,6 +1120,12 @@ def main(argv=None) -> int:
             if entry is not None and not entry.get("user_message"):
                 entry["user_message"] = sentence
                 entry["explanation"] = entry["explanation"] or _ALLOWLIST_EXPLANATION
+        for entry in catalog["codes"].values():
+            presentation = STRATEGY_DECLARATION_PRESENTATION.get(entry["message"])
+            if presentation is not None:
+                explanation, sentence = presentation
+                entry["explanation"] = entry["explanation"] or explanation
+                entry["user_message"] = entry.get("user_message") or sentence
         pruned = prune(catalog, templates)
         if pruned:
             print(f"{len(pruned)} unpinned code(s) no source spells removed: {', '.join(pruned)}")

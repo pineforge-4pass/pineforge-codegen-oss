@@ -722,6 +722,8 @@ class SupportChecker:
         self._collect_scalar_rebinds(self._ast)
         self._index_security_symbol_bindings()
         self._count_bindings(self._ast)
+        from .codegen.strategy_declaration import declaration_only_constants
+        self._strategy_constant_decls = declaration_only_constants(self._ast)
         for stmt in self._ast.body:
             self._visit(stmt)
         return self._diagnostics
@@ -1400,7 +1402,10 @@ class SupportChecker:
         # ``varip`` is supported: a historical bar executes once, so it keeps
         # its value like ``var``, and codegen leaves it out of the
         # calc_on_order_fills rollback (``_varip_state_member_names``).
-        self._visit_children(node)
+        if id(node) in getattr(self, "_strategy_constant_decls", ()):
+            self._visit_children_const_ok(node)
+        else:
+            self._visit_children(node)
 
     def _visit_Assignment(self, node: Assignment) -> None:
         self._check_bound_array_concat(node.value)

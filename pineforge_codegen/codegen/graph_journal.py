@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from ..ast_nodes import (
-    ASTNode, Assignment, BoolLiteral, ForInStmt, ForStmt, FuncCall, FuncDef,
-    Identifier, MemberAccess, MethodDef, NaLiteral, Program, StrategyDecl,
+    ASTNode, Assignment, ForInStmt, ForStmt, FuncCall, FuncDef,
+    Identifier, MemberAccess, MethodDef, NaLiteral, Program,
     Subscript, TupleAssign, VarDecl,
 )
 from ..errors import Phase
 from ..limits import syntax_children
-from .capabilities import STRATEGY_PARAMETERS
 from .tables import MATRIX_RECEIVER_KEYWORD
 
 
@@ -48,14 +47,7 @@ def prepare(cg):
     cg._graph_journal_calls = {}
     if cg._udt_defs or not (cg._uses_map or cg._uses_matrix):
         return
-    position = STRATEGY_PARAMETERS.index("calc_on_order_fills")
-    enabled = False
-    for statement in cg.ctx.ast.body:
-        if isinstance(statement, StrategyDecl):
-            flag = statement.kwargs.get("calc_on_order_fills")
-            if flag is None and len(statement.args) > position:
-                flag = statement.args[position]
-            enabled = isinstance(flag, BoolLiteral) and flag.value is True
+    enabled = cg.ctx.strategy_params.get("calc_on_order_fills") is True
     if not enabled:
         return
 

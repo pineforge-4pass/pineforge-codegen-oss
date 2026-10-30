@@ -195,14 +195,14 @@ def test_exclusions_keep_the_old_checkpoint_text(body, root, monkeypatch):
     assert cpp == _eager_cpp(source, monkeypatch)
 
 
-@pytest.mark.parametrize("flag", ["false", "1 == 1", None])
-def test_only_a_literal_true_enables_the_graph_journal(flag, monkeypatch):
+@pytest.mark.parametrize("flag", ["false", "1 == 2", None])
+def test_disabled_fill_recalculation_keeps_eager_graph_output(flag, monkeypatch):
     source = HEADER + MAP + 'm.put("a", 2)\n'
     _enrolled(transpile(source))
     disabled = (source.replace("calc_on_order_fills=true", "calc_on_order_fills=" + flag)
                 if flag is not None else source.replace(", calc_on_order_fills=true", ""))
     cpp = transpile(disabled)
-    # False, computed true and absent declarations all retain the original map snapshot.
+    # Literal false, the false equality and an absent declaration retain the eager map snapshot.
     assert "_PFCheckpointTraits<decltype(GeneratedStrategy::m)>::take(m)" in _snapshot(cpp)
     assert cpp == _eager_cpp(disabled, monkeypatch)
 

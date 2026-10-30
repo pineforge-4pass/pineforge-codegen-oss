@@ -576,6 +576,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._ensure_pine_v6()
         self._check_direct_terminal_array_element_callee_shadows()
         self._visit(self._ast)
+        # Reassignments anywhere in the program prevent const qualification.
+        from ..codegen.strategy_declaration import resolve_strategy_declarations
+        self._strategy_params = resolve_strategy_declarations(
+            self._ast, self._global_reassigned_names, self._filename, self._budget,
+        )
         collection_history = self._check_collection_history()
         self._check_direct_terminal_array_temporary_cycles()
         self._register_resolved_direct_terminal_array_forward_calls()
@@ -3971,14 +3976,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.VOID
 
     def _visit_StrategyDecl(self, node: StrategyDecl) -> PineType:
-        # Extract strategy parameters
-        if node.args:
-            # First arg is title
-            title_node = node.args[0]
-            if isinstance(title_node, StringLiteral):
-                self._strategy_params["title"] = title_node.value
-        for key, val_node in node.kwargs.items():
-            self._strategy_params[key] = self._extract_literal_value(val_node)
+        # Resolve settings after the program's lexical reassignments are known.
         return PineType.VOID
 
     def _visit_ImportStmt(self, node: ImportStmt) -> PineType:

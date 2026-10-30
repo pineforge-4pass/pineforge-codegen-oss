@@ -221,7 +221,7 @@ def test_no_export_unless_the_magnifier_is_declared_true():
         'strategy("magnifier")', 'strategy("magnifier", use_bar_magnifier=false)')
 
 
-def test_a_non_literal_declaration_warns_that_the_host_runs_without_it():
+def test_an_earlier_constant_enables_the_bar_magnifier_export():
     from pineforge_codegen import transpile_full
 
     result = transpile_full(
@@ -229,9 +229,12 @@ def test_a_non_literal_declaration_warns_that_the_host_runs_without_it():
         "const bool MAGNIFY = true\n"
         + _MAGNIFIER_SOURCE.format(declaration=", use_bar_magnifier=MAGNIFY")
         .removeprefix("//@version=6\n"))
-    assert "strategy_declares_bar_magnifier" not in result["cpp"]
+    # The earlier MAGNIFY constant is true, so the host receives the magnifier export.
+    assert result["strategyParams"]["use_bar_magnifier"] is True
+    extern_c = result["cpp"][result["cpp"].index('extern "C" {'):]
+    assert extern_c.endswith(_MAGNIFIER_EXPORT)
     messages = [d.message for d in result["diagnostics"]]
-    assert any("not a literal bool" in m and "without one" in m for m in messages), messages
+    assert not any("not a literal bool" in m and "without one" in m for m in messages), messages
 
 
 # TradingView's Pine v6 defaults for an omitted initial_capital,
