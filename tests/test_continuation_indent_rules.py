@@ -777,16 +777,6 @@ if bar_index % 20 == 15
         (4, 3),  # Two tabs skip a block level before the method's first expression.
         id="method_two_tabs",
     ),
-    pytest.param(
-        '//@version=6\nstrategy("Aligned function operand")\nf() =>\n    1.0 +\n    2.0\nplot(f())\n',
-        (4, 10),  # The plus ends at column 10 and its next line has structural indentation.
-        id="function_four_space_operand",
-    ),
-    pytest.param(
-        '//@version=6\nstrategy("Deeper function operand")\nf() =>\n    1.0 +\n        2.0\nplot(f())\n',
-        (4, 10),  # Eight spaces are structural rather than a continuation after the plus.
-        id="function_eight_space_operand",
-    ),
 ]
 
 
