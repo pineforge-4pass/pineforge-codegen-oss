@@ -81,7 +81,6 @@ class Parser:
         # parser never discards a node it built, so ids stay unique).
         self._depth = 0
         self._subtree_depths: dict[int, tuple[ASTNode, int]] = {}
-        self._raw_function_body = False
 
     # ------------------------------------------------------------------
     # Helpers
@@ -245,13 +244,15 @@ class Parser:
             location=self._loc(error.token), message=str(error),
         )]) from error
 
-    def _expect_statement_end(self) -> None:
+    def _expect_statement_end(self, *, allow_physical_line_break: bool = True) -> None:
         """A second expression on the same Pine line is a syntax error."""
         cur = self._current()
         if cur.type in (TokenType.NEWLINE, TokenType.DEDENT, TokenType.EOF_TOKEN):
             return
         previous = self.tokens[self.pos - 1]
-        if previous.type == TokenType.DEDENT or cur.line > previous.line:
+        if previous.type == TokenType.DEDENT or (
+            allow_physical_line_break and cur.line > previous.line
+        ):
             return
         raise ParseError(
             f"Unexpected token {cur.type.name}({cur.value!r}) after statement; "
@@ -945,13 +946,21 @@ class Parser:
         self._skip_newlines()
         self._consume(TokenType.FAT_ARROW)
 
-        body, is_single_expr = self._parse_func_body(start_tok)
-        node = FuncDef(
-            name=name,
-            params=params,
-            body=body,
-            is_single_expr=is_single_expr,
-        )
+        # Single expression or indented block
+        if self._check(TokenType.NEWLINE):
+            self._advance()
+            self._consume(TokenType.INDENT)
+            body = self._parse_block()
+            self._consume(TokenType.DEDENT)
+            node = FuncDef(name=name, params=params, body=body, is_single_expr=False)
+        else:
+            body, is_single_expr = self._parse_inline_func_body()
+            node = FuncDef(
+                name=name,
+                params=params,
+                body=body,
+                is_single_expr=is_single_expr,
+            )
 
         # Record per-param type hints + defaults (mirrors _parse_method_def) so
         # the analyzer can type UDT/string/array params and the codegen can emit
@@ -1071,14 +1080,21 @@ class Parser:
         self._skip_newlines()
         self._consume(TokenType.FAT_ARROW)
 
-        body, is_single_expr = self._parse_func_body(start_tok)
-        node = MethodDef(
-            name=name,
-            type_name=type_name,
-            params=params,
-            body=body,
-            is_single_expr=is_single_expr,
-        )
+        if self._check(TokenType.NEWLINE):
+            self._advance()
+            self._consume(TokenType.INDENT)
+            body = self._parse_block()
+            self._consume(TokenType.DEDENT)
+            node = MethodDef(name=name, type_name=type_name, params=params, body=body)
+        else:
+            body, is_single_expr = self._parse_inline_func_body()
+            node = MethodDef(
+                name=name,
+                type_name=type_name,
+                params=params,
+                body=body,
+                is_single_expr=is_single_expr,
+            )
         node.annotations = {
             "param_type_hints": param_type_hints,
             "param_defaults": param_defaults,
@@ -1093,7 +1109,7 @@ class Parser:
         condition = self._parse_expression()
 
         self._consume(TokenType.NEWLINE)
-        self._consume_block_indent(start_tok)
+        self._consume(TokenType.INDENT)
         body = self._parse_block()
         self._consume(TokenType.DEDENT)
 
@@ -1110,7 +1126,7 @@ class Parser:
                     self._depth -= 1
             else:
                 self._consume(TokenType.NEWLINE)
-                self._consume_block_indent(start_tok)
+                self._consume(TokenType.INDENT)
                 else_body = self._parse_block()
                 self._consume(TokenType.DEDENT)
 
@@ -1132,7 +1148,7 @@ class Parser:
             self._consume(TokenType.IN)
             iterable = self._parse_expression()
             self._consume(TokenType.NEWLINE)
-            self._consume_block_indent(start_tok)
+            self._consume(TokenType.INDENT)
             body = self._parse_block()
             self._consume(TokenType.DEDENT)
             node = ForInStmt(vars=vars_list, iterable=iterable, body=body)
@@ -1145,7 +1161,7 @@ class Parser:
             self._advance()  # consume 'in'
             iterable = self._parse_expression()
             self._consume(TokenType.NEWLINE)
-            self._consume_block_indent(start_tok)
+            self._consume(TokenType.INDENT)
             body = self._parse_block()
             self._consume(TokenType.DEDENT)
             node = ForInStmt(var=var_name, iterable=iterable, body=body)
@@ -1160,7 +1176,7 @@ class Parser:
         if self._match(TokenType.BY):
             step = self._parse_expression()
         self._consume(TokenType.NEWLINE)
-        self._consume_block_indent(start_tok)
+        self._consume(TokenType.INDENT)
         body = self._parse_block()
         self._consume(TokenType.DEDENT)
         node = ForStmt(var=var_name, start=start, end=end, step=step, body=body)
@@ -1171,7 +1187,7 @@ class Parser:
         self._consume(TokenType.WHILE)
         condition = self._parse_expression()
         self._consume(TokenType.NEWLINE)
-        self._consume_block_indent(start_tok)
+        self._consume(TokenType.INDENT)
         body = self._parse_block()
         self._consume(TokenType.DEDENT)
         node = WhileStmt(condition=condition, body=body)
@@ -1187,22 +1203,18 @@ class Parser:
             expr = self._parse_expression()
 
         self._consume(TokenType.NEWLINE)
-        self._consume_block_indent(start_tok)
+        self._consume(TokenType.INDENT)
 
         cases = []
         default_body = []
         self._skip_newlines()
-        case_indent = self._current().indent_width
         while not self._check(TokenType.DEDENT) and not self._at_end():
-            if self._raw_function_body and self._current().indent_width != case_indent:
-                self._consume(TokenType.DEDENT)
-            case_start = self._current()
             # Default case: => body
             if self._check(TokenType.FAT_ARROW):
                 self._advance()
                 if self._check(TokenType.NEWLINE):
                     self._advance()
-                    self._consume_block_indent(case_start)
+                    self._consume(TokenType.INDENT)
                     default_body = self._parse_block()
                     self._consume(TokenType.DEDENT)
                 else:
@@ -1213,7 +1225,7 @@ class Parser:
                 self._consume(TokenType.FAT_ARROW)
                 if self._check(TokenType.NEWLINE):
                     self._advance()
-                    self._consume_block_indent(case_start)
+                    self._consume(TokenType.INDENT)
                     case_body = self._parse_block()
                     self._consume(TokenType.DEDENT)
                 else:
@@ -1236,6 +1248,7 @@ class Parser:
         (``tests/fixtures/tail_f_tv``). A lone expression is the node an arm
         always held.
         """
+        first_token = self._current()
         body: list = []
         while True:
             if self._arm_line_statement_ahead():
@@ -1243,6 +1256,8 @@ class Parser:
             else:
                 body.append(self._parse_line_expr_or_assignment())
             if not self._match(TokenType.COMMA):
+                if first_token.starts_indent_continuation:
+                    self._expect_statement_end(allow_physical_line_break=False)
                 return body
             if self._check(TokenType.NEWLINE) or self._check(TokenType.DEDENT) or self._at_end():
                 return body
@@ -1276,35 +1291,6 @@ class Parser:
             return self._set_loc(node, start_tok)
         return ExprStmt(expr=expr)
 
-    def _parse_func_body(self, start_tok: Token) -> tuple[list, bool]:
-        """Parse every function form using its first body line's indentation."""
-        if not self._check(TokenType.NEWLINE):
-            return self._parse_inline_func_body()
-        self._advance()
-        if self._match(TokenType.INDENT):
-            body = self._parse_block()
-            self._consume(TokenType.DEDENT)
-            return body, False
-
-        first = self._current()
-        if (first.type in (TokenType.DEDENT, TokenType.EOF_TOKEN)
-                or first.indent_width <= start_tok.indent_width):
-            self._consume(TokenType.INDENT)
-
-        # The lexer keeps sub-block widths even when no structural INDENT
-        # exists. Read that body in place, without copying or splicing tokens.
-        previous = self._raw_function_body
-        self._raw_function_body = True
-        try:
-            body = self._parse_block()
-            if (not self._at_end()
-                    and not self._check(TokenType.DEDENT)
-                    and self._current().indent_width > start_tok.indent_width):
-                self._consume(TokenType.DEDENT)
-            return body, False
-        finally:
-            self._raw_function_body = previous
-
     def _parse_inline_func_body(self) -> tuple[list, bool]:
         """Parse a function or method body written after ``=>``.
 
@@ -1313,28 +1299,32 @@ class Parser:
         is a real statement and therefore uses the normal block representation
         so the analyzer and code generator apply statement-tail semantics.
         """
+        first_token = self._current()
         first = self._parse_line_expr_or_assignment(field_target_only=True)
-        if not isinstance(first, Assignment):
-            return [first], True
-
+        is_single_expr = not isinstance(first, Assignment)
         body = [first]
-        while self._match(TokenType.COMMA):
-            if (
-                self._check(TokenType.NEWLINE)
-                or self._check(TokenType.DEDENT)
-                or self._at_end()
-            ):
-                break
-            stmt = self._parse_line_expr_or_assignment(field_target_only=True)
-            if (
-                isinstance(stmt, ExprStmt)
-                and self._current().type in COMPOUND_ASSIGN_OPS
-            ):
-                # The next statement is a plain-name assignment.  Keep its
-                # operator for the caller's existing statement-end diagnostic.
-                break
-            body.append(stmt)
-        return body, False
+        if not is_single_expr:
+            while self._match(TokenType.COMMA):
+                if (
+                    self._check(TokenType.NEWLINE)
+                    or self._check(TokenType.DEDENT)
+                    or self._at_end()
+                ):
+                    break
+                stmt = self._parse_line_expr_or_assignment(field_target_only=True)
+                if (
+                    isinstance(stmt, ExprStmt)
+                    and self._current().type in COMPOUND_ASSIGN_OPS
+                ):
+                    # The next statement is a plain-name assignment.  Keep its
+                    # operator for the caller's existing statement-end diagnostic.
+                    break
+                body.append(stmt)
+        if first_token.starts_indent_continuation and not self._check(TokenType.COMMA):
+            # A wrapped arrow body ends at a real statement boundary; physical
+            # line numbers cannot split adjacent expressions on its logical line.
+            self._expect_statement_end(allow_physical_line_break=False)
+        return body, is_single_expr
 
     def _arm_line_statement_ahead(self) -> bool:
         """Whether an arm line's next statement is one no expression starts:
@@ -1366,38 +1356,17 @@ class Parser:
 
     # -- Block parsing --
 
-    def _consume_block_indent(self, header: Token) -> None:
-        if (self._raw_function_body
-                and self._check(TokenType.INDENT)
-                and self._current().indent_width < header.indent_width + 4):
-            # A short function body does not shorten nested block indentation.
-            first = self._peek()
-            raise ParseError(
-                f"Expected INDENT, got {first.type.name}({first.value!r}).",
-                first,
-            )
-        self._consume(TokenType.INDENT)
-
     def _parse_block(self) -> list:
         self._enter(self._current())
         try:
-            indent_width = (
-                self._current().indent_width if self._raw_function_body else None
-            )
-            return self._parse_block_statements(indent_width)
+            return self._parse_block_statements()
         finally:
             self._depth -= 1
 
-    def _parse_block_statements(self, indent_width: int | None = None) -> list:
+    def _parse_block_statements(self) -> list:
         stmts: list = []
         self._skip_newlines()
         while not self._check(TokenType.DEDENT) and not self._at_end():
-            if indent_width is not None:
-                if self._current().indent_width < indent_width:
-                    break
-                if self._current().indent_width > indent_width:
-                    # Another width cannot be a sibling statement in this body.
-                    self._consume(TokenType.DEDENT)
             try:
                 stmt = self._parse_statement()
                 if stmt is not None:
