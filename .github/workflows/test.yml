@@ -294,15 +294,54 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
+    env:
+      PF_CI_LABELS: '["self-hosted","pf-ci","pf-ci-x64"]'
+      PYTHONHASHSEED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: "${{ github.event.pull_request.head.sha || github.sha }}"
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install with dev extras
+        run: python -m pip install -e ".[dev]"
+      - name: Run test suite
+        run: python -m pytest -q
+
+  compile:
+    name: compile
+    needs: [authz, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
         include:
-          - python-version: "3.11"
+          - part: sweep-0
             compile-shard: 0
-          - python-version: "3.12"
+          - part: sweep-1
             compile-shard: 1
-          - python-version: "3.13"
+          - part: sweep-2
             compile-shard: 2
-          - python-version: "3.14"
+          - part: sweep-3
             compile-shard: 3
+          - part: suite-0
+            compile-shard: 0
+            suite-shard: 0
+          - part: suite-1
+            compile-shard: 0
+            suite-shard: 1
+          - part: suite-2
+            compile-shard: 0
+            suite-shard: 2
+          - part: suite-3
+            compile-shard: 0
+            suite-shard: 3
     env:
       PF_CI_LABELS: '["self-hosted","pf-ci","pf-ci-x64"]'
       PYTHONHASHSEED: "0"
@@ -348,21 +387,45 @@ jobs:
           git -C .ci/pineforge-engine submodule status
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
       - name: Install with dev extras
         run: python -m pip install -e ".[dev]"
-      - name: Run test suite
-        run: python -m pytest -q
-      - name: Retain fixture compile failures and measured sweep time
-        if: ${{ always() }}
+      - name: Run fixture and corpus compile sweep
+        if: startsWith(matrix.part, 'sweep-')
+        run: python -m pytest -q tests/test_translate_implies_compile.py tests/test_require_compile.py tests/test_ci_compile_contract.py
+      - name: Run remaining suite with compile checks
+        if: startsWith(matrix.part, 'suite-')
+        shell: bash
+        env:
+          SUITE_SLICE: ${{ matrix.suite-shard }}
+        run: |
+          set -euo pipefail
+          suite_files="$RUNNER_TEMP/compile-suite-${SUITE_SLICE}.txt"
+          python tests/_compile_partition.py "$SUITE_SLICE" > "$suite_files"
+          mapfile -t suite_paths < "$suite_files"
+          if [[ "${#suite_paths[@]}" -eq 0 ]]; then
+            echo "::error::compile suite slice $SUITE_SLICE is empty"
+            exit 1
+          fi
+          python -m pytest -q "${suite_paths[@]}"
+      - name: Retain sweep compile failures and measured time
+        if: ${{ always() && startsWith(matrix.part, 'sweep-') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: compile-report-python-${{ matrix.python-version }}
+          name: compile-report-${{ matrix.part }}
           path: ${{ github.workspace }}/.ci/compile-report
           if-no-files-found: error
+      # Only the sweep module writes reports; every suite slice excludes it.
+      - name: Retain any suite compile report
+        if: ${{ always() && startsWith(matrix.part, 'suite-') }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: compile-report-${{ matrix.part }}
+          path: ${{ github.workspace }}/.ci/compile-report
+          if-no-files-found: ignore
 
   test-check:
-    needs: [authz, changes, workflow-lint, package-files, pytest]
+    needs: [authz, changes, workflow-lint, package-files, pytest, compile]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     permissions:
@@ -480,7 +543,7 @@ jobs:
         shell: "bash"
         env:
           NEEDS: "${{ toJSON(needs) }}"
-          HEAVY_JOBS: "[\"pytest\"]"
+          HEAVY_JOBS: "[\"pytest\",\"compile\"]"
           DOCS_ONLY: "${{ steps.classify.outputs.docs_only }}"
           WORKFLOWS_ONLY: "${{ steps.classify.outputs.workflows_only }}"
         run: |
