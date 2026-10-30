@@ -1,0 +1,36 @@
+//@version=6
+strategy("Partial market closes", initial_capital = 1000000, process_orders_on_close = true, calc_on_order_fills = false)
+
+varip int actionBar = -1
+if actionBar != bar_index
+    actionBar := bar_index
+    if bar_index % 10 == 0
+        strategy.entry("Long", strategy.long, qty = 4)
+    if bar_index % 10 == 5
+        strategy.entry("Short", strategy.short, qty = 4)
+    if bar_index % 10 == 2
+        strategy.close("Long", qty_percent = 50, comment = "half")
+    if bar_index % 10 == 7
+        strategy.close("Short", qty_percent = 50, comment = "half")
+    if bar_index % 5 == 3
+        strategy.close_all(comment = "remainder")
+
+int longRows = 0
+int shortRows = 0
+float total = -0.125
+if strategy.closedtrades > 0
+    for i = 0 to strategy.closedtrades - 1
+        entryId = strategy.closedtrades.entry_id(i)
+        profit = strategy.closedtrades.profit(i)
+        if entryId == "Long"
+            longRows += 1
+        if entryId == "Short"
+            shortRows += 1
+        total += profit
+        // fold-body-end
+
+// @pf-trace longRows=longRows
+// @pf-trace shortRows=shortRows
+// @pf-trace total=total
+// @pf-trace closedCount=strategy.closedtrades
+// @pf-trace position=strategy.position_size

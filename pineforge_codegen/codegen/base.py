@@ -788,6 +788,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._security_arg_call_values: dict[tuple, str] = {}
         self._random_call_counter = 0
         self._for_counter = 0
+        # Retain each loop node alongside its plan; ids are lookup keys only.
+        self._closed_trade_folds: dict[int, tuple[ForStmt, object]] = {}
         self._tuple_assign_counter = 0
         # Synthetic history buffers used by inline call-history and by scalar
         # expressions passed to UDF series parameters.  They are pre-registered
@@ -4985,6 +4987,44 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return held[0]
         return None
 
+    def _prepare_closed_trade_folds(self) -> None:
+        """Keep planned loops whose bindings use ordinary scalar storage."""
+        from .closed_trade_fold import plan_closed_trade_folds
+
+        plans = plan_closed_trade_folds(self.ctx.ast, self._safe_name)
+        self._closed_trade_folds = {}
+        if not plans:
+            return
+
+        loops: dict[int, ForStmt] = {}
+        for statement in self.ctx.ast.body:
+            if self._budget is not None:
+                self._budget.check(statement.loc, Phase.CODEGEN)
+            if isinstance(statement, IfStmt):
+                for child in statement.body:
+                    if isinstance(child, ForStmt):
+                        loops[id(child)] = child
+
+        special_storage = set(self.ctx.series_vars) | self._var_names
+        excluded_accumulators = (
+            special_storage | set(self._known_vars) | self._nonfinite_int_names()
+        )
+        excluded_locals = special_storage | self._global_member_vars
+        for plan in plans:
+            node = loops.get(plan.for_node_id)
+            if node is None:
+                continue
+            if self._budget is not None:
+                self._budget.check(node.loc, Phase.CODEGEN)
+            if any(
+                name in excluded_accumulators or name not in self._global_member_vars
+                for name, _safe in plan.accumulators
+            ):
+                continue
+            if any(name in excluded_locals for name, _accessor, _cpp in plan.locals):
+                continue
+            self._closed_trade_folds[plan.for_node_id] = (node, plan)
+
     def _generate_cpp(self) -> str:
         # Every input is keyed by its title: refuse a non-constant one first,
         # then flag inputs one override key would reach together.
@@ -5007,6 +5047,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._prepare_array_journal()
         self._prepare_history_sharing()
         graph_journal.prepare(self)
+        self._prepare_closed_trade_folds()
         self._security_ohlc_hist_fields_by_sec: dict[int, set[str]] = {}
         # A source input's selected series read at a history offset in a
         # payload: (key, default) -> (the input call, its history field).
@@ -5869,6 +5910,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 f"{self._collection_history_member(variable)}"
                 f"{self._collection_history_capacity(variable)};"
             )
+
+        # Closed-trade prefixes belong to the declaration-derived checkpoint.
+        for _node, plan in self._closed_trade_folds.values():
+            lines.append(f"    int {plan.stem}settled = 0;")
+            lines.append(f"    int {plan.stem}seen = 0;")
+            for index, (_name, safe) in enumerate(plan.accumulators):
+                lines.append(
+                    f"    decltype(GeneratedStrategy::{safe}) {plan.stem}s{index} = {{}};"
+                )
 
         # 9. _var_initialized flag
         if self.ctx.var_members:
