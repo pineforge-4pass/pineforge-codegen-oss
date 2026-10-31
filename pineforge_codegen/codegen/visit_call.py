@@ -168,6 +168,7 @@ from .helpers import (
     color_alpha_cast, cpp_is_plain_read, evaluate_args_once,
     na_preserving_int_cast, pine_truth_cast,
 )
+from .id_sites import BUILTIN_NAMESPACES
 from .run_stops import request_stop
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
@@ -375,6 +376,18 @@ class CallVisitor:
         if receiver_spec is None and isinstance(receiver, Identifier):
             receiver_spec = self._scalar_receiver_spec(receiver.name, member)
         if receiver_spec is None:
+            # Namespace prefixes are not values; declared bindings still
+            # take the same inferred receiver path as other variables.
+            if (
+                isinstance(receiver, Identifier)
+                and receiver.name in BUILTIN_NAMESPACES
+                and receiver.name not in self._var_names
+                and receiver.name not in self._global_member_vars
+                and receiver.name not in self._current_func_param_types
+                and receiver.name not in self._current_func_locals
+                and receiver.name not in self._current_loop_vars
+            ):
+                return None, None
             inferred_cpp = self._infer_type(receiver)
             if inferred_cpp == "int64_t" and self._is_color_value(receiver):
                 inferred_pine = "color"

@@ -134,6 +134,93 @@ def test_expression_receiver_translates_compiles_and_runs(
     assert output.strip() == case.expected
 
 
+_NAMESPACE_HEADER = '''//@version=6
+strategy("namespace and value method receivers")
+method abs(float this) => this * 100.0
+source_value() => open - close
+float x = open - close
+float builtin = math.abs(x)
+'''
+
+
+@pytest.mark.parametrize(
+    ("statement", "method_cpp", "expected"),
+    [
+        pytest.param(
+            "float leaf = builtin + x.abs()",
+            "_udt_float_abs(x)",  # The float variable supplies the receiver argument.
+            "-297.0",  # abs(100 - 103) + (100 - 103) * 100 = -297.
+            id="variable",
+        ),
+        pytest.param(
+            "float leaf = builtin + (x + 1.0).abs()",
+            "_udt_float_abs((x + 1.0))",  # Addition stays one receiver argument.
+            "-197.0",  # abs(-3) + (-3 + 1) * 100 = -197.
+            id="parenthesised",
+        ),
+        pytest.param(
+            "float leaf = builtin + source_value().abs()",
+            "_udt_float_abs(source_value())",  # The helper result is the receiver.
+            "-297.0",  # abs(-3) + source_value() * 100 = 3 - 300.
+            id="call",
+        ),
+        pytest.param(
+            "float leaf = builtin + math.abs(x).abs()",
+            "_udt_float_abs(std::abs(x))",  # The inner built-in returns a float value.
+            "303.0",  # abs(-3) + abs(-3) * 100 = 3 + 300.
+            id="builtin-call",
+        ),
+        pytest.param(
+            "shadow(float math) => math.abs()\n"
+            "float leaf = builtin + shadow(x)",
+            "_udt_float_abs(math)",  # The float parameter is a value named math.
+            "-297.0",  # abs(-3) + shadow(-3) = 3 + (-3 * 100).
+            id="namespace-parameter",
+        ),
+        pytest.param(
+            "shadow(float value) =>\n"
+            "    float math = value\n"
+            "    math.abs()\n"
+            "float leaf = builtin + shadow(x)",
+            "_udt_float_abs(math)",  # The local float binding is the receiver.
+            "-297.0",  # abs(-3) + the local math value times 100 = -297.
+            id="namespace-local",
+        ),
+    ],
+)
+def test_namespace_builtin_and_value_method_dispatch(
+    statement: str,
+    method_cpp: str,
+    expected: str,
+) -> None:
+    cpp = transpile(_NAMESPACE_HEADER + statement + "\n")
+
+    # MATH_FUNC_MAP lowers math.abs to std::abs with x as its only argument.
+    assert "builtin = std::abs(x);" in cpp
+    assert method_cpp in cpp
+    output = run_emitted_tu(cpp, _DRIVER, opt="-O0", label="namespace-method")
+    assert output.strip() == expected
+
+
+def test_ta_builtin_with_user_method_and_global_namespace_binding() -> None:
+    source = '''//@version=6
+strategy("ta builtin and global value receiver")
+method abs(float this) => this * 100.0
+method sma(float this, int n) => this * n * 100.0
+float math = open - close
+float leaf = ta.sma(math, 1) + math.abs()
+'''
+    cpp = transpile(source)
+
+    # The sole TA site is SMA 1; only its source math reaches compute.
+    assert "_ta_sma_1.compute(math)" in cpp
+    # The global float named math supplies the authored abs method's receiver.
+    assert "_udt_float_abs(math)" in cpp
+    output = run_emitted_tu(cpp, _DRIVER, opt="-O0", label="ta-namespace-method")
+    # SMA(-3, 1) + (-3 * 100) = -3 - 300 = -303.
+    assert output.strip() == "-303.0"
+
+
 _PROBE_HEADER = '''//@version=6
 strategy("literal receiver probes")
 method f1_step(float x) => x + 0.5
