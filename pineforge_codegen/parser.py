@@ -1386,11 +1386,11 @@ class Parser:
     #   1. Ternary: ? :
     #   2. Logical OR: or
     #   3. Logical AND: and
-    #   4. Logical NOT: not (unary)
-    #   5. Comparison: == != > < >= <=
+    #   4. Comparison equality: == !=
+    #   5. Comparison relation: > < >= <=
     #   6. Addition: + -
     #   7. Multiplication: * / %
-    #   8. Unary: - +
+    #   8. Unary: not - +
     #   9. Postfix: [n] .member (args)
     #  10. Primary: literals, identifiers, (expr)
 
@@ -1475,19 +1475,19 @@ class Parser:
 
     def _parse_and(self):
         start_tok = self._current()
-        left = self._parse_not()
+        left = self._parse_comparison()
         in_continuation = False
         while True:
             self._skip_newlines_in_continuation(in_continuation)
             if self._match(TokenType.AND):
-                right = self._parse_not()
+                right = self._parse_comparison()
                 left = BinOp(left=left, op="and", right=right)
                 self._set_loc(left, start_tok)
                 self._check_chain(left, start_tok)
             elif not in_continuation and self._try_line_continuation(TokenType.AND):
                 in_continuation = True
                 self._advance()  # consume AND
-                right = self._parse_not()
+                right = self._parse_comparison()
                 left = BinOp(left=left, op="and", right=right)
                 self._set_loc(left, start_tok)
                 self._check_chain(left, start_tok)
@@ -1504,28 +1504,31 @@ class Parser:
                 self._advance()
 
     def _parse_not(self):
-        if self._check(TokenType.NOT):
-            start_tok = self._current()
-            self._enter(start_tok)
-            self._advance()
-            try:
-                operand = self._parse_not()
-            finally:
-                self._depth -= 1
-            node = UnaryOp(op="not", operand=operand)
-            return self._set_loc(node, start_tok)
-        return self._parse_comparison()
+        return self._parse_unary()
 
     def _parse_comparison(self):
         start_tok = self._current()
-        left = self._parse_addition()
-        comp_ops = {
+        left = self._parse_relational()
+        equality_ops = {
             TokenType.EQEQ: "==", TokenType.NOTEQ: "!=",
+        }
+        while self._current().type in equality_ops:
+            op = equality_ops[self._advance().type]
+            right = self._parse_relational()
+            left = BinOp(left=left, op=op, right=right)
+            self._set_loc(left, start_tok)
+            self._check_chain(left, start_tok)
+        return left
+
+    def _parse_relational(self):
+        start_tok = self._current()
+        left = self._parse_addition()
+        relational_ops = {
             TokenType.GT: ">", TokenType.LT: "<",
             TokenType.GE: ">=", TokenType.LE: "<=",
         }
-        while self._current().type in comp_ops:
-            op = comp_ops[self._advance().type]
+        while self._current().type in relational_ops:
+            op = relational_ops[self._advance().type]
             right = self._parse_addition()
             left = BinOp(left=left, op=op, right=right)
             self._set_loc(left, start_tok)
@@ -1545,17 +1548,27 @@ class Parser:
 
     def _parse_multiplication(self):
         start_tok = self._current()
-        left = self._parse_unary()
+        left = self._parse_not()
         mul_ops = {TokenType.STAR: "*", TokenType.SLASH: "/", TokenType.PERCENT: "%"}
         while self._current().type in mul_ops:
             op = mul_ops[self._advance().type]
-            right = self._parse_unary()
+            right = self._parse_not()
             left = BinOp(left=left, op=op, right=right)
             self._set_loc(left, start_tok)
             self._check_chain(left, start_tok)
         return left
 
     def _parse_unary(self):
+        if self._check(TokenType.NOT):
+            start_tok = self._current()
+            self._enter(start_tok)
+            self._advance()
+            try:
+                operand = self._parse_unary()
+            finally:
+                self._depth -= 1
+            node = UnaryOp(op="not", operand=operand)
+            return self._set_loc(node, start_tok)
         if self._check(TokenType.MINUS):
             start_tok = self._current()
             self._enter(start_tok)

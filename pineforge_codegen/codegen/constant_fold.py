@@ -21,12 +21,24 @@ from ..limits import MAX_NESTING_DEPTH, MAX_SOURCE_CHARS
 from ..signatures import get_param_names
 
 
+def _pine_remainder(left: int | float | bool, right: int | float | bool):
+    """Return Pine's remainder, whose sign follows the dividend."""
+    if type(left) in (int, bool) and type(right) in (int, bool):
+        dividend = int(left)
+        divisor = int(right)
+        if divisor == 0:
+            raise ZeroDivisionError("integer modulo by zero")
+        remainder = abs(dividend) % abs(divisor)
+        return -remainder if dividend < 0 else remainder
+    return math.fmod(float(left), float(right))
+
+
 _BINARY = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
     ast.Mult: operator.mul,
     ast.Div: operator.truediv,
-    ast.Mod: operator.mod,
+    ast.Mod: _pine_remainder,
 }
 _UNARY = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 _FUNCTIONS = {

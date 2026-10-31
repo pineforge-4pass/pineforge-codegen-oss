@@ -4486,6 +4486,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             udt_type_name=udt_ctor,
             type_spec=type_spec,
         )
+        certain_type = self._certain_scalar_type(node.value)
+        if node.type_hint in ("int", "float", "bool", "string"):
+            certain_type = val_type
+            setattr(sym, "_pf_certain_declared", True)
+        if certain_type != PineType.UNKNOWN:
+            setattr(sym, "_pf_certain_type", certain_type)
         # Only an initializer with a numeric proof supplies validation facts.
         # In particular, FLOAT from a call or an unknown identifier is not
         # evidence that a condition is numeric.
@@ -4983,6 +4989,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             )
             if pspec is not None and pspec.kind == "primitive":
                 sym._pf_numeric_condition_type = ptype
+                sym._pf_certain_type = ptype
+                sym._pf_certain_declared = True
             setattr(sym, "_pf_parameter_owner", node.name)
             self._symbols.define(sym)
 
@@ -5382,6 +5390,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             )
             if pspec is not None and pspec.kind == "primitive":
                 sym._pf_numeric_condition_type = ptype
+                sym._pf_certain_type = ptype
+                sym._pf_certain_declared = True
             setattr(sym, "_pf_parameter_owner", method_key)
             self._symbols.define(sym)
         ret_type = PineType.VOID
@@ -5565,6 +5575,102 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if scoped:
             self._symbols.enter_scope(name)
         return scoped
+
+    def _certain_scalar_type(self, node: ASTNode) -> PineType:
+        """Return a scalar type only when the syntax proves it.
+
+        Member access deliberately stays unknown: several namespace members
+        have legacy analyzer types that do not describe the value codegen
+        emits. Declaration hints, literals, builtin numeric series,
+        comparisons, logical results, arithmetic over proven numeric values,
+        and the small set of scalar casts and builtin calls are reliable.
+        """
+        if isinstance(node, NumberLiteral):
+            return PineType.FLOAT if isinstance(node.value, float) else PineType.INT
+        if isinstance(node, StringLiteral):
+            return PineType.STRING
+        if isinstance(node, BoolLiteral):
+            return PineType.BOOL
+        if isinstance(node, NaLiteral):
+            return PineType.NA
+        if isinstance(node, Identifier):
+            sym = self._symbols.resolve(node.name)
+            builtin_type = getattr(
+                sym, "_pf_builtin_condition_type", PineType.UNKNOWN
+            )
+            if builtin_type in {
+                PineType.INT, PineType.FLOAT, PineType.BOOL,
+                PineType.STRING, PineType.NA,
+            }:
+                return builtin_type
+            certain_type = getattr(sym, "_pf_certain_type", PineType.UNKNOWN)
+            if certain_type != PineType.UNKNOWN:
+                if (
+                    node.name in self._condition_reassigned_names
+                    and not getattr(sym, "_pf_certain_declared", False)
+                ):
+                    return PineType.UNKNOWN
+                return certain_type
+            numeric_type = getattr(
+                sym, "_pf_numeric_condition_type", PineType.UNKNOWN
+            )
+            if numeric_type in (PineType.INT, PineType.FLOAT):
+                return numeric_type
+            return PineType.UNKNOWN
+        if isinstance(node, UnaryOp):
+            if node.op == "not":
+                return PineType.BOOL
+            if node.op in ("+", "-"):
+                operand_type = self._certain_scalar_type(node.operand)
+                return (
+                    operand_type
+                    if operand_type in (PineType.INT, PineType.FLOAT)
+                    else PineType.UNKNOWN
+                )
+            return PineType.UNKNOWN
+        if isinstance(node, Subscript):
+            return self._certain_scalar_type(node.object)
+        if isinstance(node, BinOp):
+            if node.op in ("==", "!=", ">", "<", ">=", "<=", "and", "or"):
+                return PineType.BOOL
+            left_type = self._certain_scalar_type(node.left)
+            right_type = self._certain_scalar_type(node.right)
+            if node.op == "+" and (
+                left_type == PineType.STRING or right_type == PineType.STRING
+            ):
+                return PineType.STRING
+            numeric = (PineType.INT, PineType.FLOAT)
+            if left_type in numeric and right_type in numeric:
+                if node.op == "/" or PineType.FLOAT in (left_type, right_type):
+                    return PineType.FLOAT
+                if node.op in ("+", "-", "*", "%"):
+                    return PineType.INT
+            return PineType.UNKNOWN
+        if isinstance(node, FuncCall):
+            callee = node.callee
+            if isinstance(callee, Identifier):
+                return {
+                    "int": PineType.INT,
+                    "float": PineType.FLOAT,
+                    "bool": PineType.BOOL,
+                    "string": PineType.STRING,
+                    "na": PineType.BOOL,
+                }.get(callee.name, PineType.UNKNOWN)
+            if (
+                isinstance(callee, MemberAccess)
+                and isinstance(callee.object, Identifier)
+            ):
+                if callee.object.name == "math":
+                    return PineType.FLOAT
+                if callee.object.name == "str":
+                    if callee.member in ("contains", "startswith", "endswith"):
+                        return PineType.BOOL
+                    if callee.member in ("length", "pos"):
+                        return PineType.INT
+                    if callee.member == "tonumber":
+                        return PineType.FLOAT
+            return PineType.UNKNOWN
+        return PineType.UNKNOWN
 
     def _numeric_condition_type(self, node: ASTNode) -> PineType:
         """Prove numeric syntax without consulting legacy fallback types."""
@@ -5856,6 +5962,43 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         left_type = self._visit(node.left)
         right_type = self._visit(node.right)
 
+        if node.op in ("==", "!="):
+            if isinstance(node.left, NaLiteral) or isinstance(node.right, NaLiteral):
+                other = node.right if isinstance(node.left, NaLiteral) else node.left
+                self._error(
+                    'Cannot compare a value to "na" directly. '
+                    'Use the "na()" function instead.',
+                    other.loc or node.loc,
+                )
+            certain_left = self._certain_scalar_type(node.left)
+            certain_right = self._certain_scalar_type(node.right)
+            numeric = (PineType.INT, PineType.FLOAT)
+            if (
+                (certain_left == PineType.BOOL and certain_right in numeric)
+                or (certain_right == PineType.BOOL and certain_left in numeric)
+            ):
+                numeric_operand = (
+                    node.left if certain_left in numeric else node.right
+                )
+                self._error(
+                    "Cannot compare a bool value with a numeric value "
+                    f"using {node.op}.",
+                    numeric_operand.loc or node.loc,
+                )
+        elif node.op in (">", "<", ">=", "<="):
+            certain_left = self._certain_scalar_type(node.left)
+            certain_right = self._certain_scalar_type(node.right)
+            string_operand = (
+                node.left if certain_left == PineType.STRING
+                else node.right if certain_right == PineType.STRING
+                else None
+            )
+            if string_operand is not None:
+                self._error(
+                    f"Cannot order string values with {node.op}.",
+                    string_operand.loc or node.loc,
+                )
+
         # Comparison and logical operators return BOOL
         if node.op in ("==", "!=", ">", "<", ">=", "<=", "and", "or"):
             return PineType.BOOL
@@ -5891,8 +6034,22 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.FLOAT  # default
 
     def _visit_UnaryOp(self, node: UnaryOp) -> PineType:
+        if node.op == "not":
+            if isinstance(node.operand, UnaryOp) and node.operand.op == "not":
+                self._error(
+                    '"not" cannot be used as a variable or function name.',
+                    node.operand.loc or node.loc,
+                )
         operand_type = self._visit(node.operand)
         if node.op == "not":
+            certain_type = self._certain_scalar_type(node.operand)
+            if certain_type in (PineType.INT, PineType.FLOAT):
+                operand_type = certain_type.value
+                self._error(
+                    "The not operator requires a bool operand; "
+                    f"found {operand_type}.",
+                    node.operand.loc or node.loc,
+                )
             return PineType.BOOL
         return operand_type
 
