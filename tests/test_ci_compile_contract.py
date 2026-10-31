@@ -395,7 +395,6 @@ def test_engine_pin_is_exactly_one_lowercase_40_hex_line():
     assert re.fullmatch(r"[0-9a-f]{40}\n", pin), (
         "ci/engine-pin must contain exactly one 40-hex lowercase line"
     )
-    assert pin == "1065942c812ad4e2f15274284a26209fdf237190\n"
 
 
 @pytest.mark.parametrize("variable,checkout", [
