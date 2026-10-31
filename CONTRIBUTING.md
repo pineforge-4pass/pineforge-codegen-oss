@@ -203,6 +203,9 @@ declare the environment fails at npm.
   it. Every admitted diff runs the full test matrix and differential gate.
   See [CI admission and check mapping](docs/ci.md) for the hosted authorization
   and result jobs, pod permissions, and operator setup.
+- `test.yml` runs only on push to `main` and manual dispatch. Its `workflow-lint`,
+  `package-files` and `pytest` jobs use `gke-8cpu-16gb-amd64`; `authz`, `changes`
+  and `test-check` use `ubuntu-24.04`.
 - The README describes the latest release and becomes the PyPI page of the
   next release: when a version is tagged, update its "Releases and this
   README" section, its engine-pairing table and its release markers.

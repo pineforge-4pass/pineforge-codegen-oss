@@ -37,12 +37,12 @@ result. Status publication failure also fails the job.
 
 | Previous PR context | Current context |
 | --- | --- |
-| Test / authz | Test / authz, unchanged and hosted |
-| Test / changes | GKE PR / admit |
-| Test / workflow-lint | Test / workflow-lint runs on push and dispatch; GKE PR / workflow-lint checks the candidate |
-| Test / package-files | GKE PR / package-files |
-| Test / pytest (3.11, 3.12, 3.13, 3.14) | GKE PR / pytest, with the same versions |
-| Test / test-check | GKE PR / test-check, hosted |
+| Test / authz | Test / authz stays on `ubuntu-24.04` for push and dispatch |
+| Test / changes | GKE PR / admit; Test / changes stays on `ubuntu-24.04` for push and dispatch |
+| Test / workflow-lint | Test / workflow-lint uses `gke-8cpu-16gb-amd64` on push and dispatch; GKE PR / workflow-lint checks the candidate |
+| Test / package-files | GKE PR / package-files; Test / package-files uses `gke-8cpu-16gb-amd64` on push and dispatch |
+| Test / pytest (3.11, 3.12, 3.13, 3.14) | GKE PR / pytest, with the same versions; Test / pytest uses `gke-8cpu-16gb-amd64` on push and dispatch |
+| Test / test-check | GKE PR / test-check stays hosted; Test / test-check stays on `ubuntu-24.04` for push and dispatch |
 | Pyodide Gate / preflight-docs | GKE PR / admit |
 | Pyodide Gate / differential | GKE PR / differential |
 | Pyodide Gate / pytest (3.11, 3.12, 3.13, 3.14) | The shared GKE PR / pytest matrix |
@@ -72,11 +72,11 @@ only while `package.json` has no `packageManager` or
 `devEngines.packageManager` opt-in. Adding such metadata requires disabling
 that remaining setup default in a separate base change first.
 
-`test.yml` keeps its push-to-main and dispatch jobs hosted and has no
-pull-request trigger. Pull-request checks run through `gke-pr.yml`, which admits
-and executes the candidate head.
+`test.yml` has only push-to-main and dispatch triggers: `workflow-lint`,
+`package-files` and `pytest` use `gke-8cpu-16gb-amd64`; `authz`, `changes` and
+`test-check` use `ubuntu-24.04`. Pull-request checks use `gke-pr.yml` admission.
 The existing App-environment guard keeps its authorization dependency and
-blocking step. Hosted workflow lint uses the checked-in actionlint configuration
+blocking step. Workflow lint uses the checked-in actionlint configuration
 and the exact checkout head.
 `gate.yml` retains only its hosted schedule and dispatch
 legs. Those trusted routes require a separate runner admission entry before

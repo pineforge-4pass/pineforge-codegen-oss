@@ -16,6 +16,7 @@ import textwrap
 
 
 POD_JOBS = {"workflow-lint", "package-files", "pytest", "differential"}
+TEST_POD_JOBS = {"workflow-lint", "package-files", "pytest"}
 POD_RUNNER = "gke-8cpu-16gb-amd64"
 BOTS = {"dependabot[bot]", "pineforge-app[bot]"}
 CHECKER = "python3 -I tests/test_gke_pr_admission.py"
@@ -339,6 +340,10 @@ def check_workflows(sources):
                     or (depth == 0 and k == "on" and re.search(r"\bpull_request\b", value))
                     for depth, k, value in yaml_records(header)
                 ), "test.yml must not have a pull_request trigger")
+                for name, body in jobs(text).items():
+                    require(value_at(body, 4, "runs-on")
+                            == (POD_RUNNER if name in TEST_POD_JOBS else "ubuntu-24.04"),
+                            f"test.yml {name}: runner differs")
             if any((depth == 2 and k == "pull_request_target")
                    or (depth == 0 and k == "on" and re.search(r"\bpull_request_target\b", value))
                    for depth, k, value in yaml_records(header)):
@@ -361,12 +366,15 @@ def check_workflows(sources):
                                 and node == [promotion_pin])
                             or step_mapping(step, "with").get("package-manager-cache") == "false",
                             f"{path}: automatic package-manager cache must be disabled")
-        for _, key, value in records:
+        for depth, key, value in records:
             require(key != "cache" and not (key == "uses" and value.startswith("actions/cache")),
                     f"{path}: Actions cache restore/save/input refused")
+            test_runner = (path == ".github/workflows/test.yml" and depth == 4
+                           and key == "runs-on" and value == POD_RUNNER)
             if key == "runs-on" and value.startswith("gke-"):
-                require(path == ".github/workflows/gke-pr.yml", f"{path}: GKE routing outside admission")
-            if path != ".github/workflows/gke-pr.yml":
+                require(path == ".github/workflows/gke-pr.yml" or test_runner,
+                        f"{path}: GKE routing outside admission")
+            if path != ".github/workflows/gke-pr.yml" and not test_runner:
                 require("gke-" not in value and "GKE PR" not in value,
                         f"{path}: GKE routing outside admission")
             require(key not in {"jobs", "steps"} or not value, "jobs and steps must use block structure")
@@ -978,6 +986,62 @@ def test_test_workflow_pull_request_trigger_mutation_is_refused():
     assert mutant != original
     with pytest.raises(ValueError, match="test.yml must not have a pull_request trigger"):
         check_workflows({**sources, path: mutant})
+
+
+def test_test_workflow_pod_runner_admission_and_mutations():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    path = ".github/workflows/test.yml"
+
+    def with_runner(workflow, name, runner):
+        body = jobs(workflow)[name]
+        original = f"    runs-on: {value_at(body, 4, 'runs-on')}\n"
+        assert body.count(original) == 1
+        assert workflow.count(body) == 1
+        changed = body.replace(original, f"    runs-on: {runner}\n", 1)
+        return workflow.replace(body, changed, 1)
+
+    candidate = sources[path]
+    for name in ("workflow-lint", "package-files", "pytest"):
+        candidate = with_runner(candidate, name, "gke-8cpu-16gb-amd64")
+    assert {name: value_at(body, 4, "runs-on") for name, body in jobs(candidate).items()} == {
+        "authz": "ubuntu-24.04",
+        "changes": "ubuntu-24.04",
+        "workflow-lint": "gke-8cpu-16gb-amd64",
+        "package-files": "gke-8cpu-16gb-amd64",
+        "pytest": "gke-8cpu-16gb-amd64",
+        "test-check": "ubuntu-24.04",
+    }
+    check_workflows({**sources, path: candidate})
+
+    for name, runner in (
+        ("authz", "gke-8cpu-16gb-amd64"),
+        ("changes", "gke-8cpu-16gb-amd64"),
+        ("test-check", "gke-8cpu-16gb-amd64"),
+        ("workflow-lint", "ubuntu-24.04"),
+        ("package-files", "ubuntu-24.04"),
+        ("pytest", "ubuntu-24.04"),
+        ("pytest", "gke-4cpu-8gb-amd64"),
+    ):
+        mutant = with_runner(candidate, name, runner)
+        assert mutant != candidate
+        with pytest.raises(ValueError) as error:
+            check_workflows({**sources, path: mutant})
+        assert str(error.value) == f"test.yml {name}: runner differs"
+
+    marker = "  workflow_dispatch:\n"
+    assert candidate.count(marker) == 1
+    pr_workflow = candidate.replace(marker, "  pull_request:\n" + marker, 1)
+    for name in ("workflow-lint", "package-files", "pytest"):
+        pr_workflow = with_runner(pr_workflow, name, "ubuntu-24.04")
+    for name in ("authz", "changes", "workflow-lint", "package-files", "pytest", "test-check"):
+        mutant = with_runner(pr_workflow, name, "gke-8cpu-16gb-amd64")
+        assert mutant != candidate
+        with pytest.raises(ValueError) as error:
+            check_workflows({**sources, path: mutant})
+        assert str(error.value) == "test.yml must not have a pull_request trigger"
 
 
 def test_workflow_lint_guard_cannot_be_removed_or_pointed_at_candidate():

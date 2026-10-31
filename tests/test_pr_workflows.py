@@ -119,6 +119,49 @@ def test_test_workflow_trigger_mutation_is_rejected():
         assert_test_workflow_has_canonical_trigger(mutant)
 
 
+def assert_test_workflow_runner_routing(workflow):
+    assert_test_workflow_has_canonical_trigger(workflow)
+    runners = {
+        name: [line for line in body.splitlines() if line.startswith("    runs-on:")]
+        for name, body in job_blocks(workflow).items()
+    }
+    assert runners == {
+        "authz": ["    runs-on: ubuntu-24.04"],
+        "changes": ["    runs-on: ubuntu-24.04"],
+        "workflow-lint": ["    runs-on: gke-8cpu-16gb-amd64"],
+        "package-files": ["    runs-on: gke-8cpu-16gb-amd64"],
+        "pytest": ["    runs-on: gke-8cpu-16gb-amd64"],
+        "test-check": ["    runs-on: ubuntu-24.04"],
+    }, "test.yml runner routing differs"
+
+
+def test_test_workflow_routes_only_push_dispatch_heavy_jobs_to_pods():
+    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    assert_test_workflow_runner_routing(workflow)
+
+
+@pytest.mark.parametrize("name,before,after", [
+    ("workflow-lint", "gke-8cpu-16gb-amd64", "ubuntu-24.04"),
+    ("package-files", "gke-8cpu-16gb-amd64", "ubuntu-24.04"),
+    ("pytest", "gke-8cpu-16gb-amd64", "ubuntu-24.04"),
+    ("authz", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
+    ("changes", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
+    ("test-check", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
+    ("pytest", "gke-8cpu-16gb-amd64", "gke-4cpu-8gb-amd64"),
+])
+def test_test_workflow_runner_mutations_are_rejected(name, before, after):
+    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    assert_test_workflow_runner_routing(workflow)
+    body = job_blocks(workflow)[name]
+    original = f"    runs-on: {before}\n"
+    assert body.count(original) == 1
+    changed = body.replace(original, f"    runs-on: {after}\n", 1)
+    mutant = workflow.replace(body, changed, 1)
+    assert mutant != workflow
+    with pytest.raises(AssertionError, match="test.yml runner routing differs"):
+        assert_test_workflow_runner_routing(mutant)
+
+
 def assert_test_jobs_keep_canonical_conditions(workflow):
     jobs = job_blocks(workflow)
     for name in ("changes", "package-files"):
@@ -211,7 +254,9 @@ def assert_package_file_checks(workflow):
     assert "package-files" in jobs, "test must have its canonical package-files light job"
     package = jobs["package-files"]
     assert re.search(r"^    needs: \[authz\]$", package, re.M)
-    assert re.search(r"^    runs-on: ubuntu-24\.04$", package, re.M)
+    assert [line for line in package.splitlines() if line.startswith("    runs-on:")] == [
+        "    runs-on: gke-8cpu-16gb-amd64",
+    ]
     assert not re.search(r"^    if:", package, re.M), (
         "package-files must not carry a job-level pull_request guard"
     )
@@ -1427,7 +1472,7 @@ def test_promotion_guard_rejects_late_credential_job_overrides(override):
 
 
 def assert_test_workflow_is_canonical(test_workflow, gate_workflow):
-    """The hosted workflow retains its push/dispatch canonical text."""
+    """The push/dispatch workflow retains its canonical text."""
     assert_test_workflow_has_canonical_trigger(test_workflow)
     assert_test_jobs_keep_canonical_conditions(test_workflow)
     jobs = job_blocks(test_workflow)
