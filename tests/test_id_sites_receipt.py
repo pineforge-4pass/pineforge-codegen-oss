@@ -55,9 +55,11 @@ def expected_receipt(fresh) -> str:
     return json.dumps({"strategy": {"ids": ids}, "version": 1}, sort_keys=True, separators=(",", ":"))
 
 
-def transpiled(source: str) -> str:
+def transpiled(source: str, *, libraries=None) -> str:
     try:
-        return transpile(source)
+        if libraries is None:
+            return transpile(source)
+        return transpile(source, libraries=libraries)
     except Exception as error:
         # A fixture the transpiler refuses says nothing about the export: report it as its own failure.
         pytest.fail("fixture does not transpile on this build, so it cannot show the id-sites receipt: "
@@ -98,7 +100,7 @@ def function_body(cpp: str, opening: int) -> str:
 
 def receipt_text(source: str) -> str:
     """The document text ``strategy_id_sites_receipt`` hands to ``checked_settings::receipt``."""
-    cpp = transpiled(source)
+    cpp = transpiled(source, libraries=RECEIPT_LIBRARIES)
     definition = require_export(cpp, "strategy_id_sites_receipt", RECEIPT_DEFINITION)
     call = RECEIPT_CALL.search(function_body(cpp, definition.start()))
     if call is None:
@@ -183,11 +185,15 @@ DIRECT_RECURSIVE_FUNCTION = '''countdown(int n) =>
 total = countdown(2)
 '''
 
-RECURSIVE_FUNCTION = '''countdown(int n) =>
+FORWARD_CALL_FUNCTION = '''countdown(int n) =>
     strategy.entry("R" + str.tostring(n), strategy.long)
     n <= 0 ? 0 : countdown_next(n - 1)
 countdown_next(int n) => countdown(n)
 total = countdown(2)
+'''
+
+RECURSIVE_FUNCTION = '''import examples/ReceiptCycles/1 as cycles
+total = cycles.countdown(2)
 '''
 
 # The id-site cases, (a) to (j): the lowered sites that create a computed id.
@@ -224,6 +230,38 @@ def test_computed_order_id_function_rejects_direct_recursion():
     assert diagnostic.location.file == "recursive-id.pine"
     # Header, signature and entry take four lines; "    n <= 0 ? 0 : " is 17 columns.
     assert (diagnostic.location.line, diagnostic.location.col) == (5, 18)
+
+
+def test_version_six_function_rejects_direct_recursion():
+    body = "recur(int n) => n <= 0 ? 1.0 : recur(n - 1)\nresult = recur(2)\n"
+    with pytest.raises(CompileError) as caught:
+        transpile(HEADER + body, filename="recursive-function.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2056"
+    assert diagnostic.message == "Function 'recur' cannot call itself."
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "recursive-function.pine"
+    # Two header lines put the self-call on line 3; its prefix occupies 31 columns.
+    assert (diagnostic.location.line, diagnostic.location.col) == (3, 32)
+
+
+def test_computed_order_id_function_rejects_forward_call():
+    with pytest.raises(CompileError) as caught:
+        transpile(HEADER + FORWARD_CALL_FUNCTION, filename="forward-id.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E5034"
+    assert diagnostic.message == (
+        "Unknown function 'countdown_next(...)' — not a PineForge "
+        "builtin or a user-defined function."
+    )
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.CODEGEN
+    assert diagnostic.location.file == "forward-id.pine"
+    # Header, signature and entry take four lines; 17 prefix + 14 name columns put "(" at 32.
+    assert (diagnostic.location.line, diagnostic.location.col) == (5, 32)
 
 
 NESTED_FUNCTIONS = '''inner(float price) =>
@@ -546,11 +584,22 @@ settled = quiet(3)
 '''
 
 # Neither helper contains an order call, so their cycle reaches no counted site.
-QUIET_RECURSION = '''quiet(int n) =>
+QUIET_RECURSION = '''import examples/ReceiptCycles/1 as cycles
+settled = cycles.quiet(3)
+'''
+
+RECEIPT_LIBRARIES = {
+    "examples/ReceiptCycles/1": '''//@version=5
+library("ReceiptCycles")
+export countdown(int n) =>
+    strategy.entry("R" + str.tostring(n), strategy.long)
+    n <= 0 ? 0 : countdown_next(n - 1)
+countdown_next(int n) => countdown(n)
+export quiet(int n) =>
     n <= 0 ? 0 : quiet_next(n - 1)
 quiet_next(int n) => quiet(n)
-settled = quiet(3)
-'''
+''',
+}
 
 GLOBAL_CONSTANT_BOUND = '''n = 3
 for i = 1 to n
