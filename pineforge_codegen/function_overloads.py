@@ -326,6 +326,12 @@ def bind_scalar_overloads(program: Program, *,
     for statement in program.body:
         binder.visit(statement)
     for definitions in groups.values():
+        # Calls without an exact selection still use the final name. Its
+        # signature alone cannot prove a mismatch for the original group.
+        fallback = definitions[-1]
+        fallback.annotations = {
+            **(fallback.annotations or {}), "scalar_overload_fallback": True,
+        }
         for definition in definitions:
             definition.name = identities[id(definition)]
     return program

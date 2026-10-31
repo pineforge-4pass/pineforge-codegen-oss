@@ -572,7 +572,8 @@ class ExprVisitor:
         if name in self._current_func_series_params:
             return True
         if (name in self._current_func_param_types or name in BAR_FIELDS
-                or name in BAR_BUILTINS):
+                or (name in BAR_BUILTINS
+                    and not (node.annotations or {}).get("tuple_builtin_binding"))):
             return False
         return self._binding_is_series(
             name, self._call_site_var_name(node, self._safe_name(name)))
@@ -593,7 +594,8 @@ class ExprVisitor:
             return self._safe_name(name)
         if name in BAR_FIELDS:
             return BAR_FIELDS[name]
-        if name in BAR_BUILTINS:
+        if (name in BAR_BUILTINS
+                and not (node.annotations or {}).get("tuple_builtin_binding")):
             return BAR_BUILTINS[name]
         # Inline known constants (literals). Input-backed names are NOT inlined
         # because strategy_set_input() can override them at runtime; emit the

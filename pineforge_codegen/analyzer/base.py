@@ -269,6 +269,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Track user-defined function nodes for deferred analysis
         self._func_defs: dict[str, FuncDef] = {}
         self._func_definition_signatures: dict[str, set[tuple[str, ...]]] = {}
+        self._parameter_default_scalar_types: dict[int, dict[int, PineType]] = {}
         self._overloaded_func_names: set[str] = set()
         defined_names: set[str] = set()
         for stmt in ast.body:
@@ -4492,6 +4493,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     value.loc,
                 )
 
+    def _record_parameter_default_scalar_types(
+        self, definition: FuncDef | MethodDef,
+    ) -> None:
+        """Keep default type proofs in the declaration's lexical scope."""
+        self._parameter_default_scalar_types[id(definition)] = {
+            id(value): self._certain_scalar_type(value)
+            for value in (definition.annotations or {}).get("param_defaults", ())
+            if value is not None
+        }
+
     def _check_typed_parameter_mismatches(
         self,
         definition: FuncDef | MethodDef,
@@ -4502,7 +4513,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if (self._pine_version != 6
                 or self._in_v5_library_definition(definition)):
             return
+        if (function_name in self._overloaded_func_names
+                or (definition.annotations or {}).get("scalar_overload_fallback")):
+            # An unresolved overload keeps its established lookup; checking
+            # only that declaration would discard the other candidates.
+            return
         specs = self._param_type_specs_from_def(definition)
+        # A default needs a float proof in both scopes; a declaration proof
+        # only limits the existing refusal.
+        default_types = self._parameter_default_scalar_types.get(id(definition), {})
         for name, spec, value in zip(definition.params, specs, values):
             if (
                 value is not None
@@ -4510,6 +4529,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 and spec.kind == "primitive"
                 and spec.name == "int"
                 and self._certain_scalar_type(value) == PineType.FLOAT
+                and default_types.get(id(value), PineType.FLOAT) == PineType.FLOAT
             ):
                 self._error(
                     f"Cannot call '{function_name}' with a float argument "
@@ -5054,6 +5074,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._symbols.define(sym)
             setattr(sym, "_pf_decl_node_id", id(node))
             setattr(sym, "_pf_decl_binding_name", name)
+            setattr(sym, "_pf_tuple_binding", True)
             self._record_script_block_binding(sym, outer_symbol)
             self._note_member_writer(sym, name, node)
 
@@ -5155,6 +5176,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._check_bool_na_parameters(
             node, (node.annotations or {}).get("param_defaults", []),
         )
+        self._record_parameter_default_scalar_types(node)
         # Store the function def for later analysis
         self._func_defs[node.name] = node
 
@@ -5558,6 +5580,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._check_bool_na_parameters(
             node, (node.annotations or {}).get("param_defaults", []),
         )
+        self._record_parameter_default_scalar_types(node)
         method_key = f"{node.type_name}.{node.name}"
         self._symbols.enter_scope(f"method_{node.type_name}_{node.name}")
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
@@ -7751,6 +7774,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return PineType.VOID
 
         sym = self._symbols.resolve(node.name)
+        if (id(node) not in self._identifier_binding_scopes
+                and node.name in BUILTIN_VARS
+                and node.name not in BAR_FIELDS
+                and getattr(sym, "_pf_tuple_binding", False)):
+            # Retain this exact tuple read after its lexical scope unwinds.
+            node.annotations = {
+                **(node.annotations or {}), "tuple_builtin_binding": True,
+            }
         # Later type queries can revisit a read after its source scope ended.
         # Validate only its first visit, while lexical ownership is live.
         if (self._pine_version == 6

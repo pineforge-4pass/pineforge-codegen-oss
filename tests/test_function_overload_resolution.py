@@ -290,6 +290,19 @@ exact = probe(close - open)
     assert "exact = pf_overload_probe_1(" in cpp
 
 
+@pytest.mark.parametrize("defer_binding", [False, True])
+def test_unproven_named_math_argument_keeps_the_overload_group(
+    defer_binding: bool, monkeypatch,
+) -> None:
+    if defer_binding:
+        monkeypatch.setattr(
+            codegen, "bind_scalar_overloads", lambda program, **_kwargs: program,
+        )
+    source = HEADER + DEFINITIONS + "result = probe(value = math.abs(close - open))\n"
+    # An unresolved math call keeps probe whether earlier definitions were renamed or left together.
+    assert "result = probe(" in transpile(source)
+
+
 def test_reassigned_inferred_type_stays_unknown_but_declared_type_is_proven() -> None:
     source = HEADER + DEFINITIONS + """inferred = close - open
 inferred := close
@@ -352,6 +365,45 @@ total = first + second + integer + other
         cpp, _driver(("total",)),
         opt="-O0", label="overload tuple metadata",
     ) == "309.5\n"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # The global tuple holds 2.5 and 3, so reading both elements gives 5.5.
+        """pair(float value) => [value, value + 0.5]
+[first, second] = pair(close - open)
+total = first + second
+""",
+        # Calendar reads before the local tuple and outside its helper are 0; the pair still sums to 5.5.
+        """pair(float value) => [value, value + 0.5]
+readPair() =>
+    calendar = second
+    [first, second] = pair(close - open)
+    first + second + calendar
+total = readPair() + second
+""",
+    ],
+    ids=("global", "local"),
+)
+def test_tuple_element_shadows_the_calendar_builtin(body: str) -> None:
+    # The first bar's close-open is 12.5-10=2.5, and the other tuple element is 2.5+.5=3.
+    assert run_emitted_tu(
+        transpile(HEADER + body), _driver(("total",)),
+        opt="-O0", label="tuple calendar name",
+    ) == "5.5\n"
+
+
+def test_tuple_calendar_name_keeps_its_current_value_and_history() -> None:
+    source = HEADER + """pair(float value) => [value, value + 0.5]
+[first, second] = pair(close - open)
+total = first + nz(second[1]) + second
+"""
+    # Bar zero gives 2.5+0+3=5.5; bar one gives 4+3+4.5=11.5 from the same tuple history.
+    assert run_emitted_tu(
+        transpile(source), _driver(("total",), counts=(1, 2)),
+        opt="-O0", label="tuple calendar history",
+    ) == "5.5\n11.5\n"
 
 
 def test_nested_fixnan_state_uses_the_selected_overload_on_each_call_path() -> None:

@@ -3989,9 +3989,11 @@ class TypeInferer:
         if isinstance(node, NaLiteral):
             return "double"
         if isinstance(node, Identifier):
-            if node.name in ("time", "time_close", "timenow"):
+            tuple_binding = (node.annotations or {}).get("tuple_builtin_binding")
+            if not tuple_binding and node.name in ("time", "time_close", "timenow"):
                 return "int64_t"
-            if node.name in BAR_FIELDS or node.name in BAR_BUILTINS:
+            if (node.name in BAR_FIELDS
+                    or (node.name in BAR_BUILTINS and not tuple_binding)):
                 return "double"
             if (node.name in self._known_vars
                     and not self._known_var_is_lexically_shadowed(node.name)):
