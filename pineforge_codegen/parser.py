@@ -263,17 +263,36 @@ class Parser:
     # Statement parsing
     # ------------------------------------------------------------------
 
-    def _parse_statement(self):
-        stmt = self._parse_single_statement()
+    def _check_statement_comma(
+        self, comma: Token, following: Token, *, allow_comma_continuation: bool,
+    ) -> None:
+        if (not allow_comma_continuation
+                and (following.line > comma.line
+                     or following.type in (
+                         TokenType.NEWLINE, TokenType.DEDENT, TokenType.EOF_TOKEN,
+                     ))):
+            raise ParseError(
+                "A statement cannot end with a trailing comma.", following,
+            )
+
+    def _parse_statement(self, *, allow_comma_continuation: bool = False):
+        stmt = self._parse_single_statement(
+            allow_comma_continuation=allow_comma_continuation,
+        )
         if not self._check(TokenType.COMMA):
             return stmt
 
         stmts: list = []
         self._extend_statement_list(stmts, stmt)
-        while self._match(TokenType.COMMA):
+        while comma := self._match(TokenType.COMMA):
+            self._check_statement_comma(
+                comma, self._current(), allow_comma_continuation=allow_comma_continuation,
+            )
             if self._check(TokenType.NEWLINE) or self._check(TokenType.DEDENT) or self._at_end():
                 break
-            self._extend_statement_list(stmts, self._parse_single_statement())
+            self._extend_statement_list(stmts, self._parse_single_statement(
+                allow_comma_continuation=allow_comma_continuation,
+            ))
         return stmts
 
     @staticmethod
@@ -285,7 +304,7 @@ class Parser:
         else:
             stmts.append(stmt)
 
-    def _parse_single_statement(self):
+    def _parse_single_statement(self, *, allow_comma_continuation: bool = False):
         cur = self._current()
 
         # Control flow keywords
@@ -350,7 +369,9 @@ class Parser:
             if typed_after_qual or bare_after_qual:
                 qualifier = cur.value
                 self._advance()  # consume the qualifier prefix
-                stmt = self._parse_single_statement()
+                stmt = self._parse_single_statement(
+                    allow_comma_continuation=allow_comma_continuation,
+                )
                 if isinstance(stmt, VarDecl):
                     # Kept for the ta.* length lowering: an explicit
                     # ``series`` makes TradingView re-window the call.
@@ -419,7 +440,9 @@ class Parser:
 
             # Variable declaration: IDENT = expr (but not IDENT == expr)
             if self._peek().type == TokenType.EQUALS and self._peek(2).type != TokenType.EQUALS:
-                return self._parse_var_decl()
+                return self._parse_var_decl(
+                    allow_comma_continuation=allow_comma_continuation,
+                )
 
             # Reassignment / compound assignment: IDENT :=  +=  -=  *=  /=  %=
             if self._peek().type in COMPOUND_ASSIGN_OPS:
@@ -604,13 +627,18 @@ class Parser:
                 node.alias = values[6]
         return self._set_loc(node, start_tok)
 
-    def _parse_var_decl(self) -> VarDecl | list:
+    def _parse_var_decl(
+        self, *, allow_comma_continuation: bool = False,
+    ) -> VarDecl | list:
         """Parse var declaration(s). Returns a single VarDecl or a list for comma-separated."""
         start_tok = self._current()
         name_tok = self._consume(TokenType.IDENT)
         self._consume(TokenType.EQUALS)
         value = self._parse_expression()
         first = VarDecl(name=name_tok.value, value=value)
+        # Parentheses disappear from the AST; retain only bare-token provenance.
+        if isinstance(value, NaLiteral) and self.tokens[self.pos - 1].type == TokenType.NA:
+            first.annotations = {"bare_na_initializer": True}
         self._set_loc(first, start_tok)
 
         # Check for comma-separated additional declarations: x=1, y=2, z=3.
@@ -630,12 +658,18 @@ class Parser:
             and self._peek().type == TokenType.IDENT
             and self._peek(2).type == TokenType.EQUALS
         ):
+            self._check_statement_comma(
+                self._current(), self._peek(),
+                allow_comma_continuation=allow_comma_continuation,
+            )
             self._advance()
             st = self._current()
             n = self._consume(TokenType.IDENT)
             self._consume(TokenType.EQUALS)
             v = self._parse_expression()
             d = VarDecl(name=n.value, value=v)
+            if isinstance(v, NaLiteral) and self.tokens[self.pos - 1].type == TokenType.NA:
+                d.annotations = {"bare_na_initializer": True}
             decls.append(self._set_loc(d, st))
         return decls
 
@@ -1253,7 +1287,9 @@ class Parser:
         body: list = []
         while True:
             if self._arm_line_statement_ahead():
-                self._extend_statement_list(body, self._parse_single_statement())
+                self._extend_statement_list(body, self._parse_single_statement(
+                    allow_comma_continuation=True,
+                ))
             else:
                 body.append(self._parse_line_expr_or_assignment())
             if not self._match(TokenType.COMMA):
@@ -1284,7 +1320,9 @@ class Parser:
         """
         first_token = self._current()
         body: list = []
-        self._extend_statement_list(body, self._parse_statement())
+        self._extend_statement_list(
+            body, self._parse_statement(allow_comma_continuation=True),
+        )
         if first_token.starts_indent_continuation and not self._check(TokenType.COMMA):
             # A wrapped arrow body ends at a real statement boundary; physical
             # line numbers cannot split adjacent expressions on its logical line.
@@ -1656,7 +1694,10 @@ class Parser:
                 args.append(val)
                 call_arg_order.append(val)
 
-            self._match(TokenType.COMMA)
+            if self._match(TokenType.COMMA) and self._check(TokenType.RPAREN):
+                raise ParseError(
+                    "A function call cannot end with a trailing comma.", self._current(),
+                )
 
         return args, kwargs, ArgOrder(call_arg_order)
 

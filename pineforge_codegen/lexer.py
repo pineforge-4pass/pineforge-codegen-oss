@@ -366,6 +366,11 @@ class Lexer:
             indent_level += 1
 
         raw = self.source[line_start: self.pos]
+        if " \t" in raw:
+            self._emit_diagnostic(
+                "Indentation cannot contain spaces followed by a tab.",
+                self.line, self.col, self.col + 1,
+            )
         if "\t" in raw:
             indent_level = raw.count("\t")
         else:
@@ -379,9 +384,9 @@ class Lexer:
                 and self.indent_stack[-1] == 0
                 and not self._logical_line_has_arrow
                 and self.tokens[-1].type != TokenType.COMMA
-                and raw in ("", "    ")):
+                and raw in ("", "    ", "        ")):
             # The measured restriction is on top-level operands at zero or
-            # four spaces. Block and callable bodies retain their wraps.
+            # four or eight spaces. Block and callable bodies retain their wraps.
             last_token = self.tokens[-1]
             self._emit_diagnostic(
                 "Line continuation outside parentheses or brackets requires "

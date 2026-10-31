@@ -4377,6 +4377,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         )
 
     def _visit_VarDecl(self, node: VarDecl) -> PineType:
+        if (not node.is_var and not node.is_varip and node.type_hint is None
+                and isinstance(node.value, NaLiteral)
+                and (node.annotations or {}).get("bare_na_initializer")
+                and not (node.annotations or {}).get("qualifier")
+                and self._pine_version == 6
+                and not self._in_v5_library_definition(node)):
+            self._error(
+                "Value with NA type cannot be assigned to a variable that was "
+                "defined without type keyword.",
+                node.loc,
+            )
         if (node.type_hint == "bool"
                 and isinstance(node.value, NaLiteral)
                 and not self._in_v5_library_definition(node)):
