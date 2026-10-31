@@ -1,0 +1,159 @@
+# Throwaway workflow: one run, artifact read, branch deleted.
+name: Host members regen (scratch)
+
+on:
+  push:
+    branches: [hostmem-regen2]
+
+permissions:
+  contents: read
+
+jobs:
+  regen:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the pushed codegen commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check out the pinned engine
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pineforge-4pass/pineforge-engine
+          ref: fc0a2df5deca07f8a7e59995a17e71203fb19f34
+          path: .ci/pineforge-engine
+          submodules: false
+          persist-credentials: false
+
+      - name: Regenerate and verify host members
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/regen"
+          if command -v clang++ > /dev/null; then
+            clang++ --version
+          else
+            sudo apt-get install --yes --no-install-recommends clang
+            clang++ --version
+          fi
+          sudo apt-get install --yes --no-install-recommends libeigen3-dev
+          git -C .ci/pineforge-engine rev-parse HEAD
+          cat .ci/pineforge-engine/VERSION
+
+          # Match tests/_compile.py without importing its pytest dependency.
+          printf '%s\n' \
+            'import os' \
+            'import sys' \
+            'from pathlib import Path' \
+            '' \
+            'if sys.argv[1:] == ["--crash-control"]:' \
+            '    raise RuntimeError("deliberate crash control")' \
+            '' \
+            'engine_inc = Path(".ci/pineforge-engine/include")' \
+            'vf = engine_inc.parent / "VERSION"' \
+            'template = engine_inc / "pineforge" / "version.h.in"' \
+            'out = Path(os.environ["RUNNER_TEMP"]) / "genhdr/include/pineforge/version.h"' \
+            'blocked = tuple(Path.home() / item for item in (' \
+            '    ".config/zsh/keys", ".ssh", ".aws", ".codex", ".config/pineforge"))' \
+            'for candidate in (vf, template, out):' \
+            '    path = Path(os.path.abspath(candidate))' \
+            '    if path.name.endswith(".env") or any(path == root or root in path.parents for root in blocked):' \
+            '        raise RuntimeError(f"refused path: {path}")' \
+            '    for part in (*reversed(path.parents), path):' \
+            '        if part.is_symlink():' \
+            '            raise RuntimeError(f"refused symlink: {part}")' \
+            '' \
+            'version = "0.0.0"' \
+            'if vf.is_file():' \
+            '    version = (vf.read_text().strip() or version).splitlines()[0]' \
+            'major, minor, patch = (version.split(".") + ["0", "0", "0"])[:3]' \
+            'repl = {' \
+            '    "PINEFORGE_VERSION_MAJOR": major,' \
+            '    "PINEFORGE_VERSION_MINOR": minor,' \
+            '    "PINEFORGE_VERSION_PATCH": patch,' \
+            '    "PINEFORGE_VERSION_MMP": version,' \
+            '    "PINEFORGE_VERSION_FULL": version,' \
+            '    "PINEFORGE_VERSION_GIT_SHA": "unknown",' \
+            '}' \
+            'text = template.read_text()' \
+            'for key, val in repl.items():' \
+            '    text = text.replace(f"@{key}@", val)' \
+            'if "@" in text:' \
+            '    raise RuntimeError("unsubstituted version header placeholder")' \
+            'out.parent.mkdir(parents=True, exist_ok=True)' \
+            'out.write_text(text)' \
+            > "$RUNNER_TEMP/regen/render_version.py"
+          printf 'Header renderer files:\n%s\n%s\n%s\n%s\n' \
+            "$RUNNER_TEMP/regen/render_version.py" \
+            .ci/pineforge-engine/VERSION \
+            .ci/pineforge-engine/include/pineforge/version.h.in \
+            "$RUNNER_TEMP/genhdr/include/pineforge/version.h"
+
+          # Prove a real crash records the Python process's nonzero result.
+          set +e
+          python3 -I "$RUNNER_TEMP/regen/render_version.py" --crash-control 2>&1 | tee "$RUNNER_TEMP/regen/crash.log"
+          crash_statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${crash_statuses[0]}" > "$RUNNER_TEMP/regen/crash.exit"
+          if [[ "${crash_statuses[1]}" -ne 0 ]]; then
+            exit "${crash_statuses[1]}"
+          fi
+          read -r crash_recorded < "$RUNNER_TEMP/regen/crash.exit"
+          if [[ "$crash_recorded" != 1 ]]; then
+            printf '%s\n' '::error::deliberate crash did not record exit 1'
+            exit 1
+          fi
+          grep -Fxq 'RuntimeError: deliberate crash control' "$RUNNER_TEMP/regen/crash.log"
+
+          set +e
+          python3 -I "$RUNNER_TEMP/regen/render_version.py"
+          render_status=$?
+          set -e
+          printf '%s\n' "$render_status" > "$RUNNER_TEMP/regen/render.exit"
+          if [[ "$render_status" -ne 0 ]]; then
+            exit "$render_status"
+          fi
+
+          set +e
+          python3 -I scripts/gen_host_members.py --cxx clang++ -I .ci/pineforge-engine/include -I /usr/include/eigen3 -I "$RUNNER_TEMP/genhdr/include" 2>&1 | tee "$RUNNER_TEMP/regen/generate.log"
+          generate_statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${generate_statuses[0]}" > "$RUNNER_TEMP/regen/generate.exit"
+          if [[ "${generate_statuses[0]}" -ne 0 ]]; then
+            exit "${generate_statuses[0]}"
+          fi
+          if [[ "${generate_statuses[1]}" -ne 0 ]]; then
+            exit "${generate_statuses[1]}"
+          fi
+
+          # Save the regenerated module before the check, so a failing check cannot lose it.
+          cp pineforge_codegen/codegen/host_members.py "$RUNNER_TEMP/regen/"
+          git diff -- pineforge_codegen/codegen/host_members.py > "$RUNNER_TEMP/regen/host_members.diff"
+          sha256sum pineforge_codegen/codegen/host_members.py > "$RUNNER_TEMP/regen/host_members.sha256"
+          {
+            clang++ --version
+            git -C .ci/pineforge-engine rev-parse HEAD
+          } > "$RUNNER_TEMP/regen/environment.txt"
+
+          set +e
+          python3 -I scripts/gen_host_members.py --cxx clang++ -I .ci/pineforge-engine/include -I /usr/include/eigen3 -I "$RUNNER_TEMP/genhdr/include" --check 2>&1 | tee "$RUNNER_TEMP/regen/check.log"
+          check_statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${check_statuses[0]}" > "$RUNNER_TEMP/regen/check.exit"
+          if [[ "${check_statuses[0]}" -ne 0 ]]; then
+            exit "${check_statuses[0]}"
+          fi
+          if [[ "${check_statuses[1]}" -ne 0 ]]; then
+            exit "${check_statuses[1]}"
+          fi
+          grep -Eq '^pineforge_codegen/codegen/host_members[.]py: [0-9]+ names, up to date$' "$RUNNER_TEMP/regen/check.log"
+
+      - name: Upload the regeneration artifact
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hostmem-regen
+          path: ${{ runner.temp }}/regen
+          if-no-files-found: error
