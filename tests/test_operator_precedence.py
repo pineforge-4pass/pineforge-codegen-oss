@@ -143,14 +143,17 @@ def test_equality_and_relation_chain_books_the_boolean_branch_size():
 #include <iomanip>
 #include <iostream>
 int main() {
-    Bar bars[] = {{10.0, 11.0, 9.0, 11.0, 1.0, 60000LL}};
+    Bar bars[] = {
+        {10.0, 11.0, 9.0, 11.0, 1.0, 60000LL},
+        {11.0, 12.0, 10.0, 10.0, 1.0, 120000LL},
+    };
     GeneratedStrategy strategy;
-    strategy.run(bars, 1);
+    strategy.run(bars, 2);
     if (!strategy.last_error().empty()) return 1;
     std::cout << std::setprecision(17) << strategy.live_position_size() << "\n";
 }
 '''
-    # true == (11 > 10) selects 1.0, then 1.25 + 1 / 2 equals 1.75.
+    # Bar 0 selects 1.25 + 1 / 2 = 1.75; its market entry fills at bar 1's open.
     assert _compile_and_run(cpp + driver) == "1.75\n"
 
 

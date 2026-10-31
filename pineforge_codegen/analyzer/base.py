@@ -5962,7 +5962,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         left_type = self._visit(node.left)
         right_type = self._visit(node.right)
 
-        if node.op in ("==", "!="):
+        if (node.op in ("==", "!=")
+                and self._pine_version == 6
+                and not self._in_v5_library_definition(node)):
             if isinstance(node.left, NaLiteral) or isinstance(node.right, NaLiteral):
                 other = node.right if isinstance(node.left, NaLiteral) else node.left
                 self._error(
@@ -5985,7 +5987,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     f"using {node.op}.",
                     numeric_operand.loc or node.loc,
                 )
-        elif node.op in (">", "<", ">=", "<="):
+        elif (node.op in (">", "<", ">=", "<=")
+                and self._pine_version == 6
+                and not self._in_v5_library_definition(node)):
             certain_left = self._certain_scalar_type(node.left)
             certain_right = self._certain_scalar_type(node.right)
             string_operand = (
@@ -6034,7 +6038,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.FLOAT  # default
 
     def _visit_UnaryOp(self, node: UnaryOp) -> PineType:
-        if node.op == "not":
+        if (node.op == "not"
+                and self._pine_version == 6
+                and not self._in_v5_library_definition(node)):
             if isinstance(node.operand, UnaryOp) and node.operand.op == "not":
                 self._error(
                     '"not" cannot be used as a variable or function name.',
@@ -6043,7 +6049,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         operand_type = self._visit(node.operand)
         if node.op == "not":
             certain_type = self._certain_scalar_type(node.operand)
-            if certain_type in (PineType.INT, PineType.FLOAT):
+            if (certain_type in (PineType.INT, PineType.FLOAT)
+                    and self._pine_version == 6
+                    and not self._in_v5_library_definition(node)):
                 operand_type = certain_type.value
                 self._error(
                     "The not operator requires a bool operand; "

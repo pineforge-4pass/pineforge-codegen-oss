@@ -129,8 +129,19 @@ def test_string_template_argument_is_never_a_type() -> None:
     # not as template arguments, so the text cannot reach a type position.
     # Pinned outcome: the comparison spelling transpiles, and the probe never
     # appears in code (literals are blanked by cpp_code_only()).
-    source = HEAD + 'a = array.new<"pf_probe_type">(0)\n'
-    cpp = transpile(source, filename="raw_emit.pine")
+    # A v5 definition keeps this string-ordering vehicle available.
+    source = (
+        HEAD + "import examples/TemplateText/1 as text\n"
+        "a = text.value()\n"
+    )
+    library = (
+        '//@version=5\nlibrary("TemplateText")\n'
+        'export value() => array.new<"pf_probe_type">(0)\n'
+    )
+    cpp = transpile(
+        source, filename="raw_emit.pine",
+        libraries={"examples/TemplateText/1": library},
+    )
     assert "pf_probe_type" not in cpp_code_only(cpp)
 
 

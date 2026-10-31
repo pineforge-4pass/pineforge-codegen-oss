@@ -409,7 +409,8 @@ else
 
 
 def test_typed_arguments_comparisons_and_explicit_string_cast_compile() -> None:
-    source = """type Box
+    source = """import examples/NaComparisons/1 as comparisons
+type Box
     float value
 take_text(string value) =>
     value
@@ -423,19 +424,35 @@ array_result = take_array(na)
 box_result = take_box(na)
 string explicit_text = string(na)
 string current_text = "x"
-text_is_na = current_text == na
+text_is_na = comparisons.text(current_text)
 int current_int = 1
-int_is_na = current_int == na
+int_is_na = comparisons.integer(current_int)
 bool current_bool = true
-bool_is_na = current_bool == na
+bool_is_na = na(current_bool)
+bool_equal = current_bool == bool_is_na
 color current_color = color.red
-color_is_na = current_color == na
+color_is_na = comparisons.tint(current_color)
 """
-    cpp = transpile(_script(source))
+    # Direct-na comparisons remain available for numeric and string v5 inputs.
+    library = """//@version=5
+library("NaComparisons")
+export text(string value) => value == na
+export integer(int value) => value == na
+export tint(color value) => value == na
+"""
+    cpp = transpile(
+        _script(source), libraries={"examples/NaComparisons/1": library},
+    )
     # Hand-derived: typed parameters and comparison operands keep their authored types.
     assert "std::string take_text(" in cpp
     assert "std::vector<std::string> take_array(" in cpp
     assert "double take_box(" in cpp
+    # A string comparison returns bool and keeps its string parameter.
+    assert "bool NaComparisons_v1__text(std::string " in cpp
+    # The integer literal 1 fits the declared parameter's 32-bit C++ storage.
+    assert "bool NaComparisons_v1__integer(int " in cpp
+    # A color parameter uses the packed 64-bit color representation.
+    assert "bool NaComparisons_v1__tint(int64_t " in cpp
     compile_cpp(cpp, label="typed-na-arguments-and-comparisons")
 
 

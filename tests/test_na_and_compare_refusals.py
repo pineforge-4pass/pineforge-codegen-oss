@@ -58,7 +58,7 @@ def _assert_diagnostic(
         (
             _script("value = not math.sign(close - open) > 0\n"),
             3,
-            13,  # math.sign(...) is the numeric operand of not.
+            22,  # FuncCall.loc is the "(" after "value = not math.sign".
             "float",
         ),
         (
@@ -99,7 +99,7 @@ def test_not_rejects_proven_numeric_operands(
         (
             _script("value = close == open == close[1]\n"),
             3,
-            26,  # close[1] is the numeric right operand of the equality.
+            31,  # Subscript.loc is the "[" after "value = close == open == close".
             "==",
         ),
         (
@@ -157,6 +157,61 @@ def test_string_ordering_reports_the_first_string_operand() -> None:
         {"op": "<"},
         5,
         9,  # a is the first operand of the ordered comparison.
+    )
+
+
+@pytest.mark.parametrize(
+    "library_body",
+    [
+        # A typed numeric parameter still uses the existing v5 bool coercion.
+        "export check(float x, string text) => not x\n",
+        # A direct numeric-na comparison retains its v5 relational lowering.
+        "export check(float x, string text) => x == na\n",
+        # Nested unary not operators remain accepted inside a v5 function.
+        "export check(float x, string text) => not not (x > 0)\n",
+        # Typed strings retain their existing ordered-comparison lowering.
+        'export check(float x, string text) => text < "z"\n',
+        # A global initializer uses its definition's version outside a body.
+        "bool cached = not 1\n"
+        "export check(float x, string text) => cached\n",
+        # The global definition also shields the second not from v6 checks.
+        "bool cached = not not true\n"
+        "export check(float x, string text) => cached\n",
+    ],
+)
+def test_imported_v5_operator_definitions_keep_their_lowering(
+    library_body: str,
+) -> None:
+    source = _script(
+        "import examples/OperatorChecks/1 as legacy\n"
+        'value = legacy.check(close, "a")\n'
+        "plot(value ? 1 : 0)\n"
+    )
+    library = '//@version=5\nlibrary("OperatorChecks")\n' + library_body
+    cpp = transpile(source, libraries={"examples/OperatorChecks/1": library})
+    # Each exported function returns a comparison or an explicitly typed bool.
+    assert "bool OperatorChecks_v1__check(" in cpp
+    compile_cpp(cpp, label="v5 operator definition")
+
+
+def test_imported_v5_bool_numeric_equality_keeps_its_existing_codegen_refusal() -> None:
+    source = _script(
+        "import examples/OperatorChecks/1 as legacy\n"
+        "value = legacy.check(close)\n"
+        "plot(value ? 1 : 0)\n"
+    )
+    library = (
+        '//@version=5\nlibrary("OperatorChecks")\n'
+        "export check(float x) => true == x\n"
+    )
+    with pytest.raises(CompileError) as caught:
+        transpile(source, libraries={"examples/OperatorChecks/1": library})
+    (diagnostic,) = caught.value.diagnostics
+    # A bool equality still reaches the existing v5 third-state codegen gate.
+    assert diagnostic.phase is Phase.CODEGEN
+    assert diagnostic.message == (
+        "library 'examples/OperatorChecks/1' is //@version=5: '==' of a bool reads "
+        "v5's third bool state (na), which PineForge's two-state bool does not keep"
     )
 
 
