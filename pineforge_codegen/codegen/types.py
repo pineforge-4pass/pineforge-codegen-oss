@@ -1427,6 +1427,14 @@ class TypeInferer:
             return spec
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            # Scalar builtin results need not carry a TypeSpec. Recover a
+            # known string result here so array construction cannot fall back
+            # to a numeric vector; other expression typing stays unchanged.
+            if (namespace is not None and func_name is not None
+                    and sigs.get_return_type(
+                        namespace, func_name, len(node.args)
+                    ) == PineType.STRING):
+                return TypeSpec.primitive("string")
             if namespace is None:
                 func_info = self._func_info_map.get(func_name)
                 pine_type = getattr(func_info, "return_type", None)

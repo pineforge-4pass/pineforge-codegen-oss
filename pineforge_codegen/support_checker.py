@@ -1166,12 +1166,18 @@ class SupportChecker:
 
     # -- Diagnostic emission --
 
-    def _err(self, node: ASTNode | None, message: str, hint: str | None = None) -> None:
+    def _err(
+        self, node: ASTNode | None, message: str, hint: str | None = None,
+        *, allow_switch_warning: bool = True,
+    ) -> None:
         self._diagnostics.append(Diagnostic(
             # The checker never visited a switch's non-default arms: what it
             # finds there warns, and the arm keeps the lowering it compiled
-            # to (``_visit_SwitchStmt``).
-            level=Level.WARNING if self._switch_arm_depth else Level.ERROR,
+            # to (``_visit_SwitchStmt``). Calls without a value lowering must
+            # still fail before codegen.
+            level=(Level.WARNING
+                   if self._switch_arm_depth and allow_switch_warning
+                   else Level.ERROR),
             phase=Phase.ANALYZER,
             location=_loc(node, self._filename),
             message=message,
@@ -1704,11 +1710,17 @@ class SupportChecker:
         # Not-yet-implemented. Check qualified name (e.g. "timeframe.from_seconds")
         # first, then bare name (e.g. "max_bars_back") for back-compat entries.
         if full in NOT_YET_FUNC:
-            self._err(node, f"{full}(...) is not implemented yet.", hint=NOT_YET_FUNC[full])
+            self._err(
+                node, f"{full}(...) is not implemented yet.",
+                hint=NOT_YET_FUNC[full], allow_switch_warning=False,
+            )
             self._visit_children(node)
             return
         if ns is not None and name in NOT_YET_FUNC:
-            self._err(node, f"{name}(...) is not implemented yet.", hint=NOT_YET_FUNC[name])
+            self._err(
+                node, f"{name}(...) is not implemented yet.",
+                hint=NOT_YET_FUNC[name], allow_switch_warning=False,
+            )
             self._visit_children(node)
             return
         if (ns is None and name in POSITIONAL_BUILTINS
@@ -2108,8 +2120,9 @@ class SupportChecker:
         which the generic child walk does not enter, so every arm but the
         default went unchecked: a request of another symbol in one kept no
         lowering (``TradingView/Request/3``'s ``cryptoDerivativeMetric``).
-        Such an arm gets its lowerings now; what the checker would refuse
-        there warns instead, so a script that compiled keeps compiling."""
+        Such an arm gets its lowerings now; existing arm lowerings retain
+        warnings so a script that compiled keeps compiling. Calls listed
+        in NOT_YET_FUNC remain errors."""
         self._visit(node.expr)
         self._switch_arm_depth += 1
         try:
