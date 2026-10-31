@@ -46,7 +46,8 @@ REFUSALS = [
         ),
         "PF-E2066",
         "Operator 'and' cannot combine bool and int.",
-        {"op": "and", "left_type": "bool", "right_type": "int"},
+        # node.op, left.value and right.value supply these three arguments.
+        {"op": "and", "left": "bool", "right": "int"},
         4,
         18,  # The numeric right operand starts after "value = flag and ".
         id="logical-number",
@@ -59,7 +60,8 @@ REFUSALS = [
         ),
         "PF-E2067",
         "Cannot store a value of the 'na' type in array<bool>.",
-        {"collection_kind": "array"},
+        # spec.kind is array for the declared bool array.
+        {"kind": "array"},
         4,
         19,  # The bare na starts after "array.push(flags, ".
         id="bool-array-push",
@@ -72,7 +74,8 @@ REFUSALS = [
         ),
         "PF-E2067",
         "Cannot store a value of the 'na' type in array<bool>.",
-        {"collection_kind": "array"},
+        # spec.kind is array for the declared bool array.
+        {"kind": "array"},
         4,
         21,  # The bare na starts after "array.set(flags, 0, ".
         id="bool-array-set",
@@ -103,7 +106,8 @@ REFUSALS = [
         ),
         "PF-E2069",
         "Cannot call 'Flag.new' with a bare na value for bool field 'value'.",
-        {"callee_name": "Flag.new", "field_name": "value"},
+        # The UDT name is Flag; ".new" is literal template text.
+        {"udt_name": "Flag", "field_name": "value"},
         5,
         21,  # The constructor argument starts after "Flag.new(".
         id="bool-field-constructor",
@@ -119,11 +123,8 @@ REFUSALS = [
         "PF-E2070",
         "Cannot assign a value of the 'na' type to the 'value' variable. "
         "The variable is declared with the 'bool' type.",
-        {
-            "assignedValueType": "na",
-            "variableName": "value",
-            "ownValueType": "bool",
-        },
+        # Only node.target.member varies; na and bool are literal text.
+        {"member": "value"},
         6,
         14,  # The bare na starts after "obj.value := ".
         id="bool-field-assignment",
@@ -151,7 +152,8 @@ REFUSALS = [
         ),
         "PF-E2067",
         "Cannot store a value of the 'na' type in matrix<bool>.",
-        {"collection_kind": "matrix"},
+        # spec.kind is matrix for the declared bool matrix.
+        {"kind": "matrix"},
         4,
         25,  # The bare na starts after "matrix.set(flags, 0, 0, ".
         id="bool-matrix-set",
@@ -163,7 +165,8 @@ REFUSALS = [
         ),
         "PF-E2066",
         "Operator '+' cannot combine bool and int.",
-        {"op": "+", "left_type": "bool", "right_type": "int"},
+        # Addition reads bool from the left operand and int from the right.
+        {"op": "+", "left": "bool", "right": "int"},
         3,
         9,  # The bool operand starts after "value = ".
         id="bool-number-addition",
@@ -203,7 +206,8 @@ REFUSALS = [
         ),
         "PF-E2073",
         "Cannot call 'add' with a float argument for int parameter 'value'.",
-        {"function_name": "add", "parameter_name": "value"},
+        # function_name is add and the declared parameter name is value.
+        {"function_name": "add", "name": "value"},
         4,
         14,  # The float argument starts after "result = add(".
         id="int-parameter-float",
@@ -241,7 +245,8 @@ REFUSALS = [
         ),
         "PF-E2066",
         "Operator '+' cannot combine string and int.",
-        {"op": "+", "left_type": "string", "right_type": "int"},
+        # Addition reads string from the left operand and int from the right.
+        {"op": "+", "left": "string", "right": "int"},
         3,
         21,  # The numeric operand starts after the string and plus sign.
         id="string-number-addition",

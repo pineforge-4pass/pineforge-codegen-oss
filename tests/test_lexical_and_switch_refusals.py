@@ -49,7 +49,8 @@ REFUSALS = [
         HEADER + "value = ٢.0\n",
         "PF-E0044",
         "no viable alternative at character '٢'",
-        {"unexpected_token": "٢"},
+        # The lexer interpolates ch, the non-ASCII digit.
+        {"ch": "٢"},
         Phase.LEXER,
         3,
         9,  # The non-ASCII digit begins after "value = ".
@@ -59,7 +60,8 @@ REFUSALS = [
         HEADER + "float π = close - open\n",
         "PF-E0044",
         "no viable alternative at character 'π'",
-        {"unexpected_token": "π"},
+        # The lexer interpolates ch, the non-ASCII identifier character.
+        {"ch": "π"},
         Phase.LEXER,
         3,
         7,  # The non-ASCII identifier begins after "float ".
@@ -74,7 +76,8 @@ REFUSALS = [
         ),
         "PF-E2062",
         'The condition of the "while" statement must evaluate to a "bool" value.',
-        {"block_name": "while"},
+        # The complete condition message is literal text.
+        {},
         Phase.ANALYZER,
         4,
         7,  # gate is the condition after "while ".
@@ -89,7 +92,8 @@ REFUSALS = [
         ),
         "PF-E2062",
         'The condition of the "while" statement must evaluate to a "bool" value.',
-        {"block_name": "while"},
+        # The complete condition message is literal text.
+        {},
         Phase.ANALYZER,
         4,
         7,  # remaining stays int after reassignment and starts after "while ".
@@ -104,7 +108,8 @@ REFUSALS = [
         ),
         "PF-E0045",
         "Mismatched input '=>' expecting set 'a case expression'.",
-        {"unexpected_token": "=>", "expecting": "a case expression"},
+        # Both the arrow and the expected case text are literal.
+        {},
         Phase.PARSER,
         4,
         5,  # The default arrow is the first arm after four spaces.
@@ -120,7 +125,8 @@ REFUSALS = [
         "PF-E2063",
         'Return type of one of the "if" or "switch" blocks is not compatible '
         "with return type of other block(s) (string, float).",
-        {"blocks": "string, float"},
+        # The first arm is string; the later incompatible arm is float.
+        {"first_type": "string", "certain_type": "float"},
         Phase.ANALYZER,
         5,
         8,  # close is the second arm's proven numeric return expression.
@@ -138,7 +144,8 @@ REFUSALS = [
         ),
         "PF-E2064",
         '"text" cannot be used as a variable or function name.',
-        {"keyword": "text"},
+        # The method declaration's node.name is text.
+        {"name": "text"},
         Phase.ANALYZER,
         5,
         1,  # Two header lines and two type-declaration lines precede the method.

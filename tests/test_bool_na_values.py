@@ -426,7 +426,8 @@ def test_other_missing_values_still_compile(
             "plot(b.flag ? 1 : 0)\n",
             "PF-E2069",
             "Cannot call 'Box.new' with a bare na value for bool field 'flag'.",
-            {"callee_name": "Box.new", "field_name": "flag"},
+            # The UDT name is Box; ".new" is literal template text.
+            {"udt_name": "Box", "field_name": "flag"},
             5,
             13,
             15,  # The two-character constructor na starts after "b = Box.new(".

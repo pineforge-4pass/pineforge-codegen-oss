@@ -189,12 +189,13 @@ def test_numeric_while_condition_is_coded_and_located() -> None:
     assert diagnostic.message == (
         'The condition of the "while" statement must evaluate to a "bool" value.'
     )
-    assert diagnostic.args == {"block_name": "while"}
+    # The condition message is literal text and therefore has no arguments.
+    assert diagnostic.args == {}
     assert diagnostic.hint is None
     assert diagnostic.location.file == "numeric_while.pine"
     # Two header lines put close after "while " on line 3, column 7.
     assert (diagnostic.location.line, diagnostic.location.col) == (3, 7)
-    assert render_diagnostic("PF-E2062", {"block_name": "while"}) == (
+    assert render_diagnostic("PF-E2062", {}) == (
         diagnostic.message, diagnostic.hint,
     )
 
