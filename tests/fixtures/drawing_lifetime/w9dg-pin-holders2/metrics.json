@@ -8,17 +8,11 @@
   "deepBacktesting": true,
   "trades": 3,
   "tvTradesCsv": "tv_trades.csv",
-  "tapeChannel": "ws-report-v1",
   "sourceCanonicalization": "pine-facade-v1",
   "sourceArtifactHash": "20acb4cc8afb337747e69067110f0f4bf5438aa4879f8cffd761fe7d0acac263",
   "tvTradesCsvHash": "684f00bdd64d614ecd17c944b6f134ea599bf4b62fdafc4a8232f85b84cbd144",
-  "wsProvenance": {
+  "rangeProvenance": {
     "schemaVersion": 1,
-    "wsEndpoint": "wss://history-data.tradingview.com/socket.io/websocket?from=chart%2F&type=chart&auth=sessionid",
-    "authUser": "luisleo52655",
-    "accountType": "pro_premium_expert",
-    "pineId": "USER;3c3ee73838da415d9f6fb36ccd7cbe97",
-    "pineVersion": "0.89397",
     "symbol": "BINANCE:ETHUSDT.P",
     "interval": "15",
     "requestedRange": {

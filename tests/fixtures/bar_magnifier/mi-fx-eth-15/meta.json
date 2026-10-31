@@ -2,7 +2,6 @@
   "title": "mi-fx-eth-15",
   "slug": "mi-fx-eth-15",
   "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
   "exportedAt": "2026-09-26T04:59:09.749Z",
   "chart": {
     "symbol": "BINANCE:ETHUSDT.P",

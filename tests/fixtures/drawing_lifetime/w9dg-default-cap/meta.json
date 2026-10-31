@@ -2,7 +2,6 @@
   "title": "W9 readout: collection at the default drawing counts",
   "slug": "w9dg-default-cap",
   "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
   "exportedAt": "2026-09-27T17:29:58.438Z",
   "chart": {
     "symbol": "BINANCE:ETHUSDT.P",

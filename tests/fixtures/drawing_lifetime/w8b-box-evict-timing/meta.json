@@ -2,7 +2,6 @@
   "title": "W8B readout: when and which boxes max_boxes_count evicts",
   "slug": "w8b-box-evict-timing",
   "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
   "exportedAt": "2026-09-27T16:03:30.502Z",
   "chart": {
     "symbol": "BINANCE:ETHUSDT.P",

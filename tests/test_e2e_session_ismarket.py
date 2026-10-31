@@ -367,7 +367,7 @@ def _recorded_tape(slug: str) -> list[tuple[int, dict[str, bool]]]:
     pine_bytes = tape_file(slug, "strategy.pine").read_bytes()
     assert hashlib.sha256(tape_bytes).hexdigest() == metrics["tvTradesCsvHash"], slug
     assert hashlib.sha256(pine_bytes).hexdigest() == metrics["sourceArtifactHash"], slug
-    assert metrics["wsProvenance"]["rangeProof"] == "covered", slug
+    assert metrics["rangeProvenance"]["rangeProof"] == "covered", slug
     tape = read_tape(slug)
     assert len(tape) == metrics["trades"], slug
     return tape

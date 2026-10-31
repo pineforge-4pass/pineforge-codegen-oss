@@ -2,7 +2,6 @@
   "title": "W9 readout: which holders keep a box from the collection",
   "slug": "w9dg-pin-holders",
   "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
   "exportedAt": "2026-09-27T17:29:51.542Z",
   "chart": {
     "symbol": "BINANCE:ETHUSDT.P",

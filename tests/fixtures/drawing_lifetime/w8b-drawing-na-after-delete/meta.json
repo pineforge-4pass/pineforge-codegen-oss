@@ -2,7 +2,6 @@
   "title": "W8B readout: na() of deleted and collected drawings",
   "slug": "w8b-drawing-na-after-delete",
   "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
   "exportedAt": "2026-09-27T16:24:10.862Z",
   "chart": {
     "symbol": "BINANCE:ETHUSDT.P",

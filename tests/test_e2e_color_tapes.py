@@ -77,7 +77,7 @@ def read_tape(slug: str) -> list[tuple[int, int, str, str]]:
 def chart_bars(slug: str) -> list[int]:
     """The chart's 15-minute bars from the range's first to the tape's last exit."""
     metrics = json.loads((FIXTURES / slug / "metrics.json").read_text())
-    first = metrics["wsProvenance"]["returnedRange"]["from"]
+    first = metrics["rangeProvenance"]["returnedRange"]["from"]
     last = max(exit_ms for _, exit_ms, _, _ in read_tape(slug))
     return list(range(first, last + 1, QUARTER_HOUR_MS))
 
@@ -118,7 +118,7 @@ def test_tapes_are_the_recorded_exports() -> None:
         pine_bytes = (FIXTURES / slug / "strategy.pine").read_bytes()
         assert hashlib.sha256(tape_bytes).hexdigest() == metrics["tvTradesCsvHash"], slug
         assert hashlib.sha256(pine_bytes).hexdigest() == metrics["sourceArtifactHash"], slug
-        assert metrics["wsProvenance"]["rangeProof"] == "covered", slug
+        assert metrics["rangeProvenance"]["rangeProof"] == "covered", slug
         assert len(read_tape(slug)) == metrics["trades"], slug
     # t<k>: color.t of color.new(color.red, k) and of color.new(color.red, k + 0.5), ...
     sweep = {comment.split(":")[0]: comment.split(":")[1].split(",")

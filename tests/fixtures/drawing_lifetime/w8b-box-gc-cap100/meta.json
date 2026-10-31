@@ -2,7 +2,6 @@
   "title": "W8B readout: array-held boxes on a 100-box chart",
   "slug": "w8b-box-gc-cap100",
   "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
   "exportedAt": "2026-09-27T16:04:09.106Z",
   "chart": {
     "symbol": "BINANCE:ETHUSDT.P",

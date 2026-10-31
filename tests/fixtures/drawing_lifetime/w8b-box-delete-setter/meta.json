@@ -2,7 +2,6 @@
   "title": "W8B readout: setters and getters on deleted and collected boxes",
   "slug": "w8b-box-delete-setter",
   "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
   "exportedAt": "2026-09-27T16:23:20.887Z",
   "chart": {
     "symbol": "BINANCE:ETHUSDT.P",

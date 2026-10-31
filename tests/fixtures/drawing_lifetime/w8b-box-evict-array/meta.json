@@ -2,7 +2,6 @@
   "title": "W8B readout: array-held boxes max_boxes_count evicted",
   "slug": "w8b-box-evict-array",
   "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
   "exportedAt": "2026-09-27T16:02:56.031Z",
   "chart": {
     "symbol": "BINANCE:ETHUSDT.P",
