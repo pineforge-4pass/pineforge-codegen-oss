@@ -5802,6 +5802,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     cpp_type = "bool"
                 elif self._global_float_na_selection(name, ptype):
                     cpp_type = "double"
+                elif (int_selection := self._global_int_na_selection_cpp_type(name)) is not None:
+                    cpp_type = int_selection
                 elif (
                     name in self._direct_program_tuple_binding_names
                     and ptype == PineType.BOOL

@@ -620,15 +620,15 @@ plot(na(y) ? 1 : 0)
 _FLOAT_NA_TERNARY_ROWS = [
     pytest.param(
         "float y = close > open ? 1 : na\n",
-        "y = [&](){ auto _pf_w = (",
-        "? (1) : (na<int>())",
+        "y = ((",
+        "? (1) : (na<double>())",
         # The bear bar takes na; the bull bar takes the integer value 1.
         id="float-na-second",
     ),
     pytest.param(
         "float y = close < open ? na : 1\n",
-        "y = [&](){ auto _pf_w = (",
-        "? (na<int>()) : (1)",
+        "y = ((",
+        "? (na<double>()) : (1)",
         # The bear bar takes the first-arm na; the bull bar takes 1.
         id="float-na-first",
     ),
@@ -637,8 +637,8 @@ _FLOAT_NA_TERNARY_ROWS = [
         "    float local = cond ? 1 : na\n"
         "    local\n"
         "float y = choose_value(close > open)\n",
-        "double local = [&](){ auto _pf_w = (",
-        "? (1) : (na<int>())",
+        "double local = ((",
+        "? (1) : (na<double>())",
         # The function's float local holds na on the bear bar and 1 on the bull bar.
         id="function-local-float",
     ),
@@ -649,38 +649,38 @@ _FLOAT_NA_TERNARY_ROWS = [
         "    else\n"
         "        cond ? 1 : na\n"
         "float y = choose_value(close > open)\n",
-        "_func_ret = [&](){ auto _pf_w = (",
-        "? (1) : (na<int>())",
-        # The float function return promotes the bear branch's integer na to NaN.
+        "_func_ret = ((",
+        "? (1) : (na<double>())",
+        # The float function return keeps the bear branch's missing arm as NaN.
         id="float-function-return",
     ),
     pytest.param(
         "accept_float(float value) => value\n"
         "float y = accept_float(close > open ? k : na)\n",
-        "accept_float([&](){ auto _pf_w = (",
-        "? (k) : (na<int>())",
-        # k keeps its int sentinel while the float argument translates na to NaN.
+        "accept_float(((",
+        "? (k) : (na<double>())",
+        # k keeps its int sentinel while the float argument selects NaN or 1.
         id="int-sink-and-float-argument",
     ),
     pytest.param(
         "float y = float(close > open ? 1 : na)\n",
-        "(double)([&](){ auto _pf_w = (",
-        "? (1) : (na<int>())",
-        # An explicit float cast translates the selected int na to NaN.
+        "(double)(((",
+        "? (1) : (na<double>())",
+        # An explicit float cast keeps the selected NaN or 1.
         id="explicit-float-cast",
     ),
     pytest.param(
         "float y = 0.0\n"
         "y := close > open ? 1 : na\n",
-        "y = [&](){ auto _pf_w = (",
-        "? (1) : (na<int>())",
+        "y = ((",
+        "? (1) : (na<double>())",
         # Reassignment to a float slot preserves na and the bull bar's value 1.
         id="float-reassignment",
     ),
     pytest.param(
         "var float y = close > open ? 1 : na\n",
-        "y = [&](){ auto _pf_w = (",
-        "? (1) : (na<int>())",
+        "y = ((",
+        "? (1) : (na<double>())",
         # Each fresh strategy first reaches the persistent float on its only bar.
         id="persistent-float",
     ),
@@ -690,30 +690,30 @@ _FLOAT_NA_TERNARY_ROWS = [
         "float y = selected\n"
         "if not na(previous)\n"
         '    runtime.error("the first history slot must be na")\n',
-        "selected.push([&](){ auto _pf_w = (",
-        "? (1) : (na<int>())",
+        "selected.push(((",
+        "? (1) : (na<double>())",
         # The current float slot is na or 1; its first previous slot is always na.
         id="float-history-slot",
     ),
     pytest.param(
         "values = array.new<float>(1, close > open ? 1 : na)\n"
         "float y = values.get(0)\n",
-        "auto _pf_w = (",
-        "? (1) : (na<int>())",
+        "std::vector<double>",
+        "? (1) : (na<double>())",
         # The sole float array element is na on the bear bar and 1 on the bull bar.
         id="float-array-element",
     ),
     pytest.param(
         "float y = 0.0 + (close > open ? 1 : na)\n",
-        "(0.0 + [&](){ auto _pf_w = (",
-        "? (1) : (na<int>())",
+        "(0.0 + ((",
+        "? (1) : (na<double>())",
         # Adding zero to the promoted selection preserves NaN or the value 1.
         id="float-binary-operand",
     ),
     pytest.param(
         "float y = close == open ? 2.0 : (close > open ? 1 : na)\n",
-        ": ([&](){ auto _pf_w = (",
-        "? (1) : (na<int>())",
+        ": (((",
+        "? (1) : (na<double>())",
         # Both unequal-price bars take the inner int selection in a float ternary.
         id="nested-float-selection",
     ),
@@ -722,17 +722,17 @@ _FLOAT_NA_TERNARY_ROWS = [
         "    float value\n"
         "cell = Cell.new(close > open ? 1 : na)\n"
         "float y = cell.value\n",
-        ".value = [&](){ auto _pf_w = (",
-        "? (1) : (na<int>())",
-        # A float record field translates the selected integer sentinel to NaN.
+        ".value = ((",
+        "? (1) : (na<double>())",
+        # A float record field selects NaN or 1 without integer conversion.
         id="float-record-field",
     ),
     pytest.param(
         "float selected_time = close > open ? time : na\n"
         "float y = selected_time / 1700000000000.0\n",
-        "selected_time = [&](){ auto _pf_w = (",
-        "? (current_bar_.timestamp) : (na<int64_t>())",
-        # The exact timestamp divided by itself is 1; int64 na becomes NaN first.
+        "selected_time = ((",
+        "? (current_bar_.timestamp) : (na<double>())",
+        # The exact timestamp divided by itself is 1; the missing arm is NaN.
         id="wide-integer-selection",
     ),
     pytest.param(
@@ -740,8 +740,8 @@ _FLOAT_NA_TERNARY_ROWS = [
         "float y = close > open ? values.shift() : na\n"
         "if values.size() != (close > open ? 0 : 1)\n"
         '    runtime.error("selection evaluated an incorrect number of arms")\n',
-        "y = [&](){ auto _pf_w = (",
-        ": (na<int>())",
+        "y = ((",
+        ": (na<double>())",
         # Bear keeps the single element; bull shifts it once and returns 1.
         id="selected-arm-evaluated-once",
     ),
@@ -764,9 +764,9 @@ def test_float_na_ternary_preserves_the_integer_sentinel(
     cpp = transpile(_float_na_ternary_source(body))
     # A float sink stores double, including a hoisted initializer inferred as int.
     assert "double y =" in cpp
-    # The selected int is evaluated once before its sentinel becomes double NaN.
+    # The selected expression already has a NaN arm and needs no repair wrapper.
     assert conversion in cpp
-    assert "return is_na(_pf_w) ? na<double>() : (double)_pf_w;" in cpp
+    assert "auto _pf_w = (" not in cpp
     assert arms in cpp
     # The companion int sink still stores int and selects na<int>() on a bear bar.
     assert "int k = 0;" in cpp

@@ -1521,6 +1521,18 @@ class TypeInferer:
             )
         return False
 
+    @classmethod
+    def _ternary_contains_bare_na(cls, node: Ternary) -> bool:
+        """Look through ternary arms without widening implicit if/switch na."""
+        pending = [node]
+        while pending:
+            arm = pending.pop()
+            if isinstance(arm, Ternary):
+                pending.extend((arm.true_val, arm.false_val))
+            elif arm is not None and cls._selection_node_is_na(arm):
+                return True
+        return False
+
     def _selection_type_spec(
         self,
         branches: list[tuple[ASTNode | None, TypeSpec | None]],
@@ -3345,6 +3357,9 @@ class TypeInferer:
                 return "bool"
             if self._global_float_na_selection(name, gptype):
                 return "double"
+            int_selection = self._global_int_na_selection_cpp_type(name)
+            if int_selection is not None:
+                return int_selection
             if (name in getattr(self, "_direct_program_tuple_binding_names", ())
                     and gptype == PineType.BOOL):
                 return "bool"
@@ -3504,6 +3519,21 @@ class TypeInferer:
             and isinstance(expr, Ternary)
             and self._selection_contains_na(expr)
         )
+
+    def _global_int_na_selection_cpp_type(self, name: str) -> str | None:
+        """Keep a declared int target's storage for a nullable int ternary."""
+        expr = getattr(self.ctx, "global_expr_map", {}).get(name)
+        if not (isinstance(expr, Ternary) and self._selection_contains_na(expr)):
+            return None
+        if not any(
+            isinstance(stmt, VarDecl)
+            and stmt.name == name
+            and stmt.type_hint == "int"
+            for stmt in self.ctx.ast.body
+        ):
+            return None
+        cpp_type = self._infer_type(expr, _integer_na_context=True)
+        return cpp_type if cpp_type in NA_PRESERVING_INT_TYPES else None
 
     def _int_slot_cpp_type(self, name: str | None,
                            declared: str | None = None) -> str | None:
@@ -3682,12 +3712,12 @@ class TypeInferer:
         ``Cell.new(v = bar_index)``) cannot narrow a non-constant ``int`` or
         ``int64_t`` there, which did not compile; TradingView holds the
         number, an integer na as na (fixtures/array_history_tv uctor_float).
-        A nullable integer ternary also needs this conversion at a float sink.
+        Packed colors in a nullable ternary still need an integer-na conversion.
         A double, an integer literal or an expression of literals (a constant
         a double holds exactly narrows) and a bare na keep their spelling."""
         constant = self._pure_int_literal_value(node)
-        # A bare na arm adopts its concrete integer peer's type. Its emitted
-        # ternary is integral even though the standalone na would be double.
+        # Integral selections such as packed colors retain a typed sentinel;
+        # ordinary nullable numeric ternaries already emit a floating NaN.
         nullable_int_selection = (
             isinstance(node, Ternary)
             and self._selection_contains_na(node)
@@ -3966,6 +3996,7 @@ class TypeInferer:
         node,
         *,
         _ternary_types: dict[int, tuple[TypeSpec | None, bool]] | None = None,
+        _integer_na_context: bool = False,
     ) -> str:
         """Infer the C++ type for an expression node — workhorse used everywhere.
 
@@ -4223,14 +4254,33 @@ class TypeInferer:
                          or (ternary_spec.kind == "udt"
                              and ternary_spec.name in DRAWING_TYPE_TO_CPP))):
                 cpp_type = self._type_spec_to_cpp(ternary_spec)
+                if (nullable and ternary_spec.kind == "primitive"
+                        and ternary_spec.name in {"int", "int64"}
+                        and not _integer_na_context
+                        and self._ternary_contains_bare_na(node)):
+                    # An integer arm alone does not prove integer storage.
+                    # Keep bare na as NaN until an integer target is known.
+                    return "double"
                 if cpp_type == "int" and "int64_t" in (
-                    self._infer_type(node.true_val, _ternary_types=_ternary_types),
-                    self._infer_type(node.false_val, _ternary_types=_ternary_types),
+                    self._infer_type(
+                        node.true_val, _ternary_types=_ternary_types,
+                        _integer_na_context=_integer_na_context,
+                    ),
+                    self._infer_type(
+                        node.false_val, _ternary_types=_ternary_types,
+                        _integer_na_context=_integer_na_context,
+                    ),
                 ):
                     return "int64_t"
                 return cpp_type
-            tt = self._infer_type(node.true_val, _ternary_types=_ternary_types)
-            ft = self._infer_type(node.false_val, _ternary_types=_ternary_types)
+            tt = self._infer_type(
+                node.true_val, _ternary_types=_ternary_types,
+                _integer_na_context=_integer_na_context,
+            )
+            ft = self._infer_type(
+                node.false_val, _ternary_types=_ternary_types,
+                _integer_na_context=_integer_na_context,
+            )
             if tt.startswith("std::vector") or ft.startswith("std::vector"):
                 return tt if tt.startswith("std::vector") else ft
             if tt == "std::string" or ft == "std::string":

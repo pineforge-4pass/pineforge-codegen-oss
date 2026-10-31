@@ -317,13 +317,17 @@ class ExprVisitor:
     # keep their historical spelling byte for byte.
     _FLAT_TERNARY_CHAIN = 32
 
-    def _visit_ternary(self, node: Ternary) -> str:
+    def _visit_ternary(
+        self, node: Ternary, target_cpp_type: str | None = None,
+    ) -> str:
         links = [node]
         while isinstance(links[-1].false_val, Ternary):
             links.append(links[-1].false_val)
         string_na = self._ternary_string_na(links)
         ternary_cpp_type = (
-            self._infer_type(node)
+            self._infer_type(
+                node, _integer_na_context=target_cpp_type in ("int", "int64_t"),
+            )
             if self._selection_contains_na(node)
             else None
         )
@@ -386,10 +390,10 @@ class ExprVisitor:
                 arm,
                 target_cpp_type=target_cpp_type,
             )
-        if (target_cpp_type == "double"
+        if (target_cpp_type in ("double", "int", "int64_t")
                 and isinstance(arm, Ternary)
                 and self._selection_contains_na(arm)):
-            return self._visit_rhs_value(arm, target_cpp_type="double")
+            return self._visit_rhs_value(arm, target_cpp_type=target_cpp_type)
         if string_na and self._is_na_expr(arm):
             return "na<std::string>()"
         return self._visit_expr(arm)
@@ -486,8 +490,8 @@ class ExprVisitor:
         ``std::string``/``int``/``int64_t``/``bool`` use ``na<T>()``. Without
         this, ``State s = na;`` and ``string x = na;`` would both emit
         ``na<double>()`` and fail to compile (no viable assignment/conversion).
-        A nullable integer ternary reaching a float slot translates its integer
-        na sentinel to NaN after evaluating the selection once.
+        A nullable numeric ternary keeps its floating NaN unless an integer
+        target supplies the integer representation for its missing arm.
         """
         if (isinstance(value_node, Ternary)
                 and self._selection_contains_na(value_node)):
@@ -499,6 +503,10 @@ class ExprVisitor:
             if scalar_target == "double":
                 return self._coerce_double_slot(
                     self._visit_expr(value_node), value_node
+                )
+            if scalar_target in ("int", "int64_t"):
+                return self._visit_ternary(
+                    value_node, target_cpp_type=scalar_target,
                 )
         udt_target = None
         if (target_cpp_type in self._udt_defs
@@ -1558,6 +1566,9 @@ class ExprVisitor:
         orders it by (``_nonfinite_int_read``)."""
         if self._is_na_expr(operand):
             other_cpp_type = self._infer_type(other)
+            if op == "+" and other_cpp_type == "std::string":
+                # String concatenation formats numeric na as "nan".
+                return self._visit_expr(operand)
             if other_cpp_type in ("int", "int64_t"):
                 # A numeric peer does not prove an integer type for bare na.
                 # Arithmetic and float comparisons need the floating NaN.
