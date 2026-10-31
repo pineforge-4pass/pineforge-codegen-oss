@@ -44,7 +44,7 @@ def _assert_lexer_refusal(error, message, col, end_col):
 
 @pytest.mark.parametrize("version,message,col,end_col", NON_ASCII_VERSIONS)
 @pytest.mark.parametrize("suffix", ["", " as S", " as ta"])
-def test_non_ascii_import_version_is_refused_before_parsing(version, message, col, end_col):
+def test_non_ascii_import_version_is_refused_before_parsing(version, message, col, end_col, suffix):
     source = PRELUDE + f"import user/lib/{version}{suffix}\n"
     with pytest.raises(CompileError) as error:
         Parser(Lexer(source, filename="versions.pine").tokenize(), source=source).parse()
