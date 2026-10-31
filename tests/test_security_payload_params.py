@@ -117,9 +117,6 @@ def test_bare_reads_used_to_be_unknown_variables(payload, lowered):
     'prev = close[1]\n'
     'g(_e) => request.security(syminfo.tickerid, "D", _e[1])\nx = g(prev)\n',
     'g(_e) => request.security(syminfo.tickerid, "D", _e[1])\nx = g(ta.sma(close, 5)[1])\n',
-    # An overloaded helper on the path.
-    'g(float _e) => request.security(syminfo.tickerid, "D", _e[1])\n'
-    'h(float x) => g(x)\nh(float x, float y) => x * y\nx = h(close)\n',
     # A global holding a math call (one holding an operator expression is
     # put in: tests/test_security_global_history.py).
     'am = math.abs(close - open)\n'
@@ -202,11 +199,13 @@ def test_bare_reads_the_builder_cannot_lower_stay_unknown_variables(body):
         transpile(PRELUDE + body + TRADE)
 
 
-def test_overloaded_helper_carrying_a_context_is_refused():
-    with pytest.raises(CompileError, match="helper 'h' is overloaded"):
-        transpile(PRELUDE + (
-            'g(tf) => request.security(syminfo.tickerid, tf, close)\n'
-            'h(string tf) => g(tf)\nh(string tf, float y) => y\nx = h("60")\n') + TRADE)
+def test_proven_overloaded_helper_carrying_a_context_resolves():
+    cpp = transpile(PRELUDE + (
+        'g(tf) => request.security(syminfo.tickerid, tf, close)\n'
+        'h(string tf) => g(tf)\nh(string tf, float y) => y\nx = h("60")\n') + TRADE)
+    # The string call selects the first overload and specializes its request to the literal timeframe.
+    assert "pf_overload_h_1" in cpp
+    assert 'register_security_eval(0, "60", input_tf_, false, false);' in cpp
 
 
 @pytest.mark.parametrize("body, read", [
@@ -244,12 +243,26 @@ def test_helper_copies_warn_once_under_the_helpers_name():
     assert len(warned) == 1 and "parameter of 'g'" in warned[0]
 
 
-def test_overloaded_payload_helper_keeps_its_refusal():
-    # Every earlier build refused the length (a located error, not a crash).
-    with pytest.raises(CompileError, match="Unsupported TA constructor length 'n'"):
-        transpile(PRELUDE + (
-            'g(int n) => request.security(syminfo.tickerid, "D", ta.sma(close, n))\n'
-            'g(float a, float b) => a * b\nx = g(5) + g(close, open)\n') + TRADE)
+def test_proven_overloaded_payload_helper_resolves_its_length():
+    cpp = transpile(PRELUDE + (
+        'g(int n) => request.security(syminfo.tickerid, "D", ta.sma(close, n))\n'
+        'g(float a, float b) => a * b\nx = g(5) + g(close, open)\n') + TRADE)
+    # The integer call selects the length-bearing overload, so its literal length sizes the requested SMA.
+    assert "pf_overload_g_1" in cpp
+    assert "_sec0__ta_sma_" in cpp
+
+
+def test_proven_overloaded_payload_value_rebinds_requested_history():
+    body = (
+        'g(float _e) => request.security(syminfo.tickerid, "D", _e[1])\n'
+        'h(float x) => g(x)\nh(float x, float y) => x * y\nx = h(close)\n'
+    )
+    result = transpile_full(PRELUDE + body + TRADE)
+    # The selected float overload passes close into the requested evaluator, which reads one requested bar of history.
+    assert _evaluators(result["cpp"]) == [
+        "_req_sec_0 = _sec0_hist_close[0]; if (is_complete) { _sec0_hist_close.push(bar.close); }"
+    ]
+    assert not any(d.message.endswith(UNBOUND) for d in result["diagnostics"])
 
 
 def test_a_helper_nothing_reaches_does_not_warn():

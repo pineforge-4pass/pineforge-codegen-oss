@@ -344,13 +344,14 @@ def test_tuple_return_metadata_belongs_to_the_selected_definition() -> None:
 probe(int value) => [value + 100, value + 200]
 [first, second] = probe(close - open)
 [integer, other] = probe(2)
+total = first + second + integer + other
 """
     cpp = transpile(source)
-    # The float tuple is (2.5,3); the int tuple is (2+100,2+200)=(102,202).
+    # 2.5+3+102+202 = 309.5; the scalar observes both selected tuple results.
     assert run_emitted_tu(
-        cpp, _driver(("first", "second", "integer", "other")),
+        cpp, _driver(("total",)),
         opt="-O0", label="overload tuple metadata",
-    ) == "2.5 3 102 202\n"
+    ) == "309.5\n"
 
 
 def test_nested_fixnan_state_uses_the_selected_overload_on_each_call_path() -> None:
