@@ -361,15 +361,61 @@ def test_bool_value_refuses_bare_na(body: str, line: int, col: int, end_col: int
             'plot(nz(map.get(m, "k")))\n',
             id="float-map-put-na",
         ),
-        # Testing a bool with na() stays outside the two refusal rules.
-        pytest.param("bool b = false\nx = na(b)\nplot(x ? 1 : 0)\n", id="na-of-bool"),
-        # Replacing a bool with nz() stays outside the two refusal rules.
-        pytest.param("bool b = false\nx = nz(b)\nplot(x ? 1 : 0)\n", id="nz-of-bool"),
     ],
 )
 def test_other_na_and_bool_shapes_compile(body: str, request: pytest.FixtureRequest) -> None:
     cpp = transpile(HEADER + body)
     compile_cpp(cpp, label=request.node.name)
+
+
+@pytest.mark.parametrize(
+    "body,code,message,arguments,line,col,end_col",
+    [
+        pytest.param(
+            # Hand-derived: na(bool) is PF-E2072 at the bool argument.
+            "bool b = false\nx = na(b)\nplot(x ? 1 : 0)\n",
+            "PF-E2072",
+            "Cannot call 'na' with a bool argument: Pine v6 bool values cannot be na.",
+            {},
+            4,
+            8,
+            9,  # The one-character bool argument starts after "x = na(".
+            id="na-of-bool",
+        ),
+        pytest.param(
+            # Hand-derived: nz(bool) is PF-E2071 at the bool argument.
+            "bool b = false\nx = nz(b)\nplot(x ? 1 : 0)\n",
+            "PF-E2071",
+            "Cannot call 'nz' with a bool argument: its source must be a numeric or color series.",
+            {"callee_name": "nz"},
+            4,
+            8,
+            9,  # The one-character bool argument starts after "x = nz(".
+            id="nz-of-bool",
+        ),
+    ],
+)
+def test_bool_observers_refuse_bool_sources(
+    body: str,
+    code: str,
+    message: str,
+    arguments: dict,
+    line: int,
+    col: int,
+    end_col: int,
+) -> None:
+    with pytest.raises(CompileError) as caught:
+        transpile(HEADER + body, filename="boolean.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.phase == Phase.ANALYZER
+    assert diagnostic.code == code
+    assert diagnostic.args == arguments
+    assert diagnostic.message == message
+    assert diagnostic.location.file == "boolean.pine"
+    assert (diagnostic.location.line, diagnostic.location.col) == (line, col)
+    assert diagnostic.location.end_col == end_col
 
 
 @pytest.mark.parametrize(

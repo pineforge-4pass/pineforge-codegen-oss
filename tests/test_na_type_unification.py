@@ -433,15 +433,40 @@ bool_equal = current_bool == bool_is_na
 color current_color = color.red
 color_is_na = comparisons.tint(current_color)
 """
-    # Direct-na comparisons remain available for numeric and string v5 inputs.
     library = """//@version=5
 library("NaComparisons")
 export text(string value) => value == na
 export integer(int value) => value == na
 export tint(color value) => value == na
 """
+    # Hand-derived: na(current_bool) is PF-E2072 at line 22, column 17.
+    with pytest.raises(CompileError) as caught:
+        transpile(
+            _script(source),
+            filename="na-type.pine",
+            libraries={"examples/NaComparisons/1": library},
+        )
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.phase == Phase.ANALYZER
+    assert diagnostic.code == "PF-E2072"
+    assert diagnostic.args == {}
+    assert diagnostic.message == (
+        "Cannot call 'na' with a bool argument: "
+        "Pine v6 bool values cannot be na."
+    )
+    assert diagnostic.location.file == "na-type.pine"
+    assert (diagnostic.location.line, diagnostic.location.col) == (22, 17)
+    assert diagnostic.location.end_col == 29
+
+    # A numeric source produces the same bool predicate for the valid companion.
+    valid_source = source.replace(
+        "bool_is_na = na(current_bool)",
+        "bool_is_na = na(current_int)",
+    )
     cpp = transpile(
-        _script(source), libraries={"examples/NaComparisons/1": library},
+        _script(valid_source), libraries={"examples/NaComparisons/1": library},
     )
     # Hand-derived: typed parameters and comparison operands keep their authored types.
     assert "std::string take_text(" in cpp

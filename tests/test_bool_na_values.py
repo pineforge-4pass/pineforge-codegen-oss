@@ -274,18 +274,6 @@ if bar_index % 20 == 15
     [
         # A missing else retains the bool type supplied by the true branch.
         pytest.param(MISSING_ELSE, id="missing-else"),
-        # A concrete bool branch also types an explicitly missing opposite branch.
-        pytest.param(
-            HEADER + "choose(bool c) =>\n    if c\n        true\n"
-            "    else\n        na\nx = choose(close > open)\nplot(x ? 1 : 0)\n",
-            id="bool-and-na-return-paths",
-        ),
-        # Reversing the branches still provides a concrete bool return type.
-        pytest.param(
-            HEADER + "choose(bool c) =>\n    if c\n        na\n"
-            "    else\n        true\nx = choose(close > open)\nplot(x ? 1 : 0)\n",
-            id="na-and-bool-return-paths",
-        ),
         # A bool method tail with an implicit missing else retains its type.
         pytest.param(
             HEADER + "method choose(bool self) =>\n    if self\n        true\n"
@@ -386,25 +374,10 @@ if bar_index % 20 == 15
             HEADER + 'b = input.bool(false, "Flag")\nplot(b ? 1 : 0)\n',
             id="bool-input-false",
         ),
-        # A constructor argument for a bool field retains its existing behavior.
-        pytest.param(
-            HEADER + "type Box\n    bool flag\nb = Box.new(na)\nplot(b.flag ? 1 : 0)\n",
-            id="bool-field-constructor",
-        ),
         # A user type's bool field default is outside parameter declarations.
         pytest.param(
             HEADER + "type Box\n    bool flag = na\nb = Box.new()\nplot(b.flag ? 1 : 0)\n",
             id="bool-field-default",
-        ),
-        # A call to na on a bool stays outside every bare-na boundary check.
-        pytest.param(
-            HEADER + "bool b = false\nx = na(b)\nplot(x ? 1 : 0)\n",
-            id="na-call-on-bool",
-        ),
-        # A call to nz on a bool keeps its existing lowering.
-        pytest.param(
-            HEADER + "bool b = false\nx = nz(b)\nplot(x ? 1 : 0)\n",
-            id="nz-call-on-bool",
         ),
         # A bare na condition keeps its existing numeric truth conversion.
         pytest.param(
@@ -418,6 +391,92 @@ def test_other_missing_values_still_compile(
 ) -> None:
     cpp = transpile(source)
     compile_cpp(cpp, label=request.node.name)
+
+
+@pytest.mark.parametrize(
+    "source,code,message,arguments,line,col,end_col",
+    [
+        pytest.param(
+            # Hand-derived: the else na is PF-E2068 at line 7, column 9.
+            HEADER + "choose(bool c) =>\n    if c\n        true\n"
+            "    else\n        na\nx = choose(close > open)\nplot(x ? 1 : 0)\n",
+            "PF-E2068",
+            "A bool result cannot be na in an if or switch expression in Pine v6.",
+            {},
+            7,
+            9,
+            11,  # Eight spaces put the two-character na at columns 9 through 10.
+            id="bool-and-na-return-paths",
+        ),
+        pytest.param(
+            # Hand-derived: the true-arm na is PF-E2068 at line 5, column 9.
+            HEADER + "choose(bool c) =>\n    if c\n        na\n"
+            "    else\n        true\nx = choose(close > open)\nplot(x ? 1 : 0)\n",
+            "PF-E2068",
+            "A bool result cannot be na in an if or switch expression in Pine v6.",
+            {},
+            5,
+            9,
+            11,  # The reversed branch has its na at the same indented column.
+            id="na-and-bool-return-paths",
+        ),
+        pytest.param(
+            # Hand-derived: Box.new's bool-field na is PF-E2069 at column 13.
+            HEADER + "type Box\n    bool flag\nb = Box.new(na)\n"
+            "plot(b.flag ? 1 : 0)\n",
+            "PF-E2069",
+            "Cannot call 'Box.new' with a bare na value for bool field 'flag'.",
+            {"callee_name": "Box.new", "field_name": "flag"},
+            5,
+            13,
+            15,  # The two-character constructor na starts after "b = Box.new(".
+            id="bool-field-constructor",
+        ),
+        pytest.param(
+            # Hand-derived: na(bool) is PF-E2072 at line 4, column 8.
+            HEADER + "bool b = false\nx = na(b)\nplot(x ? 1 : 0)\n",
+            "PF-E2072",
+            "Cannot call 'na' with a bool argument: Pine v6 bool values cannot be na.",
+            {},
+            4,
+            8,
+            9,  # The bool argument starts after "x = na(".
+            id="na-call-on-bool",
+        ),
+        pytest.param(
+            # Hand-derived: nz(bool) is PF-E2071 at line 4, column 8.
+            HEADER + "bool b = false\nx = nz(b)\nplot(x ? 1 : 0)\n",
+            "PF-E2071",
+            "Cannot call 'nz' with a bool argument: its source must be a numeric or color series.",
+            {"callee_name": "nz"},
+            4,
+            8,
+            9,  # The bool argument starts after "x = nz(".
+            id="nz-call-on-bool",
+        ),
+    ],
+)
+def test_bool_na_boundaries_refuse_invalid_values(
+    source: str,
+    code: str,
+    message: str,
+    arguments: dict,
+    line: int,
+    col: int,
+    end_col: int,
+) -> None:
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="boolean-values.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.phase == Phase.ANALYZER
+    assert diagnostic.code == code
+    assert diagnostic.args == arguments
+    assert diagnostic.message == message
+    assert diagnostic.location.file == "boolean-values.pine"
+    assert (diagnostic.location.line, diagnostic.location.col) == (line, col)
+    assert diagnostic.location.end_col == end_col
 
 
 @pytest.mark.parametrize(

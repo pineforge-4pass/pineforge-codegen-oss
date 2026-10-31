@@ -5859,7 +5859,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 and isinstance(callee.object, Identifier)
             ):
                 if callee.object.name == "math":
-                    return PineType.FLOAT
+                    math_type = sigs.get_return_type(
+                        "math",
+                        callee.member,
+                        len(node.args) + len(node.kwargs),
+                    )
+                    return (
+                        math_type
+                        if math_type != PineType.UNKNOWN
+                        else PineType.FLOAT
+                    )
                 if callee.object.name == "str":
                     if callee.member in ("contains", "startswith", "endswith"):
                         return PineType.BOOL

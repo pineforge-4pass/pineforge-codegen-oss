@@ -584,34 +584,14 @@ LEGACY_CASES = [
         id="bool-switch-result-legacy",
     ),
     pytest.param(
-        "export check(bool flag) => fixnan(flag)\n",
-        "value = legacy.check(true)\nplot(value ? 1 : 0)\n",
-        id="fixnan-bool-legacy",
-    ),
-    pytest.param(
         "export check(int value) => value + 1\n",
         "result = legacy.check(1.5)\nplot(result)\n",
         id="int-parameter-float-legacy",
     ),
     pytest.param(
-        "export check(bool flag) => na(flag)\n",
-        "value = legacy.check(true)\nplot(value ? 1 : 0)\n",
-        id="na-bool-legacy",
-    ),
-    pytest.param(
-        "export check(bool flag) => nz(flag)\n",
-        "value = legacy.check(true)\nplot(value ? 1 : 0)\n",
-        id="nz-bool-legacy",
-    ),
-    pytest.param(
         'export check() => "a" + 1\n',
         "value = legacy.check()\nplot(str.length(value))\n",
         id="string-number-addition-legacy",
-    ),
-    pytest.param(
-        "export check(bool flag) => na(flag)\n",
-        "value = legacy.check(true)\nplot(value ? 1 : 0)\n",
-        id="na-bool-selection-legacy",
     ),
 ]
 
@@ -626,3 +606,87 @@ def test_imported_v5_definitions_keep_their_lowering(
     )
     library = '//@version=5\nlibrary("Legacy")\n' + library_body
     assert transpile(source, libraries={"local/Legacy/1": library})
+
+
+LEGACY_REFUSALS = [
+    pytest.param(
+        # Hand-derived: the existing v5 fixnan observer gate is PF-E5046 at 3:34.
+        "export check(bool flag) => fixnan(flag)\n",
+        "value = legacy.check(true)\nplot(value ? 1 : 0)\n",
+        "fixnan",
+        "library 'local/Legacy/1' is //@version=5: fixnan() of a bool reads "
+        "v5's third bool state (na), which PineForge's two-state bool does not keep",
+        3,
+        34,
+        35,  # The call's opening parenthesis is column 34.
+        id="fixnan-bool-legacy",
+    ),
+    pytest.param(
+        # Hand-derived: the existing v5 na observer gate is PF-E5046 at 3:30.
+        "export check(bool flag) => na(flag)\n",
+        "value = legacy.check(true)\nplot(value ? 1 : 0)\n",
+        "na",
+        "library 'local/Legacy/1' is //@version=5: na() of a bool reads "
+        "v5's third bool state (na), which PineForge's two-state bool does not keep",
+        3,
+        30,
+        31,  # The na call's opening parenthesis is column 30.
+        id="na-bool-legacy",
+    ),
+    pytest.param(
+        # Hand-derived: the existing v5 nz observer gate is PF-E5046 at 3:30.
+        "export check(bool flag) => nz(flag)\n",
+        "value = legacy.check(true)\nplot(value ? 1 : 0)\n",
+        "nz",
+        "library 'local/Legacy/1' is //@version=5: nz() of a bool reads "
+        "v5's third bool state (na), which PineForge's two-state bool does not keep",
+        3,
+        30,
+        31,  # The nz call's opening parenthesis is column 30.
+        id="nz-bool-legacy",
+    ),
+    pytest.param(
+        # Hand-derived: this second na observer row has the same PF-E5046 span.
+        "export check(bool flag) => na(flag)\n",
+        "value = legacy.check(true)\nplot(value ? 1 : 0)\n",
+        "na",
+        "library 'local/Legacy/1' is //@version=5: na() of a bool reads "
+        "v5's third bool state (na), which PineForge's two-state bool does not keep",
+        3,
+        30,
+        31,  # The selection row uses the same observer call location.
+        id="na-bool-selection-legacy",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "library_body,call_body,function_name,message,line,col,end_col",
+    LEGACY_REFUSALS,
+)
+def test_imported_v5_bool_observers_keep_the_existing_refusal(
+    library_body: str,
+    call_body: str,
+    function_name: str,
+    message: str,
+    line: int,
+    col: int,
+    end_col: int,
+) -> None:
+    source = _source(
+        "import local/Legacy/1 as legacy\n"
+        + call_body
+    )
+    library = '//@version=5\nlibrary("Legacy")\n' + library_body
+    with pytest.raises(CompileError) as caught:
+        transpile(source, libraries={"local/Legacy/1": library})
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.phase == Phase.CODEGEN
+    assert diagnostic.code == "PF-E5046"
+    assert diagnostic.message == message
+    assert f"{function_name}()" in diagnostic.message
+    assert diagnostic.location.file == "local/Legacy/1"
+    assert (diagnostic.location.line, diagnostic.location.col) == (line, col)
+    assert diagnostic.location.end_col == end_col
