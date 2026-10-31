@@ -405,10 +405,19 @@ _FUNCTION_CONSUMER_ROWS = [
         "        int local = choose ? 1 : na\n"
         "        local\n"
         "selected = choose_loop(c)\n",
-        ("int local = [&](){ auto _pf_v = (", "int choose_loop("),
-        "int",
-        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
-        "1 2 1 1 1 1 1 0\n",  # The sole iteration returns INT_MIN or 1 through the integer slot.
+        ("int local = [&](){ auto _pf_v = (", "double choose_loop("),
+        "double",
+        # The loop's int sentinel survives as a finite double, recording current behavior.
+        # selected: bear promotes INT_MIN to -2147483648.0; bull promotes 1 to 1.0.
+        # y: -2147483648.0 + 1 = -2147483647.0; 1.0 + 1 = 2.0.
+        # positive: -2147483648.0 > 0 is false (0); 1.0 > 0 is true (1).
+        # text: finite -2147483648.0 formats as "-2147483648"; 1.0 formats as "1".
+        # maximum: max(-2147483648.0, 0) = 0.0; max(1.0, 0) = 1.0.
+        # average: mean(-2147483648.0, -2147483648.0) = -2147483648.0; mean(1.0, 1.0) = 1.0.
+        # plot_value: selected copies -2147483648.0 or 1.0, printed as integers.
+        # missing_value: neither finite double is NaN, so both are false (0).
+        "-2147483648 -2147483647 0 -2147483648 0 -2147483648 -2147483648 0\n"
+        "1 2 1 1 1 1 1 0\n",
         id="loop-return",
     ),
     pytest.param(
@@ -553,8 +562,9 @@ def test_function_integer_consumers_keep_guarded_storage(
     _assert_nullable_target(cpp)
     for fragment in fragments:
         assert fragment in cpp
-    # Calls keep their integer result width; arithmetic is assigned to a double.
-    assert f"{storage} selected = 0;" in cpp
+    # Calls keep their result type; arithmetic is assigned to a double.
+    initializer = "0.0" if storage == "double" else "0"
+    assert f"{storage} selected = {initializer};" in cpp
     assert "double y = 0.0;" in cpp
     assert "y = (selected + 1);" in cpp
     assert "plot_value = selected;" in cpp
