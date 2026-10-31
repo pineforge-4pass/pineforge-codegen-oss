@@ -76,7 +76,7 @@ def test_not_rejects_proven_numeric_operands(
         source,
         "PF-E2048",
         f"The not operator requires a bool operand; found {operand_type}.",
-        {"certain_type": operand_type},
+        {"operand_type": operand_type},
         line,
         col,
     )

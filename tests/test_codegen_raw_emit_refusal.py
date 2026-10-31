@@ -131,8 +131,8 @@ def test_string_template_argument_is_never_a_type() -> None:
     # appears in code (literals are blanked by cpp_code_only()).
     # A v5 definition keeps this string-ordering vehicle available.
     source = (
-        HEAD + "import examples/TemplateText/1 as text\n"
-        "a = text.value()\n"
+        HEAD + "import examples/TemplateText/1 as tmpl\n"
+        "a = tmpl.value()\n"
     )
     library = (
         '//@version=5\nlibrary("TemplateText")\n'
