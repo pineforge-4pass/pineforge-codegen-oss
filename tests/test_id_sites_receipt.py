@@ -54,9 +54,11 @@ def expected_receipt(fresh) -> str:
     return json.dumps({"strategy": {"ids": ids}, "version": 1}, sort_keys=True, separators=(",", ":"))
 
 
-def transpiled(source: str) -> str:
+def transpiled(source: str, *, libraries=None) -> str:
     try:
-        return transpile(source)
+        if libraries is None:
+            return transpile(source)
+        return transpile(source, libraries=libraries)
     except Exception as error:
         # A fixture the transpiler refuses says nothing about the export: report it as its own failure.
         pytest.fail("fixture does not transpile on this build, so it cannot show the id-sites receipt: "
@@ -97,7 +99,7 @@ def function_body(cpp: str, opening: int) -> str:
 
 def receipt_text(source: str) -> str:
     """The document text ``strategy_id_sites_receipt`` hands to ``checked_settings::receipt``."""
-    cpp = transpiled(source)
+    cpp = transpiled(source, libraries=RECEIPT_LIBRARIES)
     definition = require_export(cpp, "strategy_id_sites_receipt", RECEIPT_DEFINITION)
     call = RECEIPT_CALL.search(function_body(cpp, definition.start()))
     if call is None:
@@ -176,11 +178,8 @@ while count < bar_index % 3
     count += 1
 '''
 
-RECURSIVE_FUNCTION = '''countdown(int n) =>
-    strategy.entry("R" + str.tostring(n), strategy.long)
-    n <= 0 ? 0 : countdown_next(n - 1)
-countdown_next(int n) => countdown(n)
-total = countdown(2)
+RECURSIVE_FUNCTION = '''import examples/ReceiptCycles/1 as cycles
+total = cycles.countdown(2)
 '''
 
 # The id-site cases, (a) to (j): the lowered sites that create a computed id.
@@ -519,11 +518,22 @@ REVERSE_FIVE_FOR_LOOP = '''for i = 5 to 1
 '''
 
 # The two helpers call each other without an order call, so the cycle reaches no counted site.
-QUIET_RECURSION = '''quiet(int n) =>
+QUIET_RECURSION = '''import examples/ReceiptCycles/1 as cycles
+settled = cycles.quiet(3)
+'''
+
+RECEIPT_LIBRARIES = {
+    "examples/ReceiptCycles/1": '''//@version=5
+library("ReceiptCycles")
+export countdown(int n) =>
+    strategy.entry("R" + str.tostring(n), strategy.long)
+    n <= 0 ? 0 : countdown_next(n - 1)
+countdown_next(int n) => countdown(n)
+export quiet(int n) =>
     n <= 0 ? 0 : quiet_next(n - 1)
 quiet_next(int n) => quiet(n)
-settled = quiet(3)
-'''
+''',
+}
 
 GLOBAL_CONSTANT_BOUND = '''n = 3
 for i = 1 to n

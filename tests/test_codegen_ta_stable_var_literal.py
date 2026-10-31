@@ -372,15 +372,19 @@ def test_callable_parameter_reassignment_fences_literal_specialization(
 ) -> None:
     source = f'''//@version=6
 strategy("reassigned helper parameter")
+import examples/Reassigned/1 as reassigned
 var int p = 5
-requested(int q) =>
+observed = reassigned.requested(p)
+'''
+    library = f'''//@version=5
+library("Reassigned")
+export requested(int q) =>
     {reassignment}
     ta.sma(close, q)
-observed = requested(p)
 '''
 
     with pytest.raises(CompileError) as caught:
-        transpile(source)
+        transpile(source, libraries={"examples/Reassigned/1": library})
 
     assert len(caught.value.diagnostics) == 1
     diagnostic = caught.value.diagnostics[0]

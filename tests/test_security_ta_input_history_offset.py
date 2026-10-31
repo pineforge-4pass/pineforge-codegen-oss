@@ -399,18 +399,22 @@ def test_containing_udf_parameter_reassignment_fails_closed(
 ):
     src = f'''//@version=6
 strategy("reassigned containing helper offset")
-requested(int idx) =>
+import examples/SecurityOffset/1 as offsetlib
+k = input.int(2, "Offset")
+x = offsetlib.requested(k)
+plot(x)
+'''
+    library = f'''//@version=5
+library("SecurityOffset")
+export requested(int idx) =>
     {reassignment}
     request.security(syminfo.tickerid, "60", ta.ema(close, 5)[idx])
-k = input.int(2, "Offset")
-x = requested(k)
-plot(x)
 '''
     with pytest.raises(
         CompileError,
         match=r"TA history index must be a literal integer",
     ):
-        transpile(src)
+        transpile(src, libraries={"examples/SecurityOffset/1": library})
 
 
 def test_containing_udf_parameter_reassignment_after_request_fails_closed():
@@ -419,19 +423,23 @@ def test_containing_udf_parameter_reassignment_after_request_fails_closed():
     # the request expression in authored statement order.
     src = """//@version=6
 strategy("post-use reassigned containing helper offset")
-requested(int idx) =>
+import examples/SecurityOffset/1 as offsetlib
+k = input.int(2, "Offset")
+x = offsetlib.requested(k)
+plot(x)
+"""
+    library = '''//@version=5
+library("SecurityOffset")
+export requested(int idx) =>
     out = request.security(syminfo.tickerid, "60", ta.ema(close, 5)[idx])
     idx := 1
     out
-k = input.int(2, "Offset")
-x = requested(k)
-plot(x)
-"""
+'''
     with pytest.raises(
         CompileError,
         match=r"TA history index must be a literal integer",
     ):
-        transpile(src)
+        transpile(src, libraries={"examples/SecurityOffset/1": library})
 
 
 @pytest.mark.parametrize(

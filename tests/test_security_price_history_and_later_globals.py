@@ -47,6 +47,17 @@ XSYM_A2_TV = Path(__file__).parent / "fixtures" / "xsym_a2_tv"
 PRELUDE = '//@version=6\nstrategy("T")\n'
 TRADE = 'if x > close\n    strategy.entry("L", strategy.long)\n'
 UNBOUND = "whose argument PineForge does not recompute on the requested bars: it reads na"
+LATER_LIBRARIES = {
+    "examples/LaterGlobals/1": '''//@version=5
+library("LaterGlobals")
+export read_price(float _e) =>
+    request.security(syminfo.tickerid, "D", _e[1])
+export request_sma(float _v, int n) =>
+    request.security(syminfo.tickerid, "240", ta.sma(_v, n))
+export request_ema(float _e, float _f) =>
+    request.security(syminfo.tickerid, "60", ta.ema(_e[1] + _f, 3))
+''',
+}
 
 
 def _evaluators(cpp: str) -> list[str]:
@@ -89,14 +100,18 @@ def test_chart_hlcc4_history_compiles():
     compile_cpp(cpp, label="chart hlcc4 history")
 
 
-LATER = ('g(_e) => request.security(syminfo.tickerid, "D", _e[1])\n'
-         'h(_v, n) => request.security(syminfo.tickerid, "240", ta.sma(_v, n))\n')
+LATER = ('import examples/LaterGlobals/1 as laterlib\n'
+         'g(_e) => laterlib.read_price(_e)\n'
+         'h(_v, n) => laterlib.request_sma(_v, n)\n')
 GLOBALS = 'ma = ta.sma(close, 20)\nlen = input.int(4, "Len")\nbody = close - open\n'
 CALLS = 'x = g(ma) + h(body, len)\n'
 
 
 def test_global_declared_after_the_helper_is_put_in():
-    after = transpile_full(PRELUDE + LATER + GLOBALS + CALLS + TRADE)
+    after = transpile_full(
+        PRELUDE + LATER + GLOBALS + CALLS + TRADE,
+        libraries=LATER_LIBRARIES,
+    )
     assert not any(d.message.endswith(UNBOUND) for d in after["diagnostics"])
     evaluators = _evaluators(after["cpp"])
     # g(ma): the requested 20-bar SMA one requested bar back.
@@ -107,7 +122,10 @@ def test_global_declared_after_the_helper_is_put_in():
     assert re.search(r'_sec1__ta_sma_\w+ = ta::SMA\(get_input_int\("Len", 4\)\)', after["cpp"])
     # The evaluators of the globals declared first, up to the TA sites'
     # numbering (declaration order).
-    before = transpile(PRELUDE + GLOBALS + LATER + CALLS + TRADE)
+    before = transpile(
+        PRELUDE + GLOBALS + LATER + CALLS + TRADE,
+        libraries=LATER_LIBRARIES,
+    )
     renumbered = lambda text: re.sub(r"(_ta_[a-z]+_|_secval_)\d+", r"\1N", text)
     assert [renumbered(e) for e in evaluators] == [
         renumbered(e) for e in _evaluators(before)]
@@ -119,11 +137,12 @@ def test_global_declared_after_the_helper_is_put_in():
     'u(_x) => ta.sma(_x, 3)\ns5 = ta.sma(close, 5)\n'
     'x = request.security(syminfo.tickerid, "D", u(s5))\n',
     # The helper holding the request, its parameter bound to a later global.
-    'g(_e) => request.security(syminfo.tickerid, "D", ta.sma(_e, 3))\n'
+    'import examples/LaterGlobals/1 as laterlib\n'
+    'g(_e) => laterlib.request_sma(_e)\n'
     's5 = ta.sma(close, 5)\nx = g(s5)\n',
 ])
 def test_a_later_globals_ta_is_computed_once_before_its_reader(body):
-    cpp = transpile(PRELUDE + body + TRADE)
+    cpp = transpile(PRELUDE + body + TRADE, libraries=LATER_LIBRARIES)
     evaluator = _evaluators(cpp)[0]
     # The 5-bar SMA advances once a bar, and ahead of the SMA of it.
     inner = re.findall(r"(_sec0__ta_sma_\d+)\.compute\(bar\.close\)", evaluator)
@@ -161,7 +180,8 @@ def test_a_prologue_variant_is_never_computed_inside_a_helpers_if(body):
     # the RSI once, before the EMA (the parent refused both spellings).
     'u(_x, _y) => ta.ema(_x + _y, 3)\ns5 = ta.sma(close, 5)\nr = ta.rsi(close, 14)\n'
     'x = request.security(syminfo.tickerid, "60", u(s5[1], r))\n',
-    'g(_e, _f) => request.security(syminfo.tickerid, "60", ta.ema(_e[1] + _f, 3))\n'
+    'import examples/LaterGlobals/1 as laterlib\n'
+    'g(_e, _f) => laterlib.request_ema(_e, _f)\n'
     's5 = ta.sma(close, 5)\nr = ta.rsi(close, 14)\nx = g(s5, r)\n',
 ])
 def test_every_read_of_a_prologue_variant_orders_it(body, monkeypatch):
@@ -169,7 +189,7 @@ def test_every_read_of_a_prologue_variant_orders_it(body, monkeypatch):
         return re.findall(r"auto _secval_\w+ = security_series_slot_is_new\(0\) \? "
                           r"(_sec0__ta_[a-z]+)_\d+\.compute", _evaluators(cpp)[0])
 
-    cpp = transpile(PRELUDE + body + TRADE)
+    cpp = transpile(PRELUDE + body + TRADE, libraries=LATER_LIBRARIES)
     assert order(cpp) == ["_sec0__ta_sma", "_sec0__ta_rsi", "_sec0__ta_ema"]
     assert _evaluators(cpp)[0].count("_ta_rsi_3.compute(") == 1
     compile_cpp(cpp, label="prologue variants read after a history read")
@@ -178,7 +198,9 @@ def test_every_read_of_a_prologue_variant_orders_it(body, monkeypatch):
     from pineforge_codegen.codegen.base import CodeGen
     monkeypatch.setattr(CodeGen, "_security_ta_sites_reached",
                         lambda self, site, stack: set(range(len(self.ctx.ta_call_sites))))
-    assert transpile(PRELUDE + body + TRADE) == cpp
+    assert transpile(
+        PRELUDE + body + TRADE, libraries=LATER_LIBRARIES
+    ) == cpp
 
 
 def test_a_later_string_global_keeps_the_parents_refusal():
