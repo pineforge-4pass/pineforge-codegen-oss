@@ -4341,8 +4341,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         """nz and fixnan take a numeric, bool or color source; v6 refuses a string."""
         if (not node.args or not isinstance(node.callee, Identifier)
                 or self._pine_version != 6
-                or self._in_v5_library_definition(node)
-                or not self._is_certainly_string(node.args[0])):
+                or self._in_v5_library_definition(node)):
+            return
+        certain_type = self._certain_scalar_type(node.args[0])
+        if certain_type == PineType.BOOL:
+            self._error(
+                f"Cannot call '{node.callee.name}' with a bool argument: "
+                "its source must be a numeric or color series.",
+                node.args[0].loc,
+            )
+            return
+        if not self._is_certainly_string(node.args[0]):
             return
         self._error(
             f"Cannot call '{node.callee.name}' with a string argument: "
@@ -4362,6 +4371,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 f'"{node.name}" cannot be used as a variable or function name.',
                 node.loc,
             )
+
+    def _check_na_bool_argument(self, node: FuncCall) -> None:
+        """The na() predicate cannot receive a proven bool in v6."""
+        if (not node.args
+                or self._pine_version != 6
+                or self._in_v5_library_definition(node)):
+            return
+        if self._certain_scalar_type(node.args[0]) != PineType.BOOL:
+            return
+        self._error(
+            "Cannot call 'na' with a bool argument: "
+            "Pine v6 bool values cannot be na.",
+            node.args[0].loc,
+        )
 
     def _check_bool_map_put_na(
         self, node: FuncCall, obj: ASTNode, member: str,
@@ -4386,6 +4409,113 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 and spec.value is not None and spec.value.kind == "primitive"
                 and spec.value.name == "bool"):
             self._bool_na_error(value.loc)
+
+    def _check_bool_collection_na(
+        self, node: FuncCall, obj: ASTNode, member: str,
+    ) -> None:
+        """A bool array or matrix cannot receive a bare na element."""
+        if (self._pine_version != 6
+                or self._in_v5_library_definition(node)):
+            return
+        receiver = None
+        value_index = None
+        if isinstance(obj, Identifier) and obj.name in {"array", "matrix"}:
+            receiver = node.args[0] if node.args else node.kwargs.get("id")
+            if obj.name == "array":
+                if member == "push":
+                    value_index = 1
+                elif member == "set":
+                    value_index = 2
+            elif member == "set":
+                value_index = 3
+        else:
+            receiver = obj
+            spec = self._type_spec_from_expr(receiver)
+            if spec is not None and spec.kind == "array":
+                if member == "push":
+                    value_index = 0
+                elif member == "set":
+                    value_index = 1
+            elif spec is not None and spec.kind == "matrix" and member == "set":
+                value_index = 2
+        if receiver is None or value_index is None:
+            return
+        value = (
+            node.args[value_index] if len(node.args) > value_index
+            else node.kwargs.get("value")
+        )
+        if not isinstance(value, NaLiteral):
+            return
+        spec = self._type_spec_from_expr(receiver)
+        if (
+            spec is None
+            or spec.kind not in {"array", "matrix"}
+            or spec.element is None
+            or spec.element.kind != "primitive"
+            or spec.element.name != "bool"
+        ):
+            return
+        self._error(
+            f"Cannot store a value of the 'na' type in {spec.kind}<bool>.",
+            value.loc,
+        )
+
+    def _check_udt_constructor_bool_na(self, node: FuncCall) -> None:
+        """A user-defined bool field cannot be initialized with bare na."""
+        if (self._pine_version != 6
+                or self._in_v5_library_definition(node)):
+            return
+        callee = node.callee
+        if not (
+            isinstance(callee, MemberAccess)
+            and isinstance(callee.object, Identifier)
+            and callee.member == "new"
+        ):
+            return
+        udt_name = callee.object.name
+        field_types = self._udt_field_type_specs.get(udt_name)
+        if not field_types:
+            return
+        field_names = list(field_types)
+        for index, field_name in enumerate(field_names):
+            field_spec = field_types[field_name]
+            if field_spec.kind != "primitive" or field_spec.name != "bool":
+                continue
+            value = (
+                node.args[index] if len(node.args) > index
+                else node.kwargs.get(field_name)
+            )
+            if isinstance(value, NaLiteral):
+                self._error(
+                    f"Cannot call '{udt_name}.new' with a bare na value "
+                    f"for bool field '{field_name}'.",
+                    value.loc,
+                )
+
+    def _check_typed_parameter_mismatches(
+        self,
+        definition: FuncDef | MethodDef,
+        values: list[ASTNode | None],
+        function_name: str,
+    ) -> None:
+        """Refuse only a proven float passed to a declared int parameter."""
+        if (self._pine_version != 6
+                or self._in_v5_library_definition(definition)):
+            return
+        specs = self._param_type_specs_from_def(definition)
+        for name, spec, value in zip(definition.params, specs, values):
+            if (
+                value is not None
+                and spec is not None
+                and spec.kind == "primitive"
+                and spec.name == "int"
+                and self._certain_scalar_type(value) == PineType.FLOAT
+            ):
+                self._error(
+                    f"Cannot call '{function_name}' with a float argument "
+                    f"for int parameter '{name}'.",
+                    value.loc,
+                )
 
     def _record_script_block_binding(self, sym: Symbol, outer: Symbol | None) -> None:
         if not self._block_node_stack or self._collection_scope_stack:
@@ -4761,6 +4891,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         delattr(sym, "is_static_series")
         else:
             target_type = self._visit(node.target)
+            if (
+                node.op == ":="
+                and isinstance(node.target, MemberAccess)
+                and isinstance(node.value, NaLiteral)
+                and target_type == PineType.BOOL
+                and self._pine_version == 6
+                and not self._in_v5_library_definition(node)
+            ):
+                self._error(
+                    "Cannot assign a value of the 'na' type to the "
+                    f"'{node.target.member}' variable. The variable is "
+                    "declared with the 'bool' type.",
+                    node.value.loc,
+                )
             base_name = self._get_target_base_name(node.target)
             if base_name:
                 self._static_vars.discard(base_name)
@@ -5797,6 +5941,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 else_type = PineType.NA
         finally:
             self._global_scope = old_global
+        self._check_bool_na_selection([
+            (self._selection_terminal_expr(node.body), body_type),
+            (self._selection_terminal_expr(node.else_body), else_type),
+        ])
         # If used as expression (x = if ...), return last expr type
         if self._selection_node_is_na(self._selection_terminal_expr(node.body)):
             return unify_pine_types(PineType.NA, else_type)
@@ -5996,6 +6144,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 branch_types.append((None, PineType.NA))
         finally:
             self._global_scope = old_global
+        self._check_bool_na_selection(branch_types)
         if (
             self._pine_version == 6
             and not self._in_v5_library_definition(node)
@@ -6053,9 +6202,50 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     # Expression visitors
     # ------------------------------------------------------------------
 
+    def _check_incompatible_binary_operands(self, node: BinOp) -> None:
+        """Reject only measured bool/string and numeric operator pairs."""
+        if (self._pine_version != 6
+                or self._in_v5_library_definition(node)):
+            return
+        left = self._certain_scalar_type(node.left)
+        right = self._certain_scalar_type(node.right)
+        numeric = {PineType.INT, PineType.FLOAT}
+        mismatch = False
+        offending = None
+        if node.op == "and":
+            mismatch = (
+                (left == PineType.BOOL and right in numeric)
+                or (right == PineType.BOOL and left in numeric)
+            )
+            if mismatch:
+                offending = node.right if right in numeric else node.left
+        elif node.op == "+":
+            mismatch = (
+                (left == PineType.BOOL and right in numeric)
+                or (right == PineType.BOOL and left in numeric)
+                or (left == PineType.STRING and right in numeric)
+                or (right == PineType.STRING and left in numeric)
+            )
+            if mismatch:
+                if left == PineType.BOOL:
+                    offending = node.left
+                elif right == PineType.BOOL:
+                    offending = node.right
+                elif left == PineType.STRING:
+                    offending = node.right
+                else:
+                    offending = node.left
+        if not mismatch:
+            return
+        self._error(
+            f"Operator '{node.op}' cannot combine {left.value} and {right.value}.",
+            offending.loc if offending is not None else node.loc,
+        )
+
     def _visit_BinOp(self, node: BinOp) -> PineType:
         left_type = self._visit(node.left)
         right_type = self._visit(node.right)
+        self._check_incompatible_binary_operands(node)
 
         if (node.op in ("==", "!=")
                 and self._pine_version == 6
@@ -6167,6 +6357,33 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     arm.loc,
                 )
 
+    def _check_bool_na_selection(
+        self, branches: list[tuple[ASTNode | None, PineType]],
+    ) -> None:
+        """Reject bare na beside a branch that is proven bool."""
+        if (self._pine_version != 6
+                or self._in_v5_library_definition()):
+            return
+        if not any(isinstance(expr, NaLiteral) for expr, _ in branches):
+            return
+        if not any(
+            ptype == PineType.BOOL
+            or (
+                expr is not None
+                and not isinstance(expr, NaLiteral)
+                and self._certain_scalar_type(expr) == PineType.BOOL
+            )
+            for expr, ptype in branches
+        ):
+            return
+        for expr, _ptype in branches:
+            if isinstance(expr, NaLiteral):
+                self._error(
+                    "A bool result cannot be na in an if or switch expression "
+                    "in Pine v6.",
+                    expr.loc,
+                )
+
     def _check_untyped_na_condition(
         self, condition: ASTNode, condition_type: PineType,
     ) -> None:
@@ -6254,6 +6471,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if isinstance(callee, MemberAccess):
             obj = callee.object
             member = callee.member
+            self._check_udt_constructor_bool_na(node)
 
             # ta.* calls
             if isinstance(obj, Identifier) and obj.name == "ta":
@@ -6349,6 +6567,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 if isinstance(initial, NaLiteral):
                     self._bool_na_error(initial.loc)
             self._check_bool_map_put_na(node, obj, member)
+            self._check_bool_collection_na(node, obj, member)
             receiver_pine_type = self._visit(obj)
             visited_member_arg_types: dict[int, PineType] = {}
             for arg in node.args:
@@ -6436,6 +6655,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         self._check_bool_na_parameters(
                             signature.declaration,
                             [obj, *strict_binding.args_by_param],
+                        )
+                        self._check_typed_parameter_mismatches(
+                            signature.declaration,
+                            [obj, *strict_binding.args_by_param],
+                            method_key,
                         )
                     # Defaults are real call-site expressions. Visit only the
                     # inserted nodes here; written actuals were visited above.
@@ -6639,6 +6863,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if func_name == "na":
                 for arg in node.args:
                     self._visit(arg)
+                self._check_na_bool_argument(node)
                 return PineType.BOOL
 
             # color.* (e.g., color.new, color.rgb)

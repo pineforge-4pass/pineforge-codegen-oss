@@ -1775,6 +1775,9 @@ class CallHandlers:
                     visited_types[id(arg)] = self._visit(arg)
 
         self._check_bool_na_parameters(func_def, bound_args)
+        self._check_typed_parameter_mismatches(
+            func_def, bound_args, func_name,
+        )
         param_types = [
             visited_types.get(id(arg), PineType.UNKNOWN)
             if arg is not None

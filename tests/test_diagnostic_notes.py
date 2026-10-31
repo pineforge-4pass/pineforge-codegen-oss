@@ -30,8 +30,9 @@ PRODUCT_BEFORE = json.loads((FIXTURES / "product.before.json").read_text())
 # syntax errors (PF-E0043 to PF-E0045), the string
 # source of nz and fixnan (PF-E2047), the operator errors (PF-E2048 to
 # PF-E2052), the function definition scope errors (PF-E2053 to PF-E2060), the
-# untyped na declaration error (PF-E2061) and the strategy() declaration
-# errors (PF-E5080 to PF-E5082).
+# untyped na declaration error (PF-E2061), the bool and type mismatch errors
+# (PF-E2066 to PF-E2073) and the strategy() declaration errors (PF-E5080 to
+# PF-E5082).
 CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2040", "PF-E2041", "PF-E2042", "PF-E2043", "PF-E2044",
                      "PF-E2045", "PF-E2046", "PF-E2047", "PF-E2048", "PF-E2049",
@@ -39,6 +40,8 @@ CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2055", "PF-E2056", "PF-E2057", "PF-E2058", "PF-E2059",
                      "PF-E2060", "PF-E2061", "PF-E2062", "PF-E2063", "PF-E2064",
                      "PF-E2065", "PF-E0043", "PF-E0044", "PF-E0045",
+                     "PF-E2066", "PF-E2067", "PF-E2068", "PF-E2069",
+                     "PF-E2070", "PF-E2071", "PF-E2072", "PF-E2073",
                      "PF-E5080", "PF-E5081", "PF-E5082", "PF-W1553"}
 # The support checker warns, inside a switch arm, what it refuses elsewhere:
 # PF-W1nnn is PF-E1nnn there. Read off the live catalog, so a twin added later
