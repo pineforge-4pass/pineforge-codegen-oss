@@ -1671,6 +1671,11 @@ class TopLevelEmitter:
         for _bname in sorted(self.ctx.series_vars):
             if _bname in self._var_names:
                 continue
+            # A history-bearing top-level tuple binding pushes its own value
+            # at the declaration; a builtin push would add a second bar slot.
+            if (_bname in self._direct_program_tuple_binding_names
+                    and _bname in self._ordinary_global_series_names):
+                continue
             _bexpr = BAR_BUILTINS.get(_bname)
             _bsafe = self._safe_name(_bname)
             if _bexpr is None or _bexpr.strip().startswith(f"{_bsafe}("):

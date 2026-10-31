@@ -406,6 +406,26 @@ total = first + nz(second[1]) + second
     ) == "5.5\n11.5\n"
 
 
+def test_tuple_calendar_history_has_one_slot_per_bar() -> None:
+    source = HEADER + """pair(float value) => [value, value + 0.5]
+[first, minute] = pair(close - open)
+current = minute[0]
+previous = nz(minute[1], -10.0)
+olderMissing = na(minute[2])
+builtinPrevious = nz(second[1], -20)
+"""
+    assert run_emitted_tu(
+        transpile(source),
+        _driver(("current", "previous", "olderMissing", "builtinPrevious"), counts=(1, 2)),
+        opt="-O0", label="tuple calendar history slots",
+    ) == (
+        # 12.5-10+.5=3; tuple offsets 1 and 2 are missing, as is calendar second[1].
+        "3 -10 1 -20\n"
+        # 24-20+.5=4.5; tuple [1]=3, [2] is missing, and the previous calendar second is 0.
+        "4.5 3 1 0\n"
+    )
+
+
 def test_nested_fixnan_state_uses_the_selected_overload_on_each_call_path() -> None:
     source = HEADER + """probe(float value) => fixnan(value)
 probe(int value) => value + 100
