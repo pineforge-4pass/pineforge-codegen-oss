@@ -221,6 +221,48 @@ float leaf = ta.sma(math, 1) + math.abs()
     assert output.strip() == "-303.0"
 
 
+_BUILTIN_VALUE_HEADER = '''//@version=6
+strategy("builtin values as method receivers")
+method seconds(int this) => this / 1000.0
+method abs(float this) => this * 100.0
+float x = open - close
+'''
+
+
+@pytest.mark.parametrize(
+    ("statement", "method_cpp"),
+    [
+        pytest.param(
+            "float leaf = time.seconds()\n"
+            "time(int value) => log.info(str.tostring(value))",
+            # The bare time value supplies the bar's timestamp to the int method.
+            "leaf = _udt_int_seconds(current_bar_.timestamp);",
+            id="time",
+        ),
+        pytest.param(
+            "float leaf = timenow.seconds()\n"
+            "timenow(int value) => log.info(str.tostring(value))",
+            # The existing timenow lowering supplies the same bar timestamp.
+            "leaf = _udt_int_seconds(current_bar_.timestamp);",
+            id="timenow",
+        ),
+        pytest.param(
+            "float leaf = math.abs(x)",
+            "leaf = std::abs(x);",  # math is a pure namespace, so abs stays built-in.
+            id="math",
+        ),
+    ],
+)
+def test_builtin_value_receiver_keeps_user_method_fallback(
+    statement: str,
+    method_cpp: str,
+) -> None:
+    # A later void helper shares the name slot without replacing the bare value.
+    cpp = transpile(_BUILTIN_VALUE_HEADER + statement + "\n")
+    assert method_cpp in cpp
+    compile_cpp(cpp, label="builtin-value-method")
+
+
 _PROBE_HEADER = '''//@version=6
 strategy("literal receiver probes")
 method f1_step(float x) => x + 0.5

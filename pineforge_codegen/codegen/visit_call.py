@@ -174,6 +174,7 @@ from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_METHODS,
     ARRAY_OPTIONAL_PARAMS,
+    BAR_BUILTINS,
     BAR_FIELDS,
     BAR_SERIES_PUSH,
     CHECKED_ARRAY_METHOD_KWARGS,
@@ -376,11 +377,12 @@ class CallVisitor:
         if receiver_spec is None and isinstance(receiver, Identifier):
             receiver_spec = self._scalar_receiver_spec(receiver.name, member)
         if receiver_spec is None:
-            # Namespace prefixes are not values; declared bindings still
-            # take the same inferred receiver path as other variables.
+            # Only pure namespace prefixes lack a receiver value. Bare
+            # built-in values and declared bindings retain type inference.
             if (
                 isinstance(receiver, Identifier)
                 and receiver.name in BUILTIN_NAMESPACES
+                and receiver.name not in BAR_BUILTINS
                 and receiver.name not in self._var_names
                 and receiver.name not in self._global_member_vars
                 and receiver.name not in self._current_func_param_types
