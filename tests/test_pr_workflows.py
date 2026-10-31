@@ -633,9 +633,173 @@ PROMOTE_GUARD = r'''  promote-guard:
           [ "$REF" = refs/heads/main ] || fail "baseline promotion requires refs/heads/main"
           case "$EVENT_NAME" in
             workflow_dispatch)
-              for value in "$INPUT_MERGE_SHA" "$INPUT_HEAD_SHA" "$INPUT_PR_NUMBER" "$INPUT_PR_URL" "$INPUT_MERGED_AT"; do
-                [[ -n "${value//[[:space:]]/}" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || fail "empty or unreadable dispatch input"
-              done
+              [[ "$INPUT_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+                fail "merge_commit must be exactly 40 lowercase hexadecimal characters"
+              [[ "$INPUT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+                fail "head_sha must be exactly 40 lowercase hexadecimal characters"
+              [[ "$INPUT_PR_NUMBER" =~ ^[1-9][0-9]*$ ]] ||
+                fail "pr_number must be a positive decimal integer"
+              expected_pr_url="https://github.com/$REPO/pull/$INPUT_PR_NUMBER"
+              [ "$INPUT_PR_URL" = "$expected_pr_url" ] ||
+                fail "pr_url must equal $expected_pr_url"
+              [[ "$INPUT_MERGED_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] ||
+                fail "merged_at must be an ISO-8601 UTC timestamp in YYYY-MM-DDTHH:MM:SSZ form"
+              if ! dispatch_pr=$(gh api "repos/$REPO/pulls/$INPUT_PR_NUMBER"); then
+                fail "pr_number API lookup failed"
+              fi
+              [[ -n "${dispatch_pr//[[:space:]]/}" ]] ||
+                fail "pr_number API lookup returned an empty response"
+              if ! python3 - "$INPUT_PR_NUMBER" 3<<<"$dispatch_pr" <<'PY'
+          import json
+          import sys
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pr = json.load(stream, parse_constant=reject_constant)
+          except (OSError, RecursionError, ValueError):
+              raise SystemExit(1)
+          number = pr.get("number") if isinstance(pr, dict) else None
+          if not (type(number) in (int, float) and number == int(sys.argv[1])):
+              raise SystemExit(1)
+          PY
+              then
+                fail "pr_number does not match the PR API response"
+              fi
+              if ! python3 - 3<<<"$dispatch_pr" <<'PY'
+          import json
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pr = json.load(stream, parse_constant=reject_constant)
+          except (OSError, RecursionError, ValueError):
+              raise SystemExit(1)
+          if not (isinstance(pr, dict) and pr.get("merged") is True):
+              raise SystemExit(1)
+          PY
+              then
+                fail "pr_number API record is not merged"
+              fi
+              if ! python3 - "$INPUT_MERGE_SHA" 3<<<"$dispatch_pr" <<'PY'
+          import json
+          import sys
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pr = json.load(stream, parse_constant=reject_constant)
+          except (OSError, RecursionError, ValueError):
+              raise SystemExit(1)
+          if not (isinstance(pr, dict) and pr.get("merge_commit_sha") == sys.argv[1]):
+              raise SystemExit(1)
+          PY
+              then
+                fail "merge_commit does not match the PR merge_commit_sha"
+              fi
+              if ! python3 - "$INPUT_HEAD_SHA" 3<<<"$dispatch_pr" <<'PY'
+          import json
+          import sys
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pr = json.load(stream, parse_constant=reject_constant)
+          except (OSError, RecursionError, ValueError):
+              raise SystemExit(1)
+          if not (
+              isinstance(pr, dict)
+              and isinstance(pr.get("head"), dict)
+              and pr["head"].get("sha") == sys.argv[1]
+          ):
+              raise SystemExit(1)
+          PY
+              then
+                fail "head_sha does not match the PR head.sha"
+              fi
+              if ! python3 - 3<<<"$dispatch_pr" <<'PY'
+          import json
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pr = json.load(stream, parse_constant=reject_constant)
+          except (OSError, RecursionError, ValueError):
+              raise SystemExit(1)
+          if not (
+              isinstance(pr, dict)
+              and isinstance(pr.get("base"), dict)
+              and pr["base"].get("ref") == "main"
+          ):
+              raise SystemExit(1)
+          PY
+              then
+                fail "pr_number API record does not use base main"
+              fi
+              if ! python3 - "$INPUT_MERGED_AT" 3<<<"$dispatch_pr" <<'PY'
+          import json
+          import sys
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pr = json.load(stream, parse_constant=reject_constant)
+          except (OSError, RecursionError, ValueError):
+              raise SystemExit(1)
+          if not (isinstance(pr, dict) and pr.get("merged_at") == sys.argv[1]):
+              raise SystemExit(1)
+          PY
+              then
+                fail "merged_at does not match the PR merged_at"
+              fi
+              if ! dispatch_pulls=$(gh api --paginate --slurp \
+                "repos/$REPO/commits/$INPUT_MERGE_SHA/pulls?per_page=100"); then
+                fail "merge_commit API lookup failed"
+              fi
+              [[ -n "${dispatch_pulls//[[:space:]]/}" ]] ||
+                fail "merge_commit API lookup returned an empty response"
+              if ! python3 - "$INPUT_PR_NUMBER" 3<<<"$dispatch_pulls" <<'PY'
+          import json
+          import sys
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pages = json.load(stream, parse_constant=reject_constant)
+          except (OSError, RecursionError, ValueError):
+              raise SystemExit(1)
+          pulls = (
+              [pr for page in pages for pr in page]
+              if isinstance(pages, list) and all(isinstance(page, list) for page in pages)
+              else []
+          )
+          if not (
+              isinstance(pages, list)
+              and all(isinstance(page, list) for page in pages)
+              and len(pulls) == 1
+              and isinstance(pulls[0], dict)
+              and type(pulls[0].get("number")) in (int, float)
+              and pulls[0].get("number") == int(sys.argv[1])
+          ):
+              raise SystemExit(1)
+          PY
+              then
+                fail "merge_commit must list exactly pull request $INPUT_PR_NUMBER"
+              fi
               printf '%s\n' "merge_sha=$INPUT_MERGE_SHA" "head_sha=$INPUT_HEAD_SHA" \
                 "pr_number=$INPUT_PR_NUMBER" "pr_url=$INPUT_PR_URL" \
                 "merged_at=$INPUT_MERGED_AT" "ok=true" >> "$GITHUB_OUTPUT"
@@ -1696,6 +1860,171 @@ def promotion_pr(number=17, *, merge_sha="a" * 40, base="main",
     }
 
 
+@dataclass(frozen=True)
+class DispatchRejectCase:
+    name: str
+    changes: dict[str, str]
+    refusal: str
+    expected_calls: tuple[str, ...] = ()
+
+
+def dispatch_overrides(pr=None):
+    pr = promotion_pr() if pr is None else pr
+    return {
+        "EVENT": "workflow_dispatch",
+        "EVENT_NAME": "workflow_dispatch",
+        "INPUT_MERGE_SHA": pr["merge_commit_sha"],
+        "INPUT_HEAD_SHA": pr["head"]["sha"],
+        "INPUT_PR_NUMBER": str(pr["number"]),
+        "INPUT_PR_URL": pr["html_url"],
+        "INPUT_MERGED_AT": pr["merged_at"],
+        "GH_DISPATCH_PR": json.dumps(pr),
+        "GH_DISPATCH_PULLS": json.dumps([[pr]]),
+    }
+
+
+def dispatch_pr_with_head(sha):
+    pr = promotion_pr()
+    pr["head"] = {**pr["head"], "sha": sha}
+    return json.dumps(pr)
+
+
+def dispatch_pr_with_base(base):
+    pr = promotion_pr()
+    pr["base"] = {"ref": base}
+    return json.dumps(pr)
+
+
+DISPATCH_PR_CALL = "api repos/owner/repo/pulls/17"
+DISPATCH_PULLS_CALL = (
+    "api --paginate --slurp "
+    "repos/owner/repo/commits/" + "a" * 40 + "/pulls?per_page=100"
+)
+
+
+DISPATCH_REJECT_CASES = [
+    DispatchRejectCase(
+        "merge-commit-39-hex", {"INPUT_MERGE_SHA": "a" * 39},
+        "merge_commit must be exactly 40 lowercase hexadecimal characters",
+    ),
+    DispatchRejectCase(
+        "merge-commit-41-hex", {"INPUT_MERGE_SHA": "a" * 41},
+        "merge_commit must be exactly 40 lowercase hexadecimal characters",
+    ),
+    DispatchRejectCase(
+        "merge-commit-uppercase-hex", {"INPUT_MERGE_SHA": "A" * 40},
+        "merge_commit must be exactly 40 lowercase hexadecimal characters",
+    ),
+    DispatchRejectCase(
+        "head-sha-39-hex", {"INPUT_HEAD_SHA": "b" * 39},
+        "head_sha must be exactly 40 lowercase hexadecimal characters",
+    ),
+    DispatchRejectCase(
+        "head-sha-41-hex", {"INPUT_HEAD_SHA": "b" * 41},
+        "head_sha must be exactly 40 lowercase hexadecimal characters",
+    ),
+    DispatchRejectCase(
+        "head-sha-uppercase-hex", {"INPUT_HEAD_SHA": "B" * 40},
+        "head_sha must be exactly 40 lowercase hexadecimal characters",
+    ),
+    DispatchRejectCase(
+        "pr-number-zero", {"INPUT_PR_NUMBER": "0"},
+        "pr_number must be a positive decimal integer",
+    ),
+    DispatchRejectCase(
+        "pr-number-leading-zero", {"INPUT_PR_NUMBER": "01"},
+        "pr_number must be a positive decimal integer",
+    ),
+    DispatchRejectCase(
+        "pr-number-negative", {"INPUT_PR_NUMBER": "-3"},
+        "pr_number must be a positive decimal integer",
+    ),
+    DispatchRejectCase(
+        "pr-number-nonnumeric", {"INPUT_PR_NUMBER": "abc"},
+        "pr_number must be a positive decimal integer",
+    ),
+    DispatchRejectCase(
+        "pr-url-another-repository",
+        {"INPUT_PR_URL": "https://github.com/other/repo/pull/17"},
+        "pr_url must equal https://github.com/owner/repo/pull/17",
+    ),
+    DispatchRejectCase(
+        "pr-url-another-number",
+        {"INPUT_PR_URL": "https://github.com/owner/repo/pull/18"},
+        "pr_url must equal https://github.com/owner/repo/pull/17",
+    ),
+    DispatchRejectCase(
+        "merged-at-wrong-form",
+        {"INPUT_MERGED_AT": "2026-10-01T00:00:00.000Z"},
+        "merged_at must be an ISO-8601 UTC timestamp in YYYY-MM-DDTHH:MM:SSZ form",
+    ),
+    DispatchRejectCase(
+        "api-pr-not-merged",
+        {"GH_DISPATCH_PR": json.dumps({**promotion_pr(), "merged": False})},
+        "pr_number API record is not merged",
+        (DISPATCH_PR_CALL,),
+    ),
+    DispatchRejectCase(
+        "api-merge-commit-mismatch",
+        {"GH_DISPATCH_PR": json.dumps({**promotion_pr(), "merge_commit_sha": "c" * 40})},
+        "merge_commit does not match the PR merge_commit_sha",
+        (DISPATCH_PR_CALL,),
+    ),
+    DispatchRejectCase(
+        "api-head-mismatch",
+        {"GH_DISPATCH_PR": dispatch_pr_with_head("c" * 40)},
+        "head_sha does not match the PR head.sha",
+        (DISPATCH_PR_CALL,),
+    ),
+    DispatchRejectCase(
+        "api-base-not-main",
+        {"GH_DISPATCH_PR": dispatch_pr_with_base("release")},
+        "pr_number API record does not use base main",
+        (DISPATCH_PR_CALL,),
+    ),
+    DispatchRejectCase(
+        "api-merged-at-mismatch",
+        {
+            "GH_DISPATCH_PR": json.dumps({
+                **promotion_pr(), "merged_at": "2026-10-02T00:00:00Z",
+            }),
+        },
+        "merged_at does not match the PR merged_at",
+        (DISPATCH_PR_CALL,),
+    ),
+    DispatchRejectCase(
+        "api-association-has-two-prs",
+        {"GH_DISPATCH_PULLS": json.dumps([[promotion_pr(), promotion_pr(18)]])},
+        "merge_commit must list exactly pull request 17",
+        (DISPATCH_PR_CALL, DISPATCH_PULLS_CALL),
+    ),
+    DispatchRejectCase(
+        "api-empty-pr-response",
+        {"GH_DISPATCH_PR": ""},
+        "pr_number API lookup returned an empty response",
+        (DISPATCH_PR_CALL,),
+    ),
+    DispatchRejectCase(
+        "api-malformed-pr-response",
+        {"GH_DISPATCH_PR": "{malformed"},
+        "pr_number does not match the PR API response",
+        (DISPATCH_PR_CALL,),
+    ),
+    DispatchRejectCase(
+        "api-malformed-association-response",
+        {"GH_DISPATCH_PULLS": "{malformed"},
+        "merge_commit must list exactly pull request 17",
+        (DISPATCH_PR_CALL, DISPATCH_PULLS_CALL),
+    ),
+    DispatchRejectCase(
+        "api-gh-error",
+        {"GH_DISPATCH_PR_EXIT": "1"},
+        "pr_number API lookup failed",
+        (DISPATCH_PR_CALL,),
+    ),
+]
+
+
 def run_promotion_entry(workflow, pages, tmp_path, *, full_pr=None, overrides=None):
     """Run the shipped first guard step, stubbing only GitHub API responses.
 
@@ -1713,7 +2042,18 @@ def run_promotion_entry(workflow, pages, tmp_path, *, full_pr=None, overrides=No
         f"#!{bash}\n"
         "set -eu\n"
         'printf "%s\\n" "$*" >> "$GH_CALLS"\n'
-        'if [ "$#" -eq 4 ] && [ "$1" = api ] && [ "$2" = --paginate ] && '
+        'if [ "$EVENT_NAME" = workflow_dispatch ]; then\n'
+        '  if [ "$#" -eq 2 ] && [ "$1" = api ] && '
+        '[ "$2" = "repos/$REPO/pulls/$INPUT_PR_NUMBER" ]; then\n'
+        '    [ "$GH_DISPATCH_PR_EXIT" -eq 0 ] || exit "$GH_DISPATCH_PR_EXIT"\n'
+        '    printf "%s\\n" "$GH_DISPATCH_PR"\n'
+        '  elif [ "$#" -eq 4 ] && [ "$1" = api ] && [ "$2" = --paginate ] && '
+        '[ "$3" = --slurp ] && '
+        '[ "$4" = "repos/$REPO/commits/$INPUT_MERGE_SHA/pulls?per_page=100" ]; then\n'
+        '    [ "$GH_DISPATCH_PULLS_EXIT" -eq 0 ] || exit "$GH_DISPATCH_PULLS_EXIT"\n'
+        '    printf "%s\\n" "$GH_DISPATCH_PULLS"\n'
+        "  else exit 97; fi\n"
+        'elif [ "$#" -eq 4 ] && [ "$1" = api ] && [ "$2" = --paginate ] && '
         '[ "$3" = --slurp ] && [ "$4" = "repos/$REPO/commits/$SHA/pulls?per_page=100" ]; then\n'
         '  printf "%s\\n" "$GH_PULLS"\n'
         'elif [ "$#" -eq 2 ] && [ "$1" = api ]; then\n'
@@ -1737,6 +2077,11 @@ def run_promotion_entry(workflow, pages, tmp_path, *, full_pr=None, overrides=No
         "GITHUB_OUTPUT": str(output_path), "GITHUB_STEP_SUMMARY": str(summary_path),
         "GH_CALLS": str(calls_path), "GH_PULLS": json.dumps(pages),
         "GH_PR": json.dumps(promotion_pr() if full_pr is None else full_pr),
+        "INPUT_MERGE_SHA": "", "INPUT_HEAD_SHA": "", "INPUT_PR_NUMBER": "",
+        "INPUT_PR_URL": "", "INPUT_MERGED_AT": "",
+        "GH_DISPATCH_PR": json.dumps(promotion_pr()),
+        "GH_DISPATCH_PULLS": json.dumps([[promotion_pr()]]),
+        "GH_DISPATCH_PR_EXIT": "0", "GH_DISPATCH_PULLS_EXIT": "0",
         **(overrides or {}),
     }
     result = subprocess.run(
@@ -1856,12 +2201,7 @@ def test_promotion_entry_binds_manual_dispatch_inputs(tmp_path):
     workflow = (WORKFLOWS / "promote-baseline.yml").read_text(encoding="utf-8")
     pr = promotion_pr()
     result, outputs, calls, summary = run_promotion_entry(
-        workflow, [], tmp_path, overrides={
-            "EVENT": "workflow_dispatch", "EVENT_NAME": "workflow_dispatch",
-            "INPUT_MERGE_SHA": "a" * 40, "INPUT_HEAD_SHA": pr["head"]["sha"],
-            "INPUT_PR_NUMBER": str(pr["number"]), "INPUT_PR_URL": pr["html_url"],
-            "INPUT_MERGED_AT": pr["merged_at"],
-        },
+        workflow, [], tmp_path, overrides=dispatch_overrides(pr),
     )
     assert result.returncode == 0 and result.stdout == "" and result.stderr == ""
     assert outputs == {
@@ -1869,7 +2209,24 @@ def test_promotion_entry_binds_manual_dispatch_inputs(tmp_path):
         "pr_number": str(pr["number"]), "pr_url": pr["html_url"],
         "merged_at": pr["merged_at"], "ok": "true",
     }
-    assert calls == [] and summary == ""
+    assert calls == [DISPATCH_PR_CALL, DISPATCH_PULLS_CALL] and summary == ""
+
+
+@pytest.mark.parametrize(
+    "case", DISPATCH_REJECT_CASES, ids=[case.name for case in DISPATCH_REJECT_CASES],
+)
+def test_promotion_entry_rejects_invalid_manual_dispatch_inputs(case, tmp_path):
+    workflow = (WORKFLOWS / "promote-baseline.yml").read_text(encoding="utf-8")
+    overrides = dispatch_overrides()
+    overrides.update(case.changes)
+    result, outputs, calls, summary = run_promotion_entry(
+        workflow, [], tmp_path, overrides=overrides,
+    )
+    assert result.returncode == 1
+    assert result.stdout == f"::error title=authz::{case.refusal}\n"
+    assert summary == f"authz: REFUSED: {case.refusal}\n"
+    assert outputs == {} and calls == list(case.expected_calls)
+    assert result.stderr == ""
 
 
 @pytest.mark.parametrize("change", [
