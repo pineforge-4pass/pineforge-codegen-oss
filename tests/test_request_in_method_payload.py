@@ -88,6 +88,20 @@ _CASES = [
         ("107 107", "95 95"),  # Only the float method requests data; the int method adds 101.
         id="typed-method-dispatch",
     ),
+    pytest.param(
+        'method sample(float value, float adjustment = 2.0) => '
+        'request.security(syminfo.tickerid, "60", value + adjustment)\n',
+        "float(close - open).sample()", "float(close - open) + 2.0",
+        ("8 8", "-4 -4"),  # The cast keeps each hourly body; the default adds 2: 8, -4.
+        id="cast-receiver-default",
+    ),
+    pytest.param(
+        "method sample(float value) => value + 0.5\n"
+        'method sample(int value) => request.security(syminfo.tickerid, "60", value)\n',
+        "int(close - open).sample() + float(1).sample()", "int(close - open) + 1.5",
+        ("7.5 7.5", "-4.5 -4.5"),  # Integer hourly bodies 6, -6 plus float(1) + 0.5.
+        id="cast-integer-method-dispatch",
+    ),
 ]
 
 

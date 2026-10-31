@@ -6025,6 +6025,29 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # codegen can emit the parameter as a scalar double.
             receiver_spec = self._type_spec_from_expr(obj)
             receiver_type_name = method_receiver_type_name(receiver_spec)
+            if receiver_spec is None and self._method_signatures:
+                # Record exact scalar expression bindings for request payload
+                # substitution without changing ordinary method return/state
+                # inference. The coarse visitor types casts such as int(x) as
+                # float, so query primitive expressions with lexical types.
+                receiver_types: dict[str, PineType] = {}
+                for child, _depth in iter_ast_nodes(obj):
+                    if isinstance(child, Identifier):
+                        sym = self._symbols.resolve(child.name)
+                        if sym is not None and (
+                            sym.type_spec is None or sym.type_spec.kind == "primitive"
+                        ):
+                            receiver_types[child.name] = sym.pine_type
+                primitive_type = self._callsite_primitive_expr_type(
+                    obj, receiver_types,
+                )
+                if primitive_type in {
+                    PineType.INT, PineType.FLOAT, PineType.BOOL,
+                    PineType.STRING, PineType.COLOR,
+                }:
+                    method_key = f"{primitive_type.value}.{member}"
+                    if method_key in self._method_signatures:
+                        self._bind_typed_method_call(method_key, node)
             if receiver_type_name is not None:
                 method_key = f"{receiver_type_name}.{member}"
                 signature = self._method_signatures.get(method_key)
