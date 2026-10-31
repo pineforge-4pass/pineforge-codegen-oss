@@ -2450,8 +2450,6 @@ class TopLevelEmitter:
                     fi, i, PINE_TYPE_TO_CPP.get(pt, "double"))
             else:
                 cpp_t = "double"
-            if cpp_t in ("int", "int64_t") and self._numeric_na_parameter(fi, i):
-                cpp_t = "double"
             param_strs.append(f"{cpp_t} {self._safe_name(p)}")
             self._current_func_param_types[p] = cpp_t
             if spec is not None:
@@ -2508,14 +2506,13 @@ class TopLevelEmitter:
             ret_type = self._type_spec_to_cpp(fi.return_type_spec)
         else:
             ret_type = PINE_TYPE_TO_CPP.get(fi.return_type, "double")
-        if ret_type in ("int", "int64_t") and self._numeric_na_return(fi):
-            ret_type = "double"
         if return_udt:
             # Use the generated handle name so an authored type cannot be
             # confused with a drawing handle's C++ name.
             rhs_return_cpp_type = self._safe_name(return_udt_name)
         elif (self._is_nullable_collection_cpp_type(ret_type)
-              or ret_type in DRAWING_TYPE_TO_CPP.values()):
+              or ret_type in DRAWING_TYPE_TO_CPP.values()
+              or ret_type in ("int", "int64_t")):
             rhs_return_cpp_type = ret_type
         else:
             rhs_return_cpp_type = None

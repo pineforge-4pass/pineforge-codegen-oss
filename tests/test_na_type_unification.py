@@ -48,16 +48,16 @@ _SELECTION_ROWS = [
         _selection_body(
             "choose_int_na_first", "values = array.from(7)", "values.shift()", True,
         ),
-        "double choose_int_na_first(",
-        # Hand-derived: a numeric array element beside bare na needs a NaN return.
+        "int choose_int_na_first(",
+        # Hand-derived: an int array element and na keep the integer return slot.
     ),
     (
         "int-na-second",
         _selection_body(
             "choose_int_na_second", "values = array.from(7)", "values.shift()", False,
         ),
-        "double choose_int_na_second(",
-        # Hand-derived: reversing the nullable arms still needs a NaN return.
+        "int choose_int_na_second(",
+        # Hand-derived: reversing the nullable arms keeps the integer return slot.
     ),
     (
         "float-na-first",
@@ -260,9 +260,19 @@ def test_na_adopts_each_value_family(
 ) -> None:
     cpp = transpile(_script(body))
     assert expected_signature in cpp
-    if expected_signature.startswith("double "):
-        # A numeric return pairs its concrete arm with double NaN, never an int sentinel.
+    if expected_signature.startswith(("int ", "double ")):
         function_body = cpp.split(expected_signature, 1)[1].split("\n    }", 1)[0]
+    if expected_signature.startswith("int "):
+        # An integer return evaluates the NaN selection once and guards its narrowing.
+        assert "return [&](){ auto _pf_v = (" in function_body
+        assert "na<double>()" in function_body
+        assert (
+            "return (_pf_v >= -2147483648.0 && _pf_v < 2147483648.0) "
+            "? (int)_pf_v : na<int>(); "
+            "else return is_na(_pf_v) ? na<int>() : (int)_pf_v; }();"
+        ) in function_body
+    elif expected_signature.startswith("double "):
+        # A numeric return pairs its concrete arm with double NaN, never an int sentinel.
         assert "na<double>()" in function_body
         assert "na<int>()" not in function_body
     compile_cpp(cpp, label=label)

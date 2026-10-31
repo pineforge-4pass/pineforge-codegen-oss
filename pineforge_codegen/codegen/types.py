@@ -2388,17 +2388,12 @@ class TypeInferer:
     # ------------------------------------------------------------------
 
     def _numeric_na_bindings(self):
-        """Inventory lexical value sources once for nullable numeric storage."""
+        """Inventory declarations for nullable global and persistent storage."""
         cached = getattr(self, "_numeric_na_bindings_cache", None)
         if cached is not None:
             return cached
         bindings = {}
-        arguments = {}
         declarations = {}
-        call_targets = {}
-        method_calls = {}
-        for (call_id, name), bound in self.ctx.method_call_bindings.items():
-            method_calls.setdefault(call_id, []).append((name, bound))
         declaration_scopes = {
             (sym.name, sym.loc.file, sym.loc.line, sym.loc.col): sym.scope
             for scope in self.ctx.symbols.all_scopes
@@ -2422,39 +2417,12 @@ class TypeInferer:
                             if node.loc is not None else None
                         )
                         bindings.setdefault((owner, node.name), []).append((node, scope))
-                    elif isinstance(node, FuncCall):
-                        name, namespace = self._resolve_callee(node.callee)
-                        methods = method_calls.get(id(node), ())
-                        if methods and isinstance(node.callee, MemberAccess):
-                            call_targets[id(node)] = tuple(name for name, _bound in methods)
-                            for name, binding in methods:
-                                bound = [node.callee.object, *binding.args_by_param]
-                                for i, value in enumerate(bound):
-                                    arguments.setdefault((name, i), []).append((owner, value))
-                            continue
-                        if not methods and namespace is None and name in self._func_info_map:
-                            fi = self._func_info_map[name]
-                            if fi.node is None:
-                                continue
-                            bound = self._user_call_args_with_defaults(name, node)
-                            if bound is None:
-                                bound = [
-                                    node.args[i] if i < len(node.args)
-                                    else node.kwargs.get(param)
-                                    for i, param in enumerate(fi.node.params)
-                                ]
-                        else:
-                            continue
-                        call_targets[id(node)] = (name,)
-                        for i, value in enumerate(bound):
-                            arguments.setdefault((name, i), []).append((owner, value))
         self._numeric_na_declarations = declarations
-        self._numeric_na_call_targets = call_targets
-        self._numeric_na_bindings_cache = (bindings, arguments)
+        self._numeric_na_bindings_cache = bindings
         return self._numeric_na_bindings_cache
 
     def _numeric_na_value(self, node, owner: str = "", seen=None) -> bool:
-        """Follow numeric value flow from a ternary containing a bare na."""
+        """Follow nullable numeric selections without crossing callable boundaries."""
         if node is None:
             return False
         seen = set() if seen is None else seen
@@ -2495,7 +2463,7 @@ class TypeInferer:
         if isinstance(node, Subscript):
             return self._numeric_na_value(node.object, owner, seen)
         if isinstance(node, Identifier):
-            bindings, _arguments = self._numeric_na_bindings()
+            bindings = self._numeric_na_bindings()
             binding_scope = self.ctx.identifier_binding_scopes.get(id(node))
             fi = self._func_info_map.get(owner)
             parameter_scope = (
@@ -2505,7 +2473,7 @@ class TypeInferer:
             )
             if (fi is not None and node.name in fi.node.params
                     and binding_scope in (None, parameter_scope)):
-                return self._numeric_na_parameter(fi, fi.node.params.index(node.name), seen)
+                return False
             scope = (
                 owner if binding_scope != "global" and (owner, node.name) in bindings
                 else ""
@@ -2518,34 +2486,7 @@ class TypeInferer:
             # that this identifier reads the nullable declaration.
             return (len(values) == 1
                     and self._numeric_na_value(values[0][0], scope, seen))
-        if isinstance(node, FuncCall):
-            name, namespace = self._resolve_callee(node.callee)
-            self._numeric_na_bindings()
-            targets = self._numeric_na_call_targets.get(
-                id(node), (name,) if namespace is None else (),
-            )
-            return any(
-                fi is not None and self._numeric_na_return(fi, seen)
-                for fi in (self._func_info_map.get(target) for target in targets)
-            )
         return False
-
-    def _numeric_na_parameter(self, fi, index: int, seen=None) -> bool:
-        specs = getattr(fi, "param_type_specs", ()) or ()
-        if (fi.node is None or index >= len(specs) or specs[index] is None
-                or specs[index].kind != "primitive" or specs[index].name != "int"):
-            return False
-        defaults = (fi.node.annotations or {}).get("param_defaults", ())
-        if index < len(defaults) and self._numeric_na_value(defaults[index], fi.name, seen):
-            return True
-        _bindings, arguments = self._numeric_na_bindings()
-        return any(self._numeric_na_value(value, owner, seen)
-                   for owner, value in arguments.get((fi.name, index), ()))
-
-    def _numeric_na_return(self, fi, seen=None) -> bool:
-        return (fi.return_type == PineType.INT and fi.node is not None
-                and bool(fi.node.body)
-                and self._numeric_na_value(fi.node.body[-1], fi.name, seen))
 
     def _numeric_na_global(self, name: str, seen=None) -> bool:
         """Recognize a declared nullable int and the globals bound to it."""
@@ -2566,8 +2507,6 @@ class TypeInferer:
         """Follow changed global storage without widening untyped ternaries."""
         if isinstance(value, Identifier):
             return self._numeric_na_global(value.name, seen)
-        if isinstance(value, FuncCall):
-            return self._numeric_na_value(value)
         if isinstance(value, Ternary):
             return any(self._numeric_na_global_value(arm, seen)
                        for arm in (value.true_val, value.false_val))
@@ -2600,9 +2539,8 @@ class TypeInferer:
         if history_value_cpp is not None:
             return history_value_cpp
         if (node.type_hint == "int"
-                and self._numeric_na_value(
-                    node.value, getattr(self, "_active_func_name", "") or "",
-                )):
+                and not getattr(self, "_active_func_name", None)
+                and self._numeric_na_value(node.value)):
             return "double"
         def promote_wide_int(cpp_type: str) -> str:
             if cpp_type != "int":
@@ -2825,8 +2763,6 @@ class TypeInferer:
         declared_spec = (
             declared_specs[index] if index < len(declared_specs) else None
         )
-        if self._numeric_na_parameter(func_info, index):
-            return "double"
         # A parameter holding a user-defined object or a drawing keeps the
         # references its calls passed (``_series_handle_cpp_type``).
         inferred_specs = list(getattr(func_info, "param_type_specs", ()) or ())
@@ -3773,8 +3709,6 @@ class TypeInferer:
             return None
         if param in self.ctx.func_series_vars.get(fi.name, set()):
             return None
-        if self._numeric_na_parameter(fi, index):
-            return None
         declared = list(
             getattr(self.ctx, "func_declared_param_type_specs", {}).get(
                 fi.name, ()
@@ -4274,7 +4208,8 @@ class TypeInferer:
                     and (node.name not in getattr(self, "_current_func_locals", ())
                          or self.ctx.identifier_binding_scopes.get(id(node)) == "global")
                     and (self._numeric_na_member(node.name)
-                         or self._numeric_na_global(node.name))):
+                         or (sym.scope == "global"
+                             and self._numeric_na_global(node.name)))):
                 return "double"
             if sym is not None and getattr(sym, "type_spec", None) is not None:
                 return self._type_spec_to_cpp(sym.type_spec)
@@ -4358,8 +4293,6 @@ class TypeInferer:
                     member_name,
                 )
                 if fi_u is not None:
-                    if self._numeric_na_return(fi_u):
-                        return "double"
                     call_site_idx = self._callable_target_callsite_idx(
                         fi_u, node
                     )
@@ -4377,8 +4310,6 @@ class TypeInferer:
                     )
             if namespace is None and func_name in self._func_info_map:
                 fi_u = self._func_info_map[func_name]
-                if self._numeric_na_return(fi_u):
-                    return "double"
                 call_site_idx = self._callable_target_callsite_idx(fi_u, node)
                 if self._func_int_return_uses_wide_history(
                     fi_u, call_site_idx=call_site_idx

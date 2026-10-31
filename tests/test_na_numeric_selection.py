@@ -1,4 +1,4 @@
-"""Nullable numeric selections preserve NaN through their consumers."""
+"""Nullable numeric selections retain their storage at each scope boundary."""
 
 from __future__ import annotations
 
@@ -229,12 +229,16 @@ y = math.max(c ? 1 : na, 0)
 """
 
 
-def test_nullable_integer_targets_keep_double_storage() -> None:
+def test_nullable_integer_targets_keep_their_scope_storage() -> None:
     cpp = transpile(_source(_INTEGER_TARGET_BODY))
-    # Each nullable numeric boundary holds NaN, including a declared int parameter.
-    assert "double accept_int(double " in cpp
-    assert "double local = " in cpp
-    assert "double returned_int(" in cpp
+    # A declared parameter, local and integer return keep guarded integer storage.
+    assert "int accept_int(int value)" in cpp
+    assert "int local = [&](){ auto _pf_v = (" in cpp
+    assert "int local_int(bool choose)" in cpp
+    assert "int returned_int(" in cpp
+    assert "int argument_value = 0;" in cpp
+    assert "int local_value = 0;" in cpp
+    assert "int return_value = 0;" in cpp
     # The timestamp is exactly representable as a double beside a NaN arm.
     assert "double wide = " in cpp
     assert "? (current_bar_.timestamp) : (na<double>())" in cpp
@@ -246,13 +250,13 @@ def test_nullable_integer_targets_keep_double_storage() -> None:
 
 _INTEGER_TARGET_DRIVER = _DRIVER.replace(
     "    const bool bear_na",
-    r"""    static_assert(std::is_same_v<decltype(bear_strategy.argument_value), double>);
-    static_assert(std::is_same_v<decltype(bear_strategy.local_value), double>);
-    static_assert(std::is_same_v<decltype(bear_strategy.return_value), double>);
+    r"""    static_assert(std::is_same_v<decltype(bear_strategy.argument_value), int>);
+    static_assert(std::is_same_v<decltype(bear_strategy.local_value), int>);
+    static_assert(std::is_same_v<decltype(bear_strategy.return_value), int>);
     static_assert(std::is_same_v<decltype(bear_strategy.wide), double>);
-    if (!std::isnan(bear_strategy.argument_value)
-            || !std::isnan(bear_strategy.local_value)
-            || !std::isnan(bear_strategy.return_value)
+    if (bear_strategy.argument_value != -2147483648LL
+            || bear_strategy.local_value != -2147483648LL
+            || bear_strategy.return_value != -2147483648LL
             || !std::isnan(bear_strategy.wide))
         return 2;
     if (bull_strategy.argument_value != 1.0 || bull_strategy.local_value != 1.0
@@ -264,7 +268,7 @@ _INTEGER_TARGET_DRIVER = _DRIVER.replace(
 
 @pytest.mark.parametrize("opt", ["-O0", "-O2"])
 def test_integer_targets_preserve_na_beside_float_consumers(opt: str) -> None:
-    # Bear holds NaN at every boundary; bull holds 1 or the exact final timestamp.
+    # Bear has three INT_MIN values and a NaN timestamp; bull has 1 and the timestamp.
     assert run_emitted_tu(
         transpile(_source(_INTEGER_TARGET_BODY)), _INTEGER_TARGET_DRIVER,
         opt=opt, label="integer-selection-targets",
@@ -279,15 +283,6 @@ _CONSUMER_ROWS = [
         id="global",
     ),
     pytest.param(
-        "choose_local(bool choose) =>\n"
-        "    int local = choose ? 1 : na\n"
-        "    local\n"
-        "selected = choose_local(c)\n",
-        ("double local = ", "double choose_local("),
-        "1 0 0 2 1 1\n",  # The local and its return retain NaN or 1 before addition.
-        id="function-local",
-    ),
-    pytest.param(
         "float selected = 0.0\n"
         "if high > open\n"
         "    int local = c ? 1 : na\n"
@@ -295,36 +290,6 @@ _CONSUMER_ROWS = [
         ("double local = ",),
         "1 0 0 2 1 1\n",  # Both feeds enter the block; its local selects NaN or 1.
         id="block-local",
-    ),
-    pytest.param(
-        "accept_value(int value) => value\n"
-        "selected = accept_value(c ? 1 : na)\n",
-        ("double accept_value(double value)",),
-        "1 0 0 2 1 1\n",  # The integer parameter receives NaN or 1 without narrowing.
-        id="parameter",
-    ),
-    pytest.param(
-        "default_value(int value = true ? na : 1) => value\n"
-        "selected = c ? default_value(1) : default_value()\n",
-        ("double default_value(double value)",),
-        "1 0 0 2 1 1\n",  # Bear uses the NaN default; bull explicitly passes 1.
-        id="parameter-default",
-    ),
-    pytest.param(
-        "choose_return(bool choose) => choose ? 1 : na\n"
-        "selected = choose_return(c)\n",
-        ("double choose_return(",),
-        "1 0 0 2 1 1\n",  # The return target retains the selected NaN or 1.
-        id="return",
-    ),
-    pytest.param(
-        "choose_nested(bool choose) =>\n"
-        "    int local = high > open ? (choose ? 1 : na) : 2\n"
-        "    local\n"
-        "selected = choose_nested(c)\n",
-        ("double local = ", "double choose_nested("),
-        "1 0 0 2 1 1\n",  # high > open on both feeds, so the nested result is NaN or 1.
-        id="nested-local",
     ),
     pytest.param(
         "var int held = c ? 1 : na\n"
@@ -352,13 +317,86 @@ _CONSUMER_ROWS = [
         "1 0 0 2 1 1\n",  # History starts missing; the second slot reads NaN or 1.
         id="global-history",
     ),
+]
+
+
+_FUNCTION_CONSUMER_ROWS = [
+    pytest.param(
+        "choose_local(bool choose) =>\n"
+        "    int local = choose ? 1 : na\n"
+        "    local\n"
+        "selected = choose_local(c)\n",
+        ("int local = [&](){ auto _pf_v = (", "int choose_local("),
+        "int",
+        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
+        "1 2 1 1 1 1 1 0\n",  # INT_MIN + 1 is -2147483647; finite 1 + 1 is 2.
+        id="function-local",
+    ),
+    pytest.param(
+        "choose_leaf(bool choose) =>\n"
+        "    int leaf = choose ? 1 : na\n"
+        "    leaf\n"
+        "choose_caller(bool choose) =>\n"
+        "    int local = choose_leaf(choose)\n"
+        "    local\n"
+        "selected = choose_caller(c)\n",
+        ("int leaf = [&](){ auto _pf_v = (", "int choose_leaf(",
+         "int local = choose_leaf(choose);", "int choose_caller("),
+        "int",
+        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
+        "1 2 1 1 1 1 1 0\n",  # Both integer calls keep INT_MIN or 1; adding 1 gives the shown sum.
+        id="local-through-call",
+    ),
+    pytest.param(
+        "accept_value(int value) => value\n"
+        "selected = accept_value(c ? 1 : na)\n",
+        ("int accept_value(int value)", "accept_value([&](){ auto _pf_v = ("),
+        "int",
+        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
+        "1 2 1 1 1 1 1 0\n",  # The guarded argument is INT_MIN or 1 before integer addition.
+        id="parameter",
+    ),
+    pytest.param(
+        "default_value(int value = true ? na : 1) => value\n"
+        "selected = c ? default_value(1) : default_value()\n",
+        ("int default_value(int value)", "default_value([&](){ auto _pf_v = ("),
+        "int",
+        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
+        "1 2 1 1 1 1 1 0\n",  # Bear narrows the missing default to INT_MIN; bull passes 1.
+        id="parameter-default",
+    ),
+    pytest.param(
+        "choose_return(bool choose) => choose ? 1 : na\n"
+        "selected = choose_return(c)\n",
+        ("int choose_return(", "return [&](){ auto _pf_v = ("),
+        "int",
+        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
+        "1 2 1 1 1 1 1 0\n",  # The guarded return is INT_MIN or 1; adding 1 remains integer.
+        id="return",
+    ),
+    pytest.param(
+        "choose_nested(bool choose) =>\n"
+        "    int local = high > open ? (choose ? 1 : na) : 2\n"
+        "    local\n"
+        "selected = choose_nested(c)\n",
+        ("int local = [&](){ auto _pf_v = (", "int choose_nested("),
+        "int",
+        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
+        "1 2 1 1 1 1 1 0\n",  # Both feeds take the inner selection, then narrow to INT_MIN or 1.
+        id="nested-local",
+    ),
     pytest.param(
         "history_value(int value) =>\n"
         "    previous = value[1]\n"
         "    na(previous) ? value : previous\n"
         "selected = history_value(c ? 1 : na)\n",
-        ("double history_value_cs0(const Series<double>& value)",),
-        "1 0 0 2 1 1\n",  # The first call uses current NaN/1; the next uses prior NaN/1.
+        ("int64_t history_value_cs0(const Series<int64_t>& value)",
+         "double previous = value[1];"),
+        "int64_t",
+        "-9223372036854775808 -9.2233720368547758e+18 0 NaN 0 "
+        "-9.2233720368547758e+18 -9223372036854775808 1\n"
+        "1 2 1 1 1 -4.6116860184273879e+18 1 0\n",
+        # The double history alias gives an initial INT64_MIN result; bull SMA averages it with 1.
         id="parameter-history",
     ),
     pytest.param(
@@ -367,8 +405,10 @@ _CONSUMER_ROWS = [
         "        int local = choose ? 1 : na\n"
         "        local\n"
         "selected = choose_loop(c)\n",
-        ("double local = ", "double choose_loop("),
-        "1 0 0 2 1 1\n",  # One loop iteration returns its nullable local as NaN or 1.
+        ("int local = [&](){ auto _pf_v = (", "int choose_loop("),
+        "int",
+        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
+        "1 2 1 1 1 1 1 0\n",  # The sole iteration returns INT_MIN or 1 through the integer slot.
         id="loop-return",
     ),
     pytest.param(
@@ -376,18 +416,38 @@ _CONSUMER_ROWS = [
         "    int local = choose ? 1 : na\n"
         "    local := choose ? 1 : na\n"
         "selected = choose_assignment(c)\n",
-        ("double local = ", "double choose_assignment("),
-        "1 0 0 2 1 1\n",  # The returned assignment keeps the local's NaN or 1 storage.
+        ("int local = [&](){ auto _pf_v = (", "int choose_assignment(",
+         "local = [&](){ auto _pf_v = ("),
+        "int",
+        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
+        "1 2 1 1 1 1 1 0\n",  # The assignment narrows to INT_MIN or 1 and returns that integer.
         id="assignment-return",
     ),
+    pytest.param(
+        "choose_shadow(bool choose) =>\n"
+        "    int captured = k\n"
+        "    int k = choose ? 1 : na\n"
+        "    captured\n"
+        "selected = choose_shadow(c)\n",
+        ("int captured = [&](){ auto _pf_v = (", "int choose_shadow(",
+         "int k = [&](){ auto _pf_v = ("),
+        "int",
+        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
+        "1 2 1 1 1 1 1 0\n",  # The earlier global read narrows to INT_MIN or 1 before shadowing.
+        id="global-before-local-shadow",
+    ),
+]
+
+
+_METHOD_CONSUMER_ROWS = [
     pytest.param(
         "type Holder\n"
         "    int seed\n"
         "method take(Holder self, int value) => value\n"
         "holder = Holder.new(0)\n"
         "selected = holder.take(c ? 1 : na)\n",
-        ("double _udt_Holder_take(Holder self, double value)",),
-        "1 0 0 2 1 1\n",  # The bound method parameter and its return retain NaN or 1.
+        "selected = _udt_Holder_take(holder, ((c) ? (1) : (na<double>())));",
+        # The method takes an int; its numeric ternary argument retains the implicit conversion.
         id="method-parameter",
     ),
     pytest.param(
@@ -396,19 +456,10 @@ _CONSUMER_ROWS = [
         "method take(Holder self, int value = true ? na : 1) => value\n"
         "holder = Holder.new(0)\n"
         "selected = c ? holder.take(1) : holder.take()\n",
-        ("double _udt_Holder_take(Holder self, double value)",),
-        "1 0 0 2 1 1\n",  # Bear uses the method's NaN default; bull passes 1.
+        "selected = ((c) ? (_udt_Holder_take(holder, 1)) : "
+        "(_udt_Holder_take(holder, ((true) ? (na<double>()) : (1)))));",
+        # The omitted int parameter receives its authored numeric selection at the call.
         id="method-parameter-default",
-    ),
-    pytest.param(
-        "choose_shadow(bool choose) =>\n"
-        "    int captured = k\n"
-        "    int k = choose ? 1 : na\n"
-        "    captured\n"
-        "selected = choose_shadow(c)\n",
-        ("double captured = ", "double choose_shadow("),
-        "1 0 0 2 1 1\n",  # The earlier read captures global NaN/1 before the local k exists.
-        id="global-before-local-shadow",
     ),
 ]
 
@@ -492,3 +543,97 @@ def test_declared_nullable_integer_consumers_on_bear_and_bull_bars(
         transpile(_source(body + _CONSUMERS)), _CONSUMER_DRIVER,
         opt=opt, label="nullable-integer-consumers",
     ) == expected
+
+
+@pytest.mark.parametrize("body,fragments,storage,expected", _FUNCTION_CONSUMER_ROWS)
+def test_function_integer_consumers_keep_guarded_storage(
+    body: str, fragments: tuple[str, ...], storage: str, expected: str,
+) -> None:
+    cpp = transpile(_source(body + _CONSUMERS))
+    _assert_nullable_target(cpp)
+    for fragment in fragments:
+        assert fragment in cpp
+    # Calls keep their integer result width; arithmetic is assigned to a double.
+    assert f"{storage} selected = 0;" in cpp
+    assert "double y = 0.0;" in cpp
+    assert "y = (selected + 1);" in cpp
+    assert "plot_value = selected;" in cpp
+    assert "direct_plot_value = k;" in cpp
+    assert "pine_str_tostring_tv(selected, std::string(), syminfo_mintick_)" in cpp
+    compile_cpp(cpp, label="function-integer-consumers")
+
+
+# Integer consumers expose the sentinel to arithmetic, min/max and TA inputs.
+_FUNCTION_CONSUMER_DRIVER = _DRIVER.split("    const bool bear_na", 1)[0] + r"""
+    static_assert(std::is_same_v<decltype(bear_strategy.selected), _EXPECTED_INT_TYPE>);
+    static_assert(std::is_same_v<decltype(bear_strategy.positive), bool>);
+    static_assert(std::is_same_v<decltype(bear_strategy.maximum), double>);
+    static_assert(std::is_same_v<decltype(bear_strategy.average), double>);
+    static_assert(std::is_same_v<decltype(bear_strategy.plot_value), _EXPECTED_INT_TYPE>);
+    static_assert(std::is_same_v<decltype(bear_strategy.direct_y), double>);
+    static_assert(std::is_same_v<decltype(bear_strategy.direct_positive), bool>);
+    static_assert(std::is_same_v<decltype(bear_strategy.direct_plot_value), double>);
+    if (!std::isnan(bear_strategy.k) || bull_strategy.k != 1.0
+            || !std::isnan(bear_strategy.direct_y) || bear_strategy.direct_positive
+            || bear_strategy.direct_text != "NaN"
+            || !std::isnan(bear_strategy.direct_maximum)
+            || !std::isnan(bear_strategy.direct_average)
+            || !std::isnan(bear_strategy.direct_plot_value))
+        return 2;
+    if (bull_strategy.direct_y != 2.0 || !bull_strategy.direct_positive
+            || bull_strategy.direct_text != "1"
+            || bull_strategy.direct_maximum != 1.0 || bull_strategy.direct_average != 1.0
+            || bull_strategy.direct_plot_value != 1.0)
+        return 3;
+    std::printf("%lld %.17g %d %s %.17g %.17g %lld %d\n",
+                static_cast<long long>(bear_strategy.selected), bear_strategy.y,
+                bear_strategy.positive, bear_strategy.text.c_str(),
+                bear_strategy.maximum, bear_strategy.average,
+                static_cast<long long>(bear_strategy.plot_value), bear_strategy.missing_value);
+    std::printf("%lld %.17g %d %s %.17g %.17g %lld %d\n",
+                static_cast<long long>(bull_strategy.selected), bull_strategy.y,
+                bull_strategy.positive, bull_strategy.text.c_str(),
+                bull_strategy.maximum, bull_strategy.average,
+                static_cast<long long>(bull_strategy.plot_value), bull_strategy.missing_value);
+}
+"""
+
+
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+@pytest.mark.parametrize("body,fragments,storage,expected", _FUNCTION_CONSUMER_ROWS)
+def test_function_integer_consumers_on_bear_and_bull_bars(
+    body: str, fragments: tuple[str, ...], storage: str, expected: str, opt: str,
+) -> None:
+    # Each row spells the values of both feeds, including their two-sample averages.
+    assert run_emitted_tu(
+        transpile(_source(body + _CONSUMERS)),
+        _FUNCTION_CONSUMER_DRIVER.replace("_EXPECTED_INT_TYPE", storage),
+        opt=opt, label="function-integer-consumers",
+    ) == expected
+
+
+@pytest.mark.parametrize("body,expected_assignment", _METHOD_CONSUMER_ROWS)
+def test_method_integer_consumers_keep_their_signature_and_argument_expression(
+    body: str, expected_assignment: str,
+) -> None:
+    cpp = transpile(_source(body + _CONSUMERS))
+    _assert_nullable_target(cpp)
+    # An int identity method keeps its parameter and return, including a defaulted call.
+    assert (
+        "    int _udt_Holder_take(Holder self, int value) {\n"
+        "        return value;\n"
+        "    }"
+    ) in cpp
+    assignment = next(
+        line.strip() for line in cpp.splitlines()
+        if line.strip().startswith("selected = ")
+    )
+    assert assignment == expected_assignment
+    assert "int selected = 0;" in cpp
+    assert "int plot_value = 0;" in cpp
+    assert "double y = 0.0;" in cpp
+    assert "y = (selected + 1);" in cpp
+    assert "plot_value = selected;" in cpp
+    assert "direct_plot_value = k;" in cpp
+    assert "pine_str_tostring_tv(selected, std::string(), syminfo_mintick_)" in cpp
+    compile_cpp(cpp, label="method-integer-consumers")
