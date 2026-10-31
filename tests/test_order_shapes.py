@@ -324,6 +324,15 @@ def test_host_reads_names_policy_setter_for_non_readers_only():
     assert "closed_trade_profit" in reader["host_reads"]
 
 
+def test_host_reads_lists_the_regenerated_member_the_config_block_spells():
+    declaration = '//@version=6\nstrategy("regenerated host reads", initial_capital=5000)\n'
+    body = 'strategy.entry("L", strategy.long)\n'
+    cpp = transpile(declaration + body)
+    reads = set(receipt(body, declaration)["host_reads"])
+    assert "initial_capital" in reads
+    assert scan_host_reads(cpp) <= reads
+
+
 def test_host_strings_do_not_create_reads():
     result = receipt('strategy.entry("L", strategy.long, comment="session_islastbar_")\nplot(close, title="pine_time_offset")')
     assert "session_islastbar_" not in result["host_reads"]

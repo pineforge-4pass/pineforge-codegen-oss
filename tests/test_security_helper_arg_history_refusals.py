@@ -23,7 +23,9 @@ from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.errors import CompileError, Phase
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
-from tests._legacy_cpp import without_id_sites_receipt, without_restore_script_state
+from tests._legacy_cpp import (
+    without_id_sites_receipt, without_regenerated_host_reads, without_restore_script_state,
+)
 from tests.test_security_helper_arg_history import (
     _CHART_CLOSES, _HOURLY_OPENS, _HOUR_MS, _assert_completed, _assert_sampled_sites,
     _assert_values, _difference, _run_requested, _sma, _source as _requested_source,
@@ -282,7 +284,9 @@ def _assert_unchanged_method(row, monkeypatch):
         # the compatibility hash. The id-sites receipt exports are additive
         # metadata the pinned emission predates.
         assert hashlib.sha256(
-            without_id_sites_receipt(without_restore_script_state(candidate["cpp"])).encode()
+            without_regenerated_host_reads(
+                without_id_sites_receipt(without_restore_script_state(candidate["cpp"]))
+            ).encode()
         ).hexdigest() == row.method_sha256
 
 
