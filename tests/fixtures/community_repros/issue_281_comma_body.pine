@@ -1,0 +1,9 @@
+//@version=6
+strategy('repro')
+type Box
+    array<string> items
+var b = Box.new(array.new<string>())
+add(Box x, string s) => array.push(x.items, s), x.items.size()
+add(b, 'a')
+if bar_index == 5
+    strategy.entry('L', strategy.long)

@@ -131,6 +131,7 @@ def assert_test_workflow_runner_routing(workflow):
         "workflow-lint": ["    runs-on: gke-8cpu-16gb-amd64"],
         "package-files": ["    runs-on: gke-8cpu-16gb-amd64"],
         "pytest": ["    runs-on: gke-8cpu-16gb-amd64"],
+        "compile": ["    runs-on: ubuntu-24.04"],
         "test-check": ["    runs-on: ubuntu-24.04"],
     }, "test.yml runner routing differs"
 
@@ -144,6 +145,7 @@ def test_test_workflow_routes_only_push_dispatch_heavy_jobs_to_pods():
     ("workflow-lint", "gke-8cpu-16gb-amd64", "ubuntu-24.04"),
     ("package-files", "gke-8cpu-16gb-amd64", "ubuntu-24.04"),
     ("pytest", "gke-8cpu-16gb-amd64", "ubuntu-24.04"),
+    ("compile", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
     ("authz", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
     ("changes", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
     ("test-check", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
@@ -275,7 +277,7 @@ def assert_package_file_checks(workflow):
     assert re.search(
         r"^        run: python -m pytest -q tests/test_license_entity\.py$", package, re.M,
     ), "package-files must execute the entity test"
-    assert "needs: [authz, changes, workflow-lint, package-files, pytest]" in jobs["test-check"]
+    assert "needs: [authz, changes, workflow-lint, package-files, pytest, compile]" in jobs["test-check"]
 
 
 def test_test_workflow_runs_package_file_and_entity_checks_on_every_diff():
@@ -555,8 +557,8 @@ def test_test_check_rejects_unsuccessful_package_files_on_docs_only_diff(package
     assert_aggregate_rejects(
         workflow, "skipped", tmp_path, package_result=package_result, docs_only="true",
     )
-    original = "    needs: [authz, changes, workflow-lint, package-files, pytest]\n"
-    replacement = "    needs: [authz, changes, workflow-lint, pytest]\n"
+    original = "    needs: [authz, changes, workflow-lint, package-files, pytest, compile]\n"
+    replacement = "    needs: [authz, changes, workflow-lint, pytest, compile]\n"
     assert workflow.count(original) == 1, "mutation must find the aggregate dependency list exactly once"
     mutant = workflow.replace(original, replacement, 1)
     assert mutant != workflow
@@ -571,8 +573,8 @@ def test_test_check_rejects_unsuccessful_package_files_on_docs_only_diff(package
 
 def test_test_check_rejects_package_files_added_to_heavy_jobs(tmp_path):
     workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
-    original = '          HEAVY_JOBS: "[\\"pytest\\"]"\n'
-    replacement = '          HEAVY_JOBS: "[\\"package-files\\",\\"pytest\\"]"\n'
+    original = '          HEAVY_JOBS: "[\\"pytest\\",\\"compile\\"]"\n'
+    replacement = '          HEAVY_JOBS: "[\\"package-files\\",\\"pytest\\",\\"compile\\"]"\n'
     assert workflow.count(original) == 1, "mutation must find the aggregate heavy-job list exactly once"
     mutant = workflow.replace(original, replacement, 1)
     assert mutant != workflow
@@ -1540,7 +1542,7 @@ def test_pr_payloads_use_only_admitted_bare_scalar_pods():
     path = WORKFLOWS / "gke-pr.yml"
     workflow = (path if path.exists() else WORKFLOWS / "gate.yml").read_text(encoding="utf-8")
     jobs = job_blocks(workflow)
-    for name in ("differential", "pytest", "workflow-lint", "package-files"):
+    for name in ("differential", "pytest", "compile", "workflow-lint", "package-files"):
         assert_pod_head_checkout(jobs[name])
 
 

@@ -25,9 +25,12 @@ Activation contract (env vars):
   checkout, then a stub synthesized from ``version.h.in`` + ``VERSION`` — so
   the syntax check works even without a configured CMake build.
 * ``CXX`` — compiler binary; defaults to ``g++``.
+* ``PINEFORGE_REQUIRE_COMPILE=1`` — missing compiler, engine or Eigen is a
+  failure, including callers that use ``have_compile_env()`` at collection.
+  GitHub CI sets this flag; local runs retain the opt-in skip.
 
-If any of the above is missing, the calling test is skipped via
-``pytest.skip(...)`` so CI without an engine checkout stays green.
+Without the required flag, missing inputs skip the calling test via
+``pytest.skip(...)``.
 """
 
 from __future__ import annotations
@@ -188,29 +191,45 @@ STRATEGY_FP_FLAGS = ("-ffp-contract=off",)
 
 
 def have_compile_env() -> bool:
-    """Cheap check used by parametrized tests to decide collection."""
+    """Collection guard; missing required inputs must not become a skip."""
+    if os.environ.get("PINEFORGE_REQUIRE_COMPILE") == "1":
+        skip_if_no_compile_env()
     return _ENGINE_INC is not None and _EIGEN_INC is not None and _COMPILER is not None
 
 
+def _compile_unavailable(message: str) -> None:
+    if os.environ.get("PINEFORGE_REQUIRE_COMPILE") == "1":
+        pytest.fail(f"PINEFORGE_REQUIRE_COMPILE=1: {message}", pytrace=False)
+    pytest.skip(message)
+
+
 def skip_if_no_compile_env() -> None:
-    """Call from a test body to skip cleanly when env is missing.
+    """Fail on missing required inputs, otherwise retain the opt-in skip.
 
     Centralises the skip message so each fail mode reads identically. The
     body checks each env piece individually so the user knows which knob to
     set, instead of a blanket "engine missing" message.
     """
     if _COMPILER is None:
-        pytest.skip("CXX compiler not found on PATH (try CXX=clang++).")
+        _compile_unavailable("CXX compiler not found on PATH (try CXX=clang++).")
     if _ENGINE_INC is None:
-        pytest.skip(
+        _compile_unavailable(
             "PINEFORGE_ENGINE_INCLUDE not set or invalid. "
             "Point it at pineforge-engine/include (containing pineforge/engine.hpp)."
         )
     if _EIGEN_INC is None:
-        pytest.skip(
+        _compile_unavailable(
             "Eigen3 headers not found. Set PINEFORGE_EIGEN_INCLUDE to the dir "
             "whose child is Eigen/ (or install eigen3 to a system path)."
         )
+
+
+class CppCompileError(AssertionError):
+    """Compile failure with full diagnostics available to aggregate reports."""
+
+    def __init__(self, message: str, *, diagnostics: str) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics
 
 
 def compile_cpp(cpp_source: str, *, label: str = "snippet",
@@ -262,10 +281,11 @@ def compile_cpp(cpp_source: str, *, label: str = "snippet",
             diag_preview = "\n".join(
                 (result.stderr or result.stdout).splitlines()[:40]
             )
-            raise AssertionError(
+            raise CppCompileError(
                 f"compile-only check failed for {label} (exit={result.returncode}).\n"
                 f"--- compiler diagnostics ---\n{diag_preview}\n"
-                f"--- emitted C++ (first 80 lines) ---\n{src_preview}\n"
+                f"--- emitted C++ (first 80 lines) ---\n{src_preview}\n",
+                diagnostics=result.stderr or result.stdout,
             )
     finally:
         try:

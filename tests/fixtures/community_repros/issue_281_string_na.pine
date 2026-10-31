@@ -1,0 +1,10 @@
+//@version=6
+strategy('repro')
+type Box
+    array<string> items
+var b = Box.new(array.new<string>())
+take(Box x) => x.items.size() > 2 ? x.items.shift() : na
+b.items.push('a')
+take(b)
+if bar_index == 5
+    strategy.entry('L', strategy.long)
