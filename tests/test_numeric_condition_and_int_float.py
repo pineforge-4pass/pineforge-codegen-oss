@@ -1,4 +1,4 @@
-"""Explicit integer declarations and numeric if conditions have located errors."""
+"""Explicit integer declarations and numeric conditions have located errors."""
 
 import pytest
 
@@ -153,9 +153,9 @@ _ACCEPTED = [
         id="na_condition",
     ),
     pytest.param(
-        '//@version=6\nstrategy("Numeric while condition")\nwhile close\n    break\n',
-        # Numeric while is unmeasured; the existing truthiness lowering stays accepted.
-        id="numeric_while_condition",
+        '//@version=6\nstrategy("Numeric while condition")\nwhile bool(close)\n    break\n',
+        # The explicit cast supplies bool while the body keeps its unconditional break.
+        id="explicit_bool_while_condition",
     ),
 ]
 
@@ -172,6 +172,29 @@ def test_type_errors_are_coded_and_located(
     assert diagnostic.code == code
     assert (diagnostic.location.line, diagnostic.location.col) == position
     assert render_diagnostic(code, diagnostic.args) == (
+        diagnostic.message, diagnostic.hint,
+    )
+
+
+def test_numeric_while_condition_is_coded_and_located() -> None:
+    source = '//@version=6\nstrategy("Numeric while condition")\nwhile close\n    break\n'
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="numeric_while.pine")
+    # A float while condition produces one analyzer error under the condition's catalog entry.
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.code == "PF-E2062"
+    assert diagnostic.message == (
+        'The condition of the "while" statement must evaluate to a "bool" value.'
+    )
+    assert diagnostic.args == {"block_name": "while"}
+    assert diagnostic.hint is None
+    assert diagnostic.location.file == "numeric_while.pine"
+    # Two header lines put close after "while " on line 3, column 7.
+    assert (diagnostic.location.line, diagnostic.location.col) == (3, 7)
+    assert render_diagnostic("PF-E2062", {"block_name": "while"}) == (
         diagnostic.message, diagnostic.hint,
     )
 

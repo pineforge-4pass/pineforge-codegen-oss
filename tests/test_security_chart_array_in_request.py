@@ -58,8 +58,8 @@ def test_scalar_dependencies_and_input_getters_are_recomputed():
         'array<float> samples = array.from(scaled, math.abs(delta))\n',
         "samples.get(0)"))
     body = _evaluator(cpp)
-    # Expanding scaled, delta and gain gives this vector on every requested bar.
-    assert ('std::vector<double>{((bar.close - bar.open) * get_input_float("Gain", 2.0)), '
+    # input.float reads get_input_double; expanding scaled and delta uses the requested bar.
+    assert ('std::vector<double>{((bar.close - bar.open) * get_input_double("Gain", 2.0)), '
             'std::abs((bar.close - bar.open))}') in body
     assert "}((samples))" not in body
 

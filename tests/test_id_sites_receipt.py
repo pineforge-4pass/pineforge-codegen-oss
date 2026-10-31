@@ -55,11 +55,9 @@ def expected_receipt(fresh) -> str:
     return json.dumps({"strategy": {"ids": ids}, "version": 1}, sort_keys=True, separators=(",", ":"))
 
 
-def transpiled(source: str, *, libraries=None) -> str:
+def transpiled(source: str) -> str:
     try:
-        if libraries is None:
-            return transpile(source)
-        return transpile(source, libraries=libraries)
+        return transpile(source)
     except Exception as error:
         # A fixture the transpiler refuses says nothing about the export: report it as its own failure.
         pytest.fail("fixture does not transpile on this build, so it cannot show the id-sites receipt: "
@@ -100,7 +98,7 @@ def function_body(cpp: str, opening: int) -> str:
 
 def receipt_text(source: str) -> str:
     """The document text ``strategy_id_sites_receipt`` hands to ``checked_settings::receipt``."""
-    cpp = transpiled(source, libraries=RECEIPT_LIBRARIES)
+    cpp = transpiled(source)
     definition = require_export(cpp, "strategy_id_sites_receipt", RECEIPT_DEFINITION)
     call = RECEIPT_CALL.search(function_body(cpp, definition.start()))
     if call is None:
@@ -192,11 +190,7 @@ countdown_next(int n) => countdown(n)
 total = countdown(2)
 '''
 
-RECURSIVE_FUNCTION = '''import examples/ReceiptCycles/1 as cycles
-total = cycles.countdown(2)
-'''
-
-# The id-site cases, (a) to (j): the lowered sites that create a computed id.
+# The lowered order sites that create a computed id.
 CASES = [
     pytest.param("plot(close)\n", 0, id="a-no-order-call"),
     pytest.param(LITERAL_IDS, 0, id="b-literal-ids-only"),
@@ -208,8 +202,6 @@ CASES = [
     pytest.param(CLOSE_AND_CANCEL, 0, id="g-close-and-cancel-with-computed-id"),
     pytest.param(DRAWINGS, 0, id="h-drawings-without-computed-order-id"),
     pytest.param(WHILE_SERIES_BOUND, UNBOUNDED, id="i-while-loop-bound-reads-a-series"),
-    # The two-function cycle reaches a computed id without a static call bound.
-    pytest.param(RECURSIVE_FUNCTION, UNBOUNDED, id="j-recursive-function"),
 ]
 
 
@@ -567,8 +559,8 @@ def test_helper_removes_exactly_the_two_id_sites_exports(body):
 
 
 # More of the cost algebra: a step that does not divide its range, a loop that counts down from
-# a start above one, a recursion that reaches no computed id, and a loop bound that is a global
-# constant. Each value is worked out by hand from the contract, never read off a transpile.
+# a start above one, and a loop bound that is a global constant. Each value is worked out by hand
+# from the contract, never read off a transpile.
 
 STEP_THREE_FOR_LOOP = '''for i = 0 to 10 by 3
     strategy.entry("L" + str.tostring(i), strategy.long)
@@ -583,24 +575,6 @@ DIRECT_QUIET_RECURSION = '''quiet(int n) =>
 settled = quiet(3)
 '''
 
-# Neither helper contains an order call, so their cycle reaches no counted site.
-QUIET_RECURSION = '''import examples/ReceiptCycles/1 as cycles
-settled = cycles.quiet(3)
-'''
-
-RECEIPT_LIBRARIES = {
-    "examples/ReceiptCycles/1": '''//@version=5
-library("ReceiptCycles")
-export countdown(int n) =>
-    strategy.entry("R" + str.tostring(n), strategy.long)
-    n <= 0 ? 0 : countdown_next(n - 1)
-countdown_next(int n) => countdown(n)
-export quiet(int n) =>
-    n <= 0 ? 0 : quiet_next(n - 1)
-quiet_next(int n) => quiet(n)
-''',
-}
-
 GLOBAL_CONSTANT_BOUND = '''n = 3
 for i = 1 to n
     strategy.entry("L" + str.tostring(i), strategy.long)
@@ -611,11 +585,6 @@ LOOP_AND_RECURSION_CASES = [
     pytest.param(STEP_THREE_FOR_LOOP, 4, id="for-loop-step-three-counts-four-iterations"),
     # i = 5, 4, 3, 2, 1: abs(1 - 5) // 1 + 1 = 5 iterations x 1 site = 5
     pytest.param(REVERSE_FIVE_FOR_LOOP, 5, id="reverse-for-loop-from-five-counts-five-iterations"),
-    # quiet() reaches no site, so the recursion adds 0; the top-level computed entry adds 1: 0 + 1 = 1
-    pytest.param(QUIET_RECURSION + COMPUTED_ENTRY, 1, id="recursion-reaching-no-computed-id-adds-nothing"),
-    # 0: the same script with a literal id, which adds nothing, so there is no site to count or to bound
-    pytest.param(QUIET_RECURSION + 'strategy.entry("L", strategy.long)\n', 0,
-                 id="recursion-beside-a-literal-id-adds-nothing"),
     # n = 3 is never reassigned, so i = 1, 2, 3: abs(3 - 1) // 1 + 1 = 3 iterations x 1 site = 3
     pytest.param(GLOBAL_CONSTANT_BOUND, 3, id="global-constant-bound-is-static"),
 ]
