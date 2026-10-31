@@ -58,11 +58,65 @@ def _is_member_of_other_object(text: str, start: int) -> bool:
     return index >= 0 and text[index] == "."
 
 
+_NOT_A_TYPE_WORD = frozenset({
+    "return", "else", "case", "throw", "new", "delete", "do", "goto", "sizeof",
+    "typeof", "if", "while", "for", "switch", "co_return", "co_yield", "co_await",
+    "not", "and", "or",
+})
+
+
+def _declares_a_member_of_its_own(text: str, start: int, end: int) -> bool:
+    """True for ``void replace(H& handle) {``: a definition, in a helper class,
+    of a name that merely matches a host member.
+
+    Only a definition that says ``override`` refers to a host member. A name
+    followed by a parameter list and preceded by a type word, with no
+    ``override`` after the parameters, declares a member of its own.
+    """
+    after = end
+    while after < len(text) and text[after] in " \t\r\n":
+        after += 1
+    if after >= len(text) or text[after] != "(":
+        return False
+    before = start - 1
+    while before >= 0 and text[before] in " \t\r\n":
+        before -= 1
+    stop = before
+    while before >= 0 and (text[before].isalnum() or text[before] == "_"):
+        before -= 1
+    word = text[before + 1:stop + 1]
+    if not word or word[0].isdigit() or word in _NOT_A_TYPE_WORD:
+        return False
+    depth = 0
+    index = after
+    while index < len(text):
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        index += 1
+    else:
+        return False
+    tail_end = len(text)
+    for stopper in ("{", ";"):
+        found = text.find(stopper, index)
+        if found != -1:
+            tail_end = min(tail_end, found)
+    return re.search(r"\boverride\b", text[index:tail_end]) is None
+
+
+def _is_host_read(text: str, match: re.Match[str]) -> bool:
+    return (match.group() in HOST_MEMBER_NAMES
+            and not _is_member_of_other_object(text, match.start())
+            and not _declares_a_member_of_its_own(text, match.start(), match.end()))
+
+
 def scan_host_reads(cpp: str) -> set[str]:
     """Cross-check host tokens, excluding C++ strings and comments."""
     return {match.group() for match in CPP_TOKENS.finditer(cpp)
-            if match.group() in HOST_MEMBER_NAMES
-            and not _is_member_of_other_object(cpp, match.start())}
+            if _is_host_read(cpp, match)}
 
 
 class HostReadLines(list):
@@ -82,8 +136,7 @@ class HostReadLines(list):
             self.in_comment = False
         for match in CPP_TOKENS.finditer(fragment):
             token = match.group()
-            if (token in HOST_MEMBER_NAMES
-                    and not _is_member_of_other_object(fragment, match.start())):
+            if _is_host_read(fragment, match):
                 self.reads.add(token)
             if token.startswith("/*") and not token.endswith("*/"):
                 self.in_comment = True
