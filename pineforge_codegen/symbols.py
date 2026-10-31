@@ -97,13 +97,14 @@ def method_receiver_cpp_token(
     spec: TypeSpec | None,
     fallback_name: str | None = None,
 ) -> str:
-    """Return a stable C++ identifier fragment for a method receiver type.
+    """Return a stable structural token for a method receiver type.
 
     Existing primitive, UDT, and drawing receiver spellings remain unchanged.
     Generic Pine types cannot be embedded directly in an identifier, so their
     structure is encoded recursively (``array<int>`` -> ``array_int``).  The
     fallback only supports older/synthetic ``FuncInfo`` records that lack the
-    structured receiver spec.
+    structured receiver spec. The emitter escapes the complete C++ identifier
+    after combining this token with the authored method name.
     """
 
     if spec is not None:

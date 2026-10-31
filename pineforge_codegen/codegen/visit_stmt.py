@@ -618,7 +618,7 @@ class StmtVisitor:
                 if info.get("is_series"):
                     lines.append(f"{pad}    {target_expr}.update({init_cpp});")
                 else:
-                    lines.append(f"{pad}    {target_expr} = {init_cpp};")
+                    lines.append(f"{pad}    {self._array_journal_initializer(target_expr, init_cpp)}")
                 lines.append(f"{pad}    {flag_expr} = true;")
                 lines.append(f"{pad}}}")
             return
@@ -1204,7 +1204,7 @@ class StmtVisitor:
             int_slot = self._int_slot_cpp_type(target_name)
             if node.op == ":=":
                 val_cpp = self._coerce_int_slot(val_cpp, node.value, int_slot)
-                lines.append(f"{pad}{safe} = {val_cpp};")
+                lines.append(f"{pad}{self._array_journal_initializer(safe, val_cpp)}")
             else:
                 rhs = self._compound_assign_rhs(safe, node.op, val_cpp)
                 if rhs is not None:
@@ -1726,6 +1726,10 @@ class StmtVisitor:
         # keeping the initial direction and step fixed.
         fid = self._for_counter
         self._for_counter += 1
+        fold = self._closed_trade_folds.get(id(node))
+        if value_target is None and fold is not None and fold[0] is node:
+            self._emit_closed_trade_fold(node, fold[1], lines, indent, var)
+            return
         s_var = f"_for_start_{fid}"
         e_var = f"_for_end_{fid}"
         step_var = f"_for_step_{fid}"
@@ -1789,6 +1793,14 @@ class StmtVisitor:
             f"{var} += ({down_var} ? -{step_var} : {step_var})"
             f"{refresh}) {{"
         )
+        self._emit_counted_loop_body(node, lines, indent + 1, value_target)
+        lines.append(f"{pad}}}")
+
+    def _emit_counted_loop_body(
+        self, node: ForStmt, lines: list[str], indent: int,
+        value_target: tuple[str, str | None] | None = None,
+    ) -> None:
+        """Emit a counted loop's body with its lexical counter binding."""
         # Register the loop counter so reads of it inside the body resolve (the
         # unknown-identifier guard in _visit_ident would otherwise flag it).
         saved_loop = self._current_loop_vars
@@ -1810,13 +1822,94 @@ class StmtVisitor:
             self._lexical_series_bindings[node.var] = False
             self._lexical_known_var_tombstones.add(node.var)
         try:
-            self._emit_loop_body(node.body, lines, indent + 1, value_target)
+            self._emit_loop_body(node.body, lines, indent, value_target)
         finally:
             self._pop_block_var_remap(_blk_saved)
         self._current_loop_vars = saved_loop
         self._current_loop_var_specs = saved_loop_specs
         self._current_counted_loop_vars = saved_counted
+
+    def _emit_closed_trade_fold(
+        self, node: ForStmt, plan, lines: list[str], indent: int, var: str,
+    ) -> None:
+        """Resume the settled left fold, then replay its mutable tail."""
+        # The cursor reads exit times even when the body only adds literals.
+        self._reads_trade_history = True
+        pad = "    " * indent
+        stem = plan.stem
+        accumulators = [safe for _name, safe in plan.accumulators]
+        parameters = [f"{stem}a{index}" for index in range(len(accumulators))]
+        prefix = [f"{stem}s{index}" for index in range(len(accumulators))]
+        checks = [f"{stem}v{index}" for index in range(len(accumulators))]
+        lines.append(
+            f"{pad}// closed-trade fold: final rows before the newest exit-time run are folded once"
+        )
+        signature = ", ".join([f"int {var}", *(f"auto& {name}" for name in parameters)])
+        lines.append(f"{pad}auto {stem}step = [&]({signature}) {{")
+        saved_remap = self._active_var_remap
+        self._active_var_remap = {**saved_remap, **dict(zip(accumulators, parameters))}
+        try:
+            self._emit_counted_loop_body(node, lines, indent + 1)
+        finally:
+            self._active_var_remap = saved_remap
+        lines.append(f"{pad}}};")
+        lines.append(f"{pad}const int {stem}n = ((int)trades_.size());")
+
+        # Capture the declaration values before restoring any saved prefix.
+        lines.append("#ifdef PINEFORGE_CLOSED_TRADE_FOLD_VERIFY")
+        for safe, check in zip(accumulators, checks):
+            lines.append(f"{pad}decltype(GeneratedStrategy::{safe}) {check} = {safe};")
+        lines.append("#endif")
+
+        lines.append(
+            f"{pad}const int {stem}final = {stem}n < {stem}seen ? {stem}n : {stem}seen;"
+        )
+        lines.append(f"{pad}int {stem}limit = 0;")
+        lines.append(f"{pad}if ({stem}final > 0) {{")
+        lines.append(
+            f"{pad}    const int64_t {stem}run = closed_trade_exit_time({stem}final - 1);"
+        )
+        lines.append(f"{pad}    {stem}limit = {stem}final - 1;")
+        lines.append(
+            f"{pad}    while ({stem}limit > 0"
+            f" && closed_trade_exit_time({stem}limit - 1) == {stem}run)"
+        )
+        lines.append(f"{pad}        --{stem}limit;")
         lines.append(f"{pad}}}")
+        lines.append(
+            f"{pad}if ({stem}n < {stem}seen || {stem}limit < {stem}settled"
+            f" || {stem}settled == 0) {{"
+        )
+        lines.append(f"{pad}    {stem}settled = 0;")
+        for safe, saved in zip(accumulators, prefix):
+            lines.append(f"{pad}    {saved} = {safe};")
+        lines.append(f"{pad}}}")
+        lines.append(
+            f"{pad}for (int {stem}i = {stem}settled; {stem}i < {stem}limit; ++{stem}i)"
+        )
+        lines.append(f"{pad}    {stem}step({stem}i, {', '.join(prefix)});")
+        lines.append(
+            f"{pad}if ({stem}limit > {stem}settled) {stem}settled = {stem}limit;"
+        )
+        lines.append(f"{pad}{stem}seen = {stem}n;")
+        for safe, saved in zip(accumulators, prefix):
+            lines.append(f"{pad}{safe} = {saved};")
+        lines.append(
+            f"{pad}for (int {stem}i = {stem}settled; {stem}i < {stem}n; ++{stem}i)"
+        )
+        lines.append(f"{pad}    {stem}step({stem}i, {', '.join(accumulators)});")
+
+        lines.append("#ifdef PINEFORGE_CLOSED_TRADE_FOLD_VERIFY")
+        lines.append(f"{pad}for (int {stem}i = 0; {stem}i < {stem}n; ++{stem}i)")
+        lines.append(f"{pad}    {stem}step({stem}i, {', '.join(checks)});")
+        for safe, check in zip(accumulators, checks):
+            lines.append(
+                f"{pad}if (std::memcmp(&{check}, &{safe}, sizeof({safe})) != 0)"
+            )
+            lines.append(
+                f'{pad}    throw std::runtime_error("closed-trade fold verification failed");'
+            )
+        lines.append("#endif")
 
     def _visit_for_in(self, node, lines: list[str], indent: int,
                       value_target: tuple[str, str | None] | None = None) -> None:
@@ -2083,7 +2176,7 @@ class StmtVisitor:
             return
         if reset:
             pad = "    " * indent
-            lines.append(f"{pad}{target} = {self._na_value_for_type(value_cpp)};")
+            lines.append(f"{pad}{self._array_journal_initializer(target, self._na_value_for_type(value_cpp))}")
         visit(node, lines, indent, value_target=(target, target_cpp_type))
 
     def _unmatched_arm_na(self, target: str) -> str | None:
@@ -2317,7 +2410,7 @@ class StmtVisitor:
                         self._int_slot_cpp_type(None, target_cpp_type),
                     )
                     pad = "    " * indent
-                    lines.append(f"{pad}{target} = {cpp};")
+                    lines.append(f"{pad}{self._array_journal_initializer(target, cpp)}")
                 elif isinstance(stmt, IfStmt):
                     # Nested if expression
                     self._visit_if_switch_expr(
@@ -2349,7 +2442,7 @@ class StmtVisitor:
                         self._int_slot_cpp_type(None, target_cpp_type),
                     )
                     pad = "    " * indent
-                    lines.append(f"{pad}{target} = {cpp};")
+                    lines.append(f"{pad}{self._array_journal_initializer(target, cpp)}")
                 elif isinstance(stmt, (ForStmt, ForInStmt, WhileStmt)):
                     self._emit_loop_with_assign(
                         stmt, target, lines, indent,
@@ -2423,7 +2516,7 @@ class StmtVisitor:
                 emit_implicit_na_fallback()
             elif self._unmatched_arm_na(target) is not None:
                 lines.append(f"{pad}else {{")
-                lines.append(f"{pad}    {target} = {self._unmatched_arm_na(target)};")
+                lines.append(f"{pad}    {self._array_journal_initializer(target, self._unmatched_arm_na(target))}")
                 lines.append(f"{pad}}}")
         elif isinstance(node, SwitchStmt):
             if node.expr:
@@ -2487,7 +2580,7 @@ class StmtVisitor:
                 na_value = self._unmatched_arm_na(target)
                 if node.cases:
                     lines.append(f"{pad}else {{")
-                    lines.append(f"{pad}    {target} = {na_value};")
+                    lines.append(f"{pad}    {self._array_journal_initializer(target, na_value)}")
                     lines.append(f"{pad}}}")
                 else:
-                    lines.append(f"{pad}{target} = {na_value};")
+                    lines.append(f"{pad}{self._array_journal_initializer(target, na_value)}")

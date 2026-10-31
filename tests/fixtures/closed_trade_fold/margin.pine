@@ -1,0 +1,36 @@
+//@version=6
+strategy("Margin liquidation after settled trades", initial_capital = 1000000, margin_long = 50, margin_short = 50, process_orders_on_close = true, calc_on_order_fills = false)
+
+varip int actionBar = -1
+if actionBar != bar_index
+    actionBar := bar_index
+    if bar_index < 2400
+        if bar_index % 8 == 0
+            strategy.entry("Long", strategy.long, qty = 1)
+        if bar_index % 8 == 4
+            strategy.entry("Short", strategy.short, qty = 1)
+        if bar_index % 4 == 2
+            strategy.close_all()
+    if bar_index == 2400
+        strategy.entry("Margin", strategy.long, qty = 19900)
+    if bar_index == 2404
+        strategy.close_all(immediately = true)
+
+int rows = 0
+float total = 0.0
+if strategy.closedtrades > 0
+    for i = 0 to strategy.closedtrades - 1
+        entryId = strategy.closedtrades.entry_id(i)
+        profit = strategy.closedtrades.profit(i)
+        rows += 1
+        total += profit
+        // fold-body-end
+
+int marginExit = 0
+if strategy.closedtrades > 0
+    if strategy.closedtrades.exit_id(strategy.closedtrades - 1) == "__margin_call__"
+        marginExit := 1
+// @pf-trace rows=rows
+// @pf-trace total=total
+// @pf-trace closedCount=strategy.closedtrades
+// @pf-trace marginExit=marginExit

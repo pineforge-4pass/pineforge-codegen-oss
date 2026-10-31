@@ -1,0 +1,40 @@
+//@version=6
+strategy("Independent closed trade folds", initial_capital = 1000000, process_orders_on_close = true, calc_on_order_fills = false)
+
+varip int actionBar = -1
+if actionBar != bar_index
+    actionBar := bar_index
+    if bar_index % 8 == 0
+        strategy.entry("Long", strategy.long, qty = 1)
+    if bar_index % 8 == 4
+        strategy.entry("Short", strategy.short, qty = 1)
+    if bar_index % 4 == 2
+        strategy.close_all()
+
+int longRows = 0
+float longTotal = -0.5
+if strategy.closedtrades > 0
+    for longIndex = 0 to strategy.closedtrades - 1
+        longIdentity = strategy.closedtrades.entry_id(longIndex)
+        float longAmount = strategy.closedtrades.profit(longIndex)
+        if longIdentity == "Long"
+            longRows += 1
+            longTotal += longAmount
+        // fold-body-end
+
+shortRows = 0
+shortTotal = 0.25
+if strategy.closedtrades > 0
+    for shortIndex = 0 to strategy.closedtrades - 1
+        string shortIdentity = strategy.closedtrades.entry_id(shortIndex)
+        shortAmount = strategy.closedtrades.profit(shortIndex)
+        if "Short" == shortIdentity
+            shortRows += 1
+            shortTotal += shortAmount
+        // fold-body-end
+
+// @pf-trace longRows=longRows
+// @pf-trace longTotal=longTotal
+// @pf-trace shortRows=shortRows
+// @pf-trace shortTotal=shortTotal
+// @pf-trace closedCount=strategy.closedtrades

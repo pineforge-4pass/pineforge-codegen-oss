@@ -91,7 +91,10 @@ def test_timestamp_numeric_form_defaults_to_syminfo_timezone():
     assert "_hr = (8)" in lam and "_min = (30)" in lam
     assert "timegm" in lam and "mktime" in lam
     assert "t.tm_isdst = -1" in lam
-    assert 'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC")' in lam
+    assert (
+        'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC" || '
+        '!pineforge::native_calendar::timezone_accepted(_tz))'
+    ) in lam
 
 
 def test_timestamp_numeric_kwargs_default_to_syminfo_timezone():

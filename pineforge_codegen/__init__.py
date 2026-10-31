@@ -6,8 +6,9 @@ from .lexer import Lexer
 from .parser import Parser
 from .analyzer import Analyzer
 from .codegen import CodeGen
+from .cpp_allowlist import REASONS, check_generated_cpp
 from .diagnostic_codes import diagnostics_catalog, render_diagnostic
-from .errors import CompileError, Level, Phase
+from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from .external_requests import lower_no_data_requests
 from .builtin_keywords import bind_builtin_keywords
 from .finite_ta_length import expand_finite_choice_extrema_lengths
@@ -99,6 +100,18 @@ def _generate(pine_source: str, check_support: bool, filename: str,
             continue
         needed = gen.session_functions_needing_clones
         if not needed:
+            findings = check_generated_cpp(cpp)
+            if findings:
+                raise CompileError([
+                    Diagnostic(
+                        level=Level.ERROR,
+                        phase=Phase.CODEGEN,
+                        location=SourceLocation(file=filename, line=1, col=1, end_col=1),
+                        message=REASONS[finding.rule],
+                        hint="Report this generated C++ allowlist failure to PineForge.",
+                    )
+                    for finding in findings[:20]
+                ])
             return gen, ctx, cpp, support_diagnostics, sites
         # Only uncloned functions ask, so the set grows each time and the
         # loop ends by the time every function that reads a flag at an

@@ -132,6 +132,8 @@ all tables it needs come from ``codegen/tables.py``, AST classes from
 
 from __future__ import annotations
 
+from . import graph_journal
+
 from ..ast_nodes import (
     ASTNode,
     Assignment,
@@ -297,11 +299,10 @@ def _timestamp_calendar_lambda(tz: str, yr: str, mo: str, dy: str,
     explicit tz expression, the numeric form passes ``syminfo_.timezone``
     (Pine v6: "If the timezone argument is not specified, the function uses
     the exchange time zone (syminfo.timezone)"). UTC / "" / "Etc/UTC" stays on
-    the ``timegm`` fast path — byte-identical to the historical numeric
-    emission for UTC symbols; anything else takes the mutex-guarded
-    setenv+``mktime`` block with ``tm_isdst = -1`` so DST is resolved by the
-    tz database. A per-call-site thread_local memo keeps the setenv churn to
-    one flip per distinct (tz, fields) tuple.
+    the ``timegm`` fast path. Rejected zones also use UTC; accepted non-UTC
+    zones take the mutex-guarded setenv+``mktime`` block with ``tm_isdst = -1``
+    so DST is resolved by the tz database. A per-call-site thread_local memo
+    keeps the setenv churn to one flip per distinct (tz, fields) tuple.
     """
     return (
         f"[&]() -> int64_t {{ "
@@ -1063,6 +1064,7 @@ class CallVisitor:
 
     def _map_param_method_expr(
         self, map_expr: str, method: str, arg_nodes: list, spec: TypeSpec,
+        node=None,
     ) -> str:
         """Lower one map operation with receiver-first, ordered single use.
 
@@ -1082,6 +1084,7 @@ class CallVisitor:
             # ``_wide_int_arith_cpp``) narrows na-preserving into the int
             # value (quirk 9), as an int array's element does.
             args[-1] = na_preserving_int_cast(args[-1], "int")
+        map_expr = graph_journal.receiver(self, map_expr, "map", method, node)
         occupied = "\n".join((map_expr, *args))
         counter = getattr(self, "_map_param_arg_counter", 0)
         bindings: list[tuple[str, str]] = []
@@ -1686,6 +1689,7 @@ class CallVisitor:
                     callee.member,
                     arg_nodes,
                     recv_spec,
+                    node,
                 )
             if recv_spec is not None and recv_spec.kind == "udt" and recv_spec.name:
                 mk = f"{recv_spec.name}.{callee.member}"
@@ -1823,6 +1827,7 @@ class CallVisitor:
                             meth,
                             arg_nodes,
                             recv_spec,
+                            node,
                         )
                     raw_args = [self._visit_expr(a) for a in node.args]
                     if recv_spec is not None and recv_spec.kind == "array" and meth in ARRAY_METHODS:
@@ -1906,7 +1911,7 @@ class CallVisitor:
                             allow_keywords=True,
                         )
                         return self._map_param_method_expr(
-                            m, meth_raw, arg_nodes, param_spec
+                            m, meth_raw, arg_nodes, param_spec, node
                         )
                     recv_spec = self._collection_spec_for_name(oname)
                     # Resolve the lexical TypeSpec once and route by its exact
@@ -1926,7 +1931,7 @@ class CallVisitor:
                             allow_keywords=False,
                         )
                         return self._map_param_method_expr(
-                            m, meth_raw, arg_nodes, recv_spec
+                            m, meth_raw, arg_nodes, recv_spec, node
                         )
                     if (
                         recv_spec is not None
@@ -2152,7 +2157,7 @@ class CallVisitor:
                 allow_keywords=False,
             )
             return self._map_param_method_expr(
-                m, func_name, arg_nodes, namespace_spec
+                m, func_name, arg_nodes, namespace_spec, node
             )
 
         # map.method(m, args...) — functional form
@@ -2174,7 +2179,7 @@ class CallVisitor:
                 m = self._visit_expr(node.args[0])
                 spec = self._type_spec_from_expr(node.args[0]) if node.args else None
                 return self._map_param_method_expr(
-                    m, func_name, list(node.args[1:]), spec
+                    m, func_name, list(node.args[1:]), spec, node
                 )
             return "0"
 
@@ -2487,6 +2492,7 @@ class CallVisitor:
         #   1-arg fallback.
         if (
             namespace is None
+            # Only the fixed calendar keys can select a pine_* callee.
             and func_name in TIME_FIELD_EXPRS
             and (node.args or node.kwargs)
         ):
@@ -2779,7 +2785,9 @@ class CallVisitor:
 
         # Unknown ta.* calls — safe fallback
         if namespace == "ta":
-            return f"na<double>() /* unsupported: ta.{func_name} */"
+            # C++ splices physical lines before recognizing comments.
+            comment_name = self._cpp_comment_escape(self._cpp_string_escape(func_name))
+            return f"na<double>() /* unsupported: ta.{comment_name} */"
 
         if namespace == "syminfo":
             if func_name in {"prefix", "ticker"}:
@@ -2807,7 +2815,8 @@ class CallVisitor:
                     "} else { return std::string(); } "
                     f"}})({symbol_expr})"
                 )
-            return f"na<double>() /* unsupported: syminfo.{func_name} */"
+            comment_name = self._cpp_comment_escape(self._cpp_string_escape(func_name))
+            return f"na<double>() /* unsupported: syminfo.{comment_name} */"
 
         # str.* fallback now handled by _visit_str_call above
 
@@ -3591,14 +3600,7 @@ class CallVisitor:
         if isinstance(node.callee, MemberAccess):
             inner = node.callee.object
             if isinstance(inner, MemberAccess) and inner.member in ("closedtrades", "opentrades"):
-                # The engine's accessors take an ``int`` trade index; a
-                # double-valued Pine expression narrows into it.
-                idx = (
-                    self._coerce_int_slot(
-                        self._visit_expr(node.args[0]), node.args[0], "int",
-                    )
-                    if node.args else "0"
-                )
+                idx = self._trade_index_cpp(node)
                 is_open = inner.member == "opentrades"
                 if not is_open:
                     # Closed-trade accessors require the resident trade rows;
@@ -3650,6 +3652,17 @@ class CallVisitor:
         raise ValueError(
             f"codegen: unhandled strategy.{func_name}(...) — analyzer should "
             f"have rejected. Add a handler above or extend STRATEGY_FUNCTIONS."
+        )
+
+    def _trade_index_cpp(self, node: FuncCall) -> str:
+        """The shared index slot of owning getters and in-place comparisons."""
+        # The engine's accessors take an int; preserve na when narrowing a
+        # double-valued Pine expression, and evaluate the expression once.
+        return (
+            self._coerce_int_slot(
+                self._visit_expr(node.args[0]), node.args[0], "int",
+            )
+            if node.args else "0"
         )
 
     # TradingView's parameter order of color.from_gradient.
@@ -3747,6 +3760,7 @@ class CallVisitor:
                     f"{color_alpha_cast('_pf_color_alpha', whole)}); }}()"
                 )
             return "0"
+        # These four fixed channel names are the only interpolated callees.
         if func_name in ("r", "g", "b", "t"):
             if args:
                 return f'pine_color::{func_name}({args[0]})'
@@ -3832,7 +3846,7 @@ class CallVisitor:
                         var = self._safe_name(val_arg.name)
                         n = len(tbl)
                         return (
-                            f"pine_enum_str_at({et}_str_values, {n}, {var})"
+                            f"pine_enum_str_at({self._safe_name(et)}_str_values, {n}, {var})"
                         )
             inferred = self._infer_type(val_arg) if val_arg is not None else ""
             if inferred == "std::string":
@@ -3913,7 +3927,8 @@ class CallVisitor:
                 args, STR_ARGS_READ_REPEATEDLY.get(func_name, ()),
                 STR_FUNC_MAP[func_name], "_pf_str_a")
 
-        return f'std::string("") /* unsupported: str.{func_name} */'
+        comment_name = self._cpp_comment_escape(self._cpp_string_escape(func_name))
+        return f'std::string("") /* unsupported: str.{comment_name} */'
 
     def _visit_math_call(self, func_name: str, node: FuncCall) -> str:
         args = _merge_kwargs(node.args, node.kwargs, sigs.get_param_names("math", func_name), self._visit_expr)
@@ -3949,7 +3964,8 @@ class CallVisitor:
                 return mapped.format(*args)
             return f"{mapped}({', '.join(args)})"
         # Unknown math.* — safe fallback
-        return f"0.0 /* unsupported: math.{func_name} */"
+        comment_name = self._cpp_comment_escape(self._cpp_string_escape(func_name))
+        return f"0.0 /* unsupported: math.{comment_name} */"
 
     # ------------------------------------------------------------------
     # Arg/kwarg resolution (PineScript parameter signatures)

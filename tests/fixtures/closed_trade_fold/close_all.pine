@@ -1,0 +1,34 @@
+//@version=6
+strategy("Flatten pyramided entries", initial_capital = 1000000, pyramiding = 2, process_orders_on_close = true, calc_on_order_fills = false)
+
+varip int actionBar = -1
+if actionBar != bar_index
+    actionBar := bar_index
+    if bar_index % 8 == 0
+        strategy.entry("Long", strategy.long, qty = 1)
+        strategy.entry("OtherLong", strategy.long, qty = 2)
+    if bar_index % 8 == 4
+        strategy.entry("Short", strategy.short, qty = 1)
+        strategy.entry("OtherShort", strategy.short, qty = 2)
+    if bar_index % 4 == 2
+        strategy.close_all(comment = "flatten")
+
+int rows = 0
+int namedRows = 0
+float total = 0.0
+if strategy.closedtrades > 0
+    for i = 0 to strategy.closedtrades - 1
+        entryId = strategy.closedtrades.entry_id(i)
+        profit = strategy.closedtrades.profit(i)
+        rows += 1
+        total += profit
+        if entryId == "Long"
+            namedRows += 1
+        if entryId == "Short"
+            namedRows += 1
+        // fold-body-end
+
+// @pf-trace rows=rows
+// @pf-trace namedRows=namedRows
+// @pf-trace total=total
+// @pf-trace closedCount=strategy.closedtrades

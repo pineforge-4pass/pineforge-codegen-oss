@@ -26,10 +26,76 @@ from ..collection_history import (
 from ..ast_nodes import Assignment, FuncCall, FuncDef, Identifier, MemberAccess, MethodDef, Ternary, VarDecl
 from ..limits import iter_ast_nodes
 from ..symbols import TypeSpec
+from .history_sharing import (
+    CACHED_COLLECTION_HISTORY_CPP, HISTORY_VERSION_CLOCK_CPP, HistorySharingPlan,
+)
+from .tables import ARRAY_JOURNAL_DELTA_METHODS, ARRAY_JOURNAL_FULL_METHODS
 
 
 class CollectionHistoryEmitter:
     """CodeGen mixin: the history members of array and matrix variables."""
+
+    def _prepare_history_sharing(self) -> None:
+        self._history_sharing = HistorySharingPlan(self)
+        if self._history_sharing.variables:
+            self._plan_array_mutations(self._history_sharing)
+        assert self._history_sharing.members.keys().isdisjoint(
+            getattr(self, "_array_journal_members", {})
+        ), "array journal and history sharing owners must be disjoint"
+
+    def _history_sharing_plan(self):
+        plan = getattr(self, "_history_sharing", None)
+        return plan if plan is not None and plan.members else None
+
+    def _history_version_clock_member(self, name: str) -> bool:
+        plan = self._history_sharing_plan()
+        return plan is not None and name == plan.clock_member
+
+    def _emit_history_sharing_includes(self, lines: list[str]) -> None:
+        if self._history_sharing_plan() is not None:
+            lines.extend(("#include <limits>", "#include <utility>"))
+
+    def _emit_history_version_clock(self, lines: list[str]) -> None:
+        plan = self._history_sharing_plan()
+        if plan is not None:
+            lines.append(f"    {plan.clock_type} {plan.clock_member};")
+
+    def _collection_history_class(self, variable) -> str:
+        plan = self._history_sharing_plan()
+        if plan is not None and self._safe_name(variable.name) in plan.members:
+            return plan.history_type
+        return "_PFCollectionHistory"
+
+    def _history_sharing_writer(self, member: str) -> str | None:
+        plan = self._history_sharing_plan()
+        return plan.writer(member) if plan is not None and member in plan.members else None
+
+    def _array_write_adapter(self, node, method: str) -> str | None:
+        if method not in ARRAY_JOURNAL_DELTA_METHODS | ARRAY_JOURNAL_FULL_METHODS:
+            return None
+        if id(node) in getattr(self, "_array_journal_calls", {}):
+            return f"this->{self._array_journal_member_name}"
+        plan = self._history_sharing_plan()
+        if plan is not None and id(node) in plan.calls:
+            return plan.writer(plan.calls[id(node)])
+        if plan is not None:
+            # Recover the stable owner from an annotated history-changing
+            # receiver when exact call-node admission is unavailable, so a
+            # zero-offset change still advances the same content token.
+            receiver = None
+            callee = getattr(node, "callee", None)
+            if (isinstance(callee, MemberAccess)
+                    and isinstance(callee.object, Identifier)
+                    and callee.object.name == "array"):
+                receiver = (node.args[0] if node.args
+                            else node.kwargs.get("id"))
+            annotation = history_annotation(receiver)
+            if (annotation is not None and annotation.get("use") == "change"
+                    and isinstance(receiver.object, Identifier)):
+                member = self._safe_name(receiver.object.name)
+                if member in plan.members:
+                    return plan.writer(member)
+        return None
 
     def _matrix_history_value_names(self) -> set[str]:
         cached = getattr(self, "_matrix_history_value_bindings", None)
@@ -82,7 +148,8 @@ class CollectionHistoryEmitter:
                     f'return {receiver}; }}())')
         return receiver
 
-    def _array_history_value_names(self) -> dict[str, TypeSpec]:
+    def _array_history_value_names(self, *, register: bool = True) -> dict[str, TypeSpec]:
+        """Return history bindings, deferring registration for ownership probes."""
         cached = getattr(self, "_array_history_value_specs", None)
         if cached is not None:
             return cached
@@ -121,10 +188,11 @@ class CollectionHistoryEmitter:
                 if name not in specs:
                     specs[name] = specs[source]
                     pending.append(name)
-        for name, spec in specs.items():
-            self._array_vars.add(name)
-            self._collection_types[name] = spec
-        self._array_history_value_specs = specs
+        if register:
+            for name, spec in specs.items():
+                self._array_vars.add(name)
+                self._collection_types[name] = spec
+            self._array_history_value_specs = specs
         return specs
 
     def _array_history_value_cpp_type(self, name: str) -> str | None:
@@ -152,6 +220,12 @@ class CollectionHistoryEmitter:
     def _legacy_array_history_element(self, receiver: str, spec: TypeSpec,
                                       offset: str, mutable: bool = False) -> str:
         element_cpp = self._type_spec_to_cpp(spec.element)
+        capture = ""
+        if mutable and receiver in getattr(self, "_array_journal_members", {}):
+            capture = (f"this->{self._array_journal_member_name}.save_set("
+                       "_pf_history_array, (size_t)_pf_history_offset); ")
+        elif mutable and (writer := self._history_sharing_writer(receiver)) is not None:
+            capture = f"{writer}.save_set(_pf_history_array, (size_t)_pf_history_offset); "
         if self._array_history_value_names():
             receiver = f"_pf_array_id({receiver})"
         if mutable:
@@ -163,6 +237,7 @@ class CollectionHistoryEmitter:
                 f"static_cast<size_t>(_pf_history_offset) >= _pf_history_array.size()) "
                 f'_PF_ARRAY_STOP("index_out_of_bounds", nullptr, '
                 f'"Array history element index is out of bounds."); '
+                f"{capture}"
                 f"return _pf_history_array.at(_pf_history_offset); }}())"
             )
         return (
@@ -217,16 +292,27 @@ class CollectionHistoryEmitter:
         if any(spec.element != float_spec for spec in matrices):
             lines.append(COLLECTION_HISTORY_GENERIC_MATRIX_CPP.strip("\n"))
         lines.append(COLLECTION_HISTORY_CLASS_CPP.strip("\n"))
+        plan = self._history_sharing_plan()
+        if plan is not None:
+            lines.append(HISTORY_VERSION_CLOCK_CPP.replace("@CLOCK@", plan.clock_type).strip("\n"))
+            lines.append(CACHED_COLLECTION_HISTORY_CPP.replace(
+                "@HISTORY@", plan.history_type).replace("@CLOCK@", plan.clock_type).strip("\n"))
         lines.append("")
 
     def _collection_history_open(self, variable) -> str:
         """The statement opening a declaration's slot."""
+        plan = self._history_sharing_plan()
+        version = (f", this->{plan.clock_member}" if plan is not None
+                   and self._safe_name(variable.name) in plan.members else "")
         return (f"{self._collection_history_member(variable)}.open_slot("
-                f"{self._safe_name(variable.name)}, history_advances_new_bar());")
+                f"{self._safe_name(variable.name)}, history_advances_new_bar(){version});")
 
     def _collection_history_close(self, variable) -> str:
+        plan = self._history_sharing_plan()
+        version = (f", this->{plan.clock_member}" if plan is not None
+                   and self._safe_name(variable.name) in plan.members else "")
         return (f"{self._collection_history_member(variable)}.close("
-                f"{self._safe_name(variable.name)});")
+                f"{self._safe_name(variable.name)}{version});")
 
     def _collection_history_decl_statements(self, node) -> list[str]:
         """What an execution of a declaration does first: close the history

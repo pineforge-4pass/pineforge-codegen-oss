@@ -216,6 +216,13 @@ _DRAWING_EFFECT_NAMESPACES = frozenset({
 })
 _DRAWING_EFFECT_METHODS = frozenset({"delete", "cell", "merge_cells"})
 
+_CLOSED_TRADE_TEXT_EQUALS = {
+    "entry_id": "closed_trade_entry_id_equals",
+    "exit_id": "closed_trade_exit_id_equals",
+    "entry_comment": "closed_trade_entry_comment_equals",
+    "exit_comment": "closed_trade_exit_comment_equals",
+}
+
 
 def _ast_children(node):
     """The AST nodes directly under ``node``: its fields, lists, tuples (a
@@ -1054,6 +1061,7 @@ class ExprVisitor:
                     # do not describe, so it keeps the predicates at the
                     # security bar's time, with a warning.
                     args = "(syminfo_.session, syminfo_.timezone, current_bar_.timestamp)"
+                    # The three literal members above close this callee set.
                     predicate = f"pine_session_{node.member}{args}"
                     if self._security_payload_depth:
                         if id(node) not in self._warned_security_session_sites:
@@ -1215,6 +1223,7 @@ class ExprVisitor:
                     or self._infer_type(node.object) == "ChartPoint"
                     or tuple_cpp == "ChartPoint"
                 )
+                # ChartPoint exposes only these three fixed C++ fields.
                 if point and node.member in ("time", "index", "price"):
                     safe = self._call_site_var_name(
                         node.object, self._safe_name(name)
@@ -1233,6 +1242,7 @@ class ExprVisitor:
             (recv_spec is not None and recv_spec.name == "chart.point")
             or self._infer_type(node.object) == "ChartPoint"
         )
+        # The expression receiver uses the same closed ChartPoint field set.
         if point and node.member in ("time", "index", "price"):
             return f"{obj}.{node.member}"
         full = f"{node.member}"
@@ -1413,7 +1423,53 @@ class ExprVisitor:
             node, left, right,
             lambda left, right: f"(({left}).id {node.op} ({right}).id)")
 
+    @staticmethod
+    def _closed_trade_text_equality_operands(
+        node: BinOp,
+    ) -> tuple[FuncCall, StringLiteral] | None:
+        """A direct closed-trade text read compared with a NUL-free literal."""
+        if node.op not in ("==", "!="):
+            return None
+        call, literal = node.left, node.right
+        if isinstance(call, StringLiteral):
+            call, literal = literal, call
+        if (not isinstance(call, FuncCall)
+                or not isinstance(literal, StringLiteral)
+                or "\0" in literal.value):
+            return None
+        callee = call.callee
+        if (not isinstance(callee, MemberAccess)
+                or callee.member not in _CLOSED_TRADE_TEXT_EQUALS):
+            return None
+        owner = callee.object
+        if (not isinstance(owner, MemberAccess)
+                or owner.member != "closedtrades"
+                or not isinstance(owner.object, Identifier)
+                or owner.object.name != "strategy"):
+            return None
+        return call, literal
+
+    def _closed_trade_text_equals_cpp(self, node: BinOp) -> str | None:
+        operands = self._closed_trade_text_equality_operands(node)
+        if operands is None:
+            return None
+        call, literal = operands
+        index = self._trade_index_cpp(call)
+        self._reads_trade_history = True
+        escaped = f'"{self._cpp_string_escape(literal.value)}"'
+        helper = _CLOSED_TRADE_TEXT_EQUALS[call.callee.member]
+        # sizeof counts the emitted bytes, including UTF-8 and escaped bytes.
+        # A NUL literal keeps std::string(const char*)'s existing truncation.
+        comparison = (
+            f"{helper}({index}, std::string_view({escaped}, "
+            f"sizeof({escaped}) - 1))"
+        )
+        return f"!({comparison})" if node.op == "!=" else comparison
+
     def _visit_binop(self, node: BinOp) -> str:
+        text_equals = self._closed_trade_text_equals_cpp(node)
+        if text_equals is not None:
+            return text_equals
         if node.op in ("==", "!="):
             identity = self._reference_equality_cpp(node)
             if identity is not None:

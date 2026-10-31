@@ -1,0 +1,45 @@
+//@version=6
+strategy("Closed trade totals", initial_capital = 1000000, process_orders_on_close = true, calc_on_order_fills = false, commission_type = strategy.commission.percent, commission_value = 0.0375)
+
+varip int actionBar = -1
+varip int calculations = 0
+calculations += 1
+if actionBar != bar_index
+    actionBar := bar_index
+    if bar_index % 8 == 0
+        strategy.entry("Long", strategy.long, qty = 3)
+    if bar_index % 8 == 4
+        strategy.entry("Short", strategy.short, qty = 3)
+    if bar_index % 4 == 2
+        strategy.close_all(comment = "scheduled")
+
+int longTrades = 0
+int shortTrades = 0
+int longWins = 0
+int shortWins = 0
+float longProfit = 0.0
+float shortProfit = 0.0
+if strategy.closedtrades > 0
+    for i = 0 to strategy.closedtrades - 1
+        entryId = strategy.closedtrades.entry_id(i)
+        profit = strategy.closedtrades.profit(i)
+        if entryId == "Long"
+            longTrades += 1
+            longProfit += profit
+            if profit > 0
+                longWins += 1
+        if entryId == "Short"
+            shortTrades += 1
+            shortProfit += profit
+            if profit > 0
+                shortWins += 1
+        // fold-body-end
+
+// @pf-trace longTrades=longTrades
+// @pf-trace shortTrades=shortTrades
+// @pf-trace longWins=longWins
+// @pf-trace shortWins=shortWins
+// @pf-trace longProfit=longProfit
+// @pf-trace shortProfit=shortProfit
+// @pf-trace closedCount=strategy.closedtrades
+// @pf-trace calculations=calculations

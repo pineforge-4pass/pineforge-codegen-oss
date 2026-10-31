@@ -94,6 +94,7 @@ from ..ast_nodes import (
     MemberAccess, SwitchStmt, TupleAssign, TupleLiteral, VarDecl, WhileStmt,
 )
 from ..analyzer import FuncInfo
+from ..cpp_names import cpp_identifier_fragment
 from ..symbols import PineType, method_receiver_cpp_token
 from .tables import (
     BAR_SERIES_PUSH,
@@ -154,6 +155,10 @@ class TopLevelEmitter:
         lines.append("#include <numeric>")
         lines.append("#include <string>")
         lines.append("#include <vector>")
+        if getattr(self, "_array_journal_members", {}):
+            lines.extend(("#include <functional>", "#include <limits>",
+                          "#include <stdexcept>", "#include <utility>"))
+        self._emit_history_sharing_includes(lines)
         if self._uses_tv_number_format:
             lines.extend(("#include <charconv>", "#include <system_error>",
                           "#include <stdexcept>"))
@@ -530,7 +535,9 @@ class TopLevelEmitter:
         Precalculated TA result vectors and their mode flag are immutable once
         the engine starts its broker walk.  Copying an O(number-of-bars) cache
         before every COOF execution would be both unnecessary and catastrophic,
-        so those implementation caches are the sole exclusions.  The live TA
+        so those implementation caches are excluded. Varip state is excluded
+        too. A collection journal owns its records outside this inventory;
+        its enrolled roots remain inventoried and use checkpoint tokens. The live TA
         objects themselves remain captured because dynamic/magnifier runs call
         ``compute`` and mutate them.
         """
@@ -542,6 +549,11 @@ class TopLevelEmitter:
             if name is None:
                 continue
             if name == "_use_precalc" or name.startswith("_precalc_"):
+                continue
+            if (getattr(self, "_array_journal_members", {})
+                    and name == self._array_journal_member_name):
+                continue
+            if self._history_version_clock_member(name):
                 continue
             if name in seen:
                 raise AssertionError(f"duplicate generated script-state member: {name}")
@@ -590,8 +602,8 @@ class TopLevelEmitter:
         Unlike per-bar rollback, a new lifecycle also invalidates precalculated
         vectors and initialization latches. Constructor arguments are taken from
         the constructor's own plan; declaration defaults cover every other
-        member. The only nonassignable state is the UDT undo coordinator/arenas,
-        whose explicit reset retains their stable internal pointers.
+        member. Nonassignable undo coordinators and UDT arenas use explicit
+        resets that retain their stable internal pointers.
         """
         constructor_values: dict[str, str] = {}
         for initializer in self._script_constructor_initializers:
@@ -620,6 +632,13 @@ class TopLevelEmitter:
             if name in seen:
                 raise AssertionError(f"duplicate generated lifecycle member: {name}")
             seen.add(name)
+            if self._history_version_clock_member(name):
+                lines.append(f"        this->{name}.reset_for_run();")
+                continue
+            if (getattr(self, "_array_journal_members", {})
+                    and name == self._array_journal_member_name):
+                lines.append(f"        this->{name}.reset_for_run();")
+                continue
             if name in udt_state:
                 lines.append(f"        this->{name}.reset_for_run();")
                 continue
@@ -958,7 +977,8 @@ class TopLevelEmitter:
         rollback updates every alias. Generated UDT arenas snapshot each owned
         record once; nested UDT/map/matrix fields therefore restore through
         their numeric/shared IDs without recursively walking object graphs.
-        Vectors snapshot their elements, including UDT handle values. Drawing
+        Proven primitive array roots use undo tokens; other vectors snapshot
+        their elements, including UDT handle values. Drawing
         handles themselves are stable ids and their arenas are captured in the
         same checkpoint.
 
@@ -973,9 +993,13 @@ class TopLevelEmitter:
             or getattr(self, "_uses_matrix", False)
             or getattr(self, "_udt_defs", {})
         )
+        journal_members = getattr(self, "_array_journal_members", {})
+        journal = (f"this->{self._array_journal_member_name}" if journal_members else None)
         lines.append("    struct _PFScriptState {")
         for idx, name in enumerate(members):
-            if handle_aware:
+            if name in journal_members:
+                lines.append(f"        {self._array_journal_cpp_name}::Token _pf_value_{idx};")
+            elif handle_aware:
                 lines.append(
                     f"        {checkpoint_traits}<"
                     f"decltype(GeneratedStrategy::{name})>::snapshot_type "
@@ -997,9 +1021,14 @@ class TopLevelEmitter:
         lines.append("    std::optional<_PFScriptState> _pf_script_state_checkpoint_;")
         lines.append("")
         lines.append("    void snapshot_script_state() override {")
+        if journal:
+            generation = self._array_journal_generation_name
+            lines.append(f"        const auto {generation} = {journal}.next_generation();")
         lines.append("        _pf_script_state_checkpoint_.emplace(_PFScriptState{")
         for name in members:
-            if handle_aware:
+            if name in journal_members:
+                lines.append(f"            {{&this->{name}, {generation}}},")
+            elif handle_aware:
                 lines.append(
                     f"            {checkpoint_traits}<"
                     f"decltype(GeneratedStrategy::{name})>::take({name}),"
@@ -1007,16 +1036,25 @@ class TopLevelEmitter:
             else:
                 lines.append(f"            {name},")
         lines.append("        });")
+        if journal:
+            # Publish only after every unchanged member snapshot succeeded.
+            lines.append(f"        {journal}.begin({generation});")
         lines.append("    }")
         lines.append("")
         lines.append("    void restore_script_state() override {")
         lines.append("        if (!_pf_script_state_checkpoint_) return;")
+        if journal:
+            for idx, name in enumerate(members):
+                if name in journal_members:
+                    lines.append(
+                        f"        {journal}.validate(_pf_script_state_checkpoint_->_pf_value_{idx}, this->{name});")
+            lines.append(f"        {journal}.restore();")
         # Requested evaluators advance independently of chart rollback, like
         # the engine's requested aggregators. Snapshot/commit still copy all
         # members; those unused requested copies are harmless.
         requested_progression = self._requested_progression_member_names()
         for idx, name in enumerate(members):
-            if name in requested_progression:
+            if name in requested_progression or name in journal_members:
                 continue
             if handle_aware:
                 lines.append(
@@ -1742,7 +1780,7 @@ class TopLevelEmitter:
                     for stmt in self.ctx.ast.body:
                         if isinstance(stmt, VarDecl) and stmt.name == name:
                             cpp_val = self._visit_expr(stmt.value)
-                            lines.append(f"            {safe} = {cpp_val};")
+                            lines.append(f"            {self._array_journal_initializer(safe, cpp_val)}")
                             break
                     continue
                 if name in self._matrix_specs:
@@ -1760,7 +1798,7 @@ class TopLevelEmitter:
                                     self._matrix_specs[name]
                                 ),
                             )
-                            lines.append(f"            {safe} = {cpp_val};")
+                            lines.append(f"            {self._array_journal_initializer(safe, cpp_val)}")
                             break
                     continue
                 if name in self._map_vars:
@@ -1773,7 +1811,7 @@ class TopLevelEmitter:
                                     self._map_spec_for_name(name)
                                 ),
                             )
-                            lines.append(f"            {safe} = {cpp_val};")
+                            lines.append(f"            {self._array_journal_initializer(safe, cpp_val)}")
                             break
                     continue
                 if name in self._runtime_scalar_var_init_members:
@@ -2137,8 +2175,9 @@ class TopLevelEmitter:
             return False
         return False
 
-    def _emit_udt_method_cpp_name(self, fi: FuncInfo) -> str:
-        """Stable C++ identifier for a typed instance method."""
+    @staticmethod
+    def _raw_udt_method_cpp_name(fi: FuncInfo) -> str:
+        """Compose a receiver's structural token and its Pine method name."""
         receiver_spec = (
             fi.param_type_specs[0]
             if getattr(fi, "param_type_specs", None)
@@ -2149,7 +2188,36 @@ class TopLevelEmitter:
             fi.udt_type_name,
         )
         base = fi.node.name if fi.node else ""
-        return self._func_safe_name(f"_udt_{receiver}_{base}")
+        return f"_udt_{receiver}_{base}"
+
+    def _emit_udt_method_cpp_name(self, fi: FuncInfo) -> str:
+        """Stable C++ identifier for a typed instance method."""
+        allocated = getattr(self, "_escaped_method_cpp_names", None)
+        if allocated is None:
+            # Reserve the existing ASCII spellings first, irrespective of
+            # declaration order. An encoded component may itself be an
+            # authored ASCII method or function name.
+            methods = [
+                (info.name, self._raw_udt_method_cpp_name(info))
+                for info in self.ctx.func_infos
+                if info.is_udt_method
+            ]
+            used = {name for _key, name in methods}
+            used.update(self._safe_name_occupied)
+            used.update(
+                self._safe_name(info.name)
+                for info in self.ctx.func_infos
+                if not info.is_udt_method
+            )
+            allocated = {}
+            for key, name in methods:
+                encoded = cpp_identifier_fragment(name)
+                allocated[key] = (
+                    name if encoded == name else
+                    self._allocate_generated_cpp_name(encoded, used)
+                )
+            self._escaped_method_cpp_names = allocated
+        return self._func_safe_name(allocated[fi.name])
 
     def _emit_func_def(self, fi: FuncInfo, lines: list[str], call_site_idx: int | None = None,
                        instance: dict | None = None) -> None:
