@@ -9,7 +9,7 @@ from pineforge_codegen.analyzer.types import TypeHelper
 from pineforge_codegen.ast_nodes import BoolLiteral, NumberLiteral, Ternary
 from pineforge_codegen.codegen.types import TypeInferer
 from pineforge_codegen.errors import CompileError, Level, Phase
-from tests._compile import compile_cpp, have_compile_env
+from tests._compile import compile_cpp, have_compile_env, run_emitted_tu
 
 
 pytestmark = pytest.mark.skipif(
@@ -490,3 +490,122 @@ result = both_missing(true)
     # Hand-derived: with no concrete arm, the existing double fallback remains.
     assert "double both_missing(" in cpp
     compile_cpp(cpp, label="two-na-fallback")
+
+
+_NUMERIC_NA_SOURCE = _script("""int n = 5
+y = n + na
+sum_left = na + n
+difference_right = n - na
+difference_left = na - n
+product_right = n * na
+product_left = na * n
+quotient_right = n / na
+quotient_left = na / n
+remainder_right = n % na
+remainder_left = na % n
+time_right = time + na
+time_left = na + time
+int missing = na
+int selected_missing = bar_index == 0 ? na : n
+int selected_value = bar_index == 0 ? n : na
+float d = 5.0
+double_result = d + na
+plot(na(y) ? 1 : 0)
+""")
+
+
+_NUMERIC_NA_ASSIGNMENTS = [
+    # 5 + NaN is NaN; borrowing INT_MIN instead would give -2147483643.
+    ("y", "y = (5 + na<double>());"),
+    # NaN + 5 is NaN, with the missing operand evaluated first.
+    ("sum_left", "sum_left = (na<double>() + 5);"),
+    # 5 - NaN is NaN, without integer subtraction or overflow.
+    ("difference_right", "difference_right = (5 - na<double>());"),
+    # NaN - 5 is NaN, with the missing operand on the left.
+    ("difference_left", "difference_left = (na<double>() - 5);"),
+    # 5 * NaN is NaN, without multiplying an integer sentinel.
+    ("product_right", "product_right = (5 * na<double>());"),
+    # NaN * 5 is NaN, with the missing operand on the left.
+    ("product_left", "product_left = (na<double>() * 5);"),
+    # 5 / NaN is NaN; division keeps its existing explicit double casts.
+    ("quotient_right", "quotient_right = ((double)(5) / (double)(na<double>()));"),
+    # NaN / 5 is NaN; moving the missing operand left does not change its type.
+    ("quotient_left", "quotient_left = ((double)(na<double>()) / (double)(5));"),
+    # fmod(5, NaN) is NaN; a finite integer sentinel would instead give 5.
+    ("remainder_right", "remainder_right = std::fmod((double)(5), (double)(na<double>()));"),
+    # fmod(NaN, 5) is NaN; a finite integer sentinel would instead give -3.
+    ("remainder_left", "remainder_left = std::fmod((double)(na<double>()), (double)(5));"),
+    # A 64-bit timestamp plus NaN is NaN, so na must not use int64_t.
+    ("time_right", "time_right = (current_bar_.timestamp + na<double>());"),
+    # NaN plus a 64-bit timestamp is NaN in the opposite operand order too.
+    ("time_left", "time_left = (na<double>() + current_bar_.timestamp);"),
+]
+
+
+@pytest.fixture(scope="module")
+def numeric_na_cpp() -> str:
+    cpp = transpile(_NUMERIC_NA_SOURCE)
+    compile_cpp(cpp, label="numeric-na-binary-operands")
+    return cpp
+
+
+@pytest.mark.parametrize(
+    "target,expected_assignment",
+    _NUMERIC_NA_ASSIGNMENTS,
+    ids=[row[0] for row in _NUMERIC_NA_ASSIGNMENTS],
+)
+def test_numeric_binary_na_keeps_the_float_fallback(
+    numeric_na_cpp: str,
+    target: str,
+    expected_assignment: str,
+) -> None:
+    assignment = next(
+        line.strip() for line in numeric_na_cpp.splitlines()
+        if line.strip().startswith(f"{target} = ")
+    )
+    assert assignment == expected_assignment
+    assert "na<int>()" not in assignment
+    assert "na<int64_t>()" not in assignment
+    # A declared int proves the target type, so its na remains the int sentinel.
+    assert "missing = na<int>();" in numeric_na_cpp
+    # The concrete int ternary arm proves int for na on either side.
+    assert "? (na<int>()) : (5)" in numeric_na_cpp
+    assert "? (5) : (na<int>())" in numeric_na_cpp
+    # 5.0 + NaN already uses double and must keep the same emitted expression.
+    assert "double_result = (5.0 + na<double>());" in numeric_na_cpp
+
+
+_NUMERIC_NA_DRIVER = r"""
+#include <cmath>
+#include <cstdio>
+#include <limits>
+
+int main() {
+    GeneratedStrategy strategy;
+    pineforge::Bar bar{100.0, 101.0, 99.0, 100.5, 10.0, 1700000000000LL};
+    strategy.on_source_bar(bar);
+    std::printf("%d %d %d %d %d\n", std::isnan(strategy.y),
+                strategy.missing == std::numeric_limits<int>::min(),
+                strategy.selected_missing == std::numeric_limits<int>::min(),
+                strategy.selected_value, std::isnan(strategy.double_result));
+}
+"""
+
+
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+def test_numeric_binary_na_is_nan_after_one_bar(opt: str) -> None:
+    source = _script("""int n = 5
+y = n + na
+int missing = na
+int selected_missing = bar_index == 0 ? na : n
+int selected_value = bar_index == 0 ? n : na
+float d = 5.0
+double_result = d + na
+plot(na(y) ? 1 : 0)
+""")
+    output = run_emitted_tu(
+        transpile(source), _NUMERIC_NA_DRIVER, opt=opt, label="numeric-na-binary-operands",
+    )
+    # 5 + NaN is NaN: isnan is 1 instead of 0 for the finite INT_MIN + 5.
+    # Bar 0 selects int na and 5; the typed na is INT_MIN and 5.0 + NaN is NaN.
+    assert output == "1 1 1 5 1\n"

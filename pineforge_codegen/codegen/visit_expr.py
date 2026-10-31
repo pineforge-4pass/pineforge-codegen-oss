@@ -1542,6 +1542,10 @@ class ExprVisitor:
         orders it by (``_nonfinite_int_read``)."""
         if self._is_na_expr(operand):
             other_cpp_type = self._infer_type(other)
+            if other_cpp_type in ("int", "int64_t"):
+                # A numeric peer does not prove an integer type for bare na.
+                # Arithmetic and float comparisons need the floating NaN.
+                other_cpp_type = "double"
             return self._visit_rhs_value(
                 operand,
                 target_cpp_type=other_cpp_type,
