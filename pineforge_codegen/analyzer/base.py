@@ -31,7 +31,9 @@ from ..symbols import (
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from ..limits import TimeBudget, iter_ast_nodes
-from ..security_contexts import PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series
+from ..security_contexts import (
+    GLOBAL_ANNOTATION, PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series,
+)
 from ..session_reads import emitted_session_reads
 from ..collection_history import (
     COLLECTION_HISTORY_ANNOTATION, LEGACY, REFUSED, SUPPORTED,
@@ -7800,7 +7802,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 )
             if (sym is None
                     and self._enclosing_func_names
-                    and node.name in self._direct_program_binding_names):
+                    and node.name in self._direct_program_binding_names
+                    and not (node.annotations or {}).get(GLOBAL_ANNOTATION)):
+                # A payload argument copied into a helper carries its own
+                # provenance. It is evaluated at the call site, so it is not
+                # an authored read in the helper definition.
                 self._error(
                     f"Global variable '{node.name}' is read before its declaration "
                     "in a function.",

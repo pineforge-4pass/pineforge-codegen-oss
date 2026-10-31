@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 
 from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.errors import CompileError, Level, Phase
+from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
 from tests._e2e import Build, skip_unless_e2e_env
 from tests._security_tapes import mismatches, replay, source, tape_exits
@@ -95,20 +95,10 @@ GLOBALS = 'ma = ta.sma(close, 20)\nlen = input.int(4, "Len")\nbody = close - ope
 CALLS = 'x = g(ma) + h(body, len)\n'
 
 
-def test_requested_payload_rejects_a_global_declared_after_its_helper():
-    with pytest.raises(CompileError) as caught:
-        transpile(PRELUDE + LATER + GLOBALS + CALLS + TRADE, filename="later-global.pine")
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.code == "PF-E2053"
-    assert diagnostic.message == (
-        "Global variable 'ma' is read before its declaration in a function."
-    )
-    assert diagnostic.level is Level.ERROR
-    assert diagnostic.phase is Phase.ANALYZER
-    assert diagnostic.location.file == "later-global.pine"
-    # 2 header + 2 helper + 3 global lines put x at 8; "x = g(" takes six columns.
-    assert (diagnostic.location.line, diagnostic.location.col) == (8, 7)
+def test_requested_payload_accepts_globals_declared_after_its_helper():
+    result = transpile_full(PRELUDE + LATER + GLOBALS + CALLS + TRADE)
+    assert not any(d.code == "PF-E2053" for d in result["diagnostics"])
+    compile_cpp(result["cpp"], label="payload globals declared after helper")
 
 
 def test_globals_declared_before_request_helpers_are_put_in():
@@ -135,24 +125,13 @@ def test_globals_declared_before_request_helpers_are_put_in():
     compile_cpp(result["cpp"], label="payload parameters bound to earlier globals")
 
 
-def test_requested_sma_rejects_a_global_declared_after_its_helper():
+def test_requested_sma_accepts_a_global_declared_after_its_helper():
     body = (
         'g(_e) => request.security(syminfo.tickerid, "D", ta.sma(_e, 3))\n'
         's5 = ta.sma(close, 5)\nx = g(s5)\n'
     )
-    with pytest.raises(CompileError) as caught:
-        transpile(PRELUDE + body + TRADE, filename="later-sma.pine")
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.code == "PF-E2053"
-    assert diagnostic.message == (
-        "Global variable 's5' is read before its declaration in a function."
-    )
-    assert diagnostic.level is Level.ERROR
-    assert diagnostic.phase is Phase.ANALYZER
-    assert diagnostic.location.file == "later-sma.pine"
-    # Two header, one helper and one global line precede x; "x = g(" is six columns.
-    assert (diagnostic.location.line, diagnostic.location.col) == (5, 7)
+    cpp = transpile(PRELUDE + body + TRADE)
+    compile_cpp(cpp, label="SMA payload global declared after helper")
 
 
 @pytest.mark.parametrize("body", [
@@ -179,24 +158,13 @@ def test_a_later_globals_ta_is_computed_once_before_its_reader(body):
 HELPER_IF = 'f(_v) =>\n    r = 0.0\n    if close > open\n        r := _v\n    r + _v\n'
 
 
-def test_conditional_requested_helper_rejects_a_later_global():
+def test_conditional_requested_helper_accepts_a_later_global():
     body = (
         'g(_e) => request.security(syminfo.tickerid, "D", ta.sma(f(_e), 3))\n'
         's5 = ta.ema(close, 5)\nx = g(s5)\n'
     )
-    with pytest.raises(CompileError) as caught:
-        transpile(PRELUDE + HELPER_IF + body + TRADE, filename="later-conditional.pine")
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.code == "PF-E2053"
-    assert diagnostic.message == (
-        "Global variable 's5' is read before its declaration in a function."
-    )
-    assert diagnostic.level is Level.ERROR
-    assert diagnostic.phase is Phase.ANALYZER
-    assert diagnostic.location.file == "later-conditional.pine"
-    # 2 header + 5 f + 1 g + 1 global lines precede x; "x = g(" is six columns.
-    assert (diagnostic.location.line, diagnostic.location.col) == (10, 7)
+    cpp = transpile(PRELUDE + HELPER_IF + body + TRADE)
+    compile_cpp(cpp, label="conditional payload global declared after helper")
 
 
 @pytest.mark.parametrize("body", [
@@ -242,24 +210,13 @@ def test_every_read_of_a_prologue_variant_orders_it(body, monkeypatch):
     assert transpile(PRELUDE + body + TRADE) == cpp
 
 
-def test_requested_ema_rejects_a_global_declared_after_its_helper():
+def test_requested_ema_accepts_globals_declared_after_its_helper():
     body = (
         'g(_e, _f) => request.security(syminfo.tickerid, "60", ta.ema(_e[1] + _f, 3))\n'
         's5 = ta.sma(close, 5)\nr = ta.rsi(close, 14)\nx = g(s5, r)\n'
     )
-    with pytest.raises(CompileError) as caught:
-        transpile(PRELUDE + body + TRADE, filename="later-prologue.pine")
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.code == "PF-E2053"
-    assert diagnostic.message == (
-        "Global variable 's5' is read before its declaration in a function."
-    )
-    assert diagnostic.level is Level.ERROR
-    assert diagnostic.phase is Phase.ANALYZER
-    assert diagnostic.location.file == "later-prologue.pine"
-    # 2 header + 1 helper + 2 globals put x at 6; "x = g(" is six columns.
-    assert (diagnostic.location.line, diagnostic.location.col) == (6, 7)
+    cpp = transpile(PRELUDE + body + TRADE)
+    compile_cpp(cpp, label="EMA payload globals declared after helper")
 
 
 def test_earlier_globals_order_every_prologue_read(monkeypatch):
@@ -294,32 +251,13 @@ def test_a_later_string_global_keeps_the_parents_refusal():
             'if x == "abc"\n    strategy.entry("L", strategy.long)\n'))
 
 
-def test_prologue_order_tape_rejects_a_later_global_read():
-    with pytest.raises(CompileError) as caught:
-        transpile(source("xa2_prologue_order", XSYM_A2_TV), filename="prologue-order.pine")
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.code == "PF-E2053"
-    assert diagnostic.message == (
-        "Global variable 's6' is read before its declaration in a function."
-    )
-    assert diagnostic.level is Level.ERROR
-    assert diagnostic.phase is Phase.ANALYZER
-    assert diagnostic.location.file == "prologue-order.pine"
-    # The fixture calls g on line 17; its copied s6 read follows the six columns "b = g(".
-    assert (diagnostic.location.line, diagnostic.location.col) == (17, 7)
-
-
-def test_prologue_order_with_earlier_globals_replays_tradingview_tape(tmp_path_factory):
+def test_prologue_order_replays_tradingview_tape(tmp_path_factory):
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("xa2_prologue_order")
-    script = source("xa2_prologue_order", XSYM_A2_TV)
-    declaration = 's6 = ta.sma(close, 6)\n'
-    marker = 'g(_e) =>'
-    assert script.count(declaration) == 1 and script.count(marker) == 1
-    # Moving the same six-bar SMA before g keeps the requested expression and every order.
-    script = script.replace(declaration, "").replace(marker, declaration + marker)
-    exits = replay(engine, base, {"probe": Build(script)})
+    exits = replay(
+        engine, base,
+        {"probe": Build(source("xa2_prologue_order", XSYM_A2_TV))},
+    )
     tape = tape_exits("xa2_prologue_order", XSYM_A2_TV)
     assert len(tape) == 336
     # The close exiting at 08:00 UTC on 2025-04-02: the hourly and the
@@ -330,39 +268,13 @@ def test_prologue_order_with_earlier_globals_replays_tradingview_tape(tmp_path_f
     print(f"prologue order: {len(tape)} of {len(tape)} exit Signals equal TradingView's")
 
 
-def test_price_history_tape_rejects_a_later_global_read():
-    with pytest.raises(CompileError) as caught:
-        transpile(source("xa2_price_later", XSYM_A2_TV), filename="price-history.pine")
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.code == "PF-E2053"
-    assert diagnostic.message == (
-        "Global variable 'ma' is read before its declaration in a function."
-    )
-    assert diagnostic.level is Level.ERROR
-    assert diagnostic.phase is Phase.ANALYZER
-    assert diagnostic.location.file == "price-history.pine"
-    # The fixture calls g(ma) on line 14; "d = g(" takes six columns before ma.
-    assert (diagnostic.location.line, diagnostic.location.col) == (14, 7)
-
-
-def test_price_history_with_earlier_globals_replays_tradingview_tape(tmp_path_factory):
+def test_price_history_replays_tradingview_tape(tmp_path_factory):
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("xa2_price_later")
-    script = source("xa2_price_later", XSYM_A2_TV)
-    declarations = (
-        'ma = ta.sma(close, 3)\n',
-        'len = input.int(4, "Len")\n',
-        'body = close - open\n',
+    exits = replay(
+        engine, base,
+        {"probe": Build(source("xa2_price_later", XSYM_A2_TV))},
     )
-    marker = 'g(_e) =>'
-    assert script.count(marker) == 1
-    for declaration in declarations:
-        assert script.count(declaration) == 1
-        script = script.replace(declaration, "")
-    # The same ma, len and body now precede g/h; every payload, input and order is unchanged.
-    script = script.replace(marker, "".join(declarations) + marker)
-    exits = replay(engine, base, {"probe": Build(script)})
     tape = tape_exits("xa2_price_later", XSYM_A2_TV)
     assert len(tape) == 336
     # The close exiting at 20:00 UTC on 2025-04-01: hourly hl2 one bar back,

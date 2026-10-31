@@ -98,6 +98,34 @@ def test_invalid_function_scope_has_a_located_diagnostic(
     assert (diagnostic.location.line, diagnostic.location.col) == (line, column)
 
 
+def test_function_body_read_of_later_global_stays_refused() -> None:
+    body = "read() => later\nlater = close\nresult = read()\n"
+    with pytest.raises(CompileError) as caught:
+        transpile(HEADER + body, filename="scope.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2053"
+    assert diagnostic.message == (
+        "Global variable 'later' is read before its declaration in a function."
+    )
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "scope.pine"
+    # Two header lines put the body read on line 3; "read() => " is ten columns.
+    assert (diagnostic.location.line, diagnostic.location.col) == (3, 11)
+
+
+def test_later_global_passed_to_payload_call_is_accepted() -> None:
+    body = (
+        'g(_e) => request.security(syminfo.tickerid, "D", _e[1])\n'
+        'later = ta.sma(close, 3)\n'
+        'x = g(later)\n'
+    )
+    cpp = transpile(HEADER + body)
+    # The declaration is line 4 and the call is line 5, after the helper definition.
+    assert "class GeneratedStrategy" in cpp
+
+
 @pytest.mark.parametrize(
     "definition,call",
     [
