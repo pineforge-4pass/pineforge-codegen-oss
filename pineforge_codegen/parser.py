@@ -1577,11 +1577,15 @@ class Parser:
             start_tok = self._current()
             self._enter(start_tok)
             self._advance()
+            consecutive_not = self._check(TokenType.NOT)
             try:
                 operand = self._parse_unary()
             finally:
                 self._depth -= 1
             node = UnaryOp(op="not", operand=operand)
+            # Parentheses disappear from the AST; retain adjacent keyword provenance.
+            if consecutive_not:
+                node.annotations = {"consecutive_not": True}
             return self._set_loc(node, start_tok)
         if self._check(TokenType.MINUS):
             start_tok = self._current()

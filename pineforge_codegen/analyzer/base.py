@@ -6294,11 +6294,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 and not self._in_v5_library_definition(node)):
             if isinstance(node.left, NaLiteral) or isinstance(node.right, NaLiteral):
                 other = node.right if isinstance(node.left, NaLiteral) else node.left
-                self._error(
-                    'Cannot compare a value to "na" directly. '
-                    'Use the "na()" function instead.',
-                    other.loc or node.loc,
-                )
+                if self._certain_scalar_type(other) in (PineType.INT, PineType.FLOAT):
+                    self._error(
+                        'Cannot compare a value to "na" directly. '
+                        'Use the "na()" function instead.',
+                        other.loc or node.loc,
+                    )
             certain_left = self._certain_scalar_type(node.left)
             certain_right = self._certain_scalar_type(node.right)
             numeric = (PineType.INT, PineType.FLOAT)
@@ -6368,7 +6369,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if (node.op == "not"
                 and self._pine_version == 6
                 and not self._in_v5_library_definition(node)):
-            if isinstance(node.operand, UnaryOp) and node.operand.op == "not":
+            if (isinstance(node.operand, UnaryOp)
+                    and node.operand.op == "not"
+                    and (node.annotations or {}).get("consecutive_not")):
                 self._error(
                     '"not" cannot be used as a variable or function name.',
                     node.operand.loc or node.loc,

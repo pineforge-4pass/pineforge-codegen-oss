@@ -134,6 +134,135 @@ def test_direct_na_equality_reports_the_value_operand() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "body, line, col",
+    [
+        (
+            "value = close != na\n",
+            3,
+            9,  # Two header lines precede close, after the eight-character prefix.
+        ),
+        (
+            "value = na == close\n",
+            3,
+            15,  # close follows the fourteen characters in "value = na == ".
+        ),
+        (
+            "value = na != close\n",
+            3,
+            15,  # close follows the fourteen characters in "value = na != ".
+        ),
+        (
+            "int count = 1\nvalue = count == na\n",
+            4,
+            9,  # The declared int is on the second body line after "value = ".
+        ),
+        (
+            "int count = 1\nvalue = count != na\n",
+            4,
+            9,  # The declared int is on the second body line after "value = ".
+        ),
+    ],
+)
+def test_direct_numeric_na_comparisons_remain_refused(
+    body: str, line: int, col: int
+) -> None:
+    # The numeric operand keeps the existing diagnostic with no template arguments.
+    _assert_diagnostic(
+        _script(body),
+        "PF-E2050",
+        'Cannot compare a value to "na" directly. Use the "na()" function instead.',
+        {},
+        line,
+        col,
+    )
+
+
+@pytest.mark.parametrize(
+    "body, comparison_cpp",
+    [
+        (
+            'string sample = input.string("value")\nvalue = sample == na\n',
+            "(sample == na<std::string>())",  # The string operand types the bare na.
+        ),
+        (
+            'string sample = input.string("value")\nvalue = sample != na\n',
+            "(sample != na<std::string>())",  # Inequality keeps the same string na.
+        ),
+        (
+            'string sample = input.string("value")\nvalue = na == sample\n',
+            "(na<std::string>() == sample)",  # The right string types the left na.
+        ),
+        (
+            'string sample = input.string("value")\nvalue = na != sample\n',
+            "(na<std::string>() != sample)",  # Operand order stays as written.
+        ),
+        (
+            "type TextState\n"
+            "    string text\n"
+            'state = TextState.new("value")\n'
+            "value = state.text == na\n",
+            "== na<std::string>()",  # The object's string field types the bare na.
+        ),
+        (
+            "type TextState\n"
+            "    string text\n"
+            'state = TextState.new("value")\n'
+            "value = state.text != na\n",
+            "!= na<std::string>()",  # Field inequality keeps the same string na.
+        ),
+        (
+            "type TextState\n"
+            "    string text\n"
+            'state = TextState.new("value")\n'
+            "value = na == state.text\n",
+            "na<std::string>() ==",  # The right string field types the left na.
+        ),
+        (
+            "type TextState\n"
+            "    string text\n"
+            'state = TextState.new("value")\n'
+            "value = na != state.text\n",
+            "na<std::string>() !=",  # Field access stays on the right.
+        ),
+        (
+            "array<float> samples = array.from(close)\nvalue = samples == na\n",
+            "(samples == std::vector<double>{})",  # An array types na as its empty vector.
+        ),
+        (
+            "array<float> samples = array.from(close)\nvalue = samples != na\n",
+            "(samples != std::vector<double>{})",  # Array inequality keeps its prior lowering.
+        ),
+        (
+            "array<float> samples = array.from(close)\nvalue = na == samples\n",
+            "(std::vector<double>{} == samples)",  # The right array types the left na.
+        ),
+        (
+            "array<float> samples = array.from(close)\nvalue = na != samples\n",
+            "(std::vector<double>{} != samples)",  # Array operand order stays as written.
+        ),
+    ],
+)
+def test_direct_nonnumeric_na_comparisons_keep_their_lowering(
+    body: str, comparison_cpp: str
+) -> None:
+    cpp = transpile(_script(body + "plot(value ? 1 : 0)\n"))
+    assert comparison_cpp in cpp
+    compile_cpp(cpp, label="nonnumeric na comparison")
+
+
+def test_direct_na_comparison_with_unproven_call_type_remains_accepted() -> None:
+    source = _script(
+        "read_value() => close\n"
+        "value = read_value() == na\n"
+        "plot(value ? 1 : 0)\n"
+    )
+    cpp = transpile(source)
+    # A user call has no certain scalar type; its existing float lowering types na.
+    assert "na<double>()" in cpp
+    compile_cpp(cpp, label="unproven na comparison")
+
+
 def test_consecutive_not_reports_the_second_keyword() -> None:
     _assert_diagnostic(
         _script("bool choice = not not flip\n"),
@@ -142,6 +271,48 @@ def test_consecutive_not_reports_the_second_keyword() -> None:
         {},
         3,
         19,  # The second not begins after "bool choice = not ".
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Parentheses separate the two keywords; a bool input needs no coercion.
+        "bool flip = input.bool(true)\nbool both = not (not flip)\n",
+        # A comparison's bool binding also accepts a parenthesized inner not.
+        "bool x = close > open\nbool both = not (not x)\n",
+        # Parenthesizing a bool expression preserves both negations.
+        "bool both = not (not (close > open))\n",
+        # The accepted double negation stays local to the left logical operand.
+        "bool flip = close > open\nbool both = not (not flip) and close > low\n",
+    ],
+)
+def test_parenthesized_double_not_remains_accepted(body: str) -> None:
+    cpp = transpile(_script(body + "plot(both ? 1 : 0)\n"))
+    # Each bool not emits !(operand), so two negations retain the literal !(!( prefix.
+    assert "!(!(" in cpp
+    compile_cpp(cpp, label="parenthesized double not")
+
+
+@pytest.mark.parametrize(
+    "expression, col",
+    [
+        ("(not not flip)", 20),  # The second not follows "bool choice = (not ".
+        ("not (not not flip)", 24),  # The inner pair follows "bool choice = not (not ".
+        ("not not (flip)", 19),  # Parenthesizing flip does not separate the two not tokens.
+    ],
+)
+def test_grouping_around_consecutive_not_keeps_the_refusal(
+    expression: str, col: int
+) -> None:
+    # The bool declaration adds one body line, so the refused expression is on line 4.
+    _assert_diagnostic(
+        _script("bool flip = close > open\n" + f"bool choice = {expression}\n"),
+        "PF-E2051",
+        '"not" cannot be used as a variable or function name.',
+        {},
+        4,
+        col,
     )
 
 
