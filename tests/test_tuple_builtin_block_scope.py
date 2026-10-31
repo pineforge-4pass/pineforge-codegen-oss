@@ -35,6 +35,15 @@ BLOCKS = [
         '        observed := second\n',
         id="switch",
     ),
+    # With close 12.5 > open 10, the else tuple holds 12.5 - 10 + 0.5 = 3.
+    pytest.param(
+        'if close <= open\n'
+        '    observed := 0.0\n'
+        'else\n'
+        '    [a, second] = pair(close - open)\n'
+        '    observed := second\n',
+        id="else",
+    ),
 ]
 
 
@@ -43,7 +52,8 @@ def test_calendar_read_after_a_tuple_block_uses_the_builtin(block: str) -> None:
     cpp = transpile(HEADER + PAIR + block + 's = second\n')
     # The live block reads its tuple; after the block, second is the calendar.
     assert "observed = second;" in cpp
-    assert "s = tm_buf.tm_sec;" in cpp
+    # BAR_BUILTINS maps second to the timestamp and exchange-timezone helper.
+    assert "s = pine_second(current_bar_.timestamp, syminfo_.timezone);" in cpp
     compile_cpp(cpp, label="calendar read after tuple block")
 
 
