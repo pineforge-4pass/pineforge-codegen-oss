@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError, Phase
+from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._compile import compile_cpp
 from tests.test_pinemap_semantics import _compile_and_run
 
@@ -43,8 +43,29 @@ observedNested = holder.inner.value
 '''
 
 
-def test_udt_values_emit_nullable_handles_records_and_arenas() -> None:
-    cpp = transpile(_ALIAS_COPY_SOURCE)
+_LOCAL_ALIAS_COPY_SOURCE = _ALIAS_COPY_SOURCE.replace(
+    "mutate_then_rebind(Item item, Item replacement) =>\n",
+    "mutate_then_rebind(Item initial, Item replacement) =>\n"
+    "    Item item = initial\n",
+)
+
+
+def test_udt_handle_source_rejects_parameter_reassignment() -> None:
+    with pytest.raises(CompileError) as caught:
+        transpile(_ALIAS_COPY_SOURCE, filename="udt-handles.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2059"
+    assert diagnostic.message == "Function parameter 'item' cannot be reassigned."
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "udt-handles.pine"
+    # Six header/type lines, the signature and field mutation precede item after four spaces.
+    assert (diagnostic.location.line, diagnostic.location.col) == (9, 5)
+
+
+def test_udt_local_rebind_emits_nullable_handles_records_and_arenas() -> None:
+    cpp = transpile(_LOCAL_ALIAS_COPY_SOURCE)
     assert "struct Item {\n    int32_t __pf_id = -1;" in cpp
     assert "struct _PFUdtRecord_Item" in cpp
     assert (
@@ -60,7 +81,22 @@ def test_udt_values_emit_nullable_handles_records_and_arenas() -> None:
     compile_cpp(cpp, label="udt-object-handles")
 
 
-def test_udt_alias_copy_and_parameter_rebind_runtime() -> None:
+def test_udt_alias_copy_source_rejects_parameter_reassignment() -> None:
+    with pytest.raises(CompileError) as caught:
+        transpile(_ALIAS_COPY_SOURCE, filename="udt-alias-copy.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2059"
+    assert diagnostic.message == "Function parameter 'item' cannot be reassigned."
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "udt-alias-copy.pine"
+    # item := replacement is source line 9; four indentation spaces precede item.
+    assert (diagnostic.location.line, diagnostic.location.col) == (9, 5)
+
+
+def test_udt_alias_copy_and_local_rebind_runtime() -> None:
+    # Shared original/alias/nested: 10+5+1=16; detached/result: 99+2=101; functional: 77.
     driver = r'''
 #include <iostream>
 int main() {
@@ -81,7 +117,7 @@ int main() {
 }
 '''
     assert _compile_and_run(
-        transpile(_ALIAS_COPY_SOURCE) + driver,
+        transpile(_LOCAL_ALIAS_COPY_SOURCE) + driver,
         label="udt-alias-copy-runtime",
     ) == "ok\n"
 
@@ -502,7 +538,7 @@ observed = result.value
     compile_cpp(cpp, label="udt-user-copy-precedence")
 
 
-def test_forward_typed_user_copy_method_precedes_builtin_runtime() -> None:
+def test_forward_typed_user_copy_method_is_rejected() -> None:
     source = r'''//@version=6
 strategy("forward typed copy precedence")
 type Item
@@ -514,9 +550,35 @@ method copy(Item self, float replacement) =>
     self.value := replacement
     self
 '''
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="forward-copy.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2060"
+    assert diagnostic.message == "Method 'copy' is called before its definition."
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "forward-copy.pine"
+    # The call is on line 6; "var Item result = original." occupies 27 columns.
+    assert (diagnostic.location.line, diagnostic.location.col) == (6, 28)
+
+
+def test_defined_typed_user_copy_method_precedes_builtin_runtime() -> None:
+    source = r'''//@version=6
+strategy("forward typed copy precedence")
+type Item
+    float value
+method copy(Item self, float replacement) =>
+    self.value := replacement
+    self
+var Item original = Item.new(1.0)
+var Item result = original.copy(7.0)
+observed = result.value
+'''
     cpp = transpile(source)
     assert "_udt_Item_copy(original, 7.0)" in cpp
     assert "result = _pf_udt_Item.copy(original);" not in cpp
+    # The user method sets the shared object's value to its argument, 7.0.
     driver = r'''
 #include <iostream>
 int main() {
@@ -534,7 +596,7 @@ int main() {
     ) == "ok\n"
 
 
-def test_forward_typed_method_fills_named_and_default_arguments_runtime() -> None:
+def test_forward_typed_method_with_named_and_default_arguments_is_rejected() -> None:
     source = r'''//@version=6
 strategy("forward typed method defaults")
 type Item
@@ -544,7 +606,31 @@ var float observed = item.combine(second=4)
 method combine(Item self, int first = 2, int second = 3) =>
     first * 10 + second
 '''
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="forward-combine.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2060"
+    assert diagnostic.message == "Method 'combine' is called before its definition."
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "forward-combine.pine"
+    # The call is on line 6; "var float observed = item." occupies 26 columns.
+    assert (diagnostic.location.line, diagnostic.location.col) == (6, 27)
+
+
+def test_defined_typed_method_fills_named_and_default_arguments_runtime() -> None:
+    source = r'''//@version=6
+strategy("forward typed method defaults")
+type Item
+    float value
+method combine(Item self, int first = 2, int second = 3) =>
+    first * 10 + second
+var Item item = Item.new(1.0)
+var float observed = item.combine(second=4)
+'''
     cpp = transpile(source)
+    # first defaults to 2 and second is 4, so 2*10+4=24.
     assert "observed = _udt_Item_combine(item, 2, 4);" in cpp
     driver = r'''
 #include <iostream>
@@ -563,14 +649,35 @@ int main() {
     ) == "ok\n"
 
 
-def test_forward_stateful_typed_method_default_sizes_ta_runtime() -> None:
+def test_forward_stateful_typed_method_with_default_length_is_rejected() -> None:
     source = r'''//@version=6
 strategy("forward stateful typed method default")
 out = 1.smooth()
 method smooth(int self, int len = 2) =>
     ta.sma(close, len)
 '''
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="forward-smooth.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2060"
+    assert diagnostic.message == "Method 'smooth' is called before its definition."
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "forward-smooth.pine"
+    # Two header lines precede the call; "out = 1." occupies eight columns.
+    assert (diagnostic.location.line, diagnostic.location.col) == (3, 9)
+
+
+def test_defined_stateful_typed_method_default_sizes_ta_runtime() -> None:
+    source = r'''//@version=6
+strategy("forward stateful typed method default")
+method smooth(int self, int len = 2) =>
+    ta.sma(close, len)
+out = 1.smooth()
+'''
     cpp = transpile(source)
+    # One SMA call with omitted len uses the method's literal default, 2.
     assert "ta::SMA _ta_sma_1;" in cpp
     assert "explicit GeneratedStrategy() : _ta_sma_1(2)" in cpp
     assert "out = _udt_int_smooth_cs0(1, 2);" in cpp

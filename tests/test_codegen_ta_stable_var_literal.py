@@ -367,33 +367,30 @@ observed = requested(p)
     ],
     ids=["literal-reassignment", "series-reassignment"],
 )
-def test_callable_parameter_reassignment_fences_literal_specialization(
+def test_callable_ta_length_rejects_parameter_reassignment(
     reassignment: str,
 ) -> None:
     source = f'''//@version=6
 strategy("reassigned helper parameter")
-import examples/Reassigned/1 as reassigned
 var int p = 5
-observed = reassigned.requested(p)
-'''
-    library = f'''//@version=5
-library("Reassigned")
-export requested(int q) =>
+requested(int q) =>
     {reassignment}
     ta.sma(close, q)
+observed = requested(p)
 '''
 
     with pytest.raises(CompileError) as caught:
-        transpile(source, libraries={"examples/Reassigned/1": library})
+        transpile(source, filename="reassigned-length.pine")
 
     assert len(caught.value.diagnostics) == 1
     diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.phase is Phase.CODEGEN
-    assert diagnostic.message == (
-        "Unsupported TA constructor length 'p' for ta::SMA: it is neither a "
-        "compile-time constant nor derived from an input, so PineForge cannot "
-        "size the indicator buffer."
-    )
+    assert diagnostic.code == "PF-E2059"
+    assert diagnostic.message == "Function parameter 'q' cannot be reassigned."
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "reassigned-length.pine"
+    # The header, p and requested take four lines; four spaces precede q.
+    assert (diagnostic.location.line, diagnostic.location.col) == (5, 5)
 
 
 @pytest.mark.parametrize(

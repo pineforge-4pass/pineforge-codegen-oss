@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 
 from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.errors import CompileError
+from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._compile import compile_cpp
 from tests._e2e import Build, skip_unless_e2e_env
 from tests._security_tapes import mismatches, replay, source, tape_exits
@@ -47,17 +47,6 @@ XSYM_A2_TV = Path(__file__).parent / "fixtures" / "xsym_a2_tv"
 PRELUDE = '//@version=6\nstrategy("T")\n'
 TRADE = 'if x > close\n    strategy.entry("L", strategy.long)\n'
 UNBOUND = "whose argument PineForge does not recompute on the requested bars: it reads na"
-LATER_LIBRARIES = {
-    "examples/LaterGlobals/1": '''//@version=5
-library("LaterGlobals")
-export read_price(float _e) =>
-    request.security(syminfo.tickerid, "D", _e[1])
-export request_sma(float _v, int n) =>
-    request.security(syminfo.tickerid, "240", ta.sma(_v, n))
-export request_ema(float _e, float _f) =>
-    request.security(syminfo.tickerid, "60", ta.ema(_e[1] + _f, 3))
-''',
-}
 
 
 def _evaluators(cpp: str) -> list[str]:
@@ -100,49 +89,83 @@ def test_chart_hlcc4_history_compiles():
     compile_cpp(cpp, label="chart hlcc4 history")
 
 
-LATER = ('import examples/LaterGlobals/1 as laterlib\n'
-         'g(_e) => laterlib.read_price(_e)\n'
-         'h(_v, n) => laterlib.request_sma(_v, n)\n')
+LATER = ('g(_e) => request.security(syminfo.tickerid, "D", _e[1])\n'
+         'h(_v, n) => request.security(syminfo.tickerid, "240", ta.sma(_v, n))\n')
 GLOBALS = 'ma = ta.sma(close, 20)\nlen = input.int(4, "Len")\nbody = close - open\n'
 CALLS = 'x = g(ma) + h(body, len)\n'
 
 
-def test_global_declared_after_the_helper_is_put_in():
-    after = transpile_full(
-        PRELUDE + LATER + GLOBALS + CALLS + TRADE,
-        libraries=LATER_LIBRARIES,
+def test_requested_payload_rejects_a_global_declared_after_its_helper():
+    with pytest.raises(CompileError) as caught:
+        transpile(PRELUDE + LATER + GLOBALS + CALLS + TRADE, filename="later-global.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2053"
+    assert diagnostic.message == (
+        "Global variable 'ma' is read before its declaration in a function."
     )
-    assert not any(d.message.endswith(UNBOUND) for d in after["diagnostics"])
-    evaluators = _evaluators(after["cpp"])
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "later-global.pine"
+    # 2 header + 2 helper + 3 global lines put x at 8; "x = g(" takes six columns.
+    assert (diagnostic.location.line, diagnostic.location.col) == (8, 7)
+
+
+def test_globals_declared_before_request_helpers_are_put_in():
+    result = transpile_full(PRELUDE + GLOBALS + LATER + CALLS + TRADE)
+    assert not any(d.message.endswith(UNBOUND) for d in result["diagnostics"])
+    evaluators = _evaluators(result["cpp"])
     # g(ma): the requested 20-bar SMA one requested bar back.
     assert re.search(r"_sec0__ta_sma_(\d+)\.compute\(bar\.close\).*"
                      r"_req_sec_0 = _sec0__ta_sma_\1_hist\[0\];", evaluators[0])
     # h(body, len): the requested SMA of the candle body, the input's length.
-    assert "_sec1__ta_sma_1.compute((bar.close - bar.open))" in evaluators[1]
-    assert re.search(r'_sec1__ta_sma_\w+ = ta::SMA\(get_input_int\("Len", 4\)\)', after["cpp"])
-    # The evaluators of the globals declared first, up to the TA sites'
-    # numbering (declaration order).
-    before = transpile(
-        PRELUDE + GLOBALS + LATER + CALLS + TRADE,
-        libraries=LATER_LIBRARIES,
-    )
+    # ma owns SMA site 1, so h's SMA is site 2 and takes the input's default of 4.
+    assert "_sec1__ta_sma_2.compute((bar.close - bar.open))" in evaluators[1]
+    assert re.search(r'_sec1__ta_sma_\w+ = ta::SMA\(get_input_int\("Len", 4\)\)', result["cpp"])
+    # Each global can sit immediately above its reader: g reads only ma, h reads body/len.
+    interleaved = transpile(PRELUDE + (
+        'ma = ta.sma(close, 20)\n'
+        'g(_e) => request.security(syminfo.tickerid, "D", _e[1])\n'
+        'len = input.int(4, "Len")\nbody = close - open\n'
+        'h(_v, n) => request.security(syminfo.tickerid, "240", ta.sma(_v, n))\n'
+    ) + CALLS + TRADE)
     renumbered = lambda text: re.sub(r"(_ta_[a-z]+_|_secval_)\d+", r"\1N", text)
     assert [renumbered(e) for e in evaluators] == [
-        renumbered(e) for e in _evaluators(before)]
-    compile_cpp(after["cpp"], label="payload parameters bound to later globals")
+        renumbered(e) for e in _evaluators(interleaved)]
+    compile_cpp(result["cpp"], label="payload parameters bound to earlier globals")
+
+
+def test_requested_sma_rejects_a_global_declared_after_its_helper():
+    body = (
+        'g(_e) => request.security(syminfo.tickerid, "D", ta.sma(_e, 3))\n'
+        's5 = ta.sma(close, 5)\nx = g(s5)\n'
+    )
+    with pytest.raises(CompileError) as caught:
+        transpile(PRELUDE + body + TRADE, filename="later-sma.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2053"
+    assert diagnostic.message == (
+        "Global variable 's5' is read before its declaration in a function."
+    )
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "later-sma.pine"
+    # Two header, one helper and one global line precede x; "x = g(" is six columns.
+    assert (diagnostic.location.line, diagnostic.location.col) == (5, 7)
 
 
 @pytest.mark.parametrize("body", [
     # A direct payload calling a helper with a later global.
     'u(_x) => ta.sma(_x, 3)\ns5 = ta.sma(close, 5)\n'
     'x = request.security(syminfo.tickerid, "D", u(s5))\n',
-    # The helper holding the request, its parameter bound to a later global.
-    'import examples/LaterGlobals/1 as laterlib\n'
-    'g(_e) => laterlib.request_sma(_e)\n'
-    's5 = ta.sma(close, 5)\nx = g(s5)\n',
+    # The helper holding the request, its parameter bound to an earlier global.
+    's5 = ta.sma(close, 5)\n'
+    'g(_e) => request.security(syminfo.tickerid, "D", ta.sma(_e, 3))\n'
+    'x = g(s5)\n',
 ])
 def test_a_later_globals_ta_is_computed_once_before_its_reader(body):
-    cpp = transpile(PRELUDE + body + TRADE, libraries=LATER_LIBRARIES)
+    cpp = transpile(PRELUDE + body + TRADE)
     evaluator = _evaluators(cpp)[0]
     # The 5-bar SMA advances once a bar, and ahead of the SMA of it.
     inner = re.findall(r"(_sec0__ta_sma_\d+)\.compute\(bar\.close\)", evaluator)
@@ -156,11 +179,32 @@ def test_a_later_globals_ta_is_computed_once_before_its_reader(body):
 HELPER_IF = 'f(_v) =>\n    r = 0.0\n    if close > open\n        r := _v\n    r + _v\n'
 
 
+def test_conditional_requested_helper_rejects_a_later_global():
+    body = (
+        'g(_e) => request.security(syminfo.tickerid, "D", ta.sma(f(_e), 3))\n'
+        's5 = ta.ema(close, 5)\nx = g(s5)\n'
+    )
+    with pytest.raises(CompileError) as caught:
+        transpile(PRELUDE + HELPER_IF + body + TRADE, filename="later-conditional.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2053"
+    assert diagnostic.message == (
+        "Global variable 's5' is read before its declaration in a function."
+    )
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "later-conditional.pine"
+    # 2 header + 5 f + 1 g + 1 global lines precede x; "x = g(" is six columns.
+    assert (diagnostic.location.line, diagnostic.location.col) == (10, 7)
+
+
 @pytest.mark.parametrize("body", [
     'u(_x) => ta.sma(f(_x), 3)\ns5 = ta.ema(close, 5)\n'
     'x = request.security(syminfo.tickerid, "D", u(s5))\n',
+    's5 = ta.ema(close, 5)\n'
     'g(_e) => request.security(syminfo.tickerid, "D", ta.sma(f(_e), 3))\n'
-    's5 = ta.ema(close, 5)\nx = g(s5)\n',
+    'x = g(s5)\n',
 ])
 def test_a_prologue_variant_is_never_computed_inside_a_helpers_if(body):
     # The EMA is computed once, at the evaluator's top level, before the
@@ -180,16 +224,13 @@ def test_a_prologue_variant_is_never_computed_inside_a_helpers_if(body):
     # the RSI once, before the EMA (the parent refused both spellings).
     'u(_x, _y) => ta.ema(_x + _y, 3)\ns5 = ta.sma(close, 5)\nr = ta.rsi(close, 14)\n'
     'x = request.security(syminfo.tickerid, "60", u(s5[1], r))\n',
-    'import examples/LaterGlobals/1 as laterlib\n'
-    'g(_e, _f) => laterlib.request_ema(_e, _f)\n'
-    's5 = ta.sma(close, 5)\nr = ta.rsi(close, 14)\nx = g(s5, r)\n',
 ])
 def test_every_read_of_a_prologue_variant_orders_it(body, monkeypatch):
     def order(cpp: str) -> list[str]:
         return re.findall(r"auto _secval_\w+ = security_series_slot_is_new\(0\) \? "
                           r"(_sec0__ta_[a-z]+)_\d+\.compute", _evaluators(cpp)[0])
 
-    cpp = transpile(PRELUDE + body + TRADE, libraries=LATER_LIBRARIES)
+    cpp = transpile(PRELUDE + body + TRADE)
     assert order(cpp) == ["_sec0__ta_sma", "_sec0__ta_rsi", "_sec0__ta_ema"]
     assert _evaluators(cpp)[0].count("_ta_rsi_3.compute(") == 1
     compile_cpp(cpp, label="prologue variants read after a history read")
@@ -198,9 +239,49 @@ def test_every_read_of_a_prologue_variant_orders_it(body, monkeypatch):
     from pineforge_codegen.codegen.base import CodeGen
     monkeypatch.setattr(CodeGen, "_security_ta_sites_reached",
                         lambda self, site, stack: set(range(len(self.ctx.ta_call_sites))))
-    assert transpile(
-        PRELUDE + body + TRADE, libraries=LATER_LIBRARIES
-    ) == cpp
+    assert transpile(PRELUDE + body + TRADE) == cpp
+
+
+def test_requested_ema_rejects_a_global_declared_after_its_helper():
+    body = (
+        'g(_e, _f) => request.security(syminfo.tickerid, "60", ta.ema(_e[1] + _f, 3))\n'
+        's5 = ta.sma(close, 5)\nr = ta.rsi(close, 14)\nx = g(s5, r)\n'
+    )
+    with pytest.raises(CompileError) as caught:
+        transpile(PRELUDE + body + TRADE, filename="later-prologue.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2053"
+    assert diagnostic.message == (
+        "Global variable 's5' is read before its declaration in a function."
+    )
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "later-prologue.pine"
+    # 2 header + 1 helper + 2 globals put x at 6; "x = g(" is six columns.
+    assert (diagnostic.location.line, diagnostic.location.col) == (6, 7)
+
+
+def test_earlier_globals_order_every_prologue_read(monkeypatch):
+    body = (
+        's5 = ta.sma(close, 5)\nr = ta.rsi(close, 14)\n'
+        'g(_e, _f) => request.security(syminfo.tickerid, "60", ta.ema(_e[1] + _f, 3))\n'
+        'x = g(s5, r)\n'
+    )
+
+    def order(cpp: str) -> list[str]:
+        return re.findall(r"auto _secval_\w+ = security_series_slot_is_new\(0\) \? "
+                          r"(_sec0__ta_[a-z]+)_\d+\.compute", _evaluators(cpp)[0])
+
+    cpp = transpile(PRELUDE + body + TRADE)
+    # s5, r and g register SMA, RSI and EMA in that order; each advances once.
+    assert order(cpp) == ["_sec0__ta_sma", "_sec0__ta_rsi", "_sec0__ta_ema"]
+    assert _evaluators(cpp)[0].count("_ta_rsi_2.compute(") == 1
+    compile_cpp(cpp, label="earlier prologue variants read after a history read")
+    from pineforge_codegen.codegen.base import CodeGen
+    monkeypatch.setattr(CodeGen, "_security_ta_sites_reached",
+                        lambda self, site, stack: set(range(len(self.ctx.ta_call_sites))))
+    assert transpile(PRELUDE + body + TRADE) == cpp
 
 
 def test_a_later_string_global_keeps_the_parents_refusal():
@@ -213,10 +294,32 @@ def test_a_later_string_global_keeps_the_parents_refusal():
             'if x == "abc"\n    strategy.entry("L", strategy.long)\n'))
 
 
-def test_prologue_order_replays_tradingview_tape(tmp_path_factory):
+def test_prologue_order_tape_rejects_a_later_global_read():
+    with pytest.raises(CompileError) as caught:
+        transpile(source("xa2_prologue_order", XSYM_A2_TV), filename="prologue-order.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2053"
+    assert diagnostic.message == (
+        "Global variable 's6' is read before its declaration in a function."
+    )
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "prologue-order.pine"
+    # The fixture calls g on line 17; its copied s6 read follows the six columns "b = g(".
+    assert (diagnostic.location.line, diagnostic.location.col) == (17, 7)
+
+
+def test_prologue_order_with_earlier_globals_replays_tradingview_tape(tmp_path_factory):
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("xa2_prologue_order")
-    exits = replay(engine, base, {"probe": Build(source("xa2_prologue_order", XSYM_A2_TV))})
+    script = source("xa2_prologue_order", XSYM_A2_TV)
+    declaration = 's6 = ta.sma(close, 6)\n'
+    marker = 'g(_e) =>'
+    assert script.count(declaration) == 1 and script.count(marker) == 1
+    # Moving the same six-bar SMA before g keeps the requested expression and every order.
+    script = script.replace(declaration, "").replace(marker, declaration + marker)
+    exits = replay(engine, base, {"probe": Build(script)})
     tape = tape_exits("xa2_prologue_order", XSYM_A2_TV)
     assert len(tape) == 336
     # The close exiting at 08:00 UTC on 2025-04-02: the hourly and the
@@ -227,10 +330,39 @@ def test_prologue_order_replays_tradingview_tape(tmp_path_factory):
     print(f"prologue order: {len(tape)} of {len(tape)} exit Signals equal TradingView's")
 
 
-def test_price_history_and_later_globals_replay_tradingview_tape(tmp_path_factory):
+def test_price_history_tape_rejects_a_later_global_read():
+    with pytest.raises(CompileError) as caught:
+        transpile(source("xa2_price_later", XSYM_A2_TV), filename="price-history.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2053"
+    assert diagnostic.message == (
+        "Global variable 'ma' is read before its declaration in a function."
+    )
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "price-history.pine"
+    # The fixture calls g(ma) on line 14; "d = g(" takes six columns before ma.
+    assert (diagnostic.location.line, diagnostic.location.col) == (14, 7)
+
+
+def test_price_history_with_earlier_globals_replays_tradingview_tape(tmp_path_factory):
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("xa2_price_later")
-    exits = replay(engine, base, {"probe": Build(source("xa2_price_later", XSYM_A2_TV))})
+    script = source("xa2_price_later", XSYM_A2_TV)
+    declarations = (
+        'ma = ta.sma(close, 3)\n',
+        'len = input.int(4, "Len")\n',
+        'body = close - open\n',
+    )
+    marker = 'g(_e) =>'
+    assert script.count(marker) == 1
+    for declaration in declarations:
+        assert script.count(declaration) == 1
+        script = script.replace(declaration, "")
+    # The same ma, len and body now precede g/h; every payload, input and order is unchanged.
+    script = script.replace(marker, "".join(declarations) + marker)
+    exits = replay(engine, base, {"probe": Build(script)})
     tape = tape_exits("xa2_price_later", XSYM_A2_TV)
     assert len(tape) == 336
     # The close exiting at 20:00 UTC on 2025-04-01: hourly hl2 one bar back,

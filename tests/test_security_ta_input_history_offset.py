@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._compile import compile_cpp
 from tests.test_security_helper_local_var import _compile_and_run
 
@@ -394,52 +394,53 @@ plot(x + y)
     ["idx := 1", "idx := int(close)"],
     ids=["literal-reassignment", "series-reassignment"],
 )
-def test_containing_udf_parameter_reassignment_fails_closed(
+def test_containing_udf_offset_rejects_parameter_reassignment(
     reassignment: str,
 ):
     src = f'''//@version=6
 strategy("reassigned containing helper offset")
-import examples/SecurityOffset/1 as offsetlib
-k = input.int(2, "Offset")
-x = offsetlib.requested(k)
-plot(x)
-'''
-    library = f'''//@version=5
-library("SecurityOffset")
-export requested(int idx) =>
+requested(int idx) =>
     {reassignment}
     request.security(syminfo.tickerid, "60", ta.ema(close, 5)[idx])
+k = input.int(2, "Offset")
+x = requested(k)
+plot(x)
 '''
-    with pytest.raises(
-        CompileError,
-        match=r"TA history index must be a literal integer",
-    ):
-        transpile(src, libraries={"examples/SecurityOffset/1": library})
+    with pytest.raises(CompileError) as caught:
+        transpile(src, filename="reassigned-offset.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2059"
+    assert diagnostic.message == "Function parameter 'idx' cannot be reassigned."
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "reassigned-offset.pine"
+    # Two header lines and the signature precede idx after four spaces.
+    assert (diagnostic.location.line, diagnostic.location.col) == (4, 5)
 
 
-def test_containing_udf_parameter_reassignment_after_request_fails_closed():
-    # Conservative on purpose: the parameter has a function-local lifecycle,
-    # so call-site substitution is disabled once any write exists, even after
-    # the request expression in authored statement order.
+def test_containing_udf_offset_rejects_parameter_reassignment_after_request():
     src = """//@version=6
 strategy("post-use reassigned containing helper offset")
-import examples/SecurityOffset/1 as offsetlib
-k = input.int(2, "Offset")
-x = offsetlib.requested(k)
-plot(x)
-"""
-    library = '''//@version=5
-library("SecurityOffset")
-export requested(int idx) =>
+requested(int idx) =>
     out = request.security(syminfo.tickerid, "60", ta.ema(close, 5)[idx])
     idx := 1
     out
-'''
-    with pytest.raises(
-        CompileError,
-        match=r"TA history index must be a literal integer",
-    ):
-        transpile(src, libraries={"examples/SecurityOffset/1": library})
+k = input.int(2, "Offset")
+x = requested(k)
+plot(x)
+"""
+    with pytest.raises(CompileError) as caught:
+        transpile(src, filename="post-use-offset.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2059"
+    assert diagnostic.message == "Function parameter 'idx' cannot be reassigned."
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "post-use-offset.pine"
+    # The request occupies line 4; the following write has four leading spaces.
+    assert (diagnostic.location.line, diagnostic.location.col) == (5, 5)
 
 
 @pytest.mark.parametrize(
