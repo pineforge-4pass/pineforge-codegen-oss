@@ -3,7 +3,6 @@ name: Test
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -193,7 +192,7 @@ jobs:
   workflow-lint:
     name: workflow-lint
     needs: [authz]
-    runs-on: ubuntu-24.04
+    runs-on: gke-8cpu-16gb-amd64
     permissions:
       contents: read
     steps:
@@ -229,7 +228,6 @@ jobs:
           fi
           tar -xzf "$lint_dir/$archive" -C "$lint_dir" actionlint
           "$lint_dir/actionlint" -version
-          printf '%s\n' '{"self-hosted-runner":{"labels":["pf-gcp-pr","pf-gcp-main","pf-gcp-post"]}}' > "$lint_dir/actionlint.yaml"
           git ls-files -z -- .github/workflows > "$lint_dir/workflows"
           workflows=()
           while IFS= read -r -d '' path; do
@@ -245,7 +243,7 @@ jobs:
             echo "::error::no workflow YAML files were found"
             exit 1
           fi
-          "$lint_dir/actionlint" -config-file "$lint_dir/actionlint.yaml" -shellcheck= -pyflakes= "${workflows[@]}"
+          "$lint_dir/actionlint" -config-file .github/actionlint.yaml -shellcheck= -pyflakes= "${workflows[@]}"
       - name: "Check App token environments"
         if: "${{ needs.authz.result == 'success' }}"
         shell: "bash"
@@ -256,7 +254,7 @@ jobs:
   package-files:
     name: package-files
     needs: [authz]
-    runs-on: ubuntu-24.04
+    runs-on: gke-8cpu-16gb-amd64
     permissions:
       contents: read
     steps:
@@ -289,7 +287,7 @@ jobs:
   pytest:
     needs: [authz, changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: gke-8cpu-16gb-amd64
     strategy:
       fail-fast: false
       matrix:

@@ -20,7 +20,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
-## Unreleased (1.9.1)
+## 1.9.1 — 2026-10-31
 
 - Translation checks the generated C++ against a fixed allowlist and refuses a
   script whose output contains a construct outside it, with a fixed reason and

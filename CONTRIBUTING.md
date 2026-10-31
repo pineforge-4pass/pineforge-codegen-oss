@@ -196,11 +196,16 @@ declare the environment fails at npm.
   engine.
 - Keep [CHANGELOG.md](CHANGELOG.md) current for user-visible changes. Its
   release-note policy applies to both stable and prerelease tags.
-- CI clears a pull request from a fork into `main` only when it changes
-  documentation or legal text alone (Markdown, `docs/`, `LICENSE`, `NOTICE`).
-  A fork's code change does not run in CI here: its `gate` check fails until a
-  maintainer pushes the branch to this repository and opens a pull request
-  from it, which runs the full gate.
+- Pull request CI requires a non-draft, same-repository PR to `main`, with
+  repository write permission for its author, actor and rerunning actor (or a
+  fixed allowed bot). Fork PRs, including documentation-only PRs, do not enter
+  GKE. A maintainer can push the branch to this repository and open a PR from
+  it. Every admitted diff runs the full test matrix and differential gate.
+  See [CI admission and check mapping](docs/ci.md) for the hosted authorization
+  and result jobs, pod permissions, and operator setup.
+- `test.yml` runs only on push to `main` and manual dispatch. Its `workflow-lint`,
+  `package-files` and `pytest` jobs use `gke-8cpu-16gb-amd64`; `authz`, `changes`
+  and `test-check` use `ubuntu-24.04`.
 - The README describes the latest release and becomes the PyPI page of the
   next release: when a version is tagged, update its "Releases and this
   README" section, its engine-pairing table and its release markers.
