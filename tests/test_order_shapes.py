@@ -324,12 +324,32 @@ def test_host_reads_names_policy_setter_for_non_readers_only():
     assert "closed_trade_profit" in reader["host_reads"]
 
 
-def test_host_reads_lists_the_regenerated_member_the_config_block_spells():
-    declaration = '//@version=6\nstrategy("regenerated host reads", initial_capital=5000)\n'
+@pytest.mark.parametrize(("cpp", "reads"), [
+    pytest.param("cfg.initial_capital = 5000.0;", set(), id="config-field"),
+    pytest.param("overrides.initial_capital = std::stod(value);", set(), id="override-field"),
+    pytest.param("cfg\n    .initial_capital = 5000.0;", set(), id="dot-on-the-next-line"),
+    pytest.param("ring.replace(member, value);", set(), id="method-of-another-object"),
+    pytest.param("cached_run_ = versions.run();", set(), id="member-of-a-version-clock"),
+    pytest.param("double x = initial_capital;", {"initial_capital"}, id="bare-read"),
+    pytest.param("double x = this->initial_capital;", {"initial_capital"}, id="this-read"),
+    pytest.param("this->replace(a, b);", {"replace"}, id="this-call"),
+    pytest.param("strat->run(bars, n);", {"run"}, id="strategy-pointer-call"),
+    pytest.param("x = bar_index_ + cfg.initial_capital;", {"bar_index_"}, id="mixed"),
+])
+def test_scan_counts_host_members_and_not_members_of_other_objects(cpp, reads):
+    assert scan_host_reads(cpp) == reads
+    recorded: set[str] = set()
+    HostReadLines(recorded).append(cpp)
+    assert recorded == reads
+
+
+def test_host_reads_omit_the_config_field_of_the_declared_capital():
+    declaration = '//@version=6\nstrategy("config capital", initial_capital=5000)\n'
     body = 'strategy.entry("L", strategy.long)\n'
     cpp = transpile(declaration + body)
+    assert "cfg.initial_capital = 5000.0;" in cpp
     reads = set(receipt(body, declaration)["host_reads"])
-    assert "initial_capital" in reads
+    assert "initial_capital" not in reads
     assert scan_host_reads(cpp) <= reads
 
 

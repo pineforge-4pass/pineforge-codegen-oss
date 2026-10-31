@@ -107,21 +107,6 @@ def without_id_sites_receipt(cpp: str) -> str:
         '', cpp, flags=re.MULTILINE | re.DOTALL)
 
 
-def without_regenerated_host_reads(cpp: str) -> str:
-    """Remove ``initial_capital`` and ``replace`` from the order-shapes receipt.
-
-    Regenerating ``codegen/host_members.py`` against the engine that gained
-    these two host members reserves them, so a script whose C++ spells either
-    one (``cfg.initial_capital``, a string ``replace`` call) lists it in the
-    receipt's ``host_reads``. That list is additive metadata that whole-C++
-    fixtures and hashes pinned earlier predate: compare them without the two
-    elements. ``test_order_shapes`` covers the receipt entries directly.
-    """
-    for name in ("initial_capital", "replace"):
-        cpp = cpp.replace(f'\\"{name}\\",', '').replace(f',\\"{name}\\"]', ']')
-    return cpp
-
-
 def without_trade_history_policy(cpp: str) -> str:
     """Remove CR-150's additive policy block/export and normalize ctor lookup.
 
@@ -141,7 +126,6 @@ def without_trade_history_policy(cpp: str) -> str:
     # Non-readers gain this setter element when it becomes reserved; readers
     # emit no policy call and have no such element.
     cpp = cpp.replace('\\"set_trade_history_streamable\\",', '')
-    cpp = without_regenerated_host_reads(cpp)
     cpp = re.sub(
         r'^#if defined\(PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1\)\n'
         r'        (?:this->)?set_trade_history_streamable\(true\);\n'

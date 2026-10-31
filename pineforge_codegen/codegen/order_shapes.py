@@ -45,10 +45,24 @@ CPP_TOKENS = re.compile(
 )
 
 
+def _is_member_of_other_object(text: str, start: int) -> bool:
+    """True when the token at ``start`` follows a dot: ``cfg.initial_capital``.
+
+    A host member is read by its bare name or through the strategy pointer
+    (``this->name``, ``strat->name``); a name after a dot belongs to another
+    object (a config, a journal, a version clock) and is not a host read.
+    """
+    index = start - 1
+    while index >= 0 and text[index] in " \t\r\n":
+        index -= 1
+    return index >= 0 and text[index] == "."
+
+
 def scan_host_reads(cpp: str) -> set[str]:
     """Cross-check host tokens, excluding C++ strings and comments."""
     return {match.group() for match in CPP_TOKENS.finditer(cpp)
-            if match.group() in HOST_MEMBER_NAMES}
+            if match.group() in HOST_MEMBER_NAMES
+            and not _is_member_of_other_object(cpp, match.start())}
 
 
 class HostReadLines(list):
@@ -68,7 +82,8 @@ class HostReadLines(list):
             self.in_comment = False
         for match in CPP_TOKENS.finditer(fragment):
             token = match.group()
-            if token in HOST_MEMBER_NAMES:
+            if (token in HOST_MEMBER_NAMES
+                    and not _is_member_of_other_object(fragment, match.start())):
                 self.reads.add(token)
             if token.startswith("/*") and not token.endswith("*/"):
                 self.in_comment = True
