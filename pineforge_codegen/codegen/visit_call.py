@@ -3888,8 +3888,10 @@ class CallVisitor:
                     if tbl:
                         var = self._safe_name(val_arg.name)
                         n = len(tbl)
+                        self._uses_enum_string_lookup = True
                         return (
-                            f"pine_enum_str_at({self._safe_name(et)}_str_values, {n}, {var})"
+                            f"::pineforge::source::pine_enum_str_at("
+                            f"{self._safe_name(et)}_str_values, {n}, {var})"
                         )
             inferred = self._infer_type(val_arg) if val_arg is not None else ""
             if inferred == "std::string":

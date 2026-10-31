@@ -4448,6 +4448,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if ic is not None:
                 val_type, is_const, const_value = ic
             enum_type_name = self._input_enum_type_name(node.value)
+        elif (isinstance(node.value, MemberAccess)
+              and isinstance(node.value.object, Identifier)):
+            enum_name = node.value.object.name
+            if node.value.member in self._enum_defs.get(enum_name, ()):
+                enum_type_name = enum_name
 
         udt_ctor = self._udt_name_from_ctor(node.value)
         # User function return propagation: if the value is a call to a user

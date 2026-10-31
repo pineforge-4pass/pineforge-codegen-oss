@@ -313,6 +313,11 @@ CPP_EMITTER_NAMES = frozenset("""
     history_advances_new_bar security_series_slot_is_new last_bar_dual_entry_path
     live_position_size pending_order_count market_admission_journal
     pine_time pine_time_close pine_time_tradingday pine_random
+    pine_time_offset pine_hour pine_minute pine_second pine_dayofmonth
+    pine_dayofweek pine_month pine_year pine_weekofyear
+    pine_log_info pine_log_warning pine_log_error
+    pine_str_match pine_str_split pine_str_format_time
+    pine_str_format_tv pine_str_tostring pine_str_tostring_tv
     pine_runtime_error pine_enum_str_at pine_session_ismarket
     pine_no_data_stop pine_other_symbol_stop pine_array_stop pine_collection_stop
     pine_na_stop pine_limit_stop pine_unsupported_stop pine_string_stop
@@ -348,6 +353,11 @@ CPP_EMITTER_NAMES = frozenset("""
     _pf_settings_inputs _pf_settings_overrides _pf_set_input_checked
     _pf_set_override_checked _pf_settings_receipt
     _pf_close_entries_rule_word _pf_default_qty_type_word _pf_commission_type_word
+    _pf_recorded _pf_symbol_is_chart _pf_symbol_data_installed _pf_symbol_column
+    _pf_run_backtest_full_impl _pf_array_id
+    _pf_derive_prefix _pf_derive_main_tickerid _pf_derive_country
+    _pf_tv_trim _pf_tv_increment_digits _pf_tv_decimal _pf_tv_pattern
+    _pf_tv_number_style
     checked_settings trace is_na na nz fixnan
 """.split())
 

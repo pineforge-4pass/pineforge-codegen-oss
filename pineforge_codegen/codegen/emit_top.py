@@ -110,6 +110,8 @@ from .drawing import DRAWING_LIFETIME_CPP
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 
 
+# Keep the late-selected include beside the headers the C++ allowlist reads.
+ENUM_STRING_INCLUDE = '#include <pineforge/source/pine_policy_support.hpp>'
 _TRADE_HISTORY_POLICY_MARKER = "        /* __PINEFORGE_TRADE_HISTORY_POLICY__ */"
 
 

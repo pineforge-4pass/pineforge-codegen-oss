@@ -331,7 +331,7 @@ from .security import SecurityEmitter
 # constructor, on_bar, extern "C") plus the per-function emission helpers
 # (_emit_func_def / _emit_udt_method_cpp_name) used by both regular
 # Pine functions and UDT instance methods.
-from .emit_top import TopLevelEmitter
+from .emit_top import ENUM_STRING_INCLUDE, TopLevelEmitter
 
 # StmtVisitor owns the statement-level visitors (_visit_stmt dispatcher
 # plus the per-kind handlers for var-decl, assignment, tuple-assign,
@@ -5016,6 +5016,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._closed_trade_folds[plan.for_node_id] = (node, plan)
 
     def _generate_cpp(self) -> str:
+        self._uses_enum_string_lookup = False
         # Every input is keyed by its title: refuse a non-constant one first,
         # then flag inputs one override key would reach together.
         self._check_input_titles()
@@ -6071,6 +6072,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         exports: list[str] = []
         emit_capabilities_exports(self, exports)
         lines[self._capabilities_export_at:self._capabilities_export_at] = exports
+        # Function bodies and security evaluators can select the enum lookup.
+        if self._uses_enum_string_lookup:
+            lines.insert(0, ENUM_STRING_INCLUDE)
         cpp = "\n".join(lines)
         self._settle_session_reads(cpp)
         return cpp
