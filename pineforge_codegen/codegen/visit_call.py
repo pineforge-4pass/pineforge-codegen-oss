@@ -374,6 +374,20 @@ class CallVisitor:
         receiver_spec = self._type_spec_from_expr(receiver)
         if receiver_spec is None and isinstance(receiver, Identifier):
             receiver_spec = self._scalar_receiver_spec(receiver.name, member)
+        if receiver_spec is None:
+            inferred_cpp = self._infer_type(receiver)
+            if inferred_cpp == "int64_t" and self._is_color_value(receiver):
+                inferred_pine = "color"
+            else:
+                inferred_pine = {
+                    "double": "float",
+                    "int": "int",
+                    "bool": "bool",
+                    "std::string": "string",
+                    "int64_t": "int",
+                }.get(inferred_cpp)
+            if inferred_pine is not None:
+                receiver_spec = TypeSpec.primitive(inferred_pine)
         receiver_name = method_receiver_type_name(receiver_spec)
         if receiver_name is None:
             return receiver_spec, None
