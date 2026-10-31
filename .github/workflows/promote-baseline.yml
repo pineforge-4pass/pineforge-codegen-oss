@@ -71,9 +71,9 @@ name: promote-baseline
 on:
   push:
     branches: [main]
-  # Manual re-fire, from main, for a merge whose event already passed (e.g. a
-  # PR merged before this workflow was installed): the commit now on the base
-  # branch, the PR head the gate cleared, and the PR.
+  # Dispatch from main re-fires a promotion for an already merged PR.
+  # Its five inputs are checked against the pull request API; a refusal means
+  # a wrong input, not a workflow fault.
   workflow_dispatch:
     inputs:
       merge_commit:
@@ -168,7 +168,7 @@ jobs:
           except (OSError, RecursionError, ValueError):
               raise SystemExit(1)
           number = pr.get("number") if isinstance(pr, dict) else None
-          if not (type(number) in (int, float) and number == int(sys.argv[1])):
+          if not (type(number) is int and number == int(sys.argv[1])):
               raise SystemExit(1)
           PY
               then
@@ -298,7 +298,7 @@ jobs:
               and all(isinstance(page, list) for page in pages)
               and len(pulls) == 1
               and isinstance(pulls[0], dict)
-              and type(pulls[0].get("number")) in (int, float)
+              and type(pulls[0].get("number")) is int
               and pulls[0].get("number") == int(sys.argv[1])
           ):
               raise SystemExit(1)

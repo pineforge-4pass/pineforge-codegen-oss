@@ -662,7 +662,7 @@ PROMOTE_GUARD = r'''  promote-guard:
           except (OSError, RecursionError, ValueError):
               raise SystemExit(1)
           number = pr.get("number") if isinstance(pr, dict) else None
-          if not (type(number) in (int, float) and number == int(sys.argv[1])):
+          if not (type(number) is int and number == int(sys.argv[1])):
               raise SystemExit(1)
           PY
               then
@@ -792,7 +792,7 @@ PROMOTE_GUARD = r'''  promote-guard:
               and all(isinstance(page, list) for page in pages)
               and len(pulls) == 1
               and isinstance(pulls[0], dict)
-              and type(pulls[0].get("number")) in (int, float)
+              and type(pulls[0].get("number")) is int
               and pulls[0].get("number") == int(sys.argv[1])
           ):
               raise SystemExit(1)
@@ -1959,6 +1959,32 @@ DISPATCH_REJECT_CASES = [
         "merged_at must be an ISO-8601 UTC timestamp in YYYY-MM-DDTHH:MM:SSZ form",
     ),
     DispatchRejectCase(
+        "merged-at-trailing-newline",
+        {"INPUT_MERGED_AT": promotion_pr()["merged_at"] + "\n"},
+        "merged_at must be an ISO-8601 UTC timestamp in YYYY-MM-DDTHH:MM:SSZ form",
+    ),
+    DispatchRejectCase(
+        "api-pr-number-mismatch",
+        {"GH_DISPATCH_PR": json.dumps({**promotion_pr(), "number": 18})},
+        "pr_number does not match the PR API response",
+        (DISPATCH_PR_CALL,),
+    ),
+    DispatchRejectCase(
+        "api-pr-number-float",
+        {"GH_DISPATCH_PR": json.dumps({**promotion_pr(), "number": 17.0})},
+        "pr_number does not match the PR API response",
+        (DISPATCH_PR_CALL,),
+    ),
+    DispatchRejectCase(
+        "api-pr-number-bool",
+        {
+            **dispatch_overrides(promotion_pr(1)),
+            "GH_DISPATCH_PR": json.dumps({**promotion_pr(1), "number": True}),
+        },
+        "pr_number does not match the PR API response",
+        ("api repos/owner/repo/pulls/1",),
+    ),
+    DispatchRejectCase(
         "api-pr-not-merged",
         {"GH_DISPATCH_PR": json.dumps({**promotion_pr(), "merged": False})},
         "pr_number API record is not merged",
@@ -1995,6 +2021,24 @@ DISPATCH_REJECT_CASES = [
     DispatchRejectCase(
         "api-association-has-two-prs",
         {"GH_DISPATCH_PULLS": json.dumps([[promotion_pr(), promotion_pr(18)]])},
+        "merge_commit must list exactly pull request 17",
+        (DISPATCH_PR_CALL, DISPATCH_PULLS_CALL),
+    ),
+    DispatchRejectCase(
+        "api-association-number-mismatch",
+        {"GH_DISPATCH_PULLS": json.dumps([[promotion_pr(18)]])},
+        "merge_commit must list exactly pull request 17",
+        (DISPATCH_PR_CALL, DISPATCH_PULLS_CALL),
+    ),
+    DispatchRejectCase(
+        "api-association-has-no-prs",
+        {"GH_DISPATCH_PULLS": json.dumps([[]])},
+        "merge_commit must list exactly pull request 17",
+        (DISPATCH_PR_CALL, DISPATCH_PULLS_CALL),
+    ),
+    DispatchRejectCase(
+        "api-association-number-float",
+        {"GH_DISPATCH_PULLS": json.dumps([[{**promotion_pr(), "number": 17.0}]])},
         "merge_commit must list exactly pull request 17",
         (DISPATCH_PR_CALL, DISPATCH_PULLS_CALL),
     ),
