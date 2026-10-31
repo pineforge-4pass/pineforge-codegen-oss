@@ -83,6 +83,21 @@ REFUSALS = [
     pytest.param(
         (
             HEADER
+            + "int remaining = 2\n"
+            + "while remaining\n"
+            + "    remaining -= 1\n"
+        ),
+        "PF-E2062",
+        'The condition of the "while" statement must evaluate to a "bool" value.',
+        {"block_name": "while"},
+        Phase.ANALYZER,
+        4,
+        7,  # remaining stays int after reassignment and starts after "while ".
+        id="reassigned-integer-while-condition",
+    ),
+    pytest.param(
+        (
+            HEADER
             + "value = switch true\n"
             + "    => 1.0\n"
             + "    false => 2.0\n"
@@ -125,8 +140,8 @@ REFUSALS = [
         '"text" cannot be used as a variable or function name.',
         {"keyword": "text"},
         Phase.ANALYZER,
-        4,
-        1,  # The method declaration starts at the first column.
+        5,
+        1,  # Two header lines and two type-declaration lines precede the method.
         id="reserved-method-name",
     ),
     pytest.param(

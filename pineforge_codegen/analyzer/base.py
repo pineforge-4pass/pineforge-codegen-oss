@@ -6080,6 +6080,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._visit(node.condition)
             condition_type = self._numeric_condition_type(node.condition)
             if (
+                condition_type == PineType.UNKNOWN
+                and isinstance(node.condition, Identifier)
+            ):
+                symbol = self._symbols.resolve(node.condition.name)
+                # Reassignment cannot change an explicitly declared scalar type.
+                if getattr(symbol, "_pf_certain_declared", False):
+                    condition_type = self._certain_scalar_type(node.condition)
+            if (
                 condition_type in (PineType.INT, PineType.FLOAT)
                 and self._pine_version == 6
                 and not self._in_v5_library_definition(node)

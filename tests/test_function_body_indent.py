@@ -120,8 +120,8 @@ type Position
     int units
 method quantity(Position self) =>
   self.units
-position = Position.new(5)
-strategy.entry("L", strategy.long, qty = position.quantity())
+holding = Position.new(5)
+strategy.entry("L", strategy.long, qty = holding.quantity())
 """,
         ((True, 1),),  # The method's field expression joins its arrow as one inline body.
         id="method",
@@ -131,10 +131,10 @@ strategy.entry("L", strategy.long, qty = position.quantity())
 strategy("Function after type")
 type Position
     int units
-quantity(Position position) =>
-  position.units
-position = Position.new(5)
-strategy.entry("L", strategy.long, qty = quantity(position))
+quantity(Position holding) =>
+  holding.units
+holding = Position.new(5)
+strategy.entry("L", strategy.long, qty = quantity(holding))
 """,
         ((True, 1),),  # Dedenting the type block leaves one inline field expression.
         id="function_after_type",
@@ -244,11 +244,11 @@ strategy.entry("L", strategy.long, qty = quantity())
 strategy("Continued field assignment")
 type Position
     int units
-setQuantity(Position position) =>
-  position.units := 5
-position = Position.new(1)
-setQuantity(position)
-strategy.entry("L", strategy.long, qty = position.units)
+setQuantity(Position holding) =>
+  holding.units := 5
+holding = Position.new(1)
+setQuantity(holding)
+strategy.entry("L", strategy.long, qty = holding.units)
 """,
         ((False, 1),),  # The joined field assignment is one statement using inline assignment semantics.
         id="continued_field_assignment",
@@ -268,6 +268,67 @@ strategy.entry("L", strategy.long, qty = quantity(true))
         id="continued_switch_arms",
     ),
 ]
+
+
+_RESERVED_OBJECT_SCRIPTS = [
+    pytest.param(
+        """//@version=6
+strategy("Method body")
+type Position
+    int units
+method quantity(Position self) =>
+  self.units
+position = Position.new(5)
+strategy.entry("L", strategy.long, qty = position.quantity())
+""",
+        id="method",
+    ),
+    pytest.param(
+        """//@version=6
+strategy("Function after type")
+type Position
+    int units
+quantity(Position position) =>
+  position.units
+position = Position.new(5)
+strategy.entry("L", strategy.long, qty = quantity(position))
+""",
+        id="function_after_type",
+    ),
+    pytest.param(
+        """//@version=6
+strategy("Continued field assignment")
+type Position
+    int units
+setQuantity(Position position) =>
+  position.units := 5
+position = Position.new(1)
+setQuantity(position)
+strategy.entry("L", strategy.long, qty = position.units)
+""",
+        id="continued_field_assignment",
+    ),
+]
+
+
+@pytest.mark.parametrize("source", _RESERVED_OBJECT_SCRIPTS)
+def test_namespace_name_is_refused_for_a_user_defined_object(source: str) -> None:
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="namespace-object.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    # A user-defined object named position collides with the built-in namespace.
+    assert diagnostic.code == "PF-E2065"
+    assert diagnostic.message == (
+        "Invalid object name: position. Namespaces of built-ins cannot be used."
+    )
+    assert diagnostic.args == {"name": "position"}
+    assert diagnostic.hint is None
+    assert diagnostic.location.file == "namespace-object.pine"
+    # Two header lines, two type lines and two callable lines put position at 7:1.
+    assert (diagnostic.location.line, diagnostic.location.col) == (7, 1)
 
 
 def _transpile_checked(
