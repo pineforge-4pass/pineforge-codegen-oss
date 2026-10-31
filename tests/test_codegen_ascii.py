@@ -9,7 +9,6 @@ import re
 import pytest
 
 from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.codegen.ascii import ascii_cpp
 from pineforge_codegen.errors import CompileError, Level, Phase, SourceLocation
 from pineforge_codegen.pine_spelling import pine_string_literal
@@ -19,13 +18,25 @@ from tests._cpp_tokens import code_only, regions, string_values
 HEADER = '//@version=6\nstrategy("ASCII output")\n'
 TRADE = 'if close > open\n    strategy.entry("L", strategy.long)\n'
 
-NAMES = (
-    # U+03B1 is UTF-8 CE B1.
-    ("\u03b1", "pf_utf8_ceb1", b"\xce\xb1"),
-    # Cyrillic U+0441 followed by "lass" is D1 81 6C 61 73 73.
-    ("\u0441lass", "pf_utf8_d1816c617373", b"\xd1\x81lass"),
-    # Deseret U+10400 is UTF-8 F0 90 90 80.
-    ("\U00010400", "pf_utf8_f0909080", b"\xf0\x90\x90\x80"),
+IDENTIFIER_REFUSALS = (
+    pytest.param("\u03b1", [
+        # The two header lines put alpha at 3:1, with its one-character end at 2.
+        ("no viable alternative at character '\u03b1'", 3, 1, 2),
+        # "if " is three characters, putting alpha at 4:4 and its end at 5.
+        ("no viable alternative at character '\u03b1'", 4, 4, 5),
+    ], id="greek-alpha"),
+    pytest.param("\u0441lass", [
+        # Cyrillic es starts line 3 at column 1; the remaining "lass" is ASCII.
+        ("no viable alternative at character '\u0441'", 3, 1, 2),
+        # "if " puts Cyrillic es at 4:4; its one-character end is 5.
+        ("no viable alternative at character '\u0441'", 4, 4, 5),
+    ], id="cyrillic-es"),
+    pytest.param("\U00010400", [
+        # Deseret starts line 3 at column 1 and occupies one Python code point.
+        ("no viable alternative at character '\U00010400'", 3, 1, 2),
+        # "if " puts Deseret at 4:4; one Python code point ends at 5.
+        ("no viable alternative at character '\U00010400'", 4, 4, 5),
+    ], id="deseret"),
 )
 
 STRINGS = (
@@ -236,17 +247,11 @@ def _assert_identifier_refusal(
         assert diagnostic.hint is None
 
 
-@pytest.mark.parametrize("name,emitted,expected_bytes", NAMES)
-def test_unicode_identifier_has_an_invertible_ascii_spelling(name, emitted, expected_bytes):
-    cpp = transpile(HEADER + f"{name} = close\nif {name} > open\n"
-                    '    strategy.entry("L", strategy.long)\n')
-    assert cpp.isascii()
-    code = code_only(cpp)
-    tokens = re.findall(rf"\b{emitted}\b", code)
-    assert len(tokens) >= 2
-    decoded = bytes.fromhex(tokens[0].removeprefix("pf_utf8_"))
-    assert decoded == expected_bytes
-    assert decoded.decode("utf-8") == name
+@pytest.mark.parametrize("name,expected", IDENTIFIER_REFUSALS)
+def test_non_ascii_identifier_declarations_and_reads_are_refused(name, expected):
+    source = (HEADER + f"{name} = close\nif {name} > open\n"
+              '    strategy.entry("L", strategy.long)\n')
+    _assert_identifier_refusal(source, expected)
 
 
 @pytest.mark.parametrize("text,spelling,expected_bytes,array_size", STRINGS)
@@ -278,26 +283,27 @@ def test_unicode_literal_compiler_decodes_the_authored_bytes(
     compile_cpp("\n".join(checks), label="ASCII UTF-8 literal")
 
 
-def test_distinct_unicode_names_avoid_authored_ascii_encodings():
+def test_non_ascii_names_are_refused_beside_encoding_looking_ascii_names():
     source = (HEADER
               + "\u03b1 = close\n\u03b2 = open\n\u0430 = high\n"
               "pf_utf8_ceb1 = low\npf_utf8_ceb1_2 = hl2\npf_utf8_ceb2 = hlc3\n"
               "a = ohlc4\n"
               "plot(\u03b1 + \u03b2 + \u0430 + a + pf_utf8_ceb1"
               " + pf_utf8_ceb1_2 + pf_utf8_ceb2)\n")
-    cpp = transpile(source)
-    assert cpp.isascii()
-    code = code_only(cpp)
-    # CE B1 needs suffix 3, CE B2 needs suffix 2, and Cyrillic D0 B0 is distinct.
-    expected = {
-        "pf_utf8_ceb1_3", "pf_utf8_ceb2_2", "pf_utf8_d0b0",
-        "pf_utf8_ceb1", "pf_utf8_ceb1_2", "pf_utf8_ceb2", "a",
-    }
-    declarations = re.findall(r"\bdouble ([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|;)", code)
-    assert expected <= set(declarations)
-    for name in expected:
-        assert declarations.count(name) == 1
-    assert transpile(source) == cpp
+    _assert_identifier_refusal(source, [
+        # Alpha starts the first declaration after the two header lines: 3:1.
+        ("no viable alternative at character '\u03b1'", 3, 1, 2),
+        # Beta starts the next declaration at 4:1.
+        ("no viable alternative at character '\u03b2'", 4, 1, 2),
+        # Cyrillic a starts the third declaration at 5:1.
+        ("no viable alternative at character '\u0430'", 5, 1, 2),
+        # Seven declarations put plot on line 10; "plot(" puts alpha at column 6.
+        ("no viable alternative at character '\u03b1'", 10, 6, 7),
+        # "plot(α + " is nine code points, putting beta at 10:10.
+        ("no viable alternative at character '\u03b2'", 10, 10, 11),
+        # "plot(α + β + " is thirteen code points, putting Cyrillic a at 10:14.
+        ("no viable alternative at character '\u0430'", 10, 14, 15),
+    ])
 
 
 def test_ascii_names_that_resemble_encodings_keep_their_spelling():
@@ -338,40 +344,45 @@ def test_ascii_reserved_identifier_keeps_its_existing_escape():
     assert "double _class_" in code_only(cpp)
 
 
-def test_unicode_encoding_avoids_reserved_names_and_unused_authored_names(monkeypatch):
+def test_non_ascii_name_is_refused_before_reserved_name_encoding():
     source = HEADER + "\u03b1 = close\nplot(\u03b1)\n"
-    assert transpile(source).isascii()
-    from pineforge_codegen.codegen import ascii as ascii_emission
-
-    # CE B1's base, suffix 2 and suffix 3 are occupied; suffix 4 is available.
-    monkeypatch.setattr(ascii_emission, "CPP_RESERVED",
-                        ascii_emission.CPP_RESERVED | {"pf_utf8_ceb1_3"})
-    original = CodeGen._generate_cpp
-
-    def reserve_unused(self):
-        self._safe_name_occupied.update({"pf_utf8_ceb1", "pf_utf8_ceb1_2"})
-        return original(self)
-
-    monkeypatch.setattr(CodeGen, "_generate_cpp", reserve_unused)
-    cpp = transpile(source)
-    assert cpp.isascii()
-    assert "double pf_utf8_ceb1_4" in code_only(cpp)
+    _assert_identifier_refusal(source, [
+        # Two header lines precede the declaration's alpha at 3:1.
+        ("no viable alternative at character '\u03b1'", 3, 1, 2),
+        # "plot(" is five characters, putting the second alpha at 4:6.
+        ("no viable alternative at character '\u03b1'", 4, 6, 7),
+    ])
 
 
-def test_unicode_callable_history_names_keep_their_distinct_storage():
-    cpp = transpile(HEADER
-                    + "\u03b1(float \u03b2) =>\n"
-                    "    var float \u03b3 = \u03b2\n"
-                    "    \u03b3 := nz(\u03b3[1], \u03b2) + 1.0\n"
-                    "    \u03b3\n"
-                    "left = \u03b1(close)\nright = \u03b1(open)\nplot(left + right)\n")
-    assert cpp.isascii()
-    code = code_only(cpp)
-    # The first call keeps gamma; the second uses gamma_cs1. Both functions are cloned.
-    assert "Series<double> pf_utf8_ceb3" in code
-    assert "Series<double> pf_utf8_ceb35f637331" in code
-    assert "pf_utf8_ceb15f637330(" in code
-    assert "pf_utf8_ceb15f637331(" in code
+def test_non_ascii_callable_history_names_are_refused():
+    source = (HEADER
+              + "\u03b1(float \u03b2) =>\n"
+              "    var float \u03b3 = \u03b2\n"
+              "    \u03b3 := nz(\u03b3[1], \u03b2) + 1.0\n"
+              "    \u03b3\n"
+              "left = \u03b1(close)\nright = \u03b1(open)\nplot(left + right)\n")
+    _assert_identifier_refusal(source, [
+        # Two header lines put the function's alpha at 3:1.
+        ("no viable alternative at character '\u03b1'", 3, 1, 2),
+        # "α(float " is eight code points, putting the parameter beta at 3:9.
+        ("no viable alternative at character '\u03b2'", 3, 9, 10),
+        # Four spaces and "var float " are fourteen characters before gamma.
+        ("no viable alternative at character '\u03b3'", 4, 15, 16),
+        # "    var float γ = " is eighteen code points before beta at 4:19.
+        ("no viable alternative at character '\u03b2'", 4, 19, 20),
+        # The assignment's four-space indent puts gamma at 5:5.
+        ("no viable alternative at character '\u03b3'", 5, 5, 6),
+        # "    γ := nz(" is twelve code points before the history gamma.
+        ("no viable alternative at character '\u03b3'", 5, 13, 14),
+        # "    γ := nz(γ[1], " is eighteen code points before beta at 5:19.
+        ("no viable alternative at character '\u03b2'", 5, 19, 20),
+        # The return's four-space indent puts gamma at 6:5.
+        ("no viable alternative at character '\u03b3'", 6, 5, 6),
+        # "left = " is seven characters before the call's alpha at 7:8.
+        ("no viable alternative at character '\u03b1'", 7, 8, 9),
+        # "right = " is eight characters before the call's alpha at 8:9.
+        ("no viable alternative at character '\u03b1'", 8, 9, 10),
+    ])
 
 
 def test_ascii_callable_history_names_keep_their_distinct_storage():
@@ -402,21 +413,40 @@ def test_a_unicode_name_in_a_string_keeps_its_value():
     assert _literal(cpp, r"\316\261")[1].encode("utf-8") == b"\xce\xb1"
 
 
-def test_unicode_type_and_field_names_are_encoded_as_complete_tokens():
-    cpp = transpile(HEADER
-                    + "type \u0394\n    float \u03b2\n"
-                    "method \u03b3(\u0394 self) => self.\u03b2\n"
-                    "point = \u0394.new(close)\nvalue = point.\u03b3()\nplot(value)\n")
-    assert cpp.isascii()
-    code = code_only(cpp)
-    # Delta is CE 94, beta is CE B2. The method name is composed as "_udt_" +
-    # receiver + "_" + method and encoded as one fragment: each non-ASCII code
-    # point becomes "_u" + six hex digits + "_" (delta U+0394 -> "_u000394_",
-    # gamma U+03B3 -> "_u0003b3_"), so the token is "_udt_" "_u000394_" "_"
-    # "_u0003b3_".
-    assert "struct pf_utf8_ce94 {" in code
-    assert "double pf_utf8_ceb2 =" in code
-    assert "_udt__u000394___u0003b3_(" in code
+def test_non_ascii_identifier_is_refused_beside_its_spelling_in_a_string():
+    source = (HEADER
+              + '\u03b1 = close\ns = "\u03b1"\n'
+              "if \u03b1 > open and str.length(s) > 0\n"
+              '    strategy.entry("L", strategy.long)\n')
+    _assert_identifier_refusal(source, [
+        # Two header lines put the declaration's alpha at 3:1.
+        ("no viable alternative at character '\u03b1'", 3, 1, 2),
+        # Line 4's quoted alpha is data; "if " puts the next identifier at 5:4.
+        ("no viable alternative at character '\u03b1'", 5, 4, 5),
+    ])
+
+
+def test_non_ascii_type_field_and_method_names_are_refused():
+    source = (HEADER
+              + "type \u0394\n    float \u03b2\n"
+              "method \u03b3(\u0394 self) => self.\u03b2\n"
+              "point = \u0394.new(close)\nvalue = point.\u03b3()\nplot(value)\n")
+    _assert_identifier_refusal(source, [
+        # Two header lines and "type " put delta at 3:6.
+        ("no viable alternative at character '\u0394'", 3, 6, 7),
+        # Four spaces and "float " are ten characters before beta at 4:11.
+        ("no viable alternative at character '\u03b2'", 4, 11, 12),
+        # "method " is seven characters before gamma at 5:8.
+        ("no viable alternative at character '\u03b3'", 5, 8, 9),
+        # "method γ(" is nine code points before the receiver delta at 5:10.
+        ("no viable alternative at character '\u0394'", 5, 10, 11),
+        # "method γ(Δ self) => self." is twenty-five code points before beta.
+        ("no viable alternative at character '\u03b2'", 5, 26, 27),
+        # "point = " is eight characters before the constructor delta at 6:9.
+        ("no viable alternative at character '\u0394'", 6, 9, 10),
+        # "value = point." is fourteen characters before the method gamma.
+        ("no viable alternative at character '\u03b3'", 7, 15, 16),
+    ])
 
 
 def test_ascii_type_field_and_method_names_keep_their_spelling():
@@ -432,15 +462,11 @@ def test_ascii_type_field_and_method_names_keep_their_spelling():
     assert "_udt_PointValue_read_value(" in code
 
 
-@pytest.mark.parametrize("name,emitted,expected_bytes", NAMES)
-def test_encoded_identifier_declarations_and_uses_compile(name, emitted, expected_bytes):
-    from tests._compile import compile_cpp
-
-    cpp = transpile(HEADER + f"{name} = close\nif {name} > open\n"
-                    '    strategy.entry("L", strategy.long)\n')
-    assert cpp.isascii()
-    assert emitted in code_only(cpp)
-    compile_cpp(cpp, label="ASCII identifier")
+@pytest.mark.parametrize("name,expected", IDENTIFIER_REFUSALS)
+def test_non_ascii_identifier_sources_are_refused_before_cpp_compilation(name, expected):
+    source = (HEADER + f"{name} = close\nif {name} > open\n"
+              '    strategy.entry("L", strategy.long)\n')
+    _assert_identifier_refusal(source, expected)
 
 
 def test_non_ascii_library_export_call_is_refused_before_inlining():
