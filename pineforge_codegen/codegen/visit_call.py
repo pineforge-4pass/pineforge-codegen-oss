@@ -711,6 +711,11 @@ class CallVisitor:
             else self._visit_expr(value_node)
         )
         if (elem_spec is not None and elem_spec.kind == "primitive"
+                and elem_spec.name == "float"
+                and isinstance(value_node, Ternary)
+                and self._selection_contains_na(value_node)):
+            rendered = self._coerce_double_slot(rendered, value_node)
+        if (elem_spec is not None and elem_spec.kind == "primitive"
                 and elem_spec.name == "bool"):
             return self._coerce_bool_expr(rendered, value_node)
         if (store and elem_spec is not None and elem_spec.kind == "primitive"
@@ -2772,7 +2777,11 @@ class CallVisitor:
                 return na_preserving_int_cast(x, "int64_t")
             return na_preserving_int_cast(x)
         if func_name == "float" and namespace is None and node.args:
-            return f"(double)({self._visit_expr(node.args[0])})"
+            value = self._visit_expr(node.args[0])
+            if (isinstance(node.args[0], Ternary)
+                    and self._selection_contains_na(node.args[0])):
+                value = self._coerce_double_slot(value, node.args[0])
+            return f"(double)({value})"
         if func_name == "bool" and namespace is None and node.args:
             # Pine v6 bools are two-state. Explicit bool(int/float) treats na
             # like false, while a raw C++ cast would make NaN truthy.

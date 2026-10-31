@@ -3343,6 +3343,8 @@ class TypeInferer:
                 return "int64_t"
             if self._global_bool_hint(name):
                 return "bool"
+            if self._global_float_na_selection(name, gptype):
+                return "double"
             if (name in getattr(self, "_direct_program_tuple_binding_names", ())
                     and gptype == PineType.BOOL):
                 return "bool"
@@ -3492,6 +3494,15 @@ class TypeInferer:
             and stmt.name == name
             and stmt.type_hint == "bool"
             for stmt in self.ctx.ast.body
+        )
+
+    def _global_float_na_selection(self, name: str, ptype: PineType) -> bool:
+        """A Pine float keeps float storage for a nullable int ternary."""
+        expr = getattr(self.ctx, "global_expr_map", {}).get(name)
+        return (
+            ptype == PineType.FLOAT
+            and isinstance(expr, Ternary)
+            and self._selection_contains_na(expr)
         )
 
     def _int_slot_cpp_type(self, name: str | None,
@@ -3665,18 +3676,28 @@ class TypeInferer:
         return cpp_val
 
     def _coerce_double_slot(self, cpp_val: str, node) -> str:
-        """Route a value into a ``double`` that a designated initializer
-        fills (a user-defined record's ``float`` field: ``Cell.new(v =
-        bar_index)``). C++ refuses to narrow a non-constant ``int`` or
+        """Route a value into a ``double`` while preserving integer ``na``.
+
+        A designated initializer (a user-defined record's ``float`` field:
+        ``Cell.new(v = bar_index)``) cannot narrow a non-constant ``int`` or
         ``int64_t`` there, which did not compile; TradingView holds the
         number, an integer na as na (fixtures/array_history_tv uctor_float).
+        A nullable integer ternary also needs this conversion at a float sink.
         A double, an integer literal or an expression of literals (a constant
         a double holds exactly narrows) and a bare na keep their spelling."""
         constant = self._pure_int_literal_value(node)
+        # A bare na arm adopts its concrete integer peer's type. Its emitted
+        # ternary is integral even though the standalone na would be double.
+        nullable_int_selection = (
+            isinstance(node, Ternary)
+            and self._selection_contains_na(node)
+            and self._infer_type(node) in NA_PRESERVING_INT_TYPES
+        )
         if (cpp_val == "na<double>()"
                 or self._INTEGRAL_CPP_TEXT.match(cpp_val)
                 or (constant is not None and abs(constant) <= 2 ** 53)
-                or self._emitted_value_is_double(node)):
+                or (not nullable_int_selection
+                    and self._emitted_value_is_double(node))):
             return cpp_val
         if cpp_val in {"na<int>()", "na<int64_t>()"}:
             return "na<double>()"

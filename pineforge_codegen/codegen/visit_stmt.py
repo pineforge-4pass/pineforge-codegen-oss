@@ -598,6 +598,14 @@ class StmtVisitor:
                             member_name,
                             target_cpp_type=target_cpp_type,
                         )
+                    elif (info["ptype"] == PineType.FLOAT
+                          and isinstance(node.value, Ternary)
+                          and self._selection_contains_na(node.value)):
+                        init_cpp = self._visit_rhs_value(
+                            node.value,
+                            member_name,
+                            target_cpp_type="double",
+                        )
                     else:
                         init_cpp = self._visit_expr(node.value)
                 finally:

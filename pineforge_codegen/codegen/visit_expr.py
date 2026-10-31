@@ -386,6 +386,10 @@ class ExprVisitor:
                 arm,
                 target_cpp_type=target_cpp_type,
             )
+        if (target_cpp_type == "double"
+                and isinstance(arm, Ternary)
+                and self._selection_contains_na(arm)):
+            return self._visit_rhs_value(arm, target_cpp_type="double")
         if string_na and self._is_na_expr(arm):
             return "na<std::string>()"
         return self._visit_expr(arm)
@@ -482,8 +486,20 @@ class ExprVisitor:
         ``std::string``/``int``/``int64_t``/``bool`` use ``na<T>()``. Without
         this, ``State s = na;`` and ``string x = na;`` would both emit
         ``na<double>()`` and fail to compile (no viable assignment/conversion).
-        Every other RHS lowers unchanged.
+        A nullable integer ternary reaching a float slot translates its integer
+        na sentinel to NaN after evaluating the selection once.
         """
+        if (isinstance(value_node, Ternary)
+                and self._selection_contains_na(value_node)):
+            scalar_target = target_cpp_type
+            if scalar_target is None and target_name is not None:
+                scalar_target = self._slot_scalar_cpp_type(target_name)
+                if scalar_target is None and target_name in self.ctx.series_vars:
+                    scalar_target = self._series_type_for(target_name)
+            if scalar_target == "double":
+                return self._coerce_double_slot(
+                    self._visit_expr(value_node), value_node
+                )
         udt_target = None
         if (target_cpp_type in self._udt_defs
                 and target_cpp_type not in DRAWING_TYPE_TO_CPP.values()):
@@ -1550,6 +1566,11 @@ class ExprVisitor:
                 operand,
                 target_cpp_type=other_cpp_type,
             )
+        if (isinstance(operand, Ternary)
+                and self._selection_contains_na(operand)
+                and op in ("+", "-", "*", "/", "%")
+                and (op in ("/", "%") or self._infer_type(other) == "double")):
+            return self._visit_rhs_value(operand, target_cpp_type="double")
         if (op in self.NONFINITE_INT_ORDERING_OPS
                 and isinstance(operand, Identifier)
                 and operand.name in self._nonfinite_int_names()):
