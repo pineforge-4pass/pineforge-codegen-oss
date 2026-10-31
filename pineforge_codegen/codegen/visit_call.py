@@ -682,7 +682,7 @@ class CallVisitor:
         )
 
     def _array_init_value_expr(self, elem_spec: TypeSpec | None, value_node,
-                               store: bool = True) -> str:
+                               store: bool = True, render=None) -> str:
         if isinstance(value_node, NaLiteral):
             if elem_spec is not None and elem_spec.kind == "udt":
                 return self._default_for_spec(elem_spec)
@@ -690,7 +690,11 @@ class CallVisitor:
             if cpp_type in ("double", "int", "int64_t", "bool", "std::string"):
                 return f"na<{cpp_type}>()"
             return self._default_for_spec(elem_spec)
-        rendered = self._visit_expr(value_node)
+        rendered = (
+            render(value_node)
+            if render is not None
+            else self._visit_expr(value_node)
+        )
         if (elem_spec is not None and elem_spec.kind == "primitive"
                 and elem_spec.name == "bool"):
             return self._coerce_bool_expr(rendered, value_node)

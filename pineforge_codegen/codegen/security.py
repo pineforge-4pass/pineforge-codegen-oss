@@ -7166,12 +7166,31 @@ class SecurityEmitter:
             if receiver.name not in values:
                 # The declaration's element family keeps na and integer widths.
                 # Braced elements evaluate in source order, including unused ones.
+                def render_requested(value_node):
+                    return self._build_security_expr(
+                        sec_id,
+                        value_node,
+                        ta_range,
+                        ta_results,
+                        resolving,
+                        mutable_names,
+                        (),
+                        lines,
+                    )
+
                 value = self._security_render_fallback(
                     decl.value, (sec_id, ta_range, ta_results, resolving, mutable_names, (), lines),
                     set(), render=lambda: (
                         self._type_spec_to_cpp(spec) + "{"
-                        + ", ".join(self._array_init_value_expr(spec.element, arg)
-                                    for arg in decl.value.args) + "}"))
+                        + ", ".join(
+                            self._array_init_value_expr(
+                                spec.element,
+                                arg,
+                                render=render_requested,
+                            )
+                            for arg in decl.value.args
+                        )
+                        + "}"))
                 definitions = self._security_shared_definitions
                 name = f"_pf_shared_{sec_id}_{len(definitions)}"
                 definitions.append(f"        const auto {name} = {value};")

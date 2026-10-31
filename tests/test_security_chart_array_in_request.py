@@ -205,10 +205,12 @@ def test_a_chart_read_keeps_the_whole_evaluator_on_its_existing_path():
 
 def test_lower_timeframe_array_requests_keep_the_existing_getter():
     cpp = transpile(PRELUDE + ARRAY
-                    + 'x = request.security_lower_tf(syminfo.tickerid, "5", samples.get(0))\n'
+                    + 'x = request.security_lower_tf(syminfo.tickerid, "5", '
+                      'float(samples.get(0)))\n'
                     + 'plot(array.size(x))\n')
     body = _evaluator(cpp)
-    # security_lower_tf owns its accumulation path, which this rule does not change.
+    # The cast gives the lower-timeframe request a scalar element type.
+    # Its accumulation path still owns the chart array getter.
     assert "}((0)); }((samples))" in body
     assert "_pf_shared_" not in body
 
