@@ -1,5 +1,8 @@
 # Translate implies compile in PR CI
 
+Pull requests run the compile gate from `gke-pr.yml` on the admitted GKE pods.
+Pushes to `main` run the retained compile gate from `test.yml` on
+`ubuntu-24.04`.
 The four Python 3.11–3.14 legs stay unchanged from main.
 The `compile` job uses Python 3.12 and has eight parts:
 four sweep shards (`sweep-0`, `sweep-1`, `sweep-2`, `sweep-3`) and
@@ -36,11 +39,14 @@ collection-time availability guard. Local runs without the flag retain the
 existing opt-in skips.
 
 The compile job reads `ci/engine-pin` and initializes the engine's pinned corpus
-submodule. The first line of that file is the engine commit for the entire
-`compile` job and for the SHAs recorded in its reports. The job verifies that
-the checkout SHA matches the pin before running tests. It uses the existing
-read-only Actions token, disables credential persistence, and installs Ubuntu's
-`g++` and `libeigen3-dev`.
+submodule.
+The push compile job in `test.yml` reads `ci/engine-pin` and initializes the
+engine's pinned corpus submodule. The first line of that file is the engine
+commit for the entire `compile` job and for the SHAs recorded in its reports.
+The job verifies that the checkout SHA matches the pin before running tests. It
+uses the existing read-only Actions token, disables credential persistence, and
+installs Ubuntu's `g++` and `libeigen3-dev`. The PR compile job in `gke-pr.yml`
+uses the same pin and relies on the prebuilt GKE image's toolchain and Eigen.
 `tests/_compile.py` already resolves or synthesizes the generated version
 header from that engine source tree; a runtime build is unnecessary for a
 syntax-only check. The checkout SHA and submodule state appear in the job log.

@@ -131,6 +131,7 @@ def assert_test_workflow_runner_routing(workflow):
         "workflow-lint": ["    runs-on: gke-8cpu-16gb-amd64"],
         "package-files": ["    runs-on: gke-8cpu-16gb-amd64"],
         "pytest": ["    runs-on: gke-8cpu-16gb-amd64"],
+        "compile": ["    runs-on: ubuntu-24.04"],
         "test-check": ["    runs-on: ubuntu-24.04"],
     }, "test.yml runner routing differs"
 
@@ -144,6 +145,7 @@ def test_test_workflow_routes_only_push_dispatch_heavy_jobs_to_pods():
     ("workflow-lint", "gke-8cpu-16gb-amd64", "ubuntu-24.04"),
     ("package-files", "gke-8cpu-16gb-amd64", "ubuntu-24.04"),
     ("pytest", "gke-8cpu-16gb-amd64", "ubuntu-24.04"),
+    ("compile", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
     ("authz", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
     ("changes", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
     ("test-check", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
@@ -1540,7 +1542,7 @@ def test_pr_payloads_use_only_admitted_bare_scalar_pods():
     path = WORKFLOWS / "gke-pr.yml"
     workflow = (path if path.exists() else WORKFLOWS / "gate.yml").read_text(encoding="utf-8")
     jobs = job_blocks(workflow)
-    for name in ("differential", "pytest", "workflow-lint", "package-files"):
+    for name in ("differential", "pytest", "compile", "workflow-lint", "package-files"):
         assert_pod_head_checkout(jobs[name])
 
 

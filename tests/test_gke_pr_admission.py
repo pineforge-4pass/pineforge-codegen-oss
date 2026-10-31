@@ -15,7 +15,7 @@ import tarfile
 import textwrap
 
 
-POD_JOBS = {"workflow-lint", "package-files", "pytest", "differential"}
+POD_JOBS = {"workflow-lint", "package-files", "pytest", "compile", "differential"}
 TEST_POD_JOBS = {"workflow-lint", "package-files", "pytest"}
 POD_RUNNER = "gke-8cpu-16gb-amd64"
 BOTS = {"dependabot[bot]", "pineforge-app[bot]"}
@@ -428,11 +428,16 @@ def check_workflows(sources):
             "admission must fail closed without a time limit")
     require(not any(k in {"defaults", "container", "services", "working-directory"}
                     for _, k, _ in all_records), "admission must not override the execution context")
-    require(not any(k in {"include", "exclude"} for _, k, _ in all_records),
-            "admission matrix must not add or exclude rows")
     require(not any(k in {"env", "with"} and v for _, k, v in all_records),
             "admission env and with must use block mappings")
     bodies = jobs(workflow)
+    require(not any(k == "exclude" for _, k, _ in all_records),
+            "admission matrix must not add or exclude rows")
+    require(not any(
+        k == "include"
+        for name, body in bodies.items() if name != "compile"
+        for _, k, _ in yaml_records(body)
+    ), "admission matrix must not add or exclude rows")
     require(set(bodies) == POD_JOBS | {"admit", "test-check", "result"}, "admission job inventory differs")
     for name, body in bodies.items():
         is_pod = name in POD_JOBS
@@ -444,7 +449,8 @@ def check_workflows(sources):
         )
         require(value_at(body, 4, "permissions") == expected_permissions, f"{name}: permissions differ")
         require(not any(depth == 4 and key == "name" for depth, key, _ in yaml_records(body))
-                or (name == "result" and value_at(body, 4, "name") == "gate"),
+                or (name == "result" and value_at(body, 4, "name") == "gate")
+                or (name == "compile" and value_at(body, 4, "name") == "compile"),
                 f"{name}: check name differs")
         if is_pod:
             require(value_at(body, 4, "needs") == "[admit]", f"{name}: admission dependency differs")
@@ -452,18 +458,45 @@ def check_workflows(sources):
                     f"{name}: allowed guard differs")
             require(not re.search(r"github\s*(?:\[\s*['\"]token|[.]\s*token)", body)
                     and "GH_TOKEN:" not in body, f"{name}: credential refused")
-            expected_env = ({
+            expected_env = {
                 "PF_CI_LABELS": "'[\"self-hosted\",\"pf-ci\",\"pf-ci-x64\"]'",
                 "PYTHONHASHSEED": '"0"',
-            } if name in {"pytest", "differential"} else {})
+            } if name in {"pytest", "differential"} else {
+                "PF_CI_LABELS": "'[\"self-hosted\",\"pf-ci\",\"pf-ci-x64\"]'",
+                "PYTHONHASHSEED": '"0"',
+                "PINEFORGE_REQUIRE_COMPILE": '"1"',
+                "PINEFORGE_ENGINE_PAIRING": '"pinned"',
+                "PINEFORGE_ENGINE_INCLUDE": "${{ github.workspace }}/.ci/pineforge-engine/include",
+                "PINEFORGE_ENGINE_CORPUS": "${{ github.workspace }}/.ci/pineforge-engine/corpus",
+                "PINEFORGE_EIGEN_INCLUDE": "/usr/include/eigen3",
+                "CXX": "/usr/bin/g++",
+                "PINEFORGE_COMPILE_SHARD": "${{ matrix.compile-shard }}",
+                "PINEFORGE_COMPILE_SHARDS": '"4"',
+                "PINEFORGE_COMPILE_REPORT_DIR": "${{ github.workspace }}/.ci/compile-report",
+            } if name == "compile" else {}
             require(mapping_at(body, "env", 4) == expected_env, f"{name}: pod environment differs")
             for step in step_blocks(body):
-                require(not step_env(step), f"{name}: step environment refused")
+                allowed_step_env = (
+                    {"SUITE_SLICE": "${{ matrix.suite-shard }}"} if name == "compile" else {}
+                )
+                require(not step_env(step) or step_env(step) == allowed_step_env,
+                        f"{name}: step environment refused")
                 for depth, key, value in yaml_records(step):
                     if key == "if":
-                        require(name == "differential" and value == "always()"
-                                and any(k == "uses" and v.startswith("actions/upload-artifact@")
-                                        for _, k, v in yaml_records(step)),
+                        differential_artifact = (
+                            name == "differential" and value == "always()"
+                            and any(k == "uses" and v.startswith("actions/upload-artifact@")
+                                    for _, k, v in yaml_records(step))
+                        )
+                        compile_part = (
+                            name == "compile" and value in {
+                                "startsWith(matrix.part, 'sweep-')",
+                                "startsWith(matrix.part, 'suite-')",
+                                "${{ always() && startsWith(matrix.part, 'sweep-') }}",
+                                "${{ always() && startsWith(matrix.part, 'suite-') }}",
+                            }
+                        )
+                        require(differential_artifact or compile_part,
                                 f"{name}: proof steps must not be skipped")
         if name in {"admit", "result"}:
             require(not any(k in {"if", "shell"} and depth >= 6
@@ -472,7 +505,11 @@ def check_workflows(sources):
             require(not any(k == "env" and depth == 4 for depth, k, _ in yaml_records(body)),
                     f"{name}: hosted job environment must not be overridden")
         for script in [*runs(body), *runs(body, "script")]:
-            require("${{" not in script, "PR interpolation in code refused")
+            checked_script = (
+                script.replace("${{ steps.pin.outputs.sha }}", "")
+                if name == "compile" else script
+            )
+            require("${{" not in checked_script, "PR interpolation in code refused")
             require(not re.search(r"(^|[;&|\s])timeout(?:\s|$)", script), "time limit refused")
         require(not any(k == "uses" and v.startswith("./")
                         for _, k, v in yaml_records(body)), "local workflow/action use refused")
@@ -480,13 +517,38 @@ def check_workflows(sources):
                      if any(k == "uses" and v.startswith("actions/checkout@")
                             for _, k, v in yaml_records(step))]
         if checkouts:
-            require(len(checkouts) == 1, f"{name}: checkout count differs")
-            inputs = step_mapping(checkouts[0], "with")
-            require(inputs.get("repository") == "${{ github.repository }}"
-                    and inputs.get("ref") == ("${{ needs.admit.outputs.head_sha }}" if is_pod else "${{ github.sha }}")
-                    and inputs.get("persist-credentials") == "false"
-                    and set(inputs) <= {"repository", "ref", "persist-credentials", "fetch-depth"},
-                    f"{name}: checkout must bind trusted base or admitted head without credentials")
+            if name == "compile":
+                require(len(checkouts) == 2, f"{name}: checkout count differs")
+                head_inputs = step_mapping(checkouts[0], "with")
+                engine_inputs = step_mapping(checkouts[1], "with")
+                require(
+                    head_inputs.get("repository") == "${{ github.repository }}"
+                    and head_inputs.get("ref") == "${{ needs.admit.outputs.head_sha }}"
+                    and head_inputs.get("persist-credentials") == "false"
+                    and set(head_inputs) <= {
+                        "repository", "ref", "persist-credentials", "fetch-depth",
+                    },
+                    f"{name}: checkout must bind the admitted head without credentials",
+                )
+                require(
+                    engine_inputs.get("repository") == "pineforge-4pass/pineforge-engine"
+                    and engine_inputs.get("ref") == "${{ steps.pin.outputs.sha }}"
+                    and engine_inputs.get("path") == ".ci/pineforge-engine"
+                    and engine_inputs.get("submodules") == "true"
+                    and engine_inputs.get("persist-credentials") == "false"
+                    and set(engine_inputs) <= {
+                        "repository", "ref", "path", "submodules", "persist-credentials",
+                    },
+                    f"{name}: checkout must bind the paired engine without credentials",
+                )
+            else:
+                require(len(checkouts) == 1, f"{name}: checkout count differs")
+                inputs = step_mapping(checkouts[0], "with")
+                require(inputs.get("repository") == "${{ github.repository }}"
+                        and inputs.get("ref") == ("${{ needs.admit.outputs.head_sha }}" if is_pod else "${{ github.sha }}")
+                        and inputs.get("persist-credentials") == "false"
+                        and set(inputs) <= {"repository", "ref", "persist-credentials", "fetch-depth"},
+                        f"{name}: checkout must bind trusted base or admitted head without credentials")
         else:
             require(name == "test-check", f"{name}: checkout missing")
         if name in {"test-check", "result"}:
@@ -517,9 +579,9 @@ def check_workflows(sources):
     require(len(result_steps) == 2 and not step_env(result_steps[0])
             and step_env(result_steps[1]) == {**identity_env(), "NEEDS": "${{ toJSON(needs) }}"},
             "result environment binding differs")
-    require("    needs: [admit, workflow-lint, package-files, pytest]" in bodies["test-check"],
+    require("    needs: [admit, workflow-lint, package-files, pytest, compile]" in bodies["test-check"],
             "test-check dependencies differ")
-    require("    needs: [admit, workflow-lint, package-files, pytest, differential, test-check]" in bodies["result"],
+    require("    needs: [admit, workflow-lint, package-files, pytest, compile, differential, test-check]" in bodies["result"],
             "result dependencies differ")
     require(value_at(bodies["result"], 4, "name") == "gate", "gate check name differs")
     test_check_steps = step_blocks(bodies["test-check"])
@@ -651,7 +713,10 @@ def proof_success(needs, expected):
 
 
 def report_result(env, api=gh_json):
-    expected = {"admit", "workflow-lint", "package-files", "pytest", "differential", "test-check"}
+    expected = {
+        "admit", "workflow-lint", "package-files", "pytest", "compile",
+        "differential", "test-check",
+    }
     needs = json.loads(env["NEEDS"])
     passed = (proof_success(needs, expected)
               and needs["admit"]["outputs"].get("head_sha") == env["HEAD_SHA"])
@@ -954,6 +1019,47 @@ def test_real_workflow_mutations():
                              trigger + "\njobs:\n  hosted:\n    runs-on: ubuntu-24.04\n"})
 
 
+def test_real_gke_workflow_admits_the_compile_pod():
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    check_workflows(sources)
+
+
+def test_compile_pod_without_admission_dependency_is_refused():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    original = sources[".github/workflows/gke-pr.yml"]
+    body = jobs(original)["compile"]
+    assert body.count("    needs: [admit]\n") == 1
+    changed = body.replace("    needs: [admit]\n", "    needs: []\n", 1)
+    mutant = original.replace(body, changed, 1)
+    with pytest.raises(ValueError, match="compile: admission dependency differs"):
+        check_workflows({**sources, ".github/workflows/gke-pr.yml": mutant})
+
+
+def test_pull_request_shape_runs_compile_and_result_needs_it():
+    root = Path(__file__).resolve().parents[1]
+    workflow = read_sources(root, [".github/workflows/gke-pr.yml"])[
+        ".github/workflows/gke-pr.yml"
+    ]
+    bodies = jobs(workflow)
+    pr_jobs = {
+        name for name, body in bodies.items()
+        if name in {"admit", "result"}
+        or value_at(body, 4, "if") in {
+            "${{ needs.admit.outputs.allowed == 'true' }}", "always()",
+        }
+    }
+    assert {"compile", "result"} <= pr_jobs
+    result_needs = {
+        item.strip()
+        for item in value_at(bodies["result"], 4, "needs").strip("[]").split(",")
+    }
+    assert "compile" in result_needs
+
+
 def test_admission_refuses_the_closed_promotion_target_trigger():
     import pytest
 
@@ -1012,6 +1118,7 @@ def test_test_workflow_pod_runner_admission_and_mutations():
         "workflow-lint": "gke-8cpu-16gb-amd64",
         "package-files": "gke-8cpu-16gb-amd64",
         "pytest": "gke-8cpu-16gb-amd64",
+        "compile": "ubuntu-24.04",
         "test-check": "ubuntu-24.04",
     }
     check_workflows({**sources, path: candidate})
@@ -1023,6 +1130,7 @@ def test_test_workflow_pod_runner_admission_and_mutations():
         ("workflow-lint", "ubuntu-24.04"),
         ("package-files", "ubuntu-24.04"),
         ("pytest", "ubuntu-24.04"),
+        ("compile", "gke-8cpu-16gb-amd64"),
         ("pytest", "gke-4cpu-8gb-amd64"),
     ):
         mutant = with_runner(candidate, name, runner)
@@ -1036,7 +1144,7 @@ def test_test_workflow_pod_runner_admission_and_mutations():
     pr_workflow = candidate.replace(marker, "  pull_request:\n" + marker, 1)
     for name in ("workflow-lint", "package-files", "pytest"):
         pr_workflow = with_runner(pr_workflow, name, "ubuntu-24.04")
-    for name in ("authz", "changes", "workflow-lint", "package-files", "pytest", "test-check"):
+    for name in ("authz", "changes", "workflow-lint", "package-files", "pytest", "compile", "test-check"):
         mutant = with_runner(pr_workflow, name, "gke-8cpu-16gb-amd64")
         assert mutant != candidate
         with pytest.raises(ValueError) as error:
@@ -1121,7 +1229,10 @@ def test_result_refuses_every_incomplete_leg_and_stale_head(monkeypatch):
 
     env, responses = identity_fixture()
     env.update(GITHUB_SERVER_URL="https://github.com", GITHUB_RUN_ID="1")
-    expected = {"admit", "workflow-lint", "package-files", "pytest", "differential", "test-check"}
+    expected = {
+        "admit", "workflow-lint", "package-files", "pytest", "compile",
+        "differential", "test-check",
+    }
     needs = {name: {"result": "success"} for name in expected}
     needs["admit"]["outputs"] = {"allowed": "true", "head_sha": env["HEAD_SHA"]}
     calls = []
@@ -1162,7 +1273,7 @@ def test_test_check_executes_real_workflow_script(tmp_path):
     workflow = read_sources(root, [".github/workflows/gke-pr.yml"])[".github/workflows/gke-pr.yml"]
     scripts = runs(jobs(workflow)["test-check"])
     assert len(scripts) == 1
-    expected = {"admit", "workflow-lint", "package-files", "pytest"}
+    expected = {"admit", "workflow-lint", "package-files", "pytest", "compile"}
     needs = {name: {"result": "success"} for name in expected}
     needs["admit"]["outputs"] = {"allowed": "true"}
 

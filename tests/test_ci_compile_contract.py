@@ -10,6 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/test.yml"
+PR_WORKFLOW = ROOT / ".github/workflows/gke-pr.yml"
 COMPILE_DOC = ROOT / "docs/ci-compile.md"
 PYTEST_FORBIDDEN = (
     "PINEFORGE_", "pineforge-engine", "apt-get", "upload-artifact", "compile-shard",
@@ -73,7 +74,9 @@ def _assert_pytest_contract(workflow: str) -> None:
     job = _job(workflow, "pytest")
     for forbidden in PYTEST_FORBIDDEN:
         assert forbidden not in job, f"pytest must not contain {forbidden}"
-    assert "    runs-on: ubuntu-24.04\n" in job
+    assert "    needs: [authz, changes]\n" in job
+    assert "    if: needs.changes.outputs.code == 'true'\n" in job
+    assert "    runs-on: gke-8cpu-16gb-amd64\n" in job
     assert '        python-version: ["3.11", "3.12", "3.13", "3.14"]\n' in job
     assert "        run: python -m pytest -q\n" in job
 
@@ -102,16 +105,28 @@ def _assert_no_failure_bypasses(workflow: str) -> None:
     ) is None, message
 
 
-def _assert_compile_contract(workflow: str) -> None:
+def _assert_compile_contract(workflow: str, *, pr: bool = False) -> None:
     job = _job(workflow, "compile")
     assert "    name: compile\n" in job
-    assert "    needs: [authz, changes]\n" in job
-    assert "    if: needs.changes.outputs.code == 'true'\n" in job, (
-        "compile must use the code-change guard"
-    )
-    assert "    runs-on: ubuntu-24.04\n" in job
-    assert "    permissions:\n      contents: read\n" in job
+    if pr:
+        assert "    needs: [admit]\n" in job, "PR compile must require admission"
+        assert "    if: ${{ needs.admit.outputs.allowed == 'true' }}\n" in job, (
+            "PR compile must require admission"
+        )
+        assert "    runs-on: gke-8cpu-16gb-amd64\n" in job
+    else:
+        assert "    needs: [authz, changes]\n" in job
+        assert "    if: needs.changes.outputs.code == 'true'\n" in job, (
+            "compile must use the code-change guard"
+        )
+        assert "    runs-on: ubuntu-24.04\n" in job
+    assert (
+        "    permissions: {contents: read}\n" if pr
+        else "    permissions:\n      contents: read\n"
+    ) in job
     assert "      fail-fast: false\n" in job, "compile must run every matrix part"
+    assert "      PF_CI_LABELS: '[\"self-hosted\",\"pf-ci\",\"pf-ci-x64\"]'\n" in job
+    assert '      PYTHONHASHSEED: "0"\n' in job
     assert '      PINEFORGE_REQUIRE_COMPILE: "1"\n' in job, (
         "compile must require compile inputs"
     )
@@ -148,10 +163,27 @@ def _assert_compile_contract(workflow: str) -> None:
     assert "          path: .ci/pineforge-engine\n" in checkout
     assert "          submodules: true\n" in checkout, "compile must check out the corpus submodule"
     assert job.count("          persist-credentials: false\n") == 2
-    install = _step(job, "Install compile-only prerequisites")
-    assert "sudo apt-get install --yes --no-install-recommends g++ libeigen3-dev" in install, (
-        "compile must install g++ and Eigen"
-    )
+    if pr:
+        head = _step(job, "Check out the admitted head")
+        assert "          repository: ${{ github.repository }}\n" in head
+        assert (
+            "          ref: ${{ needs.admit.outputs.head_sha }}\n" in head
+        ), "PR compile must check out the admitted head"
+        assert "          fetch-depth: 0\n" in head
+        assert "          persist-credentials: false\n" in head
+        install = _step(job, "Check compile-only prerequisites")
+        assert "apt-get" not in job, "PR compile must not install packages at run time"
+        assert "          g++ --version\n" in install
+        assert "test -d /usr/include/eigen3" in install, (
+            "PR compile must check the image Eigen directory"
+        )
+        assert "g++ is missing from the GKE image" in install
+        assert "Eigen include directory /usr/include/eigen3 is missing from the GKE image" in install
+    else:
+        install = _step(job, "Install compile-only prerequisites")
+        assert "sudo apt-get install --yes --no-install-recommends g++ libeigen3-dev" in install, (
+            "compile must install g++ and Eigen"
+        )
     for check in (
         'test -f "$PINEFORGE_ENGINE_INCLUDE/pineforge/engine.hpp"',
         'test -f "$PINEFORGE_EIGEN_INCLUDE/Eigen/Dense"',
@@ -250,8 +282,18 @@ def _assert_compile_contract(workflow: str) -> None:
         assert f"          if-no-files-found: {missing}\n" in step, (
             f"{name} must use if-no-files-found: {missing}"
         )
-    _assert_pytest_contract(workflow)
-    _assert_aggregate_contract(workflow)
+    if pr:
+        test_check = _job(workflow, "test-check")
+        assert "    needs: [admit, workflow-lint, package-files, pytest, compile]\n" in test_check
+        assert 'expected = {"admit", "workflow-lint", "package-files", "pytest", "compile"}' in test_check
+        result = _job(workflow, "result")
+        assert (
+            "    needs: [admit, workflow-lint, package-files, pytest, compile, differential, test-check]\n"
+            in result
+        )
+    else:
+        _assert_pytest_contract(workflow)
+        _assert_aggregate_contract(workflow)
     _assert_no_failure_bypasses(workflow)
 
 
@@ -465,7 +507,41 @@ def test_workflow_has_no_time_limits_failure_bypasses_or_cancellation():
 
 
 def test_pr_workflow_requires_the_paired_compile_sweep():
-    _assert_compile_contract(WORKFLOW.read_text(encoding="utf-8"))
+    _assert_compile_contract(PR_WORKFLOW.read_text(encoding="utf-8"), pr=True)
+
+
+@pytest.mark.parametrize("old,new,message", [
+    (
+        "    needs: [admit]\n",
+        "    needs: []\n",
+        "PR compile must require admission",
+    ),
+    (
+        "          ref: ${{ needs.admit.outputs.head_sha }}\n",
+        "          ref: ${{ github.event.pull_request.head.sha }}\n",
+        "PR compile must check out the admitted head",
+    ),
+    (
+        "          g++ --version\n",
+        "          apt-get update\n          g++ --version\n",
+        "PR compile must not install packages at run time",
+    ),
+    (
+        "          test -d /usr/include/eigen3 || {\n",
+        "",
+        "PR compile must check the image Eigen directory",
+    ),
+])
+def test_pr_compile_controls_reject_reverted_rules(old, new, message):
+    workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+    _assert_compile_contract(workflow, pr=True)
+    job = _job(workflow, "compile")
+    assert job.count(old) == 1, "PR compile mutation must target the shipped job once"
+    header = "  compile:\n"
+    assert workflow.count(header + job) == 1
+    mutated = workflow.replace(header + job, header + job.replace(old, new, 1), 1)
+    with pytest.raises(AssertionError, match=re.escape(message)):
+        _assert_compile_contract(mutated, pr=True)
 
 
 @pytest.mark.parametrize("mutation,message", [

@@ -391,8 +391,11 @@ def test_paired_engine_corpus_translates_implies_compiles(sweep_results):
                 raises=CompileError,
             )
             if path == ISSUE_281[0]
-            else pytest.mark.xfail(
-                strict=True, reason="issue #281", raises=FixtureCompileFailure,
+            else (
+                pytest.mark.xfail(
+                    strict=True, reason="issue #281", raises=FixtureCompileFailure,
+                )
+                if path == ISSUE_281[1] else ()
             )
         ),
     )
@@ -412,7 +415,7 @@ def test_issue_281_translates_and_compiles(pine_path, sweep_results):
 @pytest.mark.parametrize(("pine_path", "expected_exception"), [
     pytest.param(path, error, id=path.stem)
     for path, error in zip(
-        ISSUE_281, (CompileError, FixtureCompileFailure, FixtureCompileFailure),
+        ISSUE_281, (CompileError, FixtureCompileFailure, None),
     )
 ])
 def test_issue_281_xfail_accepts_only_the_expected_exception(pine_path, expected_exception):
@@ -421,7 +424,11 @@ def test_issue_281_xfail_accepts_only_the_expected_exception(pine_path, expected
         if mark.name == "parametrize"
     )
     parameter, = (parameter for parameter in parameters if parameter.values == (pine_path,))
-    xfail, = (mark for mark in parameter.marks if mark.name == "xfail")
+    xfails = [mark for mark in parameter.marks if mark.name == "xfail"]
+    if expected_exception is None:
+        assert not xfails
+        return
+    xfail, = xfails
     assert xfail.kwargs["strict"] is True
     assert xfail.kwargs["raises"] is expected_exception
     assert xfail.kwargs["reason"] == (
