@@ -256,6 +256,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_cs_fixnan_clone_names: dict[tuple[str, int], dict[str, str]] = {}
         # Track user-defined function nodes for deferred analysis
         self._func_defs: dict[str, FuncDef] = {}
+        self._func_definition_signatures: dict[str, set[tuple[str, ...]]] = {}
+        self._overloaded_func_names: set[str] = set()
+        defined_names: set[str] = set()
+        for stmt in ast.body:
+            if isinstance(stmt, FuncDef):
+                if stmt.name in defined_names:
+                    self._overloaded_func_names.add(stmt.name)
+                defined_names.add(stmt.name)
         # Track user-defined function return types
         self._func_return_types: dict[str, PineType] = {}
         # Track user-defined function tuple returns
@@ -4354,6 +4362,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 and spec.value.name == "bool"):
             self._bool_na_error(value.loc)
 
+    def _record_script_block_binding(self, sym: Symbol, outer: Symbol | None) -> None:
+        if not self._block_node_stack or self._collection_scope_stack:
+            return
+        sym._pf_script_block_owner = id(self._block_node_stack[-1])
+        outer_owner = getattr(outer, "_pf_script_block_owner", None)
+        # A builtin or enclosing binding survives a local shadow. The legacy
+        # global symbol table can retain the local after its block ends; that
+        # does not prove an out-of-scope read when an outer binding exists.
+        sym._pf_script_block_has_outer = outer is not None and (
+            outer_owner is None
+            or getattr(outer, "_pf_script_block_has_outer", False)
+            or any(id(body) == outer_owner for body in self._block_node_stack)
+        )
+
     def _visit_VarDecl(self, node: VarDecl) -> PineType:
         if (node.type_hint == "bool"
                 and isinstance(node.value, NaLiteral)
@@ -4498,6 +4520,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             setattr(sym, "_pf_certain_string", True)
         setattr(sym, "_pf_decl_node_id", id(node))
         setattr(sym, "_pf_decl_binding_name", node.name)
+        self._record_script_block_binding(sym, outer_symbol)
         self._note_member_writer(sym, node.name, node)
         if (type_spec is None
                 and self._collection_scope_stack
@@ -4632,6 +4655,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     node.loc or node.target.loc,
                 )
             else:
+                if (node.op == ":="
+                        and self._enclosing_func_names
+                        and self._enclosing_func_names[-1] in self._func_defs
+                        and getattr(sym, "_pf_parameter_owner", None)
+                        == self._enclosing_func_names[-1]):
+                    self._error(
+                        f"Function parameter '{node.target.name}' cannot be reassigned.",
+                        node.target.loc,
+                    )
                 if (node.op == ":="
                         and sym.pine_type == PineType.BOOL
                         and isinstance(node.value, NaLiteral)
@@ -4776,6 +4808,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         for idx, name in enumerate(node.names):
             if name == "_":
                 continue
+            outer_symbol = self._symbols.resolve(name)
 
             inferred_element_type = (
                 element_types[idx]
@@ -4813,6 +4846,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._symbols.define(sym)
             setattr(sym, "_pf_decl_node_id", id(node))
             setattr(sym, "_pf_decl_binding_name", name)
+            self._record_script_block_binding(sym, outer_symbol)
             self._note_member_writer(sym, name, node)
 
             if (self._collection_scope_stack
@@ -4873,6 +4907,37 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return sym.pine_type
 
     def _visit_FuncDef(self, node: FuncDef) -> PineType:
+        if self._enclosing_func_names:
+            self._error(
+                f"Function '{node.name}' cannot be defined inside a function.",
+                node.loc,
+            )
+        if not self._global_scope:
+            self._error(
+                f"Function '{node.name}' cannot be defined inside a local block.",
+                node.loc,
+            )
+        hints = (node.annotations or {}).get("param_type_hints", [])
+        # Only declared parameter types prove a duplicate signature. Untyped
+        # parameters retain their existing inference and overload behavior.
+        if len(hints) == len(node.params) and all(hints):
+            qualifiers = list(
+                (node.annotations or {}).get("param_qualifiers", [])
+            )
+            signature = tuple(
+                f"{qualifier or ''}:{hint.replace(' ', '')}"
+                for hint, qualifier in zip(hints, qualifiers + [None] * len(hints))
+            )
+            signatures = self._func_definition_signatures.setdefault(
+                node.name, set(),
+            )
+            if signature in signatures:
+                self._error(
+                    f"Function '{node.name}' has more than one definition "
+                    "with the same parameter types.",
+                    node.loc,
+                )
+            signatures.add(signature)
         self._check_bool_na_parameters(
             node, (node.annotations or {}).get("param_defaults", []),
         )
@@ -6057,6 +6122,43 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     else None
                 )
                 if strict_binding is not None:
+                    declaration = signature.declaration
+                    receiver_symbol = (
+                        self._symbols.resolve(obj.name)
+                        if isinstance(obj, Identifier) else None
+                    )
+                    receiver_owner = getattr(
+                        receiver_symbol, "_pf_script_block_owner", None,
+                    )
+                    if (not self._enclosing_func_names
+                            and self._current_top_level_stmt is not None
+                            and not isinstance(
+                                self._current_top_level_stmt, (FuncDef, MethodDef),
+                            )
+                            and (
+                                receiver_owner is None
+                                or any(
+                                    id(body) == receiver_owner
+                                    for body in self._block_node_stack
+                                )
+                            )
+                            and declaration is not None
+                            and declaration.loc is not None
+                            and callee.loc is not None
+                            and (callee.loc.line, callee.loc.col)
+                            < (declaration.loc.line, declaration.loc.col)
+                            and (
+                                receiver_spec.kind != "primitive"
+                                or self._numeric_condition_type(obj)
+                                in (PineType.INT, PineType.FLOAT)
+                                or isinstance(
+                                    obj, (BoolLiteral, StringLiteral, ColorLiteral),
+                                )
+                            )):
+                        self._error(
+                            f"Method '{member}' is called before its definition.",
+                            callee.loc,
+                        )
                     if signature.declaration is not None:
                         self._check_bool_na_parameters(
                             signature.declaration,
@@ -6285,6 +6387,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
             # User-defined function call
             if func_name in self._func_defs:
+                if (self._enclosing_func_names
+                        and callee.name == self._enclosing_func_names[-1]
+                        and callee.name not in self._overloaded_func_names):
+                    self._error(
+                        f"Function '{callee.name}' cannot call itself.",
+                        callee.loc,
+                    )
                 return self._handle_user_func_call(func_name, node)
 
             # Built-in functions we don't specifically handle
@@ -7125,6 +7234,28 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return PineType.VOID
 
         sym = self._symbols.resolve(node.name)
+        # Later type queries can revisit a read after its source scope ended.
+        # Validate only its first visit, while lexical ownership is live.
+        if id(node) not in self._identifier_binding_scopes:
+            block_owner = getattr(sym, "_pf_script_block_owner", None)
+            if (block_owner is not None
+                    and not getattr(sym, "_pf_script_block_has_outer", False)
+                    and all(
+                        id(body) != block_owner
+                        for body in self._block_node_stack
+                    )):
+                self._error(
+                    f"Block-local variable '{node.name}' is read outside its block.",
+                    node.loc,
+                )
+            if (sym is None
+                    and self._enclosing_func_names
+                    and node.name in self._direct_program_binding_names):
+                self._error(
+                    f"Global variable '{node.name}' is read before its declaration "
+                    "in a function.",
+                    node.loc,
+                )
         self._identifier_binding_scopes[id(node)] = (
             getattr(sym, "scope", None) if sym is not None else None
         )

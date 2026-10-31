@@ -503,6 +503,11 @@ class NamingHelper:
         """
         authored: set[str] = set()
         bound: set[str] = set()
+        local_bindings: set[str] = set()
+        direct_declarations = {id(node) for node in ast.body}
+        function_names = {
+            node.name for node in ast.body if isinstance(node, FuncDef)
+        }
         for node, _depth in iter_ast_nodes(ast):
             for attr in ("name", "var", "member"):
                 value = getattr(node, attr, None)
@@ -522,6 +527,9 @@ class NamingHelper:
                 bound.update(node.members)
             elif isinstance(node, VarDecl):
                 bound.add(node.name)
+                if (id(node) not in direct_declarations
+                        and not node.is_var and not node.is_varip):
+                    local_bindings.add(node.name)
             elif isinstance(node, TupleAssign):
                 bound.update(node.names)
             elif isinstance(node, (FuncDef, MethodDef)):
@@ -543,6 +551,31 @@ class NamingHelper:
             if (name in CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES
                     or is_emitter_temporary(name)):
                 self._allocate_safe_name(name)
+        # Buffered locals already keep their function apart through the
+        # member-collision path. Ordinary locals need separate value and
+        # callable spellings so an on_bar local cannot hide a class method.
+        function_names.intersection_update(
+            info.name for info in getattr(ctx, "func_infos", ())
+        )
+        # A call-site suffix already separates these functions from locals.
+        variant_owners = (
+            set(getattr(ctx, "func_ta_ranges", ()))
+            | set(getattr(ctx, "func_series_vars", ()))
+            | set(getattr(ctx, "func_var_members", ()))
+            | set(getattr(ctx, "func_security_clone_only", ()))
+        )
+        function_names.difference_update(
+            name for name in variant_owners
+            if getattr(ctx, "func_call_site_counts", {}).get(name, 0) > 0
+        )
+        member_names = set(getattr(ctx, "series_vars", ()))
+        member_names.update(
+            name for name, _, _ in getattr(ctx, "var_members", ())
+        )
+        self._local_function_names: dict[str, str] = {}
+        for name in sorted((local_bindings & function_names) - member_names):
+            self._local_function_names[name] = self._safe_name(name)
+            self._allocate_safe_name(name)
 
     def _allocate_safe_name(self, name: str) -> str:
         if name in LEGACY_CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES:
@@ -579,7 +612,9 @@ class NamingHelper:
 
     def _func_safe_name(self, name: str) -> str:
         """Prefix function names that collide with class members (series vars or var members)."""
-        safe = self._safe_name(name)
+        safe = getattr(self, "_local_function_names", {}).get(
+            name, self._safe_name(name),
+        )
         if safe in self._all_member_names:
             return f"_fn_{safe}"
         return safe

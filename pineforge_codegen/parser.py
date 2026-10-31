@@ -969,10 +969,11 @@ class Parser:
             "param_type_hints": param_type_hints,
             "param_defaults": param_defaults,
         }
-        if self._library:
+        if self._library or any(param_qualifiers):
             # A library may overload a function by its parameters' qualifiers
             # alone (TradingView/Request/3: ``simple string`` and ``series
-            # string``); ``library_inline`` picks the overload by them.
+            # string``); ``library_inline`` picks the overload by them. Script
+            # definitions also retain qualifiers for signature comparisons.
             node.annotations["param_qualifiers"] = param_qualifiers
         return self._set_loc(node, start_tok)
 
