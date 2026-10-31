@@ -287,13 +287,13 @@ def test_each_lanes_members_in_one_tu(runs):
     assert all(a == -1.0 for a, b in zip(hs, hs_ref) if math.isnan(b))
 
 
-def test_a_matched_pine_name_is_not_reserved(runs):
+def test_a_script_variable_named_like_the_hosts_replace_member_is_renamed(runs):
     from pineforge_codegen.codegen.host_members import HOST_MEMBER_NAMES
-    assert "replace" not in HOST_MEMBER_NAMES
+    assert "replace" in HOST_MEMBER_NAMES
     outcomes, _ = runs
     subject = ok(outcomes, "host_name")
     cpp = subject.transpiled["cpp"]
-    assert re.search(r"^\s*double replace = ", cpp, re.M)
+    assert re.search(r"^\s*double pf_safe_replace = ", cpp, re.M)
     records = subject.traces["default"]
     rep, ref = _values(records, "rep"), _values(records, "ref")
     assert rep and rep == ref

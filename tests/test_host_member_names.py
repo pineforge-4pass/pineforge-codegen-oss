@@ -112,14 +112,16 @@ def test_committed_host_members_are_the_derived_set() -> None:
                  "bar_index_", "trades_", "closed_trade_profit", "open_trade_max_drawdown"):
         assert name in derived.names, name
     # A private member cannot be read by the generated class, and a Pine name
-    # the emitter only looks up or matches on (``str.replace``'s "replace",
-    # ``strategy.position_avg_price``'s member name) is not a spelling of
-    # generated code; one it joins into a call is (``"pine_session_" +
-    # member``).
+    # the emitter only looks up or matches on (``strategy.position_avg_price``'s
+    # member name) is not a spelling of generated code; one it joins into a
+    # call is (``"pine_session_" + member``). The host's ``initial_capital``
+    # and ``replace`` members are spelled by generated code, so a script
+    # variable of either name is renamed.
     for name in ("scheduler_prepare_script_run", "staged_configuration", "apply_overrides"):
         assert name not in derived.host, name
-    for name in ("replace", "position_avg_price"):
+    for name in ("position_avg_price",):
         assert name in derived.host and name not in derived.names, name
+    assert {"initial_capital", "replace"} <= derived.names
     assert {"pine_session_ispremarket", "pine_session_ispostmarket"} <= derived.names
     print(f"{len(derived.names)} of the host's {len(derived.host)} accessible members "
           f"reserved ({derived.host_class})")
@@ -210,6 +212,8 @@ def test_script_names_of_host_members_are_renamed(tmp_path: Path) -> None:
                     "f(prev_bar_timestamp_) => prev_bar_timestamp_ + 1\n"
                     "syminfo_ = input.float(2.0)\n"
                     "trades_ = 3\n"
+                    "initial_capital = 4\n"
+                    "replace = 5\n"
                     "session_islastbar_regular_ = close > open\n"
                     "[_src_close_, _src_open_] = if true\n    [close, open]\n"
                     "else\n    [open, close]\n"
@@ -218,14 +222,15 @@ def test_script_names_of_host_members_are_renamed(tmp_path: Path) -> None:
                     "    total += security_eval_states_\n"
                     "h = Holder.new(close)\n"
                     "if time > 0 and syminfo.mintick > 0 and h.current_bar_ > 0 and "
-                    "input_tf_(1) + f(1) + syminfo_ + trades_ + _src_close_ + total > 0 and "
+                    "input_tf_(1) + f(1) + syminfo_ + trades_ + initial_capital + replace + "
+                    "_src_close_ + total > 0 and "
                     "(session.islastbar_regular or session_islastbar_regular_)\n"
                     '    strategy.entry("L", strategy.long)\n', encoding="utf-8")
     result = transpile_json(pine)
     assert result["ok"], result["diagnostics"]
     cpp = result["cpp"]
     for name in ("current_bar_", "input_tf_", "prev_bar_timestamp_", "syminfo_", "trades_",
-                 "_src_close_", "_src_open_", "security_eval_states_",
+                 "initial_capital", "replace", "_src_close_", "_src_open_", "security_eval_states_",
                  "session_islastbar_regular_"):
         assert f"pf_safe_{name}" in cpp, name
     assert [entry["title"] for entry in result["inputs"]] == ["syminfo_"]
@@ -283,6 +288,8 @@ type Holder
 {si} = 2.0
 {tr} = 3
 {sm} = 4.0
+{ic} = 5.0
+{rp} = 6.0
 {it}(x) => x * 2
 f({pb}) => {pb} + 1
 [{sc}, {so}] = if true
@@ -293,7 +300,7 @@ total = 0
 for {se} = 0 to 1
     total += {se}
 h = Holder.new(close)
-own = {cb} + {si} + {tr} + {sm} + {it}(1) + f(1) + {sc} - {so} + total + h.{cb}
+own = {cb} + {si} + {tr} + {sm} + {ic} + {rp} + {it}(1) + f(1) + {sc} - {so} + total + h.{cb}
 if time > 0 and syminfo.mintick > 0 and strategy.closedtrades >= 0 and close > open
     strategy.entry("L", strategy.long)
 if close < open
@@ -304,7 +311,7 @@ if close < open
 // @pf-trace own=own
 '''
 LOUD_NAMES = {"cb": "current_bar_", "si": "syminfo_", "tr": "trades_", "sm": "syminfo_mintick_",
-              "it": "input_tf_", "pb": "prev_bar_timestamp_", "sc": "_src_close_",
+              "ic": "initial_capital", "rp": "replace", "it": "input_tf_", "pb": "prev_bar_timestamp_", "sc": "_src_close_",
               "so": "_src_open_", "se": "security_eval_states_"}
 
 
