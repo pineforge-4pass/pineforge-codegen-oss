@@ -27,7 +27,8 @@ CALENDAR_BODY = (
     "t.tm_year = _yr - 1900; t.tm_mon = _mo - 1; "
     "t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
     "t.tm_isdst = -1; int64_t _res; "
-    'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC") { '
+    'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC" || '
+    '!pineforge::native_calendar::timezone_accepted(_tz)) { '
     "_res = (int64_t)timegm(&t) * 1000; } else { "
     "static std::mutex _pf_ts_mu; "
     "std::lock_guard<std::mutex> _pf_ts_mu_lock(_pf_ts_mu); "
@@ -45,7 +46,8 @@ CALENDAR_BODY = (
 # The hour suffix uses the decomposed tm's hour, with the original TZ restore.
 FIELD_BODY = (
     "struct tm tm_buf; "
-    'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC") { '
+    'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC" || '
+    '!pineforge::native_calendar::timezone_accepted(_tz)) { '
     "gmtime_r(&_secs, &tm_buf); } else { "
     "static std::mutex _pf_tz_mu; "
     "std::lock_guard<std::mutex> _pf_tz_lock(_pf_tz_mu); "

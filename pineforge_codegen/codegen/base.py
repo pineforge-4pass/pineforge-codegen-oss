@@ -37,7 +37,7 @@ from ..session_reads import emitted_session_reads
 from ..block_locals import block_declarations, decl_key
 from ..pine_spelling import (
     blank_string_literals, input_call_spans, pine_string_literal,
-    spell_input_call, sub_identifiers,
+    spell_input_call, sub_identifiers, sub_outside_literals,
 )
 
 
@@ -299,6 +299,7 @@ TA_TUPLE_RESULT_TYPES = {
 
 # CPP_RESERVED + the NamingHelper mixin are pulled in from helpers.py so the
 # small naming/walk utilities can be shared with future visitor mixins.
+from .ascii import ascii_cpp
 from .collection_history import CollectionHistoryEmitter
 from .helpers import (
     CPP_RESERVED, INLINE_HISTORY_KINDS, SESSION_FLAG_MEMBERS, NamingHelper,
@@ -787,6 +788,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._security_arg_call_values: dict[tuple, str] = {}
         self._random_call_counter = 0
         self._for_counter = 0
+        # Retain each loop node alongside its plan; ids are lookup keys only.
+        self._closed_trade_folds: dict[int, tuple[ForStmt, object]] = {}
         self._tuple_assign_counter = 0
         # Synthetic history buffers used by inline call-history and by scalar
         # expressions passed to UDF series parameters.  They are pre-registered
@@ -4635,7 +4638,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for type_name in self._udt_defs:
             self._udt_record_cpp_names[type_name] = (
                 self._allocate_generated_cpp_name(
-                    f"_PFUdtRecord_{type_name}", global_used
+                    self._udt_record_cpp_type(type_name), global_used
                 )
             )
 
@@ -4964,7 +4967,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 raise first from None
             if self._deferred_settings_errors:
                 raise self._deferred_settings_errors[0]
-            return cpp
+            return ascii_cpp(cpp, reserved=self._safe_name_occupied)
         finally:
             self._deferred_settings_errors = None
 
@@ -4983,6 +4986,44 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if held and where(held[0]) < where(error):
             return held[0]
         return None
+
+    def _prepare_closed_trade_folds(self) -> None:
+        """Keep planned loops whose bindings use ordinary scalar storage."""
+        from .closed_trade_fold import plan_closed_trade_folds
+
+        plans = plan_closed_trade_folds(self.ctx.ast, self._safe_name)
+        self._closed_trade_folds = {}
+        if not plans:
+            return
+
+        loops: dict[int, ForStmt] = {}
+        for statement in self.ctx.ast.body:
+            if self._budget is not None:
+                self._budget.check(statement.loc, Phase.CODEGEN)
+            if isinstance(statement, IfStmt):
+                for child in statement.body:
+                    if isinstance(child, ForStmt):
+                        loops[id(child)] = child
+
+        special_storage = set(self.ctx.series_vars) | self._var_names
+        excluded_accumulators = (
+            special_storage | set(self._known_vars) | self._nonfinite_int_names()
+        )
+        excluded_locals = special_storage | self._global_member_vars
+        for plan in plans:
+            node = loops.get(plan.for_node_id)
+            if node is None:
+                continue
+            if self._budget is not None:
+                self._budget.check(node.loc, Phase.CODEGEN)
+            if any(
+                name in excluded_accumulators or name not in self._global_member_vars
+                for name, _safe in plan.accumulators
+            ):
+                continue
+            if any(name in excluded_locals for name, _accessor, _cpp in plan.locals):
+                continue
+            self._closed_trade_folds[plan.for_node_id] = (node, plan)
 
     def _generate_cpp(self) -> str:
         # Every input is keyed by its title: refuse a non-constant one first,
@@ -5006,6 +5047,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._prepare_array_journal()
         self._prepare_history_sharing()
         graph_journal.prepare(self)
+        self._prepare_closed_trade_folds()
         self._security_ohlc_hist_fields_by_sec: dict[int, set[str]] = {}
         # A source input's selected series read at a history offset in a
         # payload: (key, default) -> (the input call, its history field).
@@ -5869,6 +5911,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 f"{self._collection_history_capacity(variable)};"
             )
 
+        # Closed-trade prefixes belong to the declaration-derived checkpoint.
+        for _node, plan in self._closed_trade_folds.values():
+            lines.append(f"    int {plan.stem}settled = 0;")
+            lines.append(f"    int {plan.stem}seen = 0;")
+            for index, (_name, safe) in enumerate(plan.accumulators):
+                lines.append(
+                    f"    decltype(GeneratedStrategy::{safe}) {plan.stem}s{index} = {{}};"
+                )
+
         # 9. _var_initialized flag
         if self.ctx.var_members:
             lines.append("    bool _var_initialized = false;")
@@ -6517,18 +6568,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # double-call ``tf_to_seconds(script_tf_)()``. Property-form members
         # (``timeframe.isdaily``) never carry ``()`` so the optional group is
         # a no-op for them.
-        expr = re.sub(r"\btimeframe\.(\w+)(?:\(\))?", _tf_rep, expr)
+        expr = sub_outside_literals(r"\btimeframe\.(\w+)(?:\(\))?", _tf_rep, expr)
 
         # 2) math.<member> -> C++ (constants + std::* functions).
         def _math_rep(p: re.Match) -> str:
             mem = p.group(1)
             return self._MATH_MEMBER_CPP.get(mem, p.group(0))
-        expr = re.sub(r"\bmath\.(\w+)", _math_rep, expr)
+        expr = sub_outside_literals(r"\bmath\.(\w+)", _math_rep, expr)
 
         # 3) Pine word-logical operators -> C++ operators (after timeframe/math
         # substitution so we don't rewrite inside their C++ expansions).
         for pine_op, cpp_op in self._PINE_LOGICAL_OPS.items():
-            expr = re.sub(rf"\b{pine_op}\b", cpp_op, expr)
+            expr = sub_outside_literals(rf"\b{pine_op}\b", cpp_op, expr)
 
         # 4) Substitute input-backed vars with override-aware get_input_*()
         # reads, and inline known compile-time consts (non-input) as literals.
@@ -6554,7 +6605,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 return f'std::string("{self._cpp_string_escape(val)}")'
             return name
 
-        rewritten = ident_re.sub(_sub, expr)
+        # Identifier tokens only: a string literal's text is not identifiers
+        # (a literal that spells an input's or a constant's name stays as is).
+        rewritten = sub_identifiers(expr, _sub)
 
         # 5) Pine auto-converts floats to ints for TA lengths; C++ does not.
         # If any math.* function appears (returns double) OR a timeframe.*

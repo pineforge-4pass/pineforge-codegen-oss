@@ -64,9 +64,11 @@ _COMPARISONS = [
     # The empty literal has zero bytes after excluding the terminator.
     ('strategy.closedtrades.entry_id(0) == ""',
      'closed_trade_entry_id_equals(0, std::string_view("", sizeof("") - 1))'),
-    # UTF-8 encodes é as two bytes and 猫 as three; sizeof excludes only the NUL.
+    # UTF-8 encodes é as two bytes (C3 A9) and 猫 as three (E7 8C AB); emitted C++
+    # is ASCII, so each byte is a three-digit octal escape (303 251 347 214 253);
+    # sizeof excludes only the NUL, so the length is still five.
     ('strategy.closedtrades.entry_id(0) == "é猫"',
-     'closed_trade_entry_id_equals(0, std::string_view("é猫", sizeof("é猫") - 1))'),
+     r'closed_trade_entry_id_equals(0, std::string_view("\303\251\347\214\253", sizeof("\303\251\347\214\253") - 1))'),
     # a, quote, backslash, newline and tab are five bytes after C++ unescaping.
     (r'strategy.closedtrades.entry_id(0) == "a\"\\\n\t"',
      r'closed_trade_entry_id_equals(0, std::string_view("a\"\\\n\t", sizeof("a\"\\\n\t") - 1))'),

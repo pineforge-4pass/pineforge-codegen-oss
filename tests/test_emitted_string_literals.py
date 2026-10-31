@@ -224,6 +224,7 @@ def test_script_string_never_reaches_the_cpp_as_code(name, sample):
         assert any(MARKER in diagnostic.message for diagnostic in exc.diagnostics
                    if diagnostic.level.name == "ERROR")
         return
+    assert cpp.isascii()
     assert MARKER in cpp
     assert "\0" not in cpp
     assert_inert(cpp, MARKER)
@@ -279,6 +280,7 @@ def test_library_string_never_reaches_the_cpp_as_code(sample):
         expected = sample
     library = LIBRARY.replace("{s}", literal)
     cpp = transpile(source, libraries={"pftest/Strings/1": library})
+    assert cpp.isascii()
     assert "\0" not in cpp
     assert_inert(cpp, MARKER)
     assert_only_in_strings(cpp, MARKER)
@@ -322,6 +324,7 @@ def test_pf_trace_literal_expression_reaches_its_emitter(sample, monkeypatch):
                         lambda *args, **kwargs: [pragma])
     cpp = transpile(PRELUDE + TRADE)
     (trace_line,) = [line for line in cpp.split("\n") if 'trace(std::string("probe"),' in line]
+    assert cpp.isascii()
     assert "\0" not in trace_line
     assert_inert(trace_line, MARKER)
     assert_only_in_strings(trace_line, MARKER)

@@ -1,0 +1,21 @@
+//@version=6
+strategy("Closed trade work count", initial_capital = 1000000, process_orders_on_close = true)
+
+if bar_index % 2 == 0
+    strategy.entry("Long", strategy.long, qty = 1)
+if bar_index % 2 == 1
+    strategy.close("Long")
+
+int rows = 0
+float total = 0.0
+if strategy.closedtrades > 0
+    for i = 0 to strategy.closedtrades - 1
+        entryId = strategy.closedtrades.entry_id(i)
+        profit = strategy.closedtrades.profit(i)
+        rows += 1
+        total += profit
+        // fold-body-end
+
+// @pf-trace rows=rows
+// @pf-trace total=total
+// @pf-trace closedCount=strategy.closedtrades

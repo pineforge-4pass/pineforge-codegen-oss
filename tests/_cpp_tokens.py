@@ -9,10 +9,25 @@ from __future__ import annotations
 
 import re
 
+from pineforge_codegen.cpp_allowlist import REASONS
+from pineforge_codegen.errors import CompileError, Level, Phase
+
 _SIMPLE_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'",
                    "?": "?", "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
 _RAW_START = re.compile(r'(?:u8|u|U|L)?R"([^ ()\\\t\r\n]{0,16})\(')
 _QUOTED_START = re.compile(r'''(?:u8|u|U|L)?(["'])''')
+
+
+def is_allowlist_refusal(error: CompileError) -> bool:
+    """True when ``error`` is the translation pipeline refusing generated C++
+    for allowlist findings and nothing else: every diagnostic is a code-phase
+    error whose message is one of the allowlist's fixed reasons. A parser,
+    analyzer or support error never qualifies."""
+    reasons = set(REASONS.values())
+    return bool(error.diagnostics) and all(
+        d.level == Level.ERROR and d.phase == Phase.CODEGEN and d.message in reasons
+        for d in error.diagnostics
+    )
 
 
 def regions(cpp: str) -> list[tuple[str, int, int, str]]:
@@ -52,7 +67,8 @@ def regions(cpp: str) -> list[tuple[str, int, int, str]]:
                              or not (i > 0 and (cpp[i - 1].isalnum() or cpp[i - 1] == "_"))):
             c = quoted_start.group(1)
             j = quoted_start.end()
-            value = []
+            # C++ octal escapes denote bytes; decode UTF-8 after joining them.
+            value = bytearray()
             kind = "string" if c == '"' else "char"
             while j < n:
                 d = cpp[j]
@@ -61,10 +77,10 @@ def regions(cpp: str) -> list[tuple[str, int, int, str]]:
                         octal_end = j + 2
                         while octal_end < min(j + 4, n) and cpp[octal_end] in "01234567":
                             octal_end += 1
-                        value.append(chr(int(cpp[j + 1:octal_end], 8)))
+                        value.append(int(cpp[j + 1:octal_end], 8))
                         j = octal_end
                         continue
-                    value.append(_SIMPLE_ESCAPES.get(cpp[j + 1], cpp[j + 1]))
+                    value.extend(_SIMPLE_ESCAPES.get(cpp[j + 1], cpp[j + 1]).encode("utf-8"))
                     j += 2
                     continue
                 if d == c:
@@ -73,11 +89,11 @@ def regions(cpp: str) -> list[tuple[str, int, int, str]]:
                 if d in "\r\n":
                     kind = "broken"
                     break
-                value.append(d)
+                value.extend(d.encode("utf-8"))
                 j += 1
             else:
                 kind = "broken"
-            out.append((kind, i, j, "".join(value)))
+            out.append((kind, i, j, value.decode("utf-8", errors="surrogateescape")))
             i = j
             continue
         i += 1
