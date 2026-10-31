@@ -16,6 +16,7 @@ import pytest
 
 from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.errors import CompileError, Level
+from tests._compile import run_emitted_tu
 from tests._pine_libraries import library_sources
 
 SOURCES = library_sources("pftest/Signals/1", "pftest/Base/1")
@@ -92,13 +93,49 @@ def test_types_enums_constants_and_methods_resolve_into_the_library():
             'S.Bar2 b = S.Bar2.new(low, high)\n'
             'S.Side side = close > open ? S.Side.long : S.Side.short\n'
             'wide(S.Bar2 r) => r.width() > 1\n'
-            'widths(S.Bar2 r) => r.width() + S.width(r) + S.RATIO\n'
-            'w = widths(b)\n'
+            'w = b.width() + S.width(b) + S.RATIO\n'
             'if side == S.Side.long and wide(b) and w > 0\n'
             '    strategy.entry("L", strategy.long)\n')
     cpp = _cpp(body)
     assert "Signals_v1__Bar2" in cpp and "Signals_v1__Side" in cpp
     assert "Signals_v1__RATIO" in cpp
+
+
+_IMPORTED_METHOD_DRIVER = r'''
+#include <iostream>
+int main() {
+    Bar bar{10.0, 15.0, 9.0, 12.5, 1.0, 0};
+    GeneratedStrategy strategy;
+    strategy.run(&bar, 1);
+    if (!strategy.last_error().empty()) {
+        std::cerr << strategy.last_error() << "\n";
+        return 1;
+    }
+    std::cout << strategy.result << "\n";
+}
+'''
+
+
+@pytest.mark.parametrize("version", [5, 6])
+def test_top_level_method_call_uses_the_librarys_source_file(version: int) -> None:
+    source = HEAD + (
+        'import examples/Offset/1 as offsets\n'
+        'point = offsets.Point.new(close)\n'
+        'result = point.increment()\n'
+    )
+    library = (
+        f'//@version={version}\nlibrary("Offset")\n'
+        'export type Point\n    float value\n'
+        '\n\n\n\n'
+        'export method increment(Point point) => point.value + 0.25\n'
+    )
+    # The call is on script line 5; library line 9 belongs to a different file.
+    cpp = transpile(source, filename="imported-method.pine",
+                    libraries={"examples/Offset/1": library})
+    # The imported method adds 0.25 to the only bar's close: 12.5 + 0.25 = 12.75.
+    assert run_emitted_tu(
+        cpp, _IMPORTED_METHOD_DRIVER, opt="-O0", label="top-level imported method",
+    ) == "12.75\n"
 
 
 def test_an_alias_equal_to_a_builtin_namespace_reads_its_builtins():

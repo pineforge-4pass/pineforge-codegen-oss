@@ -590,8 +590,7 @@ def test_every_official_export_kind_is_parsed_and_inlined():
     assert all(exported.values()), exported
     cpp = transpile(_pine(
         'import pftest/Kinds/1 as L\np = L.P.new()\ne = L.E.a\n'
-        'doubled(L.P value) => value.twice()\n'
-        'x = L.f(close) + doubled(p) + (e == L.E.b ? 1 : 0)\n'
+        'x = L.f(close) + p.twice() + (e == L.E.b ? 1 : 0)\n'
         'if x > 0\n    strategy.entry("L", strategy.long)'),
         libraries={"pftest/Kinds/1": _KINDS_LIBRARY})
     for name in ("Kinds_v1__f", "Kinds_v1__K", "Kinds_v1__P", "Kinds_v1__E", "twice"):

@@ -3360,6 +3360,9 @@ class TypeInferer:
             int_selection = self._global_int_na_selection_cpp_type(name)
             if int_selection is not None:
                 return int_selection
+            int_na_sum_type = self._global_int_na_sum_type(name, gptype)
+            if int_na_sum_type is not None:
+                return int_na_sum_type
             if (name in getattr(self, "_direct_program_tuple_binding_names", ())
                     and gptype == PineType.BOOL):
                 return "bool"
@@ -3534,6 +3537,31 @@ class TypeInferer:
             return None
         cpp_type = self._infer_type(expr, _integer_na_context=True)
         return cpp_type if cpp_type in NA_PRESERVING_INT_TYPES else None
+
+    def _global_int_na_sum_type(self, name: str, ptype: PineType) -> str | None:
+        """Keep a declared global int's storage for an integer plus bare na."""
+        expr = getattr(self.ctx, "global_expr_map", {}).get(name)
+        if (ptype != PineType.INT
+                or not isinstance(expr, BinOp)
+                or expr.op != "+"):
+            return None
+        if not any(
+            isinstance(stmt, VarDecl)
+            and stmt.name == name
+            and stmt.type_hint == "int"
+            and stmt.value is expr
+            for stmt in self.ctx.ast.body
+        ):
+            return None
+        if self._is_na_expr(expr.left):
+            peer = expr.right
+        elif self._is_na_expr(expr.right):
+            peer = expr.left
+        else:
+            return None
+        if self._infer_type(peer) not in NA_PRESERVING_INT_TYPES:
+            return None
+        return "int64_t" if self._is_int64_builtin_init(name) else "int"
 
     def _int_slot_cpp_type(self, name: str | None,
                            declared: str | None = None) -> str | None:

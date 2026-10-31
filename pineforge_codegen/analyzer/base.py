@@ -6682,6 +6682,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             and declaration is not None
                             and declaration.loc is not None
                             and callee.loc is not None
+                            and callee.loc.file == declaration.loc.file
                             and (callee.loc.line, callee.loc.col)
                             < (declaration.loc.line, declaration.loc.col)
                             and (
@@ -7779,10 +7780,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return PineType.VOID
 
         sym = self._symbols.resolve(node.name)
+        block_owner = getattr(sym, "_pf_script_block_owner", None)
         if (id(node) not in self._identifier_binding_scopes
                 and node.name in BUILTIN_VARS
                 and node.name not in BAR_FIELDS
-                and getattr(sym, "_pf_tuple_binding", False)):
+                and getattr(sym, "_pf_tuple_binding", False)
+                and (block_owner is None or any(
+                    id(body) == block_owner for body in self._block_node_stack
+                ))):
             # Retain this exact tuple read after its lexical scope unwinds.
             node.annotations = {
                 **(node.annotations or {}), "tuple_builtin_binding": True,
@@ -7792,7 +7797,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if (self._pine_version == 6
                 and not self._in_v5_library_definition(node)
                 and id(node) not in self._identifier_binding_scopes):
-            block_owner = getattr(sym, "_pf_script_block_owner", None)
             if (block_owner is not None
                     and not getattr(sym, "_pf_script_block_has_outer", False)
                     and all(

@@ -617,6 +617,68 @@ plot(na(y) ? 1 : 0)
     assert output == "1 1 1 5 1\n"
 
 
+_INT_NA_SUM_ROWS = [
+    # Integer 5 plus na is na, stored as the destination int's sentinel.
+    pytest.param("n + na", "(5 + na<double>())", id="na-right"),
+    # Na plus integer 5 is na with the operands in their written order.
+    pytest.param("na + n", "(na<double>() + 5)", id="na-left"),
+]
+
+
+def _int_na_sum_source(expression: str) -> str:
+    return _script(
+        f"int n = 5\nint missing_sum = {expression}\n"
+        "bool missing_value = na(missing_sum)\n"
+    )
+
+
+@pytest.mark.parametrize("expression,arithmetic", _INT_NA_SUM_ROWS)
+def test_integer_na_sum_uses_a_guarded_integer_sink(
+    expression: str, arithmetic: str,
+) -> None:
+    cpp = transpile(_int_na_sum_source(expression))
+    # The authored int keeps int storage; the NaN sum crosses one guarded cast.
+    assert "int missing_sum = 0;" in cpp
+    assert (
+        f"missing_sum = [&](){{ auto _pf_v = ({arithmetic}); "
+        "if constexpr (std::is_floating_point_v<decltype(_pf_v)>) "
+        "return (_pf_v >= -2147483648.0 && _pf_v < 2147483648.0) "
+        "? (int)_pf_v : na<int>(); "
+        "else return is_na(_pf_v) ? na<int>() : (int)_pf_v; }();"
+    ) in cpp
+    compile_cpp(cpp, label="integer sum with bare na")
+
+
+_INT_NA_SUM_DRIVER = r"""
+#include <cstdio>
+#include <limits>
+#include <type_traits>
+
+int main() {
+    GeneratedStrategy strategy;
+    static_assert(std::is_same_v<decltype(strategy.missing_sum), int>);
+    Bar bar{100.0, 101.0, 99.0, 100.5, 10.0, 1700000000000LL};
+    strategy.run(&bar, 1);
+    if (!strategy.last_error().empty()) return 1;
+    std::printf("%d %d\n",
+                strategy.missing_sum == std::numeric_limits<int>::min(),
+                strategy.missing_value);
+}
+"""
+
+
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+@pytest.mark.parametrize("expression,arithmetic", _INT_NA_SUM_ROWS)
+def test_integer_na_sum_stores_the_integer_sentinel(
+    expression: str, arithmetic: str, opt: str,
+) -> None:
+    # Both sums are na: the stored int is INT_MIN and Pine na() is true.
+    assert run_emitted_tu(
+        transpile(_int_na_sum_source(expression)), _INT_NA_SUM_DRIVER,
+        opt=opt, label="integer sum with bare na",
+    ) == "1 1\n"
+
+
 _FLOAT_NA_TERNARY_ROWS = [
     pytest.param(
         "float y = close > open ? 1 : na\n",

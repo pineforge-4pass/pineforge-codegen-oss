@@ -95,10 +95,23 @@ GLOBALS = 'ma = ta.sma(close, 20)\nlen = input.int(4, "Len")\nbody = close - ope
 CALLS = 'x = g(ma) + h(body, len)\n'
 
 
-def test_requested_payload_accepts_globals_declared_after_its_helper():
-    result = transpile_full(PRELUDE + LATER + GLOBALS + CALLS + TRADE)
-    assert not any(d.code == "PF-E2053" for d in result["diagnostics"])
-    compile_cpp(result["cpp"], label="payload globals declared after helper")
+def test_global_declared_after_the_helper_is_put_in():
+    after = transpile_full(PRELUDE + LATER + GLOBALS + CALLS + TRADE)
+    assert not any(d.message.endswith(UNBOUND) for d in after["diagnostics"])
+    evaluators = _evaluators(after["cpp"])
+    # g(ma): the requested 20-bar SMA one requested bar back.
+    assert re.search(r"_sec0__ta_sma_(\d+)\.compute\(bar\.close\).*"
+                     r"_req_sec_0 = _sec0__ta_sma_\1_hist\[0\];", evaluators[0])
+    # h(body, len): the requested SMA of the candle body, the input's length.
+    assert "_sec1__ta_sma_1.compute((bar.close - bar.open))" in evaluators[1]
+    assert re.search(r'_sec1__ta_sma_\w+ = ta::SMA\(get_input_int\("Len", 4\)\)', after["cpp"])
+    # The evaluators of the globals declared first, up to the TA sites'
+    # numbering (declaration order).
+    before = transpile(PRELUDE + GLOBALS + LATER + CALLS + TRADE)
+    renumbered = lambda text: re.sub(r"(_ta_[a-z]+_|_secval_)\d+", r"\1N", text)
+    assert [renumbered(e) for e in evaluators] == [
+        renumbered(e) for e in _evaluators(before)]
+    compile_cpp(after["cpp"], label="payload parameters bound to later globals")
 
 
 def test_globals_declared_before_request_helpers_are_put_in():
@@ -138,6 +151,9 @@ def test_requested_sma_accepts_a_global_declared_after_its_helper():
     # A direct payload calling a helper with a later global.
     'u(_x) => ta.sma(_x, 3)\ns5 = ta.sma(close, 5)\n'
     'x = request.security(syminfo.tickerid, "D", u(s5))\n',
+    # The helper holding the request, its parameter bound to a later global.
+    'g(_e) => request.security(syminfo.tickerid, "D", ta.sma(_e, 3))\n'
+    's5 = ta.sma(close, 5)\nx = g(s5)\n',
     # The helper holding the request, its parameter bound to an earlier global.
     's5 = ta.sma(close, 5)\n'
     'g(_e) => request.security(syminfo.tickerid, "D", ta.sma(_e, 3))\n'
@@ -170,6 +186,8 @@ def test_conditional_requested_helper_accepts_a_later_global():
 @pytest.mark.parametrize("body", [
     'u(_x) => ta.sma(f(_x), 3)\ns5 = ta.ema(close, 5)\n'
     'x = request.security(syminfo.tickerid, "D", u(s5))\n',
+    'g(_e) => request.security(syminfo.tickerid, "D", ta.sma(f(_e), 3))\n'
+    's5 = ta.ema(close, 5)\nx = g(s5)\n',
     's5 = ta.ema(close, 5)\n'
     'g(_e) => request.security(syminfo.tickerid, "D", ta.sma(f(_e), 3))\n'
     'x = g(s5)\n',
@@ -192,6 +210,8 @@ def test_a_prologue_variant_is_never_computed_inside_a_helpers_if(body):
     # the RSI once, before the EMA (the parent refused both spellings).
     'u(_x, _y) => ta.ema(_x + _y, 3)\ns5 = ta.sma(close, 5)\nr = ta.rsi(close, 14)\n'
     'x = request.security(syminfo.tickerid, "60", u(s5[1], r))\n',
+    'g(_e, _f) => request.security(syminfo.tickerid, "60", ta.ema(_e[1] + _f, 3))\n'
+    's5 = ta.sma(close, 5)\nr = ta.rsi(close, 14)\nx = g(s5, r)\n',
 ])
 def test_every_read_of_a_prologue_variant_orders_it(body, monkeypatch):
     def order(cpp: str) -> list[str]:
