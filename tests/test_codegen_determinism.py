@@ -191,6 +191,27 @@ def test_unicode_name_encoding_is_identical_across_hash_seeds() -> None:
     assert len(set(outputs)) == 1
 
 
+def test_ascii_history_and_encoded_looking_names_are_identical_across_hash_seeds() -> None:
+    fixture = (
+        '//@version=6\nstrategy("ASCII names")\n'
+        "history_calc(float price) =>\n"
+        "    var float memory_value = price\n"
+        "    memory_value := nz(memory_value[1], price) + 1.0\n"
+        "    memory_value\n"
+        "pf_utf8_ceb3 = high\npf_utf8_ceb3_2 = low\n"
+        "left = history_calc(close)\nright = history_calc(open)\nplot(left + right)\n"
+    )
+    outputs = [_transpile_under_seed(seed, fixture) for seed in _SEEDS]
+    assert all(cpp.isascii() for cpp in outputs)
+    # The two call sites retain their separate ASCII history members under every seed.
+    assert all("Series<double> memory_value" in cpp for cpp in outputs)
+    assert all("Series<double> memory_value_cs1" in cpp for cpp in outputs)
+    # These authored names already contain the encoder prefix and keep their spelling.
+    assert all("double pf_utf8_ceb3 " in cpp for cpp in outputs)
+    assert all("double pf_utf8_ceb3_2 " in cpp for cpp in outputs)
+    assert len(set(outputs)) == 1
+
+
 _PERTURBED_CHILD = """
 import builtins
 import dataclasses

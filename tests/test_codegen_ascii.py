@@ -1,4 +1,4 @@
-"""Unicode names and text retain their values in ASCII-only emitted C++."""
+"""Pine names are ASCII; Unicode strings and comments retain their bytes."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.codegen.ascii import ascii_cpp
-from pineforge_codegen.errors import CompileError
+from pineforge_codegen.errors import CompileError, Level, Phase, SourceLocation
 from pineforge_codegen.pine_spelling import pine_string_literal
 from tests._cpp_tokens import code_only, regions, string_values
 
@@ -222,6 +222,20 @@ def _literal(cpp: str, spelling: str) -> tuple[str, str]:
     return matches[0]
 
 
+def _assert_identifier_refusal(
+        source, expected, *, libraries=None, diagnostic_filename="ascii_names.pine"):
+    with pytest.raises(CompileError) as error:
+        transpile(source, filename="ascii_names.pine", libraries=libraries)
+    assert len(error.value.diagnostics) == len(expected)
+    for diagnostic, (message, line, col, end_col) in zip(error.value.diagnostics, expected):
+        assert diagnostic.code == "PF-E0044"
+        assert diagnostic.message == message
+        assert diagnostic.level == Level.ERROR
+        assert diagnostic.phase == Phase.LEXER
+        assert diagnostic.location == SourceLocation(diagnostic_filename, line, col, end_col)
+        assert diagnostic.hint is None
+
+
 @pytest.mark.parametrize("name,emitted,expected_bytes", NAMES)
 def test_unicode_identifier_has_an_invertible_ascii_spelling(name, emitted, expected_bytes):
     cpp = transpile(HEADER + f"{name} = close\nif {name} > open\n"
@@ -286,6 +300,44 @@ def test_distinct_unicode_names_avoid_authored_ascii_encodings():
     assert transpile(source) == cpp
 
 
+def test_ascii_names_that_resemble_encodings_keep_their_spelling():
+    source = (HEADER
+              + "first = close\nsecond = open\nthird = high\n"
+              "pf_utf8_ceb1 = low\npf_utf8_ceb1_2 = hl2\npf_utf8_ceb2 = hlc3\n"
+              "a = ohlc4\n"
+              "plot(first + second + third + a + pf_utf8_ceb1"
+              " + pf_utf8_ceb1_2 + pf_utf8_ceb2)\n")
+    cpp = transpile(source)
+    assert cpp.isascii()
+    # All seven authored ASCII names retain their own declaration and spelling.
+    expected = {
+        "first", "second", "third", "pf_utf8_ceb1", "pf_utf8_ceb1_2", "pf_utf8_ceb2", "a",
+    }
+    declarations = re.findall(r"\bdouble ([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|;)", code_only(cpp))
+    assert expected <= set(declarations)
+    for name in expected:
+        assert declarations.count(name) == 1
+    assert transpile(source) == cpp
+
+
+def test_identifier_encoder_avoids_reserved_and_unused_names(monkeypatch):
+    from pineforge_codegen.codegen import ascii as ascii_emission
+
+    monkeypatch.setattr(ascii_emission, "CPP_RESERVED",
+                        ascii_emission.CPP_RESERVED | {"pf_utf8_ceb1_3"})
+    cpp = ascii_cpp("double \u03b1 = 0;\n",
+                    reserved={"pf_utf8_ceb1", "pf_utf8_ceb1_2"})
+    # CE B1's base, suffix 2 and suffix 3 are occupied, so suffix 4 is first free.
+    assert cpp == "double pf_utf8_ceb1_4 = 0;\n"
+
+
+def test_ascii_reserved_identifier_keeps_its_existing_escape():
+    cpp = transpile(HEADER + "class = close\nplot(class)\n")
+    assert cpp.isascii()
+    # The existing C++ keyword escape wraps class in one underscore on each side.
+    assert "double _class_" in code_only(cpp)
+
+
 def test_unicode_encoding_avoids_reserved_names_and_unused_authored_names(monkeypatch):
     source = HEADER + "\u03b1 = close\nplot(\u03b1)\n"
     assert transpile(source).isascii()
@@ -322,14 +374,30 @@ def test_unicode_callable_history_names_keep_their_distinct_storage():
     assert "pf_utf8_ceb15f637331(" in code
 
 
+def test_ascii_callable_history_names_keep_their_distinct_storage():
+    cpp = transpile(HEADER
+                    + "history_calc(float price) =>\n"
+                    "    var float memory_value = price\n"
+                    "    memory_value := nz(memory_value[1], price) + 1.0\n"
+                    "    memory_value\n"
+                    "left = history_calc(close)\nright = history_calc(open)\nplot(left + right)\n")
+    assert cpp.isascii()
+    code = code_only(cpp)
+    # The two call sites retain memory_value and memory_value_cs1 in separate clones.
+    assert "Series<double> memory_value" in code
+    assert "Series<double> memory_value_cs1" in code
+    assert "history_calc_cs0(" in code
+    assert "history_calc_cs1(" in code
+
+
 def test_a_unicode_name_in_a_string_keeps_its_value():
     cpp = transpile(HEADER
-                    + '\u03b1 = close\ns = "\u03b1"\n'
-                    "if \u03b1 > open and str.length(s) > 0\n"
+                    + 'price = close\ns = "\u03b1"\n'
+                    "if price > open and str.length(s) > 0\n"
                     '    strategy.entry("L", strategy.long)\n')
     assert cpp.isascii()
-    # The identifier uses hex CE B1; its text value uses octal 316 261.
-    assert "double pf_utf8_ceb1" in code_only(cpp)
+    # The ASCII identifier stays price; alpha's UTF-8 bytes are octal 316 261.
+    assert "double price" in code_only(cpp)
     assert _literal(cpp, r"\316\261")[1] == "\u03b1"
     assert _literal(cpp, r"\316\261")[1].encode("utf-8") == b"\xce\xb1"
 
@@ -351,6 +419,19 @@ def test_unicode_type_and_field_names_are_encoded_as_complete_tokens():
     assert "_udt__u000394___u0003b3_(" in code
 
 
+def test_ascii_type_field_and_method_names_keep_their_spelling():
+    cpp = transpile(HEADER
+                    + "type PointValue\n    float field_value\n"
+                    "method read_value(PointValue self) => self.field_value\n"
+                    "point = PointValue.new(close)\nvalue = point.read_value()\nplot(value)\n")
+    assert cpp.isascii()
+    code = code_only(cpp)
+    # The type, field and method retain their complete authored ASCII components.
+    assert "struct PointValue {" in code
+    assert "double field_value =" in code
+    assert "_udt_PointValue_read_value(" in code
+
+
 @pytest.mark.parametrize("name,emitted,expected_bytes", NAMES)
 def test_encoded_identifier_declarations_and_uses_compile(name, emitted, expected_bytes):
     from tests._compile import compile_cpp
@@ -362,19 +443,40 @@ def test_encoded_identifier_declarations_and_uses_compile(name, emitted, expecte
     compile_cpp(cpp, label="ASCII identifier")
 
 
-def test_unicode_library_export_and_literal_are_encoded_after_inlining():
+def test_non_ascii_library_export_call_is_refused_before_inlining():
     source = (HEADER + "import pftest/Words/1 as W\n"
               "s = W.\u03b1()\nif str.length(s) > 0\n"
               '    strategy.entry("L", strategy.long)\n')
     library = ('//@version=6\nlibrary("Words \u00e9")\n'
                'export \u03b1() => "\u00e9"\n')
+    # TradingView measurement: α is refused; "s = W." puts it at line 4, column 7.
+    _assert_identifier_refusal(source, [
+        ("no viable alternative at character '\u03b1'", 4, 7, 8),
+    ], libraries={"pftest/Words/1": library})
+
+
+def test_ascii_library_export_keeps_its_unicode_literal_after_inlining():
+    source = (HEADER + "import pftest/Words/1 as W\n"
+              "s = W.word()\nif str.length(s) > 0\n"
+              '    strategy.entry("L", strategy.long)\n')
+    library = ('//@version=6\nlibrary("Words \u00e9")\n'
+               'export word() => "\u00e9"\n')
     cpp = transpile(source, libraries={"pftest/Words/1": library})
     assert cpp.isascii()
-    # The inlined export is named "Words_v1__" followed by U+03B1; the shared
-    # fragment encoder keeps the ASCII part and spells the alpha as
-    # "_u0003b1_", so the token is "Words_v1__" "_u0003b1_".
-    assert "Words_v1___u0003b1_(" in code_only(cpp)
+    # The module's path supplies Words_v1__; the export's ASCII name stays word.
+    assert "Words_v1__word(" in code_only(cpp)
     assert _literal(cpp, r"\303\251")[1] == "\u00e9"
+
+
+def test_non_ascii_library_export_definition_is_refused():
+    source = (HEADER + "import pftest/Words/1 as W\n"
+              "s = W.word()\n" + TRADE)
+    library = ('//@version=6\nlibrary("Words \u00e9")\n'
+               'export \u03b1() => "\u00e9"\n')
+    # TradingView measurement: α follows "export " on the library's third line.
+    _assert_identifier_refusal(source, [
+        ("no viable alternative at character '\u03b1'", 3, 8, 9),
+    ], libraries={"pftest/Words/1": library}, diagnostic_filename="pftest/Words/1")
 
 
 def test_bidi_text_in_an_emitted_comment_retains_its_byte_spelling():
@@ -456,14 +558,24 @@ def test_population_counter_uses_literal_and_comment_boundaries():
     from scripts.count_non_ascii_pine import scan_source
 
     source = ('//@version=6\nstrategy("\u00e9")\n'
-              '\u03b1 = close // x\u202e\n// caf\u00e9\n'
+              'price = close // x\u202e\n// caf\u00e9\n'
               's = """//\U0001f427\n e\u0301"""\n')
-    # Identifier CE B1 = 2; strings C3 A9 + F0 9F 90 A7 + CC 81 = 8; comments = 3 + 2.
+    # Strings contribute 2 + 4 + 2 = 8 bytes; comments contribute 3 + 2 = 5.
     assert scan_source(source) == {
-        "non_ascii_utf8_bytes": 15,
-        "identifier": {"lexemes": 1, "utf8_bytes": 2},
+        "non_ascii_utf8_bytes": 13,
+        "identifier": {"lexemes": 0, "utf8_bytes": 0},
         "string_literal": {"lexemes": 2, "utf8_bytes": 8},
         "comment": {"lexemes": 2, "utf8_bytes": 5},
         "other_utf8_bytes": 0,
         "lexer_error": None,
     }
+
+
+def test_non_ascii_identifier_is_refused_among_unicode_strings_and_comments():
+    source = ('//@version=6\nstrategy("\u00e9")\n'
+              '\u03b1 = close // x\u202e\n// caf\u00e9\n'
+              's = """//\U0001f427\n e\u0301"""\n')
+    # TradingView measurement: only the identifier α is refused, at line 3, column 1.
+    _assert_identifier_refusal(source, [
+        ("no viable alternative at character '\u03b1'", 3, 1, 2),
+    ])
