@@ -1344,6 +1344,7 @@ class CallHandlers:
         arg_type = PineType.FLOAT
         for arg in node.args:
             arg_type = self._visit(arg)
+        self._check_na_source_not_string(node)
 
         self._fixnan_counter += 1
         owner = self._enclosing_func_names[-1] if self._enclosing_func_names else None

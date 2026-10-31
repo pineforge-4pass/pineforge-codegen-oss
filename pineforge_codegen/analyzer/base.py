@@ -4296,6 +4296,39 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if hint == "bool" and isinstance(value, NaLiteral):
                 self._bool_na_error(value.loc)
 
+    _STRING_RETURNING_STR_FUNCTIONS = frozenset({
+        "tostring", "format", "format_time", "lower", "upper", "replace",
+        "replace_all", "substring", "trim", "repeat",
+    })
+
+    def _is_certainly_string(self, node: ASTNode) -> bool:
+        """A string literal, a str.* call that returns a string, or a variable
+        declared string (or initialized by one). The analyzer's inferred types
+        are not proof enough to refuse a script on."""
+        if isinstance(node, StringLiteral):
+            return True
+        if (isinstance(node, FuncCall) and isinstance(node.callee, MemberAccess)
+                and isinstance(node.callee.object, Identifier)
+                and node.callee.object.name == "str"):
+            return node.callee.member in self._STRING_RETURNING_STR_FUNCTIONS
+        if isinstance(node, Identifier):
+            symbol = self._symbols.resolve(node.name)
+            return symbol is not None and getattr(symbol, "_pf_certain_string", False)
+        return False
+
+    def _check_na_source_not_string(self, node: FuncCall) -> None:
+        """nz and fixnan take a numeric, bool or color source; v6 refuses a string."""
+        if (not node.args or not isinstance(node.callee, Identifier)
+                or self._pine_version != 6
+                or self._in_v5_library_definition(node)
+                or not self._is_certainly_string(node.args[0])):
+            return
+        self._error(
+            f"Cannot call '{node.callee.name}' with a string argument: "
+            "its source must be a numeric, bool or color series.",
+            node.args[0].loc,
+        )
+
     def _check_bool_map_put_na(
         self, node: FuncCall, obj: ASTNode, member: str,
     ) -> None:
@@ -4456,7 +4489,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             setattr(sym, "_pf_shadows_map_state", True)
         if node.name in self._static_vars:
             setattr(sym, "is_static_series", True)
+        certain_string = (
+            node.type_hint == "string" or self._is_certainly_string(node.value)
+        )
         self._symbols.define(sym)
+        if certain_string:
+            setattr(sym, "_pf_certain_string", True)
         setattr(sym, "_pf_decl_node_id", id(node))
         setattr(sym, "_pf_decl_binding_name", node.name)
         self._note_member_writer(sym, node.name, node)
@@ -6195,6 +6233,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if func_name == "nz":
                 for arg in node.args:
                     self._visit(arg)
+                self._check_na_source_not_string(node)
                 return PineType.FLOAT
 
             # na() as function
