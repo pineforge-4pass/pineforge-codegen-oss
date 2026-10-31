@@ -4296,6 +4296,30 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if hint == "bool" and isinstance(value, NaLiteral):
                 self._bool_na_error(value.loc)
 
+    def _check_bool_map_put_na(
+        self, node: FuncCall, obj: ASTNode, member: str,
+    ) -> None:
+        """A map of bool values cannot store a bare na: its value is a bool."""
+        if member != "put" or self._in_v5_library_definition(node):
+            return
+        if isinstance(obj, Identifier) and obj.name == "map":
+            receiver = node.args[0] if node.args else node.kwargs.get("id")
+            value_index = 2
+        else:
+            receiver = obj
+            value_index = 1
+        value = (
+            node.args[value_index] if len(node.args) > value_index
+            else node.kwargs.get("value")
+        )
+        if receiver is None or not isinstance(value, NaLiteral):
+            return
+        spec = self._type_spec_from_expr(receiver)
+        if (spec is not None and spec.kind == "map"
+                and spec.value is not None and spec.value.kind == "primitive"
+                and spec.value.name == "bool"):
+            self._bool_na_error(value.loc)
+
     def _visit_VarDecl(self, node: VarDecl) -> PineType:
         if (node.type_hint == "bool"
                 and isinstance(node.value, NaLiteral)
@@ -5949,6 +5973,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 )
                 if isinstance(initial, NaLiteral):
                     self._bool_na_error(initial.loc)
+            self._check_bool_map_put_na(node, obj, member)
             receiver_pine_type = self._visit(obj)
             visited_member_arg_types: dict[int, PineType] = {}
             for arg in node.args:

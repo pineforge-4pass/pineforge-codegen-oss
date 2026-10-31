@@ -230,6 +230,23 @@ def test_bool_declaration_refuses_bare_na(
             3, 17, 19,  # The parameter's na default spans columns 17 through 18.
             id="bool-parameter-default",
         ),
+        pytest.param(
+            'map<string, bool> m = map.new<string, bool>()\nmap.put(m, "k", na)\n'
+            "plot(map.get(m, \"k\") ? 1 : 0)\n",
+            4, 17, 19,  # The value argument of map.put spans columns 17 through 18.
+            id="bool-map-put-namespace",
+        ),
+        pytest.param(
+            'm = map.new<string, bool>()\nm.put("k", na)\nplot(m.get("k") ? 1 : 0)\n',
+            4, 12, 14,  # The value argument of m.put spans columns 12 through 13.
+            id="bool-map-put-method",
+        ),
+        pytest.param(
+            'map<string, bool> m = map.new<string, bool>()\nmap.put(m, "k", value = na)\n'
+            "plot(map.get(m, \"k\") ? 1 : 0)\n",
+            4, 25, 27,  # The keyword value spans columns 25 through 26.
+            id="bool-map-put-keyword-value",
+        ),
     ],
 )
 def test_bool_value_refuses_bare_na(body: str, line: int, col: int, end_col: int) -> None:
@@ -333,6 +350,17 @@ def test_bool_value_refuses_bare_na(body: str, line: int, col: int, end_col: int
         ),
         # bool(na) remains an explicit cast rather than a bare initializer.
         pytest.param("bool b = bool(na)\nplot(b ? 1 : 0)\n", id="bool-cast-initializer"),
+        # A bool map takes a bool value, and a float map still takes na.
+        pytest.param(
+            'map<string, bool> m = map.new<string, bool>()\nmap.put(m, "k", true)\n'
+            'plot(map.get(m, "k") ? 1 : 0)\n',
+            id="bool-map-put-bool",
+        ),
+        pytest.param(
+            'map<string, float> m = map.new<string, float>()\nmap.put(m, "k", na)\n'
+            'plot(nz(map.get(m, "k")))\n',
+            id="float-map-put-na",
+        ),
         # Testing a bool with na() stays outside the two refusal rules.
         pytest.param("bool b = false\nx = na(b)\nplot(x ? 1 : 0)\n", id="na-of-bool"),
         # Replacing a bool with nz() stays outside the two refusal rules.
