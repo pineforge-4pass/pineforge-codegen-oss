@@ -98,6 +98,34 @@ def test_invalid_function_scope_has_a_located_diagnostic(
     assert (diagnostic.location.line, diagnostic.location.col) == (line, column)
 
 
+@pytest.mark.parametrize(
+    "definition,call",
+    [
+        # A v5 parameter may retain its existing assignment lowering before returning value + 1.
+        pytest.param(
+            "export adjust(float value) =>\n"
+            "    value := value + 1.0\n"
+            "    value\n",
+            "scope.adjust(close)",
+            id="v5-library-parameter-reassignment",
+        ),
+        # recur(2) reaches recur(1), then recur(0), whose literal result is 1.0.
+        pytest.param(
+            "export recur(int n) => n <= 0 ? 1.0 : recur(n - 1)\n",
+            "scope.recur(2)",
+            id="v5-library-direct-recursion",
+        ),
+    ],
+)
+def test_imported_v5_function_scope_keeps_its_lowering(
+    definition: str, call: str,
+) -> None:
+    source = HEADER + "import examples/Scope/1 as scope\nresult = " + call + "\n"
+    library = '//@version=5\nlibrary("Scope")\n' + definition
+    cpp = transpile(source, libraries={"examples/Scope/1": library})
+    compile_cpp(cpp, label="v5 library function scope")
+
+
 ACCEPTED = [
     # A declaration above its call makes adjust(2.5) equal 3.5.
     pytest.param(

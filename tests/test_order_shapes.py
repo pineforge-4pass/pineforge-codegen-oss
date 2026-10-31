@@ -165,7 +165,8 @@ value = f(close) + f(open)'''
 
 def test_immutable_global_is_not_mutated_by_a_same_named_local():
     body = '''value = 5
-f(float value) =>
+f(float initial) =>
+    float value = initial
     value := value + 1
     value
 changed = f(close)

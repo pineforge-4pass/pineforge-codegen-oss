@@ -336,7 +336,8 @@ z = ta.sma(close, p)
 def test_any_recursive_callable_invocation_fences_stable_literal() -> None:
     source = '''//@version=6
 strategy("recursive callable control")
-identity(q) => identity(q)
+identity(q) => identity_next(q)
+identity_next(q) => identity(q)
 var int p = 5
 unused = identity(p)
 x = ta.sma(close, p)

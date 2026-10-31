@@ -371,14 +371,13 @@ plot(x)
 
 
 def test_containing_udf_mixed_callsites_get_a_request_each():
-    # Each call's offset reaches a request of its own (security_contexts),
-    # the input declared after the helper too: it was refused, as the
-    # analyzer's one binding of the parameter cannot hold both.
+    # Each call's offset reaches a request of its own (security_contexts);
+    # the analyzer's one binding of the parameter cannot hold both.
     src = """//@version=6
 strategy("mixed containing helper input offset")
+k = input.int(2, "Offset")
 requested(int idx) =>
     request.security(syminfo.tickerid, "60", ta.ema(close, 5)[idx])
-k = input.int(2, "Offset")
 x = requested(k)
 y = requested(1)
 plot(x + y)

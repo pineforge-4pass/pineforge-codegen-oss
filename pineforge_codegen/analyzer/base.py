@@ -138,7 +138,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._ast = ast
         self._filename = filename
         self._budget = budget
-        self._pine_version = 6
+        self._pine_version = ast.version
         # A later reassignment also prevents an initializer from proving the
         # type of a condition. Same-spelled bindings conservatively share this
         # exclusion; their legacy emission types remain unchanged.
@@ -4673,6 +4673,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 )
             else:
                 if (node.op == ":="
+                        and self._pine_version == 6
+                        and not self._in_v5_library_definition(node)
                         and self._enclosing_func_names
                         and self._enclosing_func_names[-1] in self._func_defs
                         and getattr(sym, "_pf_parameter_owner", None)
@@ -4924,12 +4926,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return sym.pine_type
 
     def _visit_FuncDef(self, node: FuncDef) -> PineType:
-        if self._enclosing_func_names:
+        if (self._pine_version == 6
+                and not self._in_v5_library_definition(node)
+                and self._enclosing_func_names):
             self._error(
                 f"Function '{node.name}' cannot be defined inside a function.",
                 node.loc,
             )
-        if not self._global_scope:
+        if (self._pine_version == 6
+                and not self._in_v5_library_definition(node)
+                and not self._global_scope):
             self._error(
                 f"Function '{node.name}' cannot be defined inside a local block.",
                 node.loc,
@@ -4948,7 +4954,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             signatures = self._func_definition_signatures.setdefault(
                 node.name, set(),
             )
-            if signature in signatures:
+            if (self._pine_version == 6
+                    and not self._in_v5_library_definition(node)
+                    and signature in signatures):
                 self._error(
                     f"Function '{node.name}' has more than one definition "
                     "with the same parameter types.",
@@ -5002,7 +5010,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         old_global = self._global_scope
         old_pine_version = self._pine_version
         self._global_scope = False
-        self._pine_version = (node.annotations or {}).get("pine_version", 6)
+        self._pine_version = (node.annotations or {}).get("pine_version", old_pine_version)
         self._enclosing_func_params.append(set(node.params))
         self._enclosing_func_names.append(node.name)
         self._collection_scope_stack.append(node.name)
@@ -5399,7 +5407,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         old_global = self._global_scope
         old_pine_version = self._pine_version
         self._global_scope = False
-        self._pine_version = (node.annotations or {}).get("pine_version", 6)
+        self._pine_version = (node.annotations or {}).get("pine_version", old_pine_version)
         self._enclosing_func_params.append(set(node.params))
         self._enclosing_func_names.append(method_key)
         self._collection_scope_stack.append(method_key)
@@ -6306,7 +6314,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     receiver_owner = getattr(
                         receiver_symbol, "_pf_script_block_owner", None,
                     )
-                    if (not self._enclosing_func_names
+                    if (self._pine_version == 6
+                            and not self._in_v5_library_definition(node)
+                            and not self._enclosing_func_names
                             and self._current_top_level_stmt is not None
                             and not isinstance(
                                 self._current_top_level_stmt, (FuncDef, MethodDef),
@@ -6563,7 +6573,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
             # User-defined function call
             if func_name in self._func_defs:
-                if (self._enclosing_func_names
+                if (self._pine_version == 6
+                        and not self._in_v5_library_definition(node)
+                        and self._enclosing_func_names
                         and callee.name == self._enclosing_func_names[-1]
                         and callee.name not in self._overloaded_func_names):
                     self._error(
@@ -7412,7 +7424,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         sym = self._symbols.resolve(node.name)
         # Later type queries can revisit a read after its source scope ended.
         # Validate only its first visit, while lexical ownership is live.
-        if id(node) not in self._identifier_binding_scopes:
+        if (self._pine_version == 6
+                and not self._in_v5_library_definition(node)
+                and id(node) not in self._identifier_binding_scopes):
             block_owner = getattr(sym, "_pf_script_block_owner", None)
             if (block_owner is not None
                     and not getattr(sym, "_pf_script_block_has_outer", False)

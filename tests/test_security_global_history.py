@@ -108,7 +108,7 @@ def test_a_global_read_twice_is_one_value_per_requested_bar():
 
 def test_helper_parameter_bound_to_a_multi_statement_global_is_put_in():
     # It read na, with the warning.
-    result = transpile_full(PRELUDE + SMOOTH + HELD + 'cs = smooth(close, 2)\n'
+    result = transpile_full(PRELUDE + SMOOTH + 'cs = smooth(close, 2)\n' + HELD +
                             'x = held(syminfo.tickerid, "120", cs)\n' + TRADE)
     assert not _warnings(result)
     evaluator = _evaluators(result["cpp"])[0]
@@ -137,7 +137,7 @@ def test_cast_of_a_helper_local_in_a_ta_length_is_lowered():
         'hull(_src, _len) =>\n'
         '    half = math.max(1, int(math.round(_len / 2.0)))\n'
         '    ta.wma(2.0 * ta.wma(_src, half) - ta.wma(_src, _len), half)\n'
-        'len = input.int(4, "Len")\n') + HELD + 'hs = hull(close, len)\n'
+        'len = input.int(4, "Len")\nhs = hull(close, len)\n') + HELD +
         'x = held(syminfo.tickerid, "120", hs)\n' + TRADE)
     assert not _warnings(result)
     evaluator = _evaluators(result["cpp"])[0]

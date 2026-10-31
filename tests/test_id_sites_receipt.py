@@ -178,7 +178,8 @@ while count < bar_index % 3
 
 RECURSIVE_FUNCTION = '''countdown(int n) =>
     strategy.entry("R" + str.tostring(n), strategy.long)
-    n <= 0 ? 0 : countdown(n - 1)
+    n <= 0 ? 0 : countdown_next(n - 1)
+countdown_next(int n) => countdown(n)
 total = countdown(2)
 '''
 
@@ -517,9 +518,10 @@ REVERSE_FIVE_FOR_LOOP = '''for i = 5 to 1
     strategy.entry("L" + str.tostring(i), strategy.long)
 '''
 
-# quiet() calls itself and holds no order call: a recursion that reaches no counted site.
+# The two helpers call each other without an order call, so the cycle reaches no counted site.
 QUIET_RECURSION = '''quiet(int n) =>
-    n <= 0 ? 0 : quiet(n - 1)
+    n <= 0 ? 0 : quiet_next(n - 1)
+quiet_next(int n) => quiet(n)
 settled = quiet(3)
 '''
 

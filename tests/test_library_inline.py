@@ -92,7 +92,8 @@ def test_types_enums_constants_and_methods_resolve_into_the_library():
             'S.Bar2 b = S.Bar2.new(low, high)\n'
             'S.Side side = close > open ? S.Side.long : S.Side.short\n'
             'wide(S.Bar2 r) => r.width() > 1\n'
-            'w = b.width() + S.width(b) + S.RATIO\n'
+            'widths(S.Bar2 r) => r.width() + S.width(r) + S.RATIO\n'
+            'w = widths(b)\n'
             'if side == S.Side.long and wide(b) and w > 0\n'
             '    strategy.entry("L", strategy.long)\n')
     cpp = _cpp(body)

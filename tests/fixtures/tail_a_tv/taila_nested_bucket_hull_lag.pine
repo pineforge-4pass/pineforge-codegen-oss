@@ -26,14 +26,14 @@ smoother(_kind, _src, _len, _sigma, _offs) =>
     arnaud = ta.alma(_src, _len, _offs, _sigma)
     _kind == "TEMA" ? triple : _kind == "HULL" ? hull : arnaud
 
-held(_sym, _tf, _x) => request.security(_sym, _tf, _x[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
-pick(_x, _on, _tf) => _on ? held(syminfo.tickerid, _tf, _x) : _x
-
 bucket = timeframe.isdaily ? str.tostring(timeframe.multiplier * mult) + "D" : str.tostring(timeframe.multiplier * mult)
 cSrc = useHeikin ? request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, close, lookahead = barmerge.lookahead_off) : close
 oSrc = useHeikin ? request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, open, lookahead = barmerge.lookahead_off) : open
 cs = smoother(kind, cSrc[lag], len, sigma, offs)
 os = smoother(kind, oSrc[lag], len, sigma, offs)
+
+held(_sym, _tf, _x) => request.security(_sym, _tf, _x[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+pick(_x, _on, _tf) => _on ? held(syminfo.tickerid, _tf, _x) : _x
 
 a = pick(cs, true, bucket)
 b = pick(os, true, bucket)

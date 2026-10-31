@@ -356,7 +356,9 @@ second = outer()
     "definitions",
     (
         '''reader() =>
-    array.get(array.from(reader()), 0)
+    array.get(array.from(reader_next()), 0)
+reader_next() =>
+    reader()
 ''',
         '''first_reader() =>
     array.get(array.from(second_reader()), 0)
@@ -447,7 +449,9 @@ def test_nested_method_copy_temporary_reader_recursion_is_rejected():
     source = r'''//@version=6
 strategy("Nested method copy recursion boundary")
 reader() =>
-    array.get(array.from(reader()).copy(), 0)
+    array.get(array.from(reader_next()).copy(), 0)
+reader_next() =>
+    reader()
 observed = reader()
 '''
     with pytest.raises(
@@ -861,8 +865,10 @@ def test_forward_local_identity_stateful_representation_matrix(
     "definitions",
     (
         '''reader() =>
-    local_value = array.from(reader()).copy().get(0)
+    local_value = array.from(reader_next()).copy().get(0)
     local_value
+reader_next() =>
+    reader()
 ''',
         '''first_reader() =>
     local_value = array.from(second_reader()).copy().get(0)
