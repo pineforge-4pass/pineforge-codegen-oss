@@ -81,7 +81,7 @@ def test_malformed_import_version_is_refused_with_the_existing_gate_diagnostic(v
 @pytest.mark.parametrize("version,message,col,end_col", NON_ASCII_VERSIONS)
 @pytest.mark.parametrize("suffix", ["", " as S", " as ta"])
 def test_non_ascii_import_version_is_refused_before_the_import_gate(
-        version, message, col, end_col):
+        version, message, col, end_col, suffix):
     source = PRELUDE + f"import user/lib/{version}{suffix}\n"
     with pytest.raises(CompileError) as error:
         transpile(source, filename="versions.pine")
