@@ -139,9 +139,173 @@ jobs:
           [ "$REF" = refs/heads/main ] || fail "baseline promotion requires refs/heads/main"
           case "$EVENT_NAME" in
             workflow_dispatch)
-              for value in "$INPUT_MERGE_SHA" "$INPUT_HEAD_SHA" "$INPUT_PR_NUMBER" "$INPUT_PR_URL" "$INPUT_MERGED_AT"; do
-                [[ -n "${value//[[:space:]]/}" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || fail "empty or unreadable dispatch input"
-              done
+              [[ "$INPUT_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+                fail "merge_commit must be exactly 40 lowercase hexadecimal characters"
+              [[ "$INPUT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+                fail "head_sha must be exactly 40 lowercase hexadecimal characters"
+              [[ "$INPUT_PR_NUMBER" =~ ^[1-9][0-9]*$ ]] ||
+                fail "pr_number must be a positive decimal integer"
+              expected_pr_url="https://github.com/$REPO/pull/$INPUT_PR_NUMBER"
+              [ "$INPUT_PR_URL" = "$expected_pr_url" ] ||
+                fail "pr_url must equal $expected_pr_url"
+              [[ "$INPUT_MERGED_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] ||
+                fail "merged_at must be an ISO-8601 UTC timestamp in YYYY-MM-DDTHH:MM:SSZ form"
+              if ! dispatch_pr=$(gh api "repos/$REPO/pulls/$INPUT_PR_NUMBER"); then
+                fail "pr_number API lookup failed"
+              fi
+              [[ -n "${dispatch_pr//[[:space:]]/}" ]] ||
+                fail "pr_number API lookup returned an empty response"
+              if ! python3 - "$INPUT_PR_NUMBER" 3<<<"$dispatch_pr" <<'PY'
+          import json
+          import sys
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pr = json.load(stream, parse_constant=reject_constant)
+          except (OSError, RecursionError, ValueError):
+              raise SystemExit(1)
+          number = pr.get("number") if isinstance(pr, dict) else None
+          if not (type(number) in (int, float) and number == int(sys.argv[1])):
+              raise SystemExit(1)
+          PY
+              then
+                fail "pr_number does not match the PR API response"
+              fi
+              if ! python3 - 3<<<"$dispatch_pr" <<'PY'
+          import json
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pr = json.load(stream, parse_constant=reject_constant)
+          except (OSError, RecursionError, ValueError):
+              raise SystemExit(1)
+          if not (isinstance(pr, dict) and pr.get("merged") is True):
+              raise SystemExit(1)
+          PY
+              then
+                fail "pr_number API record is not merged"
+              fi
+              if ! python3 - "$INPUT_MERGE_SHA" 3<<<"$dispatch_pr" <<'PY'
+          import json
+          import sys
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pr = json.load(stream, parse_constant=reject_constant)
+          except (OSError, RecursionError, ValueError):
+              raise SystemExit(1)
+          if not (isinstance(pr, dict) and pr.get("merge_commit_sha") == sys.argv[1]):
+              raise SystemExit(1)
+          PY
+              then
+                fail "merge_commit does not match the PR merge_commit_sha"
+              fi
+              if ! python3 - "$INPUT_HEAD_SHA" 3<<<"$dispatch_pr" <<'PY'
+          import json
+          import sys
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pr = json.load(stream, parse_constant=reject_constant)
+          except (OSError, RecursionError, ValueError):
+              raise SystemExit(1)
+          if not (
+              isinstance(pr, dict)
+              and isinstance(pr.get("head"), dict)
+              and pr["head"].get("sha") == sys.argv[1]
+          ):
+              raise SystemExit(1)
+          PY
+              then
+                fail "head_sha does not match the PR head.sha"
+              fi
+              if ! python3 - 3<<<"$dispatch_pr" <<'PY'
+          import json
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pr = json.load(stream, parse_constant=reject_constant)
+          except (OSError, RecursionError, ValueError):
+              raise SystemExit(1)
+          if not (
+              isinstance(pr, dict)
+              and isinstance(pr.get("base"), dict)
+              and pr["base"].get("ref") == "main"
+          ):
+              raise SystemExit(1)
+          PY
+              then
+                fail "pr_number API record does not use base main"
+              fi
+              if ! python3 - "$INPUT_MERGED_AT" 3<<<"$dispatch_pr" <<'PY'
+          import json
+          import sys
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pr = json.load(stream, parse_constant=reject_constant)
+          except (OSError, RecursionError, ValueError):
+              raise SystemExit(1)
+          if not (isinstance(pr, dict) and pr.get("merged_at") == sys.argv[1]):
+              raise SystemExit(1)
+          PY
+              then
+                fail "merged_at does not match the PR merged_at"
+              fi
+              if ! dispatch_pulls=$(gh api --paginate --slurp \
+                "repos/$REPO/commits/$INPUT_MERGE_SHA/pulls?per_page=100"); then
+                fail "merge_commit API lookup failed"
+              fi
+              [[ -n "${dispatch_pulls//[[:space:]]/}" ]] ||
+                fail "merge_commit API lookup returned an empty response"
+              if ! python3 - "$INPUT_PR_NUMBER" 3<<<"$dispatch_pulls" <<'PY'
+          import json
+          import sys
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pages = json.load(stream, parse_constant=reject_constant)
+          except (OSError, RecursionError, ValueError):
+              raise SystemExit(1)
+          pulls = (
+              [pr for page in pages for pr in page]
+              if isinstance(pages, list) and all(isinstance(page, list) for page in pages)
+              else []
+          )
+          if not (
+              isinstance(pages, list)
+              and all(isinstance(page, list) for page in pages)
+              and len(pulls) == 1
+              and isinstance(pulls[0], dict)
+              and type(pulls[0].get("number")) in (int, float)
+              and pulls[0].get("number") == int(sys.argv[1])
+          ):
+              raise SystemExit(1)
+          PY
+              then
+                fail "merge_commit must list exactly pull request $INPUT_PR_NUMBER"
+              fi
               printf '%s\n' "merge_sha=$INPUT_MERGE_SHA" "head_sha=$INPUT_HEAD_SHA" \
                 "pr_number=$INPUT_PR_NUMBER" "pr_url=$INPUT_PR_URL" \
                 "merged_at=$INPUT_MERGED_AT" "ok=true" >> "$GITHUB_OUTPUT"

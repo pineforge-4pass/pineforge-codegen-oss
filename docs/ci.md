@@ -84,6 +84,9 @@ they can move. PyPI/npm publication and baseline promotion remain hosted.
 
 The only `pull_request_target` workflow is `gke-pr.yml`.
 `promote-baseline.yml` runs on pushes to `main` and manual dispatch from `main`.
+Manual dispatch validates `merge_commit` and `head_sha` as lowercase 40-hex, `pr_number` as a positive decimal, `pr_url` for this repository and number, and `merged_at` as `YYYY-MM-DDTHH:MM:SSZ`.
+It checks the numbered PR and paginated commit associations with `gh`, requiring one merged PR on `main` whose merge, head, and merge time match the inputs.
+API errors, empty responses, mismatches, and multiple associations refuse dispatch.
 Promotion paginates the pushed commit's associated PRs and requires exactly one
 closed, merged PR with that merge commit and base `main`; zero or multiple
 matches skip promotion green. It rereads that PR's full record, binds its gated
