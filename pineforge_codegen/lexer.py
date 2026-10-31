@@ -11,6 +11,7 @@ Improvements over tokens.py:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -217,6 +218,19 @@ def _normalize_line_endings(source: str) -> str:
     return "".join(parts)
 
 
+_VERSION_DIRECTIVE_RE = re.compile(
+    r"[ \t\f]*//[ \t\f]*@version[ \t\f]*=[ \t\f]*([0-9]+)[ \t\f]*"
+)
+
+
+def _source_version(source: str) -> int | None:
+    for line in re.split(r"\r\n|\r|\n", source):
+        match = _VERSION_DIRECTIVE_RE.fullmatch(line)
+        if match is not None:
+            return int(match.group(1))
+    return None
+
+
 class Lexer:
     """Converts PineScript v6 source string into a list of tokens."""
 
@@ -240,6 +254,7 @@ class Lexer:
                  budget: TimeBudget | None = None) -> None:
         check_source_size(source, filename)
         self.source = _normalize_line_endings(source)
+        self._pine_version = _source_version(self.source)
         self.filename = filename
         self.pos = 0
         self.line = 1
@@ -521,18 +536,43 @@ class Lexer:
         while not self._at_end() and self.source[self.pos] in (" ", "\t"):
             self._advance()
 
+    def _is_digit(self, ch: str) -> bool:
+        return ch.isdigit() if self._pine_version != 6 else "0" <= ch <= "9"
+
+    def _is_ident_char(self, ch: str) -> bool:
+        if self._pine_version != 6:
+            return ch.isalnum() or ch == "_"
+        return ("A" <= ch <= "Z" or "a" <= ch <= "z"
+                or "0" <= ch <= "9" or ch == "_")
+
     def _read_token(self) -> None:
         ch = self.source[self.pos]
         start_line = self.line
         start_col = self.col
 
+        if (
+            self._pine_version == 6
+            and (
+                (ch.isdigit() and not self._is_digit(ch))
+                or (ch.isalpha() and not ("A" <= ch <= "Z"
+                                           or "a" <= ch <= "z"))
+            )
+        ):
+            self._emit_diagnostic(
+                f"no viable alternative at character {ch!r}",
+                start_line, start_col, start_col + 1,
+            )
+            self._advance()
+            return
+
         # Numbers: digit-starting
-        if ch.isdigit():
+        if self._is_digit(ch):
             self._read_number(start_line, start_col)
             return
 
         # Leading-dot float: .5, .123
-        if ch == "." and self.pos + 1 < len(self.source) and self.source[self.pos + 1].isdigit():
+        if (ch == "." and self.pos + 1 < len(self.source)
+                and self._is_digit(self.source[self.pos + 1])):
             self._read_leading_dot_number(start_line, start_col)
             return
 
@@ -558,11 +598,22 @@ class Lexer:
                 )
             else:
                 value = "#" + "".join(buf)
-                self._emit(TokenType.COLOR, value, start_line, start_col, start_col + len(value))
+                if self._pine_version == 6 and len(buf) not in (6, 8):
+                    self._emit_diagnostic(
+                        f"Syntax error at input {value!r}",
+                        start_line, start_col, start_col + len(value),
+                    )
+                self._emit(
+                    TokenType.COLOR, value, start_line, start_col,
+                    start_col + len(value),
+                )
             return
 
         # Identifiers / keywords
-        if ch.isalpha() or ch == "_":
+        if ((ch.isalpha() and (
+                self._pine_version != 6
+                or "A" <= ch <= "Z" or "a" <= ch <= "z"
+            )) or ch == "_"):
             self._read_ident(start_line, start_col)
             return
 
@@ -634,7 +685,7 @@ class Lexer:
         buf: list[str] = []
 
         # Integer part
-        while not self._at_end() and self.source[self.pos].isdigit():
+        while not self._at_end() and self._is_digit(self.source[self.pos]):
             buf.append(self._advance())
 
         # Optional fractional part
@@ -642,9 +693,9 @@ class Lexer:
             # Consume dot if followed by digit OR if followed by non-identifier char
             # (e.g., 0. is a valid float, but 0.member should not consume the dot)
             next_char = self.source[self.pos + 1] if self.pos + 1 < len(self.source) else ""
-            if next_char.isdigit() or (not next_char.isalpha() and next_char != "_"):
+            if self._is_digit(next_char) or (not next_char.isalpha() and next_char != "_"):
                 buf.append(self._advance())  # consume '.'
-                while not self._at_end() and self.source[self.pos].isdigit():
+                while not self._at_end() and self._is_digit(self.source[self.pos]):
                     buf.append(self._advance())
 
         # Optional exponent
@@ -652,8 +703,8 @@ class Lexer:
             buf.append(self._advance())  # consume 'e'/'E'
             if not self._at_end() and self.source[self.pos] in ("+", "-"):
                 buf.append(self._advance())  # consume sign
-            if not self._at_end() and self.source[self.pos].isdigit():
-                while not self._at_end() and self.source[self.pos].isdigit():
+            if not self._at_end() and self._is_digit(self.source[self.pos]):
+                while not self._at_end() and self._is_digit(self.source[self.pos]):
                     buf.append(self._advance())
             else:
                 # Malformed exponent — emit diagnostic
@@ -670,7 +721,7 @@ class Lexer:
         """Read a leading-dot float like .5, normalising to '0.5'."""
         self._advance()  # consume '.'
         buf: list[str] = []
-        while not self._at_end() and self.source[self.pos].isdigit():
+        while not self._at_end() and self._is_digit(self.source[self.pos]):
             buf.append(self._advance())
 
         # Optional exponent
@@ -678,8 +729,8 @@ class Lexer:
             buf2: list[str] = [self._advance()]  # 'e'/'E'
             if not self._at_end() and self.source[self.pos] in ("+", "-"):
                 buf2.append(self._advance())
-            if not self._at_end() and self.source[self.pos].isdigit():
-                while not self._at_end() and self.source[self.pos].isdigit():
+            if not self._at_end() and self._is_digit(self.source[self.pos]):
+                while not self._at_end() and self._is_digit(self.source[self.pos]):
                     buf2.append(self._advance())
                 buf.extend(buf2)
             # If malformed exponent after leading-dot, just ignore the e part
@@ -774,7 +825,7 @@ class Lexer:
 
     def _read_ident(self, start_line: int, start_col: int) -> None:
         buf: list[str] = []
-        while not self._at_end() and (self.source[self.pos].isalnum() or self.source[self.pos] == "_"):
+        while not self._at_end() and self._is_ident_char(self.source[self.pos]):
             buf.append(self._advance())
         word = "".join(buf)
         tt = KEYWORDS.get(word, TokenType.IDENT)

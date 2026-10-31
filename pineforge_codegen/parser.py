@@ -76,6 +76,7 @@ class Parser:
         # declaration and ``export`` declarations parse instead of being
         # refused, and a ``const`` qualifier is recorded on its declaration.
         self._library = library
+        self._pine_version: int | None = None
         # Syntax levels around the parse position, and the depth of each
         # operator/postfix chain subtree measured so far (held by id; the
         # parser never discards a node it built, so ids stay unique).
@@ -200,6 +201,7 @@ class Parser:
     def parse(self) -> Program:
         """Parse the full program, returning a Program node."""
         version = self._extract_version()
+        self._pine_version = version
         prog = Program(version=version)
         self._skip_newlines()
 
@@ -1242,10 +1244,13 @@ class Parser:
 
         cases = []
         default_body = []
+        default_token = None
         self._skip_newlines()
         while not self._check(TokenType.DEDENT) and not self._at_end():
             # Default case: => body
             if self._check(TokenType.FAT_ARROW):
+                if default_token is None:
+                    default_token = self._current()
                 self._advance()
                 if self._check(TokenType.NEWLINE):
                     self._advance()
@@ -1255,6 +1260,15 @@ class Parser:
                 else:
                     default_body = self._parse_arm_line()
             else:
+                if (
+                    default_token is not None
+                    and not cases
+                    and self._pine_version == 6
+                ):
+                    raise ParseError(
+                        "Mismatched input '=>' expecting set 'a case expression'.",
+                        default_token,
+                    )
                 # case_expr => body
                 case_expr = self._parse_expression()
                 self._consume(TokenType.FAT_ARROW)

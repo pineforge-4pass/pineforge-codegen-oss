@@ -105,6 +105,18 @@ from .diagnostics import DiagnosticsHelper
 from .call_handlers import CallHandlers
 
 
+_BUILTIN_NAMESPACE_NAMES = frozenset({
+    "ta", "math", "str", "array", "map", "matrix", "color", "input",
+    "request", "strategy", "syminfo", "timeframe", "barstate", "session",
+    "chart", "label", "line", "box", "table", "linefill", "polyline", "log",
+    "runtime", "ticker", "dividends", "earnings", "splits", "currency",
+    "display", "extend", "format", "hline", "location", "order", "plot",
+    "position", "scale", "shape", "size", "text", "xloc", "yloc", "alert",
+    "barmerge", "font", "adjustment", "backadjustment", "settlement_as_close",
+    "dayofweek", "footprint", "volume_row", "timenow", "time",
+})
+
+
 # ---------------------------------------------------------------------------
 # Analyzer
 # ---------------------------------------------------------------------------
@@ -4338,6 +4350,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             node.args[0].loc,
         )
 
+    def _check_reserved_definition_name(
+        self, node: MethodDef,
+    ) -> None:
+        if (
+            self._pine_version == 6
+            and not self._in_v5_library_definition(node)
+            and node.name in _BUILTIN_NAMESPACE_NAMES
+        ):
+            self._error(
+                f'"{node.name}" cannot be used as a variable or function name.',
+                node.loc,
+            )
+
     def _check_bool_map_put_na(
         self, node: FuncCall, obj: ASTNode, member: str,
     ) -> None:
@@ -4466,6 +4491,21 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 udt_ctor = self._func_udt_return_types.get(cal.name)
                 if udt_ctor is not None and type_spec is None:
                     type_spec = TypeSpec.udt(udt_ctor)
+
+        if (
+            self._pine_version == 6
+            and not self._in_v5_library_definition(node)
+            and node.name in _BUILTIN_NAMESPACE_NAMES
+            and (
+                udt_ctor is not None
+                or (type_spec is not None and type_spec.kind == "udt")
+            )
+        ):
+            self._error(
+                f"Invalid object name: {node.name}. "
+                "Namespaces of built-ins cannot be used.",
+                node.loc,
+            )
 
         self._var_decl_types_by_node[id(node)] = (val_type, type_spec)
 
@@ -5370,6 +5410,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
     def _visit_MethodDef(self, node) -> PineType:
         """Register a typed instance method under ``TypeName.methodName``."""
+        self._check_reserved_definition_name(node)
         self._check_bool_na_parameters(
             node, (node.annotations or {}).get("param_defaults", []),
         )
@@ -5889,6 +5930,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._block_node_stack.append(node)
         try:
             self._visit(node.condition)
+            condition_type = self._numeric_condition_type(node.condition)
+            if (
+                condition_type in (PineType.INT, PineType.FLOAT)
+                and self._pine_version == 6
+                and not self._in_v5_library_definition(node)
+            ):
+                self._error(
+                    'The condition of the "while" statement must evaluate '
+                    'to a "bool" value.',
+                    node.condition.loc or node.loc,
+                )
             for stmt in node.body:
                 self._visit(stmt)
         finally:
@@ -5944,6 +5996,36 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 branch_types.append((None, PineType.NA))
         finally:
             self._global_scope = old_global
+        if (
+            self._pine_version == 6
+            and not self._in_v5_library_definition(node)
+        ):
+            known_types: list[tuple[ASTNode, PineType]] = []
+            for terminal, _result_type in branch_types:
+                if terminal is None:
+                    continue
+                certain_type = self._certain_scalar_type(terminal)
+                if certain_type in (
+                    PineType.UNKNOWN, PineType.NA, PineType.VOID,
+                ):
+                    continue
+                known_types.append((terminal, certain_type))
+            if known_types:
+                _first_terminal, first_type = known_types[0]
+                numeric = (PineType.INT, PineType.FLOAT)
+                for terminal, certain_type in known_types[1:]:
+                    compatible = (
+                        certain_type == first_type
+                        or {certain_type, first_type} <= set(numeric)
+                    )
+                    if not compatible:
+                        blocks = f"{first_type.value}, {certain_type.value}"
+                        self._error(
+                            "Return type of one of the \"if\" or \"switch\" "
+                            "blocks is not compatible with return type of "
+                            f"other block(s) ({blocks}).",
+                            terminal.loc or node.loc,
+                        )
         # If used as expression (x = switch ...), return last expr type
         if any(self._selection_node_is_na(arm) for arm, _ in branch_types):
             concrete = [
