@@ -646,6 +646,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             func_ta_ranges=self._func_ta_ranges,
             func_ta_indices=self._func_ta_indices,
             func_call_cs_map=self._func_call_cs_map,
+            method_call_bindings=dict(self._method_call_bindings),
             func_inherited_call_names=dict(
                 self._func_inherited_call_names
             ),

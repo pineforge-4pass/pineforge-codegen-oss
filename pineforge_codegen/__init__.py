@@ -17,7 +17,9 @@ from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recur
 from .pragmas import extract_pf_trace_pragmas
 from .request_discovery import discover_requests, request_sites
 from .request_feed_inventory import build_request_feed_inventory
-from .security_contexts import specialize_security_contexts
+from .security_contexts import (
+    specialize_method_security_payloads, specialize_security_contexts,
+)
 from .block_locals import rename_block_locals
 from .support_checker import check_support as _support_diagnostics
 from .support_checker import check_support_or_raise
@@ -84,6 +86,15 @@ def _generate(pine_source: str, check_support: bool, filename: str,
         budget.check(phase=Phase.ANALYZER)
         ctx = Analyzer(ast, filename=filename, budget=budget,
                        session_clones=clones).analyze()
+        # Typed receiver dispatch is known only after analysis. Resolve method
+        # payload arguments with those bindings, then type the rewritten bodies.
+        if specialize_method_security_payloads(
+                ast, ctx.method_call_bindings, filename=filename):
+            del ctx
+            ast = bind_builtin_keywords(expand_finite_choice_extrema_lengths(ast))
+            check_ast_depth(ast, filename)
+            ctx = Analyzer(ast, filename=filename, budget=budget,
+                           session_clones=clones).analyze()
         budget.check(phase=Phase.ANALYZER)
         # Attach after analysis: pragma expressions are not part of the
         # program body, so the analyzer never inspects them; the codegen
