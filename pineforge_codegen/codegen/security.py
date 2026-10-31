@@ -6540,11 +6540,13 @@ class SecurityEmitter:
                  getattr(self, "_security_shared_definitions", None),
                  getattr(self, "_security_shared_globals", None),
                  getattr(self, "_security_global_hist_pushes", None),
-                 getattr(self, "_security_double_hist_nodes", set()))
+                 getattr(self, "_security_double_hist_nodes", set()),
+                 getattr(self, "_security_array_values", None))
         self._security_shared_calls = {}
         self._security_shared_definitions = definitions = []
         self._security_shared_globals = {}
         self._security_global_hist_pushes = pushes = []
+        self._security_array_values = {}
         # This evaluator's global history reads lowered as doubles.
         self._security_double_hist_nodes = set()
         outer_arg_sec = self._security_arg_history_sec
@@ -6558,7 +6560,7 @@ class SecurityEmitter:
             self._security_arg_call_values = outer_arg_values
             (self._security_shared_calls, self._security_shared_definitions,
              self._security_shared_globals, self._security_global_hist_pushes,
-             self._security_double_hist_nodes) = outer
+             self._security_double_hist_nodes, self._security_array_values) = outer
         if pushes:
             # The history of a global the payload reads at an offset
             # (``_security_global_history_value``): the value its reads keep,
@@ -6995,6 +6997,191 @@ class SecurityEmitter:
             na_cpp = "na<std::string>()" if item.get("string_result") else "na<double>()"
             lines.append(f"                _req_sec_{sec_id} = {na_cpp};")
         lines.append("                break;")
+
+    def _security_array_get_nodes(self, node):
+        """The receiver and index of a built-in get on a global array name."""
+        if (not isinstance(node, FuncCall)
+                or not isinstance(node.callee, MemberAccess)
+                or node.callee.member != "get"
+                or self._security_user_call_site(node)):
+            return None
+        callee = node.callee
+        scopes = getattr(self.ctx, "identifier_binding_scopes", {}) or {}
+        namespace = (isinstance(callee.object, Identifier)
+                     and callee.object.name == "array"
+                     and scopes.get(id(callee.object)) is None
+                     and not self._security_identifier_is_global_binding(callee.object))
+        if namespace:
+            nodes = self._array_function_arg_nodes("get", node)
+            if len(nodes) != 2:
+                return None
+            receiver, index = nodes
+        else:
+            receiver = callee.object
+            if not (isinstance(receiver, Identifier)
+                    and self._security_identifier_is_global_binding(receiver)):
+                return None
+            spec = self._type_spec_from_expr(receiver)
+            if spec is None or spec.kind != "array":
+                return None
+            nodes = self._array_method_arg_nodes("get", node)
+            if len(nodes) != 1:
+                return None
+            index = nodes[0]
+        if (isinstance(receiver, Identifier)
+                and self._security_identifier_is_global_binding(receiver)):
+            return receiver, index
+        return None
+
+    def _security_array_inputs_are_pure(self, nodes) -> bool:
+        """Whether fresh array inputs can move together to the requested bar.
+
+        Expand immutable scalar globals, with a bounded expansion even for a
+        diamond of aliases. Stateful calls, history, collections and escaping
+        references keep their existing lowering.
+        """
+        expressions = getattr(self.ctx, "global_expr_map", {}) or {}
+        scopes = getattr(self.ctx, "identifier_binding_scopes", {}) or {}
+        pending = list(nodes)
+        remaining = 2048
+        while pending:
+            remaining -= 1
+            if remaining < 0:
+                return False
+            node = pending.pop()
+            if isinstance(node, (NumberLiteral, BoolLiteral, StringLiteral, NaLiteral)):
+                continue
+            if isinstance(node, Identifier):
+                if not self._security_identifier_is_global_binding(node):
+                    return False
+                if node.name in _SECURITY_SHARED_BAR_FIELDS:
+                    continue
+                if node.name not in expressions or node.name in self._global_mutable_infos:
+                    return False
+                pending.append(expressions[node.name])
+                continue
+            if isinstance(node, BinOp):
+                pending.extend((node.left, node.right))
+                continue
+            if isinstance(node, UnaryOp):
+                pending.append(node.operand)
+                continue
+            if isinstance(node, Ternary):
+                pending.extend((node.condition, node.true_val, node.false_val))
+                continue
+            if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
+                if (node.object.name in _SECURITY_PURE_MEMBER_NAMESPACES
+                        and scopes.get(id(node.object)) is None
+                        and not self._security_identifier_is_global_binding(node.object)):
+                    continue
+                return False
+            if isinstance(node, FuncCall) and self._get_ta_site(node) is None:
+                func, namespace = self._resolve_callee(node.callee)
+                if isinstance(node.callee, MemberAccess):
+                    obj = node.callee.object
+                    if (not isinstance(obj, Identifier) or scopes.get(id(obj)) is not None
+                            or self._security_identifier_is_global_binding(obj)):
+                        return False
+                    pure = (namespace in {"math", "color", "input"}
+                            and (namespace, func) not in _SECURITY_IMPURE_CALLS)
+                else:
+                    pure = (self._security_pure_call(node)
+                            or func not in self._func_names and func in _SECURITY_PURE_CALLS)
+                if pure:
+                    pending.extend(node.args)
+                    pending.extend(node.kwargs.values())
+                    continue
+            return False
+        return True
+
+    def _security_chart_arrays(self) -> dict:
+        """Fresh top-level array.from bindings used exclusively by getters.
+
+        A reference used anywhere else can alias, mutate or retain the array.
+        Such a binding is deliberately absent, including indirect writes
+        through a helper, a field, an alias or collection history.
+        """
+        cached = getattr(self, "_security_chart_arrays_cache", None)
+        if cached is not None:
+            return cached
+        expressions = getattr(self.ctx, "global_expr_map", {}) or {}
+        scopes = getattr(self.ctx, "identifier_binding_scopes", {}) or {}
+        arrays = {}
+        for decl in self.ctx.ast.body:
+            if (not isinstance(decl, VarDecl) or decl.is_var or decl.is_varip
+                    or decl.name in self._global_mutable_infos
+                    or expressions.get(decl.name) is not decl.value
+                    or not isinstance(decl.value, FuncCall)
+                    or self._resolve_callee(decl.value.callee) != ("from", "array")
+                    or not isinstance(decl.value.callee, MemberAccess)
+                    or not isinstance(decl.value.callee.object, Identifier)
+                    or scopes.get(id(decl.value.callee.object)) is not None
+                    or self._security_identifier_is_global_binding(decl.value.callee.object)
+                    or decl.value.kwargs
+                    or not self._security_array_inputs_are_pure(decl.value.args)):
+                continue
+            spec = (self._type_spec_from_hint_name(decl.type_hint) if decl.type_hint
+                    else self._type_spec_from_expr(decl.value))
+            if (spec is not None and spec.kind == "array"
+                    and spec.element is not None and spec.element.kind == "primitive"):
+                arrays[decl.name] = (decl, self._widen_array_spec_for_name(decl.name, spec))
+        if arrays:
+            allowed = set()
+            references = []
+            for node, _depth in iter_ast_nodes(self.ctx.ast):
+                if isinstance(node, FuncCall):
+                    pair = self._security_array_get_nodes(node)
+                    if pair is not None and pair[0].name in arrays:
+                        allowed.add(id(pair[0]))
+                elif (isinstance(node, Identifier) and node.name in arrays
+                      and self._security_identifier_is_global_binding(node)):
+                    references.append(node)
+            blocked = {node.name for node in references if id(node) not in allowed}
+            arrays = {name: info for name, info in arrays.items() if name not in blocked}
+        self._security_chart_arrays_cache = arrays
+        return arrays
+
+    def _security_chart_array_get(self, node, sec_id: int):
+        """A proven fresh-array read owned by this requested evaluator."""
+        if (not self._security_requested_calls
+                or getattr(self, "_security_array_values", None) is None
+                or self._security_calls[sec_id].get("is_lower_tf_array")):
+            return None
+        pair = self._security_array_get_nodes(node)
+        if pair is None:
+            return None
+        info = self._security_chart_arrays().get(pair[0].name)
+        if info is not None and self._security_array_inputs_are_pure([pair[1]]):
+            return (*pair, *info)
+        return None
+
+    def _build_security_chart_array_get(self, node, plan, args: tuple) -> str:
+        """Build one requested array per evaluation and borrow it at each get."""
+        receiver, index, decl, spec = plan
+        sec_id, ta_range, ta_results, resolving, mutable_names, bindings, lines = args
+        values = self._security_array_values
+        active = getattr(self, "_security_array_inputs_active", False)
+        self._security_array_inputs_active = True
+        try:
+            if receiver.name not in values:
+                # The declaration's element family keeps na and integer widths.
+                # Braced elements evaluate in source order, including unused ones.
+                value = self._security_render_fallback(
+                    decl.value, (sec_id, ta_range, ta_results, resolving, mutable_names, (), lines),
+                    set(), render=lambda: (
+                        self._type_spec_to_cpp(spec) + "{"
+                        + ", ".join(self._array_init_value_expr(spec.element, arg)
+                                    for arg in decl.value.args) + "}"))
+                definitions = self._security_shared_definitions
+                name = f"_pf_shared_{sec_id}_{len(definitions)}"
+                definitions.append(f"        const auto {name} = {value};")
+                values[receiver.name] = name
+            index_cpp = self._build_security_expr(
+                sec_id, index, ta_range, ta_results, resolving, mutable_names, bindings, lines)
+        finally:
+            self._security_array_inputs_active = active
+        self._security_requested_used = True
+        return self._array_method_expr(values[receiver.name], "get", [index_cpp], spec, node)
 
     def _build_security_expr(
         self,
@@ -7708,6 +7895,11 @@ class SecurityEmitter:
             return self._security_source_input_expr(expr_node)
 
         if isinstance(expr_node, FuncCall):
+            array_get = self._security_chart_array_get(expr_node, sec_id)
+            if array_get is not None:
+                return self._build_security_chart_array_get(expr_node, array_get, (
+                    sec_id, ta_range, ta_results, resolving, security_mutable_names,
+                    helper_binding_stack, emitted_lines))
             func_name = self._security_user_call_key(expr_node)
             if func_name is not None and isinstance(expr_node.callee, MemberAccess):
                 # Every earlier build called the chart method.
@@ -8049,7 +8241,8 @@ class SecurityEmitter:
                             loc=node.loc)
         return value
 
-    def _security_render_fallback(self, expr_node, args: tuple, chart: set[int]) -> str:
+    def _security_render_fallback(self, expr_node, args: tuple, chart: set[int], *,
+                                  render=None) -> str:
         """``expr_node`` rendered by the expression visitor, handing back to
         the builder every node it owns outside ``chart``."""
         sec_id, _ta_range, _ta_results, _resolving, mutable_names, stack, _lines = args
@@ -8063,7 +8256,7 @@ class SecurityEmitter:
             "args": args,
         }
         try:
-            result = self._visit_expr(expr_node)
+            result = render() if render is not None else self._visit_expr(expr_node)
         finally:
             self._security_fallback_frame = saved_frame
             self._security_payload_depth -= 1
@@ -8308,7 +8501,8 @@ class SecurityEmitter:
         if self._get_ta_site(node) is not None:
             return True
         if isinstance(node, FuncCall):
-            return self._security_call_inlinable(node)
+            return (self._security_chart_array_get(node, sec_id) is not None
+                    or self._security_call_inlinable(node))
         if isinstance(node, Identifier):
             return (self._security_fallback_owns_name(node, helper_binding_stack)
                     or self._security_fallback_owns_global(node)
@@ -8441,6 +8635,12 @@ class SecurityEmitter:
         if not self._security_identifier_is_global_binding(node):
             return False
         global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        if (getattr(self, "_security_array_inputs_active", False)
+                and node.name in global_expr_map
+                and node.name not in self._global_mutable_infos):
+            # Pure array inputs also need stable globals through their getters:
+            # the first request can run before on_bar assigns an input's member.
+            return True
         return (
             node.name in global_expr_map
             and node.name not in self._global_mutable_infos
