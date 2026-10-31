@@ -173,7 +173,7 @@ float builtin = math.abs(x)
         pytest.param(
             "shadow(float math) => math.abs()\n"
             "float leaf = builtin + shadow(x)",
-            "_udt_float_abs(math)",  # The float parameter is a value named math.
+            "_udt_float_abs(pf_safe_math)",  # Bound math uses the C++ namespace escape.
             "-297.0",  # abs(-3) + shadow(-3) = 3 + (-3 * 100).
             id="namespace-parameter",
         ),
@@ -182,7 +182,7 @@ float builtin = math.abs(x)
             "    float math = value\n"
             "    math.abs()\n"
             "float leaf = builtin + shadow(x)",
-            "_udt_float_abs(math)",  # The local float binding is the receiver.
+            "_udt_float_abs(pf_safe_math)",  # Bound math uses the same escape locally.
             "-297.0",  # abs(-3) + the local math value times 100 = -297.
             id="namespace-local",
         ),
@@ -212,10 +212,10 @@ float leaf = ta.sma(math, 1) + math.abs()
 '''
     cpp = transpile(source)
 
-    # The sole TA site is SMA 1; only its source math reaches compute.
-    assert "_ta_sma_1.compute(math)" in cpp
-    # The global float named math supplies the authored abs method's receiver.
-    assert "_udt_float_abs(math)" in cpp
+    # The sole SMA site takes the source after math's C++ namespace escape.
+    assert "_ta_sma_1.compute(pf_safe_math)" in cpp
+    # The method receiver uses that same escaped global binding.
+    assert "_udt_float_abs(pf_safe_math)" in cpp
     output = run_emitted_tu(cpp, _DRIVER, opt="-O0", label="ta-namespace-method")
     # SMA(-3, 1) + (-3 * 100) = -3 - 300 = -303.
     assert output.strip() == "-303.0"
