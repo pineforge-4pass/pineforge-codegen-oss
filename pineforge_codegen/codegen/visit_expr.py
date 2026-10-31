@@ -317,17 +317,13 @@ class ExprVisitor:
     # keep their historical spelling byte for byte.
     _FLAT_TERNARY_CHAIN = 32
 
-    def _visit_ternary(
-        self, node: Ternary, target_cpp_type: str | None = None,
-    ) -> str:
+    def _visit_ternary(self, node: Ternary) -> str:
         links = [node]
         while isinstance(links[-1].false_val, Ternary):
             links.append(links[-1].false_val)
         string_na = self._ternary_string_na(links)
         ternary_cpp_type = (
-            self._infer_type(
-                node, _integer_na_context=target_cpp_type in ("int", "int64_t"),
-            )
+            self._infer_type(node)
             if self._selection_contains_na(node)
             else None
         )
@@ -390,7 +386,7 @@ class ExprVisitor:
                 arm,
                 target_cpp_type=target_cpp_type,
             )
-        if (target_cpp_type in ("double", "int", "int64_t")
+        if (target_cpp_type == "double"
                 and isinstance(arm, Ternary)
                 and self._selection_contains_na(arm)):
             return self._visit_rhs_value(arm, target_cpp_type=target_cpp_type)
@@ -490,8 +486,7 @@ class ExprVisitor:
         ``std::string``/``int``/``int64_t``/``bool`` use ``na<T>()``. Without
         this, ``State s = na;`` and ``string x = na;`` would both emit
         ``na<double>()`` and fail to compile (no viable assignment/conversion).
-        A nullable numeric ternary keeps its floating NaN unless an integer
-        target supplies the integer representation for its missing arm.
+        A nullable numeric ternary keeps its floating NaN.
         """
         if (isinstance(value_node, Ternary)
                 and self._selection_contains_na(value_node)):
@@ -503,10 +498,6 @@ class ExprVisitor:
             if scalar_target == "double":
                 return self._coerce_double_slot(
                     self._visit_expr(value_node), value_node
-                )
-            if scalar_target in ("int", "int64_t"):
-                return self._visit_ternary(
-                    value_node, target_cpp_type=scalar_target,
                 )
         udt_target = None
         if (target_cpp_type in self._udt_defs

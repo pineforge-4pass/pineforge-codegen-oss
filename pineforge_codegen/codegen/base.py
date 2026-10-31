@@ -2207,6 +2207,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for vname, ptype, _init_str in self.ctx.var_members:
             if self._safe_name(vname) == orig_safe:
                 cpp_type = PINE_TYPE_TO_CPP.get(ptype, "double")
+                if cpp_type == "int" and self._numeric_na_member(vname):
+                    cpp_type = "double"
                 if cpp_type == "int" and self._is_int64_builtin_init(vname):
                     cpp_type = "int64_t"
                 collection_spec = self._callable_var_collection_spec(
@@ -5683,6 +5685,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     lines.append(f"    {self._safe_name(udt_type)} {safe};")
                 continue
             cpp_type = PINE_TYPE_TO_CPP.get(ptype, "double")
+            if cpp_type == "int" and self._numeric_na_member(name):
+                cpp_type = "double"
             # Promote int->int64_t when init RHS is an int64-returning builtin
             # (time/time_close/timestamp), otherwise the na sentinel narrows.
             if cpp_type == "int" and self._is_int64_builtin_init(name):
@@ -5802,12 +5806,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     cpp_type = "bool"
                 elif self._global_float_na_selection(name, ptype):
                     cpp_type = "double"
-                elif (int_selection := self._global_int_na_selection_cpp_type(name)) is not None:
-                    cpp_type = int_selection
-                elif (int_na_sum_type := self._global_int_na_sum_type(
-                    name, ptype,
-                )) is not None:
-                    cpp_type = int_na_sum_type
                 elif (
                     name in self._direct_program_tuple_binding_names
                     and ptype == PineType.BOOL

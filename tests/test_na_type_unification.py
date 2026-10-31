@@ -48,16 +48,16 @@ _SELECTION_ROWS = [
         _selection_body(
             "choose_int_na_first", "values = array.from(7)", "values.shift()", True,
         ),
-        "int choose_int_na_first(",
-        # Hand-derived: an int array element and na produce a Pine int.
+        "double choose_int_na_first(",
+        # Hand-derived: a numeric array element beside bare na needs a NaN return.
     ),
     (
         "int-na-second",
         _selection_body(
             "choose_int_na_second", "values = array.from(7)", "values.shift()", False,
         ),
-        "int choose_int_na_second(",
-        # Hand-derived: an int array element and na produce a Pine int.
+        "double choose_int_na_second(",
+        # Hand-derived: reversing the nullable arms still needs a NaN return.
     ),
     (
         "float-na-first",
@@ -260,6 +260,11 @@ def test_na_adopts_each_value_family(
 ) -> None:
     cpp = transpile(_script(body))
     assert expected_signature in cpp
+    if expected_signature.startswith("double "):
+        # A numeric return pairs its concrete arm with double NaN, never an int sentinel.
+        function_body = cpp.split(expected_signature, 1)[1].split("\n    }", 1)[0]
+        assert "na<double>()" in function_body
+        assert "na<int>()" not in function_body
     compile_cpp(cpp, label=label)
 
 
@@ -572,9 +577,11 @@ def test_numeric_binary_na_keeps_the_float_fallback(
     assert "missing = na<double>();" in numeric_na_cpp
     # A persistent declared int's constructor keeps the integer sentinel.
     assert "persistent_missing(na<int>())" in numeric_na_cpp
-    # The concrete int ternary arm proves int for na on either side.
-    assert "? (na<int>()) : (5)" in numeric_na_cpp
-    assert "? (5) : (na<int>())" in numeric_na_cpp
+    # Both declared integer selections keep double storage and a NaN arm.
+    assert "double selected_missing = 0.0;" in numeric_na_cpp
+    assert "double selected_value = 0.0;" in numeric_na_cpp
+    assert "? (na<double>()) : (5)" in numeric_na_cpp
+    assert "? (5) : (na<double>())" in numeric_na_cpp
     # 5.0 + NaN already uses double and must keep the same emitted expression.
     assert "double_result = (5.0 + na<double>());" in numeric_na_cpp
 
@@ -583,15 +590,18 @@ _NUMERIC_NA_DRIVER = r"""
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <type_traits>
 
 int main() {
     GeneratedStrategy strategy;
+    static_assert(std::is_same_v<decltype(strategy.selected_missing), double>);
+    static_assert(std::is_same_v<decltype(strategy.selected_value), double>);
     pineforge::Bar bar{100.0, 101.0, 99.0, 100.5, 10.0, 1700000000000LL};
     strategy.run(&bar, 1);
     if (!strategy.last_error().empty()) return 1;
-    std::printf("%d %d %d %d %d\n", std::isnan(strategy.y),
+    std::printf("%d %d %d %.17g %d\n", std::isnan(strategy.y),
                 is_na(strategy.missing),
-                strategy.selected_missing == std::numeric_limits<int>::min(),
+                std::isnan(strategy.selected_missing),
                 strategy.selected_value, std::isnan(strategy.double_result));
 }
 """
@@ -618,7 +628,7 @@ plot(na(y) ? 1 : 0)
 
 
 _INT_NA_SUM_ROWS = [
-    # Integer 5 plus na is na, stored as the destination int's sentinel.
+    # Integer 5 plus na is NaN, retained in the destination's double storage.
     pytest.param("n + na", "(5 + na<double>())", id="na-right"),
     # Na plus integer 5 is na with the operands in their written order.
     pytest.param("na + n", "(na<double>() + 5)", id="na-left"),
@@ -633,35 +643,31 @@ def _int_na_sum_source(expression: str) -> str:
 
 
 @pytest.mark.parametrize("expression,arithmetic", _INT_NA_SUM_ROWS)
-def test_integer_na_sum_uses_a_guarded_integer_sink(
+def test_integer_na_sum_keeps_double_storage(
     expression: str, arithmetic: str,
 ) -> None:
     cpp = transpile(_int_na_sum_source(expression))
-    # The authored int keeps int storage; the NaN sum crosses one guarded cast.
-    assert "int missing_sum = 0;" in cpp
-    assert (
-        f"missing_sum = [&](){{ auto _pf_v = ({arithmetic}); "
-        "if constexpr (std::is_floating_point_v<decltype(_pf_v)>) "
-        "return (_pf_v >= -2147483648.0 && _pf_v < 2147483648.0) "
-        "? (int)_pf_v : na<int>(); "
-        "else return is_na(_pf_v) ? na<int>() : (int)_pf_v; }();"
-    ) in cpp
+    # The declared int stores the NaN sum directly, without a narrowing cast.
+    assert "double missing_sum = 0.0;" in cpp
+    assert f"missing_sum = {arithmetic};" in cpp
+    assert "auto _pf_v = " not in cpp
     compile_cpp(cpp, label="integer sum with bare na")
 
 
 _INT_NA_SUM_DRIVER = r"""
+#include <cmath>
 #include <cstdio>
 #include <limits>
 #include <type_traits>
 
 int main() {
     GeneratedStrategy strategy;
-    static_assert(std::is_same_v<decltype(strategy.missing_sum), int>);
+    static_assert(std::is_same_v<decltype(strategy.missing_sum), double>);
     Bar bar{100.0, 101.0, 99.0, 100.5, 10.0, 1700000000000LL};
     strategy.run(&bar, 1);
     if (!strategy.last_error().empty()) return 1;
     std::printf("%d %d\n",
-                strategy.missing_sum == std::numeric_limits<int>::min(),
+                std::isnan(strategy.missing_sum),
                 strategy.missing_value);
 }
 """
@@ -669,10 +675,10 @@ int main() {
 
 @pytest.mark.parametrize("opt", ["-O0", "-O2"])
 @pytest.mark.parametrize("expression,arithmetic", _INT_NA_SUM_ROWS)
-def test_integer_na_sum_stores_the_integer_sentinel(
+def test_integer_na_sum_stores_nan(
     expression: str, arithmetic: str, opt: str,
 ) -> None:
-    # Both sums are na: the stored int is INT_MIN and Pine na() is true.
+    # Both sums are NaN: the stored double is NaN and Pine na() is true.
     assert run_emitted_tu(
         transpile(_int_na_sum_source(expression)), _INT_NA_SUM_DRIVER,
         opt=opt, label="integer sum with bare na",
@@ -721,7 +727,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         "float y = accept_float(close > open ? k : na)\n",
         "accept_float(((",
         "? (k) : (na<double>())",
-        # k keeps its int sentinel while the float argument selects NaN or 1.
+        # The declared int and the float argument both select NaN or 1.
         id="int-sink-and-float-argument",
     ),
     pytest.param(
@@ -820,7 +826,7 @@ def _float_na_ternary_source(body: str) -> str:
 
 
 @pytest.mark.parametrize("body,conversion,arms", _FLOAT_NA_TERNARY_ROWS)
-def test_float_na_ternary_preserves_the_integer_sentinel(
+def test_float_na_ternary_preserves_nan_in_both_targets(
     body: str, conversion: str, arms: str,
 ) -> None:
     cpp = transpile(_float_na_ternary_source(body))
@@ -830,14 +836,14 @@ def test_float_na_ternary_preserves_the_integer_sentinel(
     assert conversion in cpp
     assert "auto _pf_w = (" not in cpp
     assert arms in cpp
-    # The companion int sink still stores int and selects na<int>() on a bear bar.
-    assert "int k = 0;" in cpp
+    # The companion declared int also uses double storage and a NaN missing arm.
+    assert "double k = 0.0;" in cpp
     k_assignment = next(
         line.strip() for line in cpp.splitlines()
         if line.strip().startswith("k = ")
     )
-    assert "? (1) : (na<int>())" in k_assignment
-    assert "na<double>()" not in k_assignment
+    assert "? (1) : (na<double>())" in k_assignment
+    assert "na<int>()" not in k_assignment
     compile_cpp(cpp, label="float-na-ternary")
 
 
@@ -850,7 +856,7 @@ _FLOAT_NA_TERNARY_DRIVER = r"""
 int main() {
     GeneratedStrategy bear_strategy;
     GeneratedStrategy bull_strategy;
-    static_assert(std::is_same_v<decltype(bear_strategy.k), int>);
+    static_assert(std::is_same_v<decltype(bear_strategy.k), double>);
     pineforge::Bar bear{100.0, 101.0, 98.0, 99.0, 10.0, 1700000000000LL};
     pineforge::Bar bull{100.0, 102.0, 99.0, 101.0, 10.0, 1700000000000LL};
     bear_strategy.run(&bear, 1);
@@ -859,9 +865,9 @@ int main() {
         return 1;
     std::printf("%d %d %d %d %d %d\n",
                 std::isnan(bear_strategy.y), bear_strategy.missing_value,
-                bear_strategy.k == std::numeric_limits<int>::min(),
+                std::isnan(bear_strategy.k),
                 bull_strategy.y == 1.0, bull_strategy.missing_value,
-                bull_strategy.k == 1);
+                bull_strategy.k == 1.0);
 }
 """
 
@@ -877,5 +883,5 @@ def test_float_na_ternary_is_nan_on_a_bear_bar(
         opt=opt,
         label="float-na-ternary",
     )
-    # Bear: float NaN, na(y), int sentinel; bull: y == 1, no na, k == 1.
+    # Bear: both doubles are NaN and na(y) is true; bull: both are 1, na(y) is false.
     assert output == "1 1 1 1 0 1\n"
