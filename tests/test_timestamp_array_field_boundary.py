@@ -3,6 +3,7 @@
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
 from tests.test_timestamp_callable_width import HEADER, _run
 
@@ -17,7 +18,6 @@ MESSAGE = "Timestamp values in Book.stamps require 64-bit array field storage"
 @pytest.mark.parametrize("write", [
     "b.stamps.unshift(time)",
     "array.unshift(b.stamps, time)",
-    "b.stamps.push(value = time)",
     "array.push(value = time, id = b.stamps)",
     "b.stamps.insert(0, time)",
     "b.stamps.push(0)\nb.stamps.set(0, time)",
@@ -34,6 +34,18 @@ def test_epoch_field_storage_has_a_clear_compile_failure(write):
     assert MESSAGE in cpp
     with pytest.raises(AssertionError, match=MESSAGE):
         compile_cpp(cpp)
+
+
+def test_array_method_named_argument_is_a_known_gap():
+    # Named arguments on array METHOD calls are a separate finding
+    # (class: named arguments on array.* calls, see the A4 spec).
+    # Update this pin deliberately when that binding gap is fixed.
+    # Unchanged pin: push has no keyword slots, so args=[] raises the arity error.
+    with pytest.raises(CompileError, match=r"array\.push: wrong number of arguments$"):
+        transpile(HEADER + '''var arr = array.new<float>()
+arr.push(value = 1.0)
+plot(close)
+''')
 
 
 @pytest.mark.parametrize("constructor", [
