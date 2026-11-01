@@ -12,7 +12,7 @@ import pytest
 
 from tests._legacy_cpp import legacy_cpp, without_restore_script_state, without_source_rename
 from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError, Phase
+from pineforge_codegen.errors import CompileError, Level, Phase
 from tests.test_map_param_methods import _compile_and_run
 
 
@@ -180,6 +180,38 @@ observed = map.values.get("key")
 '''
 
 
+def test_namespace_name_is_refused_for_a_user_defined_map_holder():
+    with pytest.raises(CompileError) as caught:
+        transpile(_NESTED_LEXICAL_MAP_ROOT_SOURCE, filename="map-holder.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    # A Holder object named map collides with the namespace used by its field.
+    assert diagnostic.code == "PF-E2065"
+    assert diagnostic.message == (
+        "Invalid object name: map. Namespaces of built-ins cannot be used."
+    )
+    assert diagnostic.args == {"name": "map"}
+    assert diagnostic.hint is None
+    assert diagnostic.location.file == "map-holder.pine"
+    # The typed declaration starts at column 1 after two header and two type lines.
+    assert (diagnostic.location.line, diagnostic.location.col) == (5, 1)
+
+
+def test_map_field_on_a_user_defined_object_runtime():
+    source = '''//@version=6
+strategy("nested map root")
+type Holder
+    map<string, int> values
+Holder holder = Holder.new(map.new<string, int>())
+holder.values.put("key", 7)
+observed = holder.values.get("key")
+'''
+    # The same field map receives 7 at "key" before get reads it on the first bar.
+    assert _run_observed(transpile(source)) == 7.0
+
+
 _BLOCK_LOCAL_MAP_ISOLATION_SOURCE = '''//@version=6
 strategy("block map isolation")
 target = map.new<string, int>()
@@ -194,6 +226,54 @@ if bar_index >= 0
 map.put(target, "outside", 3)
 observed := observed * 10 + map.get(target, "outside")
 '''
+
+_BLOCK_LOCAL_VALUES_ISOLATION_SOURCE = '''//@version=6
+strategy("block map isolation")
+target = map.new<string, int>()
+observed = 0
+if bar_index >= 0
+    localValues = map.new<string, int>()
+    localValues.put("local", 9)
+    observed := localValues.get("local")
+if bar_index >= 0
+    map.put(target, "sibling", 2)
+    observed := observed * 10 + map.get(target, "sibling")
+map.put(target, "outside", 3)
+observed := observed * 10 + map.get(target, "outside")
+'''
+
+
+def test_map_namespace_read_rejects_an_expired_block_local():
+    with pytest.raises(CompileError) as caught:
+        transpile(_BLOCK_LOCAL_MAP_ISOLATION_SOURCE, filename="block-map.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2054"
+    assert diagnostic.message == "Block-local variable 'map' is read outside its block."
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "block-map.pine"
+    # Lines 5-8 own map; the sibling's first read is line 10 after four spaces.
+    assert (diagnostic.location.line, diagnostic.location.col) == (10, 5)
+
+
+def test_map_namespace_calls_after_a_differently_named_block_local_runtime():
+    cpp = transpile(_BLOCK_LOCAL_VALUES_ISOLATION_SOURCE)
+    driver = r'''
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    strategy.run(&bar, 1);
+    if (!strategy.last_error().empty()) {
+        std::cerr << strategy.last_error() << "\n";
+        return 2;
+    }
+    std::cout << strategy.observed << "\n";
+}
+'''
+    # The local contributes 9, then namespace reads give 9*10+2=92 and 92*10+3=923.
+    assert float(_compile_and_run(cpp + driver)) == 923.0
 
 
 _FOR_BLOCK_LOCAL_MAP_SOURCE = '''//@version=6
@@ -212,23 +292,12 @@ for i = 0 to 0
         (
             _LATER_GLOBAL_MAP_SOURCE,
             "7a2128df4b4c4f4e10af1c129c3f6430b0f66974b3d33a1ae7c891439f5611b2",
-            34.0,
-        ),
-        (
-            _NESTED_LEXICAL_MAP_ROOT_SOURCE,
-            # The Holder arena now calls coded UDT stop helpers.
-            "ef7d12496ae3c8e07e8bbf7c20efb5a3aaee2f69f786c67747d804aec57e4e45",
-            7.0,
-        ),
-        (
-            _BLOCK_LOCAL_MAP_ISOLATION_SOURCE,
-            "36cd0a4257e71df05100ec7f6840e10c268b49c7eca75fc491d489edbe07d96e",
-            923.0,
+            34.0,  # The namespace read returns 3 and the later receiver read returns 4: 3*10+4.
         ),
         (
             _FOR_BLOCK_LOCAL_MAP_SOURCE,
             "173e0a55a404e280c651be398382a7cd3e852baf3b78fc646a4f4fce1cad8e97",
-            8.0,
+            8.0,  # The sole iteration puts 8 at "key" and reads it before leaving the block.
         ),
     ],
 )
@@ -239,6 +308,10 @@ def test_map_namespace_resolution_respects_source_order_and_lexical_roots(
 ):
     cpp = transpile(source)
     assert sha256(legacy_cpp(cpp).encode()).hexdigest() == expected_hash
+    assert _run_observed(cpp) == expected_value
+
+
+def _run_observed(cpp: str) -> float:
     driver = r'''
 #include <iostream>
 int main() {
@@ -252,7 +325,7 @@ int main() {
     std::cout << strategy.observed << "\n";
 }
 '''
-    assert float(_compile_and_run(cpp + driver)) == expected_value
+    return float(_compile_and_run(cpp + driver))
 
 
 def _typed_method_source(expression: str) -> str:

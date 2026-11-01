@@ -160,6 +160,23 @@ plot(v)
     assert "_req_sec_0 = ((bar.close * 3) + (10 * 0));" in _eval_bodies(transpile(src))
 
 
+def test_method_integer_default_keeps_its_type_under_a_local_shadow():
+    src = """//@version=6
+strategy("method default local shadow")
+LEN = 3
+method g(float x, int n = LEN) => x * n
+f() =>
+    float LEN = 10.0
+    close.g()
+v = request.security(syminfo.tickerid, "60", f())
+plot(v)
+"""
+    cpp = transpile(src)
+    # The omitted n uses the global integer 3, so the requested close is multiplied by 3.
+    assert "_req_sec_0 = (bar.close * 3);" in _eval_bodies(cpp)
+    compile_env.compile_cpp(cpp, label="security-method-default-local-shadow")
+
+
 @pytest.mark.parametrize("name, src", [
     ("compound history", """//@version=6
 strategy("global history")

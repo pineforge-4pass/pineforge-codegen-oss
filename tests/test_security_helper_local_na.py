@@ -3,8 +3,8 @@ chart's locals do.
 
 The linear helper emitter declared a local of its declaration's C++ type
 from the builder's text as is: ``int k = na`` became ``int ... =
-na<double>()`` (a NaN narrowed implicitly: undefined, 0 on arm64), ``bool b =
-na`` a NaN that reads true, and ``int k = math.round(x)`` narrowed a double
+na<double>()`` (a NaN narrowed implicitly: undefined, 0 on arm64), and
+``int k = math.round(x)`` narrowed a double
 without the na-preserving cast (CLAUDE.md quirk 9). A local now takes
 ``na<T>()`` of its own type and narrows through ``_coerce_int_slot``, on its
 declaration and on each ``:=``. Every earlier build had the defect in a bare
@@ -24,6 +24,7 @@ def _eval_bodies(cpp: str) -> str:
 
 
 def test_na_locals_take_their_own_type():
+    # A bool cannot be na in Pine v6; int and string locals remain nullable.
     src = """//@version=6
 strategy("helper na locals")
 f() =>
@@ -38,22 +39,15 @@ g() =>
     if close > open
         s := "up"
     s == "up" ? 1.0 : 0.0
-mb(float x) =>
-    bool up = na
-    if x > open
-        up := true
-    up ? 1.0 : -1.0
 a = request.security(syminfo.tickerid, "60", f())
 b = request.security(syminfo.tickerid, "60", g())
-c = request.security(syminfo.tickerid, "60", mb(close))
-plot(a + b + c)
+plot(a + b)
 """
     cpp = transpile(src)
     body = _eval_bodies(cpp)
     assert re.search(r"int _sec0_f_\d+_k = na<int>\(\);", body), body
     assert re.search(r"_sec0_f_\d+_k = na<int>\(\);", body.split("= na<int>();", 1)[1]), body
     assert re.search(r"std::string _sec1_g_\d+_s = na<std::string>\(\);", body), body
-    assert re.search(r"bool _sec2_mb_\d+_up = na<bool>\(\);", body), body
     assert "na<double>()" not in body, body
     compile_env.compile_cpp(cpp, label="security-helper-na-locals")
 

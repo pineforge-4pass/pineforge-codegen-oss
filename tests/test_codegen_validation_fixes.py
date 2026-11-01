@@ -2,7 +2,7 @@
 
 Covers ten fix families:
   1. drawing-handle ``na`` reset/assignment (Box{}/Line{}/... not na<double>()),
-     plus typed ``na`` for string/int/bool declaration init.
+     plus typed ``na`` for string/int declaration init.
   2. void drawing setter used as a UDF's last expression / if-branch value.
   3. ``request.security`` whose timeframe is a UDF parameter (resolved from the
      function's call sites; dead-code UDFs fall back to the chart timeframe).
@@ -57,18 +57,17 @@ def test_drawing_handle_na_reset_emits_brace_init():
     assert "stopLine = na<double>()" not in cpp
 
 
-def test_string_and_bool_na_init_uses_typed_na():
+def test_string_na_init_uses_typed_na():
+    # A bool cannot be na in Pine v6; this fixture protects nullable strings.
     cpp = _cpp(
         "f() =>\n"
         "    string tag = na\n"
-        "    bool flag = na\n"
         "    tag := \"x\"\n"
         "    tag\n"
         "_z = f()\n"
         "plot(close)"
     )
     assert "std::string tag = na<std::string>()" in cpp
-    assert "bool flag = na<bool>()" in cpp
     assert "std::string tag = na<double>()" not in cpp
 
 

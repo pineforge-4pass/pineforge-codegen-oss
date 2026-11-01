@@ -133,7 +133,7 @@ SUPPORTED_COLOR_CONST: frozenset[str] = frozenset(COLOR_CONST_MAP)
 SUPPORTED_COLOR_FUNC: frozenset[str] = frozenset({"new", "rgb", "r", "g", "b", "t"})
 # Cosmetic color builders with no backtest-logic effect. Warned (not rejected);
 # codegen evaluates the arguments (their side effects and history are
-# TradingView's) and emits a benign default color (0 = na color).
+# TradingView's) and emits transparent black (0) as a placeholder.
 # color.from_gradient is a charting/plot helper that only tints visual output.
 COSMETIC_COLOR_FUNC: frozenset[str] = frozenset({"from_gradient"})
 SUPPORTED_TIMEFRAME_FUNC: frozenset[str] = frozenset({"change", "in_seconds"})
@@ -305,12 +305,10 @@ NOT_YET_FUNC: dict[str, str] = {
 # cast moved to COSMETIC_BARE_FUNCS below.)
 UNSUPPORTED_BARE_FUNCS: dict[str, str] = {}
 
-# Bare (no-namespace) cosmetic casts with no backtest-logic effect. Warned
-# (not rejected); codegen emits a benign default. ``color(x)`` is a Pine color
-# cast — colors never affect trade logic, so codegen emits a default color
-# (0 = na color) and the strategy keeps running.
+# Bare casts retain their values: na() and channel reads can affect orders.
+# Keep warning that visual output is not rendered.
 COSMETIC_BARE_FUNCS: dict[str, str] = {
-    "color": "color(...) cast has no effect in PineForge backtests (visual only); it emits a default color.",
+    "color": "color(...) cast preserves color values and na; PineForge does not render visual output.",
 }
 
 # Whole namespaces with NO codegen support. Any call into one of these
@@ -460,6 +458,11 @@ def import_refusal(node: ImportStmt) -> str:
     message = f"Import is not supported: '{import_spelling(node)}'"
     reason = (node.annotations or {}).get("unresolved_reason")
     return f"{message}: {reason}" if reason else message
+
+
+def import_refusal_hint() -> str:
+    return ("Libraries are supported only when the library source is supplied: "
+            "remove the import, or paste the library code into the script.")
 
 
 def import_is_builtin_namespace_no_op(program: Program, node: ImportStmt) -> bool:
@@ -717,6 +720,8 @@ class SupportChecker:
         self._collect_scalar_rebinds(self._ast)
         self._index_security_symbol_bindings()
         self._count_bindings(self._ast)
+        from .codegen.strategy_declaration import declaration_only_constants
+        self._strategy_constant_decls = declaration_only_constants(self._ast)
         for stmt in self._ast.body:
             self._visit(stmt)
         return self._diagnostics
@@ -1161,12 +1166,18 @@ class SupportChecker:
 
     # -- Diagnostic emission --
 
-    def _err(self, node: ASTNode | None, message: str, hint: str | None = None) -> None:
+    def _err(
+        self, node: ASTNode | None, message: str, hint: str | None = None,
+        *, allow_switch_warning: bool = True,
+    ) -> None:
         self._diagnostics.append(Diagnostic(
             # The checker never visited a switch's non-default arms: what it
             # finds there warns, and the arm keeps the lowering it compiled
-            # to (``_visit_SwitchStmt``).
-            level=Level.WARNING if self._switch_arm_depth else Level.ERROR,
+            # to (``_visit_SwitchStmt``). Calls without a value lowering must
+            # still fail before codegen.
+            level=(Level.WARNING
+                   if self._switch_arm_depth and allow_switch_warning
+                   else Level.ERROR),
             phase=Phase.ANALYZER,
             location=_loc(node, self._filename),
             message=message,
@@ -1358,7 +1369,7 @@ class SupportChecker:
 
     def _visit_ImportStmt(self, node: ImportStmt) -> None:
         if not import_is_builtin_namespace_no_op(self._ast, node):
-            self._err(node, import_refusal(node))
+            self._err(node, import_refusal(node), hint=import_refusal_hint())
 
     def _visit_VarDecl(self, node: VarDecl) -> None:
         self._check_tuple_literal_value(node.value)
@@ -1395,7 +1406,10 @@ class SupportChecker:
         # ``varip`` is supported: a historical bar executes once, so it keeps
         # its value like ``var``, and codegen leaves it out of the
         # calc_on_order_fills rollback (``_varip_state_member_names``).
-        self._visit_children(node)
+        if id(node) in getattr(self, "_strategy_constant_decls", ()):
+            self._visit_children_const_ok(node)
+        else:
+            self._visit_children(node)
 
     def _visit_Assignment(self, node: Assignment) -> None:
         self._check_bound_array_concat(node.value)
@@ -1696,11 +1710,17 @@ class SupportChecker:
         # Not-yet-implemented. Check qualified name (e.g. "timeframe.from_seconds")
         # first, then bare name (e.g. "max_bars_back") for back-compat entries.
         if full in NOT_YET_FUNC:
-            self._err(node, f"{full}(...) is not implemented yet.", hint=NOT_YET_FUNC[full])
+            self._err(
+                node, f"{full}(...) is not implemented yet.",
+                hint=NOT_YET_FUNC[full], allow_switch_warning=False,
+            )
             self._visit_children(node)
             return
         if ns is not None and name in NOT_YET_FUNC:
-            self._err(node, f"{name}(...) is not implemented yet.", hint=NOT_YET_FUNC[name])
+            self._err(
+                node, f"{name}(...) is not implemented yet.",
+                hint=NOT_YET_FUNC[name], allow_switch_warning=False,
+            )
             self._visit_children(node)
             return
         if (ns is None and name in POSITIONAL_BUILTINS
@@ -1708,8 +1728,7 @@ class SupportChecker:
             self._visit_children(node)
             return
 
-        # Bare cosmetic casts (e.g. `color(na)` -> default color). No backtest
-        # effect; warn and let codegen emit a benign default color.
+        # Bare color casts preserve values while retaining the visual warning.
         if ns is None and name in COSMETIC_BARE_FUNCS:
             self._warn(node, COSMETIC_BARE_FUNCS[name])
             self._visit_children(node)
@@ -2101,8 +2120,9 @@ class SupportChecker:
         which the generic child walk does not enter, so every arm but the
         default went unchecked: a request of another symbol in one kept no
         lowering (``TradingView/Request/3``'s ``cryptoDerivativeMetric``).
-        Such an arm gets its lowerings now; what the checker would refuse
-        there warns instead, so a script that compiled keeps compiling."""
+        Such an arm gets its lowerings now; existing arm lowerings retain
+        warnings so a script that compiled keeps compiling. Calls listed
+        in NOT_YET_FUNC remain errors."""
         self._visit(node.expr)
         self._switch_arm_depth += 1
         try:

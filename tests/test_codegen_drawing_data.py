@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._compile import compile_cpp, skip_if_no_compile_env
 
 
@@ -263,7 +263,7 @@ if not na(h) and not na(a) and not na(b)
     compile_cpp(cpp, label="drawing-ternary-udf-tuple")
 
 
-def test_drawing_handle_ternary_na_drawing_parameter_reassignment_compile():
+def test_drawing_handle_ternary_rejects_parameter_reassignment():
     src = '''//@version=6
 strategy("drawing ternary parameter")
 cond = close > open
@@ -275,8 +275,34 @@ globalLine := update(globalLine)
 if not na(globalLine)
     strategy.entry("L", strategy.long)
 '''
+    with pytest.raises(CompileError) as caught:
+        transpile(src, filename="drawing-parameter.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2059"
+    assert diagnostic.message == "Function parameter 'h' cannot be reassigned."
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "drawing-parameter.pine"
+    # Four source lines precede the write; four spaces put h at column 5.
+    assert (diagnostic.location.line, diagnostic.location.col) == (5, 5)
+
+
+def test_drawing_handle_ternary_na_local_reassignment_compile():
+    src = '''//@version=6
+strategy("drawing ternary parameter")
+cond = close > open
+update(line initial) =>
+    line h = initial
+    h := cond ? line.new(bar_index, close, bar_index + 1, close) : na
+    h
+var line globalLine = na
+globalLine := update(globalLine)
+if not na(globalLine)
+    strategy.entry("L", strategy.long)
+'''
     cpp = transpile(src)
-    body = cpp.split("Line update(Line& h) {", 1)[1].split("    }", 1)[0]
+    body = cpp.split("Line update(Line& initial) {", 1)[1].split("    }", 1)[0]
     assert "h = ((cond) ? (_pf_collect_lines_(pf_line_new" in body
     assert ": (Line{}));" in body
     assert "na<double>()" not in body

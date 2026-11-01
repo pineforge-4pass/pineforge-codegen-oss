@@ -15,8 +15,8 @@ script's own requests manifest (``tests/_pine_libraries.py``).
 
 On BINANCE:ETHUSDT.P 15 the build reproduces all 288 exit Signals of the
 tape, on 1D all 45 (the corpus feed cut into UTC days). The same library
-relabeled ``//@version=6`` misses every 15-minute exit instant, so the tape
-tells the two versions apart. A negative array index stops a v5 library's
+relabeled ``//@version=6`` is refused because a bool cannot be na in Pine v6.
+A negative array index stops a v5 library's
 run where v6 counts from the array's end: TradingView stops ``xc_v5_negindex``
 (the same read in a v5 strategy) on bar 10 with RE10045 "Index -1 is out of
 bounds, array size is 3".
@@ -145,12 +145,20 @@ def test_a_v5_library_replays_the_daily_tape(runs):
     assert all(s.endswith(" f D") for v in tape.values() for s in v if s.startswith("k "))
 
 
-def test_the_library_relabeled_v6_misses_the_tape(runs):
-    engine, base, feed15, _feed1d, outcomes = runs
-    ok(outcomes, "as_v6")
-    tape = tape_signals("xc_v5_lib_tv_trades.csv")
-    got = engine_signals(closed_trades(engine, base / "as_v6", feed15))
-    assert len(missed(tape, got)) == len(tape)
+def test_the_library_relabeled_v6_refuses_bool_na(runs):
+    _engine, _base, _feed15, _feed1d, outcomes = runs
+    outcome = outcomes["as_v6"]
+    assert outcome.error is not None
+    envelope = outcome.transpiled
+    assert envelope is not None and envelope["ok"] is False
+    # A bool cannot be na in Pine v6; boolna's sole invalid declaration is line 72.
+    assert len(envelope["diagnostics"]) == 1
+    diagnostic = envelope["diagnostics"][0]
+    assert diagnostic["severity"] == "error"
+    assert diagnostic["code"] == "PF-E2042"
+    assert diagnostic["message"] == "Invalid bool declaration: a bool cannot be na in Pine v6."
+    # Four spaces place bool bl = na at column 5 in the unchanged library source.
+    assert (diagnostic["line"], diagnostic["col"]) == (72, 5)
 
 
 def test_a_negative_index_stops_a_v5_librarys_run(runs):

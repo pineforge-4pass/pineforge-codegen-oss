@@ -131,8 +131,8 @@ FALLBACKS = [
     HEADER.replace("calc_on_order_fills=true", "calc_on_order_fills=false") + "var a = array.from(2, 5)\na.push(7)\n",
     # An omitted declaration does not enroll any root.
     HEADER.replace(", calc_on_order_fills=true", "") + "var a = array.from(2, 5)\na.push(7)\n",
-    # A true expression is still not the required literal spelling.
-    HEADER.replace("calc_on_order_fills=true", "calc_on_order_fills=1 == 1") + "var a = array.from(2, 5)\na.push(7)\n",
+    # One does not equal two, so the constant expression disables fill recalculation.
+    HEADER.replace("calc_on_order_fills=true", "calc_on_order_fills=1 == 2") + "var a = array.from(2, 5)\na.push(7)\n",
     # Varip belongs outside rollback and must not acquire a journal.
     HEADER + "varip a = array.from(2, 5)\na.push(7)\n",
     # A later whole-vector replacement invalidates enrollment from the outset.

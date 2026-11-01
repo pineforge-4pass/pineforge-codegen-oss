@@ -133,7 +133,7 @@ def test_for_loop():
 
 
 def test_na_translation():
-    src = '//@version=6\nstrategy("T")\nx = na\n'
+    src = '//@version=6\nstrategy("T")\nfloat x = na\n'
     cpp = _generate(src)
     assert "na<double>()" in cpp
 

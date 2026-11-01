@@ -24,6 +24,7 @@ import re
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError, Level, Phase
 
 from tests._compile import compile_cpp, have_compile_env
 
@@ -121,20 +122,26 @@ plot(px)
 
 
 # --------------------------------------------------------------------------
-# (e) bool var -> na<bool>()
+# (e) a bool var cannot receive bare na in Pine v6
 # --------------------------------------------------------------------------
-def test_bool_var_na_reassign_retypes_to_bool():
+def test_bool_var_na_reassign_is_refused():
+    # A bool cannot be na in Pine v6; a valid initializer isolates the reset.
     src = """//@version=6
 strategy("t")
-var bool flag = na
+var bool flag = false
 if close > open
     flag := na
 plot(na(flag) ? na : 1.0)
 """
-    cpp = transpile(src)
-    assert "bool flag;" in cpp
-    assert "flag = na<bool>();" in cpp, cpp
-    assert "flag = na<double>();" not in cpp
+    with pytest.raises(CompileError) as caught:
+        transpile(src)
+    # The only invalid value is the indented assignment on line 5, column 5.
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.phase == Phase.ANALYZER
+    assert diagnostic.code == "PF-E2044"
+    assert (diagnostic.location.line, diagnostic.location.col) == (5, 5)
 
 
 # --------------------------------------------------------------------------
