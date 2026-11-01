@@ -165,7 +165,8 @@ value = f(close) + f(open)'''
 
 def test_immutable_global_is_not_mutated_by_a_same_named_local():
     body = '''value = 5
-f(float value) =>
+f(float initial) =>
+    float value = initial
     value := value + 1
     value
 changed = f(close)
@@ -322,6 +323,58 @@ def test_host_reads_names_policy_setter_for_non_readers_only():
     assert "set_trade_history_streamable" in non_reader["host_reads"]
     assert "set_trade_history_streamable" not in reader["host_reads"]
     assert "closed_trade_profit" in reader["host_reads"]
+
+
+@pytest.mark.parametrize(("cpp", "reads"), [
+    pytest.param("cfg.initial_capital = 5000.0;", set(), id="config-field"),
+    pytest.param("overrides.initial_capital = std::stod(value);", set(), id="override-field"),
+    pytest.param("cfg\n    .initial_capital = 5000.0;", set(), id="dot-on-the-next-line"),
+    pytest.param("ring.replace(member, value);", set(), id="method-of-another-object"),
+    pytest.param("cached_run_ = versions.run();", set(), id="member-of-a-version-clock"),
+    pytest.param("double x = initial_capital;", {"initial_capital"}, id="bare-read"),
+    pytest.param("double x = this->initial_capital;", {"initial_capital"}, id="this-read"),
+    pytest.param("this->replace(a, b);", {"replace"}, id="this-call"),
+    pytest.param("strat->run(bars, n);", {"run"}, id="strategy-pointer-call"),
+    pytest.param("x = bar_index_ + cfg.initial_capital;", {"bar_index_"}, id="mixed"),
+    pytest.param(
+        "template <typename H, typename V>\nvoid replace(H& handle, V&& value) {\n"
+        "    handle = std::forward<V>(value);\n}\n",
+        set(), id="helper-method-definition",
+    ),
+    pytest.param("void replace(int a) const {\n}\n", set(), id="const-helper-method"),
+    pytest.param(
+        "void restore_script_state() override {\n}\n", {"restore_script_state"},
+        id="host-override-definition",
+    ),
+    pytest.param("void replace(int a) const override {\n}\n", {"replace"}, id="const-override"),
+    pytest.param("return replace(a, b);", {"replace"}, id="call-after-return"),
+    pytest.param("if (ready) replace(a, b);", {"replace"}, id="call-after-condition"),
+    pytest.param("x = 2.0 * replace(a);", {"replace"}, id="call-in-an-expression"),
+])
+def test_scan_counts_host_members_and_not_members_of_other_objects(cpp, reads):
+    assert scan_host_reads(cpp) == reads
+    recorded: set[str] = set()
+    HostReadLines(recorded).append(cpp)
+    assert recorded == reads
+
+
+def test_host_reads_omit_the_config_field_of_the_declared_capital():
+    declaration = '//@version=6\nstrategy("config capital", initial_capital=5000)\n'
+    body = 'strategy.entry("L", strategy.long)\n'
+    cpp = transpile(declaration + body)
+    assert "cfg.initial_capital = 5000.0;" in cpp
+    reads = set(receipt(body, declaration)["host_reads"])
+    assert "initial_capital" not in reads
+    assert scan_host_reads(cpp) <= reads
+
+
+def test_host_reads_omit_the_array_journal_helpers_own_replace_method():
+    source = (Path(__file__).parent / "fixtures" / "array_history_tv" / "ahist_ref.pine").read_text(
+        encoding="utf-8")
+    cpp = transpile(source)
+    assert "replace(" in cpp
+    assert "replace" not in receipt(source, "")["host_reads"]
+    assert "replace" not in scan_host_reads(cpp)
 
 
 def test_host_strings_do_not_create_reads():

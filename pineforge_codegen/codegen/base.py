@@ -331,7 +331,7 @@ from .security import SecurityEmitter
 # constructor, on_bar, extern "C") plus the per-function emission helpers
 # (_emit_func_def / _emit_udt_method_cpp_name) used by both regular
 # Pine functions and UDT instance methods.
-from .emit_top import TopLevelEmitter
+from .emit_top import ENUM_STRING_INCLUDE, TopLevelEmitter
 
 # StmtVisitor owns the statement-level visitors (_visit_stmt dispatcher
 # plus the per-kind handlers for var-decl, assignment, tuple-assign,
@@ -2207,6 +2207,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for vname, ptype, _init_str in self.ctx.var_members:
             if self._safe_name(vname) == orig_safe:
                 cpp_type = PINE_TYPE_TO_CPP.get(ptype, "double")
+                if cpp_type == "int" and self._numeric_na_member(vname):
+                    cpp_type = "double"
                 if cpp_type == "int" and self._is_int64_builtin_init(vname):
                     cpp_type = "int64_t"
                 collection_spec = self._callable_var_collection_spec(
@@ -2341,19 +2343,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return None
 
     def _compute_max_bars_back_cap(self) -> int | None:
-        """Scan the AST for max_bars_back directives (strategy() kwarg AND the
-        bare function call) and return the largest positive integer requested,
-        or None if none is present / none is a usable literal."""
+        """Combine the resolved declaration with literal max_bars_back calls."""
         ast = getattr(self.ctx, "ast", None)
         if ast is None:
             return None
         caps: list[int] = []
+        declared = self.ctx.strategy_params.get("max_bars_back")
+        if (type(declared) in (int, float) and declared > 0
+                and (type(declared) is int or declared.is_integer())):
+            caps.append(int(declared))
         for node in self._walk_ast(ast):
-            if isinstance(node, StrategyDecl):
-                val = self._int_literal_value(node.kwargs.get("max_bars_back"))
-                if val is not None and val > 0:
-                    caps.append(val)
-            elif (
+            if (
                 isinstance(node, FuncCall)
                 and isinstance(node.callee, Identifier)
                 and node.callee.name == "max_bars_back"
@@ -4707,15 +4707,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._array_journal_calls: dict[int, str] = {}
         if self._uses_map or self._uses_matrix or self._udt_defs:
             return
-        from .capabilities import STRATEGY_PARAMETERS
-        position = STRATEGY_PARAMETERS.index("calc_on_order_fills")
-        enabled = False
-        for statement in self.ctx.ast.body:
-            if isinstance(statement, StrategyDecl):
-                flag = statement.kwargs.get("calc_on_order_fills")
-                if flag is None and len(statement.args) > position:
-                    flag = statement.args[position]
-                enabled = isinstance(flag, BoolLiteral) and flag.value is True
+        enabled = self.ctx.strategy_params.get("calc_on_order_fills") is True
         if not enabled and sharing is None:
             return
 
@@ -5026,6 +5018,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._closed_trade_folds[plan.for_node_id] = (node, plan)
 
     def _generate_cpp(self) -> str:
+        self._uses_enum_string_lookup = False
         # Every input is keyed by its title: refuse a non-constant one first,
         # then flag inputs one override key would reach together.
         self._check_input_titles()
@@ -5692,6 +5685,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     lines.append(f"    {self._safe_name(udt_type)} {safe};")
                 continue
             cpp_type = PINE_TYPE_TO_CPP.get(ptype, "double")
+            if cpp_type == "int" and self._numeric_na_member(name):
+                cpp_type = "double"
             # Promote int->int64_t when init RHS is an int64-returning builtin
             # (time/time_close/timestamp), otherwise the na sentinel narrows.
             if cpp_type == "int" and self._is_int64_builtin_init(name):
@@ -5809,6 +5804,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     cpp_type = "int64_t"
                 elif self._global_bool_hint(name):
                     cpp_type = "bool"
+                elif self._global_float_na_selection(name, ptype):
+                    cpp_type = "double"
                 elif (
                     name in self._direct_program_tuple_binding_names
                     and ptype == PineType.BOOL
@@ -6081,6 +6078,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         exports: list[str] = []
         emit_capabilities_exports(self, exports)
         lines[self._capabilities_export_at:self._capabilities_export_at] = exports
+        # Function bodies and security evaluators can select the enum lookup.
+        if self._uses_enum_string_lookup:
+            lines.insert(0, ENUM_STRING_INCLUDE)
         cpp = "\n".join(lines)
         self._settle_session_reads(cpp)
         return cpp

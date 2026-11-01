@@ -152,7 +152,7 @@ def test_supported_reads_still_transpile():
         "x = syminfo.mintick",
         "s = timeframe.period",
         "x = strategy.equity",
-        "x = na",
+        "float x = na",
         "a = close\nx = a",                       # user var
         "len = input.int(14)\nx = ta.sma(close, len)",  # input-backed var
         "f(p) =>\n    p * 2\nx = f(close)",        # function param

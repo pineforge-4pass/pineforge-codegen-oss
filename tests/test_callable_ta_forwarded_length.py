@@ -632,8 +632,9 @@ strategy("recursive stateful callable")
 rec(float src, int n) =>
     var float total = 0.0
     total += src
-    n <= 0 ? total : rec(src, n - 1)
-out = rec(close, 1)
+    n <= 0 ? total : rec_next(src, n - 1)
+rec_next(float src, int n) => rec(src, n)
+out = rec_next(close, 1)
 '''
     with pytest.raises(
         CompileError, match="Recursive stateful callable cycle"

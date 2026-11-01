@@ -22,6 +22,27 @@ DELTA = json.loads((FIXTURES / "delta.json").read_text())
 NOTE_CODES = set(DELTA["severity_changes"])
 BEFORE = json.loads((FIXTURES / "catalog.before.json").read_text())["codes"]
 PRODUCT_BEFORE = json.loads((FIXTURES / "product.before.json").read_text())
+# Codes added after this snapshot: the continuation and indentation errors
+# (PF-E0038, PF-E0039), the trailing comma and mixed indentation errors
+# (PF-E0040 to PF-E0042), the import refusals with a hint (PF-E2040,
+# PF-E2041), the bool-cannot-be-na errors (PF-E2042 to PF-E2044), the
+# int/float and numeric-condition errors (PF-E2045, PF-E2046), the source
+# syntax errors (PF-E0043 to PF-E0045), the string
+# source of nz and fixnan (PF-E2047), the operator errors (PF-E2048 to
+# PF-E2052), the function definition scope errors (PF-E2053 to PF-E2060), the
+# untyped na declaration error (PF-E2061), the bool and type mismatch errors
+# (PF-E2066 to PF-E2073) and the strategy() declaration errors (PF-E5080 to
+# PF-E5082).
+CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
+                     "PF-E2040", "PF-E2041", "PF-E2042", "PF-E2043", "PF-E2044",
+                     "PF-E2045", "PF-E2046", "PF-E2047", "PF-E2048", "PF-E2049",
+                     "PF-E2050", "PF-E2051", "PF-E2052", "PF-E2053", "PF-E2054",
+                     "PF-E2055", "PF-E2056", "PF-E2057", "PF-E2058", "PF-E2059",
+                     "PF-E2060", "PF-E2061", "PF-E2062", "PF-E2063", "PF-E2064",
+                     "PF-E2065", "PF-E0043", "PF-E0044", "PF-E0045",
+                     "PF-E2066", "PF-E2067", "PF-E2068", "PF-E2069",
+                     "PF-E2070", "PF-E2071", "PF-E2072", "PF-E2073",
+                     "PF-E5080", "PF-E5081", "PF-E5082", "PF-W1553"}
 # The support checker warns, inside a switch arm, what it refuses elsewhere:
 # PF-W1nnn is PF-E1nnn there. Read off the live catalog, so a twin added later
 # is covered by the sentence tests below without an edit here.
@@ -29,7 +50,7 @@ TWINS = sorted("PF-W" + code[4:] for code in diagnostics_catalog()["codes"] if c
 
 
 def _assert_catalog_delta(catalog):
-    assert set(catalog) == set(BEFORE)
+    assert set(catalog) == set(BEFORE) | CATALOG_ADDITIONS
     changed = set()
     for code, old in BEFORE.items():
         entry = dict(catalog[code])
@@ -56,7 +77,9 @@ def test_exact_catalog_delta_and_legacy_pin():
     _assert_catalog_delta(catalog)
     legacy = json.loads((FIXTURES / "diagnostic_codes_pin.legacy.json").read_text())["codes"]
     current = json.loads((FIXTURES.parent / "diagnostic_codes_pin.json").read_text())["codes"]
-    assert set(current) == set(legacy) == set(catalog)
+    assert set(legacy) == set(BEFORE)
+    assert set(current) == set(catalog)
+    assert set(current) - set(legacy) == CATALOG_ADDITIONS
     assert {code for code in legacy if legacy[code] != current[code]} == NOTE_CODES
     for code, entry in BEFORE.items():
         meaning = json.dumps([entry["severity"], entry["message"], entry.get("hint"),
@@ -72,6 +95,8 @@ def test_catalog_legacy_bytes_only_have_the_declared_delta():
         match = re.match(r'  "(PF-[EW][0-9]{4})": ', line)
         if match:
             code = match[1]
+            if code in CATALOG_ADDITIONS:
+                continue
             field = ', "user_message": ' + json.dumps(catalog[code]["user_message"], ensure_ascii=False)
             assert line.count(field) == 1
             line = line.replace(field, "")

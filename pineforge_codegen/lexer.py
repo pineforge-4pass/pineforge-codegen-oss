@@ -11,6 +11,7 @@ Improvements over tokens.py:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -118,6 +119,7 @@ class Token:
     line: int
     col: int
     end_col: int = 0
+    starts_indent_continuation: bool = False
 
     def __post_init__(self) -> None:
         # Default end_col to col + len(value) if not explicitly set
@@ -216,12 +218,24 @@ def _normalize_line_endings(source: str) -> str:
     return "".join(parts)
 
 
+_VERSION_DIRECTIVE_RE = re.compile(
+    r"[ \t\f]*//[ \t\f]*@version[ \t\f]*=[ \t\f]*([0-9]+)[ \t\f]*"
+)
+
+
+def _source_version(source: str) -> int | None:
+    for line in re.split(r"\r\n|\r|\n", source):
+        match = _VERSION_DIRECTIVE_RE.fullmatch(line)
+        if match is not None:
+            return int(match.group(1))
+    return None
+
+
 class Lexer:
     """Converts PineScript v6 source string into a list of tokens."""
 
-    # Token types that indicate line continuation when they end a line.
-    # If a line ends with one of these, the next line is a continuation
-    # and its INDENT/DEDENT should be suppressed.
+    # These trailing tokens require another operand on the logical line.
+    # Outside parentheses/brackets these suppress the logical line boundary.
     CONTINUATION_TOKENS = {
         TokenType.AND, TokenType.OR,
         TokenType.PLUS, TokenType.MINUS, TokenType.STAR, TokenType.SLASH,
@@ -240,6 +254,7 @@ class Lexer:
                  budget: TimeBudget | None = None) -> None:
         check_source_size(source, filename)
         self.source = _normalize_line_endings(source)
+        self._pine_version = _source_version(self.source)
         self.filename = filename
         self.pos = 0
         self.line = 1
@@ -248,6 +263,8 @@ class Lexer:
         self.indent_stack: list[int] = [0]
         self.paren_depth = 0  # Track () and [] nesting to suppress NEWLINE/INDENT/DEDENT
         self._in_continuation = False  # True when current line is a continuation
+        self._logical_line_has_arrow = False
+        self._comma_line_start = 0
         self._diagnostics: list[Diagnostic] = []
         self._budget = budget
 
@@ -277,6 +294,10 @@ class Lexer:
         if end_col is None:
             end_col = col + len(value)
         self.tokens.append(Token(tt, value, line, col, end_col))
+        if tt == TokenType.FAT_ARROW:
+            self._logical_line_has_arrow = True
+        elif tt == TokenType.COMMA and self.paren_depth == 0:
+            self._comma_line_start = self.pos - self.col + 1
 
     def _emit_diagnostic(self, message: str, line: int, col: int, end_col: int, hint: str | None = None) -> None:
         loc = SourceLocation(file=self.filename, line=line, col=col, end_col=end_col)
@@ -363,10 +384,49 @@ class Lexer:
             indent_level += 1
 
         raw = self.source[line_start: self.pos]
+        if " \t" in raw:
+            self._emit_diagnostic(
+                "Indentation cannot contain spaces followed by a tab.",
+                self.line, self.col, self.col + 1,
+            )
         if "\t" in raw:
             indent_level = raw.count("\t")
         else:
             indent_level = len(raw) // 4
+
+        # A tab-free nonmultiple of four continues the previous logical line,
+        # whether it is deeper or shallower than the current block. The stack
+        # stays unchanged until a line with structural indentation arrives.
+        continues_by_indent = "\t" not in raw and len(raw) % 4 != 0
+        if (self._in_continuation
+                and self.tokens[-1].type == TokenType.COMMA
+                and not self._logical_line_has_arrow):
+            comma = self.tokens[-1]
+            end = self._comma_line_start
+            while self.source[end] in (" ", "\t"):
+                end += 1
+            comma_raw = self.source[self._comma_line_start:end]
+            comma_indent = comma_raw.count("\t") * 4 if "\t" in comma_raw else len(comma_raw)
+            next_indent = raw.count("\t") * 4 if "\t" in raw else len(raw)
+            if next_indent <= comma_indent:
+                # Restore the boundary exactly as without the comma, including
+                # dedents and operator-first joins. Arrow bodies keep their wraps.
+                self.tokens.pop()
+                self._emit(TokenType.NEWLINE, "\\n", comma.line, 1)
+                self._in_continuation = False
+        if (self._in_continuation
+                and self.indent_stack[-1] == 0
+                and not self._logical_line_has_arrow
+                and self.tokens[-1].type != TokenType.COMMA
+                and raw in ("", "    ", "        ")):
+            # The measured restriction is on top-level operands at zero or
+            # four or eight spaces. Block and callable bodies retain their wraps.
+            last_token = self.tokens[-1]
+            self._emit_diagnostic(
+                "Line continuation outside parentheses or brackets requires "
+                "space indentation that is not a multiple of four.",
+                last_token.line, last_token.end_col, last_token.end_col,
+            )
 
         # Operator-first line continuation: when a line *begins* with a binary
         # / ternary operator that cannot start a statement (e.g. ``? x``,
@@ -380,14 +440,27 @@ class Lexer:
             not self._in_continuation
             and self._line_starts_with_continuation_op()
         )
-        if starts_with_cont_op and self.tokens and self.tokens[-1].type == TokenType.NEWLINE:
+        indent_join = False
+        if ((starts_with_cont_op or continues_by_indent)
+                and self.tokens and self.tokens[-1].type == TokenType.NEWLINE):
             self.tokens.pop()
+            indent_join = (
+                continues_by_indent
+                and not starts_with_cont_op
+                and not self._in_continuation
+            )
 
-        # If we're in a continuation (previous line ended with an operator),
-        # suppress INDENT/DEDENT — the indentation is cosmetic, not structural
-        if not self._in_continuation and not starts_with_cont_op:
+        # Continuation indentation is cosmetic, not structural.
+        if not self._in_continuation and not starts_with_cont_op and not continues_by_indent:
+            self._logical_line_has_arrow = False
             current_indent = self.indent_stack[-1]
             if indent_level > current_indent:
+                if indent_level != current_indent + 1:
+                    self._emit_diagnostic(
+                        "A block must begin exactly one indentation level "
+                        "deeper than its header.",
+                        self.line, self.col, self.col + 1,
+                    )
                 self.indent_stack.append(indent_level)
                 if len(self.indent_stack) - 1 > MAX_NESTING_DEPTH:
                     raise limit_error(
@@ -401,6 +474,7 @@ class Lexer:
                     self._emit(TokenType.DEDENT, "", self.line, 1)
 
         # Tokens on this line
+        first_token = len(self.tokens)
         emitted_something = False
         while not self._at_end() and self.source[self.pos] != "\n":
             self._skip_whitespace_inline()
@@ -411,6 +485,9 @@ class Lexer:
                 break
             emitted_something = True
             self._read_token()
+
+        if indent_join and len(self.tokens) > first_token:
+            self.tokens[first_token].starts_indent_continuation = True
 
         if not self._at_end() and self.source[self.pos] == "\n":
             self._advance()
@@ -478,18 +555,43 @@ class Lexer:
         while not self._at_end() and self.source[self.pos] in (" ", "\t"):
             self._advance()
 
+    def _is_digit(self, ch: str) -> bool:
+        return ch.isdigit() if self._pine_version != 6 else "0" <= ch <= "9"
+
+    def _is_ident_char(self, ch: str) -> bool:
+        if self._pine_version != 6:
+            return ch.isalnum() or ch == "_"
+        return ("A" <= ch <= "Z" or "a" <= ch <= "z"
+                or "0" <= ch <= "9" or ch == "_")
+
     def _read_token(self) -> None:
         ch = self.source[self.pos]
         start_line = self.line
         start_col = self.col
 
+        if (
+            self._pine_version == 6
+            and (
+                (ch.isdigit() and not self._is_digit(ch))
+                or (ch.isalpha() and not ("A" <= ch <= "Z"
+                                           or "a" <= ch <= "z"))
+            )
+        ):
+            self._emit_diagnostic(
+                f"no viable alternative at character {ch!r}",
+                start_line, start_col, start_col + 1,
+            )
+            self._advance()
+            return
+
         # Numbers: digit-starting
-        if ch.isdigit():
+        if self._is_digit(ch):
             self._read_number(start_line, start_col)
             return
 
         # Leading-dot float: .5, .123
-        if ch == "." and self.pos + 1 < len(self.source) and self.source[self.pos + 1].isdigit():
+        if (ch == "." and self.pos + 1 < len(self.source)
+                and self._is_digit(self.source[self.pos + 1])):
             self._read_leading_dot_number(start_line, start_col)
             return
 
@@ -515,11 +617,22 @@ class Lexer:
                 )
             else:
                 value = "#" + "".join(buf)
-                self._emit(TokenType.COLOR, value, start_line, start_col, start_col + len(value))
+                if self._pine_version == 6 and len(buf) not in (6, 8):
+                    self._emit_diagnostic(
+                        f"Syntax error at input {value!r}",
+                        start_line, start_col, start_col + len(value),
+                    )
+                self._emit(
+                    TokenType.COLOR, value, start_line, start_col,
+                    start_col + len(value),
+                )
             return
 
         # Identifiers / keywords
-        if ch.isalpha() or ch == "_":
+        if ((ch.isalpha() and (
+                self._pine_version != 6
+                or "A" <= ch <= "Z" or "a" <= ch <= "z"
+            )) or ch == "_"):
             self._read_ident(start_line, start_col)
             return
 
@@ -591,7 +704,7 @@ class Lexer:
         buf: list[str] = []
 
         # Integer part
-        while not self._at_end() and self.source[self.pos].isdigit():
+        while not self._at_end() and self._is_digit(self.source[self.pos]):
             buf.append(self._advance())
 
         # Optional fractional part
@@ -599,9 +712,9 @@ class Lexer:
             # Consume dot if followed by digit OR if followed by non-identifier char
             # (e.g., 0. is a valid float, but 0.member should not consume the dot)
             next_char = self.source[self.pos + 1] if self.pos + 1 < len(self.source) else ""
-            if next_char.isdigit() or (not next_char.isalpha() and next_char != "_"):
+            if self._is_digit(next_char) or (not next_char.isalpha() and next_char != "_"):
                 buf.append(self._advance())  # consume '.'
-                while not self._at_end() and self.source[self.pos].isdigit():
+                while not self._at_end() and self._is_digit(self.source[self.pos]):
                     buf.append(self._advance())
 
         # Optional exponent
@@ -609,8 +722,8 @@ class Lexer:
             buf.append(self._advance())  # consume 'e'/'E'
             if not self._at_end() and self.source[self.pos] in ("+", "-"):
                 buf.append(self._advance())  # consume sign
-            if not self._at_end() and self.source[self.pos].isdigit():
-                while not self._at_end() and self.source[self.pos].isdigit():
+            if not self._at_end() and self._is_digit(self.source[self.pos]):
+                while not self._at_end() and self._is_digit(self.source[self.pos]):
                     buf.append(self._advance())
             else:
                 # Malformed exponent — emit diagnostic
@@ -627,7 +740,7 @@ class Lexer:
         """Read a leading-dot float like .5, normalising to '0.5'."""
         self._advance()  # consume '.'
         buf: list[str] = []
-        while not self._at_end() and self.source[self.pos].isdigit():
+        while not self._at_end() and self._is_digit(self.source[self.pos]):
             buf.append(self._advance())
 
         # Optional exponent
@@ -635,8 +748,8 @@ class Lexer:
             buf2: list[str] = [self._advance()]  # 'e'/'E'
             if not self._at_end() and self.source[self.pos] in ("+", "-"):
                 buf2.append(self._advance())
-            if not self._at_end() and self.source[self.pos].isdigit():
-                while not self._at_end() and self.source[self.pos].isdigit():
+            if not self._at_end() and self._is_digit(self.source[self.pos]):
+                while not self._at_end() and self._is_digit(self.source[self.pos]):
                     buf2.append(self._advance())
                 buf.extend(buf2)
             # If malformed exponent after leading-dot, just ignore the e part
@@ -731,7 +844,7 @@ class Lexer:
 
     def _read_ident(self, start_line: int, start_col: int) -> None:
         buf: list[str] = []
-        while not self._at_end() and (self.source[self.pos].isalnum() or self.source[self.pos] == "_"):
+        while not self._at_end() and self._is_ident_char(self.source[self.pos]):
             buf.append(self._advance())
         word = "".join(buf)
         tt = KEYWORDS.get(word, TokenType.IDENT)

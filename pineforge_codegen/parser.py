@@ -76,6 +76,7 @@ class Parser:
         # declaration and ``export`` declarations parse instead of being
         # refused, and a ``const`` qualifier is recorded on its declaration.
         self._library = library
+        self._pine_version: int | None = None
         # Syntax levels around the parse position, and the depth of each
         # operator/postfix chain subtree measured so far (held by id; the
         # parser never discards a node it built, so ids stay unique).
@@ -200,6 +201,7 @@ class Parser:
     def parse(self) -> Program:
         """Parse the full program, returning a Program node."""
         version = self._extract_version()
+        self._pine_version = version
         prog = Program(version=version)
         self._skip_newlines()
 
@@ -244,13 +246,15 @@ class Parser:
             location=self._loc(error.token), message=str(error),
         )]) from error
 
-    def _expect_statement_end(self) -> None:
+    def _expect_statement_end(self, *, allow_physical_line_break: bool = True) -> None:
         """A second expression on the same Pine line is a syntax error."""
         cur = self._current()
         if cur.type in (TokenType.NEWLINE, TokenType.DEDENT, TokenType.EOF_TOKEN):
             return
         previous = self.tokens[self.pos - 1]
-        if previous.type == TokenType.DEDENT or cur.line > previous.line:
+        if previous.type == TokenType.DEDENT or (
+            allow_physical_line_break and cur.line > previous.line
+        ):
             return
         raise ParseError(
             f"Unexpected token {cur.type.name}({cur.value!r}) after statement; "
@@ -261,17 +265,38 @@ class Parser:
     # Statement parsing
     # ------------------------------------------------------------------
 
-    def _parse_statement(self):
-        stmt = self._parse_single_statement()
+    def _check_statement_comma(
+        self, comma: Token, following: Token, *, allow_comma_continuation: bool,
+    ) -> None:
+        # The lexer restores same-indent and dedented statement boundaries;
+        # only a deeper line can still follow a statement comma directly.
+        if (not allow_comma_continuation
+                and following.line > comma.line
+                and following.type not in (
+                    TokenType.NEWLINE, TokenType.DEDENT, TokenType.EOF_TOKEN,
+                )):
+            raise ParseError(
+                "A statement cannot end with a trailing comma.", following,
+            )
+
+    def _parse_statement(self, *, allow_comma_continuation: bool = False):
+        stmt = self._parse_single_statement(
+            allow_comma_continuation=allow_comma_continuation,
+        )
         if not self._check(TokenType.COMMA):
             return stmt
 
         stmts: list = []
         self._extend_statement_list(stmts, stmt)
-        while self._match(TokenType.COMMA):
+        while comma := self._match(TokenType.COMMA):
+            self._check_statement_comma(
+                comma, self._current(), allow_comma_continuation=allow_comma_continuation,
+            )
             if self._check(TokenType.NEWLINE) or self._check(TokenType.DEDENT) or self._at_end():
                 break
-            self._extend_statement_list(stmts, self._parse_single_statement())
+            self._extend_statement_list(stmts, self._parse_single_statement(
+                allow_comma_continuation=allow_comma_continuation,
+            ))
         return stmts
 
     @staticmethod
@@ -283,7 +308,7 @@ class Parser:
         else:
             stmts.append(stmt)
 
-    def _parse_single_statement(self):
+    def _parse_single_statement(self, *, allow_comma_continuation: bool = False):
         cur = self._current()
 
         # Control flow keywords
@@ -348,7 +373,9 @@ class Parser:
             if typed_after_qual or bare_after_qual:
                 qualifier = cur.value
                 self._advance()  # consume the qualifier prefix
-                stmt = self._parse_single_statement()
+                stmt = self._parse_single_statement(
+                    allow_comma_continuation=allow_comma_continuation,
+                )
                 if isinstance(stmt, VarDecl):
                     # Kept for the ta.* length lowering: an explicit
                     # ``series`` makes TradingView re-window the call.
@@ -417,7 +444,9 @@ class Parser:
 
             # Variable declaration: IDENT = expr (but not IDENT == expr)
             if self._peek().type == TokenType.EQUALS and self._peek(2).type != TokenType.EQUALS:
-                return self._parse_var_decl()
+                return self._parse_var_decl(
+                    allow_comma_continuation=allow_comma_continuation,
+                )
 
             # Reassignment / compound assignment: IDENT :=  +=  -=  *=  /=  %=
             if self._peek().type in COMPOUND_ASSIGN_OPS:
@@ -602,13 +631,18 @@ class Parser:
                 node.alias = values[6]
         return self._set_loc(node, start_tok)
 
-    def _parse_var_decl(self) -> VarDecl | list:
+    def _parse_var_decl(
+        self, *, allow_comma_continuation: bool = False,
+    ) -> VarDecl | list:
         """Parse var declaration(s). Returns a single VarDecl or a list for comma-separated."""
         start_tok = self._current()
         name_tok = self._consume(TokenType.IDENT)
         self._consume(TokenType.EQUALS)
         value = self._parse_expression()
         first = VarDecl(name=name_tok.value, value=value)
+        # Parentheses disappear from the AST; retain only bare-token provenance.
+        if isinstance(value, NaLiteral) and self.tokens[self.pos - 1].type == TokenType.NA:
+            first.annotations = {"bare_na_initializer": True}
         self._set_loc(first, start_tok)
 
         # Check for comma-separated additional declarations: x=1, y=2, z=3.
@@ -628,12 +662,18 @@ class Parser:
             and self._peek().type == TokenType.IDENT
             and self._peek(2).type == TokenType.EQUALS
         ):
+            self._check_statement_comma(
+                self._current(), self._peek(),
+                allow_comma_continuation=allow_comma_continuation,
+            )
             self._advance()
             st = self._current()
             n = self._consume(TokenType.IDENT)
             self._consume(TokenType.EQUALS)
             v = self._parse_expression()
             d = VarDecl(name=n.value, value=v)
+            if isinstance(v, NaLiteral) and self.tokens[self.pos - 1].type == TokenType.NA:
+                d.annotations = {"bare_na_initializer": True}
             decls.append(self._set_loc(d, st))
         return decls
 
@@ -967,10 +1007,11 @@ class Parser:
             "param_type_hints": param_type_hints,
             "param_defaults": param_defaults,
         }
-        if self._library:
+        if self._library or any(param_qualifiers):
             # A library may overload a function by its parameters' qualifiers
             # alone (TradingView/Request/3: ``simple string`` and ``series
-            # string``); ``library_inline`` picks the overload by them.
+            # string``); ``library_inline`` picks the overload by them. Script
+            # definitions also retain qualifiers for signature comparisons.
             node.annotations["param_qualifiers"] = param_qualifiers
         return self._set_loc(node, start_tok)
 
@@ -1205,10 +1246,13 @@ class Parser:
 
         cases = []
         default_body = []
+        default_token = None
         self._skip_newlines()
         while not self._check(TokenType.DEDENT) and not self._at_end():
             # Default case: => body
             if self._check(TokenType.FAT_ARROW):
+                if default_token is None:
+                    default_token = self._current()
                 self._advance()
                 if self._check(TokenType.NEWLINE):
                     self._advance()
@@ -1218,6 +1262,15 @@ class Parser:
                 else:
                     default_body = self._parse_arm_line()
             else:
+                if (
+                    default_token is not None
+                    and not cases
+                    and self._pine_version == 6
+                ):
+                    raise ParseError(
+                        "Mismatched input '=>' expecting set 'a case expression'.",
+                        default_token,
+                    )
                 # case_expr => body
                 case_expr = self._parse_expression()
                 self._consume(TokenType.FAT_ARROW)
@@ -1246,41 +1299,27 @@ class Parser:
         (``tests/fixtures/tail_f_tv``). A lone expression is the node an arm
         always held.
         """
+        first_token = self._current()
         body: list = []
         while True:
             if self._arm_line_statement_ahead():
-                self._extend_statement_list(body, self._parse_single_statement())
+                self._extend_statement_list(body, self._parse_single_statement(
+                    allow_comma_continuation=True,
+                ))
             else:
                 body.append(self._parse_line_expr_or_assignment())
             if not self._match(TokenType.COMMA):
+                if first_token.starts_indent_continuation:
+                    self._expect_statement_end(allow_physical_line_break=False)
                 return body
             if self._check(TokenType.NEWLINE) or self._check(TokenType.DEDENT) or self._at_end():
                 return body
 
-    @staticmethod
-    def _is_field_target(expr) -> bool:
-        # The reporter's shape is a UDT field (``s.value := 1``). A history or
-        # array subscript is not an assignable target of a one-line body.
-        return isinstance(expr, MemberAccess)
-
-    def _parse_line_expr_or_assignment(
-        self, *, field_target_only: bool = False
-    ):
-        """Parse one expression or compound-assignment statement on a line.
-
-        ``_parse_arm_line`` accepts any assignment target because switch-arm
-        statements already have that contract.  An inline function body uses
-        the same expression/assignment shape but only promotes a
-        ``MemberAccess`` (UDT field) target to a statement.  Leaving an
-        assignment operator after any other target unconsumed preserves the
-        function parser's existing syntax error for ``f() => x := 1`` and
-        ``f(x) => x[1] := 2``.
-        """
+    def _parse_line_expr_or_assignment(self):
+        """Parse one expression or compound assignment in a switch arm."""
         start_tok = self._current()
         expr = self._parse_expression()
         if self._current().type in COMPOUND_ASSIGN_OPS:
-            if field_target_only and not self._is_field_target(expr):
-                return ExprStmt(expr=expr)
             op = COMPOUND_ASSIGN_OPS[self._advance().type]
             node = Assignment(target=expr, op=op, value=self._parse_expression())
             return self._set_loc(node, start_tok)
@@ -1289,33 +1328,22 @@ class Parser:
     def _parse_inline_func_body(self) -> tuple[list, bool]:
         """Parse a function or method body written after ``=>``.
 
-        A plain expression keeps the historical one-ExprStmt,
-        ``is_single_expr=True`` representation.  A field/element assignment
-        is a real statement and therefore uses the normal block representation
-        so the analyzer and code generator apply statement-tail semantics.
+        Use the block's statement parser and flattening so commas never move
+        a statement outside the callable's scope. A lone expression keeps its
+        historical ``is_single_expr=True`` representation. An ``if`` or
+        ``switch`` opened after the arrow stays a bare statement as in an
+        indented function body, including its branch types and implicit na.
         """
-        first = self._parse_line_expr_or_assignment(field_target_only=True)
-        if not isinstance(first, Assignment):
-            return [first], True
-
-        body = [first]
-        while self._match(TokenType.COMMA):
-            if (
-                self._check(TokenType.NEWLINE)
-                or self._check(TokenType.DEDENT)
-                or self._at_end()
-            ):
-                break
-            stmt = self._parse_line_expr_or_assignment(field_target_only=True)
-            if (
-                isinstance(stmt, ExprStmt)
-                and self._current().type in COMPOUND_ASSIGN_OPS
-            ):
-                # The next statement is a plain-name assignment.  Keep its
-                # operator for the caller's existing statement-end diagnostic.
-                break
-            body.append(stmt)
-        return body, False
+        first_token = self._current()
+        body: list = []
+        self._extend_statement_list(
+            body, self._parse_statement(allow_comma_continuation=True),
+        )
+        if first_token.starts_indent_continuation and not self._check(TokenType.COMMA):
+            # A wrapped arrow body ends at a real statement boundary; physical
+            # line numbers cannot split adjacent expressions on its logical line.
+            self._expect_statement_end(allow_physical_line_break=False)
+        return body, len(body) == 1 and isinstance(body[0], ExprStmt)
 
     def _arm_line_statement_ahead(self) -> bool:
         """Whether an arm line's next statement is one no expression starts:
@@ -1359,12 +1387,7 @@ class Parser:
         self._skip_newlines()
         while not self._check(TokenType.DEDENT) and not self._at_end():
             try:
-                stmt = self._parse_statement()
-                if stmt is not None:
-                    if isinstance(stmt, list):
-                        stmts.extend(stmt)
-                    else:
-                        stmts.append(stmt)
+                self._extend_statement_list(stmts, self._parse_statement())
                 self._expect_statement_end()
             except ParseError as error:
                 self._raise_syntax_error(error)
@@ -1379,11 +1402,11 @@ class Parser:
     #   1. Ternary: ? :
     #   2. Logical OR: or
     #   3. Logical AND: and
-    #   4. Logical NOT: not (unary)
-    #   5. Comparison: == != > < >= <=
+    #   4. Comparison equality: == !=
+    #   5. Comparison relation: > < >= <=
     #   6. Addition: + -
     #   7. Multiplication: * / %
-    #   8. Unary: - +
+    #   8. Unary: not - +
     #   9. Postfix: [n] .member (args)
     #  10. Primary: literals, identifiers, (expr)
 
@@ -1468,19 +1491,19 @@ class Parser:
 
     def _parse_and(self):
         start_tok = self._current()
-        left = self._parse_not()
+        left = self._parse_comparison()
         in_continuation = False
         while True:
             self._skip_newlines_in_continuation(in_continuation)
             if self._match(TokenType.AND):
-                right = self._parse_not()
+                right = self._parse_comparison()
                 left = BinOp(left=left, op="and", right=right)
                 self._set_loc(left, start_tok)
                 self._check_chain(left, start_tok)
             elif not in_continuation and self._try_line_continuation(TokenType.AND):
                 in_continuation = True
                 self._advance()  # consume AND
-                right = self._parse_not()
+                right = self._parse_comparison()
                 left = BinOp(left=left, op="and", right=right)
                 self._set_loc(left, start_tok)
                 self._check_chain(left, start_tok)
@@ -1497,28 +1520,31 @@ class Parser:
                 self._advance()
 
     def _parse_not(self):
-        if self._check(TokenType.NOT):
-            start_tok = self._current()
-            self._enter(start_tok)
-            self._advance()
-            try:
-                operand = self._parse_not()
-            finally:
-                self._depth -= 1
-            node = UnaryOp(op="not", operand=operand)
-            return self._set_loc(node, start_tok)
-        return self._parse_comparison()
+        return self._parse_unary()
 
     def _parse_comparison(self):
         start_tok = self._current()
-        left = self._parse_addition()
-        comp_ops = {
+        left = self._parse_relational()
+        equality_ops = {
             TokenType.EQEQ: "==", TokenType.NOTEQ: "!=",
+        }
+        while self._current().type in equality_ops:
+            op = equality_ops[self._advance().type]
+            right = self._parse_relational()
+            left = BinOp(left=left, op=op, right=right)
+            self._set_loc(left, start_tok)
+            self._check_chain(left, start_tok)
+        return left
+
+    def _parse_relational(self):
+        start_tok = self._current()
+        left = self._parse_addition()
+        relational_ops = {
             TokenType.GT: ">", TokenType.LT: "<",
             TokenType.GE: ">=", TokenType.LE: "<=",
         }
-        while self._current().type in comp_ops:
-            op = comp_ops[self._advance().type]
+        while self._current().type in relational_ops:
+            op = relational_ops[self._advance().type]
             right = self._parse_addition()
             left = BinOp(left=left, op=op, right=right)
             self._set_loc(left, start_tok)
@@ -1538,17 +1564,31 @@ class Parser:
 
     def _parse_multiplication(self):
         start_tok = self._current()
-        left = self._parse_unary()
+        left = self._parse_not()
         mul_ops = {TokenType.STAR: "*", TokenType.SLASH: "/", TokenType.PERCENT: "%"}
         while self._current().type in mul_ops:
             op = mul_ops[self._advance().type]
-            right = self._parse_unary()
+            right = self._parse_not()
             left = BinOp(left=left, op=op, right=right)
             self._set_loc(left, start_tok)
             self._check_chain(left, start_tok)
         return left
 
     def _parse_unary(self):
+        if self._check(TokenType.NOT):
+            start_tok = self._current()
+            self._enter(start_tok)
+            self._advance()
+            consecutive_not = self._check(TokenType.NOT)
+            try:
+                operand = self._parse_unary()
+            finally:
+                self._depth -= 1
+            node = UnaryOp(op="not", operand=operand)
+            # Parentheses disappear from the AST; retain adjacent keyword provenance.
+            if consecutive_not:
+                node.annotations = {"consecutive_not": True}
+            return self._set_loc(node, start_tok)
         if self._check(TokenType.MINUS):
             start_tok = self._current()
             self._enter(start_tok)
@@ -1687,7 +1727,10 @@ class Parser:
                 args.append(val)
                 call_arg_order.append(val)
 
-            self._match(TokenType.COMMA)
+            if self._match(TokenType.COMMA) and self._check(TokenType.RPAREN):
+                raise ParseError(
+                    "A function call cannot end with a trailing comma.", self._current(),
+                )
 
         return args, kwargs, ArgOrder(call_arg_order)
 

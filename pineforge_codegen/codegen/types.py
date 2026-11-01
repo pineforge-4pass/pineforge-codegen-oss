@@ -39,10 +39,11 @@ import re
 from . import graph_journal
 
 from ..ast_nodes import (
-    ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall, FuncDef,
+    ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt,
+    ForInStmt, ForStmt, FuncCall, FuncDef,
     Identifier, IfStmt,
     MemberAccess, MethodDef, NaLiteral, NumberLiteral, StringLiteral, SwitchStmt,
-    Subscript, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
+    Subscript, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, WhileStmt,
 )
 from ..collection_history import history_annotation
 from ..cpp_names import cpp_identifier_fragment
@@ -50,7 +51,12 @@ from ..errors import Phase
 from ..external_requests import UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
 from ..matrix_overloads import matrix_sum_has_rhs
-from ..symbols import PineType, TypeSpec, method_receiver_type_name
+from ..symbols import (
+    PineType,
+    TypeSpec,
+    method_receiver_type_name,
+    unify_type_specs,
+)
 from .helpers import (
     NA_PRESERVING_INT_TYPES,
     evaluate_args_once,
@@ -1422,6 +1428,14 @@ class TypeInferer:
             return spec
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            # Scalar builtin results need not carry a TypeSpec. Recover a
+            # known string result here so array construction cannot fall back
+            # to a numeric vector; other expression typing stays unchanged.
+            if (namespace is not None and func_name is not None
+                    and sigs.get_return_type(
+                        namespace, func_name, len(node.args)
+                    ) == PineType.STRING):
+                return TypeSpec.primitive("string")
             if namespace is None:
                 func_info = self._func_info_map.get(func_name)
                 pine_type = getattr(func_info, "return_type", None)
@@ -1487,24 +1501,105 @@ class TypeInferer:
             or (isinstance(node, Identifier) and node.name == "na")
         )
 
-    def _nullable_collection_selection_spec(
+    @classmethod
+    def _selection_contains_na(cls, node: ASTNode | None) -> bool:
+        """Whether a selected value has a bare or implicit ``na`` arm."""
+        if cls._selection_node_is_na(node):
+            return True
+        if isinstance(node, Ternary):
+            return (cls._selection_contains_na(node.true_val)
+                    or cls._selection_contains_na(node.false_val))
+        if isinstance(node, IfStmt):
+            return any(cls._selection_contains_na(cls._selection_terminal_expr(body))
+                       for body in (node.body, node.else_body))
+        if isinstance(node, SwitchStmt):
+            return (
+                any(cls._selection_contains_na(cls._selection_terminal_expr(body))
+                    for _, body in node.cases)
+                or cls._selection_contains_na(
+                    cls._selection_terminal_expr(node.default_body)
+                )
+            )
+        return False
+
+    @classmethod
+    def _ternary_contains_bare_na(cls, node: Ternary) -> bool:
+        """Look through ternary arms without widening implicit if/switch na."""
+        pending = [node]
+        while pending:
+            arm = pending.pop()
+            if isinstance(arm, Ternary):
+                pending.extend((arm.true_val, arm.false_val))
+            elif arm is not None and cls._selection_node_is_na(arm):
+                return True
+        return False
+
+    def _selection_type_spec(
         self,
         branches: list[tuple[ASTNode | None, TypeSpec | None]],
+        *,
+        nullable: bool | None = None,
     ) -> TypeSpec | None:
-        """Unify compatible map/matrix selection arms around typed ``na``."""
-        concrete: list[TypeSpec] = []
+        """Keep exact collection joins; extend other families only around ``na``."""
+        if nullable is None:
+            nullable = any(self._selection_contains_na(node) for node, _ in branches)
+        result: TypeSpec | None = None
         for node, spec in branches:
             if self._selection_node_is_na(node):
                 continue
-            if spec is None or spec.kind not in {"map", "matrix"}:
+            if (nullable and spec is None
+                    and isinstance(node, (ColorLiteral, MemberAccess, FuncCall))
+                    and self._is_color_value(node)):
+                spec = TypeSpec.primitive("color")
+            if spec is None:
                 return None
-            concrete.append(spec)
-        if not concrete:
-            return None
-        first = concrete[0]
-        return first if all(spec == first for spec in concrete[1:]) else None
+            if not nullable and spec.kind not in {"map", "matrix"}:
+                return None
+            result = (
+                spec
+                if result is None
+                else unify_type_specs(result, spec)
+            )
+            if result is None:
+                return None
+        return result
 
-    def _type_spec_from_expr(self, node) -> TypeSpec | None:
+    def _ternary_type_specs(
+        self, value: Ternary,
+    ) -> dict[int, tuple[TypeSpec | None, bool]]:
+        """Derive arm specs and nullability once in the current lexical context."""
+        # Keep results within this query: a later query on the same AST can
+        # have different parameter, local or callable return types.
+        specs: dict[int, tuple[TypeSpec | None, bool]] = {}
+        pending = [(value, False)]
+        while pending:
+            node, ready = pending.pop()
+            if id(node) in specs:
+                continue
+            if isinstance(node, Ternary):
+                if not ready:
+                    pending.append((node, True))
+                    pending.append((node.false_val, False))
+                    pending.append((node.true_val, False))
+                    continue
+                true_spec, true_na = specs[id(node.true_val)]
+                false_spec, false_na = specs[id(node.false_val)]
+                nullable = true_na or false_na
+                spec = self._type_spec_from_expr(
+                    node, _ternary_arms=(true_spec, false_spec, nullable),
+                )
+            else:
+                spec = self._type_spec_from_expr(node)
+                nullable = self._selection_contains_na(node)
+            specs[id(node)] = (spec, nullable)
+        return specs
+
+    def _type_spec_from_expr(
+        self,
+        node,
+        *,
+        _ternary_arms: tuple[TypeSpec | None, TypeSpec | None, bool] | None = None,
+    ) -> TypeSpec | None:
         """Best-effort TypeSpec inference for an expression node.
 
         Returns ``None`` when the node's type cannot be narrowed beyond
@@ -1612,14 +1707,15 @@ class TypeInferer:
                 return annotation["spec"]
             return None
         if isinstance(node, Ternary):
-            true_spec = self._type_spec_from_expr(node.true_val)
-            false_spec = self._type_spec_from_expr(node.false_val)
-            collection_spec = self._nullable_collection_selection_spec([
+            if _ternary_arms is None:
+                return self._ternary_type_specs(node)[id(node)][0]
+            true_spec, false_spec, nullable = _ternary_arms
+            selection_spec = self._selection_type_spec([
                 (node.true_val, true_spec),
                 (node.false_val, false_spec),
-            ])
-            if collection_spec is not None:
-                return collection_spec
+            ], nullable=nullable)
+            if selection_spec is not None:
+                return selection_spec
             if true_spec is not None and true_spec == false_spec:
                 return true_spec
             if (true_spec is not None
@@ -1638,12 +1734,12 @@ class TypeInferer:
             false_node = self._selection_terminal_expr(node.else_body)
             true_spec = self._type_spec_from_expr(true_node)
             false_spec = self._type_spec_from_expr(false_node)
-            collection_spec = self._nullable_collection_selection_spec([
+            selection_spec = self._selection_type_spec([
                 (true_node, true_spec),
                 (false_node, false_spec),
             ])
-            if collection_spec is not None:
-                return collection_spec
+            if selection_spec is not None:
+                return selection_spec
             true_is_na = (
                 isinstance(true_node, NaLiteral)
                 or (isinstance(true_node, Identifier)
@@ -1685,7 +1781,7 @@ class TypeInferer:
                 default_terminal,
                 self._type_spec_from_expr(default_terminal),
             ))
-            return self._nullable_collection_selection_spec(branches)
+            return self._selection_type_spec(branches)
         if isinstance(node, MemberAccess):
             owner = self._type_spec_from_expr(node.object)
             if owner is not None and owner.kind == "udt" and owner.name:
@@ -2291,12 +2387,161 @@ class TypeInferer:
     # Whole-expression / declaration-level inference
     # ------------------------------------------------------------------
 
+    def _numeric_na_bindings(self):
+        """Inventory declarations for nullable global and persistent storage."""
+        cached = getattr(self, "_numeric_na_bindings_cache", None)
+        if cached is not None:
+            return cached
+        bindings = {}
+        declarations = {}
+        declaration_scopes = {
+            (sym.name, sym.loc.file, sym.loc.line, sym.loc.col): sym.scope
+            for scope in self.ctx.symbols.all_scopes
+            for sym in scope.symbols.values()
+            if sym.loc is not None
+        }
+        for owner, body in [
+            ("", [stmt for stmt in self.ctx.ast.body
+                  if not isinstance(stmt, (FuncDef, MethodDef))]),
+            *((name, fi.node.body) for name, fi in self._func_info_map.items()
+              if fi.node is not None),
+        ]:
+            for stmt in body:
+                for node, _depth in iter_ast_nodes(stmt):
+                    if isinstance(node, VarDecl):
+                        declarations[id(node)] = (node, owner)
+                        scope = (
+                            declaration_scopes.get((
+                                node.name, node.loc.file, node.loc.line, node.loc.col,
+                            ))
+                            if node.loc is not None else None
+                        )
+                        bindings.setdefault((owner, node.name), []).append((node, scope))
+        self._numeric_na_declarations = declarations
+        self._numeric_na_bindings_cache = bindings
+        return self._numeric_na_bindings_cache
+
+    def _numeric_na_value(self, node, owner: str = "", seen=None) -> bool:
+        """Follow nullable numeric selections without crossing callable boundaries."""
+        if node is None:
+            return False
+        seen = set() if seen is None else seen
+        key = (owner, id(node))
+        if key in seen:
+            return False
+        seen.add(key)
+        if isinstance(node, Ternary):
+            return (self._is_na_expr(node.true_val)
+                    or self._is_na_expr(node.false_val)
+                    or self._numeric_na_value(node.true_val, owner, seen)
+                    or self._numeric_na_value(node.false_val, owner, seen))
+        if isinstance(node, (ExprStmt, VarDecl)):
+            if (isinstance(node, VarDecl) and (node.is_var or node.is_varip)
+                    and node.type_hint != "int"):
+                return False
+            value = node.expr if isinstance(node, ExprStmt) else node.value
+            return self._numeric_na_value(value, owner, seen)
+        if isinstance(node, Assignment):
+            return self._numeric_na_value(node.target, owner, seen)
+        if isinstance(node, (ForStmt, ForInStmt, WhileStmt)):
+            return self._numeric_na_value(
+                self._selection_terminal_expr(node.body), owner, seen,
+            )
+        if isinstance(node, IfStmt):
+            return any(self._numeric_na_value(
+                self._selection_terminal_expr(body), owner, seen,
+            ) for body in (node.body, node.else_body) if body)
+        if isinstance(node, SwitchStmt):
+            return any(self._numeric_na_value(
+                self._selection_terminal_expr(body), owner, seen,
+            ) for _case, body in node.cases if body)
+        if isinstance(node, BinOp) and node.op in {"+", "-", "*", "/", "%"}:
+            return (self._numeric_na_value(node.left, owner, seen)
+                    or self._numeric_na_value(node.right, owner, seen))
+        if isinstance(node, UnaryOp) and node.op in {"+", "-"}:
+            return self._numeric_na_value(node.operand, owner, seen)
+        if isinstance(node, Subscript):
+            return self._numeric_na_value(node.object, owner, seen)
+        if isinstance(node, Identifier):
+            bindings = self._numeric_na_bindings()
+            binding_scope = self.ctx.identifier_binding_scopes.get(id(node))
+            fi = self._func_info_map.get(owner)
+            parameter_scope = (
+                f"method_{fi.udt_type_name}_{fi.node.name}"
+                if fi is not None and getattr(fi, "is_udt_method", False)
+                else f"func_{fi.node.name}" if fi is not None else None
+            )
+            if (fi is not None and node.name in fi.node.params
+                    and binding_scope in (None, parameter_scope)):
+                return False
+            scope = (
+                owner if binding_scope != "global" and (owner, node.name) in bindings
+                else ""
+            )
+            values = [
+                value for value in bindings.get((scope, node.name), ())
+                if binding_scope in (None, value[1])
+            ]
+            # A raw name shared by multiple lexical bindings is not proof
+            # that this identifier reads the nullable declaration.
+            return (len(values) == 1
+                    and self._numeric_na_value(values[0][0], scope, seen))
+        return False
+
+    def _numeric_na_global(self, name: str, seen=None) -> bool:
+        """Recognize a declared nullable int and the globals bound to it."""
+        seen = set() if seen is None else seen
+        if name in seen:
+            return False
+        seen.add(name)
+        if self._numeric_na_member(name):
+            return True
+        value = getattr(self.ctx, "global_expr_map", {}).get(name)
+        if (any(isinstance(stmt, VarDecl) and stmt.name == name
+                and stmt.type_hint == "int" for stmt in self.ctx.ast.body)
+                and self._numeric_na_value(value)):
+            return True
+        return self._numeric_na_global_value(value, seen)
+
+    def _numeric_na_global_value(self, value, seen) -> bool:
+        """Follow changed global storage without widening untyped ternaries."""
+        if isinstance(value, Identifier):
+            return self._numeric_na_global(value.name, seen)
+        if isinstance(value, Ternary):
+            return any(self._numeric_na_global_value(arm, seen)
+                       for arm in (value.true_val, value.false_val))
+        if isinstance(value, BinOp) and value.op in {"+", "-", "*", "/", "%"}:
+            return any(self._numeric_na_global_value(arm, seen)
+                       for arm in (value.left, value.right))
+        if isinstance(value, UnaryOp) and value.op in {"+", "-"}:
+            return self._numeric_na_global_value(value.operand, seen)
+        if isinstance(value, Subscript):
+            return self._numeric_na_global_value(value.object, seen)
+        return False
+
+    def _numeric_na_member(self, name: str) -> bool:
+        """Resolve persistent storage by declaration identity, including clones."""
+        info = getattr(self, "_runtime_scalar_var_init_by_member", {}).get(name)
+        if info is None or info["ptype"] != PineType.INT:
+            return False
+        self._numeric_na_bindings()
+        declaration = self._numeric_na_declarations.get(info["node_id"])
+        return (declaration is not None
+                and declaration[0].type_hint == "int"
+                and self._numeric_na_value(
+                    declaration[0].value, declaration[1],
+                ))
+
     def _type_for_decl(self, node: VarDecl) -> str:
         """Determine the C++ type for a ``VarDecl``: explicit hint, then symbol, then RHS inference."""
         history_value_cpp = (self._array_history_value_cpp_type(node.name)
                              if not getattr(self, "_active_func_name", None) else None)
         if history_value_cpp is not None:
             return history_value_cpp
+        if (node.type_hint == "int"
+                and not getattr(self, "_active_func_name", None)
+                and self._numeric_na_value(node.value)):
+            return "double"
         def promote_wide_int(cpp_type: str) -> str:
             if cpp_type != "int":
                 return cpp_type
@@ -2371,6 +2616,8 @@ class TypeInferer:
         # init RHS is such a builtin, so also match the builtin name directly.
         if name in INT64_BUILTINS:
             return "int64_t"
+        if self._numeric_na_member(name) or self._numeric_na_global(name):
+            return "double"
         handle = self._series_handle_cpp_type(name)
         if handle is not None:
             return handle
@@ -3246,6 +3493,8 @@ class TypeInferer:
         """
         for vname, ptype, _init in self.ctx.var_members:
             if vname == name:
+                if self._numeric_na_member(name):
+                    return "double"
                 return PINE_TYPE_TO_CPP.get(ptype, "double")
         local = getattr(self, "_current_func_local_types", {}).get(name)
         if local is not None:
@@ -3260,6 +3509,8 @@ class TypeInferer:
                 return "int64_t"
             if self._global_bool_hint(name):
                 return "bool"
+            if self._global_float_na_selection(name, gptype):
+                return "double"
             if (name in getattr(self, "_direct_program_tuple_binding_names", ())
                     and gptype == PineType.BOOL):
                 return "bool"
@@ -3409,6 +3660,15 @@ class TypeInferer:
             and stmt.name == name
             and stmt.type_hint == "bool"
             for stmt in self.ctx.ast.body
+        )
+
+    def _global_float_na_selection(self, name: str, ptype: PineType) -> bool:
+        """A Pine float keeps float storage for a nullable int ternary."""
+        expr = getattr(self.ctx, "global_expr_map", {}).get(name)
+        return (
+            ptype == PineType.FLOAT
+            and isinstance(expr, Ternary)
+            and self._selection_contains_na(expr)
         )
 
     def _int_slot_cpp_type(self, name: str | None,
@@ -3582,18 +3842,28 @@ class TypeInferer:
         return cpp_val
 
     def _coerce_double_slot(self, cpp_val: str, node) -> str:
-        """Route a value into a ``double`` that a designated initializer
-        fills (a user-defined record's ``float`` field: ``Cell.new(v =
-        bar_index)``). C++ refuses to narrow a non-constant ``int`` or
+        """Route a value into a ``double`` while preserving integer ``na``.
+
+        A designated initializer (a user-defined record's ``float`` field:
+        ``Cell.new(v = bar_index)``) cannot narrow a non-constant ``int`` or
         ``int64_t`` there, which did not compile; TradingView holds the
         number, an integer na as na (fixtures/array_history_tv uctor_float).
+        Packed colors in a nullable ternary still need an integer-na conversion.
         A double, an integer literal or an expression of literals (a constant
         a double holds exactly narrows) and a bare na keep their spelling."""
         constant = self._pure_int_literal_value(node)
+        # Integral selections such as packed colors retain a typed sentinel;
+        # ordinary nullable numeric ternaries already emit a floating NaN.
+        nullable_int_selection = (
+            isinstance(node, Ternary)
+            and self._selection_contains_na(node)
+            and self._infer_type(node) in NA_PRESERVING_INT_TYPES
+        )
         if (cpp_val == "na<double>()"
                 or self._INTEGRAL_CPP_TEXT.match(cpp_val)
                 or (constant is not None and abs(constant) <= 2 ** 53)
-                or self._emitted_value_is_double(node)):
+                or (not nullable_int_selection
+                    and self._emitted_value_is_double(node))):
             return cpp_val
         if cpp_val in {"na<int>()", "na<int64_t>()"}:
             return "na<double>()"
@@ -3857,7 +4127,12 @@ class TypeInferer:
             return "std::vector<double>"
         return "double"
 
-    def _infer_type(self, node) -> str:
+    def _infer_type(
+        self,
+        node,
+        *,
+        _ternary_types: dict[int, tuple[TypeSpec | None, bool]] | None = None,
+    ) -> str:
         """Infer the C++ type for an expression node — workhorse used everywhere.
 
         Falls through a layered set of checks: literals first, then
@@ -3901,9 +4176,11 @@ class TypeInferer:
         if isinstance(node, NaLiteral):
             return "double"
         if isinstance(node, Identifier):
-            if node.name in ("time", "time_close", "timenow"):
+            tuple_binding = (node.annotations or {}).get("tuple_builtin_binding")
+            if not tuple_binding and node.name in ("time", "time_close", "timenow"):
                 return "int64_t"
-            if node.name in BAR_FIELDS or node.name in BAR_BUILTINS:
+            if (node.name in BAR_FIELDS
+                    or (node.name in BAR_BUILTINS and not tuple_binding)):
                 return "double"
             if (node.name in self._known_vars
                     and not self._known_var_is_lexically_shadowed(node.name)):
@@ -3927,6 +4204,13 @@ class TypeInferer:
             if node.name in getattr(self, "_current_loop_vars", set()):
                 return "double"
             sym = self._variable_symbol(node.name)
+            if (sym is not None and sym.pine_type == PineType.INT
+                    and (node.name not in getattr(self, "_current_func_locals", ())
+                         or self.ctx.identifier_binding_scopes.get(id(node)) == "global")
+                    and (self._numeric_na_member(node.name)
+                         or (sym.scope == "global"
+                             and self._numeric_na_global(node.name)))):
+                return "double"
             if sym is not None and getattr(sym, "type_spec", None) is not None:
                 return self._type_spec_to_cpp(sym.type_spec)
             if sym is not None and sym.pine_type != PineType.UNKNOWN:
@@ -4001,27 +4285,29 @@ class TypeInferer:
                 recv_spec = self._type_spec_from_expr(node.callee.object)
                 if recv_spec is not None and recv_spec.kind == "array" and member_name == "join":
                     return "std::string"
-                receiver_name = method_receiver_type_name(recv_spec)
-                if receiver_name is not None:
-                    fi_u = self._func_info_map.get(
-                        f"{receiver_name}.{member_name}"
+                # Keep expression storage aligned with call emission. The
+                # call visitor resolves scalar receivers through its fallback
+                # when a global binding's UDT tombstone hides its primitive.
+                _recv_spec, fi_u = self._typed_user_method_info(
+                    node.callee.object,
+                    member_name,
+                )
+                if fi_u is not None:
+                    call_site_idx = self._callable_target_callsite_idx(
+                        fi_u, node
                     )
-                    if fi_u is not None:
-                        call_site_idx = self._callable_target_callsite_idx(
-                            fi_u, node
-                        )
-                        if self._func_int_return_uses_wide_history(
-                            fi_u, call_site_idx=call_site_idx
-                        ):
-                            return "int64_t"
-                        if getattr(fi_u, "return_type_spec", None) is not None:
-                            return self._type_spec_to_cpp(fi_u.return_type_spec)
-                        return PINE_TYPE_TO_CPP.get(
-                            self._callsite_callable_return_pine_type(
-                                fi_u, call_site_idx
-                            ),
-                            "double",
-                        )
+                    if self._func_int_return_uses_wide_history(
+                        fi_u, call_site_idx=call_site_idx
+                    ):
+                        return "int64_t"
+                    if getattr(fi_u, "return_type_spec", None) is not None:
+                        return self._type_spec_to_cpp(fi_u.return_type_spec)
+                    return PINE_TYPE_TO_CPP.get(
+                        self._callsite_callable_return_pine_type(
+                            fi_u, call_site_idx
+                        ),
+                        "double",
+                    )
             if namespace is None and func_name in self._func_info_map:
                 fi_u = self._func_info_map[func_name]
                 call_site_idx = self._callable_target_callsite_idx(fi_u, node)
@@ -4101,13 +4387,36 @@ class TypeInferer:
             if spec is not None:
                 return self._type_spec_to_cpp(spec)
         if isinstance(node, Ternary):
-            ternary_spec = self._type_spec_from_expr(node)
+            if _ternary_types is None:
+                _ternary_types = self._ternary_type_specs(node)
+            # Recursive arm queries share only this selection's lexical context.
+            ternary_spec, nullable = _ternary_types[id(node)]
             if (ternary_spec is not None
-                    and ternary_spec.kind == "udt"
-                    and ternary_spec.name in DRAWING_TYPE_TO_CPP):
-                return self._type_spec_to_cpp(ternary_spec)
-            tt = self._infer_type(node.true_val)
-            ft = self._infer_type(node.false_val)
+                    and (nullable
+                         or (ternary_spec.kind == "udt"
+                             and ternary_spec.name in DRAWING_TYPE_TO_CPP))):
+                cpp_type = self._type_spec_to_cpp(ternary_spec)
+                if (nullable and ternary_spec.kind == "primitive"
+                        and ternary_spec.name in {"int", "int64"}
+                        and self._ternary_contains_bare_na(node)):
+                    # Numeric selections keep NaN even with a declared int target.
+                    return "double"
+                if cpp_type == "int" and "int64_t" in (
+                    self._infer_type(
+                        node.true_val, _ternary_types=_ternary_types,
+                    ),
+                    self._infer_type(
+                        node.false_val, _ternary_types=_ternary_types,
+                    ),
+                ):
+                    return "int64_t"
+                return cpp_type
+            tt = self._infer_type(
+                node.true_val, _ternary_types=_ternary_types,
+            )
+            ft = self._infer_type(
+                node.false_val, _ternary_types=_ternary_types,
+            )
             if tt.startswith("std::vector") or ft.startswith("std::vector"):
                 return tt if tt.startswith("std::vector") else ft
             if tt == "std::string" or ft == "std::string":
@@ -4124,15 +4433,33 @@ class TypeInferer:
         if isinstance(node, IfStmt):
             block_spec = self._type_spec_from_expr(node)
             if (block_spec is not None
-                    and block_spec.kind == "udt"
-                    and block_spec.name in DRAWING_TYPE_TO_CPP):
-                return self._type_spec_to_cpp(block_spec)
+                    and (self._selection_contains_na(node)
+                         or (block_spec.kind == "udt"
+                             and block_spec.name in DRAWING_TYPE_TO_CPP))):
+                cpp_type = self._type_spec_to_cpp(block_spec)
+                if cpp_type == "int" and any(
+                    self._infer_type(self._selection_terminal_expr(body)) == "int64_t"
+                    for body in (node.body, node.else_body) if body
+                ):
+                    return "int64_t"
+                return cpp_type
             if node.body:
                 last = node.body[-1]
                 if isinstance(last, ExprStmt):
                     return self._infer_type(last.expr)
             return "double"
         if isinstance(node, SwitchStmt):
+            if self._selection_contains_na(node):
+                block_spec = self._type_spec_from_expr(node)
+                if block_spec is not None:
+                    cpp_type = self._type_spec_to_cpp(block_spec)
+                    if cpp_type == "int" and any(
+                        self._infer_type(self._selection_terminal_expr(body)) == "int64_t"
+                        for body in [*(body for _, body in node.cases),
+                                     node.default_body] if body
+                    ):
+                        return "int64_t"
+                    return cpp_type
             if node.cases:
                 _, case_body = node.cases[0]
                 if case_body:

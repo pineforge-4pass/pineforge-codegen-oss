@@ -544,6 +544,9 @@ class _Linker:
     # ------------------------------------------------------------------
 
     def _process(self, mod: _Module, node) -> None:
+        if not isinstance(node, (FuncDef, MethodDef)):
+            # Definitions keep their module's version for later semantic checks.
+            node.annotations = dict(node.annotations or {}, pine_version=mod.lib.pine_version)
         if isinstance(node, FuncDef):
             callable_name, new_name = mod.overloads.get(
                 id(node), (node.name, mod.names[node.name]))
@@ -663,6 +666,8 @@ class _Linker:
         spelling itself changes (``alias.f`` -> ``f``)."""
         if node is None or not isinstance(node, ASTNode):
             return node
+        if isinstance(node, Ternary):
+            node.annotations = dict(node.annotations or {}, pine_version=mod.lib.pine_version)
         if isinstance(node, Identifier):
             local = scope.lookup(node.name) if scope is not None else None
             if local is not None:

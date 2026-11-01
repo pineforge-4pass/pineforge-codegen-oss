@@ -18,7 +18,7 @@ above_midpoint(float price) =>
     price > midpoint
 // John's "threshold" comment must end before the next statement.
 change = close -
-    open
+      open
 if above_midpoint(close) and change > threshold
     strategy.entry("Long", strategy.long)
 plot(change, title="Bar change")
