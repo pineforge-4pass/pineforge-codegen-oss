@@ -228,8 +228,7 @@ local_int(bool choose) =>
     int local = choose ? 1 : na
     local
 returned_int(bool choose) =>
-    values = array.from(1)
-    choose ? values.shift() : na
+    choose ? 1 : na
 argument_value = accept_int(c ? 1 : na)
 local_value = local_int(c)
 return_value = returned_int(c)
