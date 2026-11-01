@@ -420,10 +420,11 @@ class Lexer:
                 and not continues_by_indent):
             # Multiples of four are structural indentation at every block
             # depth; only a nonmultiple can continue an unfinished expression.
+            last_token = self.tokens[-1]
             self._emit_diagnostic(
                 "Line continuation outside parentheses or brackets requires "
                 "space indentation that is not a multiple of four.",
-                self.line, self.col, self.col + 1,
+                last_token.line, last_token.end_col, last_token.end_col + 1,
             )
 
         # Operator-first line continuation: when a line *begins* with a binary
