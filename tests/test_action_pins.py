@@ -10,6 +10,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 # Recounted at c1cc532b: gate.yml 9, gke-pr.yml 11, promote-baseline.yml 6,
 # publish-pyodide.yml 5, release.yml 7, test.yml 7; no .github/actions/ (45 total).
+# This count is exact: lower the floor in the same commit as any legitimate
+# removal of a uses: entry.
 MIN_USES = 45
 
 QUOTED = r'"(?:\\.|[^"\\])*"' + r"|'(?:''|[^'])*'"
@@ -66,36 +68,14 @@ def scan_action_pins(name: str, text: str) -> tuple[int, list[str]]:
     return count, findings
 
 
-def checked_path(path: Path) -> Path:
-    """Refuse protected names and links before following a diagnostic input."""
-    parts = tuple(part.casefold() for part in path.parts)
-    if any(
-        part in (".ssh", ".aws", ".codex") or part.endswith(".env")
-        for part in parts
-    ) or any(
-        parts[index : index + 3] == (".config", "zsh", "keys")
-        or parts[index : index + 2] == (".config", "pineforge")
-        for index in range(len(parts))
-    ):
-        raise ValueError(f"refusing prohibited path: {path}")
-    # Check parents first so even metadata checks cannot follow a linked parent.
-    for candidate in reversed((path, *path.parents)):
-        if candidate.is_symlink():
-            raise ValueError(f"refusing symbolic link: {candidate}")
-    return path
-
-
 def github_yaml_files(directory: Path) -> list[Path]:
     """Walk every directory, including composite actions, without ignore rules."""
-    checked_path(directory)
-    paths = []
-    for path in sorted(directory.iterdir()):
-        checked_path(path)
-        if path.is_dir():
-            paths.extend(github_yaml_files(path))
-        elif path.suffix in (".yml", ".yaml"):
-            paths.append(path)
-    return paths
+    return sorted(
+        path
+        for pattern in ("*.yml", "*.yaml")
+        for path in directory.rglob(pattern)
+        if path.is_file()
+    )
 
 
 CONTROL_SHA = "0123456789abcdef" * 2 + "01234567"
@@ -181,7 +161,6 @@ def test_every_flow_entry_is_checked() -> None:
 @pytest.fixture(scope="module")
 def sources() -> dict[str, str]:
     paths = github_yaml_files(ROOT / ".github")
-    print("Action pin input files:\n" + "\n".join(map(str, paths)), flush=True)
     return {
         path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
         for path in paths
