@@ -10,14 +10,14 @@ from tests._compile import run_emitted_tu
 _REFUSED_CASES = [
     pytest.param(
         "evaluate() =>\n    1.0 +\n    2.0\nactual = evaluate()\n",
-        (5, 5),
-        # Four spaces are structural; the operand starts at line 5, column 5.
+        (4, 10),
+        # fn_body_4/error.json: four spaces refuse after the plus at 4:10.
         id="aligned_function_operand",
     ),
     pytest.param(
         "evaluate() =>\n    1.0 +\n        2.0\nactual = evaluate()\n",
-        (5, 9),
-        # Eight spaces are structural; the operand starts at line 5, column 9.
+        (4, 10),
+        # fn_body_8/error.json: eight spaces refuse after the plus at 4:10.
         id="deeper_function_operand",
     ),
     pytest.param(
@@ -28,8 +28,8 @@ _REFUSED_CASES = [
         "    else\n"
         "        0.0\n"
         "actual = evaluate(4.0)\n",
-        (6, 13),
-        # Twelve spaces are structural even inside the function's nested block.
+        (5, 16),
+        # Hand derivation: nested width 12 refuses; eight spaces + "price +" end at 5:16.
         id="nested_block_operand",
     ),
     pytest.param(
@@ -37,8 +37,8 @@ _REFUSED_CASES = [
         "    enabled ? 7.0 :\n"
         "        2.0\n"
         "actual = evaluate(false)\n",
-        (5, 9),
-        # Eight spaces cannot continue a ternary's false operand.
+        (4, 20),
+        # fn_ternary_8/error.json: width 8 refuses; this longer colon line ends at 4:20.
         id="block_ternary",
     ),
     pytest.param(
@@ -47,16 +47,16 @@ _REFUSED_CASES = [
         "        price < 10\n"
         "    ready ? 9.0 : 0.0\n"
         "actual = evaluate(4.0)\n",
-        (5, 9),
-        # Eight spaces cannot continue the right operand of and.
+        (4, 26),
+        # Hand derivation: width 8 refuses; four spaces + "ready = price > 0 and" end at 4:26.
         id="block_logical_chain",
     ),
     pytest.param(
         "evaluate(float price) => price +\n"
         "    3.0\n"
         "actual = evaluate(4.0)\n",
-        (4, 5),
-        # An inline arrow does not exempt an operand at four spaces.
+        (3, 33),
+        # fn_arrow_4/error.json: width 4 refuses; this longer inline body ends at 3:33.
         id="inline_arithmetic_body",
     ),
     pytest.param(
@@ -65,16 +65,16 @@ _REFUSED_CASES = [
         "        1.0) +\n"
         "        3.0\n"
         "actual = evaluate(4.0)\n",
-        (6, 9),
-        # Once the call closes, the plus requires nonmultiple indentation.
+        (5, 15),
+        # Hand derivation: after ")" closes the call, width 8 refuses at the plus end, 5:15.
         id="closed_call_in_block",
     ),
     pytest.param(
         "method doubled(float self) => self *\n"
         "        2.0\n"
         "actual = close.doubled()\n",
-        (4, 9),
-        # A method's trailing multiplication also requires nonmultiple spaces.
+        (3, 37),
+        # Hand derivation: inline method width 8 refuses after its trailing star at 3:37.
         id="inline_method_operand",
     ),
 ]
@@ -162,7 +162,5 @@ def test_callable_wrap_does_not_exempt_the_next_script_statement(operand: str) -
     (diagnostic,) = caught.value.diagnostics
     assert diagnostic.phase == Phase.LEXER
     assert diagnostic.code == "PF-E0038"
-    # The six-space callable wrap is valid; the next operand is on line 7.
-    assert (diagnostic.location.line, diagnostic.location.col) == (
-        7, len(operand) - len(operand.lstrip()) + 1,
-    )
+    # Hand derivation from cont_top_4/error.json: the next script plus ends at 6:10.
+    assert (diagnostic.location.line, diagnostic.location.col) == (6, 10)

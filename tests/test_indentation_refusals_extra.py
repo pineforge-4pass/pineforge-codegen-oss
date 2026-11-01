@@ -30,31 +30,31 @@ if bar_index % 20 == 15 and strategy.position_size != 0
         pytest.param(
             "float leaf = close +\n        0.5\n"
             "float signal = float(leaf) + (0.11)\n",
-            4, 9,  # Eight spaces place the refused operand at line 4, column 9.
+            3, 21,  # cont_top_8/error.json: width 8 refuses; this plus line ends at 3:21.
             id="close-operand",
         ),
         pytest.param(
             "float leaf = open +\n        0.5\n"
             "float signal = float(leaf) + (0.22)\n",
-            4, 9,  # The operand's location is independent of the source name.
+            3, 20,  # cont_top_8/error.json: width 8 refuses; "open" shortens the end to 3:20.
             id="open-operand",
         ),
         pytest.param(
             "float leaf = high +\n        0.5\n"
             "float signal = float(leaf) + (0.33)\n",
-            4, 9,  # The eight-space operand still begins at line 4, column 9.
+            3, 20,  # cont_top_8/error.json: width 8 refuses; "high" gives a plus end of 3:20.
             id="high-operand",
         ),
         pytest.param(
             "float leaf = low +\n        0.5\n"
             "float signal = float(leaf) + (0.44)\n",
-            4, 9,  # The shorter preceding source does not move the operand.
+            3, 19,  # cont_top_8/error.json: width 8 refuses; "low" gives a plus end of 3:19.
             id="low-operand",
         ),
         pytest.param(
             "float leaf = hl2 +\n        0.5\n"
             "float signal = float(leaf) + (0.55)\n",
-            4, 9,  # The eight-space operand still begins at line 4, column 9.
+            3, 19,  # cont_top_8/error.json: width 8 refuses; "hl2" gives a plus end of 3:19.
             id="midpoint-operand",
         ),
     ],
@@ -161,17 +161,17 @@ def test_other_indentation_shapes_stay_accepted(body: str) -> None:
     [
         pytest.param(
             "choose() =>\n    close +\n        0.5\nfloat leaf = choose()\n",
-            5, 9,  # The block operand's eight spaces are structural at line 5.
+            4, 12,  # fn_body_8/error.json: width 8 refuses; "    close +" ends at 4:12.
             id="block-operand",
         ),
         pytest.param(
             "choose() => close +\n        0.5\nfloat leaf = choose()\n",
-            4, 9,  # The inline operand's eight spaces are structural at line 4.
+            3, 20,  # fn_arrow_8/error.json: width 8 refuses; this inline plus ends at 3:20.
             id="inline-callable-operand",
         ),
         pytest.param(
             "float leaf = close +\n            0.5\n",
-            4, 13,  # Twelve spaces are structural, just like four or eight.
+            3, 21,  # cont_top_12/error.json: width 12 refuses; this plus line ends at 3:21.
             id="other-space-width",
         ),
     ],

@@ -22,20 +22,21 @@ _TAIL = (
     'plot(close, "p")\n'
 )
 _CONTEXTS = {
-    "top": ("float a = close +\n", "open\n", 4),
+    "top": ("float a = close +\n", "open\n", (3, 18)),
     "block": (
         "float a = 0.0\nif bar_index % 2 == 0\n    a := close +\n",
-        "open\n", 6,
+        "open\n", (5, 17),
     ),
-    "call": ("float a = math.max(close,\n", "open)\n", 4),
+    "call": ("float a = math.max(close,\n", "open)\n", None),
     "decl_call_block": (
         "float a = 0.0\nif bar_index % 2 == 0\n    a := math.max(close,\n",
-        "open)\n", 6,
+        "open)\n", None,
     ),
 }
 
-# Accepted rows are explicit unchanged pins. Refused rows fail before the
-# change: either the lexer accepted them or it located the preceding operator.
+# Accepted rows are explicit unchanged pins. Each refused row changes the
+# location from the operand to the operator's exclusive end column.
+# cont_top_<width>/error.json measures 3:18; cont_block_<width> measures 5:17.
 _CASES = [
     pytest.param("top", 1, True, id="cont_top_1"),  # 1 % 4 = 1: operand joins.
     pytest.param("top", 2, True, id="cont_top_2"),  # 2 % 4 = 2: operand joins.
@@ -82,7 +83,7 @@ _CASES = [
 def test_measured_continuation_width(
     tmp_path: Path, context: str, width: int, accepted: bool,
 ) -> None:
-    prefix, operand, line = _CONTEXTS[context]
+    prefix, operand, position = _CONTEXTS[context]
     pine = tmp_path / f"cont_{context}_{width}.pine"
     pine.write_text(_HEADER + prefix + " " * width + operand + _TAIL, encoding="utf-8")
     result = transpile_json(pine)
@@ -93,5 +94,88 @@ def test_measured_continuation_width(
         (diagnostic,) = result["diagnostics"]
         assert diagnostic["severity"] == "error"
         assert diagnostic["code"] == "PF-E0038"
-        # Two header lines plus the context put the operand on line 4 or 6.
-        assert (diagnostic["line"], diagnostic["col"]) == (line, width + 1)
+        # The trailing plus ends at 3:18 or 5:17 regardless of operand width.
+        assert (diagnostic["line"], diagnostic["col"]) == position
+
+
+_BODY_CONTEXTS = {
+    "fn_body": ("f() =>\n    1.0 +\n", "2.0\nplot(f())\n"),
+    "fn_arrow": ("f(x) => x +\n", "3.0\nplot(f(close))\n"),
+    "fn_second_stmt": (
+        "f(float x) =>\n    y = x\n    y +\n", "3.0\nplot(f(close))\n",
+    ),
+    "method_body": (
+        "method m(float self) =>\n    self +\n", "3.0\nplot(close.m())\n",
+    ),
+    "fn_ternary": ("f(float x) =>\n    x > 1 ? 1.0 :\n", "2.0\nplot(f(close))\n"),
+    "if_block": (
+        "float a = 0.0\nif bar_index % 2 == 0\n    a := close +\n",
+        "open\nplot(a)\n",
+    ),
+    "for_block": (
+        "float a = 0.0\nfor i = 0 to 1\n    a += close +\n",
+        "open\nplot(a)\n",
+    ),
+}
+_BODY_TAIL = (
+    'if bar_index > 6 and bar_index % 7 == 3\n'
+    '    strategy.entry("L", strategy.long, qty = 1)\n'
+    'if bar_index > 6 and bar_index % 7 == 5\n'
+    '    strategy.close("L")\n'
+)
+
+# Each row uses <context>_<width>/error.json or tv_trades.csv.
+# Refusals fail before the location change; accepted rows are unchanged pins.
+_BODY_CASES = [
+    pytest.param("fn_body", 4, (4, 10), id="fn_body_4"),  # 4 % 4 = 0; plus ends at 4:10.
+    pytest.param("fn_body", 5, None, id="fn_body_5"),  # 5 % 4 = 1; operand joins.
+    pytest.param("fn_body", 8, (4, 10), id="fn_body_8"),  # 8 % 4 = 0; plus ends at 4:10.
+    pytest.param("fn_body", 9, None, id="fn_body_9"),  # 9 % 4 = 1; operand joins.
+    pytest.param("fn_body", 12, (4, 10), id="fn_body_12"),  # 12 % 4 = 0; plus ends at 4:10.
+    pytest.param("fn_arrow", 4, (3, 12), id="fn_arrow_4"),  # 4 % 4 = 0; plus ends at 3:12.
+    pytest.param("fn_arrow", 5, None, id="fn_arrow_5"),  # 5 % 4 = 1; operand joins.
+    pytest.param("fn_arrow", 8, (3, 12), id="fn_arrow_8"),  # 8 % 4 = 0; plus ends at 3:12.
+    pytest.param("fn_arrow", 9, None, id="fn_arrow_9"),  # 9 % 4 = 1; operand joins.
+    pytest.param("fn_arrow", 12, (3, 12), id="fn_arrow_12"),  # 12 % 4 = 0; plus ends at 3:12.
+    pytest.param("fn_second_stmt", 4, (5, 8), id="fn_second_stmt_4"),  # 4 % 4 = 0; plus ends at 5:8.
+    pytest.param("fn_second_stmt", 5, None, id="fn_second_stmt_5"),  # 5 % 4 = 1; operand joins.
+    pytest.param("fn_second_stmt", 8, (5, 8), id="fn_second_stmt_8"),  # 8 % 4 = 0; plus ends at 5:8.
+    pytest.param("fn_second_stmt", 9, None, id="fn_second_stmt_9"),  # 9 % 4 = 1; operand joins.
+    pytest.param("fn_second_stmt", 12, (5, 8), id="fn_second_stmt_12"),  # 12 % 4 = 0; plus ends at 5:8.
+    pytest.param("method_body", 4, (4, 11), id="method_body_4"),  # 4 % 4 = 0; plus ends at 4:11.
+    pytest.param("method_body", 5, None, id="method_body_5"),  # 5 % 4 = 1; operand joins.
+    pytest.param("method_body", 8, (4, 11), id="method_body_8"),  # 8 % 4 = 0; plus ends at 4:11.
+    pytest.param("method_body", 9, None, id="method_body_9"),  # 9 % 4 = 1; operand joins.
+    pytest.param("method_body", 12, (4, 11), id="method_body_12"),  # 12 % 4 = 0; plus ends at 4:11.
+    pytest.param("fn_ternary", 8, (4, 18), id="fn_ternary_8"),  # 8 % 4 = 0; colon ends at 4:18.
+    pytest.param("fn_ternary", 9, None, id="fn_ternary_9"),  # 9 % 4 = 1; false operand joins.
+    pytest.param("fn_ternary", 12, (4, 18), id="fn_ternary_12"),  # 12 % 4 = 0; colon ends at 4:18.
+    pytest.param("if_block", 4, (5, 17), id="if_block_4"),  # 4 % 4 = 0; plus ends at 5:17.
+    pytest.param("if_block", 5, None, id="if_block_5"),  # 5 % 4 = 1; operand joins.
+    pytest.param("if_block", 8, (5, 17), id="if_block_8"),  # 8 % 4 = 0; plus ends at 5:17.
+    pytest.param("if_block", 9, None, id="if_block_9"),  # 9 % 4 = 1; operand joins.
+    pytest.param("for_block", 4, (5, 17), id="for_block_4"),  # 4 % 4 = 0; plus ends at 5:17.
+    pytest.param("for_block", 5, None, id="for_block_5"),  # 5 % 4 = 1; operand joins.
+    pytest.param("for_block", 8, (5, 17), id="for_block_8"),  # 8 % 4 = 0; plus ends at 5:17.
+    pytest.param("for_block", 9, None, id="for_block_9"),  # 9 % 4 = 1; operand joins.
+]
+
+
+@pytest.mark.parametrize("context, width, position", _BODY_CASES)
+def test_measured_body_continuation_width(
+    tmp_path: Path, context: str, width: int, position: tuple[int, int] | None,
+) -> None:
+    prefix, operand = _BODY_CONTEXTS[context]
+    pine = tmp_path / f"{context}_{width}.pine"
+    pine.write_text(
+        _HEADER + prefix + " " * width + operand + _BODY_TAIL, encoding="utf-8",
+    )
+    result = transpile_json(pine)
+    assert result["ok"] is (position is None), result
+    if position is None:
+        assert result["cpp"]
+    else:
+        (diagnostic,) = result["diagnostics"]
+        assert diagnostic["severity"] == "error"
+        assert diagnostic["code"] == "PF-E0038"
+        assert (diagnostic["line"], diagnostic["col"]) == position
