@@ -415,17 +415,15 @@ class Lexer:
                 self._emit(TokenType.NEWLINE, "\\n", comma.line, 1)
                 self._in_continuation = False
         if (self._in_continuation
-                and self.indent_stack[-1] == 0
-                and not self._logical_line_has_arrow
                 and self.tokens[-1].type != TokenType.COMMA
-                and raw in ("", "    ", "        ")):
-            # The measured restriction is on top-level operands at zero or
-            # four or eight spaces. Block and callable bodies retain their wraps.
-            last_token = self.tokens[-1]
+                and "\t" not in raw
+                and not continues_by_indent):
+            # Multiples of four are structural indentation at every block
+            # depth; only a nonmultiple can continue an unfinished expression.
             self._emit_diagnostic(
                 "Line continuation outside parentheses or brackets requires "
                 "space indentation that is not a multiple of four.",
-                last_token.line, last_token.end_col, last_token.end_col,
+                self.line, self.col, self.col + 1,
             )
 
         # Operator-first line continuation: when a line *begins* with a binary
