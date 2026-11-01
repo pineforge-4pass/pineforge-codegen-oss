@@ -367,6 +367,11 @@ class TypeHelper:
                 (value.false_val, false_spec),
             ], nullable=nullable)
             if selection_spec is not None:
+                if (selection_spec.kind == "primitive"
+                        and selection_spec.name in {"int", "int64"}
+                        and id(value) in getattr(self, "_ternary_int_fallbacks", ())):
+                    # An integer spec must not retype the analyzed missing arm.
+                    return None
                 return selection_spec
 
             def direct_user_udt_ctor_name(node: ASTNode) -> str | None:

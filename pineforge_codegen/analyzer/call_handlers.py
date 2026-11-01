@@ -183,6 +183,9 @@ class CallHandlers:
                     or self._selection_node_is_na(expr.false_val)):
                 result_type = unify_pine_types(true_type, false_type)
                 self._check_bool_na_ternary(expr, result_type)
+                if result_type == PineType.INT:
+                    # Integer selections keep their definition's return fallback.
+                    return PineType.UNKNOWN
                 return result_type
             if true_type == false_type:
                 return true_type

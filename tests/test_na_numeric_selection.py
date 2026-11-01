@@ -98,6 +98,132 @@ _ROWS = [
         "1 0 0 8 1 1\n",  # Bear gives NaN + 1 = NaN; bull gives 7 + 1 = 8.
         id="array-element-return-na-first",
     ),
+    pytest.param(
+        "choose_value(bool choose) => choose ? na : 1\n"
+        "selected = choose_value(not c)\n"
+        "y = selected + 1\n"
+        "plot(selected)\nplot(y)\n",
+        ("double choose_value(bool choose)", "? (na<double>()) : (1)"),
+        "1 0 0 2 1 1\n",  # Bear returns NaN; bull returns 1, then 1 + 1 = 2.
+        id="literal-return-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) => choose ? na : time\n"
+        "selected = choose_value(not c)\n"
+        "y = selected + 1\n"
+        "plot(selected)\nplot(y)\n",
+        ("double choose_value(bool choose)", "? (na<double>()) : (current_bar_.timestamp)"),
+        "1 0 0 1700000060001 1 1\n",  # Bull bar 1 has time 1700000060000; adding 1 is exact.
+        id="timestamp-return-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) => choose ? na : bar_index\n"
+        "selected = choose_value(not c)\n"
+        "y = selected + 1\n"
+        "plot(selected)\nplot(y)\n",
+        ("double choose_value(bool choose)", "? (na<double>()) : (pine_bar_index())"),
+        "1 0 0 2 1 1\n",  # Bear returns NaN; bull bar 1 returns index 1, then 1 + 1 = 2.
+        id="bar-index-return-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    n = 5\n"
+        "    choose ? na : n\n"
+        "selected = choose_value(not c)\n"
+        "y = selected + 1\n"
+        "plot(selected)\nplot(y)\n",
+        ("double choose_value(bool choose)", "? (na<double>()) : ("),
+        "1 0 0 6 1 1\n",  # Bear returns NaN; bull returns the local 5, then 5 + 1 = 6.
+        id="local-integer-return-na-first",
+    ),
+    pytest.param(
+        "type Holder\n"
+        "    array<int> items\n"
+        "choose_value(bool choose) =>\n"
+        "    holder = Holder.new(array.from(7))\n"
+        "    choose ? na : holder.items.shift()\n"
+        "selected = choose_value(not c)\n"
+        "y = selected + 1\n"
+        "plot(selected)\nplot(y)\n",
+        ("double choose_value(bool choose)", "? (na<double>()) : ("),
+        "1 0 0 8 1 1\n",  # Bear returns NaN; bull shifts 7 from its fresh field array, then adds 1.
+        id="field-array-return-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) => choose ? na : array.from(7).shift()\n"
+        "selected = choose_value(not c)\n"
+        "y = selected + 1\n"
+        "plot(selected)\nplot(y)\n",
+        ("double choose_value(bool choose)", "? (na<double>()) : ("),
+        "1 0 0 8 1 1\n",  # The missing branch is NaN; the temporary's sole element is 7.
+        id="temporary-array-return-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    values = array.from(7)\n"
+        "    selected_value = choose ? na : values.shift()\n"
+        "    selected_value\n"
+        "selected = choose_value(not c)\n"
+        "y = selected + 1\n"
+        "plot(selected)\nplot(y)\n",
+        ("double choose_value(bool choose)", "double selected_value = ", "? (na<double>()) : ("),
+        "1 0 0 8 1 1\n",  # The alias preserves NaN on bear and 7 on bull before addition.
+        id="aliased-array-return-na-first",
+    ),
+    pytest.param(
+        "type Holder\n"
+        "    array<int> items\n"
+        "method take(Holder this, bool choose) =>\n"
+        "    choose ? na : this.items.shift()\n"
+        "holder = Holder.new(array.from(7))\n"
+        "selected = holder.take(not c)\n"
+        "y = selected + 1\n"
+        "plot(selected)\nplot(y)\n",
+        ("double _udt_Holder_take(", "? (na<double>()) : ("),
+        "1 0 0 8 1 1\n",  # Each bar creates one field array; the method selects NaN or 7.
+        id="method-array-return-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    values = map.new<string, int>()\n"
+        '    values.put("k", 7)\n'
+        '    choose ? na : values.get("k")\n'
+        "selected = choose_value(not c)\n"
+        "y = selected + 1\n"
+        "plot(selected)\nplot(y)\n",
+        ("double choose_value(bool choose)", "? (na<double>()) : ("),
+        "1 0 0 8 1 1\n",  # Bear returns NaN; the populated map returns 7 on bull, then adds 1.
+        id="map-value-return-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    values = matrix.new<int>(1, 1, 7)\n"
+        "    choose ? na : values.get(0, 0)\n"
+        "selected = choose_value(not c)\n"
+        "y = selected + 1\n"
+        "plot(selected)\nplot(y)\n",
+        ("double choose_value(bool choose)", "? (na<double>()) : ("),
+        "1 0 0 8 1 1\n",  # Bear returns NaN; the single matrix element is 7 on bull, then adds 1.
+        id="matrix-value-return-na-first",
+    ),
+    pytest.param(
+        "choose_value(value, bool choose) => choose ? na : value\n"
+        "selected = choose_value(5, not c)\n"
+        "y = selected + 1\n"
+        "plot(selected)\nplot(y)\n",
+        ("double choose_value(", "? (na<double>()) : (value)"),
+        "1 0 0 6 1 1\n",  # The integer argument is 5; the missing function result is NaN.
+        id="untyped-parameter-na-first",
+    ),
+    pytest.param(
+        "choose_value(value, bool choose) => choose ? value : na\n"
+        "selected = choose_value(5, c)\n"
+        "y = selected + 1\n"
+        "plot(selected)\nplot(y)\n",
+        ("double choose_value(", "? (value) : (na<double>())"),
+        "1 0 0 6 1 1\n",  # Bear selects NaN; bull returns the integer argument 5, then adds 1.
+        id="untyped-parameter-na-second",
+    ),
 ]
 
 

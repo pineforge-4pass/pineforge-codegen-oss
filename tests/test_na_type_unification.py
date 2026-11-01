@@ -5,10 +5,14 @@ from __future__ import annotations
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.analyzer import Analyzer
 from pineforge_codegen.analyzer.types import TypeHelper
 from pineforge_codegen.ast_nodes import BoolLiteral, NumberLiteral, Ternary
 from pineforge_codegen.codegen.types import TypeInferer
 from pineforge_codegen.errors import CompileError, Level, Phase
+from pineforge_codegen.lexer import Lexer
+from pineforge_codegen.parser import Parser
+from pineforge_codegen.symbols import PineType
 from tests._compile import compile_cpp, have_compile_env, run_emitted_tu
 
 
@@ -276,6 +280,299 @@ def test_na_adopts_each_value_family(
         assert "na<double>()" in function_body
         assert "na<int>()" not in function_body
     compile_cpp(cpp, label=label)
+
+
+_INTEGER_TERNARY_ROWS = [
+    pytest.param(
+        "choose_value(bool choose) => choose ? na : 1\n",
+        PineType.NA,  # The true arm is na; the integer literal does not promote it.
+        "choose_value(close > open)",
+        id="literal-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) => choose ? na : time\n",
+        PineType.NA,  # The true arm is na even though the other arm is a timestamp.
+        "choose_value(close > open)",
+        id="time-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) => choose ? na : bar_index\n",
+        PineType.NA,  # The true arm is na; bar_index supplies no float promotion.
+        "choose_value(close > open)",
+        id="bar-index-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    n = 5\n"
+        "    choose ? na : n\n",
+        PineType.NA,  # The integer local leaves the true arm's na type unchanged.
+        "choose_value(close > open)",
+        id="integer-local-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    values = array.from(7)\n"
+        "    choose ? na : values.shift()\n",
+        PineType.NA,  # A shifted element has coarse type VOID, so the true na wins.
+        "choose_value(close > open)",
+        id="array-shift-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    values = array.from(7)\n"
+        "    choose ? values.shift() : na\n",
+        PineType.VOID,  # The true member call is VOID in the coarse analyzer.
+        "choose_value(close > open)",
+        id="array-shift-na-second",
+    ),
+    pytest.param(
+        "type Holder\n"
+        "    array<int> items\n"
+        "choose_value(bool choose) =>\n"
+        "    holder = Holder.new(array.from(7))\n"
+        "    choose ? na : holder.items.shift()\n",
+        PineType.NA,  # An integer field-array spec cannot replace the true na.
+        "choose_value(close > open)",
+        id="field-array-na-first",
+    ),
+    pytest.param(
+        "type Holder\n"
+        "    array<int> items\n"
+        "choose_value(bool choose) =>\n"
+        "    holder = Holder.new(array.from(7))\n"
+        "    choose ? holder.items.shift() : na\n",
+        PineType.VOID,  # The true field-array member call retains its coarse VOID.
+        "choose_value(close > open)",
+        id="field-array-na-second",
+    ),
+    pytest.param(
+        "choose_value(bool choose) => choose ? na : array.from(7).shift()\n",
+        PineType.NA,  # A temporary array's integer element cannot promote true na.
+        "choose_value(close > open)",
+        id="temporary-array-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) => choose ? array.from(7).shift() : na\n",
+        PineType.VOID,  # The temporary's true member call is still coarse VOID.
+        "choose_value(close > open)",
+        id="temporary-array-na-second",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    values = array.from(7)\n"
+        "    x = choose ? na : values.shift()\n"
+        "    x\n",
+        PineType.NA,  # Returning an alias must preserve its initializer's true na.
+        "choose_value(close > open)",
+        id="aliased-selection",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    values = array.from(7)\n"
+        "    if choose\n"
+        "        choose ? na : values.shift()\n"
+        "    else\n"
+        "        choose ? na : values.shift()\n",
+        PineType.NA,  # Both branch tails have true na arms, so the function stays NA.
+        "choose_value(close > open)",
+        id="branch-selections",
+    ),
+    pytest.param(
+        "choose_value(array<int> values, bool choose) =>\n"
+        "    choose ? na : values.shift()\n"
+        "values = array.from(7)\n",
+        PineType.NA,  # A typed array parameter supplies a spec, not a float promotion.
+        "choose_value(values, close > open)",
+        id="parameter-array-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    array<int> values = array.new<int>()\n"
+        "    choose ? na : values.shift()\n",
+        PineType.NA,  # The explicit integer array still leaves the true arm typed NA.
+        "choose_value(close > open)",
+        id="declared-array-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    values = array.from(7)\n"
+        "    choose ? na : values.get(0)\n",
+        PineType.NA,  # The integer get spec cannot promote the true na arm.
+        "choose_value(close > open)",
+        id="array-get-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    values = array.from(7)\n"
+        "    choose ? na : values.first()\n",
+        PineType.NA,  # The integer first-element spec cannot promote true na.
+        "choose_value(close > open)",
+        id="array-first-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    values = array.from(7)\n"
+        "    choose ? na : values.last()\n",
+        PineType.NA,  # The integer last-element spec cannot promote true na.
+        "choose_value(close > open)",
+        id="array-last-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    values = array.from(7)\n"
+        "    choose ? na : values.pop()\n",
+        PineType.NA,  # The integer pop spec cannot promote the true na arm.
+        "choose_value(close > open)",
+        id="array-pop-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    values = map.new<string, int>()\n"
+        '    values.put("k", 7)\n'
+        '    choose ? na : values.get("k")\n',
+        PineType.NA,  # A map's integer value spec cannot promote true na.
+        "choose_value(close > open)",
+        id="map-get-na-first",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    values = map.new<string, int>()\n"
+        '    values.put("k", 7)\n'
+        '    choose ? values.get("k") : na\n',
+        PineType.VOID,  # The true map get remains coarse VOID despite its integer spec.
+        "choose_value(close > open)",
+        id="map-get-na-second",
+    ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    values = matrix.new<int>(1, 1, 7)\n"
+        "    choose ? na : values.get(0, 0)\n",
+        PineType.NA,  # The matrix method is INT, but the true na still determines the type.
+        "choose_value(close > open)",
+        id="matrix-get-na-first",
+    ),
+]
+
+
+@pytest.mark.parametrize("body,expected_type,invocation", _INTEGER_TERNARY_ROWS)
+def test_integer_ternary_returns_keep_the_true_arm_type(
+    body: str, expected_type: PineType, invocation: str,
+) -> None:
+    source = _script(
+        body + f"selected = {invocation}\n"
+        "y = selected + 1\nplot(selected)\nplot(y)\n"
+    )
+    ast = Parser(Lexer(source).tokenize(), source=source).parse()
+    ctx = Analyzer(ast).analyze()
+    info = next(info for info in ctx.func_infos if info.name == "choose_value")
+    assert info.return_type == expected_type
+    assert info.return_type_spec is None
+    cpp = transpile(source)
+    # NA and VOID both emit double; the missing arm stays a double NaN.
+    signature = "double choose_value("
+    assert signature in cpp
+    function_body = cpp.split(signature, 1)[1].split("\n    }", 1)[0]
+    assert "na<double>()" in function_body
+    assert "na<int>()" not in function_body
+    assert "na<int64_t>()" not in function_body
+    assert "double selected = 0.0;" in cpp
+    assert "y = (selected + 1);" in cpp
+    compile_cpp(cpp, label="integer-ternary-return")
+
+
+def test_integer_ternary_argument_keeps_the_true_arm_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _script(
+        "accept_value(float value) => value\n"
+        "values = array.from(7)\n"
+        "selected = accept_value(close > open ? na : values.shift())\n"
+        "plot(selected + 1)\nplot(selected)\n"
+    )
+    ast = Parser(Lexer(source).tokenize(), source=source).parse()
+    analyzer = Analyzer(ast)
+    observed = []
+    visit = analyzer._visit_Ternary
+
+    def record_type(node):
+        result = visit(node)
+        observed.append(result)
+        return result
+
+    monkeypatch.setattr(analyzer, "_visit_Ternary", record_type)
+    analyzer.analyze()
+    # The sole ternary has true na; a float parameter does not retype that expression.
+    assert observed == [PineType.NA]
+    cpp = transpile(source)
+    assert "double accept_value(double value)" in cpp
+    assignment = next(
+        line.strip() for line in cpp.splitlines()
+        if line.strip().startswith("selected = ")
+    )
+    assert "? (na<double>()) : (" in assignment
+    assert "na<int>()" not in assignment
+    compile_cpp(cpp, label="integer-ternary-argument")
+
+
+def test_integer_ternary_method_keeps_the_true_arm_type() -> None:
+    source = _script(
+        "type Holder\n"
+        "    array<int> items\n"
+        "method take(Holder this, bool choose) =>\n"
+        "    choose ? na : this.items.shift()\n"
+        "holder = Holder.new(array.from(7))\n"
+        "selected = holder.take(close > open)\n"
+        "plot(selected + 1)\nplot(selected)\n"
+    )
+    ast = Parser(Lexer(source).tokenize(), source=source).parse()
+    ctx = Analyzer(ast).analyze()
+    info = next(info for info in ctx.func_infos if info.name == "Holder.take")
+    # The true arm is NA; neither method return recovery nor the call may promote it.
+    assert info.return_type == PineType.NA
+    assert info.return_type_spec is None
+    cpp = transpile(source)
+    signature = "double _udt_Holder_take("
+    assert signature in cpp
+    function_body = cpp.split(signature, 1)[1].split("\n    }", 1)[0]
+    assert "? (na<double>()) : (" in function_body
+    assert "na<int>()" not in function_body
+    compile_cpp(cpp, label="integer-ternary-method")
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        pytest.param("t = close > open ? na : 1\n", id="inferred"),
+        pytest.param("int t = close > open ? na : 1\n", id="declared"),
+    ],
+)
+def test_na_first_integer_global_keeps_the_initializer_type(
+    declaration: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _script(declaration + "plot(t + 1)\nplot(t)\n")
+    ast = Parser(Lexer(source).tokenize(), source=source).parse()
+    analyzer = Analyzer(ast)
+    observed = []
+    visit = analyzer._visit_Ternary
+
+    def record_type(node):
+        result = visit(node)
+        observed.append(result)
+        return result
+
+    monkeypatch.setattr(analyzer, "_visit_Ternary", record_type)
+    analyzer.analyze()
+    # Both initializers have true na, including the explicitly declared integer.
+    assert observed == [PineType.NA]
+    cpp = transpile(source)
+    assert "double t = 0.0;" in cpp
+    assignment = next(
+        line.strip() for line in cpp.splitlines()
+        if line.strip().startswith("t = ")
+    )
+    assert "? (na<double>()) : (1)" in assignment
+    assert "na<int>()" not in assignment
+    compile_cpp(cpp, label="na-first-integer-global")
 
 
 @pytest.mark.parametrize(

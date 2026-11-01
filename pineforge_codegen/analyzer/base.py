@@ -281,6 +281,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 defined_names.add(stmt.name)
         # Track user-defined function return types
         self._func_return_types: dict[str, PineType] = {}
+        self._ternary_int_fallbacks: set[int] = set()
         # Track user-defined function tuple returns
         self._func_returns_tuple: dict[str, bool] = {}
         self._func_tuple_element_count: dict[str, int] = {}
@@ -6468,19 +6469,22 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._bool_na_error(token.loc)
 
     def _visit_Ternary(self, node: Ternary) -> PineType:
+        self._ternary_int_fallbacks.discard(id(node))
         condition_type = self._visit(node.condition)
         self._check_untyped_na_condition(node.condition, condition_type)
         true_type = self._visit(node.true_val)
         false_type = self._visit(node.false_val)
+        if PineType.STRING in (true_type, false_type):
+            main_type = PineType.STRING
+        elif PineType.FLOAT in (true_type, false_type):
+            main_type = PineType.FLOAT
+        else:
+            main_type = true_type
         if (self._selection_node_is_na(node.true_val)
                 or self._selection_node_is_na(node.false_val)):
             result_type = unify_pine_types(true_type, false_type)
-        elif PineType.STRING in (true_type, false_type):
-            result_type = PineType.STRING
-        elif PineType.FLOAT in (true_type, false_type):
-            result_type = PineType.FLOAT
         else:
-            result_type = true_type
+            result_type = main_type
         structured_type = PineType.UNKNOWN
         if (self._selection_contains_na(node)
                 and result_type in {PineType.NA, PineType.UNKNOWN, PineType.VOID}):
@@ -6506,36 +6510,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             structured_type != PineType.UNKNOWN
             and result_type in {PineType.NA, PineType.UNKNOWN, PineType.VOID}
         ):
-            if (structured_type == PineType.INT
-                    and self._enclosing_func_names
-                    and (self._selection_node_is_na(node.true_val)
-                         or self._selection_node_is_na(node.false_val))):
-                func_def = self._func_defs.get(self._enclosing_func_names[-1])
-                if (func_def is not None
-                        and self._direct_terminal_return_expr(func_def) is node):
-                    value = (
-                        node.false_val
-                        if self._selection_node_is_na(node.true_val)
-                        else node.true_val
-                    )
-                    if (isinstance(value, FuncCall)
-                            and isinstance(value.callee, MemberAccess)):
-                        receiver = value.callee.object
-                        if (isinstance(receiver, Identifier)
-                                and receiver.name == "array"
-                                and self._symbols.resolve("array") is None):
-                            receiver = (
-                                value.args[0] if value.args
-                                else value.kwargs.get("id")
-                            )
-                        if isinstance(receiver, Identifier):
-                            receiver_spec = self._type_spec_from_expr(receiver)
-                            if (receiver_spec is not None
-                                    and receiver_spec.kind == "array"):
-                                # An array element known only through its spec
-                                # keeps the floating return and its NaN arm.
-                                return PineType.FLOAT
-            return structured_type
+            result_type = structured_type
+        if result_type == PineType.INT and main_type != PineType.INT:
+            # Keep the true arm's numeric fallback through later return queries.
+            self._ternary_int_fallbacks.add(id(node))
+            return main_type
         return result_type
 
     def _visit_FuncCall(self, node: FuncCall) -> PineType:
