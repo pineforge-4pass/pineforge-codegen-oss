@@ -1,7 +1,7 @@
 """Compile every fixture that translates; retain all compiler failures.
 
-Known front-end and compiler defects have strict, exception-specific xfails. Run with
-``--runxfail -k issue_281`` for red-first evidence against unfixed codegen.
+Known compiler defects have strict, exception-specific xfails. All issue #281 rows
+must translate and compile without xfail markers.
 Reports include known compile failures as well as every unexpected compiler failure.
 """
 
@@ -266,7 +266,7 @@ def sweep_results(tmp_path_factory):
     pairing = _pairing()
     skip_if_no_compile_env()
     # An incompatible header tree or missing generated header must fail setup,
-    # before the issue #281 xfail markers can apply.
+    # before the known compile-failure xfail markers can apply.
     compile_cpp(
         transpile('//@version=6\nstrategy("compile sweep preflight")\n'),
         label="fixture-sweep-preflight", extra_flags=STRATEGY_FP_FLAGS,
@@ -379,32 +379,13 @@ def test_paired_engine_corpus_translates_implies_compiles(sweep_results):
 
 
 @pytest.mark.parametrize("pine_path", [
-    pytest.param(
-        path, id=path.stem,
-        marks=(
-            pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "issue #281 case 1: the front end rejects a valid script (CompileError), "
-                    "not a compile failure"
-                ),
-                raises=CompileError,
-            )
-            if path == ISSUE_281[0]
-            else (
-                pytest.mark.xfail(
-                    strict=True, reason="issue #281", raises=FixtureCompileFailure,
-                )
-                if path == ISSUE_281[1] else ()
-            )
-        ),
-    )
+    pytest.param(path, id=path.stem)
     for path in ISSUE_281
 ])
 def test_issue_281_translates_and_compiles(pine_path, sweep_results):
     _checked_path(pine_path)
     print(f"Issue #281 source file: {pine_path}", flush=True)
-    # The parameter's marker distinguishes front-end and compiler failures.
+    # Front-end and compiler failures must both fail this unmarked row.
     cpp = transpile(pine_path.read_text(encoding="utf-8"), filename=_label(pine_path))
     result = _compile(pine_path, cpp)
     sweep_results.append(result)
@@ -412,30 +393,19 @@ def test_issue_281_translates_and_compiles(pine_path, sweep_results):
         raise FixtureCompileFailure(f"{result.path}\t{result.diagnostic}")
 
 
-@pytest.mark.parametrize(("pine_path", "expected_exception"), [
-    pytest.param(path, error, id=path.stem)
-    for path, error in zip(
-        ISSUE_281, (CompileError, FixtureCompileFailure, None),
-    )
+@pytest.mark.parametrize("pine_path", [
+    pytest.param(path, id=path.stem)
+    for path in ISSUE_281
 ])
-def test_issue_281_xfail_accepts_only_the_expected_exception(pine_path, expected_exception):
+def test_issue_281_rows_carry_no_xfail(pine_path):
     parameters, = (
         mark.args[1] for mark in test_issue_281_translates_and_compiles.pytestmark
         if mark.name == "parametrize"
     )
+    assert [parameter.values[0] for parameter in parameters] == list(ISSUE_281)
     parameter, = (parameter for parameter in parameters if parameter.values == (pine_path,))
     xfails = [mark for mark in parameter.marks if mark.name == "xfail"]
-    if expected_exception is None:
-        assert not xfails
-        return
-    xfail, = xfails
-    assert xfail.kwargs["strict"] is True
-    assert xfail.kwargs["raises"] is expected_exception
-    assert xfail.kwargs["reason"] == (
-        "issue #281 case 1: the front end rejects a valid script (CompileError), "
-        "not a compile failure"
-        if expected_exception is CompileError else "issue #281"
-    )
+    assert not xfails
 
 
 @pytest.mark.parametrize("pine_path", [

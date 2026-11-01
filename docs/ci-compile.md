@@ -95,10 +95,10 @@ sweep part.
 `KNOWN_COMPILE_FAILURES` maps exact repository paths to compiler-failure reasons.
 Its sole entry is `tests/fixtures/drawing_lifetime/w9dg-label-collect/strategy.pine`.
 Both ordinary batches exclude registry paths; dedicated rows still compile them.
-Registry rows and #281 cases 2–3 strictly xfail only on `FixtureCompileFailure`.
-Case 1 of #281 strictly xfails only on `CompileError`: the front end rejects valid Pine.
+Registry rows are the only strict xfails, accepting only `FixtureCompileFailure`.
+All three #281 rows are ordinary tests that must translate and compile.
 Registry controls check real files, disjoint batches, exact marks and full coverage.
-A successful row is strict XPASS, forcing removal of its marker or registry entry.
+A successful registry row is strict XPASS, forcing removal of its marker or registry entry.
 The generated preflight strategy must compile before any xfail body can run.
 
 Each sweep part uploads `compile-report-<part>` even when pytest fails;
@@ -107,7 +107,7 @@ with that name, but permits an empty report directory because it excludes the
 sweep module that writes these files:
 
 - `compile-failures.txt`: one path and first compiler error line per failure,
-  including the registered failure and #281 cases 2–3.
+  including the registered failure and any #281 regression.
 - `front-end-rejections.txt`: sources rejected before producing C++.
 - `results.json`: per-source outcomes, compiler seconds, shard identity,
   sweep wall time, `engine_sha`, `corpus_sha`, `engine_pin` and `pairing_mode`.
@@ -129,16 +129,16 @@ using the same rule as a skipped pytest job.
 On a CLOUD checkout with the paired compile environment already exported,
 also export `PINEFORGE_ENGINE_SHA` and `PINEFORGE_CORPUS_SHA` from the engine
 and corpus checkouts' respective `git rev-parse HEAD` results. Then
-these commands expose #281 without its markers and then exercise its strict
-expected failures. Run them as separate verification rows; the first is
-intentionally red before the CGI fixes:
-
-```bash
-PINEFORGE_REQUIRE_COMPILE=1 python -m pytest -ra --runxfail tests/test_translate_implies_compile.py -k issue_281
-```
+these commands first verify the three ordinary #281 translate-and-compile rows,
+then run the full sweep, including the registry's sole strict-xfail entry.
+Run them as separate verification rows; all #281 rows must pass in both:
 
 ```bash
 PINEFORGE_REQUIRE_COMPILE=1 python -m pytest -ra tests/test_translate_implies_compile.py -k issue_281
+```
+
+```bash
+PINEFORGE_REQUIRE_COMPILE=1 python -m pytest -ra tests/test_translate_implies_compile.py
 ```
 
 For the complete unsharded check, use a fresh report directory, set
