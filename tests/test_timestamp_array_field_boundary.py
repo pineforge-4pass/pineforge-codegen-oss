@@ -1,4 +1,4 @@
-"""Timestamp-bearing integer array fields fail before any truncated run."""
+"""Timestamp-bearing integer fields compile and preserve their Pine values."""
 
 import pytest
 
@@ -12,28 +12,26 @@ FIELD = '''type Book
     array<int> stamps
 var b = Book.new(array.new<int>())
 '''
-MESSAGE = "Timestamp values in Book.stamps require 64-bit array field storage"
 
 
-@pytest.mark.parametrize("write", [
-    "b.stamps.unshift(time)",
-    "array.unshift(b.stamps, time)",
-    "array.push(value = time, id = b.stamps)",
-    "b.stamps.insert(0, time)",
-    "b.stamps.push(0)\nb.stamps.set(0, time)",
-    "b.stamps.push(0)\nb.stamps.fill(time)",
-    "alias = b.stamps\nalias.push(time)",
-    "alias = b.stamps.copy()\nalias.push(time)",
-    "alias = b.stamps.slice(0, 0)\nalias.push(time)",
-    "b.stamps := array.from(time)",
-    "b.stamps := array.new<int>(1, time)",
+@pytest.mark.parametrize("write, read", [
+    ("b.stamps.unshift(time)", "b.stamps.get(0)"),
+    ("array.unshift(b.stamps, time)", "b.stamps.get(0)"),
+    ("array.push(value = time, id = b.stamps)", "b.stamps.get(0)"),
+    ("b.stamps.insert(0, time)", "b.stamps.get(0)"),
+    ("b.stamps.push(0)\nb.stamps.set(0, time)", "b.stamps.get(0)"),
+    ("b.stamps.push(0)\nb.stamps.fill(time)", "b.stamps.get(0)"),
+    ("alias = b.stamps\nalias.push(time)", "alias.get(0)"),
+    ("alias = b.stamps.copy()\nalias.push(time)", "alias.get(0)"),
+    ("alias = b.stamps.slice(0, 0)\nalias.push(time)", "alias.get(0)"),
+    ("b.stamps := array.from(time)", "b.stamps.get(0)"),
+    ("b.stamps := array.new<int>(1, time)", "b.stamps.get(0)"),
 ])
-def test_epoch_field_storage_has_a_clear_compile_failure(write):
-    # Each component includes Book.stamps and an epoch write; int32 storage must not run.
-    cpp = transpile(HEADER + FIELD + write + "\nplot(close)\n")
-    assert MESSAGE in cpp
-    with pytest.raises(AssertionError, match=MESSAGE):
-        compile_cpp(cpp)
+def test_epoch_field_storage_preserves_value(write, read):
+    # The directly written array, alias or copy reads the full timestamp.
+    cpp = transpile(HEADER + FIELD + write + f"\nok = {read} == time ? 1 : 0\n")
+    compile_cpp(cpp)
+    assert _run(cpp) == "1"
 
 
 def test_array_method_named_argument_is_a_known_gap():
@@ -52,23 +50,19 @@ plot(close)
     "Book.new(array.from(time))",
     "Book.new(stamps = array.new<int>(1, time))",
 ])
-def test_constructor_epoch_field_has_a_clear_compile_failure(constructor):
-    # An inline constructor stores the epoch in the same int32 field as a later push.
+def test_constructor_epoch_field_preserves_value(constructor):
     cpp = transpile(HEADER + "type Book\n    array<int> stamps\n"
-                    f"var b = {constructor}\nplot(close)\n")
-    assert MESSAGE in cpp
-    with pytest.raises(AssertionError, match=MESSAGE):
-        compile_cpp(cpp)
+                    f"var b = {constructor}\nok = b.stamps.get(0) == time ? 1 : 0\n")
+    compile_cpp(cpp)
+    assert _run(cpp) == "1"
 
 
 @pytest.mark.parametrize("persistent", ["var ", ""])
-def test_both_record_lifetimes_block_epoch_truncation(persistent):
-    # Persistent vectors and bar-local array aliases both hold int32 elements today.
+def test_both_record_lifetimes_preserve_epoch(persistent):
     cpp = transpile(HEADER + FIELD.replace("var b =", persistent + "b =")
-                    + "b.stamps.unshift(time)\nplot(close)\n")
-    assert MESSAGE in cpp
-    with pytest.raises(AssertionError, match=MESSAGE):
-        compile_cpp(cpp)
+                    + "b.stamps.unshift(time)\nok = b.stamps.get(0) == time ? 1 : 0\n")
+    compile_cpp(cpp)
+    assert _run(cpp) == "1"
 
 
 def test_callable_array_alias_and_result_are_connected_to_field():
@@ -76,11 +70,10 @@ def test_callable_array_alias_and_result_are_connected_to_field():
     cpp = transpile(HEADER + FIELD + '''identity(array<int> xs) => xs
 alias = identity(b.stamps)
 alias.push(time)
-plot(close)
+ok = alias.get(0) == time ? 1 : 0
 ''')
-    assert MESSAGE in cpp
-    with pytest.raises(AssertionError, match=MESSAGE):
-        compile_cpp(cpp)
+    compile_cpp(cpp)
+    assert _run(cpp) == "1"
 
 
 def test_callable_array_writer_is_connected_to_field():
@@ -88,11 +81,10 @@ def test_callable_array_writer_is_connected_to_field():
     cpp = transpile(HEADER + FIELD + '''append(array<int> xs, int epoch) =>
     xs.push(epoch)
 append(b.stamps, time)
-plot(close)
+ok = b.stamps.get(0) == time ? 1 : 0
 ''')
-    assert MESSAGE in cpp
-    with pytest.raises(AssertionError, match=MESSAGE):
-        compile_cpp(cpp)
+    compile_cpp(cpp)
+    assert _run(cpp) == "1"
 
 
 def test_method_receiver_field_write_is_resolved():
@@ -103,15 +95,14 @@ method append(Book self, int epoch) =>
     self.stamps.push(epoch)
 var b = Book.new(array.new<int>())
 b.append(epoch = time)
-plot(close)
+ok = b.stamps.get(0) == time ? 1 : 0
 ''')
-    assert MESSAGE in cpp
-    with pytest.raises(AssertionError, match=MESSAGE):
-        compile_cpp(cpp)
+    compile_cpp(cpp)
+    assert _run(cpp) == "1"
 
 
 def test_count_field_and_float_timestamp_field_are_unchanged():
-    # Unchanged pin: a float holds the epoch exactly, while a count-only field stays int32.
+    # A float holds these timestamps exactly; the count-only field keeps its value.
     cpp = transpile(HEADER + '''type Book
     array<int> counts
     array<float> stamps
@@ -120,8 +111,5 @@ b.counts.push(bar_index)
 b.stamps.unshift(time)
 ok = b.counts.get(0) == bar_index and b.stamps.get(0) == time ? 1 : 0
 ''')
-    assert "require 64-bit array field storage" not in cpp
-    assert "std::vector<int> counts" in cpp
-    assert "std::vector<double> stamps" in cpp
     compile_cpp(cpp)
     assert _run(cpp) == "1"

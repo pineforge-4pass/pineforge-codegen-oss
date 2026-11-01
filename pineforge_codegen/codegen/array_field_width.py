@@ -1,31 +1,48 @@
-"""Find integer array fields whose connected storage receives timestamps."""
+"""Keep connected integer arrays at one width, including callable boundaries."""
+
+from dataclasses import dataclass, field
 
 from ..ast_nodes import (
     Assignment, ExprStmt, FuncCall, FuncDef, Identifier, IfStmt, MemberAccess,
-    MethodDef, Subscript, SwitchStmt, Ternary, VarDecl,
+    MethodDef, Subscript, SwitchStmt, Ternary, TupleAssign, VarDecl,
 )
 from ..symbols import TypeSpec
 
 
-def timestamp_array_fields(gen):
-    """Return resolved (record type, field) pairs requiring wide storage.
+@dataclass
+class ArrayWidths:
+    wide: set = field(default_factory=set)
+    nodes: dict = field(default_factory=dict)
+    names: dict = field(default_factory=dict)
+    specs: dict = field(default_factory=dict)
+    elements: dict = field(default_factory=dict)
 
-    This is a compatibility check, not a collection specialization pass.
-    Connections include aliases, constructor fields and callable boundaries:
-    changing only one vector in a connected component cannot preserve its
-    existing reference bindings.
+    def widen(self, spec, slots):
+        if _int_array(spec) and not self.wide.isdisjoint(slots):
+            return TypeSpec.array(TypeSpec.primitive("int64"))
+        return spec
+
+
+def prepare_array_widths(gen):
+    """Specialize an entire connected component, never convert its references.
+
+    A field is keyed by its resolved record type, not its spelling. All
+    instances share that layout. Copies need the same element type too, but
+    this pass does not change their ownership or lifetime. Unconnected arrays
+    containing only small integers retain their original C++.
     """
+    result = ArrayWidths()
+    # Type queries made by scalar provenance can see the growing answer.
+    gen._array_widths = result
     fields = {
         (type_name, name)
         for type_name, specs in gen._udt_field_type_specs.items()
         for name, spec in specs.items()
         if _int_array(spec)
     }
-    if not fields:
-        return set()
-
     nodes = []
     declarations = {}
+    declarations_by_id = {}
     for stmt in gen.ctx.ast.body:
         if not isinstance(stmt, (FuncDef, MethodDef)):
             nodes.extend((child, None) for child in gen._walk_ast(stmt))
@@ -33,33 +50,62 @@ def timestamp_array_fields(gen):
         if info.node is not None:
             nodes.extend((child, info)
                          for child in gen._walk_ast_list(info.node.body))
+    if (not fields
+            and not any(_int_array(spec, include_wide=True)
+                        for spec in gen._collection_types.values())
+            and not any(isinstance(node, FuncCall)
+                        and gen._resolve_callee(node.callee)[1] == "array"
+                        for node, _owner in nodes)):
+        return result
     for node, owner in nodes:
         if isinstance(node, VarDecl):
             declarations[(owner.name if owner else "", node.name)] = node
+            declarations_by_id[id(node)] = (node, owner)
+        elif isinstance(node, TupleAssign):
+            for index, name in enumerate(node.names):
+                element = gen._tuple_element_value(node.value, index, owner)
+                if name and name != "_" and element is not None:
+                    declarations[(owner.name if owner else "", name)] = element
 
-    def binding(name, owner):
+    def binding(name, owner, expr=None):
         scope = owner.name if owner else ""
+        resolved = gen.ctx.identifier_decl_bindings.get(id(expr))
+        if resolved is not None and resolved[0] in declarations_by_id:
+            return ("declaration", *resolved)
         if owner and (name in owner.node.params
                       or (scope, name) in declarations):
-            return scope, name
-        return "", name
+            return "name", scope, name
+        return "name", "", name
+
+    def declaration(expr, owner):
+        resolved = gen.ctx.identifier_decl_bindings.get(id(expr))
+        if resolved is not None and resolved[0] in declarations_by_id:
+            return declarations_by_id[resolved[0]]
+        scope = owner.name if owner else ""
+        if owner and expr.name in owner.node.params:
+            return None, owner
+        if (scope, expr.name) in declarations:
+            return declarations[(scope, expr.name)], owner
+        return declarations.get(("", expr.name)), None
 
     def spec_of(expr, owner, seen=frozenset()):
         if isinstance(expr, Identifier):
-            scope, name = binding(expr.name, owner)
-            key = (scope, name)
+            key = binding(expr.name, owner, expr)
             if key in seen:
                 return None
-            if owner and scope and name in owner.node.params:
-                index = owner.node.params.index(name)
+            decl, lexical_owner = declaration(expr, owner)
+            if owner and decl is None and expr.name in owner.node.params:
+                index = owner.node.params.index(expr.name)
                 specs = owner.param_type_specs
                 return specs[index] if index < len(specs) else None
-            decl = declarations.get(key)
+            if isinstance(decl, tuple):
+                value, lexical_owner = decl
+                return spec_of(value, lexical_owner, seen | {key})
             if decl is not None:
                 hint = gen._type_spec_from_hint_name(decl.type_hint)
                 if hint is not None:
                     return hint
-                return spec_of(decl.value, owner if scope else None, seen | {key})
+                return spec_of(decl.value, lexical_owner, seen | {key})
         if isinstance(expr, MemberAccess):
             record = spec_of(expr.object, owner, seen)
             if record is not None and record.kind == "udt":
@@ -71,6 +117,20 @@ def timestamp_array_fields(gen):
             fn, ns = gen._resolve_callee(expr.callee)
             if ns in gen._udt_defs and fn == "new":
                 return TypeSpec.udt(ns)
+            if ns is None and fn in {"int", "float", "bool", "string"}:
+                return TypeSpec.primitive(fn)
+            if ns == "array" and fn == "from" and expr.args:
+                elements = [spec_of(arg, owner, seen)
+                            or gen._array_from_element_spec(arg) for arg in expr.args]
+                known = [spec for spec in elements if spec is not None]
+                if known and all(spec.kind == "primitive" and spec.name in {
+                        "int", "int64", "float"} for spec in known):
+                    name = ("float" if any(spec.name == "float" for spec in known)
+                            else "int64" if any(spec.name == "int64" for spec in known)
+                            else "int")
+                    return TypeSpec.array(TypeSpec.primitive(name))
+                if known:
+                    return TypeSpec.array(known[0])
             callees = gen._wide_callable_args(expr)
             if callees:
                 info = callees[0][0]
@@ -78,7 +138,7 @@ def timestamp_array_fields(gen):
                     return info.return_type_spec
                 if info.udt_return_type:
                     return TypeSpec.udt(info.udt_return_type)
-            if fn in {"copy", "slice", "concat"}:
+            if fn in {"copy", "slice", "concat"} | gen._WIDE_ARRAY_ELEMENT_READS:
                 receiver = None
                 if ns == "array":
                     receiver = expr.args[0] if expr.args else expr.kwargs.get("id")
@@ -86,7 +146,8 @@ def timestamp_array_fields(gen):
                     receiver = expr.callee.object
                 receiver_spec = spec_of(receiver, owner, seen)
                 if _int_array(receiver_spec, include_wide=True):
-                    return receiver_spec
+                    return (receiver_spec.element if fn in gen._WIDE_ARRAY_ELEMENT_READS
+                            else receiver_spec)
         return gen._type_spec_from_expr(expr) if expr is not None else None
 
     def slots(expr, owner):
@@ -95,8 +156,10 @@ def timestamp_array_fields(gen):
         if isinstance(expr, Assignment):
             return slots(expr.target, owner)
         if isinstance(expr, VarDecl):
-            spec = spec_of(Identifier(name=expr.name), owner)
-            return ({("name", *binding(expr.name, owner))}
+            spec = (gen._type_spec_from_hint_name(expr.type_hint)
+                    or spec_of(expr.value, owner))
+            return ({("declaration", id(expr), expr.name),
+                     ("name", owner.name if owner else "", expr.name)}
                     if _int_array(spec, include_wide=True) else set())
         if isinstance(expr, Ternary):
             return slots(expr.true_val, owner) | slots(expr.false_val, owner)
@@ -110,7 +173,7 @@ def timestamp_array_fields(gen):
         if not _int_array(spec_of(expr, owner), include_wide=True):
             return set()
         if isinstance(expr, Identifier):
-            return {("name", *binding(expr.name, owner))}
+            return {binding(expr.name, owner, expr)}
         if isinstance(expr, MemberAccess):
             record = spec_of(expr.object, owner)
             if record is not None and (record.name, expr.member) in fields:
@@ -128,7 +191,8 @@ def timestamp_array_fields(gen):
         return slots(body[-1], owner) if body else set()
 
     graph = {}
-    wide = set()
+    seeds = []
+    wide = result.wide
 
     def connect(left, right):
         for a in left:
@@ -138,8 +202,34 @@ def timestamp_array_fields(gen):
 
     with gen._int_width_scan(epoch_only=True):
         for node, owner in nodes:
+            node_slots = slots(node, owner)
+            result.nodes[id(node)] = node_slots
+            if node_slots:
+                spec = (gen._type_spec_from_hint_name(node.type_hint)
+                        or spec_of(node.value, owner)
+                        if isinstance(node, VarDecl) else spec_of(node, owner))
+                if _int_array(spec, include_wide=True):
+                    result.specs[id(node)] = spec
+            if isinstance(node, VarDecl):
+                scope = owner.name if owner else ""
+                result.names.setdefault((scope, node.name), set()).update(node_slots)
+                # Persistent callable/block variables have a separate member
+                # spelling; their class layout must use the same width.
+                meta = gen.ctx.var_member_metadata_by_node.get(id(node))
+                if meta is not None:
+                    result.names.setdefault(("", meta[1]), set()).update(node_slots)
+                connect(node_slots, node_slots)
             if isinstance(node, (VarDecl, Assignment)):
                 connect(slots(node, owner), slots(node.value, owner))
+            elif isinstance(node, TupleAssign):
+                for index, name in enumerate(node.names):
+                    element = gen._tuple_element_value(node.value, index, owner)
+                    if name and name != "_" and element is not None:
+                        value, lexical_owner = element
+                        target = {("name", owner.name if owner else "", name)}
+                        connect(target, slots(value, lexical_owner))
+                        result.names.setdefault(
+                            (owner.name if owner else "", name), set()).update(target)
             if not isinstance(node, FuncCall):
                 continue
             fn, ns = gen._resolve_callee(node.callee)
@@ -150,6 +240,9 @@ def timestamp_array_fields(gen):
                             info.param_type_specs[index], include_wide=True):
                         connect({("name", info.name, info.node.params[index])},
                                 slots(actual, owner))
+                        result.names.setdefault(
+                            (info.name, info.node.params[index]), set()).add(
+                                ("name", info.name, info.node.params[index]))
             if callees:
                 continue
             if ns in gen._udt_defs and fn == "new":
@@ -164,13 +257,14 @@ def timestamp_array_fields(gen):
                 receiver = node.args[0] if node.args else node.kwargs.get("id")
             elif isinstance(node.callee, MemberAccess):
                 receiver = node.callee.object
+            if fn in gen._WIDE_ARRAY_ELEMENT_READS:
+                result.elements[id(node)] = slots(receiver, owner)
             if fn in gen._ARRAY_ELEMENT_WRITERS:
                 functional, method = gen._ARRAY_ELEMENT_WRITERS[fn]
                 index = functional if ns == "array" else method
                 value = (node.args[index] if index < len(node.args)
                          else node.kwargs.get("value"))
-                if gen._expr_returns_wide_int(value, owner, set(), None):
-                    wide |= slots(receiver, owner)
+                seeds.append((slots(receiver, owner), value, owner))
             if fn in {"copy", "slice", "concat"}:
                 connect(slots(node, owner), slots(receiver, owner))
                 if fn == "concat":
@@ -182,8 +276,7 @@ def timestamp_array_fields(gen):
                 values = (node.args if fn == "from" else
                           [node.args[1] if len(node.args) > 1
                            else node.kwargs.get("initial_value")])
-                if any(gen._expr_returns_wide_int(v, owner, set(), None) for v in values):
-                    wide |= slots(node, owner)
+                seeds.extend((slots(node, owner), value, owner) for value in values)
         for info in gen.ctx.func_infos:
             if info.node is not None and _int_array(info.return_type_spec, include_wide=True):
                 connect({("return", info.name)}, tail(info.node.body, info))
@@ -192,15 +285,53 @@ def timestamp_array_fields(gen):
                 if (type_name, field.name) in fields:
                     connect({("field", type_name, field.name)}, slots(field.default, None))
 
-    pending = list(wide)
-    while pending:
-        current = pending.pop()
-        for adjacent in graph.get(current, ()):
-            if adjacent not in wide:
-                wide.add(adjacent)
-                pending.append(adjacent)
-    return {(type_name, name) for type_name, name in fields
-            if ("field", type_name, name) in wide}
+    # The legacy name scan remains a seed for the shapes already supported.
+    for (scope, name), storage in result.names.items():
+        if name in gen._wide_int_array_names():
+            wide.update(storage)
+    with gen._int_width_scan(epoch_only=True):
+        while True:
+            before = len(wide)
+            for storage, value, owner in seeds:
+                if gen._expr_returns_wide_int(value, owner, set(), None):
+                    wide.update(storage)
+            pending = list(wide)
+            while pending:
+                current = pending.pop()
+                for adjacent in graph.get(current, ()):
+                    if adjacent not in wide:
+                        wide.add(adjacent)
+                        pending.append(adjacent)
+            if len(wide) == before:
+                break
+            # Scalar reads/returns can now obtain width from an array element.
+            for attr in ("_wide_int_provenance_cache",
+                         "_wide_int_epoch_provenance_cache",
+                         "_wide_udt_int_field_cache"):
+                gen.__dict__.pop(attr, None)
+    # Captured declarations are used directly for persistent member layout,
+    # tuple inference and lexical overlays; specialize these private copies.
+    for node_id, spec in gen._callable_collection_bindings.items():
+        gen._callable_collection_bindings[node_id] = result.widen(
+            spec, result.nodes.get(node_id, ()))
+    for owner, specs in gen._func_collection_types.items():
+        for name, spec in specs.items():
+            specs[name] = result.widen(spec, result.names.get((owner, name), ()))
+    for block_id, specs in gen._block_collection_types.items():
+        owner = gen._block_collection_owners.get(block_id, "")
+        for name, spec in specs.items():
+            specs[name] = result.widen(spec, result.names.get((owner, name), ()))
+    for attr in ("_wide_int_provenance_cache",
+                 "_wide_int_epoch_provenance_cache",
+                 "_wide_udt_int_field_cache"):
+        gen.__dict__.pop(attr, None)
+    return result
+
+
+def timestamp_array_fields(gen):
+    """Resolved field layouts specialized by the shared storage plan."""
+    return {(slot[1], slot[2]) for slot in gen._array_widths.wide
+            if slot[0] == "field"}
 
 
 def _int_array(spec, include_wide=False):

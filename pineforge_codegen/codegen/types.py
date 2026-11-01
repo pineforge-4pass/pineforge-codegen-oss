@@ -262,7 +262,7 @@ class TypeInferer:
                 or owner_spec.name not in self._udt_defs):
             return None
         return self._udt_array_field_cpp(
-            self._udt_field_type_specs.get(owner_spec.name, {}).get(node.member),
+            self._type_spec_from_expr(node),
             owner_spec.name)
 
     # Builtin namespaces whose calls never return a user object.
@@ -966,8 +966,34 @@ class TypeInferer:
         """Whether ``node`` is a 64-bit ``+ - *`` (``_int_arith_leaves_int32``)
         over an operand that can be na, which ``_wide_int_arith_cpp`` emits
         as a double."""
-        return (isinstance(node, BinOp) and self._int_arith_leaves_int32(node)
-                and self._int_operand_may_be_na(node))
+        return (isinstance(node, BinOp)
+                and (self._arithmetic_has_wide_int_operand(node)
+                     or (self._int_arith_leaves_int32(node)
+                         and self._int_operand_may_be_na(node))))
+
+    def _arithmetic_has_wide_int_operand(self, node) -> bool:
+        """An already-wide integer still needs na-preserving arithmetic.
+
+        In particular, widening a callable parameter must not turn ``na+1``
+        into the finite number INT64_MIN+1.
+        """
+        if not isinstance(node, BinOp) or node.op not in {"+", "-", "*"}:
+            return False
+        types = (self._infer_type(node.left), self._infer_type(node.right))
+        return "int64_t" in types and all(t in {"int", "int64_t"} for t in types)
+
+    def _wide_value_arithmetic_cpp(self, node, left, right):
+        """Pine numeric arithmetic after a wide storage/parameter boundary.
+
+        Convert before the operation: the measured C1_24 subtraction at 2**53
+        yields 16, not the exact-integer delta 17. Contemporary timestamps
+        retain their full value, and an integer na never becomes finite.
+        """
+        return (f"[&]() -> double {{ auto _pf_wide_l = ({left}); "
+                f"auto _pf_wide_r = ({right}); "
+                f"return (is_na(_pf_wide_l) || is_na(_pf_wide_r)) "
+                f"? na<double>() : (static_cast<double>(_pf_wide_l) {node.op} "
+                f"static_cast<double>(_pf_wide_r)); }}()")
 
     def _holds_na_aware_wide_double(self, expr) -> bool:
         """Whether ``expr`` holds such a double-valued product: an integer
@@ -1053,13 +1079,15 @@ class TypeInferer:
         """The user type of a field read's receiver: a method's own receiver
         parameter by its declared type, anything else by its TypeSpec."""
         owner_node = getattr(owner_info, "node", None)
-        if (getattr(owner_info, "is_udt_method", False)
-                and owner_node is not None and owner_node.params
+        if (owner_node is not None
                 and isinstance(receiver, Identifier)
-                and receiver.name == owner_node.params[0]):
+                and receiver.name in owner_node.params):
             specs = list(getattr(owner_info, "param_type_specs", ()) or ())
-            return (method_receiver_type_name(specs[0] if specs else None)
-                    or getattr(owner_info, "udt_type_name", None))
+            index = owner_node.params.index(receiver.name)
+            return (method_receiver_type_name(
+                        specs[index] if index < len(specs) else None)
+                    or (getattr(owner_info, "udt_type_name", None)
+                        if index == 0 else None))
         try:
             spec = self._type_spec_from_expr(receiver)
         except Exception as exc:  # an unresolvable receiver holds no wide field
@@ -1249,14 +1277,36 @@ class TypeInferer:
 
     def _widen_array_spec_for_name(self, name, spec):
         """``array<int>`` -> ``array<int64>`` when ``name`` is a wide int
-        array; every other spec (and ``None``) passes through unchanged."""
+        array. A wide tuple binding may supply an otherwise absent spec."""
+        plan = getattr(self, "_array_widths", None)
+        owner = getattr(self, "_active_func_name", None) or ""
+        storage = plan.names.get((owner, name), ()) if plan is not None else ()
+        if spec is None and plan is not None and not plan.wide.isdisjoint(storage):
+            # A tuple's collection element has no legacy raw-name registry.
+            return TypeSpec.array(TypeSpec.primitive("int64"))
         if (spec is None or spec.kind != "array" or spec.element is None
                 or spec.element.kind != "primitive"
                 or spec.element.name != "int"):
             return spec
+        if plan is not None:
+            widened = plan.widen(spec, storage)
+            if widened != spec:
+                return widened
         if name in self._wide_int_array_names():
             return TypeSpec.array(TypeSpec.primitive("int64"))
         return spec
+
+    def _array_param_spec(self, info, index, spec):
+        plan = getattr(self, "_array_widths", None)
+        if plan is None or info.node is None or index >= len(info.node.params):
+            return spec
+        return plan.widen(spec, {("name", info.name, info.node.params[index])})
+
+    def _array_return_spec(self, info):
+        spec = getattr(info, "return_type_spec", None)
+        plan = getattr(self, "_array_widths", None)
+        return (plan.widen(spec, {("return", info.name)})
+                if plan is not None else spec)
 
     def _collection_spec_for_name_raw(self, name: str) -> TypeSpec | None:
         """Resolve collection metadata with lexical precedence.
@@ -1419,6 +1469,10 @@ class TypeInferer:
                         return TypeSpec.primitive("int64")
                     return TypeSpec.primitive("int")
             return None
+        if isinstance(node, FuncCall):
+            func_name, namespace = self._resolve_callee(node.callee)
+            if namespace is None and func_name in {"int", "float", "bool", "string"}:
+                return TypeSpec.primitive(func_name)
         if self._is_color_value(node):
             # A color is a packed-ARGB ``int64_t``: ``array.from(color.red,
             # color.new(c, 50))`` is ``std::vector<int64_t>``, which a
@@ -1596,6 +1650,25 @@ class TypeInferer:
         return specs
 
     def _type_spec_from_expr(
+        self,
+        node,
+        *,
+        _ternary_arms: tuple[TypeSpec | None, TypeSpec | None, bool] | None = None,
+    ) -> TypeSpec | None:
+        spec = self._type_spec_from_expr_raw(node, _ternary_arms=_ternary_arms)
+        plan = getattr(self, "_array_widths", None)
+        if plan is None:
+            return spec
+        if not plan.wide.isdisjoint(plan.elements.get(id(node), ())):
+            return TypeSpec.primitive("int64")
+        storage = plan.nodes.get(id(node), ())
+        if not plan.wide.isdisjoint(storage):
+            # Outside the callable's emission scope, an array-valued tuple
+            # element still needs the type resolved in its lexical owner.
+            return plan.widen(plan.specs.get(id(node), spec), storage)
+        return spec
+
+    def _type_spec_from_expr_raw(
         self,
         node,
         *,
@@ -1786,13 +1859,17 @@ class TypeInferer:
         if isinstance(node, MemberAccess):
             owner = self._type_spec_from_expr(node.object)
             if owner is not None and owner.kind == "udt" and owner.name:
-                return (self._udt_field_type_specs.get(owner.name) or {}).get(node.member)
+                spec = (self._udt_field_type_specs.get(owner.name) or {}).get(node.member)
+                plan = getattr(self, "_array_widths", None)
+                return (plan.widen(spec, {("field", owner.name, node.member)})
+                        if plan is not None else spec)
             return None
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
             if namespace is None:
                 func_info = self._func_info_map.get(func_name)
-                return_spec = getattr(func_info, "return_type_spec", None)
+                return_spec = (self._array_return_spec(func_info)
+                               if func_info is not None else None)
                 if return_spec is not None:
                     return return_spec
                 udt_return = getattr(func_info, "udt_return_type", None)
@@ -1815,9 +1892,7 @@ class TypeInferer:
                     method_info is not None
                     and getattr(method_info, "is_udt_method", False)
                 ):
-                    return_spec = getattr(
-                        method_info, "return_type_spec", None
-                    )
+                    return_spec = self._array_return_spec(method_info)
                     if return_spec is not None:
                         return return_spec
                     udt_return = getattr(
@@ -2542,6 +2617,13 @@ class TypeInferer:
                              if not getattr(self, "_active_func_name", None) else None)
         if history_value_cpp is not None:
             return history_value_cpp
+        plan = getattr(self, "_array_widths", None)
+        if plan is not None:
+            spec = (self._type_spec_from_hint_name(node.type_hint)
+                    or self._type_spec_from_expr(node.value))
+            wide_spec = plan.widen(spec, plan.nodes.get(id(node), ()))
+            if wide_spec != spec:
+                return self._type_spec_to_cpp(wide_spec)
         if (node.type_hint == "int"
                 and not getattr(self, "_active_func_name", None)
                 and self._numeric_na_value(node.value)):
@@ -2909,6 +2991,9 @@ class TypeInferer:
         """Trace wide integer provenance through a callable return expression."""
         if expr is None:
             return False
+        if isinstance(expr, NumberLiteral):
+            return (not getattr(self, "_wide_int_epoch_only", False)
+                    and self._holds_wide_int_constant(expr))
         if isinstance(expr, (Assignment, VarDecl)):
             # A value-producing write leaves its stored value. Follow both
             # sides: field provenance may still be growing while a callable
@@ -2982,8 +3067,6 @@ class TypeInferer:
             return True
         epoch_only = getattr(self, "_wide_int_epoch_only", False)
         if isinstance(expr, MemberAccess):
-            if epoch_only:
-                return False
             # A UDT ``int`` field is ``int64_t`` storage; a read of one some
             # write fills with a wide value keeps it (``_wide_udt_int_fields``).
             type_name = self._udt_receiver_type_name(expr.object, owner_info)
@@ -3003,9 +3086,16 @@ class TypeInferer:
                 receiver = None
                 if namespace == "array":
                     receiver = expr.args[0] if expr.args else expr.kwargs.get("id")
-                elif (isinstance(expr.callee, MemberAccess)
-                      and isinstance(expr.callee.object, Identifier)):
+                elif isinstance(expr.callee, MemberAccess):
                     receiver = expr.callee.object
+                plan = getattr(self, "_array_widths", None)
+                if plan is not None and not plan.wide.isdisjoint(
+                        plan.nodes.get(id(receiver), ())):
+                    return True
+                receiver_spec = self._type_spec_from_expr(receiver)
+                if (receiver_spec is not None and receiver_spec.kind == "array"
+                        and receiver_spec.element == TypeSpec.primitive("int64")):
+                    return True
                 if (isinstance(receiver, Identifier)
                         and receiver.name in self._wide_int_array_names()):
                     return True
@@ -3216,6 +3306,9 @@ class TypeInferer:
         def collect(node, owner) -> None:
             if isinstance(node, VarDecl) and node.value is not None:
                 bindings.append((node.name, node.value, owner))
+                metadata = self.ctx.var_member_metadata_by_node.get(id(node))
+                if metadata is not None and metadata[1] != node.name:
+                    bindings.append((metadata[1], node.value, owner))
             elif (isinstance(node, Assignment)
                     and isinstance(node.target, Identifier)):
                 bindings.append((node.target.name, node.value, owner))
@@ -3342,12 +3435,14 @@ class TypeInferer:
     def _param_is_integer_scalar(self, fi, index: int) -> bool:
         """Whether parameter ``index`` of ``fi`` is a scalar integer slot:
         declared ``int`` or untyped, not a history parameter (those are
-        ``Series<int64_t>`` already) and not a method receiver."""
+        ``Series<int64_t>`` already). An int method receiver is eligible too."""
         node = getattr(fi, "node", None)
         if node is None or index >= len(node.params or ()):
             return False
         if getattr(fi, "is_udt_method", False) and index == 0:
-            return False
+            specs = getattr(fi, "param_type_specs", ())
+            return (bool(specs) and specs[0] is not None
+                    and specs[0].kind == "primitive" and specs[0].name == "int")
         if node.params[index] in self.ctx.func_series_vars.get(fi.name, set()):
             return False
         declared = list(
@@ -3523,6 +3618,16 @@ class TypeInferer:
                     return declared == "double"
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            if func_name in {"min", "max"}:
+                receiver = None
+                if namespace == "array":
+                    receiver = node.args[0] if node.args else node.kwargs.get("id")
+                elif isinstance(node.callee, MemberAccess):
+                    receiver = node.callee.object
+                spec = self._type_spec_from_expr(receiver)
+                if spec is not None and spec.kind == "array":
+                    # The empty-array arm of these templates is na<double>().
+                    return True
             if (namespace, func_name) in self._DOUBLE_EMITTING_INT_CALLS:
                 # The 2-arg precision overload is a float in Pine as well and
                 # falls through to the generic check.
@@ -3776,7 +3881,10 @@ class TypeInferer:
             return None
         param = node.params[index]
         if getattr(fi, "is_udt_method", False) and index == 0:
-            return None
+            specs = getattr(fi, "param_type_specs", ())
+            if not (specs and specs[0] is not None
+                    and specs[0].kind == "primitive" and specs[0].name == "int"):
+                return None
         if fi.name == "isInSession" and index < 2:
             return None
         if param in self.ctx.func_series_vars.get(fi.name, set()):
@@ -3904,7 +4012,7 @@ class TypeInferer:
             return na_preserving_int_cast(cpp_val, target_cpp_type)
         if node is None:
             return cpp_val
-        source_cpp_type = self._infer_type(node)
+        source_cpp_type = self._udt_field_int_cpp_type(node) or self._infer_type(node)
         if (isinstance(node, Identifier)
                 and self._is_int64_builtin_init(node.name)):
             source_cpp_type = "int64_t"
@@ -4091,6 +4199,14 @@ class TypeInferer:
         var/global member, return its ``TypeSpec``; else ``None``. Pine
         collections are reference types, so a local bound to such an lvalue and
         then mutated through must ALIAS it, not value-copy."""
+        if isinstance(expr, MemberAccess):
+            spec = self._type_spec_from_expr(expr)
+            if (spec is not None and spec.kind == "array"
+                    and spec.element == TypeSpec.primitive("int64")):
+                # A timestamp field passed through a local is still the
+                # same vector. Copy/slice calls retain their separate path.
+                return spec
+            return None
         if not isinstance(expr, Identifier):
             return None
         name = expr.name
@@ -4291,6 +4407,12 @@ class TypeInferer:
         and ternaries / if / switch expressions. Returns the string
         ``"double"`` as the safe fallback when no narrower type can be
         determined."""
+        plan = getattr(self, "_array_widths", None)
+        if plan is not None and not plan.wide.isdisjoint(
+                plan.nodes.get(id(node), ())):
+            spec = self._type_spec_from_expr(node)
+            if spec is not None and spec.kind == "array":
+                return self._type_spec_to_cpp(spec)
         if isinstance(node, Subscript) and history_annotation(node) is not None:
             # An array's or a matrix's history is a collection of its type
             # (collection_history.py): a loop's local bound to it is one.
@@ -4360,6 +4482,9 @@ class TypeInferer:
                          or (sym.scope == "global"
                              and self._numeric_na_global(node.name)))):
                 return "double"
+            if (sym is not None and sym.pine_type == PineType.INT
+                    and self._is_int64_builtin_init(node.name)):
+                return "int64_t"
             if sym is not None and getattr(sym, "type_spec", None) is not None:
                 return self._type_spec_to_cpp(sym.type_spec)
             if sym is not None and sym.pine_type != PineType.UNKNOWN:

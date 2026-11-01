@@ -1603,6 +1603,11 @@ class ExprVisitor:
                     self._wide_int_products.add(id(operand))
         left = self._visit_binop_operand(node.left, node.op, node.right)
         right = self._visit_binop_operand(node.right, node.op, node.left)
+        if self._arithmetic_has_wide_int_operand(node):
+            return self._left_operand_first(
+                node, left, right,
+                lambda left, right: self._wide_value_arithmetic_cpp(node, left, right),
+            )
         if (self._int_arith_leaves_int32(node)
                 and self._fold_int32_overflow_cpp(node.op, left, right) is None):
             # Both operands are 32-bit C++ ints and the value can leave

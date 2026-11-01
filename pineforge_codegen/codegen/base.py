@@ -1277,6 +1277,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             })
         self._security_selection_local_members = self._security_selection_local_member_names()
         self._global_member_vars.difference_update(self._security_selection_local_members)
+        from .array_field_width import prepare_array_widths
+        prepare_array_widths(self)
         self._register_global_aggregate_member_types()
         self._uses_map = self._detect_map_usage()
         self._uses_matrix = self._detect_matrix_usage()
@@ -5299,12 +5301,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for f in fields:
                 if f.name in omitted:
                     continue
-                if (type_name, f.name) in timestamp_fields:
-                    lines.append(
-                        '    static_assert(false, "Timestamp values in '
-                        f'{self._safe_name(type_name)}.{self._safe_name(f.name)} '
-                        'require 64-bit array field storage");')
                 spec = field_specs.get(f.name) or self._type_spec_from_hint_name(f.type_name)
+                if (type_name, f.name) in timestamp_fields:
+                    spec = TypeSpec.array(TypeSpec.primitive("int64"))
                 array_field = self._udt_array_field_cpp(spec, type_name)
                 if array_field is not None:
                     lines.append(f"    {array_field} {self._safe_name(f.name)} = {array_field}();")

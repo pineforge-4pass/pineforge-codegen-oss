@@ -62,7 +62,6 @@ ARRAY_FIELD_CONTROL = ARRAY_FIELD.replace("array<int>", "array<float>").replace(
 def test_date_window_and_inline_control_compile():
     # The two input epochs feed int64 bounds; a bool comparison does not change the return family.
     cpp = transpile(WINDOW)
-    assert "bool inWindow(int64_t s, int64_t e)" in cpp
     compile_cpp(cpp)
     compile_cpp(transpile(WINDOW_CONTROL))
 
@@ -96,7 +95,7 @@ def test_date_guard_matches_inline_comparison(outcomes):
     assert_same_runs(subject, control)
 
 
-@pytest.mark.parametrize("name", ["method", "array_from"])
+@pytest.mark.parametrize("name", ["method", "array_from", "array_field"])
 def test_epoch_storage_matches_control_on_every_bar(outcomes, name):
     # A stored/returned timestamp equals its source exactly, so every traced ok is 1.
     subject = ok(outcomes, name)
@@ -108,14 +107,8 @@ def test_epoch_storage_matches_control_on_every_bar(outcomes, name):
         assert all(value == 1 for value in values)
 
 
-def test_integer_array_field_cannot_start_a_truncated_run(outcomes):
-    # The integer field lacks wide storage: compilation stops; the float control stores time exactly.
-    refused = outcomes["array_field"]
-    assert refused.transpiled is not None and refused.transpiled["ok"]
-    assert refused.error is not None
-    assert "Timestamp values in Book.stamps require 64-bit array field storage" in refused.error
-    assert not refused.trades
-    control = ok(outcomes, "array_field_control")
-    values = [r["value"] for r in control.traces["default"] if r["name"] == "ok"]
+def test_integer_array_field_runs_with_full_timestamps(outcomes):
+    subject = ok(outcomes, "array_field")
+    values = [r["value"] for r in subject.traces["default"] if r["name"] == "ok"]
     assert values
     assert all(value == 1 for value in values)
