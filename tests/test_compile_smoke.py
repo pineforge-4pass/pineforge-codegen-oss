@@ -579,7 +579,7 @@ go_long = m == Mode.Trend
 
 def test_na_nz_fixnan_compile():
     _check("na_nz_fixnan", """
-a = na
+float a = na
 b = nz(close)
 c = nz(close, open)
 d = fixnan(close)

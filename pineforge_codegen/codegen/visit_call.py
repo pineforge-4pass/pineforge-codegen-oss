@@ -168,11 +168,13 @@ from .helpers import (
     color_alpha_cast, cpp_is_plain_read, evaluate_args_once,
     na_preserving_int_cast, pine_truth_cast,
 )
+from .id_sites import BUILTIN_NAMESPACES
 from .run_stops import request_stop
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_METHODS,
     ARRAY_OPTIONAL_PARAMS,
+    BAR_BUILTINS,
     BAR_FIELDS,
     BAR_SERIES_PUSH,
     CHECKED_ARRAY_METHOD_KWARGS,
@@ -374,6 +376,33 @@ class CallVisitor:
         receiver_spec = self._type_spec_from_expr(receiver)
         if receiver_spec is None and isinstance(receiver, Identifier):
             receiver_spec = self._scalar_receiver_spec(receiver.name, member)
+        if receiver_spec is None:
+            # Only pure namespace prefixes lack a receiver value. Bare
+            # built-in values and declared bindings retain type inference.
+            if (
+                isinstance(receiver, Identifier)
+                and receiver.name in BUILTIN_NAMESPACES
+                and receiver.name not in BAR_BUILTINS
+                and receiver.name not in self._var_names
+                and receiver.name not in self._global_member_vars
+                and receiver.name not in self._current_func_param_types
+                and receiver.name not in self._current_func_locals
+                and receiver.name not in self._current_loop_vars
+            ):
+                return None, None
+            inferred_cpp = self._infer_type(receiver)
+            if inferred_cpp == "int64_t" and self._is_color_value(receiver):
+                inferred_pine = "color"
+            else:
+                inferred_pine = {
+                    "double": "float",
+                    "int": "int",
+                    "bool": "bool",
+                    "std::string": "string",
+                    "int64_t": "int",
+                }.get(inferred_cpp)
+            if inferred_pine is not None:
+                receiver_spec = TypeSpec.primitive(inferred_pine)
         receiver_name = method_receiver_type_name(receiver_spec)
         if receiver_name is None:
             return receiver_spec, None
@@ -668,7 +697,7 @@ class CallVisitor:
         )
 
     def _array_init_value_expr(self, elem_spec: TypeSpec | None, value_node,
-                               store: bool = True) -> str:
+                               store: bool = True, render=None) -> str:
         if isinstance(value_node, NaLiteral):
             if elem_spec is not None and elem_spec.kind == "udt":
                 return self._default_for_spec(elem_spec)
@@ -676,7 +705,16 @@ class CallVisitor:
             if cpp_type in ("double", "int", "int64_t", "bool", "std::string"):
                 return f"na<{cpp_type}>()"
             return self._default_for_spec(elem_spec)
-        rendered = self._visit_expr(value_node)
+        rendered = (
+            render(value_node)
+            if render is not None
+            else self._visit_expr(value_node)
+        )
+        if (elem_spec is not None and elem_spec.kind == "primitive"
+                and elem_spec.name == "float"
+                and isinstance(value_node, Ternary)
+                and self._selection_contains_na(value_node)):
+            rendered = self._coerce_double_slot(rendered, value_node)
         if (elem_spec is not None and elem_spec.kind == "primitive"
                 and elem_spec.name == "bool"):
             return self._coerce_bool_expr(rendered, value_node)
@@ -1407,6 +1445,9 @@ class CallVisitor:
             if (arg is None or spec is None or spec.kind != "array"
                     or (index < len(params) and params[index] in series)):
                 continue
+            if self._is_na_expr(arg):
+                stage = True
+                continue
             kind = self._array_arg_kind(arg)
             if kind == "alias":
                 param = params[index] if index < len(params) else f"#{index + 1}"
@@ -1554,16 +1595,25 @@ class CallVisitor:
             if param_index < len(param_specs)
             else None
         )
-        if param_spec is not None and param_spec.kind in {"map", "matrix"}:
+        method_series = self.ctx.func_series_vars.get(func_info.name, set())
+        if (param_spec is not None
+                and (param_spec.kind in {"map", "matrix"}
+                     or (param_name not in method_series
+                         and self._selection_contains_na(arg_node)))):
             # Both UDT-method dispatch paths funnel through this helper after
-            # positional/keyword/default merging.  Lower a bare ``na`` (and
+            # positional/keyword/default merging. Lower a bare ``na`` (and
             # nullable selections containing it) against the declared exact
             # parameter type instead of the legacy numeric ``na<double>()``.
             return self._visit_rhs_value(
                 arg_node,
-                target_cpp_type=self._type_spec_to_cpp(param_spec),
+                target_cpp_type=(
+                    self._func_param_int_cpp_type(
+                        func_info, param_index,
+                        self._callable_target_callsite_idx(func_info, call_node),
+                    )
+                    or self._type_spec_to_cpp(param_spec)
+                ),
             )
-        method_series = self.ctx.func_series_vars.get(func_info.name, set())
         if param_name not in method_series:
             cpp = self._visit_expr(arg_node)
             int_cpp = self._func_param_int_cpp_type(
@@ -1605,7 +1655,11 @@ class CallVisitor:
                 and self._series_type_for(arg_name) == expected_cpp_type
             ):
                 return safe
-        expr_cpp = self._visit_expr(arg_node)
+        expr_cpp = (
+            self._visit_rhs_value(arg_node, target_cpp_type=expected_cpp_type)
+            if self._selection_contains_na(arg_node)
+            else self._visit_expr(arg_node)
+        )
         cpp_type = expected_cpp_type
         bridge_cpp = self._series_bridge_value_expr(expr_cpp, cpp_type)
         member = self._inline_history_member(
@@ -2305,11 +2359,15 @@ class CallVisitor:
         if namespace == "color":
             return self._visit_color_call(func_name, node)
 
-        # Bare color(...) cast (cosmetic). The engine has no color-cast helper
-        # and colors have no backtest-logic effect, so emit a benign default
-        # color (0 = na color, matching the color.new / from_gradient
-        # fallbacks). The support checker warns on this construct.
+        # A bare color(...) cast keeps the packed value and the color na.
+        # Reuse the integer-slot conversion so missing values survive both
+        # floating-point narrowing and integer-width changes.
         if namespace is None and func_name == "color" and func_name not in self._func_names:
+            arg = node.args[0] if node.args else node.kwargs.get("x")
+            if arg is not None:
+                return self._coerce_int_slot_with_cast(
+                    self._visit_expr(arg), arg, "int64_t",
+                )
             return "0"
 
         # Drawing-objects-as-data namespace-functional form (spec §4.3 form 1):
@@ -2719,7 +2777,11 @@ class CallVisitor:
                 return na_preserving_int_cast(x, "int64_t")
             return na_preserving_int_cast(x)
         if func_name == "float" and namespace is None and node.args:
-            return f"(double)({self._visit_expr(node.args[0])})"
+            value = self._visit_expr(node.args[0])
+            if (isinstance(node.args[0], Ternary)
+                    and self._selection_contains_na(node.args[0])):
+                value = self._coerce_double_slot(value, node.args[0])
+            return f"(double)({value})"
         if func_name == "bool" and namespace is None and node.args:
             # Pine v6 bools are two-state. Explicit bool(int/float) treats na
             # like false, while a raw C++ cast would make NaN truthy.
@@ -3111,7 +3173,11 @@ class CallVisitor:
                             == expected_cpp_type
                     ):
                         return safe
-                expr_cpp = self._visit_expr(arg_node)
+                expr_cpp = (
+                    self._visit_rhs_value(arg_node, target_cpp_type=expected_cpp_type)
+                    if self._selection_contains_na(arg_node)
+                    else self._visit_expr(arg_node)
+                )
                 cpp_t = expected_cpp_type
                 bridge_cpp = self._series_bridge_value_expr(
                     expr_cpp, cpp_t
@@ -3151,10 +3217,17 @@ class CallVisitor:
                 if arg_idx < len(param_specs):
                     param_spec = param_specs[arg_idx]
                     if (param_spec is not None
-                            and param_spec.kind in {"map", "matrix"}):
+                            and (param_spec.kind in {"map", "matrix"}
+                                 or self._selection_contains_na(arg_node))):
                         return self._visit_rhs_value(
                             arg_node,
-                            target_cpp_type=self._type_spec_to_cpp(param_spec),
+                            target_cpp_type=(
+                                self._func_param_int_cpp_type(
+                                    fi_lookup, arg_idx,
+                                    self._callable_target_callsite_idx(fi_lookup, node),
+                                )
+                                or self._type_spec_to_cpp(param_spec)
+                            ),
                         )
             return self._visit_expr(arg_node)
 
@@ -3711,11 +3784,9 @@ class CallVisitor:
     def _visit_color_call(self, func_name: str, node) -> str:
         """Emit color.* calls as integer representations."""
         if func_name == "from_gradient":
-            # Visual only: the colour it picks reaches no order, so the call
-            # yields the na colour. Its arguments still run once each, in
-            # parameter order, as on TradingView -- a stateful call in one
-            # (a user function keeping a series, a ta.* compute(), a counter)
-            # advances on every bar (lab tv probe pf-oi-from-gradient-args).
+            # Interpolation is approximated by transparent black (0), distinct
+            # from a missing color. Stateful arguments still run once each,
+            # in parameter order, so their histories and effects advance.
             arguments = _merge_kwargs(node.args, node.kwargs,
                                       list(self._FROM_GRADIENT_PARAMS), lambda a: a)
             effects = []
@@ -3845,8 +3916,10 @@ class CallVisitor:
                     if tbl:
                         var = self._safe_name(val_arg.name)
                         n = len(tbl)
+                        self._uses_enum_string_lookup = True
                         return (
-                            f"pine_enum_str_at({self._safe_name(et)}_str_values, {n}, {var})"
+                            f"::pineforge::source::pine_enum_str_at("
+                            f"{self._safe_name(et)}_str_values, {n}, {var})"
                         )
             inferred = self._infer_type(val_arg) if val_arg is not None else ""
             if inferred == "std::string":

@@ -35,6 +35,7 @@ import re
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._legacy_cpp import without_id_sites_receipt
 
 
@@ -54,9 +55,11 @@ def expected_receipt(fresh) -> str:
     return json.dumps({"strategy": {"ids": ids}, "version": 1}, sort_keys=True, separators=(",", ":"))
 
 
-def transpiled(source: str) -> str:
+def transpiled(source: str, *, libraries=None) -> str:
     try:
-        return transpile(source)
+        if libraries is None:
+            return transpile(source)
+        return transpile(source, libraries=libraries)
     except Exception as error:
         # A fixture the transpiler refuses says nothing about the export: report it as its own failure.
         pytest.fail("fixture does not transpile on this build, so it cannot show the id-sites receipt: "
@@ -97,7 +100,7 @@ def function_body(cpp: str, opening: int) -> str:
 
 def receipt_text(source: str) -> str:
     """The document text ``strategy_id_sites_receipt`` hands to ``checked_settings::receipt``."""
-    cpp = transpiled(source)
+    cpp = transpiled(source, libraries=RECEIPT_LIBRARIES)
     definition = require_export(cpp, "strategy_id_sites_receipt", RECEIPT_DEFINITION)
     call = RECEIPT_CALL.search(function_body(cpp, definition.start()))
     if call is None:
@@ -176,13 +179,24 @@ while count < bar_index % 3
     count += 1
 '''
 
-RECURSIVE_FUNCTION = '''countdown(int n) =>
+DIRECT_RECURSIVE_FUNCTION = '''countdown(int n) =>
     strategy.entry("R" + str.tostring(n), strategy.long)
     n <= 0 ? 0 : countdown(n - 1)
 total = countdown(2)
 '''
 
-# The id-site cases, (a) to (j): the lowered sites that create a computed id.
+FORWARD_CALL_FUNCTION = '''countdown(int n) =>
+    strategy.entry("R" + str.tostring(n), strategy.long)
+    n <= 0 ? 0 : countdown_next(n - 1)
+countdown_next(int n) => countdown(n)
+total = countdown(2)
+'''
+
+RECURSIVE_FUNCTION = '''import examples/ReceiptCycles/1 as cycles
+total = cycles.countdown(2)
+'''
+
+# The lowered order sites that create a computed id.
 CASES = [
     pytest.param("plot(close)\n", 0, id="a-no-order-call"),
     pytest.param(LITERAL_IDS, 0, id="b-literal-ids-only"),
@@ -194,6 +208,7 @@ CASES = [
     pytest.param(CLOSE_AND_CANCEL, 0, id="g-close-and-cancel-with-computed-id"),
     pytest.param(DRAWINGS, 0, id="h-drawings-without-computed-order-id"),
     pytest.param(WHILE_SERIES_BOUND, UNBOUNDED, id="i-while-loop-bound-reads-a-series"),
+    # A recursive v5 helper reaches a computed id without a static call bound.
     pytest.param(RECURSIVE_FUNCTION, UNBOUNDED, id="j-recursive-function"),
 ]
 
@@ -201,6 +216,52 @@ CASES = [
 @pytest.mark.parametrize(("body", "fresh"), CASES)
 def test_receipt_counts_the_sites_that_create_a_computed_id(body, fresh):
     assert receipt_text(HEADER + body) == expected_receipt(fresh)
+
+
+def test_computed_order_id_function_rejects_direct_recursion():
+    with pytest.raises(CompileError) as caught:
+        transpile(HEADER + DIRECT_RECURSIVE_FUNCTION, filename="recursive-id.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2056"
+    assert diagnostic.message == "Function 'countdown' cannot call itself."
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "recursive-id.pine"
+    # Header, signature and entry take four lines; "    n <= 0 ? 0 : " is 17 columns.
+    assert (diagnostic.location.line, diagnostic.location.col) == (5, 18)
+
+
+def test_version_six_function_rejects_direct_recursion():
+    body = "recur(int n) => n <= 0 ? 1.0 : recur(n - 1)\nresult = recur(2)\n"
+    with pytest.raises(CompileError) as caught:
+        transpile(HEADER + body, filename="recursive-function.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2056"
+    assert diagnostic.message == "Function 'recur' cannot call itself."
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "recursive-function.pine"
+    # Two header lines put the self-call on line 3; its prefix occupies 31 columns.
+    assert (diagnostic.location.line, diagnostic.location.col) == (3, 32)
+
+
+def test_computed_order_id_function_rejects_forward_call():
+    with pytest.raises(CompileError) as caught:
+        transpile(HEADER + FORWARD_CALL_FUNCTION, filename="forward-id.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E5034"
+    assert diagnostic.message == (
+        "Unknown function 'countdown_next(...)' — not a PineForge "
+        "builtin or a user-defined function."
+    )
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.CODEGEN
+    assert diagnostic.location.file == "forward-id.pine"
+    # Header, signature and entry take four lines; 17 prefix + 14 name columns put "(" at 32.
+    assert (diagnostic.location.line, diagnostic.location.col) == (5, 32)
 
 
 NESTED_FUNCTIONS = '''inner(float price) =>
@@ -517,11 +578,26 @@ REVERSE_FIVE_FOR_LOOP = '''for i = 5 to 1
     strategy.entry("L" + str.tostring(i), strategy.long)
 '''
 
-# quiet() calls itself and holds no order call: a recursion that reaches no counted site.
-QUIET_RECURSION = '''quiet(int n) =>
+DIRECT_QUIET_RECURSION = '''quiet(int n) =>
     n <= 0 ? 0 : quiet(n - 1)
 settled = quiet(3)
 '''
+
+# The helper contains no order call, so its recursion reaches no counted site.
+QUIET_RECURSION = '''import examples/ReceiptCycles/1 as cycles
+settled = cycles.quiet(3)
+'''
+
+RECEIPT_LIBRARIES = {
+    "examples/ReceiptCycles/1": '''//@version=5
+library("ReceiptCycles")
+export countdown(int n) =>
+    strategy.entry("R" + str.tostring(n), strategy.long)
+    n <= 0 ? 0 : countdown(n - 1)
+export quiet(int n) =>
+    n <= 0 ? 0 : quiet(n - 1)
+''',
+}
 
 GLOBAL_CONSTANT_BOUND = '''n = 3
 for i = 1 to n
@@ -533,9 +609,9 @@ LOOP_AND_RECURSION_CASES = [
     pytest.param(STEP_THREE_FOR_LOOP, 4, id="for-loop-step-three-counts-four-iterations"),
     # i = 5, 4, 3, 2, 1: abs(1 - 5) // 1 + 1 = 5 iterations x 1 site = 5
     pytest.param(REVERSE_FIVE_FOR_LOOP, 5, id="reverse-for-loop-from-five-counts-five-iterations"),
-    # quiet() reaches no site, so the recursion adds 0; the top-level computed entry adds 1: 0 + 1 = 1
+    # quiet() reaches no site; the top-level computed entry adds 1: 0 + 1 = 1.
     pytest.param(QUIET_RECURSION + COMPUTED_ENTRY, 1, id="recursion-reaching-no-computed-id-adds-nothing"),
-    # 0: the same script with a literal id, which adds nothing, so there is no site to count or to bound
+    # A literal id adds 0 beside quiet recursion, which reaches no counted site.
     pytest.param(QUIET_RECURSION + 'strategy.entry("L", strategy.long)\n', 0,
                  id="recursion-beside-a-literal-id-adds-nothing"),
     # n = 3 is never reassigned, so i = 1, 2, 3: abs(3 - 1) // 1 + 1 = 3 iterations x 1 site = 3
@@ -546,6 +622,27 @@ LOOP_AND_RECURSION_CASES = [
 @pytest.mark.parametrize(("body", "fresh"), LOOP_AND_RECURSION_CASES)
 def test_receipt_follows_the_contract_for_steps_directions_constant_bounds_and_quiet_recursion(body, fresh):
     assert receipt_text(HEADER + body) == expected_receipt(fresh)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param(COMPUTED_ENTRY, id="computed-id"),
+        pytest.param('strategy.entry("L", strategy.long)\n', id="literal-id"),
+    ],
+)
+def test_quiet_order_id_function_rejects_direct_recursion(entry):
+    with pytest.raises(CompileError) as caught:
+        transpile(HEADER + DIRECT_QUIET_RECURSION + entry, filename="quiet-id.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2056"
+    assert diagnostic.message == "Function 'quiet' cannot call itself."
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "quiet-id.pine"
+    # Header and signature take three lines; "    n <= 0 ? 0 : " is 17 columns.
+    assert (diagnostic.location.line, diagnostic.location.col) == (4, 18)
 
 
 # The count of a `for` loop against the loop the codegen emits. A `for` statement lowers to

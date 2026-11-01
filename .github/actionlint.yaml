@@ -1,0 +1,6 @@
+self-hosted-runner:
+  labels:
+    - pf-gcp-pr
+    - pf-gcp-main
+    - pf-gcp-post
+    - gke-8cpu-16gb-amd64

@@ -267,6 +267,8 @@ class AnalyzerContext:
     # range can contain unrelated sites allocated between two borrowed sites.
     func_ta_indices: dict = field(default_factory=dict)   # func_name -> [site_idx, ...]
     func_call_cs_map: dict = field(default_factory=dict)  # call_node_id -> (func_name, call_site_index)
+    # Strict typed-method bindings: (call node id, Type.method) -> BoundMethodArgs.
+    method_call_bindings: dict = field(default_factory=dict)
     # Removed lexical nested-call mappings inherit their natural parent's
     # active cs index. Fresh context-sensitive parents have no such index, so
     # codegen uses this exact node -> callee identity to compose dispatch.

@@ -110,6 +110,8 @@ from .drawing import DRAWING_LIFETIME_CPP
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 
 
+# Keep the late-selected include beside the headers the C++ allowlist reads.
+ENUM_STRING_INCLUDE = '#include <pineforge/source/pine_policy_support.hpp>'
 _TRADE_HISTORY_POLICY_MARKER = "        /* __PINEFORGE_TRADE_HISTORY_POLICY__ */"
 
 
@@ -1082,6 +1084,8 @@ class TopLevelEmitter:
         is non-double."""
         if cpp_val != "na<double>()":
             return cpp_val
+        if ptype == PineType.INT and self._numeric_na_member(name):
+            return cpp_val
         cpp_type = PINE_TYPE_TO_CPP.get(ptype, "double")
         if cpp_type == "int" and self._is_int64_builtin_init(name):
             cpp_type = "int64_t"
@@ -1669,6 +1673,11 @@ class TopLevelEmitter:
         for _bname in sorted(self.ctx.series_vars):
             if _bname in self._var_names:
                 continue
+            # A history-bearing top-level tuple binding pushes its own value
+            # at the declaration; a builtin push would add a second bar slot.
+            if (_bname in self._direct_program_tuple_binding_names
+                    and _bname in self._ordinary_global_series_names):
+                continue
             _bexpr = BAR_BUILTINS.get(_bname)
             _bsafe = self._safe_name(_bname)
             if _bexpr is None or _bexpr.strip().startswith(f"{_bsafe}("):
@@ -2156,24 +2165,8 @@ class TopLevelEmitter:
         lines.append("")
 
     def _declares_bar_magnifier(self) -> bool:
-        """``strategy(use_bar_magnifier = true)``. The argument is a const
-        bool; one that is not a literal cannot be read here, so the TU does
-        not declare the magnifier and the codegen warns."""
-        from ..ast_nodes import BoolLiteral, StrategyDecl
-        for node in self._walk_ast(self.ctx.ast):
-            if not isinstance(node, StrategyDecl):
-                continue
-            value = node.kwargs.get("use_bar_magnifier")
-            if value is None or isinstance(value, BoolLiteral):
-                return value is not None and value.value is True
-            self._codegen_warning(
-                value,
-                "strategy(use_bar_magnifier=...) is not a literal bool: the "
-                "generated strategy does not declare the bar magnifier, so a host "
-                "runs it without one.",
-                hint="Write use_bar_magnifier = true or false.")
-            return False
-        return False
+        """Expose the resolved constant magnifier setting to the host."""
+        return self.ctx.strategy_params.get("use_bar_magnifier") is True
 
     @staticmethod
     def _raw_udt_method_cpp_name(fi: FuncInfo) -> str:
@@ -2514,12 +2507,12 @@ class TopLevelEmitter:
         else:
             ret_type = PINE_TYPE_TO_CPP.get(fi.return_type, "double")
         if return_udt:
-            # Keep the authored UDT spelling here for target typing; the
-            # expression visitor converts it to the escaped C++ handle name
-            # at the point it emits ``T{}``.
-            rhs_return_cpp_type = return_udt_name
+            # Use the generated handle name so an authored type cannot be
+            # confused with a drawing handle's C++ name.
+            rhs_return_cpp_type = self._safe_name(return_udt_name)
         elif (self._is_nullable_collection_cpp_type(ret_type)
-              or ret_type in DRAWING_TYPE_TO_CPP.values()):
+              or ret_type in DRAWING_TYPE_TO_CPP.values()
+              or ret_type in ("int", "int64_t")):
             rhs_return_cpp_type = ret_type
         else:
             rhs_return_cpp_type = None

@@ -1,4 +1,4 @@
-"""Unicode names and text retain their values in ASCII-only emitted C++."""
+"""Pine names are ASCII; Unicode strings and comments retain their bytes."""
 
 from __future__ import annotations
 
@@ -9,9 +9,8 @@ import re
 import pytest
 
 from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.codegen.ascii import ascii_cpp
-from pineforge_codegen.errors import CompileError
+from pineforge_codegen.errors import CompileError, Level, Phase, SourceLocation
 from pineforge_codegen.pine_spelling import pine_string_literal
 from tests._cpp_tokens import code_only, regions, string_values
 
@@ -19,13 +18,25 @@ from tests._cpp_tokens import code_only, regions, string_values
 HEADER = '//@version=6\nstrategy("ASCII output")\n'
 TRADE = 'if close > open\n    strategy.entry("L", strategy.long)\n'
 
-NAMES = (
-    # U+03B1 is UTF-8 CE B1.
-    ("\u03b1", "pf_utf8_ceb1", b"\xce\xb1"),
-    # Cyrillic U+0441 followed by "lass" is D1 81 6C 61 73 73.
-    ("\u0441lass", "pf_utf8_d1816c617373", b"\xd1\x81lass"),
-    # Deseret U+10400 is UTF-8 F0 90 90 80.
-    ("\U00010400", "pf_utf8_f0909080", b"\xf0\x90\x90\x80"),
+IDENTIFIER_REFUSALS = (
+    pytest.param("\u03b1", [
+        # The two header lines put alpha at 3:1, with its one-character end at 2.
+        ("no viable alternative at character '\u03b1'", 3, 1, 2),
+        # "if " is three characters, putting alpha at 4:4 and its end at 5.
+        ("no viable alternative at character '\u03b1'", 4, 4, 5),
+    ], id="greek-alpha"),
+    pytest.param("\u0441lass", [
+        # Cyrillic es starts line 3 at column 1; the remaining "lass" is ASCII.
+        ("no viable alternative at character '\u0441'", 3, 1, 2),
+        # "if " puts Cyrillic es at 4:4; its one-character end is 5.
+        ("no viable alternative at character '\u0441'", 4, 4, 5),
+    ], id="cyrillic-es"),
+    pytest.param("\U00010400", [
+        # Deseret starts line 3 at column 1 and occupies one Python code point.
+        ("no viable alternative at character '\U00010400'", 3, 1, 2),
+        # "if " puts Deseret at 4:4; one Python code point ends at 5.
+        ("no viable alternative at character '\U00010400'", 4, 4, 5),
+    ], id="deseret"),
 )
 
 STRINGS = (
@@ -222,17 +233,25 @@ def _literal(cpp: str, spelling: str) -> tuple[str, str]:
     return matches[0]
 
 
-@pytest.mark.parametrize("name,emitted,expected_bytes", NAMES)
-def test_unicode_identifier_has_an_invertible_ascii_spelling(name, emitted, expected_bytes):
-    cpp = transpile(HEADER + f"{name} = close\nif {name} > open\n"
-                    '    strategy.entry("L", strategy.long)\n')
-    assert cpp.isascii()
-    code = code_only(cpp)
-    tokens = re.findall(rf"\b{emitted}\b", code)
-    assert len(tokens) >= 2
-    decoded = bytes.fromhex(tokens[0].removeprefix("pf_utf8_"))
-    assert decoded == expected_bytes
-    assert decoded.decode("utf-8") == name
+def _assert_identifier_refusal(
+        source, expected, *, libraries=None, diagnostic_filename="ascii_names.pine"):
+    with pytest.raises(CompileError) as error:
+        transpile(source, filename="ascii_names.pine", libraries=libraries)
+    assert len(error.value.diagnostics) == len(expected)
+    for diagnostic, (message, line, col, end_col) in zip(error.value.diagnostics, expected):
+        assert diagnostic.code == "PF-E0044"
+        assert diagnostic.message == message
+        assert diagnostic.level == Level.ERROR
+        assert diagnostic.phase == Phase.LEXER
+        assert diagnostic.location == SourceLocation(diagnostic_filename, line, col, end_col)
+        assert diagnostic.hint is None
+
+
+@pytest.mark.parametrize("name,expected", IDENTIFIER_REFUSALS)
+def test_non_ascii_identifier_declarations_and_reads_are_refused(name, expected):
+    source = (HEADER + f"{name} = close\nif {name} > open\n"
+              '    strategy.entry("L", strategy.long)\n')
+    _assert_identifier_refusal(source, expected)
 
 
 @pytest.mark.parametrize("text,spelling,expected_bytes,array_size", STRINGS)
@@ -264,117 +283,226 @@ def test_unicode_literal_compiler_decodes_the_authored_bytes(
     compile_cpp("\n".join(checks), label="ASCII UTF-8 literal")
 
 
-def test_distinct_unicode_names_avoid_authored_ascii_encodings():
+def test_non_ascii_names_are_refused_beside_encoding_looking_ascii_names():
     source = (HEADER
               + "\u03b1 = close\n\u03b2 = open\n\u0430 = high\n"
               "pf_utf8_ceb1 = low\npf_utf8_ceb1_2 = hl2\npf_utf8_ceb2 = hlc3\n"
               "a = ohlc4\n"
               "plot(\u03b1 + \u03b2 + \u0430 + a + pf_utf8_ceb1"
               " + pf_utf8_ceb1_2 + pf_utf8_ceb2)\n")
+    _assert_identifier_refusal(source, [
+        # Alpha starts the first declaration after the two header lines: 3:1.
+        ("no viable alternative at character '\u03b1'", 3, 1, 2),
+        # Beta starts the next declaration at 4:1.
+        ("no viable alternative at character '\u03b2'", 4, 1, 2),
+        # Cyrillic a starts the third declaration at 5:1.
+        ("no viable alternative at character '\u0430'", 5, 1, 2),
+        # Seven declarations put plot on line 10; "plot(" puts alpha at column 6.
+        ("no viable alternative at character '\u03b1'", 10, 6, 7),
+        # "plot(α + " is nine code points, putting beta at 10:10.
+        ("no viable alternative at character '\u03b2'", 10, 10, 11),
+        # "plot(α + β + " is thirteen code points, putting Cyrillic a at 10:14.
+        ("no viable alternative at character '\u0430'", 10, 14, 15),
+    ])
+
+
+def test_ascii_names_that_resemble_encodings_keep_their_spelling():
+    source = (HEADER
+              + "first = close\nsecond = open\nthird = high\n"
+              "pf_utf8_ceb1 = low\npf_utf8_ceb1_2 = hl2\npf_utf8_ceb2 = hlc3\n"
+              "a = ohlc4\n"
+              "plot(first + second + third + a + pf_utf8_ceb1"
+              " + pf_utf8_ceb1_2 + pf_utf8_ceb2)\n")
     cpp = transpile(source)
     assert cpp.isascii()
-    code = code_only(cpp)
-    # CE B1 needs suffix 3, CE B2 needs suffix 2, and Cyrillic D0 B0 is distinct.
+    # All seven authored ASCII names retain their own declaration and spelling.
     expected = {
-        "pf_utf8_ceb1_3", "pf_utf8_ceb2_2", "pf_utf8_d0b0",
-        "pf_utf8_ceb1", "pf_utf8_ceb1_2", "pf_utf8_ceb2", "a",
+        "first", "second", "third", "pf_utf8_ceb1", "pf_utf8_ceb1_2", "pf_utf8_ceb2", "a",
     }
-    declarations = re.findall(r"\bdouble ([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|;)", code)
+    declarations = re.findall(r"\bdouble ([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|;)", code_only(cpp))
     assert expected <= set(declarations)
     for name in expected:
         assert declarations.count(name) == 1
     assert transpile(source) == cpp
 
 
-def test_unicode_encoding_avoids_reserved_names_and_unused_authored_names(monkeypatch):
-    source = HEADER + "\u03b1 = close\nplot(\u03b1)\n"
-    assert transpile(source).isascii()
+def test_identifier_encoder_avoids_reserved_and_unused_names(monkeypatch):
     from pineforge_codegen.codegen import ascii as ascii_emission
 
-    # CE B1's base, suffix 2 and suffix 3 are occupied; suffix 4 is available.
     monkeypatch.setattr(ascii_emission, "CPP_RESERVED",
                         ascii_emission.CPP_RESERVED | {"pf_utf8_ceb1_3"})
-    original = CodeGen._generate_cpp
+    cpp = ascii_cpp("double \u03b1 = 0;\n",
+                    reserved={"pf_utf8_ceb1", "pf_utf8_ceb1_2"})
+    # CE B1's base, suffix 2 and suffix 3 are occupied, so suffix 4 is first free.
+    assert cpp == "double pf_utf8_ceb1_4 = 0;\n"
 
-    def reserve_unused(self):
-        self._safe_name_occupied.update({"pf_utf8_ceb1", "pf_utf8_ceb1_2"})
-        return original(self)
 
-    monkeypatch.setattr(CodeGen, "_generate_cpp", reserve_unused)
-    cpp = transpile(source)
+def test_ascii_reserved_identifier_keeps_its_existing_escape():
+    cpp = transpile(HEADER + "class = close\nplot(class)\n")
     assert cpp.isascii()
-    assert "double pf_utf8_ceb1_4" in code_only(cpp)
+    # The existing C++ keyword escape wraps class in one underscore on each side.
+    assert "double _class_" in code_only(cpp)
 
 
-def test_unicode_callable_history_names_keep_their_distinct_storage():
+def test_non_ascii_name_is_refused_before_reserved_name_encoding():
+    source = HEADER + "\u03b1 = close\nplot(\u03b1)\n"
+    _assert_identifier_refusal(source, [
+        # Two header lines precede the declaration's alpha at 3:1.
+        ("no viable alternative at character '\u03b1'", 3, 1, 2),
+        # "plot(" is five characters, putting the second alpha at 4:6.
+        ("no viable alternative at character '\u03b1'", 4, 6, 7),
+    ])
+
+
+def test_non_ascii_callable_history_names_are_refused():
+    source = (HEADER
+              + "\u03b1(float \u03b2) =>\n"
+              "    var float \u03b3 = \u03b2\n"
+              "    \u03b3 := nz(\u03b3[1], \u03b2) + 1.0\n"
+              "    \u03b3\n"
+              "left = \u03b1(close)\nright = \u03b1(open)\nplot(left + right)\n")
+    _assert_identifier_refusal(source, [
+        # Two header lines put the function's alpha at 3:1.
+        ("no viable alternative at character '\u03b1'", 3, 1, 2),
+        # "α(float " is eight code points, putting the parameter beta at 3:9.
+        ("no viable alternative at character '\u03b2'", 3, 9, 10),
+        # Four spaces and "var float " are fourteen characters before gamma.
+        ("no viable alternative at character '\u03b3'", 4, 15, 16),
+        # "    var float γ = " is eighteen code points before beta at 4:19.
+        ("no viable alternative at character '\u03b2'", 4, 19, 20),
+        # The assignment's four-space indent puts gamma at 5:5.
+        ("no viable alternative at character '\u03b3'", 5, 5, 6),
+        # "    γ := nz(" is twelve code points before the history gamma.
+        ("no viable alternative at character '\u03b3'", 5, 13, 14),
+        # "    γ := nz(γ[1], " is eighteen code points before beta at 5:19.
+        ("no viable alternative at character '\u03b2'", 5, 19, 20),
+        # The return's four-space indent puts gamma at 6:5.
+        ("no viable alternative at character '\u03b3'", 6, 5, 6),
+        # "left = " is seven characters before the call's alpha at 7:8.
+        ("no viable alternative at character '\u03b1'", 7, 8, 9),
+        # "right = " is eight characters before the call's alpha at 8:9.
+        ("no viable alternative at character '\u03b1'", 8, 9, 10),
+    ])
+
+
+def test_ascii_callable_history_names_keep_their_distinct_storage():
     cpp = transpile(HEADER
-                    + "\u03b1(float \u03b2) =>\n"
-                    "    var float \u03b3 = \u03b2\n"
-                    "    \u03b3 := nz(\u03b3[1], \u03b2) + 1.0\n"
-                    "    \u03b3\n"
-                    "left = \u03b1(close)\nright = \u03b1(open)\nplot(left + right)\n")
+                    + "history_calc(float price) =>\n"
+                    "    var float memory_value = price\n"
+                    "    memory_value := nz(memory_value[1], price) + 1.0\n"
+                    "    memory_value\n"
+                    "left = history_calc(close)\nright = history_calc(open)\nplot(left + right)\n")
     assert cpp.isascii()
     code = code_only(cpp)
-    # The first call keeps gamma; the second uses gamma_cs1. Both functions are cloned.
-    assert "Series<double> pf_utf8_ceb3" in code
-    assert "Series<double> pf_utf8_ceb35f637331" in code
-    assert "pf_utf8_ceb15f637330(" in code
-    assert "pf_utf8_ceb15f637331(" in code
+    # The two call sites retain memory_value and memory_value_cs1 in separate clones.
+    assert "Series<double> memory_value" in code
+    assert "Series<double> memory_value_cs1" in code
+    assert "history_calc_cs0(" in code
+    assert "history_calc_cs1(" in code
 
 
 def test_a_unicode_name_in_a_string_keeps_its_value():
     cpp = transpile(HEADER
-                    + '\u03b1 = close\ns = "\u03b1"\n'
-                    "if \u03b1 > open and str.length(s) > 0\n"
+                    + 'price = close\ns = "\u03b1"\n'
+                    "if price > open and str.length(s) > 0\n"
                     '    strategy.entry("L", strategy.long)\n')
     assert cpp.isascii()
-    # The identifier uses hex CE B1; its text value uses octal 316 261.
-    assert "double pf_utf8_ceb1" in code_only(cpp)
+    # The ASCII identifier stays price; alpha's UTF-8 bytes are octal 316 261.
+    assert "double price" in code_only(cpp)
     assert _literal(cpp, r"\316\261")[1] == "\u03b1"
     assert _literal(cpp, r"\316\261")[1].encode("utf-8") == b"\xce\xb1"
 
 
-def test_unicode_type_and_field_names_are_encoded_as_complete_tokens():
+def test_non_ascii_identifier_is_refused_beside_its_spelling_in_a_string():
+    source = (HEADER
+              + '\u03b1 = close\ns = "\u03b1"\n'
+              "if \u03b1 > open and str.length(s) > 0\n"
+              '    strategy.entry("L", strategy.long)\n')
+    _assert_identifier_refusal(source, [
+        # Two header lines put the declaration's alpha at 3:1.
+        ("no viable alternative at character '\u03b1'", 3, 1, 2),
+        # Line 4's quoted alpha is data; "if " puts the next identifier at 5:4.
+        ("no viable alternative at character '\u03b1'", 5, 4, 5),
+    ])
+
+
+def test_non_ascii_type_field_and_method_names_are_refused():
+    source = (HEADER
+              + "type \u0394\n    float \u03b2\n"
+              "method \u03b3(\u0394 self) => self.\u03b2\n"
+              "point = \u0394.new(close)\nvalue = point.\u03b3()\nplot(value)\n")
+    _assert_identifier_refusal(source, [
+        # Two header lines and "type " put delta at 3:6.
+        ("no viable alternative at character '\u0394'", 3, 6, 7),
+        # Four spaces and "float " are ten characters before beta at 4:11.
+        ("no viable alternative at character '\u03b2'", 4, 11, 12),
+        # "method " is seven characters before gamma at 5:8.
+        ("no viable alternative at character '\u03b3'", 5, 8, 9),
+        # "method γ(" is nine code points before the receiver delta at 5:10.
+        ("no viable alternative at character '\u0394'", 5, 10, 11),
+        # "method γ(Δ self) => self." is twenty-five code points before beta.
+        ("no viable alternative at character '\u03b2'", 5, 26, 27),
+        # "point = " is eight characters before the constructor delta at 6:9.
+        ("no viable alternative at character '\u0394'", 6, 9, 10),
+        # "value = point." is fourteen characters before the method gamma.
+        ("no viable alternative at character '\u03b3'", 7, 15, 16),
+    ])
+
+
+def test_ascii_type_field_and_method_names_keep_their_spelling():
     cpp = transpile(HEADER
-                    + "type \u0394\n    float \u03b2\n"
-                    "method \u03b3(\u0394 self) => self.\u03b2\n"
-                    "point = \u0394.new(close)\nvalue = point.\u03b3()\nplot(value)\n")
+                    + "type PointValue\n    float field_value\n"
+                    "method read_value(PointValue self) => self.field_value\n"
+                    "point = PointValue.new(close)\nvalue = point.read_value()\nplot(value)\n")
     assert cpp.isascii()
     code = code_only(cpp)
-    # Delta is CE 94, beta is CE B2. The method name is composed as "_udt_" +
-    # receiver + "_" + method and encoded as one fragment: each non-ASCII code
-    # point becomes "_u" + six hex digits + "_" (delta U+0394 -> "_u000394_",
-    # gamma U+03B3 -> "_u0003b3_"), so the token is "_udt_" "_u000394_" "_"
-    # "_u0003b3_".
-    assert "struct pf_utf8_ce94 {" in code
-    assert "double pf_utf8_ceb2 =" in code
-    assert "_udt__u000394___u0003b3_(" in code
+    # The type, field and method retain their complete authored ASCII components.
+    assert "struct PointValue {" in code
+    assert "double field_value =" in code
+    assert "_udt_PointValue_read_value(" in code
 
 
-@pytest.mark.parametrize("name,emitted,expected_bytes", NAMES)
-def test_encoded_identifier_declarations_and_uses_compile(name, emitted, expected_bytes):
-    from tests._compile import compile_cpp
-
-    cpp = transpile(HEADER + f"{name} = close\nif {name} > open\n"
-                    '    strategy.entry("L", strategy.long)\n')
-    assert cpp.isascii()
-    assert emitted in code_only(cpp)
-    compile_cpp(cpp, label="ASCII identifier")
+@pytest.mark.parametrize("name,expected", IDENTIFIER_REFUSALS)
+def test_non_ascii_identifier_sources_are_refused_before_cpp_compilation(name, expected):
+    source = (HEADER + f"{name} = close\nif {name} > open\n"
+              '    strategy.entry("L", strategy.long)\n')
+    _assert_identifier_refusal(source, expected)
 
 
-def test_unicode_library_export_and_literal_are_encoded_after_inlining():
+def test_non_ascii_library_export_call_is_refused_before_inlining():
     source = (HEADER + "import pftest/Words/1 as W\n"
               "s = W.\u03b1()\nif str.length(s) > 0\n"
               '    strategy.entry("L", strategy.long)\n')
     library = ('//@version=6\nlibrary("Words \u00e9")\n'
                'export \u03b1() => "\u00e9"\n')
+    # TradingView measurement: α is refused; "s = W." puts it at line 4, column 7.
+    _assert_identifier_refusal(source, [
+        ("no viable alternative at character '\u03b1'", 4, 7, 8),
+    ], libraries={"pftest/Words/1": library})
+
+
+def test_ascii_library_export_keeps_its_unicode_literal_after_inlining():
+    source = (HEADER + "import pftest/Words/1 as W\n"
+              "s = W.word()\nif str.length(s) > 0\n"
+              '    strategy.entry("L", strategy.long)\n')
+    library = ('//@version=6\nlibrary("Words \u00e9")\n'
+               'export word() => "\u00e9"\n')
     cpp = transpile(source, libraries={"pftest/Words/1": library})
     assert cpp.isascii()
-    # The inlined export is named "Words_v1__" followed by U+03B1; the shared
-    # fragment encoder keeps the ASCII part and spells the alpha as
-    # "_u0003b1_", so the token is "Words_v1__" "_u0003b1_".
-    assert "Words_v1___u0003b1_(" in code_only(cpp)
+    # The module's path supplies Words_v1__; the export's ASCII name stays word.
+    assert "Words_v1__word(" in code_only(cpp)
     assert _literal(cpp, r"\303\251")[1] == "\u00e9"
+
+
+def test_non_ascii_library_export_definition_is_refused():
+    source = (HEADER + "import pftest/Words/1 as W\n"
+              "s = W.word()\n" + TRADE)
+    library = ('//@version=6\nlibrary("Words \u00e9")\n'
+               'export \u03b1() => "\u00e9"\n')
+    # TradingView measurement: α follows "export " on the library's third line.
+    _assert_identifier_refusal(source, [
+        ("no viable alternative at character '\u03b1'", 3, 8, 9),
+    ], libraries={"pftest/Words/1": library}, diagnostic_filename="pftest/Words/1")
 
 
 def test_bidi_text_in_an_emitted_comment_retains_its_byte_spelling():
@@ -456,14 +584,24 @@ def test_population_counter_uses_literal_and_comment_boundaries():
     from scripts.count_non_ascii_pine import scan_source
 
     source = ('//@version=6\nstrategy("\u00e9")\n'
-              '\u03b1 = close // x\u202e\n// caf\u00e9\n'
+              'price = close // x\u202e\n// caf\u00e9\n'
               's = """//\U0001f427\n e\u0301"""\n')
-    # Identifier CE B1 = 2; strings C3 A9 + F0 9F 90 A7 + CC 81 = 8; comments = 3 + 2.
+    # Strings contribute 2 + 4 + 2 = 8 bytes; comments contribute 3 + 2 = 5.
     assert scan_source(source) == {
-        "non_ascii_utf8_bytes": 15,
-        "identifier": {"lexemes": 1, "utf8_bytes": 2},
+        "non_ascii_utf8_bytes": 13,
+        "identifier": {"lexemes": 0, "utf8_bytes": 0},
         "string_literal": {"lexemes": 2, "utf8_bytes": 8},
         "comment": {"lexemes": 2, "utf8_bytes": 5},
         "other_utf8_bytes": 0,
         "lexer_error": None,
     }
+
+
+def test_non_ascii_identifier_is_refused_among_unicode_strings_and_comments():
+    source = ('//@version=6\nstrategy("\u00e9")\n'
+              '\u03b1 = close // x\u202e\n// caf\u00e9\n'
+              's = """//\U0001f427\n e\u0301"""\n')
+    # TradingView measurement: only the identifier α is refused, at line 3, column 1.
+    _assert_identifier_refusal(source, [
+        ("no viable alternative at character '\u03b1'", 3, 1, 2),
+    ])

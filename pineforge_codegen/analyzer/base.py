@@ -27,10 +27,13 @@ from ..symbols import (
     SymbolTable,
     TypeSpec,
     method_receiver_type_name,
+    unify_pine_types,
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from ..limits import TimeBudget, iter_ast_nodes
-from ..security_contexts import PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series
+from ..security_contexts import (
+    GLOBAL_ANNOTATION, PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series,
+)
 from ..session_reads import emitted_session_reads
 from ..collection_history import (
     COLLECTION_HISTORY_ANNOTATION, LEGACY, REFUSED, SUPPORTED,
@@ -104,6 +107,18 @@ from .diagnostics import DiagnosticsHelper
 from .call_handlers import CallHandlers
 
 
+_BUILTIN_NAMESPACE_NAMES = frozenset({
+    "ta", "math", "str", "array", "map", "matrix", "color", "input",
+    "request", "strategy", "syminfo", "timeframe", "barstate", "session",
+    "chart", "label", "line", "box", "table", "linefill", "polyline", "log",
+    "runtime", "ticker", "dividends", "earnings", "splits", "currency",
+    "display", "extend", "format", "hline", "location", "order", "plot",
+    "position", "scale", "shape", "size", "text", "xloc", "yloc", "alert",
+    "barmerge", "font", "adjustment", "backadjustment", "settlement_as_close",
+    "dayofweek", "footprint", "volume_row", "timenow", "time",
+})
+
+
 # ---------------------------------------------------------------------------
 # Analyzer
 # ---------------------------------------------------------------------------
@@ -137,6 +152,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._ast = ast
         self._filename = filename
         self._budget = budget
+        self._pine_version = ast.version
+        # A later reassignment also prevents an initializer from proving the
+        # type of a condition. Same-spelled bindings conservatively share this
+        # exclusion; their legacy emission types remain unchanged.
+        self._condition_reassigned_names = {
+            node.target.name
+            for node, _depth in iter_ast_nodes(ast)
+            if isinstance(node, Assignment) and isinstance(node.target, Identifier)
+        }
         # The functions that may be emitted once per call site for their
         # session.<flag>[k] reads; None: every one that reads a flag at an
         # offset (pineforge_codegen._generate passes none first, then each
@@ -246,8 +270,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_cs_fixnan_clone_names: dict[tuple[str, int], dict[str, str]] = {}
         # Track user-defined function nodes for deferred analysis
         self._func_defs: dict[str, FuncDef] = {}
+        self._func_definition_signatures: dict[str, set[tuple[str, ...]]] = {}
+        self._parameter_default_scalar_types: dict[int, dict[int, PineType]] = {}
+        self._overloaded_func_names: set[str] = set()
+        defined_names: set[str] = set()
+        for stmt in ast.body:
+            if isinstance(stmt, FuncDef):
+                if stmt.name in defined_names:
+                    self._overloaded_func_names.add(stmt.name)
+                defined_names.add(stmt.name)
         # Track user-defined function return types
         self._func_return_types: dict[str, PineType] = {}
+        self._ternary_int_fallbacks: set[int] = set()
         # Track user-defined function tuple returns
         self._func_returns_tuple: dict[str, bool] = {}
         self._func_tuple_element_count: dict[str, int] = {}
@@ -349,6 +383,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # closed. Pine explicitly permits an untyped parameter to inherit a
         # different type at each written call site.
         self._callable_bound_param_types_by_node: dict[int, list[PineType]] = {}
+        # Diagnostic provenance only; never re-visit a condition's receiver.
+        self._na_return_callables: dict[int, FuncDef] = {}
         self._func_callsite_param_types: dict[
             tuple[str, int], list[PineType]
         ] = {}
@@ -466,6 +502,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 scope="global",
                 loc=dummy_loc,
             )
+            sym._pf_builtin_condition_type = ptype
             self._symbols.define(sym)
 
     def _ensure_pine_v6(self) -> None:
@@ -563,6 +600,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._ensure_pine_v6()
         self._check_direct_terminal_array_element_callee_shadows()
         self._visit(self._ast)
+        # Reassignments anywhere in the program prevent const qualification.
+        from ..codegen.strategy_declaration import resolve_strategy_declarations
+        self._strategy_params = resolve_strategy_declarations(
+            self._ast, self._global_reassigned_names, self._filename, self._budget,
+        )
         collection_history = self._check_collection_history()
         self._check_direct_terminal_array_temporary_cycles()
         self._register_resolved_direct_terminal_array_forward_calls()
@@ -628,6 +670,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             func_ta_ranges=self._func_ta_ranges,
             func_ta_indices=self._func_ta_indices,
             func_call_cs_map=self._func_call_cs_map,
+            method_call_bindings=dict(self._method_call_bindings),
             func_inherited_call_names=dict(
                 self._func_inherited_call_names
             ),
@@ -3958,19 +4001,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.VOID
 
     def _visit_StrategyDecl(self, node: StrategyDecl) -> PineType:
-        # Extract strategy parameters
-        if node.args:
-            # First arg is title
-            title_node = node.args[0]
-            if isinstance(title_node, StringLiteral):
-                self._strategy_params["title"] = title_node.value
-        for key, val_node in node.kwargs.items():
-            self._strategy_params[key] = self._extract_literal_value(val_node)
+        # Resolve settings after the program's lexical reassignments are known.
         return PineType.VOID
 
     def _visit_ImportStmt(self, node: ImportStmt) -> PineType:
         # Imported here: the support checker imports the analyzer package.
-        from ..support_checker import import_is_builtin_namespace_no_op, import_refusal
+        from ..support_checker import (
+            import_is_builtin_namespace_no_op,
+            import_refusal,
+            import_refusal_hint,
+        )
         if import_is_builtin_namespace_no_op(self._ast, node):
             return PineType.VOID
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
@@ -3979,6 +4019,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             phase=Phase.ANALYZER,
             location=loc,
             message=import_refusal(node),
+            hint=import_refusal_hint(),
         )
         raise CompileError([diag])
 
@@ -4255,7 +4296,290 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return
         self._collection_types[name] = spec
 
+    def _in_v5_library_definition(self, node: ASTNode | None = None) -> bool:
+        """Imported v5 definitions retain their existing nullable bool lowering."""
+        version = (node.annotations or {}).get("pine_version") if node is not None else None
+        if version is not None:
+            return version == 5
+        owner = self._current_top_level_stmt
+        return owner is not None and (owner.annotations or {}).get("pine_version") == 5
+
+    def _bool_na_error(self, location: SourceLocation | None) -> None:
+        self._error(
+            "Invalid bool value: a bool cannot be na in Pine v6.",
+            location,
+        )
+
+    def _check_bool_na_parameters(
+        self, definition: FuncDef | MethodDef, values: list[ASTNode | None],
+    ) -> None:
+        """Check only explicitly bool parameters, after argument binding."""
+        if self._in_v5_library_definition(definition):
+            return
+        hints = (definition.annotations or {}).get("param_type_hints", ())
+        for hint, value in zip(hints, values):
+            if hint == "bool" and isinstance(value, NaLiteral):
+                self._bool_na_error(value.loc)
+
+    _STRING_RETURNING_STR_FUNCTIONS = frozenset({
+        "tostring", "format", "format_time", "lower", "upper", "replace",
+        "replace_all", "substring", "trim", "repeat",
+    })
+
+    def _is_certainly_string(self, node: ASTNode) -> bool:
+        """A string literal, a str.* call that returns a string, or a variable
+        declared string (or initialized by one). The analyzer's inferred types
+        are not proof enough to refuse a script on."""
+        if isinstance(node, StringLiteral):
+            return True
+        if (isinstance(node, FuncCall) and isinstance(node.callee, MemberAccess)
+                and isinstance(node.callee.object, Identifier)
+                and node.callee.object.name == "str"):
+            return node.callee.member in self._STRING_RETURNING_STR_FUNCTIONS
+        if isinstance(node, Identifier):
+            symbol = self._symbols.resolve(node.name)
+            return symbol is not None and getattr(symbol, "_pf_certain_string", False)
+        return False
+
+    def _check_na_source_not_string(self, node: FuncCall) -> None:
+        """nz and fixnan take a numeric, bool or color source; v6 refuses a string."""
+        if (not node.args or not isinstance(node.callee, Identifier)
+                or self._pine_version != 6
+                or self._in_v5_library_definition(node)):
+            return
+        certain_type = self._certain_scalar_type(node.args[0])
+        if certain_type == PineType.BOOL:
+            self._error(
+                f"Cannot call '{node.callee.name}' with a bool argument: "
+                "its source must be a numeric or color series.",
+                node.args[0].loc,
+            )
+            return
+        if not self._is_certainly_string(node.args[0]):
+            return
+        self._error(
+            f"Cannot call '{node.callee.name}' with a string argument: "
+            "its source must be a numeric, bool or color series.",
+            node.args[0].loc,
+        )
+
+    def _check_reserved_definition_name(
+        self, node: MethodDef,
+    ) -> None:
+        if (
+            self._pine_version == 6
+            and not self._in_v5_library_definition(node)
+            and node.name in _BUILTIN_NAMESPACE_NAMES
+        ):
+            self._error(
+                f'"{node.name}" cannot be used as a variable or function name.',
+                node.loc,
+            )
+
+    def _check_na_bool_argument(self, node: FuncCall) -> None:
+        """The na() predicate cannot receive a proven bool in v6."""
+        if (not node.args
+                or self._pine_version != 6
+                or self._in_v5_library_definition(node)):
+            return
+        if self._certain_scalar_type(node.args[0]) != PineType.BOOL:
+            return
+        self._error(
+            "Cannot call 'na' with a bool argument: "
+            "Pine v6 bool values cannot be na.",
+            node.args[0].loc,
+        )
+
+    def _check_bool_map_put_na(
+        self, node: FuncCall, obj: ASTNode, member: str,
+    ) -> None:
+        """A map of bool values cannot store a bare na: its value is a bool."""
+        if member != "put" or self._in_v5_library_definition(node):
+            return
+        if isinstance(obj, Identifier) and obj.name == "map":
+            receiver = node.args[0] if node.args else node.kwargs.get("id")
+            value_index = 2
+        else:
+            receiver = obj
+            value_index = 1
+        value = (
+            node.args[value_index] if len(node.args) > value_index
+            else node.kwargs.get("value")
+        )
+        if receiver is None or not isinstance(value, NaLiteral):
+            return
+        spec = self._type_spec_from_expr(receiver)
+        if (spec is not None and spec.kind == "map"
+                and spec.value is not None and spec.value.kind == "primitive"
+                and spec.value.name == "bool"):
+            self._bool_na_error(value.loc)
+
+    def _check_bool_collection_na(
+        self, node: FuncCall, obj: ASTNode, member: str,
+    ) -> None:
+        """A bool array or matrix cannot receive a bare na element."""
+        if (self._pine_version != 6
+                or self._in_v5_library_definition(node)):
+            return
+        receiver = None
+        value_index = None
+        if isinstance(obj, Identifier) and obj.name in {"array", "matrix"}:
+            receiver = node.args[0] if node.args else node.kwargs.get("id")
+            if obj.name == "array":
+                if member == "push":
+                    value_index = 1
+                elif member == "set":
+                    value_index = 2
+            elif member == "set":
+                value_index = 3
+        else:
+            receiver = obj
+            spec = self._type_spec_from_expr(receiver)
+            if spec is not None and spec.kind == "array":
+                if member == "push":
+                    value_index = 0
+                elif member == "set":
+                    value_index = 1
+            elif spec is not None and spec.kind == "matrix" and member == "set":
+                value_index = 2
+        if receiver is None or value_index is None:
+            return
+        value = (
+            node.args[value_index] if len(node.args) > value_index
+            else node.kwargs.get("value")
+        )
+        if not isinstance(value, NaLiteral):
+            return
+        spec = self._type_spec_from_expr(receiver)
+        if (
+            spec is None
+            or spec.kind not in {"array", "matrix"}
+            or spec.element is None
+            or spec.element.kind != "primitive"
+            or spec.element.name != "bool"
+        ):
+            return
+        self._error(
+            f"Cannot store a value of the 'na' type in {spec.kind}<bool>.",
+            value.loc,
+        )
+
+    def _check_udt_constructor_bool_na(self, node: FuncCall) -> None:
+        """A user-defined bool field cannot be initialized with bare na."""
+        if (self._pine_version != 6
+                or self._in_v5_library_definition(node)):
+            return
+        callee = node.callee
+        if not (
+            isinstance(callee, MemberAccess)
+            and isinstance(callee.object, Identifier)
+            and callee.member == "new"
+        ):
+            return
+        udt_name = callee.object.name
+        field_types = self._udt_field_type_specs.get(udt_name)
+        if not field_types:
+            return
+        field_names = list(field_types)
+        for index, field_name in enumerate(field_names):
+            field_spec = field_types[field_name]
+            if field_spec.kind != "primitive" or field_spec.name != "bool":
+                continue
+            value = (
+                node.args[index] if len(node.args) > index
+                else node.kwargs.get(field_name)
+            )
+            if isinstance(value, NaLiteral):
+                self._error(
+                    f"Cannot call '{udt_name}.new' with a bare na value "
+                    f"for bool field '{field_name}'.",
+                    value.loc,
+                )
+
+    def _record_parameter_default_scalar_types(
+        self, definition: FuncDef | MethodDef,
+    ) -> None:
+        """Keep default type proofs in the declaration's lexical scope."""
+        self._parameter_default_scalar_types[id(definition)] = {
+            id(value): self._certain_scalar_type(value)
+            for value in (definition.annotations or {}).get("param_defaults", ())
+            if value is not None
+        }
+
+    def _check_typed_parameter_mismatches(
+        self,
+        definition: FuncDef | MethodDef,
+        values: list[ASTNode | None],
+        function_name: str,
+    ) -> None:
+        """Refuse only a proven float passed to a declared int parameter."""
+        if (self._pine_version != 6
+                or self._in_v5_library_definition(definition)):
+            return
+        if (function_name in self._overloaded_func_names
+                or (definition.annotations or {}).get("scalar_overload_fallback")):
+            # An unresolved overload keeps its established lookup; checking
+            # only that declaration would discard the other candidates.
+            return
+        specs = self._param_type_specs_from_def(definition)
+        # A default needs a float proof in both scopes; a declaration proof
+        # only limits the existing refusal.
+        default_types = self._parameter_default_scalar_types.get(id(definition), {})
+        for name, spec, value in zip(definition.params, specs, values):
+            if (
+                value is not None
+                and spec is not None
+                and spec.kind == "primitive"
+                and spec.name == "int"
+                and self._certain_scalar_type(value) == PineType.FLOAT
+                and default_types.get(id(value), PineType.FLOAT) == PineType.FLOAT
+            ):
+                self._error(
+                    f"Cannot call '{function_name}' with a float argument "
+                    f"for int parameter '{name}'.",
+                    value.loc,
+                )
+
+    def _record_script_block_binding(self, sym: Symbol, outer: Symbol | None) -> None:
+        if not self._block_node_stack or self._collection_scope_stack:
+            return
+        sym._pf_script_block_owner = id(self._block_node_stack[-1])
+        outer_owner = getattr(outer, "_pf_script_block_owner", None)
+        # A builtin or enclosing binding survives a local shadow. The legacy
+        # global symbol table can retain the local after its block ends; that
+        # does not prove an out-of-scope read when an outer binding exists.
+        sym._pf_script_block_has_outer = outer is not None and (
+            outer_owner is None
+            or getattr(outer, "_pf_script_block_has_outer", False)
+            or any(id(body) == outer_owner for body in self._block_node_stack)
+        )
+
     def _visit_VarDecl(self, node: VarDecl) -> PineType:
+        if (not node.is_var and not node.is_varip and node.type_hint is None
+                and isinstance(node.value, NaLiteral)
+                and (node.annotations or {}).get("bare_na_initializer")
+                and not (node.annotations or {}).get("qualifier")
+                and self._pine_version == 6
+                and not self._in_v5_library_definition(node)):
+            self._error(
+                "Value with NA type cannot be assigned to a variable that was "
+                "defined without type keyword.",
+                node.loc,
+            )
+        if (node.type_hint == "bool"
+                and isinstance(node.value, NaLiteral)
+                and not self._in_v5_library_definition(node)):
+            location = node.loc
+            if (location is not None and node.value.loc is not None
+                    and location.line == node.value.loc.line):
+                location = SourceLocation(
+                    file=location.file, line=location.line, col=location.col,
+                    end_col=node.value.loc.end_col,
+                )
+            self._error(
+                "Invalid bool declaration: a bool cannot be na in Pine v6.",
+                location,
+            )
         outer_symbol = self._symbols.resolve(node.name)
         outer_spec = (
             getattr(outer_symbol, "type_spec", None)
@@ -4264,6 +4588,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         )
         # Infer type from the value expression
         val_type = self._visit(node.value)
+        if (node.type_hint == "int"
+                and isinstance(node.value, NumberLiteral)
+                and isinstance(node.value.value, float)
+                and self._pine_version == 6):
+            self._error(
+                f"An int declaration cannot initialize '{node.name}' "
+                "with a float literal.",
+                node.loc,
+            )
         type_spec = self._type_spec_from_hint(node.type_hint) if node.type_hint else None
         if type_spec is None:
             type_spec = self._type_spec_from_expr(node.value)
@@ -4293,6 +4626,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if ic is not None:
                 val_type, is_const, const_value = ic
             enum_type_name = self._input_enum_type_name(node.value)
+        elif (isinstance(node.value, MemberAccess)
+              and isinstance(node.value.object, Identifier)):
+            enum_name = node.value.object.name
+            if node.value.member in self._enum_defs.get(enum_name, ()):
+                enum_type_name = enum_name
 
         udt_ctor = self._udt_name_from_ctor(node.value)
         # User function return propagation: if the value is a call to a user
@@ -4306,6 +4644,21 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 udt_ctor = self._func_udt_return_types.get(cal.name)
                 if udt_ctor is not None and type_spec is None:
                     type_spec = TypeSpec.udt(udt_ctor)
+
+        if (
+            self._pine_version == 6
+            and not self._in_v5_library_definition(node)
+            and node.name in _BUILTIN_NAMESPACE_NAMES
+            and (
+                udt_ctor is not None
+                or (type_spec is not None and type_spec.kind == "udt")
+            )
+        ):
+            self._error(
+                f"Invalid object name: {node.name}. "
+                "Namespaces of built-ins cannot be used.",
+                node.loc,
+            )
 
         self._var_decl_types_by_node[id(node)] = (val_type, type_spec)
 
@@ -4331,6 +4684,24 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             udt_type_name=udt_ctor,
             type_spec=type_spec,
         )
+        certain_type = self._certain_scalar_type(node.value)
+        if node.type_hint in ("int", "float", "bool", "string"):
+            certain_type = val_type
+            setattr(sym, "_pf_certain_declared", True)
+        if certain_type != PineType.UNKNOWN:
+            setattr(sym, "_pf_certain_type", certain_type)
+        # Only an initializer with a numeric proof supplies validation facts.
+        # In particular, FLOAT from a call or an unknown identifier is not
+        # evidence that a condition is numeric.
+        numeric_type = self._numeric_condition_type(node.value)
+        if node.type_hint:
+            numeric_type = (
+                val_type
+                if numeric_type in (PineType.INT, PineType.FLOAT)
+                and val_type in (PineType.INT, PineType.FLOAT)
+                else PineType.UNKNOWN
+            )
+        sym._pf_numeric_condition_type = numeric_type
         # A direct persistent primitive in an ordinary UDF can safely shadow
         # a top-level map once post-analysis owner qualification gives it exact
         # storage.  Other scalar/map shadows still need the legacy fail-closed
@@ -4356,9 +4727,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             setattr(sym, "_pf_shadows_map_state", True)
         if node.name in self._static_vars:
             setattr(sym, "is_static_series", True)
+        certain_string = (
+            node.type_hint == "string" or self._is_certainly_string(node.value)
+        )
         self._symbols.define(sym)
+        if certain_string:
+            setattr(sym, "_pf_certain_string", True)
         setattr(sym, "_pf_decl_node_id", id(node))
         setattr(sym, "_pf_decl_binding_name", node.name)
+        self._record_script_block_binding(sym, outer_symbol)
         self._note_member_writer(sym, node.name, node)
         if (type_spec is None
                 and self._collection_scope_stack
@@ -4493,6 +4870,29 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     node.loc or node.target.loc,
                 )
             else:
+                if (node.op == ":="
+                        and self._pine_version == 6
+                        and not self._in_v5_library_definition(node)
+                        and self._enclosing_func_names
+                        and self._enclosing_func_names[-1] in self._func_defs
+                        and getattr(sym, "_pf_parameter_owner", None)
+                        == self._enclosing_func_names[-1]):
+                    self._error(
+                        f"Function parameter '{node.target.name}' cannot be reassigned.",
+                        node.target.loc,
+                    )
+                if (node.op == ":="
+                        and sym.pine_type == PineType.BOOL
+                        and isinstance(node.value, NaLiteral)
+                        and not self._in_v5_library_definition(node)):
+                    location = node.loc or node.target.loc
+                    if (location is not None and node.value.loc is not None
+                            and location.line == node.value.loc.line):
+                        location = SourceLocation(
+                            file=location.file, line=location.line, col=location.col,
+                            end_col=node.value.loc.end_col,
+                        )
+                    self._bool_na_error(location)
                 if sym.scope == "global":
                     self._global_reassigned_names.add(node.target.name)
                     self._record_global_binding_stmt(
@@ -4514,6 +4914,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         delattr(sym, "is_static_series")
         else:
             target_type = self._visit(node.target)
+            if (
+                node.op == ":="
+                and isinstance(node.target, MemberAccess)
+                and isinstance(node.value, NaLiteral)
+                and target_type == PineType.BOOL
+                and self._pine_version == 6
+                and not self._in_v5_library_definition(node)
+            ):
+                self._error(
+                    "Cannot assign a value of the 'na' type to the "
+                    f"'{node.target.member}' variable. The variable is "
+                    "declared with the 'bool' type.",
+                    node.value.loc,
+                )
             base_name = self._get_target_base_name(node.target)
             if base_name:
                 self._static_vars.discard(base_name)
@@ -4625,6 +5039,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         for idx, name in enumerate(node.names):
             if name == "_":
                 continue
+            outer_symbol = self._symbols.resolve(name)
 
             inferred_element_type = (
                 element_types[idx]
@@ -4662,6 +5077,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._symbols.define(sym)
             setattr(sym, "_pf_decl_node_id", id(node))
             setattr(sym, "_pf_decl_binding_name", name)
+            setattr(sym, "_pf_tuple_binding", True)
+            self._record_script_block_binding(sym, outer_symbol)
             self._note_member_writer(sym, name, node)
 
             if (self._collection_scope_stack
@@ -4722,6 +5139,47 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return sym.pine_type
 
     def _visit_FuncDef(self, node: FuncDef) -> PineType:
+        if (self._pine_version == 6
+                and not self._in_v5_library_definition(node)
+                and self._enclosing_func_names):
+            self._error(
+                f"Function '{node.name}' cannot be defined inside a function.",
+                node.loc,
+            )
+        if (self._pine_version == 6
+                and not self._in_v5_library_definition(node)
+                and not self._global_scope):
+            self._error(
+                f"Function '{node.name}' cannot be defined inside a local block.",
+                node.loc,
+            )
+        hints = (node.annotations or {}).get("param_type_hints", [])
+        # Only declared parameter types prove a duplicate signature. Untyped
+        # parameters retain their existing inference and overload behavior.
+        if len(hints) == len(node.params) and all(hints):
+            qualifiers = list(
+                (node.annotations or {}).get("param_qualifiers", [])
+            )
+            signature = tuple(
+                f"{qualifier or ''}:{hint.replace(' ', '')}"
+                for hint, qualifier in zip(hints, qualifiers + [None] * len(hints))
+            )
+            signatures = self._func_definition_signatures.setdefault(
+                node.name, set(),
+            )
+            if (self._pine_version == 6
+                    and not self._in_v5_library_definition(node)
+                    and signature in signatures):
+                self._error(
+                    f"Function '{node.name}' has more than one definition "
+                    "with the same parameter types.",
+                    node.loc,
+                )
+            signatures.add(signature)
+        self._check_bool_na_parameters(
+            node, (node.annotations or {}).get("param_defaults", []),
+        )
+        self._record_parameter_default_scalar_types(node)
         # Store the function def for later analysis
         self._func_defs[node.name] = node
 
@@ -4751,6 +5209,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 loc=loc,
                 type_spec=pspec,
             )
+            if pspec is not None and pspec.kind == "primitive":
+                sym._pf_numeric_condition_type = ptype
+                sym._pf_certain_type = ptype
+                sym._pf_certain_declared = True
             setattr(sym, "_pf_parameter_owner", node.name)
             self._symbols.define(sym)
 
@@ -4760,7 +5222,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Visit body to discover return type
         body_type = PineType.VOID
         old_global = self._global_scope
+        old_pine_version = self._pine_version
         self._global_scope = False
+        self._pine_version = (node.annotations or {}).get("pine_version", old_pine_version)
         self._enclosing_func_params.append(set(node.params))
         self._enclosing_func_names.append(node.name)
         self._collection_scope_stack.append(node.name)
@@ -4772,6 +5236,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 body_type = self._statement_value_type(node.body[-1], body_type)
         finally:
             self._global_scope = old_global
+            self._pine_version = old_pine_version
             self._collection_scope_stack.pop()
             self._enclosing_func_params.pop()
             self._enclosing_func_names.pop()
@@ -5029,6 +5494,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # re-visit the call and duplicate stateful call sites.
             self._func_return_type_specs[node.name] = terminal_spec
 
+        if (
+            self._selection_contains_na(terminal_ret_expr)
+            and body_type in {PineType.NA, PineType.UNKNOWN, PineType.VOID}
+        ):
+            terminal_primitive_type = self._primitive_pine_type_from_spec(
+                terminal_direct_return_spec
+            )
+            if terminal_primitive_type != PineType.UNKNOWN:
+                body_type = terminal_primitive_type
+                self._func_return_type_specs[node.name] = (
+                    terminal_direct_return_spec
+                )
+
         # Store return type
         self._func_return_types[node.name] = body_type
 
@@ -5101,6 +5579,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
     def _visit_MethodDef(self, node) -> PineType:
         """Register a typed instance method under ``TypeName.methodName``."""
+        self._check_reserved_definition_name(node)
+        self._check_bool_na_parameters(
+            node, (node.annotations or {}).get("param_defaults", []),
+        )
+        self._record_parameter_default_scalar_types(node)
         method_key = f"{node.type_name}.{node.name}"
         self._symbols.enter_scope(f"method_{node.type_name}_{node.name}")
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
@@ -5129,12 +5612,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 udt_type_name=udt_self,
                 type_spec=pspec,
             )
+            if pspec is not None and pspec.kind == "primitive":
+                sym._pf_numeric_condition_type = ptype
+                sym._pf_certain_type = ptype
+                sym._pf_certain_declared = True
             setattr(sym, "_pf_parameter_owner", method_key)
             self._symbols.define(sym)
         ret_type = PineType.VOID
         ta_start = len(self._ta_call_sites)
         old_global = self._global_scope
+        old_pine_version = self._pine_version
         self._global_scope = False
+        self._pine_version = (node.annotations or {}).get("pine_version", old_pine_version)
         self._enclosing_func_params.append(set(node.params))
         self._enclosing_func_names.append(method_key)
         self._collection_scope_stack.append(method_key)
@@ -5150,6 +5639,30 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 ret_type = self._statement_value_type(node.body[-1], ret_type)
             if terminal_ret_expr is not None:
                 terminal_spec = self._type_spec_from_expr(terminal_ret_expr)
+                nullable_selection = self._selection_contains_na(terminal_ret_expr)
+                terminal_needs_structured_return = (
+                    nullable_selection
+                    and ret_type in {PineType.NA, PineType.UNKNOWN, PineType.VOID}
+                )
+                terminal_primitive_type = self._primitive_pine_type_from_spec(
+                    terminal_spec
+                )
+                if (
+                    terminal_primitive_type != PineType.UNKNOWN
+                    and terminal_needs_structured_return
+                ):
+                    ret_type = terminal_primitive_type
+                if (
+                    terminal_spec is not None
+                    and (
+                        (terminal_spec.kind == "array" and nullable_selection)
+                        or (
+                            terminal_spec.kind == "primitive"
+                            and terminal_needs_structured_return
+                        )
+                    )
+                ):
+                    return_type_spec = terminal_spec
                 if terminal_spec is not None and terminal_spec.kind in ("map", "matrix"):
                     return_type_spec = terminal_spec
                 if terminal_spec is not None and terminal_spec.kind == "udt":
@@ -5168,6 +5681,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     return_type_spec = TypeSpec.udt(method_udt_return)
         finally:
             self._global_scope = old_global
+            self._pine_version = old_pine_version
             self._collection_scope_stack.pop()
             self._enclosing_func_params.pop()
             self._enclosing_func_names.pop()
@@ -5286,11 +5800,153 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._symbols.enter_scope(name)
         return scoped
 
+    def _certain_scalar_type(self, node: ASTNode) -> PineType:
+        """Return a scalar type only when the syntax proves it.
+
+        Member access deliberately stays unknown: several namespace members
+        have legacy analyzer types that do not describe the value codegen
+        emits. Declaration hints, literals, builtin numeric series,
+        comparisons, logical results, arithmetic over proven numeric values,
+        and the small set of scalar casts and builtin calls are reliable.
+        """
+        if isinstance(node, NumberLiteral):
+            return PineType.FLOAT if isinstance(node.value, float) else PineType.INT
+        if isinstance(node, StringLiteral):
+            return PineType.STRING
+        if isinstance(node, BoolLiteral):
+            return PineType.BOOL
+        if isinstance(node, NaLiteral):
+            return PineType.NA
+        if isinstance(node, Identifier):
+            sym = self._symbols.resolve(node.name)
+            builtin_type = getattr(
+                sym, "_pf_builtin_condition_type", PineType.UNKNOWN
+            )
+            if builtin_type in {
+                PineType.INT, PineType.FLOAT, PineType.BOOL,
+                PineType.STRING, PineType.NA,
+            }:
+                return builtin_type
+            certain_type = getattr(sym, "_pf_certain_type", PineType.UNKNOWN)
+            if certain_type != PineType.UNKNOWN:
+                if (
+                    node.name in self._condition_reassigned_names
+                    and not getattr(sym, "_pf_certain_declared", False)
+                ):
+                    return PineType.UNKNOWN
+                return certain_type
+            numeric_type = getattr(
+                sym, "_pf_numeric_condition_type", PineType.UNKNOWN
+            )
+            if numeric_type in (PineType.INT, PineType.FLOAT):
+                return numeric_type
+            return PineType.UNKNOWN
+        if isinstance(node, UnaryOp):
+            if node.op == "not":
+                return PineType.BOOL
+            if node.op in ("+", "-"):
+                operand_type = self._certain_scalar_type(node.operand)
+                return (
+                    operand_type
+                    if operand_type in (PineType.INT, PineType.FLOAT)
+                    else PineType.UNKNOWN
+                )
+            return PineType.UNKNOWN
+        if isinstance(node, Subscript):
+            return self._certain_scalar_type(node.object)
+        if isinstance(node, BinOp):
+            if node.op in ("==", "!=", ">", "<", ">=", "<=", "and", "or"):
+                return PineType.BOOL
+            left_type = self._certain_scalar_type(node.left)
+            right_type = self._certain_scalar_type(node.right)
+            if node.op == "+" and (
+                left_type == PineType.STRING or right_type == PineType.STRING
+            ):
+                return PineType.STRING
+            numeric = (PineType.INT, PineType.FLOAT)
+            if left_type in numeric and right_type in numeric:
+                if node.op == "/" or PineType.FLOAT in (left_type, right_type):
+                    return PineType.FLOAT
+                if node.op in ("+", "-", "*", "%"):
+                    return PineType.INT
+            return PineType.UNKNOWN
+        if isinstance(node, FuncCall):
+            callee = node.callee
+            if isinstance(callee, Identifier):
+                return {
+                    "int": PineType.INT,
+                    "float": PineType.FLOAT,
+                    "bool": PineType.BOOL,
+                    "string": PineType.STRING,
+                    "na": PineType.BOOL,
+                }.get(callee.name, PineType.UNKNOWN)
+            if (
+                isinstance(callee, MemberAccess)
+                and isinstance(callee.object, Identifier)
+            ):
+                if callee.object.name == "math":
+                    math_type = sigs.get_return_type(
+                        "math",
+                        callee.member,
+                        len(node.args) + len(node.kwargs),
+                    )
+                    return (
+                        math_type
+                        if math_type != PineType.UNKNOWN
+                        else PineType.FLOAT
+                    )
+                if callee.object.name == "str":
+                    if callee.member in ("contains", "startswith", "endswith"):
+                        return PineType.BOOL
+                    if callee.member in ("length", "pos"):
+                        return PineType.INT
+                    if callee.member == "tonumber":
+                        return PineType.FLOAT
+            return PineType.UNKNOWN
+        return PineType.UNKNOWN
+
+    def _numeric_condition_type(self, node: ASTNode) -> PineType:
+        """Prove numeric syntax without consulting legacy fallback types."""
+        if isinstance(node, Identifier):
+            sym = self._symbols.resolve(node.name)
+            binding_scope = self._identifier_binding_scopes.get(id(node))
+            if sym is not None and binding_scope is not None and sym.scope != binding_scope:
+                return PineType.UNKNOWN
+            builtin_type = getattr(sym, "_pf_builtin_condition_type", PineType.UNKNOWN)
+            if builtin_type in (PineType.INT, PineType.FLOAT):
+                return builtin_type
+            if node.name in self._condition_reassigned_names:
+                return PineType.UNKNOWN
+            return getattr(sym, "_pf_numeric_condition_type", PineType.UNKNOWN)
+        if isinstance(node, NumberLiteral):
+            return PineType.FLOAT if isinstance(node.value, float) else PineType.INT
+        if isinstance(node, UnaryOp) and node.op == "-":
+            return self._numeric_condition_type(node.operand)
+        if isinstance(node, BinOp) and node.op in ("+", "-", "*", "/", "%"):
+            left = self._numeric_condition_type(node.left)
+            right = self._numeric_condition_type(node.right)
+            if left in (PineType.INT, PineType.FLOAT) and right in (
+                PineType.INT, PineType.FLOAT,
+            ):
+                return (
+                    PineType.FLOAT if node.op == "/" or PineType.FLOAT in (left, right)
+                    else PineType.INT
+                )
+        return PineType.UNKNOWN
+
     def _visit_IfStmt(self, node: IfStmt) -> PineType:
         old_global = self._global_scope
         self._global_scope = False
         try:
             self._visit(node.condition)
+            condition_type = self._numeric_condition_type(node.condition)
+            if (condition_type in (PineType.INT, PineType.FLOAT)
+                    and self._pine_version == 6):
+                self._error(
+                    "An if condition must have bool type; "
+                    f"found {condition_type.value}.",
+                    node.condition.loc or node.loc,
+                )
             body_type = PineType.VOID
             body_scoped = self._enter_top_level_branch_scope(
                 node.body, "top_if"
@@ -5309,15 +5965,24 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 )
                 self._block_node_stack.append(node.else_body)
                 try:
+                    else_type = PineType.VOID
                     for stmt in node.else_body:
-                        self._visit(stmt)
+                        else_type = self._visit(stmt)
                 finally:
                     self._block_node_stack.pop()
                     if else_scoped:
                         self._symbols.exit_scope()
+            else:
+                else_type = PineType.NA
         finally:
             self._global_scope = old_global
+        self._check_bool_na_selection([
+            (self._selection_terminal_expr(node.body), body_type),
+            (self._selection_terminal_expr(node.else_body), else_type),
+        ])
         # If used as expression (x = if ...), return last expr type
+        if self._selection_node_is_na(self._selection_terminal_expr(node.body)):
+            return unify_pine_types(PineType.NA, else_type)
         return body_type
 
     def _visit_ForStmt(self, node: ForStmt) -> PineType:
@@ -5448,6 +6113,25 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._block_node_stack.append(node)
         try:
             self._visit(node.condition)
+            condition_type = self._numeric_condition_type(node.condition)
+            if (
+                condition_type == PineType.UNKNOWN
+                and isinstance(node.condition, Identifier)
+            ):
+                symbol = self._symbols.resolve(node.condition.name)
+                # Reassignment cannot change an explicitly declared scalar type.
+                if getattr(symbol, "_pf_certain_declared", False):
+                    condition_type = self._certain_scalar_type(node.condition)
+            if (
+                condition_type in (PineType.INT, PineType.FLOAT)
+                and self._pine_version == 6
+                and not self._in_v5_library_definition(node)
+            ):
+                self._error(
+                    'The condition of the "while" statement must evaluate '
+                    'to a "bool" value.',
+                    node.condition.loc or node.loc,
+                )
             for stmt in node.body:
                 self._visit(stmt)
         finally:
@@ -5464,6 +6148,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if node.expr:
                 self._visit(node.expr)
             result_type = PineType.VOID
+            branch_types: list[tuple[ASTNode | None, PineType]] = []
             for case_expr, case_body in node.cases:
                 if case_expr:
                     self._visit(case_expr)
@@ -5474,6 +6159,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 try:
                     for stmt in case_body:
                         result_type = self._visit(stmt)
+                    branch_types.append((
+                        self._selection_terminal_expr(case_body), result_type,
+                    ))
                 finally:
                     self._block_node_stack.pop()
                     if case_scoped:
@@ -5484,15 +6172,60 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 )
                 self._block_node_stack.append(node.default_body)
                 try:
+                    default_type = PineType.VOID
                     for stmt in node.default_body:
-                        self._visit(stmt)
+                        default_type = self._visit(stmt)
+                    branch_types.append((
+                        self._selection_terminal_expr(node.default_body),
+                        default_type,
+                    ))
                 finally:
                     self._block_node_stack.pop()
                     if default_scoped:
                         self._symbols.exit_scope()
+            else:
+                branch_types.append((None, PineType.NA))
         finally:
             self._global_scope = old_global
+        self._check_bool_na_selection(branch_types)
+        if (
+            self._pine_version == 6
+            and not self._in_v5_library_definition(node)
+        ):
+            known_types: list[tuple[ASTNode, PineType]] = []
+            for terminal, _result_type in branch_types:
+                if terminal is None:
+                    continue
+                certain_type = self._certain_scalar_type(terminal)
+                if certain_type in (
+                    PineType.UNKNOWN, PineType.NA, PineType.VOID,
+                ):
+                    continue
+                known_types.append((terminal, certain_type))
+            if known_types:
+                _first_terminal, first_type = known_types[0]
+                numeric = (PineType.INT, PineType.FLOAT)
+                for terminal, certain_type in known_types[1:]:
+                    compatible = (
+                        certain_type == first_type
+                        or {certain_type, first_type} <= set(numeric)
+                    )
+                    if not compatible:
+                        blocks = f"{first_type.value}, {certain_type.value}"
+                        self._error(
+                            "Return type of one of the \"if\" or \"switch\" "
+                            "blocks is not compatible with return type of "
+                            f"other block(s) ({blocks}).",
+                            terminal.loc or node.loc,
+                        )
         # If used as expression (x = switch ...), return last expr type
+        if any(self._selection_node_is_na(arm) for arm, _ in branch_types):
+            concrete = [
+                ptype for arm, ptype in branch_types
+                if not self._selection_node_is_na(arm)
+            ]
+            if concrete and all(ptype == concrete[0] for ptype in concrete):
+                return concrete[0]
         return result_type
 
     def _visit_BreakStmt(self, node: BreakStmt) -> PineType:
@@ -5512,9 +6245,92 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     # Expression visitors
     # ------------------------------------------------------------------
 
+    def _check_incompatible_binary_operands(self, node: BinOp) -> None:
+        """Reject only measured bool/string and numeric operator pairs."""
+        if (self._pine_version != 6
+                or self._in_v5_library_definition(node)):
+            return
+        left = self._certain_scalar_type(node.left)
+        right = self._certain_scalar_type(node.right)
+        numeric = {PineType.INT, PineType.FLOAT}
+        mismatch = False
+        offending = None
+        if node.op == "and":
+            mismatch = (
+                (left == PineType.BOOL and right in numeric)
+                or (right == PineType.BOOL and left in numeric)
+            )
+            if mismatch:
+                offending = node.right if right in numeric else node.left
+        elif node.op == "+":
+            mismatch = (
+                (left == PineType.BOOL and right in numeric)
+                or (right == PineType.BOOL and left in numeric)
+                or (left == PineType.STRING and right in numeric)
+                or (right == PineType.STRING and left in numeric)
+            )
+            if mismatch:
+                if left == PineType.BOOL:
+                    offending = node.left
+                elif right == PineType.BOOL:
+                    offending = node.right
+                elif left == PineType.STRING:
+                    offending = node.right
+                else:
+                    offending = node.left
+        if not mismatch:
+            return
+        self._error(
+            f"Operator '{node.op}' cannot combine {left.value} and {right.value}.",
+            offending.loc if offending is not None else node.loc,
+        )
+
     def _visit_BinOp(self, node: BinOp) -> PineType:
         left_type = self._visit(node.left)
         right_type = self._visit(node.right)
+        self._check_incompatible_binary_operands(node)
+
+        if (node.op in ("==", "!=")
+                and self._pine_version == 6
+                and not self._in_v5_library_definition(node)):
+            if isinstance(node.left, NaLiteral) or isinstance(node.right, NaLiteral):
+                other = node.right if isinstance(node.left, NaLiteral) else node.left
+                if self._certain_scalar_type(other) in (PineType.INT, PineType.FLOAT):
+                    self._error(
+                        'Cannot compare a value to "na" directly. '
+                        'Use the "na()" function instead.',
+                        other.loc or node.loc,
+                    )
+            certain_left = self._certain_scalar_type(node.left)
+            certain_right = self._certain_scalar_type(node.right)
+            numeric = (PineType.INT, PineType.FLOAT)
+            if (
+                (certain_left == PineType.BOOL and certain_right in numeric)
+                or (certain_right == PineType.BOOL and certain_left in numeric)
+            ):
+                numeric_operand = (
+                    node.left if certain_left in numeric else node.right
+                )
+                self._error(
+                    "Cannot compare a bool value with a numeric value "
+                    f"using {node.op}.",
+                    numeric_operand.loc or node.loc,
+                )
+        elif (node.op in (">", "<", ">=", "<=")
+                and self._pine_version == 6
+                and not self._in_v5_library_definition(node)):
+            certain_left = self._certain_scalar_type(node.left)
+            certain_right = self._certain_scalar_type(node.right)
+            string_operand = (
+                node.left if certain_left == PineType.STRING
+                else node.right if certain_right == PineType.STRING
+                else None
+            )
+            if string_operand is not None:
+                self._error(
+                    f"Cannot order string values with {node.op}.",
+                    string_operand.loc or node.loc,
+                )
 
         # Comparison and logical operators return BOOL
         if node.op in ("==", "!=", ">", "<", ">=", "<=", "and", "or"):
@@ -5551,23 +6367,155 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.FLOAT  # default
 
     def _visit_UnaryOp(self, node: UnaryOp) -> PineType:
+        if (node.op == "not"
+                and self._pine_version == 6
+                and not self._in_v5_library_definition(node)):
+            if (isinstance(node.operand, UnaryOp)
+                    and node.operand.op == "not"
+                    and (node.annotations or {}).get("consecutive_not")):
+                self._error(
+                    '"not" cannot be used as a variable or function name.',
+                    node.operand.loc or node.loc,
+                )
         operand_type = self._visit(node.operand)
         if node.op == "not":
+            certain_type = self._certain_scalar_type(node.operand)
+            if (certain_type in (PineType.INT, PineType.FLOAT)
+                    and self._pine_version == 6
+                    and not self._in_v5_library_definition(node)):
+                operand_type = certain_type.value
+                self._error(
+                    "The not operator requires a bool operand; "
+                    f"found {operand_type}.",
+                    node.operand.loc or node.loc,
+                )
             return PineType.BOOL
         return operand_type
 
+    def _check_bool_na_ternary(self, node: Ternary, pine_type: PineType) -> None:
+        """Reject a bare na arm once its selection is known to be bool."""
+        if pine_type != PineType.BOOL or self._in_v5_library_definition(node):
+            return
+        for arm in (node.true_val, node.false_val):
+            if isinstance(arm, NaLiteral):
+                self._error(
+                    "Invalid ternary operator ?: a bool cannot be na in Pine v6.",
+                    arm.loc,
+                )
+
+    def _check_bool_na_selection(
+        self, branches: list[tuple[ASTNode | None, PineType]],
+    ) -> None:
+        """Reject bare na beside a branch that is proven bool."""
+        if (self._pine_version != 6
+                or self._in_v5_library_definition()):
+            return
+        if not any(isinstance(expr, NaLiteral) for expr, _ in branches):
+            return
+        if not any(
+            ptype == PineType.BOOL
+            or (
+                expr is not None
+                and not isinstance(expr, NaLiteral)
+                and self._certain_scalar_type(expr) == PineType.BOOL
+            )
+            for expr, ptype in branches
+        ):
+            return
+        for expr, _ptype in branches:
+            if isinstance(expr, NaLiteral):
+                self._error(
+                    "A bool result cannot be na in an if or switch expression "
+                    "in Pine v6.",
+                    expr.loc,
+                )
+
+    def _check_untyped_na_condition(
+        self, condition: ASTNode, condition_type: PineType,
+    ) -> None:
+        """A callable with only bare na returns cannot supply a bool condition."""
+        if (condition_type != PineType.NA
+                or not isinstance(condition, FuncCall)
+                or self._in_v5_library_definition(condition)):
+            return
+        definition = self._na_return_callables.get(id(condition))
+        if definition is None or self._in_v5_library_definition(definition):
+            return
+
+        def bare_return(expr: ASTNode | None) -> NaLiteral | None:
+            if isinstance(expr, NaLiteral):
+                return expr
+            if isinstance(expr, Ternary):
+                arms = [expr.true_val, expr.false_val]
+            elif isinstance(expr, IfStmt):
+                arms = [
+                    self._selection_terminal_expr(body)
+                    for body in (expr.body, expr.else_body) if body
+                ]
+            elif isinstance(expr, SwitchStmt):
+                arms = [
+                    self._selection_terminal_expr(body)
+                    for _, body in expr.cases
+                ]
+                if expr.default_body:
+                    arms.append(self._selection_terminal_expr(expr.default_body))
+            else:
+                return None
+            tokens = [bare_return(arm) for arm in arms]
+            return tokens[0] if tokens and all(tokens) else None
+
+        token = bare_return(self._selection_terminal_expr(definition.body))
+        if token is not None:
+            self._bool_na_error(token.loc)
+
     def _visit_Ternary(self, node: Ternary) -> PineType:
-        self._visit(node.condition)
+        self._ternary_int_fallbacks.discard(id(node))
+        condition_type = self._visit(node.condition)
+        self._check_untyped_na_condition(node.condition, condition_type)
         true_type = self._visit(node.true_val)
         false_type = self._visit(node.false_val)
-
-        # String type dominates
-        if true_type == PineType.STRING or false_type == PineType.STRING:
-            return PineType.STRING
-        # Promote types
-        if true_type == PineType.FLOAT or false_type == PineType.FLOAT:
-            return PineType.FLOAT
-        return true_type
+        if PineType.STRING in (true_type, false_type):
+            main_type = PineType.STRING
+        elif PineType.FLOAT in (true_type, false_type):
+            main_type = PineType.FLOAT
+        else:
+            main_type = true_type
+        if (self._selection_node_is_na(node.true_val)
+                or self._selection_node_is_na(node.false_val)):
+            result_type = unify_pine_types(true_type, false_type)
+        else:
+            result_type = main_type
+        structured_type = PineType.UNKNOWN
+        if (self._selection_contains_na(node)
+                and result_type in {PineType.NA, PineType.UNKNOWN, PineType.VOID}):
+            structured_type = self._primitive_pine_type_from_spec(
+                self._type_spec_from_expr(node)
+            )
+        if not self._in_v5_library_definition(node):
+            for arm, peer in (
+                (node.true_val, node.false_val),
+                (node.false_val, node.true_val),
+            ):
+                if not isinstance(arm, NaLiteral):
+                    continue
+                peer_is_bool = PineType.BOOL in (result_type, structured_type)
+                if not peer_is_bool and isinstance(peer, FuncCall):
+                    # The primitive call query types casts without visiting arguments.
+                    peer_is_bool = (
+                        self._callsite_primitive_expr_type(peer, {}) == PineType.BOOL
+                    )
+                if peer_is_bool:
+                    self._check_bool_na_ternary(node, PineType.BOOL)
+        if (
+            structured_type != PineType.UNKNOWN
+            and result_type in {PineType.NA, PineType.UNKNOWN, PineType.VOID}
+        ):
+            result_type = structured_type
+        if result_type == PineType.INT and main_type != PineType.INT:
+            # Keep the true arm's numeric fallback through later return queries.
+            self._ternary_int_fallbacks.add(id(node))
+            return main_type
+        return result_type
 
     def _visit_FuncCall(self, node: FuncCall) -> PineType:
         # Determine what is being called
@@ -5576,6 +6524,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if isinstance(callee, MemberAccess):
             obj = callee.object
             member = callee.member
+            self._check_udt_constructor_bool_na(node)
 
             # ta.* calls
             if isinstance(obj, Identifier) and obj.name == "ta":
@@ -5660,6 +6609,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return self._visit(node.args[0])
 
             # General member call (e.g., array.push, etc.)
+            if (isinstance(obj, Identifier) and obj.name == "array"
+                    and member == "new"
+                    and self._template_args_from_call(node) == ["bool"]
+                    and not self._in_v5_library_definition(node)):
+                initial = (
+                    node.args[1] if len(node.args) > 1
+                    else node.kwargs.get("initial_value")
+                )
+                if isinstance(initial, NaLiteral):
+                    self._bool_na_error(initial.loc)
+            self._check_bool_map_put_na(node, obj, member)
+            self._check_bool_collection_na(node, obj, member)
             receiver_pine_type = self._visit(obj)
             visited_member_arg_types: dict[int, PineType] = {}
             for arg in node.args:
@@ -5672,6 +6633,29 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # codegen can emit the parameter as a scalar double.
             receiver_spec = self._type_spec_from_expr(obj)
             receiver_type_name = method_receiver_type_name(receiver_spec)
+            if receiver_spec is None and self._method_signatures:
+                # Record exact scalar expression bindings for request payload
+                # substitution without changing ordinary method return/state
+                # inference. The coarse visitor types casts such as int(x) as
+                # float, so query primitive expressions with lexical types.
+                receiver_types: dict[str, PineType] = {}
+                for child, _depth in iter_ast_nodes(obj):
+                    if isinstance(child, Identifier):
+                        sym = self._symbols.resolve(child.name)
+                        if sym is not None and (
+                            sym.type_spec is None or sym.type_spec.kind == "primitive"
+                        ):
+                            receiver_types[child.name] = sym.pine_type
+                primitive_type = self._callsite_primitive_expr_type(
+                    obj, receiver_types,
+                )
+                if primitive_type in {
+                    PineType.INT, PineType.FLOAT, PineType.BOOL,
+                    PineType.STRING, PineType.COLOR,
+                }:
+                    method_key = f"{primitive_type.value}.{member}"
+                    if method_key in self._method_signatures:
+                        self._bind_typed_method_call(method_key, node)
             if receiver_type_name is not None:
                 method_key = f"{receiver_type_name}.{member}"
                 signature = self._method_signatures.get(method_key)
@@ -5681,6 +6665,56 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     else None
                 )
                 if strict_binding is not None:
+                    declaration = signature.declaration
+                    receiver_symbol = (
+                        self._symbols.resolve(obj.name)
+                        if isinstance(obj, Identifier) else None
+                    )
+                    receiver_owner = getattr(
+                        receiver_symbol, "_pf_script_block_owner", None,
+                    )
+                    if (self._pine_version == 6
+                            and not self._in_v5_library_definition(node)
+                            and not self._enclosing_func_names
+                            and self._current_top_level_stmt is not None
+                            and not isinstance(
+                                self._current_top_level_stmt, (FuncDef, MethodDef),
+                            )
+                            and (
+                                receiver_owner is None
+                                or any(
+                                    id(body) == receiver_owner
+                                    for body in self._block_node_stack
+                                )
+                            )
+                            and declaration is not None
+                            and declaration.loc is not None
+                            and callee.loc is not None
+                            and callee.loc.file == declaration.loc.file
+                            and (callee.loc.line, callee.loc.col)
+                            < (declaration.loc.line, declaration.loc.col)
+                            and (
+                                receiver_spec.kind != "primitive"
+                                or self._numeric_condition_type(obj)
+                                in (PineType.INT, PineType.FLOAT)
+                                or isinstance(
+                                    obj, (BoolLiteral, StringLiteral, ColorLiteral),
+                                )
+                            )):
+                        self._error(
+                            f"Method '{member}' is called before its definition.",
+                            callee.loc,
+                        )
+                    if signature.declaration is not None:
+                        self._check_bool_na_parameters(
+                            signature.declaration,
+                            [obj, *strict_binding.args_by_param],
+                        )
+                        self._check_typed_parameter_mismatches(
+                            signature.declaration,
+                            [obj, *strict_binding.args_by_param],
+                            method_key,
+                        )
                     # Defaults are real call-site expressions. Visit only the
                     # inserted nodes here; written actuals were visited above.
                     supplied_ids = {
@@ -5804,11 +6838,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             self._materialize_user_func_call_site_state(
                                 method_key, cs_idx, node
                             )
-                    return self._callsite_callable_return_type(
+                    return_type = self._callsite_callable_return_type(
                         method_info.node,
                         full_param_types,
                         method_info.return_type,
                     )
+                    if return_type == PineType.NA:
+                        self._na_return_callables[id(node)] = method_info.node
+                    return return_type
                 if signature is not None:
                     # The exact authored method exists later in source. Its
                     # body-derived return/effect metadata is intentionally not
@@ -5873,12 +6910,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if func_name == "nz":
                 for arg in node.args:
                     self._visit(arg)
+                self._check_na_source_not_string(node)
                 return PineType.FLOAT
 
             # na() as function
             if func_name == "na":
                 for arg in node.args:
                     self._visit(arg)
+                self._check_na_bool_argument(node)
                 return PineType.BOOL
 
             # color.* (e.g., color.new, color.rgb)
@@ -5900,6 +6939,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
             # User-defined function call
             if func_name in self._func_defs:
+                if (self._pine_version == 6
+                        and not self._in_v5_library_definition(node)
+                        and self._enclosing_func_names
+                        and callee.name == self._enclosing_func_names[-1]
+                        and callee.name not in self._overloaded_func_names):
+                    self._error(
+                        f"Function '{callee.name}' cannot call itself.",
+                        callee.loc,
+                    )
                 return self._handle_user_func_call(func_name, node)
 
             # Built-in functions we don't specifically handle
@@ -6740,6 +7788,45 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return PineType.VOID
 
         sym = self._symbols.resolve(node.name)
+        block_owner = getattr(sym, "_pf_script_block_owner", None)
+        if (id(node) not in self._identifier_binding_scopes
+                and node.name in BUILTIN_VARS
+                and node.name not in BAR_FIELDS
+                and getattr(sym, "_pf_tuple_binding", False)
+                and (block_owner is None or any(
+                    id(body) == block_owner for body in self._block_node_stack
+                ))):
+            # Retain this exact tuple read after its lexical scope unwinds.
+            node.annotations = {
+                **(node.annotations or {}), "tuple_builtin_binding": True,
+            }
+        # Later type queries can revisit a read after its source scope ended.
+        # Validate only its first visit, while lexical ownership is live.
+        if (self._pine_version == 6
+                and not self._in_v5_library_definition(node)
+                and id(node) not in self._identifier_binding_scopes):
+            if (block_owner is not None
+                    and not getattr(sym, "_pf_script_block_has_outer", False)
+                    and all(
+                        id(body) != block_owner
+                        for body in self._block_node_stack
+                    )):
+                self._error(
+                    f"Block-local variable '{node.name}' is read outside its block.",
+                    node.loc,
+                )
+            if (sym is None
+                    and self._enclosing_func_names
+                    and node.name in self._direct_program_binding_names
+                    and not (node.annotations or {}).get(GLOBAL_ANNOTATION)):
+                # A payload argument copied into a helper carries its own
+                # provenance. It is evaluated at the call site, so it is not
+                # an authored read in the helper definition.
+                self._error(
+                    f"Global variable '{node.name}' is read before its declaration "
+                    "in a function.",
+                    node.loc,
+                )
         self._identifier_binding_scopes[id(node)] = (
             getattr(sym, "scope", None) if sym is not None else None
         )

@@ -36,8 +36,10 @@ from pineforge_codegen import transpile
 from tests._compile import compile_cpp, skip_if_no_compile_env
 
 
-def _gen(body: str) -> str:
-    return transpile('//@version=6\nstrategy("T")\n' + body + "\n")
+def _gen(body: str, *, libraries: dict[str, str] | None = None) -> str:
+    return transpile(
+        '//@version=6\nstrategy("T")\n' + body + "\n", libraries=libraries,
+    )
 
 
 # The na-aware wrapper's fingerprint in the emitted C++.
@@ -116,7 +118,17 @@ def test_int_compared_to_na_literal_wraps():
     """``someInt == na`` — the bare ``na`` lowers to ``na<double>()`` but the
     mixed inferred types route through the float comparator; both sentinels
     are still rejected before the equality result is returned."""
-    cpp = _gen("var int lr = na\nx = lr == na ? 1 : 0\nplot(x)")
+    # A v5 library retains direct-na comparisons under a v6 entry script.
+    cpp = _gen(
+        "import examples/Relations/1 as relations\nplot(relations.compare())",
+        libraries={"examples/Relations/1": (
+            '//@version=5\nlibrary("Relations")\n'
+            "export compare() =>\n"
+            "    var int lr = na\n"
+            "    x = lr == na ? 1 : 0\n"
+            "    x\n"
+        )},
+    )
     assert _float_cmp(cpp, "=="), cpp
 
 
@@ -130,7 +142,16 @@ def test_float_neq_wraps():
 
 
 def test_float_neq_na_literal_wraps():
-    cpp = _gen("float f = close\nx = f != na ? 1 : 0\nplot(x)")
+    # The v5 numeric comparison keeps the same na-aware float wrapper.
+    cpp = _gen(
+        "import examples/Relations/1 as relations\nplot(relations.compare(close))",
+        libraries={"examples/Relations/1": (
+            '//@version=5\nlibrary("Relations")\n'
+            "export compare(float f) =>\n"
+            "    x = f != na ? 1 : 0\n"
+            "    x\n"
+        )},
+    )
     assert _float_cmp(cpp, "!="), cpp
 
 

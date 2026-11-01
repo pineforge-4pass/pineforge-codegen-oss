@@ -44,6 +44,9 @@ from pathlib import Path
 
 import pytest
 
+from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError, Level, Phase, SourceLocation
+
 # Repo root = parent of this tests/ directory. Threaded into the child via
 # PYTHONPATH so ``import pineforge_codegen`` resolves regardless of how/where
 # pytest was launched.
@@ -174,7 +177,7 @@ def test_synthetic_history_names_byte_identical_across_hash_seeds() -> None:
     assert len(set(outputs)) == 1
 
 
-def test_unicode_name_encoding_is_identical_across_hash_seeds() -> None:
+def test_non_ascii_history_names_are_refused() -> None:
     fixture = (
         '//@version=6\nstrategy("Unicode names")\n'
         "\u03b1(float \u03b2) =>\n"
@@ -184,10 +187,60 @@ def test_unicode_name_encoding_is_identical_across_hash_seeds() -> None:
         "pf_utf8_ceb3 = high\npf_utf8_ceb3_2 = low\n"
         "left = \u03b1(close)\nright = \u03b1(open)\nplot(left + right)\n"
     )
+    with pytest.raises(CompileError) as error:
+        transpile(fixture, filename="unicode_names.pine")
+    # The declaration, body and two calls contain ten non-ASCII identifier characters.
+    assert len(error.value.diagnostics) == 10
+    expected = [
+        # Two header lines put the function's alpha at 3:1.
+        ("no viable alternative at character '\u03b1'", 3, 1, 2),
+        # "α(float " is eight code points, putting the parameter beta at 3:9.
+        ("no viable alternative at character '\u03b2'", 3, 9, 10),
+        # Four spaces and "var float " are fourteen characters before gamma.
+        ("no viable alternative at character '\u03b3'", 4, 15, 16),
+        # "    var float γ = " is eighteen code points before beta at 4:19.
+        ("no viable alternative at character '\u03b2'", 4, 19, 20),
+        # The assignment's four-space indent puts gamma at 5:5.
+        ("no viable alternative at character '\u03b3'", 5, 5, 6),
+        # "    γ := nz(" is twelve code points before the history gamma.
+        ("no viable alternative at character '\u03b3'", 5, 13, 14),
+        # "    γ := nz(γ[1], " is eighteen code points before beta at 5:19.
+        ("no viable alternative at character '\u03b2'", 5, 19, 20),
+        # The return's four-space indent puts gamma at 6:5.
+        ("no viable alternative at character '\u03b3'", 6, 5, 6),
+        # Two ASCII declarations occupy lines 7 and 8; "left = " puts alpha at 9:8.
+        ("no viable alternative at character '\u03b1'", 9, 8, 9),
+        # "right = " is eight characters before the next call's alpha at 10:9.
+        ("no viable alternative at character '\u03b1'", 10, 9, 10),
+    ]
+    assert len(error.value.diagnostics) == len(expected)
+    for diagnostic, (message, line, col, end_col) in zip(error.value.diagnostics, expected):
+        assert diagnostic.code == "PF-E0044"
+        assert diagnostic.message == message
+        assert diagnostic.level == Level.ERROR
+        assert diagnostic.phase == Phase.LEXER
+        assert diagnostic.location == SourceLocation("unicode_names.pine", line, col, end_col)
+        assert diagnostic.hint is None
+
+
+def test_ascii_history_and_encoded_looking_names_are_identical_across_hash_seeds() -> None:
+    fixture = (
+        '//@version=6\nstrategy("ASCII names")\n'
+        "history_calc(float price) =>\n"
+        "    var float memory_value = price\n"
+        "    memory_value := nz(memory_value[1], price) + 1.0\n"
+        "    memory_value\n"
+        "pf_utf8_ceb3 = high\npf_utf8_ceb3_2 = low\n"
+        "left = history_calc(close)\nright = history_calc(open)\nplot(left + right)\n"
+    )
     outputs = [_transpile_under_seed(seed, fixture) for seed in _SEEDS]
     assert all(cpp.isascii() for cpp in outputs)
-    # Gamma is CE B3; its base and suffix 2 are authored, so every run uses suffix 3.
-    assert all("Series<double> pf_utf8_ceb3_3" in cpp for cpp in outputs)
+    # The two call sites retain their separate ASCII history members under every seed.
+    assert all("Series<double> memory_value" in cpp for cpp in outputs)
+    assert all("Series<double> memory_value_cs1" in cpp for cpp in outputs)
+    # These authored names already contain the encoder prefix and keep their spelling.
+    assert all("double pf_utf8_ceb3 " in cpp for cpp in outputs)
+    assert all("double pf_utf8_ceb3_2 " in cpp for cpp in outputs)
     assert len(set(outputs)) == 1
 
 

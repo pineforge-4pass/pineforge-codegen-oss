@@ -69,6 +69,18 @@ def test_int_var_from_math_round_uses_na_preserving_cast():
     )
 
 
+def test_integer_valued_math_call_fits_an_int_parameter():
+    source = """//@version=6
+strategy("integer math argument")
+f(int n) => n + 1
+value = math.floor(close)
+plot(f(value))
+"""
+    cpp = transpile(source)
+    # math.floor returns Pine int, so the declared int parameter remains int.
+    assert "int f(" in cpp
+
+
 # One Pine snippet per emission site that can put a double-valued expression
 # into an int slot. Each must emit a translation unit with no implicit
 # narrowing left.

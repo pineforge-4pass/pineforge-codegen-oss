@@ -22,18 +22,12 @@ from tests import _compile as compile_env
 
 _HANDLE_SOURCE = '''//@version=6
 strategy("PineMap handles")
+import examples/MapHandles/1 as handles
 identity(map<string, int> value) => value
 mutate_then_rebind(map<string, int> value) =>
-    value.put("caller", 10)
-    value := map.new<string, int>()
-    value.put("private", 20)
-    value
+    handles.rebind(value)
 local_alias_then_rebind(map<string, int> value) =>
-    alias = value
-    alias.put("local", 11)
-    alias := map.new<string, int>()
-    alias.put("local_private", 12)
-    value.get("local")
+    handles.alias_rebind(value)
 var map<string, int> original = map.new<string, int>()
 var map<string, int> alias = identity(original)
 var map<string, int> rebound = mutate_then_rebind(alias)
@@ -53,6 +47,24 @@ merge_source.put("a", 100)
 merge_source.put("d", 4)
 ordered.put_all(merge_source)
 '''
+
+
+_HANDLE_LIBRARIES = {
+    "examples/MapHandles/1": '''//@version=5
+library("MapHandles")
+export rebind(map<string, int> item) =>
+    item.put("caller", 10)
+    item := map.new<string, int>()
+    item.put("private", 20)
+    item
+export alias_rebind(map<string, int> item) =>
+    alias = item
+    alias.put("local", 11)
+    alias := map.new<string, int>()
+    alias.put("local_private", 12)
+    item.get("local")
+''',
+}
 
 
 _ORDER_SOURCE = '''//@version=6
@@ -270,8 +282,9 @@ effect_middle(value) => effect_leaf(value)
 effect_outer(value) => effect_middle(value)
 cycle_passthrough(value) =>
     if false
-        cycle_passthrough(value)
+        cycle_next(value)
     value
+cycle_next(value) => cycle_passthrough(value)
 var left = map.new<string, int>()
 var right = map.new<string, int>()
 var words = map.new<string, string>()
@@ -280,7 +293,7 @@ right.put("seed-right", 2)
 words.put("seed-text", "present")
 selected = deep_select(true, left, right)
 copied = deep_select(false, left, right).copy()
-cycled = cycle_passthrough(left)
+cycled = cycle_next(left)
 nullable_selected = nullable_layer(true, left)
 nullable_absent = nullable_layer(false, left)
 selected_previous = deep_select(true, left, right).put("selected", 10)
@@ -356,11 +369,13 @@ def _compile_and_run(cpp_source: str, *, label: str) -> str:
     ],
 )
 def test_pinemap_generated_sources_compile(source: str, label: str) -> None:
-    compile_env.compile_cpp(transpile(source), label=label)
+    compile_env.compile_cpp(
+        transpile(source, libraries=_HANDLE_LIBRARIES), label=label
+    )
 
 
 def test_pinemap_emission_uses_handle_identity_and_recursive_checkpoints() -> None:
-    handles = transpile(_HANDLE_SOURCE)
+    handles = transpile(_HANDLE_SOURCE, libraries=_HANDLE_LIBRARIES)
     assert '#include <pineforge/map.hpp>' in handles
     assert "PineMap<std::string, int> identity(PineMap<std::string, int> value)" in handles
     assert "PineMap<std::string, int>& value" not in handles
@@ -579,7 +594,8 @@ int main() {
 }
 '''
     assert _compile_and_run(
-        transpile(_HANDLE_SOURCE) + driver, label="pinemap-handle-runtime"
+        transpile(_HANDLE_SOURCE, libraries=_HANDLE_LIBRARIES) + driver,
+        label="pinemap-handle-runtime",
     ) == "ok\n"
 
 

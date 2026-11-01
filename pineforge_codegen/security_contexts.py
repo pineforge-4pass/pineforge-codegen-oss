@@ -313,9 +313,16 @@ def _spell(node) -> str:
 class ScriptIndex:
     """The lexical bindings, helpers and calls of a program."""
 
-    def __init__(self, program: Program) -> None:
+    def __init__(self, program: Program, method_bindings: dict | None = None) -> None:
         self.program = program
-        self.funcs: dict[str, FuncDef] = {}
+        self.method_bindings = method_bindings or {}
+        targets: dict[int, set[str]] = {}
+        for node_id, key in self.method_bindings:
+            targets.setdefault(node_id, set()).add(key)
+        self.method_targets = {node_id: next(iter(keys)) for node_id, keys in targets.items()
+                               if len(keys) == 1}
+        self.methods: set[str] = set()
+        self.funcs: dict[str, FuncDef | MethodDef] = {}
         # Names defined more than once: Pine overloads a function by its
         # parameters, which this pass does not tell apart.
         self.overloaded: set[str] = set()
@@ -324,6 +331,12 @@ class ScriptIndex:
                 if stmt.name in self.funcs:
                     self.overloaded.add(stmt.name)
                 self.funcs[stmt.name] = stmt
+            elif isinstance(stmt, MethodDef) and self.method_bindings:
+                key = self.definition_key(stmt)
+                self.methods.add(key)
+                if key in self.funcs:
+                    self.overloaded.add(key)
+                self.funcs.setdefault(key, stmt)
         # Identifier id -> its binding: ("global", name) for an unnested
         # top-level declaration, ("param", func, name), ("local", decl id)
         # for a declaration in a callable or a top-level block, ("bound",
@@ -396,9 +409,10 @@ class ScriptIndex:
                 return
             if isinstance(node, FuncCall):
                 self.owner[id(node)] = owner
-                if (isinstance(node.callee, Identifier) and node.callee.name in self.funcs
-                        and resolve(node.callee.name, scopes) is None):
-                    self.calls[node.callee.name].append(node)
+                target = self.call_target(node)
+                if (target in self.funcs and (id(node) in self.method_targets
+                                             or resolve(target, scopes) is None)):
+                    self.calls[target].append(node)
                     self.call_ids.add(id(node))
                 if _request_name(node):
                     self.requests.setdefault(owner, []).append(node)
@@ -409,8 +423,9 @@ class ScriptIndex:
                         self.unstable.add(binding)
                         self.reassigned.add(binding)
             if isinstance(node, (FuncDef, MethodDef)):
-                name = node.name if isinstance(node, FuncDef) else None
-                params = {p: ("param", node.name, p) for p in node.params}
+                name = self.definition_key(node)
+                params = {p: ("param", name if name in self.funcs else node.name, p)
+                          for p in node.params}
                 block(node.body, scopes, name if name in self.funcs else f"method {node.name}",
                       params)
                 return
@@ -447,6 +462,21 @@ class ScriptIndex:
 
     # -- scopes --------------------------------------------------------------
 
+    @staticmethod
+    def definition_key(node) -> str:
+        return f"{node.type_name}.{node.name}" if isinstance(node, MethodDef) else node.name
+
+    def call_target(self, call: FuncCall) -> str | None:
+        if id(call) in self.method_targets:
+            return self.method_targets[id(call)]
+        return call.callee.name if isinstance(call.callee, Identifier) else None
+
+    def retarget_call(self, call: FuncCall, name: str) -> None:
+        if isinstance(call.callee, MemberAccess):
+            call.callee = replace(call.callee, member=name.rsplit(".", 1)[-1])
+        else:
+            call.callee = replace(call.callee, name=name)
+
     def depends_on_scope(self, expr) -> bool:
         """``expr`` reads a parameter, a local or a bound name."""
         return any(isinstance(n, Identifier) and self.refs.get(id(n), ("global",))[0]
@@ -456,6 +486,12 @@ class ScriptIndex:
         """The argument ``call`` binds to ``param`` of ``func`` (its default
         when omitted), or None."""
         fdef = self.funcs[func]
+        if func in self.methods:
+            index = fdef.params.index(param)
+            if index == 0:
+                return call.callee.object
+            bound = self.method_bindings[(id(call), func)]
+            return bound.args_by_param[index - 1]
         if param in call.kwargs:
             return call.kwargs[param]
         index = fdef.params.index(param)
@@ -653,11 +689,33 @@ def _error(node, message: str, filename: str) -> Diagnostic:
                             "at the helper's call sites."))
 
 
-def specialize_security_contexts(program: Program, filename: str = "<input>") -> Program:
+def specialize_method_security_payloads(
+        program: Program, method_bindings: dict, filename: str = "<input>") -> bool:
+    """Resolve payload parameters along typed method call paths only when a
+    request reads one. Scripts without that shape keep their first analysis."""
+    if not method_bindings:
+        return False
+    prog = ScriptIndex(program, method_bindings)
+    leads = {owner for owner, requests in prog.requests.items() if owner in prog.funcs
+             and any(_payload_params(prog, owner, request) for request in requests)}
+    changed = True
+    while changed:
+        callers = {prog.owner[id(call)] for name in leads for call in prog.calls[name]}
+        added = (callers & prog.funcs.keys()) - leads
+        changed = bool(added)
+        leads.update(added)
+    if not any(name in leads and prog.calls[name] for name in prog.methods):
+        return False
+    specialize_security_contexts(program, filename, method_bindings=method_bindings)
+    return True
+
+
+def specialize_security_contexts(program: Program, filename: str = "<input>", *,
+                                 method_bindings: dict | None = None) -> Program:
     """Resolve the context of every helper request (module docstring)."""
     while True:
         try:
-            return _specialize(program, filename)
+            return _specialize(program, filename, method_bindings)
         except _FeedFallback as exc:
             # Nothing is rewritten before the plan holds: these requests keep
             # their deferred refusal, and the pass starts over without them.
@@ -665,8 +723,8 @@ def specialize_security_contexts(program: Program, filename: str = "<input>") ->
             unpin_requests(program, exc.reasons)
 
 
-def _specialize(program: Program, filename: str) -> Program:
-    prog = ScriptIndex(program)
+def _specialize(program: Program, filename: str, method_bindings: dict | None = None) -> Program:
+    prog = ScriptIndex(program, method_bindings)
     _mark_unreached(prog, _reached(prog))
     # The requests whose context this pass owns, by helper; those owned for
     # their symbol or timeframe; the payload parameter reads of those owned
@@ -688,12 +746,13 @@ def _specialize(program: Program, filename: str) -> Program:
             continue
         for request in requests:
             symbol, tf = _request_args(request)
-            if (prog.depends_on_scope(symbol) or prog.depends_on_scope(tf)) and (
+            reads = _payload_params(prog, owner, request)
+            if (owner not in prog.methods or reads) and (
+                    prog.depends_on_scope(symbol) or prog.depends_on_scope(tf)) and (
                     _is_feed(request) or not (
                         _request_name(request) == "security"
                         and _analyzer_resolves(prog, owner, symbol, tf))):
                 context_owned.add(id(request))
-            reads = _payload_params(prog, owner, request)
             if reads and not _analyzer_binds_payload(prog, owner, request, reads):
                 payload_reads[id(request)] = reads
             if id(request) in context_owned or id(request) in payload_reads:
@@ -746,8 +805,8 @@ def _specialize(program: Program, filename: str) -> Program:
     taken = {n.name for n in _walk(program) if isinstance(n, Identifier)} | set(prog.funcs)
     taken |= {name for n in _walk(program) for name in _declared_names(n)}
     names: dict[tuple, str] = {}
-    defs: dict[tuple, tuple[FuncDef, dict | None]] = {}
-    new_defs: dict[str, list[FuncDef]] = {}
+    defs: dict[tuple, tuple[FuncDef | MethodDef, dict | None]] = {}
+    new_defs: dict[str, list[FuncDef | MethodDef]] = {}
     for func, sigs in instances.items():
         original = prog.funcs[func]
         for index, signature in enumerate(sigs):
@@ -762,7 +821,8 @@ def _specialize(program: Program, filename: str) -> Program:
             taken.add(names[signature])
             memo: dict = {}
             clone = copy.deepcopy(original, memo)
-            clone.name = names[signature]
+            clone.name = (names[signature].rsplit(".", 1)[-1]
+                          if isinstance(clone, MethodDef) else names[signature])
             _rename_locals(prog, original, memo, names[signature][len(func):], taken)
             defs[signature] = (clone, memo)
             new_defs.setdefault(func, []).append(clone)
@@ -782,15 +842,15 @@ def _specialize(program: Program, filename: str) -> Program:
                     for read in payload_reads[id(request)]})
         for call, child in info["kids"]:
             target = mapped(call)
-            target.callee = replace(target.callee, name=names[child])
+            prog.retarget_call(target, names[child])
     for call, signature in top:
-        call.callee = replace(call.callee, name=names[signature])
+        prog.retarget_call(call, names[signature])
 
     body = []
     for stmt in program.body:
         body.append(stmt)
-        if isinstance(stmt, FuncDef):
-            body.extend(new_defs.get(stmt.name, ()))
+        if isinstance(stmt, (FuncDef, MethodDef)):
+            body.extend(new_defs.get(prog.definition_key(stmt), ()))
     program.body = body
     return program
 
@@ -900,7 +960,7 @@ def _plan(prog: ScriptIndex, owned: dict, context_owned: set[int],
             contexts.append((request, tuple(values), payload))
         kids = []
         for call in _body_calls(prog, func, leads):
-            callee = call.callee.name
+            callee = prog.call_target(call)
             callee_env = {p: (prog.param_arg(callee, call, p), env)
                           for p in prog.funcs[callee].params}
             kids.append((call, instantiate(callee, callee_env, here)))
@@ -1009,6 +1069,8 @@ def _analyzer_binds_payload(prog: ScriptIndex, func: str, request: FuncCall,
     calls = prog.calls[func]
     if not calls or func in prog.overloaded:
         return True
+    if func in prog.methods:
+        return False
     if any(prog.owner.get(id(call)) is not None for call in calls):
         return False
     objects, lengths, _ = _payload_positions(prog, request)
@@ -1522,7 +1584,7 @@ def _type_context_params(prog: ScriptIndex, owned: dict, leads: set[str]) -> Non
         changed = False
         for func in leads:
             for call in _body_calls(prog, func, leads):
-                callee = call.callee.name
+                callee = prog.call_target(call)
                 for param in carriers.get(callee, ()):
                     passed = bare_param(prog.param_arg(callee, call, param), func)
                     if passed is not None and passed not in carriers.get(func, set()):
@@ -1546,7 +1608,7 @@ def _reachable(prog: ScriptIndex, func: str, leads: set[str]) -> set[str]:
     while stack:
         name = stack.pop()
         for call in _body_calls(prog, name, leads):
-            callee = call.callee.name
+            callee = prog.call_target(call)
             if callee not in seen:
                 seen.add(callee)
                 stack.append(callee)
@@ -1557,8 +1619,8 @@ def _body_calls(prog: ScriptIndex, func: str, leads: set[str]) -> list[FuncCall]
     """The calls in ``func``'s body to helpers leading to owned requests, in
     source order."""
     return [node for node in _walk(prog.funcs[func].body)
-            if isinstance(node, FuncCall) and isinstance(node.callee, Identifier)
-            and node.callee.name in leads and prog.owner.get(id(node)) == func
+            if isinstance(node, FuncCall) and prog.call_target(node) in leads
+            and prog.owner.get(id(node)) == func
             and id(node) in prog.call_ids]
 
 
@@ -1566,6 +1628,8 @@ def _analyzer_resolves(prog: ScriptIndex, func: str, symbol, tf) -> bool:
     """The analyzer's call-site clones serve this request: its symbol and
     timeframe are each a global expression or a bare parameter of ``func``,
     and every call of ``func`` passes a global expression for them."""
+    if func in prog.methods:
+        return False
     params = []
     for arg in (symbol, tf):
         if arg is None or not prog.depends_on_scope(arg):

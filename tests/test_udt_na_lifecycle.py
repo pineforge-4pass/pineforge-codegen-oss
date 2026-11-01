@@ -470,7 +470,7 @@ choose(bool enabled, float seed) => enabled ? State.new(seed) : na
 State missing = choose(false, 1.0)
 State present = choose(true, 7.5)
 float observed = (na(missing) ? 100.0 : 0.0) +
-    (na(present) ? 0.0 : present.value)
+      (na(present) ? 0.0 : present.value)
 '''
     cpp = transpile(source)
     assert re.search(r"State choose\(bool enabled, double seed\)", cpp)

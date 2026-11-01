@@ -12,12 +12,15 @@ from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from .external_requests import lower_no_data_requests
 from .builtin_keywords import bind_builtin_keywords
 from .finite_ta_length import expand_finite_choice_extrema_lengths
+from .function_overloads import bind_scalar_overloads
 from .library_inline import inline_libraries
 from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
 from .pragmas import extract_pf_trace_pragmas
 from .request_discovery import discover_requests, request_sites
 from .request_feed_inventory import build_request_feed_inventory
-from .security_contexts import specialize_security_contexts
+from .security_contexts import (
+    specialize_method_security_payloads, specialize_security_contexts,
+)
 from .block_locals import rename_block_locals
 from .support_checker import check_support as _support_diagnostics
 from .support_checker import check_support_or_raise
@@ -69,6 +72,7 @@ def _generate(pine_source: str, check_support: bool, filename: str,
         ast, pragmas, budget = _parse_bounded(pine_source, filename, budget)
         ast = inline_libraries(ast, pine_source, libraries=libraries,
                                filename=filename, budget=budget)
+        ast = bind_scalar_overloads(ast, budget=budget)
         rename_block_locals(ast, renamed)
         support_diagnostics = []
         if check_support:
@@ -84,6 +88,15 @@ def _generate(pine_source: str, check_support: bool, filename: str,
         budget.check(phase=Phase.ANALYZER)
         ctx = Analyzer(ast, filename=filename, budget=budget,
                        session_clones=clones).analyze()
+        # Typed receiver dispatch is known only after analysis. Resolve method
+        # payload arguments with those bindings, then type the rewritten bodies.
+        if specialize_method_security_payloads(
+                ast, ctx.method_call_bindings, filename=filename):
+            del ctx
+            ast = bind_builtin_keywords(expand_finite_choice_extrema_lengths(ast))
+            check_ast_depth(ast, filename)
+            ctx = Analyzer(ast, filename=filename, budget=budget,
+                           session_clones=clones).analyze()
         budget.check(phase=Phase.ANALYZER)
         # Attach after analysis: pragma expressions are not part of the
         # program body, so the analyzer never inspects them; the codegen

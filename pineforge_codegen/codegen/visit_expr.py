@@ -110,7 +110,7 @@ from ..ast_nodes import (
     TupleLiteral,
     UnaryOp,
 )
-from .capabilities import STRATEGY_PARAMETERS
+from .strategy_declaration import DECLARATION_CONSTANTS, NamedConstant
 from .helpers import pine_index_int_cast, unary_sign_cpp
 from .types import COLLECTION_MUTATING_METHODS
 from .tables import (
@@ -322,13 +322,22 @@ class ExprVisitor:
         while isinstance(links[-1].false_val, Ternary):
             links.append(links[-1].false_val)
         string_na = self._ternary_string_na(links)
+        ternary_cpp_type = (
+            self._infer_type(node)
+            if self._selection_contains_na(node)
+            else None
+        )
         array_history_type = self._array_history_value_expr_cpp_type(node)
         if len(links) < self._FLAT_TERNARY_CHAIN:
             c = self._coerce_bool_expr(
                 self._visit_expr(node.condition), node.condition
             )
-            t = self._ternary_arm(node.true_val, string_na)
-            f = self._ternary_arm(node.false_val, string_na)
+            t = self._ternary_arm(
+                node.true_val, string_na, ternary_cpp_type
+            )
+            f = self._ternary_arm(
+                node.false_val, string_na, ternary_cpp_type
+            )
             if array_history_type is not None:
                 t = (f"{array_history_type}{{}}" if self._is_na_expr(node.true_val)
                      else f"{array_history_type}({t})")
@@ -340,12 +349,16 @@ class ExprVisitor:
             c = self._coerce_bool_expr(
                 self._visit_expr(link.condition), link.condition
             )
-            t = self._ternary_arm(link.true_val, string_na)
+            t = self._ternary_arm(
+                link.true_val, string_na, ternary_cpp_type
+            )
             if array_history_type is not None:
                 t = (f"{array_history_type}{{}}" if self._is_na_expr(link.true_val)
                      else f"{array_history_type}({t})")
             arms.append(f"({c}) ? ({t}) : ")
-        tail = self._ternary_arm(links[-1].false_val, string_na)
+        tail = self._ternary_arm(
+            links[-1].false_val, string_na, ternary_cpp_type
+        )
         if array_history_type is not None:
             tail = (f"{array_history_type}{{}}" if self._is_na_expr(links[-1].false_val)
                     else f"{array_history_type}({tail})")
@@ -362,7 +375,21 @@ class ExprVisitor:
             return False
         return all(self._infer_type(arm) == "std::string" for arm in values)
 
-    def _ternary_arm(self, arm, string_na: bool) -> str:
+    def _ternary_arm(
+        self,
+        arm,
+        string_na: bool,
+        target_cpp_type: str | None = None,
+    ) -> str:
+        if target_cpp_type is not None and self._is_na_expr(arm):
+            return self._visit_rhs_value(
+                arm,
+                target_cpp_type=target_cpp_type,
+            )
+        if (target_cpp_type == "double"
+                and isinstance(arm, Ternary)
+                and self._selection_contains_na(arm)):
+            return self._visit_rhs_value(arm, target_cpp_type=target_cpp_type)
         if string_na and self._is_na_expr(arm):
             return "na<std::string>()"
         return self._visit_expr(arm)
@@ -443,11 +470,11 @@ class ExprVisitor:
         if spec is None and target_node is not None:
             spec = self._type_spec_from_expr(target_node)
         if spec is not None and spec.kind == "udt" and spec.name in self._udt_defs:
-            return spec.name
+            return self._safe_name(spec.name)
         if not target_name:
             return None
         udt_name = self._identifier_udt_type(target_name)
-        return udt_name if udt_name in self._udt_defs else None
+        return self._safe_name(udt_name) if udt_name in self._udt_defs else None
 
     def _visit_rhs_value(self, value_node, target_name: str | None = None,
                          target_cpp_type: str | None = None) -> str:
@@ -459,17 +486,38 @@ class ExprVisitor:
         ``std::string``/``int``/``int64_t``/``bool`` use ``na<T>()``. Without
         this, ``State s = na;`` and ``string x = na;`` would both emit
         ``na<double>()`` and fail to compile (no viable assignment/conversion).
-        Every other RHS lowers unchanged.
+        A nullable numeric ternary keeps its floating NaN.
         """
-        drawing_target = self._drawing_target_cpp_type(
-            target_name,
-            target_cpp_type,
+        if (isinstance(value_node, Ternary)
+                and self._selection_contains_na(value_node)):
+            scalar_target = target_cpp_type
+            if scalar_target is None and target_name is not None:
+                scalar_target = self._slot_scalar_cpp_type(target_name)
+                if scalar_target is None and target_name in self.ctx.series_vars:
+                    scalar_target = self._series_type_for(target_name)
+            if scalar_target == "double":
+                return self._coerce_double_slot(
+                    self._visit_expr(value_node), value_node
+                )
+        udt_target = None
+        if (target_cpp_type in self._udt_defs
+                and target_cpp_type not in DRAWING_TYPE_TO_CPP.values()):
+            udt_target = self._safe_name(target_cpp_type)
+        elif target_cpp_type is not None:
+            udt_target = next(
+                (target_cpp_type for name in self._udt_defs
+                 if self._safe_name(name) == target_cpp_type),
+                None,
+            )
+        drawing_target = (
+            None if udt_target is not None
+            else self._drawing_target_cpp_type(target_name, target_cpp_type)
         )
         if self._is_na_expr(value_node):
+            if udt_target is not None:
+                return f"{udt_target}{{}}"
             if drawing_target is not None:
                 return f"{drawing_target}{{}}"
-            if target_cpp_type in self._udt_defs:
-                return f"{self._safe_name(target_cpp_type)}{{}}"
             if self._is_nullable_collection_cpp_type(target_cpp_type):
                 # Maps and matrices use default construction for a typed
                 # ``na`` ID. Their ``*.new`` factories create a valid ID,
@@ -477,17 +525,22 @@ class ExprVisitor:
                 return f"{target_cpp_type}{{}}"
             if target_cpp_type in ("std::string", "int", "int64_t", "bool"):
                 return f"na<{target_cpp_type}>()"
+            if (
+                target_cpp_type is not None
+                and target_cpp_type.startswith("std::vector")
+            ):
+                return f"{target_cpp_type}{{}}"
         if (isinstance(value_node, Ternary)
                 and (self._is_nullable_collection_cpp_type(target_cpp_type)
                      or drawing_target is not None
-                     or target_cpp_type in self._udt_defs)):
+                     or udt_target is not None)):
             # C++ cannot deduce a common type for ``na<double>()`` and a
             # collection/drawing handle. Pine's ternary is target typed, so
             # propagate the exact declared/reassignment target into both arms.
             # Arrays and scalar ternaries retain the established generic path;
             # target typing is safe only for collections with nullable runtime
             # representations.
-            branch_target = drawing_target or target_cpp_type
+            branch_target = udt_target or drawing_target or target_cpp_type
             condition = self._visit_expr(value_node.condition)
             true_value = self._visit_rhs_value(
                 value_node.true_val,
@@ -534,7 +587,8 @@ class ExprVisitor:
         if name in self._current_func_series_params:
             return True
         if (name in self._current_func_param_types or name in BAR_FIELDS
-                or name in BAR_BUILTINS):
+                or (name in BAR_BUILTINS
+                    and not (node.annotations or {}).get("tuple_builtin_binding"))):
             return False
         return self._binding_is_series(
             name, self._call_site_var_name(node, self._safe_name(name)))
@@ -555,7 +609,8 @@ class ExprVisitor:
             return self._safe_name(name)
         if name in BAR_FIELDS:
             return BAR_FIELDS[name]
-        if name in BAR_BUILTINS:
+        if (name in BAR_BUILTINS
+                and not (node.annotations or {}).get("tuple_builtin_binding")):
             return BAR_BUILTINS[name]
         # Inline known constants (literals). Input-backed names are NOT inlined
         # because strategy_set_input() can override them at runtime; emit the
@@ -681,26 +736,16 @@ class ExprVisitor:
             self._udt_assignment_target = previous_target
 
     def _strategy_account_currency_expr(self) -> str:
-        """Read the declaration's literal currency, or the chart's quote currency."""
+        """Read the resolved currency, or the chart's quote currency."""
         currency = None
-        position = STRATEGY_PARAMETERS.index("currency")
         for statement in self.ctx.ast.body:
             if isinstance(statement, StrategyDecl):
-                currency = statement.kwargs.get("currency")
-                if currency is None and len(statement.args) > position:
-                    currency = statement.args[position]
+                currency = (statement.annotations or {}).get(DECLARATION_CONSTANTS, {}).get("currency")
                 break
-        # Read the AST, not strategy_params: its literal extractor also spells
-        # an unresolved Identifier as a string. Declaration variables keep the
-        # existing fallback and unresolved capability receipt.
-        if isinstance(currency, StringLiteral):
-            if currency.value != "NONE":
-                return self._visit_expr(currency)
-        elif (isinstance(currency, MemberAccess)
-                and isinstance(currency.object, Identifier)
-                and currency.object.name == "currency"
-                and currency.member != "NONE"):
-            return self._visit_expr(currency)
+        if isinstance(currency, NamedConstant):
+            currency = currency.value
+        if isinstance(currency, str) and currency != "NONE":
+            return self._visit_expr(StringLiteral(value=currency))
         return "syminfo_.currency"
 
     def _visit_member_access(self, node: MemberAccess) -> str:
@@ -947,8 +992,8 @@ class ExprVisitor:
                     return "false"
                 # Cosmetic / chart-only reads with no batch-mode value (theme
                 # colors, viewport bar times). The support checker warns on
-                # these (COSMETIC_MEMBERS); emit a benign default (0 = na color /
-                # epoch 0). They have no backtest-logic effect.
+                # these (COSMETIC_MEMBERS); emit a default (transparent black
+                # for theme colors, epoch 0 for viewport times).
                 if node.member in ("fg_color", "bg_color",
                                    "left_visible_bar_time",
                                    "right_visible_bar_time"):
@@ -1488,8 +1533,8 @@ class ExprVisitor:
             for operand in (node.left, node.right):
                 if isinstance(operand, BinOp) and operand.op == "*":
                     self._wide_int_products.add(id(operand))
-        left = self._visit_binop_operand(node.left, node.op)
-        right = self._visit_binop_operand(node.right, node.op)
+        left = self._visit_binop_operand(node.left, node.op, node.right)
+        right = self._visit_binop_operand(node.right, node.op, node.left)
         if (self._int_arith_leaves_int32(node)
                 and self._fold_int32_overflow_cpp(node.op, left, right) is None):
             # Both operands are 32-bit C++ ints and the value can leave
@@ -1506,10 +1551,28 @@ class ExprVisitor:
             lambda left, right: self._lower_binop(node, left, right),
         )
 
-    def _visit_binop_operand(self, operand, op: str) -> str:
+    def _visit_binop_operand(self, operand, op: str, other) -> str:
         """An operand's C++. An ordering comparison reads a
         ``_nonfinite_int_names`` name's infinity as the number TradingView
         orders it by (``_nonfinite_int_read``)."""
+        if self._is_na_expr(operand):
+            other_cpp_type = self._infer_type(other)
+            if op == "+" and other_cpp_type == "std::string":
+                # String concatenation formats numeric na as "nan".
+                return self._visit_expr(operand)
+            if other_cpp_type in ("int", "int64_t"):
+                # A numeric peer does not prove an integer type for bare na.
+                # Arithmetic and float comparisons need the floating NaN.
+                other_cpp_type = "double"
+            return self._visit_rhs_value(
+                operand,
+                target_cpp_type=other_cpp_type,
+            )
+        if (isinstance(operand, Ternary)
+                and self._selection_contains_na(operand)
+                and op in ("+", "-", "*", "/", "%")
+                and (op in ("/", "%") or self._infer_type(other) == "double")):
+            return self._visit_rhs_value(operand, target_cpp_type="double")
         if (op in self.NONFINITE_INT_ORDERING_OPS
                 and isinstance(operand, Identifier)
                 and operand.name in self._nonfinite_int_names()):
