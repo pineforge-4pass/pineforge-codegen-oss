@@ -48,16 +48,16 @@ _SELECTION_ROWS = [
         _selection_body(
             "choose_int_na_first", "values = array.from(7)", "values.shift()", True,
         ),
-        "int choose_int_na_first(",
-        # Hand-derived: an int array element and na keep the integer return slot.
+        "double choose_int_na_first(",
+        # Hand-derived: an int array element and na retain a double return with NaN.
     ),
     (
         "int-na-second",
         _selection_body(
             "choose_int_na_second", "values = array.from(7)", "values.shift()", False,
         ),
-        "int choose_int_na_second(",
-        # Hand-derived: reversing the nullable arms keeps the integer return slot.
+        "double choose_int_na_second(",
+        # Hand-derived: reversing the arms retains a double return with NaN.
     ),
     (
         "float-na-first",

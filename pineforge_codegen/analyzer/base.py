@@ -6506,6 +6506,35 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             structured_type != PineType.UNKNOWN
             and result_type in {PineType.NA, PineType.UNKNOWN, PineType.VOID}
         ):
+            if (structured_type == PineType.INT
+                    and self._enclosing_func_names
+                    and (self._selection_node_is_na(node.true_val)
+                         or self._selection_node_is_na(node.false_val))):
+                func_def = self._func_defs.get(self._enclosing_func_names[-1])
+                if (func_def is not None
+                        and self._direct_terminal_return_expr(func_def) is node):
+                    value = (
+                        node.false_val
+                        if self._selection_node_is_na(node.true_val)
+                        else node.true_val
+                    )
+                    if (isinstance(value, FuncCall)
+                            and isinstance(value.callee, MemberAccess)):
+                        receiver = value.callee.object
+                        if (isinstance(receiver, Identifier)
+                                and receiver.name == "array"
+                                and self._symbols.resolve("array") is None):
+                            receiver = (
+                                value.args[0] if value.args
+                                else value.kwargs.get("id")
+                            )
+                        if isinstance(receiver, Identifier):
+                            receiver_spec = self._type_spec_from_expr(receiver)
+                            if (receiver_spec is not None
+                                    and receiver_spec.kind == "array"):
+                                # An array element known only through its spec
+                                # keeps the floating return and its NaN arm.
+                                return PineType.FLOAT
             return structured_type
         return result_type
 

@@ -89,6 +89,15 @@ _ROWS = [
         "1 0 0 1 1 1\n",  # Bear leaves the array alone; bull shifts its only element once.
         id="selected-effect",
     ),
+    pytest.param(
+        "choose_value(bool choose) =>\n"
+        "    values = array.from(7)\n"
+        "    choose ? na : values.shift()\n"
+        "y = choose_value(not c) + 1\n",
+        ("double choose_value(bool choose)", "? (na<double>()) : ("),
+        "1 0 0 8 1 1\n",  # Bear gives NaN + 1 = NaN; bull gives 7 + 1 = 8.
+        id="array-element-return-na-first",
+    ),
 ]
 
 
