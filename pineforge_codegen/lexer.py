@@ -354,6 +354,7 @@ class Lexer:
             while not self._at_end() and self.source[self.pos] in (" ", "\t"):
                 self._advance()
             emitted_in_parens = False
+            last_token = None
             while not self._at_end() and self.source[self.pos] != "\n":
                 self._skip_whitespace_inline()
                 if self._at_end() or self.source[self.pos] == "\n":
@@ -362,14 +363,15 @@ class Lexer:
                     self._skip_comment()
                     break
                 emitted_in_parens = True
+                token_count = len(self.tokens)
                 self._read_token()
+                last_token = self.tokens[-1] if len(self.tokens) > token_count else None
             if not self._at_end() and self.source[self.pos] == "\n":
                 self._advance()
             # If parens closed on this line, end the statement UNLESS the line
             # ends with a continuation token (e.g. trailing operator), in which
             # case the next line continues the same logical line.
             if self.paren_depth == 0 and emitted_in_parens:
-                last_token = self.tokens[-1] if self.tokens else None
                 if last_token and last_token.type in self.CONTINUATION_TOKENS:
                     self._in_continuation = True
                 else:
@@ -475,6 +477,7 @@ class Lexer:
         # Tokens on this line
         first_token = len(self.tokens)
         emitted_something = False
+        last_token = None
         while not self._at_end() and self.source[self.pos] != "\n":
             self._skip_whitespace_inline()
             if self._at_end() or self.source[self.pos] == "\n":
@@ -483,7 +486,11 @@ class Lexer:
                 self._skip_comment()
                 break
             emitted_something = True
+            token_count = len(self.tokens)
             self._read_token()
+            # Error recovery can consume a lexeme without emitting a token.
+            # Only the final lexeme can leave an operand pending at line end.
+            last_token = self.tokens[-1] if len(self.tokens) > token_count else None
 
         if indent_join and len(self.tokens) > first_token:
             self.tokens[first_token].starts_indent_continuation = True
@@ -493,7 +500,6 @@ class Lexer:
 
         # Check if this line ends with a continuation token
         if emitted_something and self.paren_depth == 0:
-            last_token = self.tokens[-1] if self.tokens else None
             if last_token and last_token.type in self.CONTINUATION_TOKENS:
                 # Next line is a continuation — don't emit NEWLINE
                 self._in_continuation = True
