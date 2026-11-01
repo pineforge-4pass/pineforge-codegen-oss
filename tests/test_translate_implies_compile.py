@@ -402,7 +402,11 @@ def test_issue_281_rows_carry_no_xfail(pine_path):
         mark.args[1] for mark in test_issue_281_translates_and_compiles.pytestmark
         if mark.name == "parametrize"
     )
-    assert [parameter.values[0] for parameter in parameters] == list(ISSUE_281)
+    assert sorted(
+        (ROOT / "tests/fixtures/community_repros").glob("issue_281_*.pine")
+    ) == sorted(ISSUE_281)
+    assert len(ISSUE_281) == 3
+    assert all(path.is_file() for path in ISSUE_281)
     parameter, = (parameter for parameter in parameters if parameter.values == (pine_path,))
     xfails = [mark for mark in parameter.marks if mark.name == "xfail"]
     assert not xfails
