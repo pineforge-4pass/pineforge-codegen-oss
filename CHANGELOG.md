@@ -5,6 +5,8 @@ Release notes for `pineforge-codegen`. From 1.0.0 on, versions of codegen and
 supported as exact pairs; on the 0.x line they are independent. See the
 [pairing rule](README.md#engine-pairing).
 
+- Unreleased: add a probe-population compile driver with private-byte-safe reports and public subprocess controls.
+
 ## Release note policy
 
 - Keep a section for each released version, including prereleases. Use the exact

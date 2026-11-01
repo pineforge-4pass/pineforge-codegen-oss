@@ -166,3 +166,83 @@ Release workflows still need their own compile dependency; their workflow
 files were outside this lane's edit allowlist. Header-only CI also does not
 replace the engine-enabled runtime and corpus validation required by
 AGENTS.md and CONTRIBUTING.md before completion.
+
+## Probe population compile
+
+`scripts/compile_probes.py` recursively translates every `.pine` under
+`--sources`, sorted by relative path, then checks its generated C++ with real
+`g++ -fsyntax-only`. It imports `transpile()` and the PR sweep's
+`tests._compile.compile_cpp` / `STRATEGY_FP_FLAGS`; compiler flags, Eigen and
+generated version-header resolution therefore use the existing helper.
+Run it from a source checkout with the dev extra installed:
+
+```bash
+python scripts/compile_probes.py --sources /data/probes --engine /data/pineforge-engine --out /data/reports/probe-compile-report.json --jobs 4
+```
+
+`--engine` is an engine tree, not its include directory. When omitted, the
+compile helper resolves `PINEFORGE_ENGINE_INCLUDE` or a sibling engine checkout.
+`PINEFORGE_EIGEN_INCLUDE` and `PINEFORGE_GENERATED_INCLUDE` keep their existing
+meanings. `--jobs` defaults to the CPU count; translation is serial and at most
+that many C++ checks and generated sources are in flight. Optional `--index`
+is a JSON list of `{id, path}` objects with unique string IDs and normalized
+paths relative to `--sources`. It must cover the discovered population exactly;
+it cannot select a subset. Without it, the relative path is the ID.
+
+The schema-1 JSON report records the actual codegen and engine Git SHAs
+(`ci/engine-pin` supplies the engine SHA for a tree without Git), source hashes,
+counts for all four verdicts, and one entry per source:
+
+- `translated_compiled`: translation and the real syntax check succeeded.
+- `front_end_refusal`: the transpiler raised `CompileError`; the entry has its
+  diagnostic code and the redacted first diagnostic line.
+- `compile_failed`: g++ failed; the entry has a redacted first error line,
+  limited to 300 characters, and the generated C++ SHA-256.
+- `internal_error`: another exception; `first_line` contains its class only.
+
+Exit 0 means every source compiled; exit 1 means at least one source had a
+non-green verdict. Exit 2 means an invocation, native preflight or driver
+failure. Missing g++, engine/version headers or Eigen never skip. An empty
+selection, any symlink within the source tree, and an output within that tree
+are refused, including a symlink used as the source root. Failures write a report when the destination is valid and
+writable; a rejected output path is never written. A preflight failure marks
+the identified sources `internal_error`; SHAs not yet obtained remain null.
+
+The private-bytes rule applies to reports and stdout/stderr: publish identities,
+hashes, diagnostic codes and counts, with only redacted diagnostic summaries.
+Never publish Pine or generated C++ bytes, source excerpts or exception
+messages. Diagnostic arguments become `<src>`; compiler lines
+lose paths, quote contents and everything beyond a closed diagnostic prefix.
+Compilation runs leave stdout empty, and per-source outcomes appear only in
+the report. A driver refusal emits exactly one stderr line,
+`compile_probes: refused: <reason>`. Unexpected driver or report-write failures
+emit `compile_probes: internal error: <exception class name>`, without the
+exception message. Report writing finishes before that single line is emitted.
+The fixed refusal reasons are:
+
+```text
+sources must be a directory
+source must be a regular file
+sources tree contains a symlink
+source selection is empty
+output is inside sources tree
+index must cover sources exactly
+g++ not found
+engine headers not found
+Eigen headers not found
+version header not found
+jobs must be at least 1
+native preflight failed
+temporary directory is inside sources or report directory
+```
+
+Generated C++, synthesized version headers and compiler scratch live only in
+an owned `TemporaryDirectory`, removed on success and failure. `TMPDIR` can
+place that directory on the job's scratch volume, outside the source tree
+and report directory. The translator's existing library/request-manifest
+environment contract is retained.
+
+Wiring the driver to the registry's private probe population and to a status
+check is the next step and is not done here. The public subprocess
+controls live in `tests/test_compile_probes.py`, require the paired compile
+environment, and have no skips or xfails.
