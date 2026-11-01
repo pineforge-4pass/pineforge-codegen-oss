@@ -264,6 +264,7 @@ class Lexer:
         self.paren_depth = 0  # Track () and [] nesting to suppress NEWLINE/INDENT/DEDENT
         self._in_continuation = False  # True when current line is a continuation
         self._logical_line_has_arrow = False
+        self._comma_line_start = 0
         self._diagnostics: list[Diagnostic] = []
         self._budget = budget
 
@@ -295,6 +296,8 @@ class Lexer:
         self.tokens.append(Token(tt, value, line, col, end_col))
         if tt == TokenType.FAT_ARROW:
             self._logical_line_has_arrow = True
+        elif tt == TokenType.COMMA and self.paren_depth == 0:
+            self._comma_line_start = self.pos - self.col + 1
 
     def _emit_diagnostic(self, message: str, line: int, col: int, end_col: int, hint: str | None = None) -> None:
         loc = SourceLocation(file=self.filename, line=line, col=col, end_col=end_col)
@@ -395,6 +398,22 @@ class Lexer:
         # whether it is deeper or shallower than the current block. The stack
         # stays unchanged until a line with structural indentation arrives.
         continues_by_indent = "\t" not in raw and len(raw) % 4 != 0
+        if (self._in_continuation
+                and self.tokens[-1].type == TokenType.COMMA
+                and not self._logical_line_has_arrow):
+            comma = self.tokens[-1]
+            end = self._comma_line_start
+            while self.source[end] in (" ", "\t"):
+                end += 1
+            comma_raw = self.source[self._comma_line_start:end]
+            comma_indent = comma_raw.count("\t") * 4 if "\t" in comma_raw else len(comma_raw)
+            next_indent = raw.count("\t") * 4 if "\t" in raw else len(raw)
+            if next_indent <= comma_indent:
+                # Restore the boundary exactly as without the comma, including
+                # dedents and operator-first joins. Arrow bodies keep their wraps.
+                self.tokens.pop()
+                self._emit(TokenType.NEWLINE, "\\n", comma.line, 1)
+                self._in_continuation = False
         if (self._in_continuation
                 and self.indent_stack[-1] == 0
                 and not self._logical_line_has_arrow

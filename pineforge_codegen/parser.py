@@ -268,11 +268,13 @@ class Parser:
     def _check_statement_comma(
         self, comma: Token, following: Token, *, allow_comma_continuation: bool,
     ) -> None:
+        # The lexer restores same-indent and dedented statement boundaries;
+        # only a deeper line can still follow a statement comma directly.
         if (not allow_comma_continuation
-                and (following.line > comma.line
-                     or following.type in (
-                         TokenType.NEWLINE, TokenType.DEDENT, TokenType.EOF_TOKEN,
-                     ))):
+                and following.line > comma.line
+                and following.type not in (
+                    TokenType.NEWLINE, TokenType.DEDENT, TokenType.EOF_TOKEN,
+                )):
             raise ParseError(
                 "A statement cannot end with a trailing comma.", following,
             )
