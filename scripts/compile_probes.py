@@ -3,6 +3,8 @@
 
 Run from a source checkout with the dev extra installed. The native compile
 implementation and flags are imported from the same helper as the PR sweep.
+CLI only, not re-entrant: it sets process environment variables, sys.path and
+sys.dont_write_bytecode and does not restore them.
 """
 
 from __future__ import annotations

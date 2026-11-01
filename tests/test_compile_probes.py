@@ -1,12 +1,14 @@
-"""Black-box probe-driver controls using the real transpiler and real g++.
+"""Synthetic redaction and black-box controls with the real transpiler and g++.
 
-These rows require the paired native inputs. There are no skip or xfail paths.
-Every subprocess has its own sources, report and temporary-file directory.
+The black-box rows require paired native inputs; synthetic redaction does not.
+There are no skip or xfail paths.
+Every CLI subprocess has its own sources, report and temporary-file directory.
 """
 
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -39,8 +41,7 @@ def _copy(sources: Path, fixture: str, name: str, *, marker: str = "") -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = original.read_bytes()
     if marker:
-        # On the refusal fixture this is the rejected line itself, so a rich
-        # diagnostic that accidentally prints source context leaks the marker.
+        # Green controls also keep private Pine comments out of the report.
         payload = payload.rstrip(b"\r\n") + f" // {marker}\n".encode("ascii")
     destination.write_bytes(payload)
     return destination
@@ -58,6 +59,97 @@ def _refused_fixture() -> str:
 
 
 @pytest.fixture(scope="module")
+def driver_module():
+    # scripts/ is not a package. Importing definitions must not enter main()
+    # or leave the CLI's process-wide settings behind.
+    spec = importlib.util.spec_from_file_location("compile_probes", DRIVER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    environment = dict(os.environ)
+    search_path = sys.path[:]
+    bytecode_setting = sys.dont_write_bytecode
+    spec.loader.exec_module(module)
+    assert dict(os.environ) == environment
+    assert sys.path == search_path
+    assert sys.dont_write_bytecode is bytecode_setting
+    return module
+
+
+def _assert_compiler_redaction(
+    redact, diagnostics: str, marker: str, severity: str, prefix: str,
+) -> str:
+    assert marker in diagnostics, "the control must contain private compiler bytes"
+    first_line = redact(diagnostics)
+    assert marker not in first_line
+    assert len(first_line) <= 300
+    assert "\n" not in first_line
+    expected = f"{severity}: {prefix} <src>" if prefix else f"{severity}: <src>"
+    assert first_line == expected
+    return first_line
+
+
+@pytest.mark.parametrize("severity", ["error", "fatal error"])
+def test_compiler_redaction_keeps_each_closed_prefix(driver_module, severity):
+    results = set()
+    for prefix in driver_module.COMPILER_PREFIXES:
+        marker = "PRIVATE_COMPILER_" + hashlib.sha256(
+            f"{severity}:{prefix}".encode(),
+        ).hexdigest()
+        # No quotes: dropping quoted strings alone cannot protect this case.
+        diagnostics = f"probe.cpp:12:7: {severity}: {prefix} {marker} " + "x" * 400
+        results.add(_assert_compiler_redaction(
+            driver_module._compiler_first_line, diagnostics, marker, severity, prefix,
+        ))
+    # At least three distinct input-derived summaries must survive. A constant
+    # "error: <src>" (or a constant closed prefix) cannot satisfy this control.
+    assert len(results) >= 3
+
+
+@pytest.mark.parametrize("severity", ["error", "fatal error"])
+@pytest.mark.parametrize(("opening", "closing"), [
+    ("'", "'"), ('"', '"'), ("`", "`"), ("`", "'"), ("‘", "’"), ("“", "”"),
+], ids=["single", "double", "backtick", "gcc-backtick-single", "curly-single", "curly-double"])
+def test_compiler_redaction_removes_every_quote_form(
+    driver_module, severity, opening, closing,
+):
+    marker = "PRIVATE_QUOTED_" + hashlib.sha256(
+        f"{severity}:{opening}:{closing}".encode(),
+    ).hexdigest()
+    prefix = driver_module.COMPILER_PREFIXES[0]
+    diagnostics = f"probe.cpp:12:7: {severity}: {prefix} {opening}{marker}{closing}"
+    _assert_compiler_redaction(
+        driver_module._compiler_first_line, diagnostics, marker, severity, prefix,
+    )
+
+
+@pytest.mark.parametrize("severity", ["error", "fatal error"])
+@pytest.mark.parametrize(("position", "template", "prefix"), [
+    ("preprocessor", "probe.cpp:12:2: {severity}: #error {marker}\n"
+     "   12 | #error {marker}\n", "#error"),
+    ("file-path", "/private/{marker}/probe.cpp:12:7: {severity}: private detail", ""),
+    ("line-location", "probe.cpp:{marker}:7: {severity}: private detail", ""),
+    ("column-location", "probe.cpp:12:{marker}: {severity}: private detail", ""),
+    ("source-excerpt", "probe.cpp:12:7: {severity}: private detail\n"
+     "   12 |  {marker}\n      |  ^\n", ""),
+    ("note-before", "probe.cpp:11:7: note: {marker}\n"
+     "probe.cpp:12:7: {severity}: private detail", ""),
+    ("note-after", "probe.cpp:12:7: {severity}: private detail\n"
+     "probe.cpp:13:7: note: {marker}\n", ""),
+], ids=["preprocessor", "file-path", "line-location", "column-location",
+        "source-excerpt", "note-before", "note-after"])
+def test_compiler_redaction_omits_paths_excerpts_and_notes(
+    driver_module, severity, position, template, prefix,
+):
+    marker = "PRIVATE_CONTEXT_" + hashlib.sha256(
+        f"{severity}:{position}".encode(),
+    ).hexdigest()
+    diagnostics = template.format(severity=severity, marker=marker)
+    _assert_compiler_redaction(
+        driver_module._compiler_first_line, diagnostics, marker, severity, prefix,
+    )
+
+
+@pytest.fixture(scope="module")
 def native_inputs():
     from tests import _compile
 
@@ -72,6 +164,29 @@ def native_inputs():
     if _compile._GENERATED_INC is not None:
         env["PINEFORGE_GENERATED_INCLUDE"] = str(_compile._GENERATED_INC)
     return engine, env
+
+
+def test_driver_passes_the_shared_strategy_flags_object(
+    driver_module, native_inputs, monkeypatch,
+):
+    from pineforge_codegen import transpile
+    from tests import _compile
+    from tests._compile import STRATEGY_FP_FLAGS
+
+    compile_cpp = _compile.compile_cpp
+    observed = []
+
+    def observe_flags(cpp, **kwargs):
+        observed.append(kwargs["extra_flags"])
+        return compile_cpp(cpp, **kwargs)
+
+    # Observe the helper boundary, retaining the real transpiler and compiler.
+    monkeypatch.setattr(_compile, "compile_cpp", observe_flags)
+    cpp = transpile('//@version=6\nstrategy("shared strategy flags control")\n')
+    result = driver_module._compile_one(cpp, "shared-flags", _compile)
+    assert result["verdict"] == "translated_compiled"
+    flags, = observed
+    assert flags is STRATEGY_FP_FLAGS
 
 
 def _run(
@@ -199,12 +314,17 @@ def test_three_public_sources_compile_and_do_not_publish_private_comments(
     _private(marker, process, destination)
 
 
-def test_front_end_red_control_records_a_code_and_keeps_private_comment_private(
+def test_front_end_red_control_records_a_code_and_keeps_rejected_statement_private(
     tmp_path, native_inputs,
 ):
     sources = tmp_path / "sources"
     marker = "PRIVATE_REFUSAL_" + hashlib.sha256(str(tmp_path).encode()).hexdigest()
-    _copy(sources, _refused_fixture(), "refused.pine", marker=marker)
+    path = _copy(sources, _refused_fixture(), "refused.pine")
+    payload = path.read_text(encoding="utf-8")
+    assert payload.count("math.bogus(") == 1
+    # The unknown member itself is a diagnostic argument, rather than a
+    # comment the lexer discards before the rejected call is inspected.
+    path.write_text(payload.replace("math.bogus(", f"math.{marker}("), encoding="utf-8")
     process, destination = _run(tmp_path / "run", sources, native_inputs)
     assert process.returncode == 1, process.stderr
     report = _report(destination)
@@ -220,9 +340,11 @@ def test_front_end_red_control_records_a_code_and_keeps_private_comment_private(
 def test_real_registered_compile_failures_are_red_or_the_fix_really_compiles(
     tmp_path, native_inputs,
 ):
+    from pineforge_codegen import transpile
     from tests.test_translate_implies_compile import KNOWN_COMPILE_FAILURES
 
     sources = tmp_path / "sources"
+    marker = "PRIVATE_COMPILE_" + hashlib.sha256(str(tmp_path).encode()).hexdigest()
     if KNOWN_COMPILE_FAILURES:
         fixtures = sorted(KNOWN_COMPILE_FAILURES)
         expected_verdict, expected_status = "compile_failed", 1
@@ -233,7 +355,18 @@ def test_real_registered_compile_failures_are_red_or_the_fix_really_compiles(
         fixtures = [STANDING_BUILD_FAILURE]
         expected_verdict, expected_status = "translated_compiled", 0
     for number, fixture in enumerate(fixtures):
-        _copy(sources, fixture, f"registered-{number}.pine")
+        path = _copy(sources, fixture, f"registered-{number}.pine")
+        if KNOWN_COMPILE_FAILURES:
+            payload = path.read_text(encoding="utf-8")
+            payload, replacements = re.subn(
+                r'(?m)^(strategy\(")', rf"\g<1>{marker} ", payload, count=1,
+            )
+            assert replacements == 1, "the copied strategy must carry the private title"
+            # Strategy titles need not be emitted. An alert literal supplies
+            # actual generated-C++ bytes independently of metadata emission.
+            payload = payload.rstrip("\r\n") + f'\nalert("{marker}")\n'
+            path.write_text(payload, encoding="utf-8")
+            assert marker in transpile(payload, filename=path.name)
     _copy(sources, GREEN_FIXTURES[0], "zz-green.pine")
     process, destination = _run(tmp_path / "run", sources, native_inputs)
     assert process.returncode == expected_status, process.stderr
@@ -249,8 +382,11 @@ def test_real_registered_compile_failures_are_red_or_the_fix_really_compiles(
         if expected_verdict == "compile_failed":
             assert row["first_line"].startswith(("error:", "fatal error:"))
             assert "<src>" in row["first_line"]
+            assert len(row["first_line"]) <= 300
             assert "is_na" not in row["first_line"]
             assert "std::string" not in row["first_line"]
+    if KNOWN_COMPILE_FAILURES:
+        _private(marker, process, destination)
 
 
 def test_a_mixed_batch_continues_after_refusal_and_internal_error(tmp_path, native_inputs):

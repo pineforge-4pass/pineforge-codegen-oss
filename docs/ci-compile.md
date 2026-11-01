@@ -188,6 +188,8 @@ that many C++ checks and generated sources are in flight. Optional `--index`
 is a JSON list of `{id, path}` objects with unique string IDs and normalized
 paths relative to `--sources`. It must cover the discovered population exactly;
 it cannot select a subset. Without it, the relative path is the ID.
+Private runs must use `--index` with opaque IDs: file names can themselves
+contain private information.
 
 The schema-1 JSON report records the actual codegen and engine Git SHAs
 (`ci/engine-pin` supplies the engine SHA for a tree without Git), source hashes,
@@ -204,9 +206,12 @@ Exit 0 means every source compiled; exit 1 means at least one source had a
 non-green verdict. Exit 2 means an invocation, native preflight or driver
 failure. Missing g++, engine/version headers or Eigen never skip. An empty
 selection, any symlink within the source tree, and an output within that tree
-are refused, including a symlink used as the source root. Failures write a report when the destination is valid and
-writable; a rejected output path is never written. A preflight failure marks
-the identified sources `internal_error`; SHAs not yet obtained remain null.
+are refused, including a symlink used as the source root. The report is written
+in every case once the arguments and output destination are accepted, provided
+the destination is writable. An argument error or an output path inside the
+sources tree exits 2 with no report; a rejected output path is never written.
+A preflight failure marks the identified sources `internal_error`; SHAs not
+yet obtained remain null.
 
 The private-bytes rule applies to reports and stdout/stderr: publish identities,
 hashes, diagnostic codes and counts, with only redacted diagnostic summaries.
@@ -246,3 +251,20 @@ Wiring the driver to the registry's private probe population and to a status
 check is the next step and is not done here. The public subprocess
 controls live in `tests/test_compile_probes.py`, require the paired compile
 environment, and have no skips or xfails.
+
+### Two halves of the gate
+
+The codegen CI gate has two halves: COMPILE and VALUE.
+COMPILE proves that the generated C++ builds; this driver implements that half.
+VALUE checks every key that newly compiles compared with main against
+TradingView's own tape for that same key.
+A key newly compiles when main refuses it or its generated C++ fails at g++,
+and the pull request makes it build.
+Each such key must have value evidence in the pull request:
+a TradingView tape row in its tests, or a full-quantity value check run on
+that key.
+A pull request that proves only COMPILE for a newly compiling key fails the gate.
+A compile-only proof cannot distinguish a correct value from a silent wrong one.
+Turning a g++ failure into a previous-bar value is worse than the failure.
+This driver implements COMPILE only.
+VALUE is the next change and is not implemented here.
