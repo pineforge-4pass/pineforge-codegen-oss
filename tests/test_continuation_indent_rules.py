@@ -572,7 +572,7 @@ if bar_index % 20 == 5
 if bar_index % 20 == 15
     strategy.close("L")
 """,
-        (3, 10),  # Column zero cannot continue the plus, which ends at column 10.
+        (4, 1),  # Column zero cannot continue the plus; the operand is at 4:1.
         id="column_zero_operand",
     ),
     pytest.param(
@@ -585,7 +585,7 @@ if bar_index % 20 == 5
 if bar_index % 20 == 15
     strategy.close("L")
 """,
-        (3, 10),  # Four spaces cannot continue the plus, which ends at column 10.
+        (4, 5),  # Four spaces cannot continue the plus; the operand is at 4:5.
         id="four_space_operand",
     ),
     pytest.param(
