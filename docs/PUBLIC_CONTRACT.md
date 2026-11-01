@@ -632,6 +632,14 @@ argument.
 
 ## Diagnostic codes
 
+Pine v6 call arguments must put all positional arguments before named
+arguments. `PF-E2074` is a fatal analyzer diagnostic at the first positional
+expression that follows a named argument in the same call. It covers calls
+and strategy declarations before argument rewriting or unused-code removal,
+including v6 library bodies, and remains enforced with `check_support=False`.
+Nested calls have independent argument lists; all-named calls may name
+parameters in any order. Imported v5 libraries retain their existing policy.
+
 Every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
 `CompileError`'s `diagnostics`, and in the glue envelopes) carries the stable
 `code` and `args` introduced in 1.2.0. Since 1.5.0 it also carries

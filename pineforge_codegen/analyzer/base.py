@@ -44,6 +44,7 @@ from ..method_binding import (
     MethodBindError,
     bind_method_call,
     inventory_method_signatures,
+    validate_call_argument_order,
 )
 from .. import signatures as sigs
 from .. import tv_input_choices as tv_in
@@ -598,6 +599,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def analyze(self) -> AnalyzerContext:
         """Run semantic analysis and return the analyzer context."""
         self._ensure_pine_v6()
+        validate_call_argument_order(self._ast, filename=self._filename)
         self._check_direct_terminal_array_element_callee_shadows()
         self._visit(self._ast)
         # Reassignments anywhere in the program prevent const qualification.

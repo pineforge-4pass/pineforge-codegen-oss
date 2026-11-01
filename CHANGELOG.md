@@ -20,6 +20,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## Unreleased
+
+- Pine v6 calls refuse a positional argument after a named argument with
+  `PF-E2074` at that positional expression. The check also covers strategy
+  declarations, unused functions and v6 library bodies before lowering.
+
 ## 1.9.1 — 2026-10-31
 
 - Translation checks the generated C++ against a fixed allowlist and refuses a
