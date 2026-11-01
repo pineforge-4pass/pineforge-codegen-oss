@@ -1,5 +1,9 @@
 # Codegen coverage gaps — running follow-up list
 
+Follow the [emission invariant](../AGENTS.md#emission-invariant) for translator
+changes. The historical acceptance of defensive placeholder fallthroughs below
+is superseded; an upstream check does not authorize a placeholder in the emitter.
+
 > **Historical record.** Each section below is dated and describes the tree of
 > its date, not `main`. The Phase B audit ran on 2026-05-28, before the first
 > public release, so its `file:line` references point into that tree. Since
@@ -19,15 +23,15 @@ Tracks fallthrough paths in `pineforge_codegen/codegen/visit_call.py` and
 analyzer (`support_checker.py`) already rejects the construct before
 codegen ever sees it.
 
-A gap appears here only when **both** are true:
+The historical audit counted a gap only when **both** were true:
 
 1. The fallthrough is reachable from a valid Pine v6 construct.
 2. The fallthrough produces silently-wrong behavior (not a defensive
    sentinel that the engine ignores).
 
-If only (1) is true but the analyzer rejects the construct, the
-fallthrough is defensive-only and is intentionally left in place as a
-safety net.
+The audit treated a fallthrough behind an analyzer refusal as a defensive
+safety net. Under the emission invariant, such a fallback must raise an
+internal error that becomes a located refusal instead of emitting a value.
 
 ## Status — 2026-05-28 (end of Phase B)
 

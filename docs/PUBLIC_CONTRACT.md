@@ -632,6 +632,11 @@ argument.
 
 ## Diagnostic codes
 
+Translator changes must follow the
+[emission invariant](../AGENTS.md#emission-invariant). Missing lowerings require
+a `PF-E` refusal at the construct's source location; the existing diagnostic
+catalog and Python/JSON error envelopes carry that refusal.
+
 Every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
 `CompileError`'s `diagnostics`, and in the glue envelopes) carries the stable
 `code` and `args` introduced in 1.2.0. Since 1.5.0 it also carries
@@ -775,9 +780,10 @@ exceptions, not a general permission to regenerate existing pins.
 ## Compatibility boundary
 
 `check_support=False` on either Python function is **experimental**. It skips
-the support gate and can produce C++ that fails to compile or does not match
-Pine behavior; the 1.0 compatibility promise applies with the default
-`check_support=True`.
+the support gate; the 1.0 compatibility promise applies with the default
+`check_support=True`. Existing bypass paths can produce C++ that fails to
+compile or does not match Pine behavior. Those are defects under the emission
+invariant, which applies with either value of `check_support`.
 
 There is no installed command-line interface. This package makes no
 process-exit-code promises for a CLI, shell wrapper, or gate script. Consumers

@@ -343,6 +343,37 @@ tests/
 
 ## Support contracts
 
+### Emission invariant
+
+Emit C++ only for a form the analyzer can prove lowerable correctly. Refuse
+an unproven construct at translation time, before it reaches the emitter,
+with a `PF-E` diagnostic at its Pine line and column and a message naming
+the construct. Never emit a placeholder, an empty expression, an undeclared
+identifier, or a C++ operator or conversion that does not exist.
+
+Give every emission path either a correct lowering or an analyzer refusal
+in front of it. An emitter fallback must raise an internal error that the
+translator turns into a located `PF-E` refusal; it must never print a
+placeholder such as `/* unknown */`. Bypassing the support checker does not
+waive this invariant.
+
+Match TradingView's Pine v6 grammar and typing. Refuse a form TradingView
+refuses through one general grammar or typing rule, not a list of shapes.
+Emit correct C++ for a form TradingView accepts; refusing it is a support
+gap to fix. Fix construct classes generically: no feature flags, per-script,
+per-id or per-literal special cases, or shape lists where a signature or
+grammar rule exists.
+
+Treat any generated-C++ compile failure as a P0 defect. When TradingView
+refuses a form and PineForge instead fails in g++, the matching outcome
+is still a P0 defect, not a valid translation-time refusal.
+
+### Current support behavior
+
+The notes below describe existing behavior. Documented approximations and
+unsupported fallbacks are implementation gaps, not exceptions to the
+emission invariant.
+
 An aggregate `var` initializer that reads a statement-computed value (directly,
 through a user helper, or through another declaration-site `var`) runs at its
 declaration under the existing once flag. An earlier reassignment or collection
@@ -412,13 +443,10 @@ a missing array-template argument is a located wrong-argument refusal, not
 an internal `IndexError`. `tests/test_arrseg_coded_run_stops.py` checks both
 macro paths, every nullable-array trait and native `run_json` envelopes.
 
-A change must never make a script that transpiles and compiles today fail
-to transpile: when the engine cannot express what such a script asks for, it
-keeps its current lowering and gets a WARNING naming the approximation and
-the missing engine capability. Refuse only a spelling TradingView itself
-rejects, or one that already failed the C++ compile (supervisor rule, since
-C4 W8 lost 15 excellent campaign probes to a refusal of a working shape). The
-taxonomy:
+Keep valid scripts compiling by implementing their semantics. A warning
+does not authorize an incorrect lowering when the engine lacks a capability;
+apply the emission invariant and fix the missing support. The existing
+support taxonomy follows:
 
 
 | Bucket                           | What                                                                 |
@@ -1075,9 +1103,9 @@ literal, so a sign's operand text can start with one: `unary_sign_cpp`
 (`codegen/helpers.py`) parenthesizes it there (`-NEG` over `NEG = -5` is
 `(-(-5))`; it was `(--5)`, a decrement of a literal), on the chart and in
 a `request.security` payload (`tests/test_e2e_negated_constants.py`).
-- **Comments in emitted C++.** When emitting a fallback / unsupported
-stub, include a `/* unsupported: ... */` marker in the source so a
-later compile error has context. Avoid emitting bare empty literals.
+- **Comments in emitted C++.** A comment cannot substitute for a lowering.
+Apply the emission invariant instead of emitting an unsupported stub or
+leaving a failure for the C++ compiler.
 A string a script spells reaches the C++ only as a string literal's
 value (`_cpp_string_escape`) or as comment text (`_cpp_comment_escape`):
 escape every script-derived value where it is written into a literal or
@@ -1099,13 +1127,15 @@ are not part of the package's external surface.
 grammar only. `array.new<T>` and `array.from<T>` accept a Pine primitive, a
 drawing/visual type, an enum the script declares, or a declared UDT; anything
 else is refused before generation (and again in the emitter, because a switch
-arm downgrades the checker's error to a warning). A nested element type's
-inner name is not validated; an undeclared one becomes `double` and writes no
-raw text. A call on a user type left after its constructor, `copy` and typed
+arm downgrades the checker's error to a warning). Validate nested element
+types too: the current substitution of `double` for an undeclared inner name
+is an implementation gap under the emission invariant.
+A call on a user type left after its constructor, `copy` and typed
 methods, an unknown method outside its receiver's own table, and a member read
 on a non-user-type value are refused instead of emitted. A `chart.point` read
-of `time` / `index` / `price` stays allowed; a receiver the resolver cannot
-place keeps the historical pass-through for a Pine table method name.
+of `time` / `index` / `price` stays allowed. The historical pass-through of a
+Pine table method on an unresolved receiver is also an implementation gap;
+prove the receiver and signature or refuse at its source location.
 - **Reserved names.** `codegen/helpers.py::CPP_RESERVED` carries every C++17
 and C++20 keyword/operator alternative plus header macros and emitter names
 that can collide. `_safe_name` allocates distinct escapes against all authored
