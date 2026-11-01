@@ -2909,6 +2909,19 @@ class TypeInferer:
         """Trace wide integer provenance through a callable return expression."""
         if expr is None:
             return False
+        if isinstance(expr, (Assignment, VarDecl)):
+            # A value-producing write leaves its stored value. Follow both
+            # sides: field provenance may still be growing while a callable
+            # parameter has already become wide in the outer fixpoint.
+            target = self._statement_value_node(expr)
+            return (
+                self._expr_returns_wide_int(
+                    target, owner_info, seen, call_site_idx)
+                or self._expr_returns_wide_int(
+                    expr.value, owner_info, seen, call_site_idx)
+                or (not getattr(self, "_wide_int_epoch_only", False)
+                    and self._holds_wide_int_constant(expr.value))
+            )
         if isinstance(expr, Subscript):
             return self._expr_returns_wide_int(
                 expr.object, owner_info, seen, call_site_idx
@@ -3019,6 +3032,13 @@ class TypeInferer:
                     for arg in expr.args
                 )
 
+            resolved_methods = self._wide_method_call_bindings().get(id(expr), ())
+            if resolved_methods:
+                return any(
+                    self._func_int_return_uses_wide_history(
+                        info, seen, call_site_idx=call_site_idx)
+                    for info, _binding in resolved_methods
+                )
             callee_info = None
             if namespace is None and func_name:
                 callee_info = self._func_info_map.get(func_name)
@@ -3125,14 +3145,15 @@ class TypeInferer:
     def _expr_is_int64_builtin(self, expr) -> bool:
         """True if ``expr`` is a top-level int64-returning Pine builtin: either a
         call to one of ``INT64_BUILTINS`` (``time(...)``, ``timestamp(...)``, …)
-        or a bare ``Identifier`` spelled like ``time`` / ``time_close`` /
-        ``timenow`` (which Pine exposes as a value, not a call)."""
+        or ``input.time(...)``, or a bare ``Identifier`` spelled like ``time`` /
+        ``time_close`` / ``timenow`` (which Pine exposes as a value, not a call)."""
         from .tables import INT64_BUILTINS, INT64_BUILTIN_IDENTIFIERS
         if expr is None:
             return False
         if isinstance(expr, FuncCall):
             func_name, namespace = self._resolve_callee(expr.callee)
-            return namespace is None and func_name in INT64_BUILTINS
+            return ((namespace is None and func_name in INT64_BUILTINS)
+                    or (namespace == "input" and func_name == "time"))
         if isinstance(expr, Identifier):
             return expr.name in INT64_BUILTIN_IDENTIFIERS
         return False
@@ -3208,10 +3229,9 @@ class TypeInferer:
                     )
                     if element is not None:
                         bindings.append((name, *element))
-            elif (isinstance(node, FuncCall)
-                    and isinstance(node.callee, Identifier)
-                    and node.callee.name in self._func_info_map):
-                calls.append((node, owner))
+            elif isinstance(node, FuncCall):
+                calls.extend((callee, bound, owner)
+                             for callee, bound in self._wide_callable_args(node))
 
         # Callable bodies resolve their locals and parameters against their
         # lexical owner; everything outside them is global.
@@ -3237,24 +3257,55 @@ class TypeInferer:
                             value, owner, set(), None):
                         names.add(name)
                         changed = True
-                for call, owner in calls:
-                    callee = self._func_info_map[call.callee.name]
-                    callee_params = list(getattr(callee.node, "params", ()) or ())
-                    bound = list(enumerate(call.args))
-                    bound += [
-                        (callee_params.index(key), arg)
-                        for key, arg in call.kwargs.items()
-                        if key in callee_params
-                    ]
+                for callee, bound, owner in calls:
                     for index, arg in bound:
                         key = (callee.name, index)
                         if (key not in params
                                 and self._param_is_integer_scalar(callee, index)
-                                and self._expr_returns_wide_int(
-                                    arg, owner, set(), None)):
+                                and (self._expr_returns_wide_int(
+                                    arg, owner, set(), None)
+                                     or (not getattr(self, "_wide_int_epoch_only", False)
+                                         and self._holds_wide_int_constant(arg)))):
                             params.add(key)
                             changed = True
         return names, params
+
+    def _wide_method_call_bindings(self):
+        """Analyzed receiver calls, independent of the current emission scope."""
+        cached = getattr(self, "_wide_method_bindings_cache", None)
+        if cached is not None:
+            return cached
+        bindings = {}
+        for (node_id, name), bound in getattr(
+                self.ctx, "method_call_bindings", {}).items():
+            info = self._func_info_map.get(name)
+            if info is not None and getattr(info, "is_udt_method", False):
+                bindings.setdefault(node_id, []).append((info, bound))
+        self._wide_method_bindings_cache = bindings
+        return bindings
+
+    def _wide_callable_args(self, call):
+        """Callable identity and actuals in full parameter-slot order."""
+        methods = self._wide_method_call_bindings().get(id(call), ())
+        if methods and isinstance(call.callee, MemberAccess):
+            return [
+                (info, [(0, call.callee.object),
+                        *enumerate(binding.args_by_param, start=1)])
+                for info, binding in methods
+            ]
+        if not isinstance(call.callee, Identifier):
+            return []
+        info = self._func_info_map.get(call.callee.name)
+        if info is None or info.node is None:
+            return []
+        names = list(info.node.params or ())
+        defaults = self._user_call_args_with_defaults(info.name, call)
+        if defaults is not None:
+            return [(info, list(enumerate(defaults)))]
+        bound = list(enumerate(call.args))
+        bound += [(names.index(key), arg) for key, arg in call.kwargs.items()
+                  if key in names]
+        return [(info, bound)]
 
     @staticmethod
     def _security_payload_node(call: FuncCall):

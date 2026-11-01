@@ -5289,6 +5289,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # bar/TA expressions never leak into namespace-scope C++ initializers.
         if self._udt_has_array_fields():
             lines.append(UDT_ARRAY_FIELD_CPP)
+        from .array_field_width import timestamp_array_fields
+        timestamp_fields = timestamp_array_fields(self)
         for type_name, fields in self._udt_defs.items():
             record_type = self._udt_record_cpp_type(type_name)
             lines.append(f"struct {record_type} {{")
@@ -5297,6 +5299,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for f in fields:
                 if f.name in omitted:
                     continue
+                if (type_name, f.name) in timestamp_fields:
+                    lines.append(
+                        '    static_assert(false, "Timestamp values in '
+                        f'{self._safe_name(type_name)}.{self._safe_name(f.name)} '
+                        'require 64-bit array field storage");')
                 spec = field_specs.get(f.name) or self._type_spec_from_hint_name(f.type_name)
                 array_field = self._udt_array_field_cpp(spec, type_name)
                 if array_field is not None:
