@@ -634,8 +634,10 @@ argument.
 
 Translator changes must follow the
 [emission invariant](../AGENTS.md#emission-invariant). Missing lowerings require
-a `PF-E` refusal at the construct's source location; the existing diagnostic
-catalog and Python/JSON error envelopes carry that refusal.
+a `PF-E` refusal at the construct's source location where that rule permits
+refusal. TradingView-valid scripts that already transpile and compile keep
+compiling while their semantics are implemented. The existing diagnostic
+catalog and Python/JSON error envelopes carry located refusals.
 
 Every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
 `CompileError`'s `diagnostics`, and in the glue envelopes) carries the stable
@@ -783,7 +785,8 @@ exceptions, not a general permission to regenerate existing pins.
 the support gate; the 1.0 compatibility promise applies with the default
 `check_support=True`. Existing bypass paths can produce C++ that fails to
 compile or does not match Pine behavior. Those are defects under the emission
-invariant, which applies with either value of `check_support`.
+invariant, which applies with either value of `check_support`; see the
+[open defects](codegen-coverage-gaps.md).
 
 There is no installed command-line interface. This package makes no
 process-exit-code promises for a CLI, shell wrapper, or gate script. Consumers

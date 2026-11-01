@@ -345,17 +345,27 @@ tests/
 
 ### Emission invariant
 
-Emit C++ only for a form the analyzer can prove lowerable correctly. Refuse
-an unproven construct at translation time, before it reaches the emitter,
-with a `PF-E` diagnostic at its Pine line and column and a message naming
-the construct. Never emit a placeholder, an empty expression, an undeclared
+Emit C++ only for a form the analyzer knows how to lower correctly.
+Never emit a placeholder, an empty expression, an undeclared
 identifier, or a C++ operator or conversion that does not exist.
 
+A change must not make a script that TradingView accepts, and that
+transpiles and compiles today, fail to transpile. This non-regression rule
+takes precedence over adding refusals for missing or incorrect lowerings,
+including emitter fallbacks. Refuse only a form TradingView refuses, or a
+form that already fails the C++ compile. When the lowering of a
+TradingView-valid form is approximate or wrong, implement its semantics;
+until then it keeps compiling and is recorded as a defect, never newly
+refused as unproven.
+
+For a form eligible for refusal under this rule, diagnose a missing lowering
+at translation time, before it reaches the emitter, with a `PF-E` diagnostic
+at its Pine line and column and a message naming the construct.
 Give every emission path either a correct lowering or an analyzer refusal
-in front of it. An emitter fallback must raise an internal error that the
-translator turns into a located `PF-E` refusal; it must never print a
-placeholder such as `/* unknown */`. Bypassing the support checker does not
-waive this invariant.
+permitted by this rule in front of it. An emitter fallback must raise an
+internal error that the translator turns into a located `PF-E` refusal;
+it must never print a placeholder such as `/* unknown */`. Bypassing the
+support checker does not waive this invariant.
 
 Match TradingView's Pine v6 grammar and typing. Refuse a form TradingView
 refuses through one general grammar or typing rule, not a list of shapes.
@@ -443,10 +453,9 @@ a missing array-template argument is a located wrong-argument refusal, not
 an internal `IndexError`. `tests/test_arrseg_coded_run_stops.py` checks both
 macro paths, every nullable-array trait and native `run_json` envelopes.
 
-Keep valid scripts compiling by implementing their semantics. A warning
-does not authorize an incorrect lowering when the engine lacks a capability;
-apply the emission invariant and fix the missing support. The existing
-support taxonomy follows:
+Preserve compilation and repair incorrect lowerings under the emission
+invariant. Record missing engine capabilities as defects; a warning does
+not resolve them. The existing support taxonomy follows:
 
 
 | Bucket                           | What                                                                 |
@@ -1135,7 +1144,7 @@ methods, an unknown method outside its receiver's own table, and a member read
 on a non-user-type value are refused instead of emitted. A `chart.point` read
 of `time` / `index` / `price` stays allowed. The historical pass-through of a
 Pine table method on an unresolved receiver is also an implementation gap;
-prove the receiver and signature or refuse at its source location.
+resolve the receiver and implement its signature under the emission invariant.
 - **Reserved names.** `codegen/helpers.py::CPP_RESERVED` carries every C++17
 and C++20 keyword/operator alternative plus header macros and emitter names
 that can collide. `_safe_name` allocates distinct escapes against all authored
