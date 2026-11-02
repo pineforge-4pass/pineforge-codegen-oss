@@ -79,6 +79,8 @@ def test_float_step_loop_from_a_widened_variable_is_refused_like_int(name):
 
 @pytest.mark.parametrize("name", (
     "callable_direct_float_step", "callable_bound_float_step",
+    "callable_input_float_step", "plain_callable_direct_literal",
+    "plain_callable_direct_input", "plain_callable_bound_input",
 ))
 def test_float_step_loop_from_a_measured_callable_is_refused_like_int(name):
     source = (FIXTURES / f"{name}.pine").read_bytes()
@@ -150,14 +152,12 @@ CALLABLE_LOOP_START_REFUSALS = {
 
 @pytest.mark.parametrize("name", tuple(CALLABLE_LOOP_START_REFUSALS))
 def test_float_step_loop_from_a_widened_callable_is_refused(name):
-    """TradingView refuses a float-step loop that starts at a callable's result.
+    """TradingView refused every measured float-step loop from a callable result.
 
-    Measured (CE10106): the var callable called directly with a literal and
-    bound to a name (the two fixture rows above), and the plain-local callable
-    called directly with a literal, directly with an input and bound to a
-    name. These inline rows pin the engine's refusal of each shape so a later
-    change is visible; the TradingView receipts for the plain-local shapes are
-    not stored as fixtures here.
+    Both the var and plain-local callables were refused (CE10106) when called
+    directly with a literal, directly with an input, or bound to a name.
+    The fixtures above pin the receipts; these inline rows pin the engine's
+    refusal of the shapes written inline.
     """
     assert_float_step_refused(CALLABLE_LOOP_START_REFUSALS[name])
 

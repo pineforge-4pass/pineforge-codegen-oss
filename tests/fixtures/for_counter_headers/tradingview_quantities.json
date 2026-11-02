@@ -5,7 +5,7 @@
   "reassignment_provenance": "All seven reassignment/helper fixtures copy the measured sources byte for byte. TradingView accepted every source on BINANCE:BTCUSDT 60 with default inputs. reassign_int_hint is the controlling row: an explicit int hint retains the quotient, quantity 2.5 on 205 entries, as do the plain and literal initializers. reassign_series_qty alternates 2.5 (103 entries) and 3.5 (102). reassign_untyped, reassign_typed (float hint) and helper_param each have quantity 10.5 on 205 entries and share fractional_input's supplied export digest. The helper_param source digest is computed from the copied source; export digests are supplied measurements, with no export or C++ hash recapture.",
   "callable_quantity_provenance": "callable_var_qty.pine and callable_local_qty.pine copy the measured sources byte for byte. TradingView accepted each source on BINANCE:BTCUSDT 60 with default inputs. Each source was exported once; both exports contain 205 entries, all with quantity 2.5. The two exports are byte-equal, with each export digest bound to its own source digest below. The source and export digests are supplied measurement receipts; the supplied verdict table has SHA-256 0167f54f735894bacf4a6beb4b1643dff4ad2590a12015f42f78af0c54ac44a2.",
   "widened_step_provenance": "The widened_float_step and widened_int_hint_float_step fixtures copy the measured sources byte for byte. TradingView refused both on BINANCE:BTCUSDT 60 with default inputs, reporting CE10106. Their check type stays int although the plain-quantity reassignment rows measure a value of 2.5. The source and error-artifact digests are supplied measurement receipts; the supplied verdict table has SHA-256 88b9dd5b851000ca157b7ade785ea20a85c8a2f8c7f10260ea93d1a0aa11763a.",
-  "callable_step_provenance": "The callable_direct_float_step and callable_bound_float_step fixtures copy the measured sources byte for byte. TradingView refused both on BINANCE:BTCUSDT 60 with default inputs, reporting CE10106 for a series int counter and literal float step. Each source was exported once. The source and error-artifact digests are supplied measurement receipts; the supplied verdict table has SHA-256 e6e85132a0d37351bfc7238c05628552050398ce1206fbbccac1a15583809693. Plain-local callable float-step shapes remain TradingView-unmeasured.",
+  "callable_step_provenance": "The callable_direct_float_step, callable_bound_float_step, callable_input_float_step, plain_callable_direct_literal, plain_callable_direct_input and plain_callable_bound_input fixtures copy the measured sources byte for byte. TradingView refused all six on BINANCE:BTCUSDT 60 with default inputs, reporting CE10106 for a series int counter and literal float step. Each source was exported once. The source and error-artifact digests are supplied measurement receipts. The supplied verdict tables have SHA-256 e6e85132a0d37351bfc7238c05628552050398ce1206fbbccac1a15583809693 for callable_direct_float_step and callable_bound_float_step, b0eacb211dadf42644a3403b7658daa4b5e6626705a8a80f9b7aef76e354877d for callable_input_float_step and 81611becfb6be66642ccdbc1424db4b12b74dd5d145e838748243afa2259dc9b for the three plain-local callable fixtures.",
   "ta_counter_type_receipt": {
     "receipt": "tacarriers-2302",
     "sha256": "be854854835eed60f33abe809a60e100cf978a304ba68138a332ef9d1124d1cc",
@@ -167,6 +167,38 @@
       "span": "11:19-11:21",
       "source_sha256": "3d14afbd3351a98fdff6dfdaa3071013a28b00b6c1f705c3ca9fa940debc0eee",
       "error_json_sha256": "0a0e26ca288a99bdff7971d2274508d876d688614137729c96f51ccbb882da9c"
+    },
+    "callable_input_float_step": {
+      "source_shape": "n = input.int(5); measure(int seed) => var int s = seed; s := seed; s := s / 2; s; for i = measure(n) to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "10:28-10:30",
+      "source_sha256": "93577e6dd9124856e177ecee4758eb8c947194bda4aadf26055ef2a30521cc41",
+      "error_json_sha256": "41abe4c758be1f7a17fd58a981ae0580d155ddb2b9eea2d730855a3ac33cf0e6"
+    },
+    "plain_callable_direct_literal": {
+      "source_shape": "measure(int seed) => int s = seed; s := s / 2; s; for i = measure(5) to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "8:28-8:30",
+      "source_sha256": "437f66ef40957df8f1046e59dfee9f7ebdf5a36a8391229af18d8ba70750d3bd",
+      "error_json_sha256": "7d7da1f8c771d560f1248d7d06b478e5c0818f35b48288c1c148123ffd9cb6ee"
+    },
+    "plain_callable_direct_input": {
+      "source_shape": "n = input.int(5); measure(int seed) => int s = seed; s := s / 2; s; for i = measure(n) to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "9:28-9:30",
+      "source_sha256": "f7e06871d0f08a5141037b621892fce6119f0c04d2d9615e36697c9568d5e189",
+      "error_json_sha256": "3edb8d447ddde8302749d720ca43ac5c55384cf2ceb5e191637f18f492823140"
+    },
+    "plain_callable_bound_input": {
+      "source_shape": "n = input.int(5); measure(int seed) => int s = seed; s := s / 2; s; x = measure(n); for i = x to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "10:19-10:21",
+      "source_sha256": "feefbb1600b23a3a898b4963865e333d3bd81254da292ab88d7811eecde01219",
+      "error_json_sha256": "69a733318218c63957e40a329114e8df1b8b302c334b3397305abe29748db437"
     }
   },
   "known_gaps": {
