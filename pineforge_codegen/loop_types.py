@@ -8,6 +8,7 @@ from .ast_nodes import (
     TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from .limits import iter_ast_nodes
+from .errors import CompileError, Diagnostic, Level, Phase
 from .symbols import PineType, TypeSpec
 from . import signatures as sigs
 
@@ -120,12 +121,25 @@ class _CounterQuery:
             self.declaration_specs[key] = spec
         return self.declaration_specs[key]
 
-    def counter_spec(self, start, step):
+    def counter_spec(self, start, step, *, counter_name=None, step_location=None):
         spec = self.infer(start)
-        # TradingView refuses a float step with an int counter. For an unknown
-        # start, a positively float step therefore has only one TradingView-valid
-        # counter type: float. Positive int starts keep their existing route.
-        if spec == _FLOAT or (spec in (None, _NA) and self.infer(step) == _FLOAT):
+        step_spec = self.infer(step)
+        # Refusal and counter selection use these same source facts. An int
+        # fallback for an unknown start is not positive int evidence.
+        if spec == _INT and step_spec == _FLOAT and counter_name is not None:
+            step_type, counter_type = "float", "int"
+            raise CompileError([Diagnostic(
+                level=Level.ERROR,
+                phase=Phase.ANALYZER,
+                location=step_location or step.loc,
+                message=(
+                    f"The step of a 'for' loop has type {step_type}, "
+                    f"but counter '{counter_name}' has type {counter_type}."
+                ),
+                hint="Use an int step or a float counter.",
+            )])
+        # Unknown starts with a positively float step keep the float route.
+        if spec == _FLOAT or (spec in (None, _NA) and step_spec == _FLOAT):
             return _FLOAT
         return _INT
 
@@ -273,8 +287,9 @@ class _CounterQuery:
 
 def for_counter_type(
     start, sources, bindings, scopes, *, step=None, pine_v5=False, counter_types=None,
+    counter_name=None, step_location=None,
 ):
-    """Choose FLOAT from the start, or a float step when the start is unknown."""
+    """Choose the counter family; analysis also validates a named counter's step."""
     if pine_v5:
         return PineType.INT
     if counter_types is not None and id(start) in counter_types:
@@ -282,4 +297,7 @@ def for_counter_type(
         # Reuse that decision rather than a later coarse symbol/storage type.
         return counter_types[id(start)]
     query = _CounterQuery(sources, bindings, scopes)
-    return PineType.FLOAT if query.counter_spec(start, step) == _FLOAT else PineType.INT
+    spec = query.counter_spec(
+        start, step, counter_name=counter_name, step_location=step_location,
+    )
+    return PineType.FLOAT if spec == _FLOAT else PineType.INT

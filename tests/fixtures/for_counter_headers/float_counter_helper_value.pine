@@ -1,0 +1,11 @@
+//@version=6
+strategy("Float counter passed to an untyped helper", initial_capital = 1000000, currency = currency.NONE)
+twice(v) => v * 2
+float acc = 0.0
+for x = 0.0 to 1.0 by 0.25
+    acc += twice(x)
+// TradingView measurement: quantity 5 preserves the helper argument's fractions.
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = acc)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

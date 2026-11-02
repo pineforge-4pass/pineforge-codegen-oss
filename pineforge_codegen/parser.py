@@ -1229,13 +1229,20 @@ class Parser:
         self._consume(TokenType.TO)
         end = self._parse_expression_in_slot("for end")
         step = None
+        step_location = None
         if self._match(TokenType.BY):
+            step_location = self._loc(self._current())
             step = self._parse_expression()
+            last_token = self.tokens[self.pos - 1]
+            if last_token.line == step_location.line:
+                step_location.end_col = last_token.end_col
         self._consume(TokenType.NEWLINE)
         self._consume(TokenType.INDENT)
         body = self._parse_block()
         self._consume(TokenType.DEDENT)
         node = ForStmt(var=var_name, start=start, end=end, step=step, body=body)
+        if step_location is not None:
+            node.annotations = {"for_step_location": step_location}
         return self._set_loc(node, start_tok)
 
     def _parse_while_stmt(self) -> WhileStmt:

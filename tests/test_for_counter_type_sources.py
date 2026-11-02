@@ -17,6 +17,7 @@ from pineforge_codegen.parser import Parser
 from pineforge_codegen.symbols import PineType
 from tests import _compile as compile_env
 from tests._for_counter_header_cases import INT_START_SOURCES
+from tests._for_float_step import assert_float_step_refused
 from tests._for_counter_type_source_cases import (
     ARRAY_TYPES, BASELINE, BASELINE_SOURCES, FLOAT_COUNTER_SOURCES,
     INT_COUNTER_SOURCES, MAIN_COMMIT,
@@ -135,29 +136,13 @@ int main() {
     ) == expected
 
 
-def test_positive_int_start_keeps_the_existing_fractional_step_stop():
-    # A declared int parameter is positive int evidence. The narrowed stop
-    # remains the known gap against TradingView's refusal of this float step.
+def test_positive_int_parameter_start_refuses_a_float_step():
+    # A declared int parameter supplies positive int evidence to the same
+    # query that keeps an untyped parameter on the float route.
     pine = BASELINE_SOURCES["unknown_parameter"].replace(
         "measure(first) =>", "measure(int first) =>",
     ).replace("measure(0.0)", "measure(0)")
-    cpp = transpile(pine)
-    assert re.search(r"\bfor \(int walkIndex = ", cpp), cpp
-    driver = r'''
-#include <cassert>
-#include <iostream>
-int main() {
-    GeneratedStrategy strategy;
-    Bar bar{10.0, 10.0, 10.0, 10.0, 1.0, 60000};
-    strategy.run(&bar, 1, "1", "1");
-    assert(strategy.trade_count() == 0);
-    std::cout << strategy.last_error();
-}
-'''
-    error = compile_env.run_emitted_tu(
-        cpp, driver, opt="-O2", label="int parameter fractional step",
-    )
-    assert "'step' in loop must be greater than zero" in error
+    assert_float_step_refused(pine, counter="walkIndex", location=(5, 37, 41))
 
 
 @pytest.mark.parametrize("context", ["chart", "security"])
@@ -169,22 +154,25 @@ int main() {
     ("", "", "first", "1", "int"),
     ("", "stride = ta.median(1, 2)\n", "first", "stride", "int"),
     ("", "", "0", "1", "int"),
-    ("", "", "0", "0.25", "int"),
-    ("", "int begin = 0\n", "begin", "0.25", "int"),
-    ("", "", "int(first)", "0.25", "int"),
-    ("begin = input.int(0)\n", "", "begin", "0.25", "int"),
-    ("", "", "bar_index", "0.25", "int"),
-    ("", "", "math.floor(first)", "0.25", "int"),
-    ("", "", "math.round(first)", "0.25", "int"),
-    ("", "", "(true ? 0 : na)", "0.25", "int"),
-    ("a = array.from(0.0, 1.0)\n", "", "array.size(a)", "0.25", "int"),
-    ("a = array.from(0.0, 1.0)\n", "", "a.size()", "0.25", "int"),
+    ("", "", "0", "0.25", "refused"),
+    ("", "int begin = 0\n", "begin", "0.25", "refused"),
+    ("", "", "int(first)", "0.25", "refused"),
+    ("begin = input.int(0)\n", "", "begin", "0.25", "refused"),
+    ("", "", "bar_index", "0.25", "refused"),
+    ("", "", "math.floor(first)", "0.25", "refused"),
+    ("", "", "math.round(first)", "0.25", "refused"),
+    ("", "", "(true ? 0 : na)", "0.25", "refused"),
+    ("a = array.from(0.0, 1.0)\n", "", "array.size(a)", "0.25", "refused"),
+    ("a = array.from(0.0, 1.0)\n", "", "a.size()", "0.25", "refused"),
 ])
 def test_step_evidence_only_promotes_an_unknown_start(
     context, counter_bound, prefix, setup, start, step, family,
 ):
     # Derive the family from authored evidence, never a signature's FLOAT
     # default or the analyzer's guessed storage for an untyped parameter.
+    # The literal int start with float end and step is measured in
+    # tradingview_quantities.json: int_start_float_end_float_step.
+    # Other start expressions and requested/bound compositions are derived.
     end = "(walkIndex >= 0 ? 1.0 : 1.0)" if counter_bound else "1.0"
     body = (
         setup + "float acc = 0.0\n"
@@ -201,6 +189,9 @@ def test_step_evidence_only_promotes_an_unknown_start(
         + "".join("    " + line + "\n" for line in body.splitlines())
         + f"plot({call})\n"
     )
+    if family == "refused":
+        assert_float_step_refused(pine, counter="walkIndex")
+        return
     cpp = transpile(pine)
     counter = "walkIndex" if context == "chart" else r"\w+_\d+_walkIndex"
     assert re.search(rf"\b{family} {counter} = ", cpp), cpp
@@ -214,12 +205,9 @@ def test_step_evidence_only_promotes_an_unknown_start(
 
 
 @pytest.mark.parametrize("name,pine", sorted(INT_START_SOURCES.items()))
-def test_existing_positive_int_start_evidence_wins_over_a_float_step(name, pine):
+def test_existing_positive_int_start_evidence_refuses_a_float_step(name, pine):
     # Reuse every existing integer source, including nullable ternaries,
     # array sizes, trade counts and int-returning math/TA calls.
     source = pine.replace(" to 0\n", " to 0 by 0.25\n")
     assert source != pine
-    cpp = transpile(source)
-    counter = "walkIndex" if name.startswith("chart_") else r"\w+_\d+_walkIndex"
-    assert re.search(rf"\bfor \(int {counter} = ", cpp), cpp
-    assert not re.search(rf"\bdouble {counter} = ", cpp), cpp
+    assert_float_step_refused(source, counter="walkIndex")

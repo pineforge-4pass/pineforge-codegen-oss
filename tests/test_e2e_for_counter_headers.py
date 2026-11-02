@@ -24,6 +24,17 @@ from tests._for_counter_header_cases import STOP_SOURCES
 FIXTURES = Path(__file__).parent / "fixtures" / "for_counter_headers"
 TV = json.loads((FIXTURES / "tradingview_quantities.json").read_text(encoding="utf-8"))
 MEASURED = tuple(TV["entry_quantities"])
+# Shared parameter inference still truncates this float counter. Run it as
+# a documented discrepancy, retaining TradingView's measured 5 in the quantities file.
+HELPER_VALUE_GAP = "float_counter_helper_value"
+MATCHING_MEASURED = tuple(name for name in MEASURED if name != HELPER_VALUE_GAP)
+# These existing measured rows pin the absolute bracket about
+# [5.6e-17, 9.98e-11]: 1e-17 loses the fourth 0.3-by-0.1 iteration;
+# 1e-10 wrongly admits the fourth 2999.9999999999-by-1000.0 iteration.
+ABSOLUTE_TOLERANCE_BOUNDARY_PROBES = (
+    "float_counter_tenth_step_to_three_tenths",
+    "float_counter_mid_step_short_end",
+)
 FEED_BARS = 1443
 ZERO_ENTRY_PROBES = tuple(TV["zero_entry_probes"])
 FIRST_END_READ_PROBES = (
@@ -32,6 +43,15 @@ FIRST_END_READ_PROBES = (
     *ZERO_ENTRY_PROBES,
 )
 REAL_SCRIPTS = ("open_counter_header_end", "open_counter_header_step")
+# Derived compositions of measured chart counts, without new TradingView tapes.
+FLOAT_CONTINUATION_PROBES = (
+    "float_counter_tenth_step_to_three_tenths",
+    "float_counter_fifth_step_to_three_fifths",
+    "float_counter_descending_tenth_step",
+    "float_counter_end_between_steps",
+    "float_counter_end_short_by_ten_billionth",
+    "float_counter_large_magnitude",
+)
 TRADE_TAIL = """\
 if bar_index > 6 and bar_index % 7 == 3
     strategy.entry("L", strategy.long, qty = acc)
@@ -171,12 +191,19 @@ def runs(tmp_path_factory):
             # A requested-context composition of the measured chart source;
             # this is derived coverage, not an additional TradingView tape.
             builds[f"{name}_in_security"] = Build(_in_security(pine))
+        if name in FLOAT_CONTINUATION_PROBES:
+            bound = _with_counter_bound_step(pine)
+            builds[f"{name}_bound"] = Build(bound)
+            builds[f"{name}_in_security"] = Build(_in_security(pine))
+            builds[f"{name}_bound_in_security"] = Build(_in_security(bound))
     for name in REAL_SCRIPTS:
         builds[name] = Build((FIXTURES / f"{name}.pine").read_text(encoding="utf-8"))
     for name, (pine, _) in CONTROLS.items():
         overrides = {"First": 4} if name == "nonzero_input_start" else None
         builds[name] = Build(pine, overrides=overrides)
     for name, pine in DERIVED_FLOAT_SOURCES.items():
+        builds[name] = Build(pine)
+    for name, pine in NONFINITE_FLOAT_SOURCES.items():
         builds[name] = Build(pine)
     return execute_all(engine, feed, base, builds)
 
@@ -207,22 +234,52 @@ def _assert_quantities(
 
 def test_tradingview_evidence_has_complete_sha256():
     for name in (*MEASURED, *ZERO_ENTRY_PROBES, *TV["runtime_errors"]):
-        assert re.fullmatch(
-            r"[0-9a-fA-F]{64}", TV["evidence"][name]["sha256"] or ""
-        ), name
+        for field in ("sha256", "source_sha256"):
+            assert re.fullmatch(
+                r"[0-9a-fA-F]{64}", TV["evidence"][name][field] or ""
+            ), (name, field)
+    for name, refusal in TV["compile_refusals"].items():
+        for field in ("error_json_sha256", "source_sha256"):
+            assert re.fullmatch(
+                r"[0-9a-fA-F]{64}", refusal[field] or ""
+            ), (name, field)
 
 
-@pytest.mark.parametrize("name", MEASURED)
+@pytest.mark.parametrize("name", tuple(
+    name for name in MATCHING_MEASURED
+    if name not in ABSOLUTE_TOLERANCE_BOUNDARY_PROBES
+))
 def test_tradingview_entry_quantities(runs, name):
     _assert_quantities(
         ok(runs, name), "default", TV["entry_quantities"][name], probe=name,
     )
 
 
-@pytest.mark.parametrize("name", MEASURED)
+@pytest.mark.parametrize("name", ABSOLUTE_TOLERANCE_BOUNDARY_PROBES)
+def test_tradingview_absolute_tolerance_bracket(runs, name):
+    _assert_quantities(
+        ok(runs, name), "default", TV["entry_quantities"][name], probe=name,
+    )
+
+
+@pytest.mark.parametrize("name", MATCHING_MEASURED)
 def test_counter_spelling_does_not_change_values(runs, name):
     _assert_quantities(ok(runs, f"{name}_renamed"), "default",
                        TV["entry_quantities"][name], probe=name)
+
+
+@pytest.mark.parametrize("suffix", ["", "_renamed"])
+def test_documented_untyped_helper_fraction_gap(runs, suffix):
+    # This asserts the remaining discrepancy, not TradingView parity.
+    assert TV["entry_quantities"][HELPER_VALUE_GAP] == 5
+    _assert_quantities(ok(runs, f"{HELPER_VALUE_GAP}{suffix}"), "default", 2)
+
+
+@pytest.mark.parametrize("name", FLOAT_CONTINUATION_PROBES)
+@pytest.mark.parametrize("suffix", ["_bound", "_in_security", "_bound_in_security"])
+def test_float_continuation_routes_follow_measured_counts(runs, name, suffix):
+    _assert_quantities(ok(runs, f"{name}{suffix}"), "default",
+                       TV["entry_quantities"][name])
 
 
 @pytest.mark.parametrize("name", FIRST_END_READ_PROBES[:2])
@@ -307,6 +364,17 @@ def _in_security(pine: str) -> str:
     ])
 
 
+def _with_counter_bound_step(pine: str) -> str:
+    def bind(match):
+        counter, step = match["counter"], match["step"]
+        return match["header"] + f"({counter} >= 0 ? {step} : {step})"
+
+    return re.sub(
+        r"(?m)^(?P<header>for (?P<counter>\w+) = [^\n]+ by )(?P<step>[^\n]+)$",
+        bind, pine,
+    )
+
+
 # DERIVED, no TradingView tape: exact binary step 0.25 gives
 # (1.0 - 0.0) / 0.25 + 1 = 5 iterations, each adding 1.0.
 _FLOAT_COUNTER_SOURCE = _source("""
@@ -326,9 +394,37 @@ DERIVED_FLOAT_SOURCES = {
 }
 
 
+# DERIVED, without a TradingView tape: math.exp lowers to std::exp and
+# overflows to +inf. A finite bound admits the initial counter once, then
+# the absolute allowance leaves end +/- allowance finite and rejects the
+# infinite counter after its first increment.
+NONFINITE_FLOAT_SOURCES = {}
+for _direction, _start, _end in (("up", "0.0", "1.0"), ("down", "1.0", "0.0")):
+    _pine = _source(f"""
+        float acc = 0.0
+        for walkIndex = {_start} to {_end} by math.exp(1000.0)
+            acc += 1.0
+    """)
+    NONFINITE_FLOAT_SOURCES[f"infinite_step_{_direction}"] = _pine
+    NONFINITE_FLOAT_SOURCES[f"infinite_step_{_direction}_bound"] = (
+        _with_counter_bound_step(_pine)
+    )
+    NONFINITE_FLOAT_SOURCES[f"infinite_step_{_direction}_in_security"] = (
+        _in_security(_pine)
+    )
+    NONFINITE_FLOAT_SOURCES[f"infinite_step_{_direction}_bound_in_security"] = _in_security(
+        _with_counter_bound_step(_pine),
+    )
+
+
 @pytest.mark.parametrize("name", sorted(DERIVED_FLOAT_SOURCES))
 def test_derived_float_counter_quantities(runs, name):
     _assert_quantities(ok(runs, name), "default", 5)
+
+
+@pytest.mark.parametrize("name", sorted(NONFINITE_FLOAT_SOURCES))
+def test_infinite_float_step_terminates_after_one_iteration(runs, name):
+    _assert_quantities(ok(runs, name), "default", 1)
 
 
 @pytest.mark.parametrize("context", ["chart", "security"])

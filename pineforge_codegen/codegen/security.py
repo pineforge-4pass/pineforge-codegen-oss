@@ -5066,10 +5066,13 @@ class SecurityEmitter:
                 lines.append(f"{pad}if ({st_var} == 0) {st_var} = 1;")
                 lines.append(f"{pad}const bool {dn_var} = ({s_var} > {e_var});")
                 refresh = f", {e_var} = {end_cpp}" if end_inline else ""
+                continuation = self._for_continuation(
+                    counter_cpp_type, var, e_var, st_var, dn_var,
+                )
                 lines.append(
                     f"{pad}for ({counter_cpp_type} {var} = {s_var}; "
                     f"!is_na({s_var}) && !is_na({e_var}) && !is_na({st_var}) && "
-                    f"({dn_var} ? ({var} >= {e_var}) : ({var} <= {e_var})); "
+                    f"{continuation}; "
                     f"{var} += ({dn_var} ? -{st_var} : {st_var}){refresh}) {{"
                 )
                 if stmt.var:

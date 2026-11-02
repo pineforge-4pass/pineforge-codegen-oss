@@ -6086,6 +6086,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._identifier_decl_bindings, self._identifier_binding_scopes,
                 step=node.step,
                 pine_v5=self._pine_version != 6 or self._in_v5_library_definition(node),
+                counter_name=node.var,
+                step_location=(node.annotations or {}).get(
+                    "for_step_location", (node.step.loc if node.step else None) or loc,
+                ),
             )
             for stmt in node.body:
                 self._visit(stmt)

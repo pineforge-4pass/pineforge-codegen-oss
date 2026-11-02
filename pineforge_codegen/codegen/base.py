@@ -307,6 +307,7 @@ from .helpers import (
 )
 from .constant_fold import fold_numeric_expression
 from .session_market import SESSION_MARKET_CPP, SESSION_MARKET_MEMBER
+from .for_loops import FLOAT_STEP_TOLERANCE_CPP
 
 # TypeInferer mixin owns the ~15 type-spec / C++-type inference helpers
 # previously scattered across this module; see ``codegen/types.py``.
@@ -792,6 +793,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._security_arg_call_values: dict[tuple, str] = {}
         self._random_call_counter = 0
         self._for_counter = 0
+        self._uses_float_step_tolerance = False
         # Retain each loop node alongside its plan; ids are lookup keys only.
         self._closed_trade_folds: dict[int, tuple[ForStmt, object]] = {}
         self._tuple_assign_counter = 0
@@ -5077,6 +5079,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 1. Includes
         self._emit_includes(lines)
+        float_step_tolerance_at = len(lines)
         if self._array_journal_members:
             lines.append(graph_journal.runtime(self, ARRAY_JOURNAL_CPP).replace(
                 "@JOURNAL@", self._array_journal_cpp_name))
@@ -6087,6 +6090,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         exports: list[str] = []
         emit_capabilities_exports(self, exports)
         lines[self._capabilities_export_at:self._capabilities_export_at] = exports
+        # A float counter may first appear in a requested evaluator.
+        if self._uses_float_step_tolerance:
+            lines.insert(float_step_tolerance_at, FLOAT_STEP_TOLERANCE_CPP)
         # Function bodies and security evaluators can select the enum lookup.
         if self._uses_enum_string_lookup:
             lines.insert(0, ENUM_STRING_INCLUDE)

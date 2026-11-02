@@ -1,0 +1,10 @@
+//@version=6
+strategy("Float loop with a large start magnitude", initial_capital = 1000000, currency = currency.NONE)
+float acc = 0.0
+for x = 1000000000.0 to 1000000000.3 by 0.1
+    acc += 1
+// TradingView measurement: quantity 3; the tolerance does not scale with the end.
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = acc)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")
