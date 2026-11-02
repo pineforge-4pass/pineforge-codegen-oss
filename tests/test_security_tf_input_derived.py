@@ -17,6 +17,8 @@ See oscar-lab MTF confluence root-cause (data/ campaign, KI series).
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from pineforge_codegen import transpile
@@ -114,14 +116,38 @@ def test_lower_tf_runtime_persistent_timeframe_leaf_initializes_series_metadata_
         + "plot(array.size(a))\n"
     )
     cpp = transpile(src)
-    line = next(
+    registrations = [
         ln.strip()
         for ln in cpp.splitlines()
         if "register_security_lower_tf_eval(" in ln
-    )
-    assert "seconds" in line
-    assert 'std::string("1")' in line
-    assert 'std::string("5")' in line
+    ]
+    # A reassigned chart value selects per bar, after its assignment and the
+    # declaration of sub. Setup registers both independent intrabar streams.
+    assert registrations == [
+        'register_security_lower_tf_eval(0, "1", input_tf_);',
+        'register_security_lower_tf_eval(1, "5", input_tf_);',
+    ]
+    body = cpp.split("void on_source_bar(", 1)[1]
+    selected = re.search(r"const std::string _pf_selected_tf = sub(?:\[0\])?;", body)
+    assert selected is not None
+    assignment = re.search(r"seconds(?:\[0\])? = ", body)
+    declaration = re.search(r"sub(?:\[0\])? = ", body)
+    assert assignment is not None and declaration is not None
+    assert assignment.start() < declaration.start() < selected.start()
+    assert "current_bar_.close" in body[assignment.start():declaration.start()]
+    assert "seconds" in body[declaration.start():selected.start()]
+    assert 'std::string("1")' in body[declaration.start():selected.start()]
+    assert 'std::string("5")' in body[declaration.start():selected.start()]
+    assert (
+        '    if (_pf_selected_tf == "1") return _req_sec_lower_tf_0;\n'
+        '    if (_pf_selected_tf == "5") return _req_sec_lower_tf_1;\n'
+        '    _PF_ENGINE_INVARIANT("Requested timeframe matched no registered timeframe", std::logic_error);\n'
+        '}())'
+    ) in body
+    for sec_id in (0, 1):
+        assert f"std::vector<double> _req_sec_lower_tf_{sec_id}{{}};" in cpp
+        assert f"_req_sec_lower_tf_{sec_id}.clear();" in cpp
+        assert f"_req_sec_lower_tf_{sec_id}.push_back(" in cpp
     compile_cpp(cpp, label="lower-tf-runtime-persistent-leaf")
 
 

@@ -228,6 +228,17 @@ class SecurityEmitter:
         message, hint = render_diagnostic("PF-E3111", {"reason": reason})
         self._codegen_error(expr_start(node), message, hint=hint)
 
+    def _security_series_tf_local_binding(self, node):
+        """A lexical declaration, even when analysis uses global storage."""
+        if not isinstance(node, Identifier):
+            return None
+        binding = self.ctx.identifier_binding_nodes.get(id(node))
+        if isinstance(binding, VarDecl) and (
+                not self._security_identifier_is_global_binding(node)
+                or id(binding) not in self._security_series_tf_global_declarations):
+            return binding
+        return None
+
     def _security_series_tf_sources(self, node, seen=frozenset()):
         """Follow exact declaration aliases of the authored timeframe selection.
 
@@ -236,8 +247,8 @@ class SecurityEmitter:
         """
         if isinstance(node, Identifier):
             name = node.name
-            if not self._security_identifier_is_global_binding(node):
-                binding = self.ctx.identifier_binding_nodes.get(id(node))
+            binding = self._security_series_tf_local_binding(node)
+            if binding is not None or not self._security_identifier_is_global_binding(node):
                 # Scope labels and spellings are shared by sibling blocks.
                 # Only the declaration this read resolved to supplies its arms.
                 key = ("local", id(binding))
@@ -262,17 +273,19 @@ class SecurityEmitter:
         """Collect terminal arms using the shared chart-dependency predicate."""
         leaves = []
         series = []
+        has_computed_value = False
+        has_series_condition = False
+        block_selection = False
         normalization_failed = False
-        local_selection = (
-            isinstance(node, Identifier)
-            and not self._security_identifier_is_global_binding(node)
-            and isinstance(self.ctx.identifier_binding_nodes.get(id(node)), VarDecl))
+        local_selection = self._security_series_tf_local_binding(node) is not None
 
         def condition(value):
+            nonlocal has_series_condition
             # A local selection must run where its binding is visible, even
             # when its condition happens to be fixed for this run.
             if local_selection or self._security_tf_expr_is_per_bar(value):
                 series.append(value)
+                has_series_condition = True
 
         def arm(body, owner):
             if not body:
@@ -286,7 +299,7 @@ class SecurityEmitter:
                 walk(self._security_selection_arm_expr(body, owner))
 
         def walk(value):
-            nonlocal normalization_failed
+            nonlocal normalization_failed, block_selection, has_computed_value
             sources = self._security_series_tf_sources(value)
             if len(sources) != 1 or sources[0] is not value:
                 for source in sources:
@@ -298,6 +311,7 @@ class SecurityEmitter:
                 walk(value.false_val)
             elif isinstance(value, (IfStmt, SwitchStmt)):
                 if self._security_selection_has_block_arms(value):
+                    block_selection = True
                     try:
                         value = self._security_selection_arms(
                             value, registration=False, series_timeframe=True)
@@ -322,12 +336,28 @@ class SecurityEmitter:
             else:
                 # A call or operator can carry a choice in its operands or
                 # pure helper body. Do not mistake that value for a fixed arm.
-                if isinstance(value, (FuncCall, BinOp, UnaryOp)):
-                    condition(value)
+                # An opaque call with no explicit bar read keeps its existing
+                # registration path; conservative implicit-state classification
+                # alone must not introduce a new closed-set requirement.
+                if (isinstance(value, (FuncCall, BinOp, UnaryOp))
+                        and (local_selection or self._security_tf_expr_is_per_bar(
+                            value, implicit_calls=False))):
+                    series.append(value)
+                    has_computed_value = True
                 leaves.append(value)
 
         walk(node)
-        return leaves, [] if normalization_failed else series
+        setup_error = None
+        if (not normalization_failed and not has_series_condition
+                and has_computed_value and block_selection):
+            try:
+                # Keep the original, more specific arm diagnostic if the new
+                # value proof cannot extend a setup-controlled block selection.
+                self._substitute_tf_input_reads(node, set())
+            except CompileError as error:
+                setup_error = error
+        dependencies = [] if normalization_failed else series
+        return leaves, dependencies, setup_error
 
     def _security_series_tf_has_state(self, root) -> bool:
         """Persistent declarations reachable from a requested value, not TA."""
@@ -365,11 +395,17 @@ class SecurityEmitter:
 
         extras = []
         values = None
+        self._security_series_tf_global_declarations = {
+            id(stmt) for stmt in self.ctx.ast.body if isinstance(stmt, VarDecl)}
         next_id = len(self._security_calls)
         for item in self._security_calls:
             if item.get("dead"):
                 continue
-            leaves, series = self._security_series_tf_choices(item["tf_node"])
+            # Choice discovery validates selection arms too, before the later
+            # evaluator loop sets this flag for timeframe resolution.
+            self._security_tf_lower = bool(item.get("is_lower_tf_array"))
+            leaves, series, setup_error = self._security_series_tf_choices(
+                item["tf_node"])
             if not series:
                 continue
             if item.get("foreign"):
@@ -404,6 +440,8 @@ class SecurityEmitter:
                         candidates = values.strings(leaf)
                     except (OpenTimeframeSet, ValueError, TypeError, KeyError,
                             ArithmeticError, RecursionError):
+                        if setup_error is not None:
+                            raise setup_error
                         self._security_series_tf_refusal(
                             leaf, "the timeframe set is not closed at compile time")
                 for candidate in candidates:
@@ -1577,12 +1615,15 @@ class SecurityEmitter:
     # count as per-bar; ordinary global cycles stop at their resetting binding.
     # These path checks make traversal finite. Loop bindings count as per-bar;
     # other unknown identifiers retain their existing fixed classification.
-    def _security_tf_expr_is_per_bar(self, node) -> bool:
+    def _security_tf_expr_is_per_bar(self, node, *, implicit_calls: bool = True) -> bool:
         """Follow bar dependencies without requiring a setup replay proof.
 
         Arguments and user bodies both contribute reads. Recursive calls and
         persistent value cycles are conservatively treated as per-bar.
         This inspection never rewrites the expression or emits C++.
+        Computed timeframe values can disable implicit call state so an opaque
+        call accepted by the setup emitter keeps that path in the absence of
+        explicit chart dependencies. Selection conditions retain the full rule.
         """
         from .visit_expr import _BUILTIN_NAMESPACE_NAMES
 
@@ -1656,7 +1697,7 @@ class SecurityEmitter:
                     return per_bar(info.node.body, frozenset(bound), active | {key})
                 # Pure builtin calls inherit their arguments' dependencies.
                 # Other calls can read implicit chart state even with no args.
-                return not (
+                return implicit_calls and not (
                     (namespace is None and name in self._SECURITY_TF_REPLAY_CALLS)
                     or (namespace in _SECURITY_PURE_CALL_NAMESPACES
                         and (namespace, name) not in _SECURITY_IMPURE_CALLS)

@@ -160,21 +160,40 @@ PER_RUN_FIXED_VARIABLES = {
 }
 
 # Keep duplicate memberships and partition the same inventories by one proof.
-LOWERING_ROWS = [
+VARIABLE_LOWERING_ROWS = [
     (name, "", _variable_condition(name, pine_type))
     for inventory in VARIABLE_INVENTORIES
     for name, pine_type in sorted(inventory.items())
     if name not in PER_RUN_FIXED_VARIABLES and name not in EXCLUDED
 ]
+# The chart predicates are Pine bools, but their helpers currently have a
+# numeric C++ return type. Pin that family independently of the emitter's
+# bool-conversion helper; bool-returning helpers retain their direct call.
+NUMERIC_FIXED_MEMBERS = {
+    "chart.is_kagi", "chart.is_linebreak", "chart.is_pnf", "chart.is_range",
+    "chart.is_renko", "chart.is_standard", "chart.is_heikinashi",
+}
+NUMERIC_FIXED_CONDITION_CPP = (
+    "[&](){ auto _pf_bool_v = (inventory_condition()); "
+    "using _pf_bool_t = std::decay_t<decltype(_pf_bool_v)>; "
+    "if constexpr (std::is_same_v<_pf_bool_t, bool>) { return _pf_bool_v; } "
+    "else if constexpr (std::is_floating_point_v<_pf_bool_t> || "
+    "std::is_integral_v<_pf_bool_t>) { "
+    "return is_na(_pf_bool_v) ? false : (_pf_bool_v != 0); } "
+    "else { return static_cast<bool>(_pf_bool_v); } }()"
+)
 ACCEPTANCE_ROWS = [
     # Keep the actual member read live in a helper so registration has an exact
     # call spelling without a second, manually maintained constant-value table.
     (name, f"inventory_condition() => {_variable_condition(name, pine_type)}\n",
-     "inventory_condition()")
+     "inventory_condition()",
+     NUMERIC_FIXED_CONDITION_CPP if name in NUMERIC_FIXED_MEMBERS
+     else "inventory_condition()")
     for inventory in VARIABLE_INVENTORIES
     for name, pine_type in sorted(inventory.items())
     if name in PER_RUN_FIXED_VARIABLES and name not in EXCLUDED
 ]
+LOWERING_ROWS = list(VARIABLE_LOWERING_ROWS)
 # Loop bindings conservatively carry chart dependency even with literal bounds;
 # closed arms now lower instead of refusing that conservative classification.
 LOWERING_ROWS.append((
@@ -186,10 +205,11 @@ LOWERING_ROWS.append((
     '    chosen_side\n',
     "choose_side()",
 ))
-LOWERING_ROWS.extend(
+CALL_LOWERING_ROWS = [
     _namespace_row(namespace, functions)
     for namespace, functions in sorted(CALL_NAMESPACES.items())
-)
+]
+LOWERING_ROWS.extend(CALL_LOWERING_ROWS)
 
 
 def test_bar_dependency_inventory_coverage():
@@ -199,9 +219,10 @@ def test_bar_dependency_inventory_coverage():
     members = Counter(
         name for inventory in VARIABLE_INVENTORIES for name in inventory
         if name not in EXCLUDED)
-    lowered = Counter(name for name, _setup, _condition in LOWERING_ROWS
-                      if name in members)
-    accepted = Counter(name for name, _setup, _condition in ACCEPTANCE_ROWS
+    # A variable and a function can share a spelling (ta.tr); function rows
+    # cover call namespaces below and must not double-count variable coverage.
+    lowered = Counter(name for name, _setup, _condition in VARIABLE_LOWERING_ROWS)
+    accepted = Counter(name for name, _setup, _condition, _cpp in ACCEPTANCE_ROWS
                        if name in members)
     assert lowered + accepted == members
     assert lowered.keys().isdisjoint(accepted)
@@ -211,10 +232,7 @@ def test_bar_dependency_inventory_coverage():
         assert set(inventory) - EXCLUDED.keys() <= row_names
     for inventory in SIGNATURE_VARIABLE_INVENTORIES:
         assert set(inventory) - PER_RUN_FIXED_VARIABLES - EXCLUDED.keys() <= row_names
-    call_rows = [name for name in row_names if name in {
-        function.name for functions in CALL_NAMESPACES.values()
-        for function in functions.values()
-    }]
+    call_rows = [name for name, _setup, _condition in CALL_LOWERING_ROWS]
     assert {name.rsplit(".", 1)[0] for name in call_rows} == set(CALL_NAMESPACES)
     assert len(CALL_NAMESPACES) >= 7
     # Session has variable predicates, not registered call signatures.
@@ -224,7 +242,7 @@ def test_bar_dependency_inventory_coverage():
 
 
 def test_per_bar_inventory_members_cannot_enter_acceptance():
-    accepted = {name for name, _setup, _condition in ACCEPTANCE_ROWS}
+    accepted = {name for name, _setup, _condition, _cpp in ACCEPTANCE_ROWS}
     lowered = {name for name, _setup, _condition in LOWERING_ROWS}
     # Bare bar reads are unconditionally per-bar in the shared predicate.
     per_bar = set(BAR_BUILTINS) | set(SECURITY_BAR_FIELDS)
@@ -300,9 +318,10 @@ def test_inventory_condition_selects_chart_dependency(name, setup, condition):
     _assert_lowering(_script(setup, condition))
 
 
-@pytest.mark.parametrize("name,setup,condition", ACCEPTANCE_ROWS,
+@pytest.mark.parametrize("name,setup,condition,expected_condition", ACCEPTANCE_ROWS,
                          ids=[row[0] for row in ACCEPTANCE_ROWS])
-def test_fixed_inventory_condition_registration(name, setup, condition, monkeypatch):
+def test_fixed_inventory_condition_registration(
+        name, setup, condition, expected_condition, monkeypatch):
     pine = _script(setup, condition)
     result = transpile_full(pine)
     assert all(diagnostic.code != "PF-E3110"
@@ -314,7 +333,7 @@ def test_fixed_inventory_condition_registration(name, setup, condition, monkeypa
     assert registration == (
         '0, ([&]() -> std::string {\n'
         '    std::string __selection_value_0 = na<std::string>();\n'
-        f'    if ({condition}) {{\n'
+        f'    if ({expected_condition}) {{\n'
         '        __selection_value_0 = std::string("60");\n'
         '    } else {\n'
         '        __selection_value_0 = std::string("240");\n'

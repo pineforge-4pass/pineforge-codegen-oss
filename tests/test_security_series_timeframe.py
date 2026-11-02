@@ -560,6 +560,40 @@ def test_values_beneath_pure_operations_register_every_possible_result(
     assert all("current_bar_" not in line for line in registrations(cpp))
 
 
+@pytest.mark.parametrize("lower_tf", (False, True))
+def test_setup_controlled_block_can_gain_a_closed_computed_arm(lower_tf):
+    # A setup-only selector does not make its arm's price-dependent value
+    # fixed. Successful finite-value interpretation must extend the old setup
+    # proof even though that proof refuses the arm's chart read.
+    request_name = "security_lower_tf" if lower_tf else "security"
+    result = "array.size(got_v)" if lower_tf else "got_v"
+    pine = (HEADER + 'pick_v = input.bool(true)\n'
+            'tf_v = if pick_v\n'
+            '    amount_v = close > open ? 75 : 180\n'
+            '    str.tostring(amount_v)\n'
+            'else\n    "30"\n'
+            f'got_v = request.{request_name}(syminfo.tickerid, tf_v, close)\n'
+            f'plot({result})\n')
+    cpp = transpile(pine)
+    if lower_tf:
+        assert re.findall(
+            r"^\s*register_security_lower_tf_eval\((.*)\);$", cpp, re.MULTILINE
+        ) == ['0, "75", input_tf_', '1, "180", input_tf_', '2, "30", input_tf_']
+    else:
+        assert registrations(cpp) == [
+            '0, "75", input_tf_, false, false',
+            '1, "180", input_tf_, false, false',
+            '2, "30", input_tf_, false, false',
+        ]
+    result_prefix = "_req_sec_lower_tf_" if lower_tf else "_req_sec_"
+    assert_selection_tail(
+        chart_body(cpp),
+        f'if (_pf_selected_tf == "75") return {result_prefix}0;',
+        f'if (_pf_selected_tf == "180") return {result_prefix}1;',
+        f'if (_pf_selected_tf == "30") return {result_prefix}2;',
+    )
+
+
 def test_imported_pure_string_helper_has_the_same_value_inventory():
     libraries = {"pftest/FrameText/1": (
         '//@version=6\nlibrary("FrameText")\n'
