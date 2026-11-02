@@ -186,6 +186,81 @@ def test_fractional_storage_reaches_each_unambiguous_scope(name):
         assert re.search(r"\bfor \(double i = ", cpp), cpp
 
 
+@pytest.mark.parametrize("qualifier", ("var", "varip"))
+@pytest.mark.parametrize("signature,call,cpp_name", (
+    ("measure(int seed)", "measure(n)", "measure"),
+    ("method measure(int seed)", "n.measure()", "_udt_int_measure"),
+))
+def test_persistent_callable_storage_and_return_keep_the_fraction(
+    qualifier, signature, call, cpp_name,
+):
+    cpp = transpile(_source(f"""
+        {signature} =>
+            {qualifier} int s = seed
+            s := seed
+            s := s / 2
+            s
+        observed = {call}
+    """))
+    _assert_fractional_storage(cpp)
+    # A double member alone did not prevent an int return variant from
+    # truncating it. Check the function boundary as well as the quotient write.
+    definitions = list(re.finditer(
+        rf"\b(double|int|int64_t) {cpp_name}(?:_cs\d+)?\([^)]*\) \{{"
+        r"(.*?)\n    \}",
+        cpp, re.DOTALL,
+    ))
+    assert definitions, cpp
+    for definition in definitions:
+        assert definition.group(1) == "double", definition.group(0)
+        assert "(int)_pf_v" not in definition.group(2), definition.group(0)
+    assert re.search(r"\bdouble observed\b", cpp), cpp
+
+
+@pytest.mark.parametrize("qualifier", ("var", "varip"))
+def test_cloned_persistent_callable_members_and_returns_are_double(qualifier):
+    pine = SCOPE_SOURCES["callable_var"].replace("var int s", f"{qualifier} int s")
+    cpp = transpile(pine + "other = measure(n + 1)\n")
+    _assert_fractional_storage(cpp)
+    assert re.search(r"\bdouble s_cs1\b", cpp), cpp
+    assert re.search(r"\bdouble measure_cs0\(", cpp), cpp
+    assert re.search(r"\bdouble measure_cs1\(", cpp), cpp
+    assert not re.search(r"\b(?:int|int64_t) measure_cs\d+\(", cpp), cpp
+
+
+@pytest.mark.parametrize("qualifier", ("var", "varip"))
+def test_loop_body_persistent_storage_keeps_the_fraction(qualifier):
+    cpp = transpile(_source(f"""
+        float observed = 0.0
+        for turn = 0 to 0
+            {qualifier} int s = n
+            s := n
+            s := s / 2
+            observed := s
+    """))
+    _assert_fractional_storage(cpp)
+
+
+def test_security_helper_persistent_storage_keeps_the_fraction():
+    pine = SCOPE_SOURCES["callable_var"].replace(
+        "observed = measure(n)",
+        'observed = request.security(syminfo.tickerid, "2", measure(n))',
+    )
+    cpp = transpile(pine)
+    _assert_fractional_storage(cpp)
+    start = cpp.index("void _eval_security_0(")
+    body = cpp[start:cpp.index("void evaluate_security(", start)]
+    assert "@var_seed" in body, body
+    writes = [
+        line for line in body.splitlines()
+        if "_security_helper_series_[" in line and ".update(" in line
+        and " / " in line
+    ]
+    assert writes, body
+    assert all("(int)_pf_v" not in line and "na<int>()" not in line
+               for line in writes), writes
+
+
 VALUE_DRIVER = r'''
 #include <cassert>
 #include <iostream>
@@ -203,7 +278,12 @@ int main() {
 
 
 @pytest.mark.parametrize("name", tuple(SCOPE_SOURCES))
-def test_scope_storage_keeps_the_measured_quotient(name):
+def test_scope_storage_keeps_the_same_quotient_in_every_scope(name):
+    """Engine-consistency control, not TradingView evidence for each scope.
+
+    The expected quantity is the plain-global shape's recorded TradingView
+    value; TradingView was not run on these storage-scope sources.
+    """
     # The existing helper owns the native-prerequisite skip.
     actual = compile_env.run_emitted_tu(
         transpile(SCOPE_SOURCES[name]), VALUE_DRIVER, opt="-O2", label=name,
@@ -273,6 +353,42 @@ FROZEN_CONTROLS = {
             s := s + 1
             s
         plot(measure(n))
+    """,
+    "callable_var_integer_write": """
+        measure(int seed) =>
+            var int s = seed
+            s := s + 1
+            s
+        plot(measure(n))
+    """,
+    "callable_varip_integer_write": """
+        measure(int seed) =>
+            varip int s = seed
+            s := s + 1
+            s
+        plot(measure(n))
+    """,
+    "callable_var_literal_write": """
+        measure(int seed) =>
+            var int s = seed
+            s := 5.7
+            s
+        plot(measure(n))
+    """,
+    "callable_var_integral_quotient_write": """
+        measure(int seed) =>
+            var int s = seed
+            s := 4 / 2
+            s
+        plot(measure(n))
+    """,
+    "shadowed_callable_var": """
+        int s = n
+        measure(int seed) =>
+            var int s = seed
+            s := s / 2
+            s
+        plot(s + measure(n))
     """,
     "loop_body_integer_write": """
         float total = 0.0

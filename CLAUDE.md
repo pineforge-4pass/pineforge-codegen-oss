@@ -490,6 +490,9 @@ This covers unambiguous global,
 callable, block and loop-body declarations; duplicate storage names, unknown
 initializer families and untyped helper parameters remain gaps. Direct
 initializers and direct non-quotient numeric-literal writes keep their policy.
+Call-site return inference honors the same widening annotation, including
+callable-local `var` and `varip`; an `int` return must not narrow their double
+storage.
 `tests/test_float_reassignment.py` and the measured reassignment fixtures pin
 storage, quantities and complete unchanged integer-control C++.
 

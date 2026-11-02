@@ -71,6 +71,7 @@ from ..ast_nodes import (
     Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, NaLiteral,
 )
 from ..method_binding import bind_function_defaults
+from ..loop_types import FLOAT_REASSIGNMENT
 from ..pine_spelling import sub_outside_literals
 from ..external_requests import FEED_LOWERING, LOWERING_ANNOTATION
 from ..security_contexts import CONTEXT_ANNOTATION, DEAD_ANNOTATION
@@ -243,6 +244,11 @@ class CallHandlers:
         loops/collections remain unknown and cannot silently pick FLOAT.
         """
         if isinstance(stmt, VarDecl):
+            if (stmt.annotations or {}).get(FLOAT_REASSIGNMENT):
+                # Return variants must keep the declaration's widened storage
+                # family even when its written hint or initializer is int.
+                local_types[stmt.name] = PineType.FLOAT
+                return
             hinted = {
                 "int": PineType.INT,
                 "float": PineType.FLOAT,
