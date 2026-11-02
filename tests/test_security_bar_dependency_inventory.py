@@ -1,11 +1,13 @@
 """Inventory coverage for chart-dependent request timeframe conditions."""
 
 import json
+from collections import Counter
 
 import pytest
 
 from pineforge_codegen import signatures as sigs, transpile_full
 from pineforge_codegen.analyzer import Analyzer
+from pineforge_codegen.ast_nodes import VarDecl
 from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.codegen.security import (
     _SECURITY_IMPURE_CALLS,
@@ -21,16 +23,6 @@ from pineforge_codegen.symbols import PineType
 def _parse(pine):
     return Parser(Lexer(pine).tokenize(), source=pine).parse()
 
-
-def _variable_node(name):
-    return _parse(f"probe_value = {name}\n").body[0].value
-
-
-# Use the same positive stability proof as the member-access classifier.
-# Constructing its empty-script context neither generates nor compiles C++.
-_STABILITY_PROOF = CodeGen(Analyzer(_parse(
-    '//@version=6\nstrategy("Inventory stability")\n'
-)).analyze())
 
 BAR_INVENTORIES = (
     {name: sigs.BUILTIN_VARIABLES.get(name, PineType.FLOAT)
@@ -50,6 +42,8 @@ EXCLUDED = {}
 
 
 def _scalar_condition(expression, pine_type):
+    if pine_type == PineType.NA:
+        return f"na({expression})"
     if pine_type == PineType.BOOL:
         return expression
     if pine_type in (PineType.INT, PineType.FLOAT):
@@ -61,6 +55,29 @@ def _scalar_condition(expression, pine_type):
 
 def _variable_condition(name, pine_type):
     return _scalar_condition(name, pine_type)
+
+
+def _script(setup, condition):
+    return ('//@version=6\nstrategy("Inventory condition")\n'
+            + setup + f'tf = if {condition}\n    "60"\nelse\n    "240"\n'
+            'value = request.security(syminfo.tickerid, tf, close)\n'
+            'if value > close\n    strategy.entry("Long", strategy.long)\n')
+
+
+def _condition_is_per_run_fixed(condition):
+    # Classify the live request itself at import time, including the member
+    # rules beyond _expr_is_stable. Unexpected failures must stop collection.
+    try:
+        result = transpile_full(_script("", condition))
+    except CompileError as error:
+        if (len(error.diagnostics) == 1
+                and error.diagnostics[0].code == "PF-E3110"):
+            return False
+        raise
+    assert all(diagnostic.code != "PF-E3110"
+               for diagnostic in result["diagnostics"])
+    assert "register_security_eval(" in result["cpp"]
+    return True
 
 
 def _call_is_per_bar(name):
@@ -140,25 +157,40 @@ def _namespace_row(namespace, functions):
                               signature.return_type))
 
 
-STABLE_VARIABLES = {
-    name for inventory in SIGNATURE_VARIABLE_INVENTORIES for name in inventory
-    if _STABILITY_PROOF._expr_is_stable(_variable_node(name))
+PER_RUN_FIXED_VARIABLES = {
+    name for inventory in VARIABLE_INVENTORIES
+    for name, pine_type in inventory.items()
+    if name not in EXCLUDED
+    and _condition_is_per_run_fixed(_variable_condition(name, pine_type))
 }
 
-# Keep duplicate memberships: the count guard covers each inventory in full.
-# The positive proof removes only names it actually establishes as stable.
+# Keep duplicate memberships and partition the same inventories by one proof.
 REFUSAL_ROWS = [
     (name, "", _variable_condition(name, pine_type))
-    for inventory in BAR_INVENTORIES
+    for inventory in VARIABLE_INVENTORIES
     for name, pine_type in sorted(inventory.items())
-    if name not in EXCLUDED
+    if name not in PER_RUN_FIXED_VARIABLES and name not in EXCLUDED
 ]
-REFUSAL_ROWS.extend(
-    (name, "", _variable_condition(name, pine_type))
-    for inventory in SIGNATURE_VARIABLE_INVENTORIES
+ACCEPTANCE_ROWS = [
+    # Keep the actual member read live in a helper so registration has an exact
+    # call spelling without a second, manually maintained constant-value table.
+    (name, f"inventory_condition() => {_variable_condition(name, pine_type)}\n",
+     "inventory_condition()", None)
+    for inventory in VARIABLE_INVENTORIES
     for name, pine_type in sorted(inventory.items())
-    if name not in STABLE_VARIABLES and name not in EXCLUDED
-)
+    if name in PER_RUN_FIXED_VARIABLES and name not in EXCLUDED
+]
+# Known over-refusal, retained by policy: conservative refusal of a fixed-value
+# script. The helper always returns true, but its loop binding lacks fixed proof.
+ACCEPTANCE_ROWS.append((
+    "known-over-refusal-literal-loop-helper",
+    'choose_side() =>\n'
+    '    chosen_side = false\n'
+    '    for sample_index = 0 to 1\n'
+    '        chosen_side := sample_index > 0\n'
+    '    chosen_side\n',
+    "choose_side()", "PF-E3110",
+))
 REFUSAL_ROWS.extend(
     _namespace_row(namespace, functions)
     for namespace, functions in sorted(CALL_NAMESPACES.items())
@@ -168,14 +200,22 @@ REFUSAL_ROWS.extend(
 def test_bar_dependency_inventory_coverage():
     assert VARIABLE_INVENTORIES and all(VARIABLE_INVENTORIES)
     assert CALL_INVENTORIES and all(CALL_INVENTORIES.values())
-    assert REFUSAL_ROWS
-    assert len(REFUSAL_ROWS) >= sum(
-        len(inventory) for inventory in VARIABLE_INVENTORIES)
+    assert REFUSAL_ROWS and ACCEPTANCE_ROWS
+    members = Counter(
+        name for inventory in VARIABLE_INVENTORIES for name in inventory
+        if name not in EXCLUDED)
+    refused = Counter(name for name, _setup, _condition in REFUSAL_ROWS
+                      if name in members)
+    accepted = Counter(name for name, _setup, _condition, _code in ACCEPTANCE_ROWS
+                       if name in members)
+    assert refused + accepted == members
+    assert refused.keys().isdisjoint(accepted)
+    assert accepted.keys() == PER_RUN_FIXED_VARIABLES
     row_names = {name for name, _setup, _condition in REFUSAL_ROWS}
     for inventory in BAR_INVENTORIES:
         assert set(inventory) - EXCLUDED.keys() <= row_names
     for inventory in SIGNATURE_VARIABLE_INVENTORIES:
-        assert set(inventory) - STABLE_VARIABLES - EXCLUDED.keys() <= row_names
+        assert set(inventory) - PER_RUN_FIXED_VARIABLES - EXCLUDED.keys() <= row_names
     call_rows = [name for name in row_names if name in {
         function.name for functions in CALL_NAMESPACES.values()
         for function in functions.values()
@@ -186,6 +226,32 @@ def test_bar_dependency_inventory_coverage():
     assert {f"session.{member}" for member in sigs.SESSION_FLAG_MEMBERS} <= row_names
     for namespace, member in _SECURITY_IMPURE_CALLS:
         assert f"{namespace}.{member}" in row_names
+
+
+def test_per_bar_inventory_members_cannot_enter_acceptance():
+    accepted = {name for name, _setup, _condition, _code in ACCEPTANCE_ROWS}
+    refused = {name for name, _setup, _condition in REFUSAL_ROWS}
+    # Bare bar reads are unconditionally per-bar at security.py:1344.
+    per_bar = set(BAR_BUILTINS) | set(SECURITY_BAR_FIELDS)
+    # Direct strategy members and nested state receivers retain their reads;
+    # namespace constants have no state receiver (security.py:1368).
+    per_bar.update(name for name in sigs.STRATEGY_VARIABLES
+                   if name.rpartition(".")[0] == "strategy"
+                   or name.rpartition(".")[0] in sigs.STRATEGY_VARIABLES)
+    # Other inventoried namespace reads include TA series and session flags;
+    # chart facts are the classifier's explicit exception (security.py:1373).
+    per_bar.update(name for name in sigs.BUILTIN_VARIABLES
+                   if "." in name and name.partition(".")[0] != "chart")
+    per_bar.update(sigs.BARSTATE_VARIABLES)
+    per_bar.update(f"session.{member}" for member in sigs.SESSION_FLAG_MEMBERS)
+    assert accepted.isdisjoint(per_bar)
+    assert EXCLUDED.keys().isdisjoint(per_bar)
+    assert per_bar <= refused
+    # Non-pure namespace representatives must also stay refusal rows.
+    for namespace, functions in CALL_NAMESPACES.items():
+        name, _setup, _condition = _namespace_row(namespace, functions)
+        assert name not in accepted
+        assert name in refused
 
 
 def test_excluded_inventory_members_cannot_form_scalar_conditions():
@@ -215,19 +281,39 @@ def _assert_refusal(pine, line, column):
     assert diagnostic.location.col == column
 
 
-def _script(setup, condition):
-    return ('//@version=6\nstrategy("Inventory condition")\n'
-            + setup + f'tf = if {condition}\n    "60"\nelse\n    "240"\n'
-            'value = request.security(syminfo.tickerid, tf, close)\n'
-            'if value > close\n    strategy.entry("Long", strategy.long)\n')
-
-
 @pytest.mark.parametrize("name,setup,condition", REFUSAL_ROWS,
                          ids=[row[0] for row in REFUSAL_ROWS])
 def test_inventory_condition_refuses_chart_dependency(name, setup, condition):
-    # Each selected inventory read lacks a stability proof; scalar-if setup
+    # Each selected inventory read has a per-bar dependency; scalar-if setup
     # diagnoses the condition's first token, after the eight-character prefix.
     _assert_refusal(_script(setup, condition), 3 + setup.count("\n"), 9)
+
+
+@pytest.mark.parametrize("name,setup,condition,expected_code", ACCEPTANCE_ROWS,
+                         ids=[row[0] for row in ACCEPTANCE_ROWS])
+def test_fixed_inventory_condition_registration(name, setup, condition, expected_code):
+    pine = _script(setup, condition)
+    if expected_code is not None:
+        _assert_refusal(pine, 3 + setup.count("\n"), 9)
+        return
+    result = transpile_full(pine)
+    assert all(diagnostic.code != "PF-E3110"
+               for diagnostic in result["diagnostics"])
+    # The live helper reads the inventory member; ordinary call emission keeps
+    # its name, while scalar-if setup assigns both string arms in slot zero.
+    registration = result["cpp"].split("register_security_eval(", 1)[1].split(
+        ", input_tf_", 1)[0]
+    assert registration == (
+        '0, ([&]() -> std::string {\n'
+        '    std::string __selection_value_0 = na<std::string>();\n'
+        f'    if ({condition}) {{\n'
+        '        __selection_value_0 = std::string("60");\n'
+        '    } else {\n'
+        '        __selection_value_0 = std::string("240");\n'
+        '    }\n'
+        '    return __selection_value_0;\n'
+        '}())'
+    )
 
 
 @pytest.mark.parametrize("setup,condition", (
@@ -253,3 +339,81 @@ def test_loop_bound_condition_refuses_chart_dependency():
             '    if value > close\n'
             '        strategy.entry("Long", strategy.long)\n')
     _assert_refusal(pine, 4, 13)
+
+
+@pytest.mark.parametrize("setup,loop,condition", (
+    # Literal bounds do not make an iterator available during registration.
+    pytest.param("", "for sample_index = 0 to 1", "sample_index > 0",
+                 id="literal-counted-loop"),
+    # The element is bound by the loop, not by a global initializer.
+    pytest.param("samples = array.from(close)\n", "for sample_value in samples",
+                 "sample_value > 0", id="array-element"),
+    # Both destructured positions are loop bindings, including the index.
+    pytest.param("samples = array.from(close)\n",
+                 "for [sample_index, sample_value] in samples",
+                 "sample_index > 0", id="array-index"),
+    pytest.param("samples = array.from(close)\n",
+                 "for [sample_index, sample_value] in samples",
+                 "sample_value > 0", id="array-indexed-element"),
+))
+def test_loop_binding_timeframe_condition_is_refused(setup, loop, condition):
+    pine = ('//@version=6\nstrategy("Loop binding condition")\n'
+            + setup + loop + '\n'
+            f'    tf = if {condition}\n'
+            '        "60"\n    else\n        "240"\n'
+            '    value = request.security(syminfo.tickerid, tf, close)\n'
+            '    if value > close\n'
+            '        strategy.entry("Long", strategy.long)\n')
+    # The local initializer is checked before registration can emit its name.
+    _assert_refusal(pine, 4 + setup.count("\n"), 13)
+
+
+@pytest.mark.parametrize("setup,loop,condition", (
+    # A same-named fixed global must not hide the counted loop's binding.
+    pytest.param("sample_index = input.int(1)\n",
+                 "for sample_index = 0 to bar_index", "sample_index > 0",
+                 id="counted-shadows-input"),
+    # A same-named fixed global must not hide a for-in element either.
+    pytest.param("sample_value = 1.0\nsamples = array.from(close)\n",
+                 "for sample_value in samples", "sample_value > 0",
+                 id="element-shadows-constant"),
+))
+def test_classifier_follows_exact_loop_binding(setup, loop, condition):
+    pine = ('//@version=6\nstrategy("Binding identity")\n'
+            + setup + loop + '\n'
+            f'    condition_value = {condition}\n')
+    ast = _parse(pine)
+    generator = CodeGen(Analyzer(ast).analyze())
+    value = ast.body[-1].body[0].value
+    # Exact declaration provenance wins over the raw-name global expression.
+    assert generator._security_tf_expr_is_per_bar(value)
+
+
+def test_same_named_globals_and_ordinary_loop_locals_stay_fixed():
+    pine = ('//@version=6\nstrategy("Fixed bindings")\n'
+            'sample_index = input.int(1)\n'
+            'for sample_index = 0 to bar_index\n'
+            '    fixed_value = 2\n'
+            '    condition_value = fixed_value > 0\n'
+            'condition_value = sample_index > 0\n')
+    ast = _parse(pine)
+    generator = CodeGen(Analyzer(ast).analyze())
+    loop = ast.body[-2]
+    # Scope labels alone would mistake the ordinary local for an iterator.
+    assert not generator._security_tf_expr_is_per_bar(loop.body[-1].value)
+    # After the loop, the same spelling resolves to the fixed input again.
+    assert not generator._security_tf_expr_is_per_bar(ast.body[-1].value)
+
+
+def test_nested_local_shadow_of_iterator_stays_fixed():
+    pine = ('//@version=6\nstrategy("Nested binding")\n'
+            'for sample_index = 0 to bar_index\n'
+            '    if true\n'
+            '        sample_index = 2\n'
+            '        condition_value = sample_index > 0\n')
+    ast = _parse(pine)
+    generator = CodeGen(Analyzer(ast).analyze())
+    declaration = ast.body[-1].body[0].body[-1]
+    assert isinstance(declaration, VarDecl)
+    # The inner declaration, rather than the outer loop, binds this read.
+    assert not generator._security_tf_expr_is_per_bar(declaration.value)

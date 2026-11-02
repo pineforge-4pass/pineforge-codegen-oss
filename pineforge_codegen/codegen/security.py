@@ -245,6 +245,20 @@ class SecurityEmitter:
             return None, self._security_tf_runtime_expr(tf_node)
         if isinstance(tf_node, Identifier):
             name = tf_node.name
+            binding = self.ctx.identifier_binding_nodes.get(id(tf_node))
+            if (not self._security_identifier_is_global_binding(tf_node)
+                    and isinstance(binding, VarDecl)
+                    and isinstance(binding.value, IfStmt)
+                    and not self._security_selection_has_block_arms(binding.value)
+                    and any(
+                        isinstance(self.ctx.identifier_binding_nodes.get(id(part)),
+                                   (ForStmt, ForInStmt))
+                        for selection, _ in iter_ast_nodes(binding.value)
+                        if isinstance(selection, IfStmt)
+                        for part, _ in iter_ast_nodes(selection.condition))):
+                # A local initializer is not available at registration time,
+                # but its condition still owns a chart-dependency diagnostic.
+                self._check_security_tf_if_conditions(binding.value)
             if name in self._timeframe_period_vars:
                 return None, "script_tf_"
             if (name in self._known_vars and name not in self._input_backed_vars
@@ -415,20 +429,21 @@ class SecurityEmitter:
         if isinstance(node, SwitchStmt):
             return self._security_tf_switch_runtime_expr(node, resolving or set())
         if isinstance(node, IfStmt):
-            from ..diagnostic_codes import render_diagnostic
-            from ..pine_spelling import expr_start
-
-            # Scalar if conditions must not depend on the chart bar.
-            # Keep the authored condition for the first-token diagnostic span.
-            for selection, _depth in iter_ast_nodes(node):
-                if not isinstance(selection, IfStmt):
-                    continue
-                if self._security_tf_expr_is_per_bar(selection.condition):
-                    message, hint = render_diagnostic("PF-E3110", {})
-                    self._codegen_error(
-                        expr_start(selection.condition), message, hint=hint)
+            self._check_security_tf_if_conditions(node)
         substituted = self._substitute_tf_input_reads(node, resolving or set())
         return self._visit_expr(substituted)
+
+    def _check_security_tf_if_conditions(self, node: IfStmt) -> None:
+        from ..diagnostic_codes import render_diagnostic
+        from ..pine_spelling import expr_start
+
+        # Keep the authored condition for the first-token diagnostic span.
+        for selection, _depth in iter_ast_nodes(node):
+            if (isinstance(selection, IfStmt)
+                    and self._security_tf_expr_is_per_bar(selection.condition)):
+                message, hint = render_diagnostic("PF-E3110", {})
+                self._codegen_error(
+                    expr_start(selection.condition), message, hint=hint)
 
     def _security_tf_if_runtime_expr(self, node: IfStmt) -> str:
         """Render normalized setup arms without entering statement emission.
@@ -1297,7 +1312,8 @@ class SecurityEmitter:
     # Shared subpaths are explored again without memoization, so work can grow
     # with the number of paths. Active functions and persistent global cycles
     # count as per-bar; ordinary global cycles stop at their resetting binding.
-    # These path checks make traversal finite. Unknown identifiers count as fixed.
+    # These path checks make traversal finite. Loop bindings count as per-bar;
+    # other unknown identifiers retain their existing fixed classification.
     def _security_tf_expr_is_per_bar(self, node) -> bool:
         """Follow bar dependencies without requiring a setup replay proof.
 
@@ -1318,6 +1334,9 @@ class SecurityEmitter:
                 return False
             if isinstance(value, Identifier):
                 name = value.name
+                binding = self.ctx.identifier_binding_nodes.get(id(value))
+                if isinstance(binding, (ForStmt, ForInStmt)):
+                    return True
                 global_binding = self._security_identifier_is_global_binding(value)
                 if name in local and not global_binding:
                     # The enclosing body also inspects every local definition.

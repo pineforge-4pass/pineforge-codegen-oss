@@ -256,6 +256,9 @@ class AnalyzerContext:
     # Dedicated source-evidence family of each counted loop, keyed by start.
     # Legacy symbol storage remains independent (collection/callable inference).
     for_counter_types: dict = field(default_factory=dict)  # id(start) -> PineType
+    # Exact declarations for identifier reads, retained after scopes unwind.
+    # Loop binders and ordinary locals can share both a name and a scope label.
+    identifier_binding_nodes: dict = field(default_factory=dict)
     var_member_init_exprs: dict = field(default_factory=dict)  # var-member name -> init AST expr
     # id(VarDecl) -> (node, emitted member name, PineType, rendered initializer,
     #                 is function/method scoped)
