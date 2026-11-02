@@ -77,6 +77,29 @@ def test_float_step_loop_from_a_widened_variable_is_refused_like_int(name):
     assert_float_step_refused(pine, location=(line, first, last + 1))
 
 
+@pytest.mark.parametrize("name", (
+    "callable_direct_float_step", "callable_bound_float_step",
+))
+def test_float_step_loop_from_a_measured_callable_is_refused_like_int(name):
+    source = (FIXTURES / f"{name}.pine").read_bytes()
+    pine = source.decode("utf-8")
+    refusal = TV["compile_refusals"][name]
+    assert refusal["verdict"] == "REFUSED"
+    assert refusal["code"] == "CE10106"
+    assert hashlib.sha256(source).hexdigest() == refusal["source_sha256"]
+    start, end = refusal["span"].split("-")
+    line, first = (int(part) for part in start.split(":"))
+    end_line, last = (int(part) for part in end.split(":"))
+    assert end_line == line
+    # The recorded span must select the step on the loop-header line.
+    header = re.fullmatch(
+        r"\s*for i = .* by (?P<step>.+)", pine.splitlines()[line - 1],
+    )
+    assert header is not None
+    assert (header.start("step") + 1, header.end("step")) == (first, last)
+    assert_float_step_refused(pine, location=(line, first, last + 1))
+
+
 CALLABLE_LOOP_START_REFUSALS = {
     "callable_var_direct": _source("""
         measure(int seed) =>
@@ -127,7 +150,15 @@ CALLABLE_LOOP_START_REFUSALS = {
 
 @pytest.mark.parametrize("name", tuple(CALLABLE_LOOP_START_REFUSALS))
 def test_float_step_loop_from_a_widened_callable_is_refused(name):
-    """TradingView verdict unmeasured; engine refusal pinned so a later change is visible."""
+    """TradingView refuses a float-step loop that starts at a callable's result.
+
+    Measured (CE10106): the var callable called directly with a literal and
+    bound to a name (the two fixture rows above), and the plain-local callable
+    called directly with a literal, directly with an input and bound to a
+    name. These inline rows pin the engine's refusal of each shape so a later
+    change is visible; the TradingView receipts for the plain-local shapes are
+    not stored as fixtures here.
+    """
     assert_float_step_refused(CALLABLE_LOOP_START_REFUSALS[name])
 
 

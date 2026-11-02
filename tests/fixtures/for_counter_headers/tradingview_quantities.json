@@ -5,6 +5,7 @@
   "reassignment_provenance": "All seven reassignment/helper fixtures copy the measured sources byte for byte. TradingView accepted every source on BINANCE:BTCUSDT 60 with default inputs. reassign_int_hint is the controlling row: an explicit int hint retains the quotient, quantity 2.5 on 205 entries, as do the plain and literal initializers. reassign_series_qty alternates 2.5 (103 entries) and 3.5 (102). reassign_untyped, reassign_typed (float hint) and helper_param each have quantity 10.5 on 205 entries and share fractional_input's supplied export digest. The helper_param source digest is computed from the copied source; export digests are supplied measurements, with no export or C++ hash recapture.",
   "callable_quantity_provenance": "callable_var_qty.pine and callable_local_qty.pine copy the measured sources byte for byte. TradingView accepted each source on BINANCE:BTCUSDT 60 with default inputs. Each source was exported once; both exports contain 205 entries, all with quantity 2.5. The two exports are byte-equal, with each export digest bound to its own source digest below. The source and export digests are supplied measurement receipts; the supplied verdict table has SHA-256 0167f54f735894bacf4a6beb4b1643dff4ad2590a12015f42f78af0c54ac44a2.",
   "widened_step_provenance": "The widened_float_step and widened_int_hint_float_step fixtures copy the measured sources byte for byte. TradingView refused both on BINANCE:BTCUSDT 60 with default inputs, reporting CE10106. Their check type stays int although the plain-quantity reassignment rows measure a value of 2.5. The source and error-artifact digests are supplied measurement receipts; the supplied verdict table has SHA-256 88b9dd5b851000ca157b7ade785ea20a85c8a2f8c7f10260ea93d1a0aa11763a.",
+  "callable_step_provenance": "The callable_direct_float_step and callable_bound_float_step fixtures copy the measured sources byte for byte. TradingView refused both on BINANCE:BTCUSDT 60 with default inputs, reporting CE10106 for a series int counter and literal float step. Each source was exported once. The source and error-artifact digests are supplied measurement receipts; the supplied verdict table has SHA-256 e6e85132a0d37351bfc7238c05628552050398ce1206fbbccac1a15583809693. Plain-local callable float-step shapes remain TradingView-unmeasured.",
   "ta_counter_type_receipt": {
     "receipt": "tacarriers-2302",
     "sha256": "be854854835eed60f33abe809a60e100cf978a304ba68138a332ef9d1124d1cc",
@@ -150,6 +151,22 @@
       "span": "7:19-7:21",
       "source_sha256": "436c4da2f6674e4b32770a88957ed0c3b775d6fcc206a89796d7b7f8bd0f2f69",
       "error_json_sha256": "cd67711a0727c06058e5f74d8b50eaa92a07dfcab7e652e669baa8191738594b"
+    },
+    "callable_direct_float_step": {
+      "source_shape": "measure(int seed) => var int s = seed; s := seed; s := s / 2; s; for i = measure(5) to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "9:28-9:30",
+      "source_sha256": "6b31db71ff140465c89f4704756f6ff7bc7792334c8ea055bb6bad045360936e",
+      "error_json_sha256": "222565ee733a6a7071ddab26813a3f85f44d7827f09b5bc1f499dd69b8f28164"
+    },
+    "callable_bound_float_step": {
+      "source_shape": "measure(int seed) => var int s = seed; s := seed; s := s / 2; s; x = measure(n); for i = x to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "11:19-11:21",
+      "source_sha256": "3d14afbd3351a98fdff6dfdaa3071013a28b00b6c1f705c3ca9fa940debc0eee",
+      "error_json_sha256": "0a0e26ca288a99bdff7971d2274508d876d688614137729c96f51ccbb882da9c"
     }
   },
   "known_gaps": {
