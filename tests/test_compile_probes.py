@@ -358,13 +358,13 @@ def test_real_registered_compile_failures_are_red_or_the_fix_really_compiles(
         path = _copy(sources, fixture, f"registered-{number}.pine")
         if KNOWN_COMPILE_FAILURES:
             payload = path.read_text(encoding="utf-8")
+            # The entry ID is emitted beside the unchanged comment expression,
+            # so g++'s source excerpt for the registered failure carries it.
             payload, replacements = re.subn(
-                r'(?m)^(strategy\(")', rf"\g<1>{marker} ", payload, count=1,
+                r'(?m)^([ \t]*strategy\.entry\([ \t]*")',
+                rf"\g<1>{marker} ", payload, count=1,
             )
-            assert replacements == 1, "the copied strategy must carry the private title"
-            # Strategy titles need not be emitted. An alert literal supplies
-            # actual generated-C++ bytes independently of metadata emission.
-            payload = payload.rstrip("\r\n") + f'\nalert("{marker}")\n'
+            assert replacements == 1, "the copied strategy must carry the private entry ID"
             path.write_text(payload, encoding="utf-8")
             assert marker in transpile(payload, filename=path.name)
     _copy(sources, GREEN_FIXTURES[0], "zz-green.pine")
