@@ -219,10 +219,11 @@ class SecurityEmitter:
         from ..diagnostic_codes import render_diagnostic
         from ..pine_spelling import expr_start
 
-        # Independent requested histories match measured three-bar SMA and
-        # one-bar history values at two timeframes. Longer windows have not
-        # been measured; var/varip payload state and other symbols remain
-        # outside that evidence.
+        # Independent requested histories and helper-owned counters match
+        # measured values at two timeframes. Persistent bindings outside the
+        # payload and other symbols remain outside that evidence.
+        # The "another symbol" reason is reserved and currently unreachable:
+        # foreign series-timeframe requests are replaced before analysis.
         message, hint = render_diagnostic("PF-E3111", {"reason": reason})
         self._codegen_error(expr_start(node), message, hint=hint)
 
@@ -357,33 +358,49 @@ class SecurityEmitter:
         dependencies = [] if normalization_failed else series
         return leaves, dependencies, setup_error
 
-    def _security_series_tf_has_state(self, root) -> bool:
-        """Persistent declarations reachable from a requested value, not TA."""
+    def _security_series_tf_state_declarations(self, root) -> tuple[set[int], set[int]]:
+        """Separate payload-owned state from persistent outside bindings.
+
+        Entering a helper body or an expression owns its declarations.
+        Following a value binding only enters its initializer, never owns
+        that binding's storage. Compare declaration identities after the walk
+        so a helper-local read can precede the visit to its declaration.
+        """
+        from ..limits import syntax_children
         from ..security_contexts import ScriptIndex
 
-        index = ScriptIndex(self.ctx.ast)
+        index = ScriptIndex(self.ctx.ast, self.ctx.method_call_bindings)
+        writes: dict[tuple, list[ASTNode]] = {}
+        for node, _depth in iter_ast_nodes(self.ctx.ast):
+            if isinstance(node, Assignment) and isinstance(node.target, Identifier):
+                binding = index.refs.get(id(node.target))
+                if binding is not None:
+                    writes.setdefault(binding, []).append(node.value)
         pending = [root]
         seen: set[int] = set()
+        owned: set[int] = set()
+        referenced: set[int] = set()
         while pending:
             value = pending.pop()
             if not isinstance(value, ASTNode) or id(value) in seen:
                 continue
             seen.add(id(value))
             if isinstance(value, VarDecl) and (value.is_var or value.is_varip):
-                return True
+                owned.add(id(value))
             if isinstance(value, Identifier):
                 binding = index.refs.get(id(value))
                 decl = index.decls.get(binding)
                 if decl is not None:
-                    pending.append(decl)
+                    if decl.is_var or decl.is_varip:
+                        referenced.add(id(decl))
+                    pending.append(decl.value)
+                pending.extend(writes.get(binding, ()))
             if isinstance(value, FuncCall):
-                name, namespace = self._resolve_callee(value.callee)
-                info = self._func_info_map.get(name) if namespace is None else None
+                info = self._func_info_map.get(index.call_target(value))
                 if info is not None and info.node is not None:
                     pending.append(info.node)
-            pending.extend(child for child, _depth in iter_ast_nodes(value)
-                           if child is not value)
-        return False
+            pending.extend(syntax_children(value))
+        return owned, referenced - owned
 
     def _expand_security_series_timeframes(self) -> None:
         """Give every closed arm its own continuously evaluated request state."""
@@ -406,11 +423,15 @@ class SecurityEmitter:
                 item["tf_node"])
             if not series:
                 continue
-            if self._security_series_tf_has_state(item["expr_node"]):
-                # Closing this disagreement needs a TV tape per persistent
-                # state form, then independent state on each requested clock.
+            if item.get("foreign"):
+                self._security_series_tf_refusal(
+                    series[0], "another symbol is not yet supported")
+            local_state, outside_state = self._security_series_tf_state_declarations(
+                item["expr_node"])
+            if outside_state:
                 self._security_series_tf_refusal(
                     series[0], "persistent requested expression state is not yet supported")
+            self._security_series_tf_local_decls.update(local_state)
             arms = []
             keys = set()
             computed = False
@@ -460,6 +481,9 @@ class SecurityEmitter:
                 site = item if arm_index == 0 else dict(original)
                 site["sec_id"] = sec_id
                 site["tf_node"] = leaf
+                if local_state:
+                    site["series_tf_local_decls"] = frozenset(local_state)
+                    site["series_tf_state_node"] = series[0]
                 sites.append(sec_id)
                 if arm_index:
                     site["series_tf_extra"] = True
@@ -4432,8 +4456,9 @@ class SecurityEmitter:
         def scan_body(body, series: set[str]) -> bool:
             for stmt in body or []:
                 if isinstance(stmt, VarDecl):
-                    if ((stmt.is_var or stmt.name in series)
-                            and is_string_decl(stmt)):
+                    persistent = stmt.is_var or (
+                        stmt.is_varip and id(stmt) in self._security_series_tf_local_decls)
+                    if (persistent or stmt.name in series) and is_string_decl(stmt):
                         return True
                     if scan_expr(stmt.value):
                         return True
@@ -4564,7 +4589,10 @@ class SecurityEmitter:
                 self._activate_callable_collection_binding(stmt.name, spec)
 
             if isinstance(stmt, VarDecl):
-                is_persistent_var = stmt.is_var
+                if stmt.is_varip:
+                    self._security_check_helper_varip(
+                        stmt, plan["call_node"], sec_id=sec_id)
+                is_persistent_var = stmt.is_var or stmt.is_varip
                 if stmt.name in local_series_names or is_persistent_var:
                     binding = active_bindings.get(stmt.name)
                     if binding is None:
@@ -4585,6 +4613,7 @@ class SecurityEmitter:
                     )
                     active_bindings[stmt.name] = binding
                     if is_persistent_var:
+                        self._security_series_tf_emitted_state.add((sec_id, id(stmt)))
                         self._security_persistent_helper_series.add(series_name)
                     cpp_type = None
                     if is_persistent_var or self._security_string_series_declared:
@@ -5592,13 +5621,8 @@ class SecurityEmitter:
                     node,
                     "request.security multi-statement helpers may only use local declarations, assignments, and if-branches before the final expression",
                 )
-            if isinstance(stmt, VarDecl):
-                if stmt.is_varip:
-                    self._codegen_error(
-                        node,
-                        "request.security does not support helper-local varip state",
-                        hint="Use var for requested-context bar state; varip tick state is unavailable in batch backtests.",
-                    )
+            if isinstance(stmt, VarDecl) and stmt.is_varip:
+                self._security_check_helper_varip(stmt, node)
             if isinstance(stmt, Assignment):
                 target_name = self._get_target_name(stmt.target)
                 if target_name is None:
@@ -5610,12 +5634,26 @@ class SecurityEmitter:
         local_series_names = sorted(set(self.ctx.func_series_vars.get(fi.name, set())) - set(params))
         return {
             "mode": "linear",
+            "call_node": node,
             "func_info": fi,
             "binding_stack": bound_stack,
             "expr": final_expr,
             "body": stmt_body,
             "local_series_names": local_series_names,
         }
+
+    def _security_check_helper_varip(
+        self, stmt: VarDecl, node: ASTNode, *, sec_id: int | None = None,
+    ) -> None:
+        """Expanded arms use historical bar state; fixed requests keep their gate."""
+        allowed = (self._security_series_tf_local_decls if sec_id is None
+                   else self._security_calls[sec_id].get("series_tf_local_decls", ()))
+        if id(stmt) not in allowed:
+            self._codegen_error(
+                node,
+                "request.security does not support helper-local varip state",
+                hint="Use var for requested-context bar state; varip tick state is unavailable in batch backtests.",
+            )
 
     def _security_tuple_value_fields(
         self,
@@ -5773,7 +5811,9 @@ class SecurityEmitter:
 
         def visit_stmt(stmt, conditional: bool) -> None:
             if isinstance(stmt, VarDecl):
-                if stmt.is_var and conditional:
+                persistent = stmt.is_var or (
+                    stmt.is_varip and id(stmt) in self._security_series_tf_local_decls)
+                if persistent and conditional:
                     self._codegen_error(
                         stmt,
                         "request.security helper-local var declarations inside "
@@ -5787,7 +5827,7 @@ class SecurityEmitter:
                 # current linear emitter hoists nested helper statements ahead
                 # of that guard, so treat the initializer as conditional and
                 # fail closed until it can preserve that execution boundary.
-                visit_expr(stmt.value, conditional or stmt.is_var)
+                visit_expr(stmt.value, conditional or persistent)
                 return
             if isinstance(stmt, IfStmt):
                 visit_expr(stmt.condition, conditional)
@@ -7288,6 +7328,9 @@ class SecurityEmitter:
         with a warning: a requested ``f()`` beside the chart's ``g`` would mix
         two bars. A failure of that emission is the script's own and
         propagates, as does a limit error."""
+        local_state = item.get("series_tf_local_decls", ())
+        self._security_series_tf_emitted_state.difference_update(
+            (item["sec_id"], decl) for decl in local_state)
         snapshot = self._security_state_snapshot()
         body: list[str] = []
         self._security_requested_calls = True
@@ -7315,6 +7358,16 @@ class SecurityEmitter:
         else:
             if self._security_requested_used and self._security_chart_read is not None:
                 reason = self._security_chart_read
+        if local_state and (
+                reason is not None or self._security_chart_read is not None
+                or any((item["sec_id"], decl) not in self._security_series_tf_emitted_state
+                       for decl in local_state)):
+            # A chart fallback can call the ordinary function member and
+            # share its state across arms. Newly admitted state must instead
+            # have been emitted into this site's requested-context cells.
+            self._security_series_tf_refusal(
+                item["series_tf_state_node"],
+                "persistent requested expression state is not yet supported")
         if reason is None:
             lines.extend(body)
             self._security_eval_info[item["sec_id"]]["chart_fallback"] = False
@@ -9751,6 +9804,7 @@ class SecurityEmitter:
             value = build(node.value)
             value = self._security_local_value(value, node.value, cpp_type, args[5])
             if node.is_var or node.is_varip:
+                self._security_series_tf_emitted_state.add((args[0], id(node)))
                 ref = self._security_helper_series_ref(name)
                 seed = self._security_helper_series_ref(f"{name}@var_seed")
                 lines.extend((

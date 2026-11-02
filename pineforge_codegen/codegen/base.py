@@ -780,6 +780,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._dead_fixnan_indices: set[int] = set()
         self._switch_counter = 0
         self._security_inline_counter = 0
+        # Declaration identities are membership keys, never emission order.
+        self._security_series_tf_local_decls: set[int] = set()
+        self._security_series_tf_emitted_state: set[tuple[int, int]] = set()
         # Codegen-only requested argument-history plans. Inner values are
         # frozen records, so speculative evaluator restore is two levels deep.
         self._security_arg_inventory: dict[int, dict] = {}

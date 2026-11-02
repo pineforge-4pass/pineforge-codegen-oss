@@ -434,10 +434,18 @@ Per-bar `request.security` timeframes can have a closed set by value:
 `codegen/timeframe_values.py` unions selection arms through pure scalar
 operators, exact integral string conversions, plain indexed `str.format`
 and pure v6 helpers (including inlined libraries). Unknown values,
-unproved formatting, persistent storage and writes keep PF-E3111.
+unproved formatting, persistent timeframe storage and writes keep PF-E3111.
 `limits.py` names the inventory and deterministic work bounds. The authored
 timeframe still runs at the call; each value has its own registered stream.
 Existing literal/input/chart-period arms retain their emitter.
+The requested expression's own scalar `var` state uses independent helper
+series and once seeds per registered timeframe and helper call. Expanded
+arms also admit helper-local `varip` on the historical requested-bar protocol:
+new requested bars carry the prior value, repeated evaluations roll back.
+Outside persistent bindings (including reads through aliases) retain PF-E3111.
+A stateful expanded evaluator cannot fall back to a chart helper call;
+conditional helper declarations and unsupported state types keep their gates.
+Fixed requests retain their helper-local `varip` refusal.
 
 An aggregate `var` initializer that reads a statement-computed value (directly,
 through a user helper, or through another declaration-site `var`) runs at its

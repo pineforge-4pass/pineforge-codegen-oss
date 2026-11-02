@@ -688,19 +688,85 @@ def test_value_set_limit_refuses_instead_of_truncating_the_inventory():
 
 
 @pytest.mark.parametrize("persistent", ("var", "varip"))
+@pytest.mark.parametrize("selection", (
+    'close > open ? "{fast_tf}" : "{slow_tf}"\n',
+    'if close > open\n    "{fast_tf}"\nelse\n    "{slow_tf}"\n',
+    'switch close > open\n    true => "{fast_tf}"\n    => "{slow_tf}"\n',
+))
+@pytest.mark.parametrize("helper,counter,fast_tf,slow_tf", (
+    ("payload", "saved_v", "75", "180"),
+    ("advance_count", "tally_v", "45", "2D"),
+))
+def test_persistent_requested_expression_has_independent_bar_counters(
+        persistent, selection, helper, counter, fast_tf, slow_tf):
+    # Counter semantics: each requested bar carries its own prior value,
+    # adds one, and recomputations restore that prior value before adding.
+    pine = (HEADER + f"{helper}() =>\n    {persistent} int {counter} = 0\n"
+            f"    {counter} += 1\n    {counter}\n"
+            + 'tf_v = ' + selection.format(fast_tf=fast_tf, slow_tf=slow_tf)
+            + f'got_v = request.security(syminfo.tickerid, tf_v, {helper}())\nplot(got_v)\n')
+    cpp = transpile(pine)
+    assert registrations(cpp) == [
+        f'{i}, "{tf}", input_tf_, false, false'
+        for i, tf in enumerate((fast_tf, slow_tf))
+    ]
+    keys = []
+    for sec_id in (0, 1):
+        body = requested_body(cpp, sec_id)
+        (key,) = set(re.findall(
+            rf'_security_helper_series_\["(_sec{sec_id}_{helper}_\d+_{counter})"\]',
+            body))
+        keys.append(key)
+        assert_counter_protocol(body, sec_id, key)
+        ref = f'_security_helper_series_["{key}"]'
+        assert f"_req_sec_{sec_id} = {ref}[0];" in body
+        assert ref not in chart_body(cpp)
+        assert not re.search(rf"\b{helper}(?:_cs\d+)?\(", body)
+        assert f"case {sec_id}: _eval_security_{sec_id}(bar, is_complete); break;" in cpp
+    assert keys[0] != keys[1]
+    assert keys[0] not in requested_body(cpp, 1)
+    assert keys[1] not in requested_body(cpp, 0)
+    assert_selection_tail(
+        cpp,
+        f'if (_pf_selected_tf == "{fast_tf}") return _req_sec_0;',
+        f'if (_pf_selected_tf == "{slow_tf}") return _req_sec_1;',
+    )
+
+
+def requested_body(cpp, sec_id):
+    return cpp.split(f"void _eval_security_{sec_id}(", 1)[1].split("\n    }\n", 1)[0]
+
+
+def assert_counter_protocol(body, sec_id, key):
+    ref = f'_security_helper_series_["{key}"]'
+    seed = f'_security_helper_series_["{key}@var_seed"]'
+    assert (
+        f"        if ({ref}.size() == 0) {{\n"
+        f"            {seed}.push(0);\n"
+        f"            {ref}.push({seed}[0]);\n"
+        f"        }} else if (security_series_slot_is_new({sec_id})) {{\n"
+        f"            {ref}.push({ref}[0]);\n"
+        f"        }} else {{\n"
+        f"            {ref}.update({ref}.size() > 1 ? {ref}[1] : {seed}[0]);\n"
+        f"        }}\n"
+        f"        {ref}.update({ref}[0] + 1);"
+    ) in body
+    assert body.count(f"{ref}.update({ref}[0] + 1);") == 1
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
 @pytest.mark.parametrize("selection,column", (
     ('close > open ? "75" : "180"\n', 8),
     ('if close > open\n    "75"\nelse\n    "180"\n', 11),
     ('switch close > open\n    true => "75"\n    => "180"\n', 15),
 ))
-def test_persistent_requested_expression_keeps_a_located_refusal(
-        persistent, selection, column):
-    # The requested helper owns persistent storage, unlike independent TA
-    # or history buffers; this unmeasured state retains an explicit refusal.
-    pine = (HEADER + f"payload() =>\n    {persistent} float saved_v = na\n"
-            "    saved_v := nz(saved_v) + close\n    saved_v\n"
+@pytest.mark.parametrize("expression", ("saved_v", "payload()", "saved_v[1]"))
+def test_global_persistent_requested_expression_keeps_a_located_refusal(
+        persistent, selection, column, expression):
+    pine = (HEADER + f"{persistent} float saved_v = na\n"
+            "payload() =>\n    local_v = saved_v\n    local_v\n"
             + 'tf_v = ' + selection
-            + 'got_v = request.security(syminfo.tickerid, tf_v, payload())\nplot(got_v)\n')
+            + f'got_v = request.security(syminfo.tickerid, tf_v, {expression})\nplot(got_v)\n')
     with pytest.raises(CompileError) as caught:
         transpile(pine)
     (diagnostic,) = caught.value.diagnostics
@@ -708,6 +774,141 @@ def test_persistent_requested_expression_keeps_a_located_refusal(
     assert diagnostic.args == {
         "reason": "persistent requested expression state is not yet supported"}
     assert (diagnostic.location.line, diagnostic.location.col) == (7, column)
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+def test_reassigned_alias_cannot_hide_global_persistent_state(persistent):
+    pine = (HEADER + f"{persistent} int saved_v = 0\n"
+            "saved_v += 1\nalias_v = 0\nalias_v := saved_v\n"
+            'tf_v = close > open ? "45" : "2D"\n'
+            'got_v = request.security(syminfo.tickerid, tf_v, alias_v)\nplot(got_v)\n')
+    with pytest.raises(CompileError) as caught:
+        transpile(pine)
+    assert caught.value.diagnostics[0].code == "PF-E3111"
+    assert caught.value.diagnostics[0].args == {
+        "reason": "persistent requested expression state is not yet supported"}
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+def test_state_in_the_requesting_helper_stays_outside_the_payload(persistent):
+    pine = (HEADER + f"read_value() =>\n    {persistent} int saved_v = 0\n"
+            "    saved_v += 1\n"
+            '    tf_v = close > open ? "45" : "2D"\n'
+            '    request.security(syminfo.tickerid, tf_v, saved_v)\n'
+            'plot(read_value())\n')
+    with pytest.raises(CompileError) as caught:
+        transpile(pine)
+    assert caught.value.diagnostics[0].code == "PF-E3111"
+    assert caught.value.diagnostics[0].args == {
+        "reason": "persistent requested expression state is not yet supported"}
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+def test_method_payload_cannot_hide_a_global_persistent_read(persistent):
+    pine = (HEADER + f"{persistent} float saved_v = 0.0\n"
+            "method read_saved(float receiver_v) =>\n    receiver_v + saved_v\n"
+            'tf_v = close > open ? "45" : "2D"\n'
+            'got_v = request.security(syminfo.tickerid, tf_v, close.read_saved())\n'
+            'plot(got_v)\n')
+    with pytest.raises(CompileError) as caught:
+        transpile(pine)
+    assert caught.value.diagnostics[0].code == "PF-E3111"
+    assert caught.value.diagnostics[0].args == {
+        "reason": "persistent requested expression state is not yet supported"}
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+def test_requested_selection_owns_its_persistent_declaration(persistent):
+    pine = (HEADER + "chosen_v = if true\n"
+            f"    {persistent} int saved_v = 0\n"
+            "    saved_v := saved_v + 1\n    saved_v\nelse\n    0\n"
+            'tf_v = close > open ? "45" : "2D"\n'
+            'got_v = request.security(syminfo.tickerid, tf_v, chosen_v)\nplot(got_v)\n')
+    cpp = transpile(pine)
+    for sec_id in (0, 1):
+        body = requested_body(cpp, sec_id)
+        (key,) = set(re.findall(
+            rf'_security_helper_series_\["(_sec{sec_id}_selection_\d+_saved_v)"\]', body))
+        ref = f'_security_helper_series_["{key}"]'
+        seed = f'_security_helper_series_["{key}@var_seed"]'
+        assert f"{seed}.push(0);" in body
+        assert f"security_series_slot_is_new({sec_id})" in body
+        assert f"{ref}.push({ref}[0]);" in body
+        assert f"{ref}.update({ref}.size() > 1 ? {ref}[1] : {seed}[0]);" in body
+        assert ref not in requested_body(cpp, 1 - sec_id)
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+def test_nested_helper_counter_shadows_unused_global_state(persistent):
+    pine = (HEADER + "var int saved_v = 100\n"
+            f"payload() =>\n    {persistent} int saved_v = 0\n"
+            "    saved_v += 1\n    saved_v\n"
+            "forward_count() =>\n    payload()\n"
+            'tf_v = close > open ? "45" : "2D"\n'
+            'got_v = request.security(syminfo.tickerid, tf_v, forward_count())\nplot(got_v)\n')
+    cpp = transpile(pine)
+    for sec_id in (0, 1):
+        body = requested_body(cpp, sec_id)
+        (key,) = set(re.findall(
+            rf'_security_helper_series_\["(_sec{sec_id}_payload_\d+_saved_v)"\]', body))
+        assert_counter_protocol(body, sec_id, key)
+        assert "forward_count(" not in body and "payload(" not in body
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+def test_each_helper_call_in_one_payload_keeps_its_own_counter(persistent):
+    pine = (HEADER + f"payload() =>\n    {persistent} int saved_v = 0\n"
+            "    saved_v += 1\n    saved_v\n"
+            'tf_v = close > open ? "45" : "2D"\n'
+            'got_v = request.security(syminfo.tickerid, tf_v, payload() + payload())\n'
+            'plot(got_v)\n')
+    cpp = transpile(pine)
+    all_keys = set()
+    for sec_id in (0, 1):
+        body = requested_body(cpp, sec_id)
+        keys = set(re.findall(
+            rf'_security_helper_series_\["(_sec{sec_id}_payload_\d+_saved_v)"\]', body))
+        assert len(keys) == 2
+        for key in keys:
+            assert_counter_protocol(body, sec_id, key)
+        assert all_keys.isdisjoint(keys)
+        all_keys.update(keys)
+    assert len(all_keys) == 4
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+def test_stateful_payload_cannot_fall_back_to_a_chart_helper_call(persistent):
+    pine = (HEADER + f"payload() =>\n    {persistent} int saved_v = 0\n"
+            "    saved_v += 1\n    saved_v\n"
+            'tf_v = close > open ? "45" : "2D"\n'
+            'got_v = request.security(syminfo.tickerid, tf_v, nz(payload()))\nplot(got_v)\n')
+    with pytest.raises(CompileError) as caught:
+        transpile(pine)
+    assert caught.value.diagnostics[0].code == "PF-E3111"
+    assert caught.value.diagnostics[0].args == {
+        "reason": "persistent requested expression state is not yet supported"}
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+def test_conditional_helper_persistence_keeps_its_rollback_refusal(persistent):
+    pine = (HEADER + "payload() =>\n    result_v = 0\n    if close > open\n"
+            f"        {persistent} int saved_v = 0\n"
+            "        saved_v += 1\n        result_v := saved_v\n    result_v\n"
+            'tf_v = close > open ? "45" : "2D"\n'
+            'got_v = request.security(syminfo.tickerid, tf_v, payload())\nplot(got_v)\n')
+    with pytest.raises(CompileError, match="conditional control flow"):
+        transpile(pine)
+
+
+def test_fixed_request_of_same_varip_helper_keeps_its_refusal():
+    pine = (HEADER + "payload() =>\n    varip int saved_v = 0\n"
+            "    saved_v += 1\n    saved_v\n"
+            'tf_v = close > open ? "45" : "2D"\n'
+            'got_v = request.security(syminfo.tickerid, tf_v, payload())\n'
+            'fixed_v = request.security(syminfo.tickerid, "30", payload())\n'
+            'plot(got_v + fixed_v)\n')
+    with pytest.raises(CompileError, match="helper-local varip state"):
+        transpile(pine)
 
 
 @pytest.mark.parametrize("selection", (
