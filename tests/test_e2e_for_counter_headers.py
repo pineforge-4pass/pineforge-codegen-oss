@@ -7,6 +7,7 @@ TradingView tapes. Every assertion reads the compiled strategy's trade output.
 
 from __future__ import annotations
 
+from collections import Counter
 import csv
 import hashlib
 import json
@@ -19,7 +20,8 @@ import pytest
 from tests import _compile as compile_env
 from pineforge_codegen import transpile
 from tests._e2e import (
-    Build, assert_same_runs, chart_feed_head, execute_all, ok, skip_unless_e2e_env,
+    Build, assert_same_runs, chart_feed_head, closed_trades, execute_all, ok,
+    skip_unless_e2e_env,
 )
 from tests._for_counter_header_cases import STOP_SOURCES
 from tests._for_fractional_carriers import CARRIER_SOURCES, KNOWN_CARRIER_GAPS
@@ -29,6 +31,9 @@ FIXTURES = Path(__file__).parent / "fixtures" / "for_counter_headers"
 TV = json.loads((FIXTURES / "tradingview_quantities.json").read_text(encoding="utf-8"))
 MEASURED = tuple(TV["entry_quantities"])
 PATTERN_MEASURED = tuple(TV["entry_quantity_patterns"])
+FRACTIONAL_COUNTER_TAPES = (
+    "fractional_descending", "fractional_array_index", "counter_string",
+)
 # These twins change authored Pine expressions, never emitted C++ or a tape.
 DIVISION_TAPE_TWINS = {
     "division_start_no_step": ("for i = 5 / 2 to", "for i = 2.5 to"),
@@ -38,6 +43,9 @@ DIVISION_TAPE_TWINS = {
     "division_counter_value": ("for i = 9 / 2 to", "for i = 4.5 to"),
     "fractional_input": ("for i = n / 2 to", "for i = n * 0.5 to"),
     "fractional_series": ("for i = n / 2 to", "for i = n * 0.5 to"),
+    "fractional_descending": ("for i = n / 2 to", "for i = n * 0.5 to"),
+    "fractional_array_index": ("for i = n / 2 to", "for i = n * 0.5 to"),
+    "counter_string": ("for i = n / 2 to", "for i = n * 0.5 to"),
 }
 # Shared parameter inference still truncates this float counter. Run it as
 # a documented discrepancy, retaining TradingView's measured 5 in the quantities file.
@@ -185,12 +193,18 @@ CONTROLS = {
 
 
 @pytest.fixture(scope="module")
-def runs(tmp_path_factory):
+def run_environment(tmp_path_factory):
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("for_counter_headers")
     # The seven-bar schedule closes all 205 entries by bar 1441. The eight-bar
     # schedule closes its final entry at bar 1442, so include that bar too.
     feed = chart_feed_head(engine, base, FEED_BARS)
+    return engine, base, feed
+
+
+@pytest.fixture(scope="module")
+def runs(run_environment):
+    engine, base, feed = run_environment
     builds = {}
     for name in (*MEASURED, *PATTERN_MEASURED, *ZERO_ENTRY_PROBES):
         # Includes the float-start probes with TradingView's measured
@@ -234,7 +248,7 @@ def _assert_quantities(
 ) -> None:
     rows = csv.DictReader(outcome.trades[tag].decode("utf-8-sig").splitlines())
     entries = [row for row in rows if row["Type"].startswith("Entry")]
-    expected_entries = TV["entries_per_probe"]
+    expected_entries = TV["entry_counts"].get(probe, TV["entries_per_probe"])
     schedule = TV["trade_schedules"].get(probe)
     if schedule is not None:
         # Orders fill on the next bar. Only entries whose close can fill
@@ -264,6 +278,7 @@ def test_tradingview_evidence_has_complete_sha256():
             assert re.fullmatch(
                 r"[0-9a-fA-F]{64}", refusal[field] or ""
             ), (name, field)
+    assert re.fullmatch(r"[0-9a-fA-F]{64}", TV["ta_counter_type_receipt"]["sha256"])
 
 
 @pytest.mark.parametrize("name", tuple(DIVISION_TAPE_TWINS))
@@ -273,6 +288,16 @@ def test_division_fixture_is_the_measured_source(name):
     assert hashlib.sha256((FIXTURES / evidence["source"]).read_bytes()).hexdigest() == (
         evidence["source_sha256"]
     )
+
+
+@pytest.mark.parametrize("name", FRACTIONAL_COUNTER_TAPES)
+def test_fractional_counter_tape_translates_with_a_double_counter(name):
+    # TradingView accepted each exact fixture. This check has no native skip.
+    cpp = transpile((FIXTURES / f"{name}.pine").read_text(encoding="utf-8"))
+    assert re.search(r"\bfor \(double i = ", cpp), cpp
+    assert not re.search(r"\bfor \(int i = ", cpp), cpp
+    for slot in ("start", "end", "step"):
+        assert re.search(rf"\bdouble _for_{slot}_\d+ = ", cpp), cpp
 
 
 @pytest.mark.parametrize("name", tuple(
@@ -391,6 +416,34 @@ def test_tradingview_alternating_entry_quantities(runs, name, suffix):
         for index in range(TV["entries_per_probe"])
     ], TV["evidence"][name]["sha256"]
     assert [quantities.count(qty) for qty in pattern["quantities"]] == pattern["counts"]
+
+
+@pytest.mark.parametrize("suffix", ["", "_twin"])
+def test_known_gap_counter_tostring(runs, run_environment, suffix):
+    """TV prints 2.500000000000000000; we print 2.500000000000000 (15 places).
+
+    Quantity and entry counts match the tape; ids are a known formatter gap.
+    This row must flip to the recorded TV ids when the formatter is fixed.
+    """
+    gap = TV["known_gaps"]["counter_tostring"]
+    name = gap["probe"]
+    pattern = TV["entry_id_patterns"][name]
+    evidence = TV["evidence"][name]["sha256"]
+    outcome = ok(runs, name + suffix)
+    _assert_quantities(outcome, "default", TV["entry_quantities"][name], probe=name)
+    engine, base, feed = run_environment
+    # engine_trades.csv has no ids. Read the same built strategy through the
+    # existing native report helper, which exposes each closed trade's id.
+    entries = closed_trades(engine, base / (name + suffix), feed)
+    assert len(entries) == TV["entry_counts"][name], evidence
+    assert all(
+        entry["qty"] == TV["entry_quantities"][name] for entry in entries
+    ), evidence
+    recorded = Counter(dict(zip(pattern["ids"], pattern["counts"])))
+    current = Counter(dict(zip(gap["current_entry_ids"], pattern["counts"])))
+    actual = Counter(entry["entry_id"] for entry in entries)
+    assert actual == current, (evidence, actual, current)
+    assert actual != recorded, (evidence, "formatter gap closed; assert the TV ids")
 
 
 @pytest.mark.parametrize("name", sorted(CARRIER_SOURCES.keys() - KNOWN_CARRIER_GAPS))

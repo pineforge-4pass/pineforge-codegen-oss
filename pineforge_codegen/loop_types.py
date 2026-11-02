@@ -35,6 +35,7 @@ _FLOAT_CALLS = {
         "tsi", "wpr", "cog", "bbw", "kcw", "atr", "tr", "stdev",
         "variance", "sar", "percentrank", "percentile_linear_interpolation",
         "dev", "cum", "correlation", "rci", "highest", "lowest",
+        "max", "min", "percentile_nearest_rank",
     }),
 }
 _ARRAY_ELEMENTS = frozenset({
@@ -252,15 +253,9 @@ class _CounterQuery:
         if namespace is None and name in {"nz", "fixnan", "input"}:
             return self.infer(argument(0, "defval" if name == "input" else "source"))
         if namespace == "ta" and name in {
-            "change", "valuewhen", "median", "mode", "max", "min",
-            "range", "percentile_nearest_rank",
+            "change", "valuewhen", "median", "mode", "range",
         }:
-            source = self.infer(argument(1 if name == "valuewhen" else 0, "source"))
-            if source == _INT and name not in {"change", "valuewhen"}:
-                # No TradingView int-result receipt yet for these six calls.
-                # Leave the check unknown until their overloads are measured.
-                return None
-            return source
+            return self.infer(argument(1 if name == "valuewhen" else 0, "source"))
         if namespace == "request" and name == "security":
             return self.infer(argument(2, "expression"))
         if namespace == "array":

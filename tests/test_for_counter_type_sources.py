@@ -176,35 +176,59 @@ def test_highest_and_lowest_int_sources_accept_a_float_step(name, arguments):
 
 @pytest.mark.parametrize("start", [
     "ta.change(bar_index)",
-    "ta.valuewhen(true, bar_index, 0)",
+    "ta.change(bar_index, 2)",  # TradingView CE10106, receipt tacarriers-2302
+    "ta.median(bar_index, 3)",  # TradingView CE10106, receipt tacarriers-2302
+    "ta.mode(bar_index, 3)",  # TradingView CE10106, receipt tacarriers-2302
+    "ta.range(bar_index, 3)",  # TradingView CE10106, receipt tacarriers-2302
 ])
 def test_measured_source_typed_ta_calls_still_refuse_an_int_source_float_step(start):
-    # TradingView refuses both int-source forms; division value typing must
+    # TradingView refuses these int-source forms; division value typing must
     # not widen their check result to the registry's default float.
     assert_float_step_refused(loop_step_source(start))
     pine = loop_step_source(start, step=None)
     loop, ctx, query = _analyzed_counter_start(pine)
     assert query.infer(loop.start) == TypeSpec.primitive("int")
+    assert query.value_spec(loop.start) == TypeSpec.primitive("int")
     assert ctx.for_counter_types[id(loop.start)] == PineType.INT
 
 
 @pytest.mark.parametrize("start", [
-    "ta.median(bar_index, 3)",  # no TradingView receipt yet
-    "ta.mode(bar_index, 3)",  # no TradingView receipt yet
-    "ta.max(bar_index)",  # no TradingView receipt yet
-    "ta.min(bar_index)",  # no TradingView receipt yet
-    "ta.range(bar_index, 3)",  # no TradingView receipt yet
-    "ta.percentile_nearest_rank(bar_index, 3, 50)",  # no TradingView receipt yet
+    "ta.max(bar_index)",  # TradingView ACCEPTED, receipt tacarriers-2302
+    "ta.min(bar_index)",  # TradingView ACCEPTED, receipt tacarriers-2302
+    "ta.percentile_nearest_rank(bar_index, 3, 50)",  # TradingView ACCEPTED, receipt tacarriers-2302
 ])
-def test_unmeasured_int_source_ta_check_type_stays_temporarily_unknown(start):
+def test_measured_float_result_ta_calls_accept_an_int_source_float_step(start):
     pine = loop_step_source(start)
     loop, ctx, query = _analyzed_counter_start(pine)
-    assert query.infer(loop.start) is None
-    assert query.value_spec(loop.start) is None
+    assert query.infer(loop.start) == TypeSpec.primitive("float")
+    assert query.value_spec(loop.start) == TypeSpec.primitive("float")
     assert ctx.for_counter_types[id(loop.start)] == PineType.FLOAT
     cpp = transpile(pine)
     assert re.search(r"\bfor \(double i = ", cpp), cpp
     assert not re.search(r"\bfor \(int i = ", cpp), cpp
+    for slot in ("start", "end", "step"):
+        assert re.search(rf"\bdouble _for_{slot}_\d+ = ", cpp), cpp
+
+
+def test_highest_one_argument_accepts_a_float_step():
+    # TradingView ACCEPTED, receipt tacarriers-2302: compile evidence only,
+    # with zero entries. This row claims no measured runtime quantity.
+    pine = loop_step_source("ta.highest(3)")
+    loop, ctx, query = _analyzed_counter_start(pine)
+    assert query.infer(loop.start) == TypeSpec.primitive("float")
+    assert query.value_spec(loop.start) == TypeSpec.primitive("float")
+    assert ctx.for_counter_types[id(loop.start)] == PineType.FLOAT
+    assert re.search(r"\bfor \(double i = ", transpile(pine))
+
+
+def test_valuewhen_keeps_its_existing_source_typed_check():
+    # No receipt, kept as on main.
+    start = "ta.valuewhen(true, bar_index, 0)"
+    assert_float_step_refused(loop_step_source(start))
+    loop, ctx, query = _analyzed_counter_start(loop_step_source(start, step=None))
+    assert query.infer(loop.start) == TypeSpec.primitive("int")
+    assert query.value_spec(loop.start) == TypeSpec.primitive("int")
+    assert ctx.for_counter_types[id(loop.start)] == PineType.INT
 
 
 def test_requested_expression_helper_division_start_uses_a_double_counter():
