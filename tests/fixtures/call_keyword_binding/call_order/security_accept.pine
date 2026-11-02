@@ -1,0 +1,10 @@
+//@version=6
+strategy("Request positional prefix", initial_capital = 1000000, currency = currency.NONE)
+// The request reads the chart's own symbol and timeframe.
+metric = request.security(syminfo.tickerid, timeframe.period, expression = close)
+if metric < 0
+    strategy.cancel("L")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

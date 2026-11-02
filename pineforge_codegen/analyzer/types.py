@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .. import signatures as sigs
 from ..ast_nodes import (
     ASTNode, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall, Identifier, IfStmt,
     MemberAccess, NaLiteral, NumberLiteral, StringLiteral, Subscript, Ternary,
@@ -647,8 +648,9 @@ class TypeHelper:
             if ns == "map" and func in {
                 "put", "get", "remove", "contains", "size", "keys",
                 "values", "copy", "put_all", "clear",
-            } and value.args:
-                recv_spec = self._type_spec_from_expr(value.args[0])
+            }:
+                receiver = value.args[0] if value.args else value.kwargs.get("id")
+                recv_spec = self._type_spec_from_expr(receiver)
                 if recv_spec is not None and recv_spec.kind == "map":
                     if func in ("put", "get", "remove"):
                         return recv_spec.value
@@ -888,71 +890,30 @@ class TypeHelper:
 
         callee = value.callee
         method = callee.member
-        receiver = None
+        param_names = sigs.get_param_names("map", method)
+        if param_names is None:
+            return None
         if isinstance(callee.object, Identifier) and callee.object.name == "map":
-            # Functional form: map.method(id, ...). Keyword-only receiver
-            # routing remains a separate residual, so require the established
-            # positional receiver here.
-            functional_arity = {
-                "clear": 1,
-                "keys": 1,
-                "values": 1,
-                "copy": 1,
-                "put_all": 2,
-                "get": 2,
-                "remove": 2,
-                "put": 3,
-            }.get(method)
-            if (
-                functional_arity is not None
-                and len(value.args) == functional_arity
-                and not value.kwargs
-            ):
-                receiver = value.args[0]
+            receiver = value.args[0] if value.args else value.kwargs.get("id")
         elif isinstance(callee.object, Identifier):
             # Global/local/typed-parameter method forms only. Do not infer an
             # arbitrary expression receiver that codegen cannot route.
-            is_parameter = (
-                parameter_specs is not None
-                and callee.object.name in parameter_specs
-            )
-            valid_method_shape = False
-            expected_arity = {
-                "clear": 0,
-                "keys": 0,
-                "values": 0,
-                "copy": 0,
-                "put_all": 1,
-                "get": 1,
-                "remove": 1,
-                "put": 2,
-            }.get(method)
-            if expected_arity is not None:
-                valid_method_shape = (
-                    len(value.args) == expected_arity and not value.kwargs
-                )
-            if is_parameter and not valid_method_shape:
-                if method == "put_all":
-                    valid_method_shape = (
-                        not value.args and set(value.kwargs) == {"id2"}
-                    )
-                elif method in ("get", "remove"):
-                    valid_method_shape = (
-                        not value.args and set(value.kwargs) == {"key"}
-                    )
-                elif method == "put":
-                    valid_method_shape = (
-                        (
-                            len(value.args) == 1
-                            and set(value.kwargs) == {"value"}
-                        )
-                        or (
-                            not value.args
-                            and set(value.kwargs) == {"key", "value"}
-                        )
-                    )
-            if valid_method_shape:
-                receiver = callee.object
+            param_names = param_names[1:]
+            receiver = callee.object
+        else:
+            return None
+
+        # Match the map binder's positional-prefix/named-slot rule without
+        # changing the codegen diagnostics of malformed calls.
+        if len(value.args) > len(param_names):
+            return None
+        if any(name not in param_names for name in value.kwargs):
+            return None
+        if any(name in value.kwargs for name in param_names[:len(value.args)]):
+            return None
+        provided = set(param_names[:len(value.args)]) | set(value.kwargs)
+        if provided != set(param_names):
+            return None
         if receiver is None:
             return None
 

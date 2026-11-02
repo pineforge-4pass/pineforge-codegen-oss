@@ -1,0 +1,11 @@
+//@version=6
+strategy("Typed array named initializer", initial_capital = 1000000, currency = currency.NONE)
+// The named initializer belongs to the second slot; the first element is 2.
+values = array.new_float(3, initial_value = 2.0)
+metric = array.get(values, 0)
+if metric < 0
+    strategy.cancel("L")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

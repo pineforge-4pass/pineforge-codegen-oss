@@ -7057,9 +7057,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if (
                 isinstance(callee.object, Identifier)
                 and callee.object.name == "map"
-                and node.args
             ):
-                receiver = node.args[0]
+                receiver = node.args[0] if node.args else node.kwargs.get("id")
             elif not (
                 isinstance(callee.object, Identifier)
                 and callee.object.name in {

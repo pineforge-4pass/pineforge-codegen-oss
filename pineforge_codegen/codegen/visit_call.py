@@ -971,17 +971,13 @@ class CallVisitor:
         node: FuncCall,
         *,
         functional: bool,
-        allow_keywords: bool,
     ) -> list:
-        """Validate and bind one established map-call form.
+        """Validate and bind map arguments in declared parameter order.
 
-        Map lowerings index directly into their argument arrays.  Before this
-        guard, malformed calls therefore either reached a raw ``IndexError``
-        or, for keyword-only ``map.*`` functional calls, silently lowered to
-        ``0``.  Keep routing policy separate from signature validation: only
-        the typed-map UDF-parameter method lane currently accepts canonical
-        keywords; all other lanes retain their established positional-only
-        semantics and fail closed when keywords are supplied.
+        A positional prefix fills the leading slots; keywords fill their own
+        named slots in both namespace and receiver forms. Map lowerings index
+        directly into the returned list, so reject unknown, duplicate, missing
+        and excess arguments before emission.
         """
         if method == "new":
             param_names: list[str] = []
@@ -1040,17 +1036,6 @@ class CallVisitor:
                 node,
                 f"map.{method}: missing required argument '{missing[0]}'",
                 hint=f"Expected {signature}.",
-            )
-
-        if node.kwargs and not allow_keywords:
-            form = "functional" if functional else "receiver-method"
-            self._codegen_error(
-                node,
-                (
-                    f"map.{method}: keyword arguments are not supported "
-                    f"for this {form} call form"
-                ),
-                hint=f"Use the established positional form: {signature}.",
             )
 
         if method == "put":
@@ -1735,7 +1720,6 @@ class CallVisitor:
                     callee.member,
                     node,
                     functional=False,
-                    allow_keywords=False,
                 )
                 receiver = f"({self._visit_expr(callee.object)})"
                 return self._map_param_method_expr(
@@ -1874,7 +1858,6 @@ class CallVisitor:
                             meth,
                             node,
                             functional=False,
-                            allow_keywords=False,
                         )
                         return self._map_param_method_expr(
                             recv,
@@ -1962,7 +1945,6 @@ class CallVisitor:
                             meth_raw,
                             node,
                             functional=False,
-                            allow_keywords=True,
                         )
                         return self._map_param_method_expr(
                             m, meth_raw, arg_nodes, param_spec, node
@@ -1982,7 +1964,6 @@ class CallVisitor:
                             meth_raw,
                             node,
                             functional=False,
-                            allow_keywords=False,
                         )
                         return self._map_param_method_expr(
                             m, meth_raw, arg_nodes, recv_spec, node
@@ -2208,7 +2189,6 @@ class CallVisitor:
                 func_name,
                 node,
                 functional=False,
-                allow_keywords=False,
             )
             return self._map_param_method_expr(
                 m, func_name, arg_nodes, namespace_spec, node
@@ -2220,20 +2200,19 @@ class CallVisitor:
                 # This dispatch point comes after lexical receiver routing, so
                 # a parameter/local/global named ``map`` retains precedence
                 # over the built-in namespace.
-                self._map_call_arg_nodes(
+                arg_nodes = self._map_call_arg_nodes(
                     func_name,
                     node,
                     functional=True,
-                    allow_keywords=False,
                 )
             if func_name == "new":
                 spec = self._type_spec_from_expr(node) or TypeSpec.map(TypeSpec.primitive("string"), TypeSpec.primitive("float"))
                 return f"{self._type_spec_to_cpp(spec)}::new_()"
-            if func_name in MAP_METHODS and node.args:
-                m = self._visit_expr(node.args[0])
-                spec = self._type_spec_from_expr(node.args[0]) if node.args else None
+            if func_name in MAP_METHODS:
+                m = self._visit_expr(arg_nodes[0])
+                spec = self._type_spec_from_expr(arg_nodes[0])
                 return self._map_param_method_expr(
-                    m, func_name, list(node.args[1:]), spec, node
+                    m, func_name, arg_nodes[1:], spec, node
                 )
             return "0"
 

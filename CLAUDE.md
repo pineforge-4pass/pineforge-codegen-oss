@@ -349,6 +349,13 @@ tests/
 
 ## Support contracts
 
+Map namespace calls and receiver methods share named-slot argument binding:
+positional arguments fill the leading slots, and keywords fill the parameters
+with those names, including a functional receiver named `id`. Valid keyword
+forms lower as their positional twins; unknown, duplicate, missing and excess
+arguments keep the existing map diagnostics. Named receivers retain the map's
+value and collection result types, including direct function returns.
+
 An aggregate `var` initializer that reads a statement-computed value (directly,
 through a user helper, or through another declaration-site `var`) runs at its
 declaration under the existing once flag. An earlier reassignment or collection
