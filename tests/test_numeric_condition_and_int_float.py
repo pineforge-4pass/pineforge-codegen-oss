@@ -73,6 +73,13 @@ if bar_index % 20 == 15
         # An if expression uses the same condition rule; close starts at column 8.
         id="numeric_if_expression",
     ),
+    pytest.param(
+        '//@version=6\nstrategy("Unavailable condition")\nif na\n    strategy.entry("L", strategy.long)\n',
+        "PF-E2046", (3, 4),
+        # TV CE10101: specprobes/P0C2/if_na_cond/error.json.
+        # The condition relation rejects na; it begins after "if " at 3:4.
+        id="na_condition",
+    ),
 ]
 
 
@@ -146,11 +153,6 @@ _ACCEPTED = [
         '//@version=6\nstrategy("Boolean array selection")\nflags = array.from(true, close > open)\nfor [i, ready] in flags\n    alias = bar_index % 2 == 0 ? ready : false\n    if alias\n        strategy.entry("L", strategy.long)\n',
         # Both ternary arms have bool type, so the selected local is a bool condition.
         id="bool_array_selected_condition",
-    ),
-    pytest.param(
-        '//@version=6\nstrategy("Unavailable condition")\nif na\n    strategy.entry("L", strategy.long)\n',
-        # A condition of na type is unmeasured and retains its existing lowering.
-        id="na_condition",
     ),
     pytest.param(
         '//@version=6\nstrategy("Numeric while condition")\nwhile bool(close)\n    break\n',

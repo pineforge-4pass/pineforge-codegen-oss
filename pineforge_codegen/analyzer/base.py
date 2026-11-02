@@ -93,7 +93,7 @@ from .tables import (
 # TypeHelper mixin owns the Pine type-hint / expression -> TypeSpec / PineType
 # inference helpers previously inlined in this module; see
 # ``compiler/transpiler/analyzer/types.py``.
-from .types import TypeHelper
+from .types import OperatorTypeQuery, TypeHelper
 
 # DiagnosticsHelper mixin owns _error / _warn / _input_diag_loc /
 # _expr_to_str / _warn_if_unknown_source_id; see
@@ -105,6 +105,10 @@ from .diagnostics import DiagnosticsHelper
 # ``compiler/transpiler/analyzer/call_handlers.py``. Largest analyzer
 # mixin (~500 lines).
 from .call_handlers import CallHandlers
+from .operators import (
+    fixed_builtin_result, join_value_types, reference_value_type, resolve_operator,
+    source_builtin_result,
+)
 
 
 _BUILTIN_NAMESPACE_NAMES = frozenset({
@@ -383,6 +387,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # closed. Pine explicitly permits an untyped parameter to inherit a
         # different type at each written call site.
         self._callable_bound_param_types_by_node: dict[int, list[PineType]] = {}
+        # Refusal proofs are private to the relation. None is an explicit
+        # unresolved declaration, never permission to recover a storage type.
+        self._operator_types_by_node: dict[int, TypeSpec | None] = {}
+        self._operator_definition_scopes = {}
+        self._operator_condition_errors: list[tuple[TypeSpec, SourceLocation | None]] = []
         # Diagnostic provenance only; never re-visit a condition's receiver.
         self._na_return_callables: dict[int, FuncDef] = {}
         self._func_callsite_param_types: dict[
@@ -600,6 +609,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._ensure_pine_v6()
         self._check_direct_terminal_array_element_callee_shadows()
         self._visit(self._ast)
+        if self._operator_condition_errors:
+            condition_type, location = self._operator_condition_errors[0]
+            self._error(
+                f"The ?: operator requires a bool condition; found {condition_type}.",
+                location,
+            )
         # Reassignments anywhere in the program prevent const qualification.
         from ..codegen.strategy_declaration import resolve_strategy_declarations
         self._strategy_params = resolve_strategy_declarations(
@@ -4690,6 +4705,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             setattr(sym, "_pf_certain_declared", True)
         if certain_type != PineType.UNKNOWN:
             setattr(sym, "_pf_certain_type", certain_type)
+        self._operator_types_by_node[id(node)] = (
+            TypeSpec("enum", name=node.type_hint)
+            if node.type_hint in self._enum_defs else
+            self._type_spec_from_hint(node.type_hint) or reference_value_type(node.type_hint)
+            if node.type_hint else self._operator_operand_type(node.value)
+        )
         # Only an initializer with a numeric proof supplies validation facts.
         # In particular, FLOAT from a call or an unknown identifier is not
         # evidence that a condition is numeric.
@@ -4847,6 +4868,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _visit_Assignment(self, node: Assignment) -> PineType:
         # Visit the value first
         val_type = self._visit(node.value)
+        if node.op in ("+=", "-=", "*=", "/=", "%="):
+            self._check_operator_operands(
+                node, node.op[:-1], (node.target, node.value),
+            )
 
         udt_ctor = self._udt_name_from_ctor(node.value)
         if isinstance(node.target, Identifier) and udt_ctor is not None:
@@ -5139,6 +5164,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return sym.pine_type
 
     def _visit_FuncDef(self, node: FuncDef) -> PineType:
+        self._operator_definition_scopes[id(node)] = self._symbols.current_scope
         if (self._pine_version == 6
                 and not self._in_v5_library_definition(node)
                 and self._enclosing_func_names):
@@ -5579,6 +5605,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
     def _visit_MethodDef(self, node) -> PineType:
         """Register a typed instance method under ``TypeName.methodName``."""
+        self._operator_definition_scopes[id(node)] = self._symbols.current_scope
         self._check_reserved_definition_name(node)
         self._check_bool_na_parameters(
             node, (node.annotations or {}).get("param_defaults", []),
@@ -5906,7 +5933,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.UNKNOWN
 
     def _numeric_condition_type(self, node: ASTNode) -> PineType:
-        """Prove numeric syntax without consulting legacy fallback types."""
+        """Prove numeric or missing syntax without legacy fallback types."""
+        if isinstance(node, NaLiteral):
+            return PineType.NA
         if isinstance(node, Identifier):
             sym = self._symbols.resolve(node.name)
             binding_scope = self._identifier_binding_scopes.get(id(node))
@@ -5940,8 +5969,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         try:
             self._visit(node.condition)
             condition_type = self._numeric_condition_type(node.condition)
-            if (condition_type in (PineType.INT, PineType.FLOAT)
-                    and self._pine_version == 6):
+            condition_spec = (
+                None if condition_type == PineType.UNKNOWN
+                else TypeSpec.primitive(condition_type.value)
+            )
+            _, mismatch = resolve_operator("?:", (condition_spec, None, None))
+            if (mismatch == 0 and self._pine_version == 6
+                    and not self._in_v5_library_definition(node)):
                 self._error(
                     "An if condition must have bool type; "
                     f"found {condition_type.value}.",
@@ -6122,8 +6156,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 # Reassignment cannot change an explicitly declared scalar type.
                 if getattr(symbol, "_pf_certain_declared", False):
                     condition_type = self._certain_scalar_type(node.condition)
+            condition_spec = (
+                None if condition_type == PineType.UNKNOWN
+                else TypeSpec.primitive(condition_type.value)
+            )
+            _, mismatch = resolve_operator("?:", (condition_spec, None, None))
             if (
-                condition_type in (PineType.INT, PineType.FLOAT)
+                mismatch == 0
                 and self._pine_version == 6
                 and not self._in_v5_library_definition(node)
             ):
@@ -6152,6 +6191,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             for case_expr, case_body in node.cases:
                 if case_expr:
                     self._visit(case_expr)
+                    if node.expr is not None:
+                        self._check_operator_operands(
+                            node, "==", (node.expr, case_expr),
+                        )
                 case_scoped = self._enter_top_level_branch_scope(
                     case_body, "top_switch_case"
                 )
@@ -6245,92 +6288,331 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     # Expression visitors
     # ------------------------------------------------------------------
 
-    def _check_incompatible_binary_operands(self, node: BinOp) -> None:
-        """Reject only measured bool/string and numeric operator pairs."""
+    @staticmethod
+    def _operator_operand_location(node: ASTNode) -> SourceLocation | None:
+        """Locate an operand's first token, rather than its call or member suffix."""
+        if isinstance(node, FuncCall):
+            return Analyzer._operator_operand_location(node.callee)
+        if isinstance(node, (MemberAccess, Subscript)):
+            return Analyzer._operator_operand_location(node.object)
+        if isinstance(node, BinOp):
+            return Analyzer._operator_operand_location(node.left)
+        if isinstance(node, Ternary):
+            return Analyzer._operator_operand_location(node.condition)
+        return node.loc
+
+    def _operator_operand_type(
+        self, node: ASTNode,
+        parameter_types: dict[str, PineType | TypeSpec] | None = None,
+    ) -> TypeSpec | None:
+        """Use lexical type facts and written-call facts, never a float fallback."""
+        if isinstance(node, Identifier) and parameter_types is not None:
+            if node.name in parameter_types:
+                ptype = parameter_types[node.name]
+                if isinstance(ptype, TypeSpec):
+                    return ptype
+                # Primitive return inference also carries coarse PineType
+                # slots. Only a structured fact carries operator certainty.
+                return None
+        if isinstance(node, Identifier):
+            sym = self._symbols.resolve(node.name)
+            if sym is not None and sym.enum_type_name is not None:
+                return TypeSpec("enum", name=sym.enum_type_name)
+            declaration = getattr(sym, "_pf_decl_node_id", None)
+            if declaration in self._operator_types_by_node:
+                # An explicitly unresolved initializer must not acquire the
+                # legacy scalar inference default through its binding. Its
+                # structured value family remains an independent proof.
+                result = self._operator_types_by_node[declaration]
+                if result is not None:
+                    return result
+                if sym.type_spec is not None and sym.type_spec.kind != "primitive":
+                    return sym.type_spec
+                return None
+        if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
+            if node.object.name in self._enum_defs:
+                return TypeSpec("enum", name=node.object.name)
+        if isinstance(node, FuncCall):
+            callee = node.callee
+            if isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier):
+                ns = callee.object.name
+                if ns in {"input", "str", "math", "ta", "table"}:
+                    binding = self._symbols.resolve(ns)
+                    if binding is not None and (
+                        hasattr(binding, "_pf_decl_node_id")
+                        or getattr(binding, "_pf_parameter_owner", None)
+                    ):
+                        return None
+                    fixed = fixed_builtin_result(
+                        ns, callee.member, len(node.args) + len(node.kwargs),
+                    )
+                    if fixed is not None:
+                        return fixed
+                    # Read source slots in their signature order. The registry
+                    # supplies parameter names here, never a result type.
+                    names = sigs.get_param_names(ns, callee.member) or []
+                    arguments = list(node.args)
+                    keyword_end = max(
+                        (index + 1 for index, name in enumerate(names) if name in node.kwargs),
+                        default=0,
+                    )
+                    for name in names[len(arguments):keyword_end]:
+                        arguments.append(node.kwargs.get(name))
+                    result = source_builtin_result(
+                        ns, callee.member, tuple(
+                            self._operator_operand_type(arg, parameter_types)
+                            if arg is not None else None for arg in arguments
+                        ),
+                    )
+                    if result is not None:
+                        return result
+                    # The structured return contract can prove a collection
+                    # even when no scalar result rule applies.
+                    result = OperatorTypeQuery(self, parameter_types)._type_spec_from_expr(node)
+                    return result if result is not None and result.kind != "primitive" else None
+            if isinstance(callee, Identifier) and callee.name in {"nz", "fixnan", "input"}:
+                return None
+        if isinstance(node, Subscript):
+            if isinstance(node.object, Subscript):
+                # Nested history is decided by the subscript checker.
+                return None
+            receiver = self._operator_operand_type(node.object, parameter_types)
+            if receiver is None:
+                return None
+            if receiver.kind in {"array", "matrix", "map"}:
+                # Every history value retains its domain, even if its runtime
+                # history is unsupported. Assignment targets retain the
+                # separate legacy element-lvalue lowering.
+                return (
+                    receiver
+                    if not self._history_checker().is_assignment_target(node) else None
+                )
+            return receiver
+        if isinstance(node, (IfStmt, SwitchStmt)):
+            bodies = (
+                [node.body, node.else_body] if isinstance(node, IfStmt)
+                else [body for _, body in node.cases] + [node.default_body]
+            )
+            result = None
+            for body in bodies:
+                terminal = self._selection_terminal_expr(body)
+                if terminal is None:
+                    continue
+                arm = self._operator_operand_type(terminal, parameter_types)
+                if arm is None:
+                    return None
+                if result is None:
+                    result = arm
+                else:
+                    result = join_value_types(result, arm)
+                    if result is None:
+                        return None
+            return result
+        if isinstance(node, (BinOp, UnaryOp, Ternary)):
+            if isinstance(node, BinOp):
+                # A comparison always produces bool, including when an
+                # operand's family is open or its own constraint fails.
+                if node.op in {"==", "!=", "<", "<=", ">", ">="}:
+                    return TypeSpec.primitive("bool")
+                op, operands = node.op, (node.left, node.right)
+            elif isinstance(node, UnaryOp):
+                op, operands = node.op, (node.operand,)
+            else:
+                op, operands = "?:", (node.condition, node.true_val, node.false_val)
+            result, _ = resolve_operator(op, tuple(
+                self._operator_operand_type(expr, parameter_types)
+                for expr in operands
+            ))
+            return result
+        cached = (
+            self._operator_types_by_node.get(id(node))
+            if parameter_types is None or isinstance(node, Identifier) else None
+        )
+        if cached is not None:
+            return cached
+        result = None
+        if isinstance(node, Identifier):
+            sym = self._symbols.resolve(node.name)
+            result = self._operator_types_by_node.get(
+                getattr(sym, "_pf_decl_node_id", None)
+            )
+        if result is None:
+            if self._is_color_constructor(node):
+                result = TypeSpec.primitive("color")
+            else:
+                certain = (
+                    PineType.UNKNOWN if isinstance(node, Subscript)
+                    else self._certain_scalar_type(node)
+                )
+                if certain not in {PineType.UNKNOWN, PineType.VOID}:
+                    result = TypeSpec.primitive(certain.value)
+        if result is None and isinstance(node, Identifier):
+            sym = self._symbols.resolve(node.name)
+            result = self._operator_types_by_node.get(
+                getattr(sym, "_pf_decl_node_id", None)
+            )
+            if result is None and sym is not None and sym.type_spec is not None:
+                # Structured metadata and declared parameters are exact; legacy
+                # scalar slots can contain inference defaults.
+                if (sym.type_spec.kind != "primitive"
+                        or getattr(sym, "_pf_parameter_owner", None)):
+                    result = sym.type_spec
+        if result is None and isinstance(node, (MemberAccess, FuncCall, Subscript)):
+            result = OperatorTypeQuery(self, parameter_types)._type_spec_from_expr(node)
+            if isinstance(node, FuncCall) and result is not None and result.kind == "primitive":
+                # A definition-wide callable result is legacy inference.
+                # Collection accessors instead have a declared element slot.
+                callee = node.callee
+                receiver = None
+                if isinstance(callee, MemberAccess):
+                    receiver = (
+                        node.args[0] if isinstance(callee.object, Identifier)
+                        and callee.object.name in {"array", "matrix", "map"} and node.args
+                        else callee.object
+                    )
+                receiver_type = (
+                    self._operator_operand_type(receiver, parameter_types)
+                    if receiver is not None else None
+                )
+                accessors = {
+                    "array": {"get", "first", "last", "pop", "shift", "remove"},
+                    "matrix": {"get"},
+                    "map": {"get", "remove"},
+                }
+                receiver_name = method_receiver_type_name(receiver_type)
+                authored_method = (
+                    isinstance(callee, MemberAccess)
+                    and f"{receiver_name}.{callee.member}" in self._method_signatures
+                )
+                if (
+                    receiver_type is None
+                    or not isinstance(callee, MemberAccess)
+                    or callee.member not in accessors.get(receiver_type.kind, ())
+                    or authored_method
+                ):
+                    result = None
+        if result is None and isinstance(node, MemberAccess):
+            if isinstance(node.object, Identifier):
+                ns = node.object.name
+                if ns == "syminfo":
+                    ptype = sigs.SYMINFO_VARIABLES.get(f"syminfo.{node.member}")
+                    if ptype is not None:
+                        result = TypeSpec.primitive(ptype.value)
+                elif ns == "timeframe" and node.member == "period":
+                    result = TypeSpec.primitive("string")
+        if result is None and isinstance(node, FuncCall):
+            callee = node.callee
+            if isinstance(callee, Identifier):
+                ptype = self._type_hint_to_pine(callee.name)
+                if ptype != PineType.UNKNOWN:
+                    result = TypeSpec.primitive(ptype.value)
+            # Request result caches are registration/storage information, not
+            # an exact operator-domain proof for a payload in another context.
+        if result in {TypeSpec.primitive("void"), TypeSpec.primitive("unknown")}:
+            result = None
+        if result is not None and parameter_types is None:
+            self._operator_types_by_node[id(node)] = result
+        return result
+
+    def _operator_operand_description(self, node: ASTNode, spec: TypeSpec | None) -> str:
+        """Name a call's result with its receiver, as history diagnostics do."""
+        if spec is None:
+            return "unresolved"
+        if isinstance(node, FuncCall):
+            callee = self._expr_to_str(node.callee)
+            receiver = next(iter(node.args or node.kwargs.values()), None)
+            label = self._expr_to_str(receiver) if receiver is not None else ""
+            return f"{spec} ({callee}({label}))"
+        return str(spec)
+
+    def _check_operator_operands(
+        self, node: ASTNode, op: str, operands: tuple[ASTNode, ...],
+        parameter_types: dict[str, PineType | TypeSpec] | None = None,
+    ) -> bool:
+        """Resolve all operator domains through the shared overload table."""
         if (self._pine_version != 6
                 or self._in_v5_library_definition(node)):
-            return
-        left = self._certain_scalar_type(node.left)
-        right = self._certain_scalar_type(node.right)
-        numeric = {PineType.INT, PineType.FLOAT}
-        mismatch = False
-        offending = None
-        if node.op == "and":
-            mismatch = (
-                (left == PineType.BOOL and right in numeric)
-                or (right == PineType.BOOL and left in numeric)
-            )
-            if mismatch:
-                offending = node.right if right in numeric else node.left
-        elif node.op == "+":
-            mismatch = (
-                (left == PineType.BOOL and right in numeric)
-                or (right == PineType.BOOL and left in numeric)
-                or (left == PineType.STRING and right in numeric)
-                or (right == PineType.STRING and left in numeric)
-            )
-            if mismatch:
-                if left == PineType.BOOL:
-                    offending = node.left
-                elif right == PineType.BOOL:
-                    offending = node.right
-                elif left == PineType.STRING:
-                    offending = node.right
-                else:
-                    offending = node.left
-        if not mismatch:
-            return
-        self._error(
-            f"Operator '{node.op}' cannot combine {left.value} and {right.value}.",
-            offending.loc if offending is not None else node.loc,
+            return False
+        types = tuple(
+            self._operator_operand_type(expr, parameter_types) for expr in operands
         )
+        # Direct na equality is a separate Pine restriction, not an overload.
+        if len(operands) == 2 and op in ("==", "!="):
+            for operand in operands:
+                if isinstance(operand, NaLiteral):
+                    self._error(
+                        'Cannot compare a value to "na" directly. '
+                        'Use the "na()" function instead.',
+                        self._operator_operand_location(operands[0]),
+                    )
+        _result, mismatch = resolve_operator(op, types)
+        if mismatch is None:
+            return False
+        offending = operands[mismatch]
+        location = self._operator_operand_location(offending)
+        # Keep the established diagnostic families while sharing applicability.
+        numeric = {TypeSpec.primitive("int"), TypeSpec.primitive("float")}
+        boolean = TypeSpec.primitive("bool")
+        string = TypeSpec.primitive("string")
+        if len(operands) == 1 and op == "not":
+            operand_type = types[0]
+            self._error(
+                "The not operator requires a bool operand; "
+                f"found {operand_type}.", location,
+            )
+        if len(operands) == 1:
+            operand_type = types[0]
+            self._error(
+                f"Operator '{op}' requires a numeric operand; found {operand_type}.",
+                location,
+            )
+        if len(operands) == 3 and mismatch == 0:
+            condition_type = types[0]
+            # Finish declarations first so their established diagnostics
+            # retain priority over a newly checked condition constraint.
+            self._operator_condition_errors.append((condition_type, location))
+            return True
+        if len(operands) == 2:
+            left, right = types
+            if op in ("==", "!=") and boolean in types and any(t in numeric for t in types):
+                index = 0 if left in numeric else 1
+                self._error(
+                    "Cannot compare a bool value with a numeric value "
+                    f"using {op}.",
+                    self._operator_operand_location(operands[index]),
+                )
+            if op in ("<", "<=", ">", ">=") and string in types:
+                index = types.index(string)
+                self._error(
+                    f"Cannot order string values with {op}.",
+                    self._operator_operand_location(operands[index]),
+                )
+            if op == "+" and string in types and any(t in numeric for t in types):
+                # Existing addition diagnostics point at the numeric operand.
+                location = self._operator_operand_location(operands[0 if left in numeric else 1])
+            if op == "+" and string in types and TypeSpec.primitive("number") in types:
+                # An open numeric width still excludes string concatenation;
+                # locate the string that cannot bind the numeric overload.
+                location = self._operator_operand_location(operands[types.index(string)])
+        elif len(operands) == 3 and mismatch > 0:
+            left, right = types[1:]
+            if boolean in (left, right) and TypeSpec.primitive("na") in (left, right):
+                self._check_bool_na_ternary(node, PineType.BOOL)
+        left_node, right_node = operands[-2:]
+        self._error(
+            f"Operator '{op}' cannot combine "
+            f"{self._operator_operand_description(left_node, left)} and "
+            f"{self._operator_operand_description(right_node, right)}.",
+            location,
+        )
+
+    def _check_incompatible_binary_operands(self, node: BinOp) -> None:
+        self._check_operator_operands(node, node.op, (node.left, node.right))
 
     def _visit_BinOp(self, node: BinOp) -> PineType:
         left_type = self._visit(node.left)
         right_type = self._visit(node.right)
         self._check_incompatible_binary_operands(node)
-
-        if (node.op in ("==", "!=")
-                and self._pine_version == 6
-                and not self._in_v5_library_definition(node)):
-            if isinstance(node.left, NaLiteral) or isinstance(node.right, NaLiteral):
-                other = node.right if isinstance(node.left, NaLiteral) else node.left
-                if self._certain_scalar_type(other) in (PineType.INT, PineType.FLOAT):
-                    self._error(
-                        'Cannot compare a value to "na" directly. '
-                        'Use the "na()" function instead.',
-                        other.loc or node.loc,
-                    )
-            certain_left = self._certain_scalar_type(node.left)
-            certain_right = self._certain_scalar_type(node.right)
-            numeric = (PineType.INT, PineType.FLOAT)
-            if (
-                (certain_left == PineType.BOOL and certain_right in numeric)
-                or (certain_right == PineType.BOOL and certain_left in numeric)
-            ):
-                numeric_operand = (
-                    node.left if certain_left in numeric else node.right
-                )
-                self._error(
-                    "Cannot compare a bool value with a numeric value "
-                    f"using {node.op}.",
-                    numeric_operand.loc or node.loc,
-                )
-        elif (node.op in (">", "<", ">=", "<=")
-                and self._pine_version == 6
-                and not self._in_v5_library_definition(node)):
-            certain_left = self._certain_scalar_type(node.left)
-            certain_right = self._certain_scalar_type(node.right)
-            string_operand = (
-                node.left if certain_left == PineType.STRING
-                else node.right if certain_right == PineType.STRING
-                else None
-            )
-            if string_operand is not None:
-                self._error(
-                    f"Cannot order string values with {node.op}.",
-                    string_operand.loc or node.loc,
-                )
 
         # Comparison and logical operators return BOOL
         if node.op in ("==", "!=", ">", "<", ">=", "<=", "and", "or"):
@@ -6378,17 +6660,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     node.operand.loc or node.loc,
                 )
         operand_type = self._visit(node.operand)
+        self._check_operator_operands(node, node.op, (node.operand,))
         if node.op == "not":
-            certain_type = self._certain_scalar_type(node.operand)
-            if (certain_type in (PineType.INT, PineType.FLOAT)
-                    and self._pine_version == 6
-                    and not self._in_v5_library_definition(node)):
-                operand_type = certain_type.value
-                self._error(
-                    "The not operator requires a bool operand; "
-                    f"found {operand_type}.",
-                    node.operand.loc or node.loc,
-                )
             return PineType.BOOL
         return operand_type
 
@@ -6474,6 +6747,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._check_untyped_na_condition(node.condition, condition_type)
         true_type = self._visit(node.true_val)
         false_type = self._visit(node.false_val)
+        self._check_operator_operands(
+            node, "?:", (node.condition, node.true_val, node.false_val),
+        )
         if PineType.STRING in (true_type, false_type):
             main_type = PineType.STRING
         elif PineType.FLOAT in (true_type, false_type):
@@ -6838,6 +7114,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             self._materialize_user_func_call_site_state(
                                 method_key, cs_idx, node
                             )
+                    self._check_callsite_operator_types(method_info.node, full_bound)
                     return_type = self._callsite_callable_return_type(
                         method_info.node,
                         full_param_types,
@@ -7508,6 +7785,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._refuse_collection_field_history(node)
 
         object_spec = self._history_receiver_type_spec(node.object)
+        if object_spec is not None and object_spec.kind in {"array", "matrix", "map"}:
+            use = self._history_checker().operator_use(node)
+            if use is not None:
+                # Check a proven history value before an unsupported runtime
+                # history can hide its operand domain. A deferred condition
+                # already guarantees refusal after declarations finish.
+                owner, op, operands = use
+                if self._check_operator_operands(owner, op, operands):
+                    return obj_type
         self._refuse_collection_expression_history(node, object_spec)
         if self._type_spec_contains_map(object_spec):
             assert object_spec is not None

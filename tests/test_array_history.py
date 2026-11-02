@@ -58,7 +58,7 @@ def _refusal(source: str) -> CompileError:
 
 
 def _diag(error: CompileError, needle: str):
-    found = [d for d in error.diagnostics if needle in d.message]
+    found = [d for d in error.diagnostics if needle in d.message or d.code == needle]
     assert found, [d.message for d in error.diagnostics]
     return found[0]
 
@@ -311,7 +311,7 @@ TRADINGVIEW_REFUSED = {
     "ahist_field_noparen": ("CE10290", 10),
     "ahist_field_paren": ("CE10290", 10),
     "ahist_mfield": ("CE10290", 9),
-    "ahist_eq": ("CE10123", 7),
+    "ahist_eq": ("PF-E2066", 7),  # CE10123 in TV; the operator table owns this refusal.
 }
 
 
@@ -364,17 +364,20 @@ def test_a_method_straight_after_a_collection_history_cites_ce10011(body, line):
 # An array where TradingView expects something else: each refused there with
 # the code named (pine-facade, 2026-10-01).
 SCALAR_CONTEXTS = {
-    "equality": ("r = a == a[1] ? 1 : 0\n", "CE10123"),
-    "inequality": ("r = a[1] != a ? 1 : 0\n", "CE10123"),
-    "arithmetic": ("r = a[1] + 1\n", "CE10123"),
-    "comparison": ("r = a[1] > 0 ? 1 : 0\n", "CE10123"),
-    "negation": ("r = -a[1]\n", "CE10123"),
-    "ternary_condition": ("r = a[1] ? 1 : 0\n", "CE10123"),
+    # These CE10123 forms now stop at the common operator table.
+    "equality": ("r = a == a[1] ? 1 : 0\n", "PF-E2066"),
+    "inequality": ("r = a[1] != a ? 1 : 0\n", "PF-E2066"),
+    "arithmetic": ("r = a[1] + 1\n", "PF-E2066"),
+    "comparison": ("r = a[1] > 0 ? 1 : 0\n", "PF-E2066"),
+    # The same measured refusals name a unary operand and a condition,
+    # respectively; neither diagnostic invents a second operand.
+    "negation": ("r = -a[1]\n", "PF-E2076"),
+    "ternary_condition": ("r = a[1] ? 1 : 0\n", "PF-E2077"),
     "builtin_argument": ("r = math.abs(a[1])\n", "CE10123"),
     "nz_argument": ("r = nz(a[1])\n", "CE10123"),
     "float_declaration": ("float r = a[1]\n", "CE10173"),
     "float_reassignment": ("float r = 0.0\nr := a[1]\n", "CE10173"),
-    "compound_assignment": ("b = array.from(1.0)\nb += a[1]\nr = b.size()\n", "CE10123"),
+    "compound_assignment": ("b = array.from(1.0)\nb += a[1]\nr = b.size()\n", "PF-E2066"),
     "if_condition": ("float r = 0.0\nif a[1]\n    r := 1\n", "CE10101"),
     "while_condition": ("float r = 0.0\nwhile a[1]\n    r := 1\n    break\n", "CE10101"),
 }
@@ -386,6 +389,10 @@ def test_an_array_history_where_tradingview_expects_a_number_is_refused(name):
     error = _refusal(_script("a = array.from(close)\n" + body))
     diag = _diag(error, code)
     assert diag.location is not None
+    if name == "negation":
+        assert diag.args == {"op": "-", "operand_type": "array<float>"}
+    elif name == "ternary_condition":
+        assert diag.args == {"condition_type": "array<float>"}
 
 
 def test_a_bare_history_statement_is_refused():
