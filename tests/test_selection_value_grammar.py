@@ -185,8 +185,8 @@ def test_accepted_block_values_compile(name):
 
 
 def test_unmeasured_typed_blocks_remain_accepted():
-    # This source's keyword-name error measured no string-branch behavior.
-    # Preserve admission; nested bool/string tails must retain their types.
+    # This source uses ordinary identifiers; nested bool and string tails
+    # must keep their types through the recursive value assignments.
     cpp = transpile(_source("block-typed-values"))
     _assert_value_output(cpp)
     compile_cpp(cpp, label="typed nested blocks")

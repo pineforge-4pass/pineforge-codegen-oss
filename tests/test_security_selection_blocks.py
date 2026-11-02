@@ -9,7 +9,7 @@ from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.analyzer import Analyzer
 from pineforge_codegen.ast_nodes import Identifier, SwitchStmt, VarDecl
 from pineforge_codegen.codegen import CodeGen
-from pineforge_codegen.errors import CompileError
+from pineforge_codegen.errors import CompileError, Level, Phase
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from tests._compile import compile_cpp, run_emitted_tu
@@ -408,12 +408,63 @@ def test_setup_substitution_preserves_earlier_binding_when_shadowed():
     assert "get_input_int(" in registration(transpile(pine))
 
 
-def test_expression_only_setup_keeps_its_existing_bar_condition():
+@pytest.mark.parametrize("setup,condition,line", (
+    ("", "close > open", 3),
+    ("", "volume > 0", 3),
+    ("", "bar_index > 3", 3),
+    ("", "ta.sma(close, 3) > close", 3),
+    ("", "close[1] > open", 3),
+    ("", "time > 0", 3),
+    ("", "barstate.isfirst", 3),
+    ("prior_value = close - open\n", "prior_value > 0", 4),
+))
+def test_expression_only_setup_refuses_series_condition(setup, condition, line):
+    """This refusal is labelled as a temporary located refusal of a shape
+    that did not compile before this change; it is listed as a compile gap,
+    and a TradingView value comparison will lift it.
+    """
     pine = ('//@version=6\nstrategy("Expression condition")\n'
-            'tf = if close > open\n    "60"\nelse\n    "240"\n'
+            + setup + f'tf = if {condition}\n    "60"\nelse\n    "240"\n'
             'value = request.security(syminfo.tickerid, tf, close)\nplot(value)\n')
-    # Acceptance pin: TradingView accepts a series condition choosing a request
-    # timeframe (its tape has 26 entries, first quantities all 1), and main's
-    # registration reads the chart-field condition; the quantity is constant,
-    # so the tape proves acceptance, not the value.
+    # Setup replay cannot prove these reads; expr_start places each at column 9.
+    with pytest.raises(CompileError) as caught:
+        transpile_full(pine)
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E3110"
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.phase == Phase.CODEGEN
+    assert diagnostic.args == {}
+    assert diagnostic.message == (
+        "A requested timeframe cannot be chosen by a condition that reads "
+        "a chart series value."
+    )
+    assert diagnostic.location.line == line
+    assert diagnostic.location.col == 9
+
+
+@pytest.mark.parametrize("name", (
+    "security-timeframe-if",
+    "requested-timeframe-if-block",
+    "requested-timeframe-if-nested-block",
+))
+def test_existing_setup_condition_sources_remain_accepted(name):
+    # Preservation pin: input getters select the same already-pinned setup arms.
+    cpp = transpile(source(name))
+    assert 'get_input_' in registration(cpp)
+
+
+def test_expression_only_constant_setup_condition_remains_accepted():
+    pine = ('//@version=6\nstrategy("Constant condition")\n'
+            'tf = if true\n    "60"\nelse\n    "240"\n'
+            'value = request.security(syminfo.tickerid, tf, close)\nplot(value)\n')
+    # Preservation pin: a bool literal needs no chart bar in the setup proof.
+    assert "if (true)" in registration(transpile(pine))
+
+
+def test_expression_only_series_ternary_keeps_its_registration():
+    pine = ('//@version=6\nstrategy("Expression condition")\n'
+            'tf = close > open ? "60" : "240"\n'
+            'value = request.security(syminfo.tickerid, tf, close)\nplot(value)\n')
+    # Preservation pin: scalar ternaries retain the ordinary substitution path.
     assert "current_bar_.close" in registration(transpile(pine))

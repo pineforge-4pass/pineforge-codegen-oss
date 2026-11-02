@@ -69,10 +69,18 @@ def skip_unless_e2e_env() -> Path:
 
 def derive_chart_feed(engine_root: Path, out: Path) -> Path:
     """The corpus's 15m chart feed, via the engine's own resampler."""
+    scripts = str(engine_root / "scripts")
     spec = importlib.util.spec_from_file_location(
         "_pf_derive_corpus_feeds", engine_root / "scripts" / "derive_corpus_feeds.py")
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    # The resampler imports sibling modules of the engine's scripts directory
+    # (newer engines import parity_paths), so that directory must be importable
+    # while it loads; the path entry is removed again afterwards.
+    sys.path.insert(0, scripts)
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.path.remove(scripts)
     with mod.SOURCE_1M.open() as fh:
         next(fh)
         buckets = mod._resample_15m(fh)
