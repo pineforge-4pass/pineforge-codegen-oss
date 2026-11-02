@@ -20,6 +20,7 @@ from .ast_nodes import (
 from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from .lexer import Lexer
 from .limits import TimeBudget, check_ast_depth, check_source_size
+from .method_binding import validate_call_argument_order
 from .parser import Parser
 
 # The Pine versions whose rules the inliner implements (v5 through
@@ -76,6 +77,7 @@ def parse_library_module(path: str, text: str, *,
     program = Parser(tokens, source=text, filename=path, budget=budget,
                      library=True).parse()
     check_ast_depth(program, path)
+    validate_call_argument_order(program, filename=path)
     if program.version not in SUPPORTED_LIBRARY_VERSIONS:
         found = ("no //@version directive" if program.version is None
                  else f"//@version={program.version}")

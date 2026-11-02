@@ -42,6 +42,7 @@ CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2065", "PF-E0043", "PF-E0044", "PF-E0045",
                      "PF-E2066", "PF-E2067", "PF-E2068", "PF-E2069",
                      "PF-E2070", "PF-E2071", "PF-E2072", "PF-E2073",
+                     "PF-E2074",  # Positional arguments after keyword arguments.
                      "PF-E2076", "PF-E2077", "PF-E2078",
                      "PF-E5080", "PF-E5081", "PF-E5082", "PF-W1553"}
 # The support checker warns, inside a switch arm, what it refuses elsewhere:
