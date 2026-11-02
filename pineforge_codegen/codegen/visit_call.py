@@ -156,7 +156,7 @@ from ..external_requests import RECORDED_KEY_ANNOTATION, request_stop_marker
 from ..intrinsic_binding import validate_intrinsic_keywords
 from ..limits import iter_ast_nodes
 from ..security_contexts import ticker_symbol_arg
-from ..symbols import TypeSpec, method_receiver_type_name
+from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from ..method_binding import (
     MethodBindError,
     bind_function_defaults,
