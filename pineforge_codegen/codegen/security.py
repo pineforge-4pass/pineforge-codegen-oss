@@ -418,16 +418,12 @@ class SecurityEmitter:
             from ..diagnostic_codes import render_diagnostic
             from ..pine_spelling import expr_start
 
-            # Scalar if arms need the same setup proof as replayed conditions.
+            # Scalar if conditions must not depend on the chart bar.
             # Keep the authored condition for the first-token diagnostic span.
             for selection, _depth in iter_ast_nodes(node):
                 if not isinstance(selection, IfStmt):
                     continue
-                condition = self._substitute_tf_input_reads(
-                    selection.condition, resolving or set())
-                reads: set[str] = set()
-                if (not self._security_tf_replay_reads(condition, reads)
-                        or (reads and not self._security_tf_replay_closure(reads)[0])):
+                if self._security_tf_expr_is_per_bar(selection.condition):
                     message, hint = render_diagnostic("PF-E3110", {})
                     self._codegen_error(
                         expr_start(selection.condition), message, hint=hint)
@@ -1297,6 +1293,105 @@ class SecurityEmitter:
                         for child in stmt.else_body or ())
             )
         return False
+
+    def _security_tf_expr_is_per_bar(self, node) -> bool:
+        """Follow bar dependencies without requiring a setup replay proof.
+
+        Arguments and user bodies both contribute reads. Recursive calls and
+        persistent value cycles are conservatively treated as per-bar.
+        This inspection never rewrites the expression or emits C++.
+        """
+        from .visit_expr import _BUILTIN_NAMESPACE_NAMES
+
+        expressions = getattr(self.ctx, "global_expr_map", {}) or {}
+
+        def per_bar(value, local=frozenset(), active=frozenset()):
+            if isinstance(value, (list, tuple)):
+                return any(per_bar(part, local, active) for part in value)
+            if isinstance(value, dict):
+                return any(per_bar(part, local, active) for part in value.values())
+            if not isinstance(value, ASTNode):
+                return False
+            if isinstance(value, Identifier):
+                name = value.name
+                global_binding = self._security_identifier_is_global_binding(value)
+                if name in local and not global_binding:
+                    # The enclosing body also inspects every local definition.
+                    return False
+                if name in BAR_BUILTINS or name in SECURITY_BAR_FIELDS:
+                    return True
+                if self._binding_is_series(name):
+                    return True
+                info = self._global_mutable_infos.get(name)
+                key = ("global", name)
+                if key in active:
+                    # Ordinary declarations reset before each bar's writes;
+                    # persistent self-dependence carries the previous bar.
+                    return info is None or info.is_var
+                if info is not None:
+                    return per_bar(info.source_stmts, frozenset(), active | {key})
+                if name in expressions:
+                    return per_bar(expressions[name], frozenset(), active | {key})
+                return False
+            if isinstance(value, Subscript):
+                return True
+            if isinstance(value, MemberAccess):
+                obj = value.object
+                if (isinstance(obj, Identifier) and obj.name not in local
+                        and not self._security_identifier_is_global_binding(obj)
+                        and obj.name in _BUILTIN_NAMESPACE_NAMES):
+                    if self._expr_is_stable(value):
+                        return False
+                    qualified = f"{obj.name}.{value.member}"
+                    # Chart/timeframe/symbol facts and namespace constants
+                    # have no chart clock; these inventories hold bar reads.
+                    return (
+                        obj.name == "barstate"
+                        or (qualified in sigs.BUILTIN_VARIABLES
+                            and obj.name != "chart")
+                        or qualified in sigs.STRATEGY_VARIABLES
+                        or self._get_ta_site(value) is not None
+                    )
+                return per_bar(obj, local, active)
+            if isinstance(value, FuncCall):
+                name, namespace = self._resolve_callee(value.callee)
+                if per_bar([*value.args, *value.kwargs.values()], local, active):
+                    return True
+                info = self._func_info_map.get(name) if namespace is None else None
+                if info is not None and info.node is not None:
+                    key = ("function", name)
+                    if key in active:
+                        return True
+                    defaults = self._user_call_args_with_defaults(name, value)
+                    if defaults is not None and per_bar(defaults, local, active):
+                        return True
+                    bound = set(info.node.params) | self._collect_binding_names(
+                        info.node.body)
+                    return per_bar(info.node.body, frozenset(bound), active | {key})
+                # Pure builtin calls inherit their arguments' dependencies.
+                # Other calls can read implicit chart state even with no args.
+                return not (
+                    (namespace is None and name in self._SECURITY_TF_REPLAY_CALLS)
+                    or (namespace in _SECURITY_PURE_CALL_NAMESPACES
+                        and (namespace, name) not in _SECURITY_IMPURE_CALLS)
+                    or (namespace == "timeframe"
+                        and name in self._SECURITY_TF_REPLAY_TIMEFRAME_CALLS)
+                )
+            if isinstance(value, (VarDecl, TupleAssign)):
+                return per_bar(value.value, local, active)
+            if isinstance(value, Assignment):
+                if value.op != ":=" and isinstance(value.target, Identifier):
+                    info = self._global_mutable_infos.get(value.target.name)
+                    if info is not None and info.is_var:
+                        return True
+                return per_bar(value.value, local, active)
+            return any(
+                per_bar(part, local, active)
+                for field, part in vars(value).items()
+                if field not in ("loc", "annotations")
+            )
+
+        return per_bar(node)
 
     def _security_tf_replay_reads(
         self, node, reads: set[str], seen: frozenset = frozenset()
