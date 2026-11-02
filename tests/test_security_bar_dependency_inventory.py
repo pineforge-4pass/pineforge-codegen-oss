@@ -15,7 +15,6 @@ from pineforge_codegen.codegen.security import (
     _SECURITY_PURE_CALL_NAMESPACES,
 )
 from pineforge_codegen.codegen.tables import BAR_BUILTINS, SECURITY_BAR_FIELDS
-from pineforge_codegen.errors import CompileError, Level, Phase
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from pineforge_codegen.symbols import PineType
@@ -260,41 +259,34 @@ def test_excluded_inventory_members_cannot_form_scalar_conditions():
             _variable_condition(name, members[name])
 
 
-def _assert_refusal(pine, line, column):
-    with pytest.raises(CompileError) as caught:
-        transpile_full(pine)
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.code == "PF-E3110"
-    assert diagnostic.level == Level.ERROR
-    assert diagnostic.phase == Phase.CODEGEN
-    assert diagnostic.args == {}
-    assert diagnostic.message == (
-        "A requested timeframe cannot be chosen by a condition that reads "
-        "a chart series value."
-    )
-    assert diagnostic.location.line == line
-    assert diagnostic.location.col == column
-
-
-def _assert_lowering(pine):
+def _assert_lowering(pine, timeframes=("60", "240"), lower_tf=False):
     cpp = transpile_full(pine)["cpp"]
     # Closed literal arms register in source order; selection reads the
     # authored timeframe binding once, then compares both arms before stopping.
+    register = ("register_security_lower_tf_eval" if lower_tf
+                else "register_security_eval")
     registrations = [
         part.split(");", 1)[0]
-        for part in cpp.split("register_security_eval(")[1:]
+        for part in cpp.split(register + "(")[1:]
     ]
+    flags = "" if lower_tf else ", false, false"
     assert registrations == [
-        '0, "60", input_tf_, false, false',
-        '1, "240", input_tf_, false, false',
+        f'{index}, "{timeframe}", input_tf_{flags}'
+        for index, timeframe in enumerate(timeframes)
     ]
     assert all("current_bar_" not in part for part in registrations)
+    setup = cpp.split("void configure_security_evaluators()", 1)[1].split(
+        "\n    }\n", 1)[0]
+    assert "sample_index" not in setup
+    assert "sample_value" not in setup
     body = cpp.split("void on_source_bar(", 1)[1]
     assert re.search(r"const std::string _pf_selected_tf = tf(?:\[0\])?;", body)
-    assert (
-        '    if (_pf_selected_tf == "60") return _req_sec_0;\n'
-        '    if (_pf_selected_tf == "240") return _req_sec_1;\n'
+    result = "_req_sec_lower_tf_" if lower_tf else "_req_sec_"
+    branches = "".join(
+        f'    if (_pf_selected_tf == "{timeframe}") return {result}{index};\n'
+        for index, timeframe in enumerate(timeframes)
+    )
+    assert (branches +
         '    _PF_ENGINE_INVARIANT("Requested timeframe matched no registered timeframe", std::logic_error);\n'
         '}())'
     ) in body
@@ -353,9 +345,8 @@ def test_indirect_condition_selects_chart_dependency(setup, condition):
     _assert_lowering(_script(setup, condition))
 
 
-def test_loop_bound_condition_refuses_chart_dependency():
+def test_loop_bound_condition_selects_the_authored_timeframe():
     # The iterator's range reads bar_index, so its value depends on the bar.
-    # Four spaces of block indentation put the first condition token at 13.
     pine = ('//@version=6\nstrategy("Iterator condition")\n'
             'for sample_index = 0 to bar_index\n'
             '    tf = if sample_index > 0\n'
@@ -363,17 +354,15 @@ def test_loop_bound_condition_refuses_chart_dependency():
             '    value = request.security(syminfo.tickerid, tf, close)\n'
             '    if value > close\n'
             '        strategy.entry("Long", strategy.long)\n')
-    _assert_refusal(pine, 4, 13)
+    _assert_lowering(pine)
 
 
-def test_lower_timeframe_condition_keeps_chart_dependency_refusal():
+def test_lower_timeframe_condition_selects_the_authored_array():
     pine = ('//@version=6\nstrategy("Lower timeframe condition")\n'
             'tf = if close > open\n    "1"\nelse\n    "5"\n'
             'values = request.security_lower_tf(syminfo.tickerid, tf, close)\n'
             'if array.size(values) > 0\n    strategy.entry("Long", strategy.long)\n')
-    # Preservation pin: array requests bypass expansion, so their scalar-if
-    # registration still diagnoses the authored condition at its first token.
-    _assert_refusal(pine, 3, 9)
+    _assert_lowering(pine, timeframes=("1", "5"), lower_tf=True)
 
 
 @pytest.mark.parametrize("setup,loop,condition", (
@@ -391,7 +380,7 @@ def test_lower_timeframe_condition_keeps_chart_dependency_refusal():
                  "for [sample_index, sample_value] in samples",
                  "sample_value > 0", id="array-indexed-element"),
 ))
-def test_loop_binding_timeframe_condition_is_refused(setup, loop, condition):
+def test_loop_binding_timeframe_condition_selects_closed_arms(setup, loop, condition):
     pine = ('//@version=6\nstrategy("Loop binding condition")\n'
             + setup + loop + '\n'
             f'    tf = if {condition}\n'
@@ -399,8 +388,8 @@ def test_loop_binding_timeframe_condition_is_refused(setup, loop, condition):
             '    value = request.security(syminfo.tickerid, tf, close)\n'
             '    if value > close\n'
             '        strategy.entry("Long", strategy.long)\n')
-    # The local initializer is checked before registration can emit its name.
-    _assert_refusal(pine, 4 + setup.count("\n"), 13)
+    # Loop bindings only choose at the request's execution, never in setup.
+    _assert_lowering(pine)
 
 
 @pytest.mark.parametrize("setup,loop,condition", (

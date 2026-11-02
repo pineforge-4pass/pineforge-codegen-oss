@@ -85,6 +85,191 @@ def test_chart_selection_reads_the_authored_timeframe_once(name, condition):
     assert body.index(condition) < selected.start()
 
 
+@pytest.mark.parametrize("selection", (
+    'close > open ? "75" : "180"',
+    'if close > open\n        "75"\n    else\n        "180"',
+    'switch close > open\n        true => "75"\n        => "180"',
+))
+@pytest.mark.parametrize("scope", ("block", "function"))
+@pytest.mark.parametrize("lower_tf", (False, True))
+def test_local_alias_registers_exact_declaration_arms(selection, scope, lower_tf):
+    # The same-spelled global must contribute neither its input nor its arms.
+    setup = 'chosen_local = input.timeframe("2D", "Outer frame")\n'
+    request_name = "security_lower_tf" if lower_tf else "security"
+    local = ('    chosen_local = ' + selection + '\n'
+             '    alias_local = chosen_local\n'
+             f'    got_local = request.{request_name}(syminfo.tickerid, alias_local, close)\n')
+    result = "array.size(got_local)" if lower_tf else "got_local"
+    if scope == "function":
+        pine = (HEADER + setup + 'read_local() =>\n' + local
+                + f'    {result}\nplot(read_local())\n')
+    else:
+        pine = (HEADER + setup + 'if bar_index > 0\n' + local
+                + f'    strategy.entry("Long", strategy.long, qty = {result})\n')
+    cpp = transpile(pine)
+    if lower_tf:
+        assert re.findall(
+            r"^\s*register_security_lower_tf_eval\((.*)\);$", cpp, re.MULTILINE
+        ) == ['0, "75", input_tf_', '1, "180", input_tf_']
+    else:
+        assert registrations(cpp) == [
+            '0, "75", input_tf_, false, false',
+            '1, "180", input_tf_, false, false',
+        ]
+    assert re.search(
+        r"const std::string _pf_selected_tf = [^;\n]*alias_local(?:\[0\])?;",
+        cpp)
+    result_prefix = "_req_sec_lower_tf_" if lower_tf else "_req_sec_"
+    assert_selection_tail(
+        cpp,
+        f'if (_pf_selected_tf == "75") return {result_prefix}0;',
+        f'if (_pf_selected_tf == "180") return {result_prefix}1;',
+    )
+
+
+def test_sibling_local_aliases_keep_distinct_arm_sets():
+    pine = (HEADER
+            + 'if close > open\n'
+            '    chosen_local = volume > 0 ? "75" : "180"\n'
+            '    got_local = request.security(syminfo.tickerid, chosen_local, close)\n'
+            '    strategy.entry("First", strategy.long, qty = got_local)\n'
+            'if close < open\n'
+            '    chosen_local = volume > 0 ? "30" : "2D"\n'
+            '    got_local = request.security(syminfo.tickerid, chosen_local, open)\n'
+            '    strategy.entry("Second", strategy.long, qty = got_local)\n')
+    cpp = transpile(pine)
+    assert registrations(cpp) == [
+        '0, "75", input_tf_, false, false',
+        '1, "30", input_tf_, false, false',
+        '2, "180", input_tf_, false, false',
+        '3, "2D", input_tf_, false, false',
+    ]
+    assert_selection_tail(
+        cpp,
+        'if (_pf_selected_tf == "75") return _req_sec_0;',
+        'if (_pf_selected_tf == "180") return _req_sec_2;',
+    )
+    assert_selection_tail(
+        cpp,
+        'if (_pf_selected_tf == "30") return _req_sec_1;',
+        'if (_pf_selected_tf == "2D") return _req_sec_3;',
+    )
+
+
+def test_request_in_loop_selects_at_each_iteration_before_retaining_last_value():
+    pine = (HEADER + 'got_v = 0.0\n'
+            'for step_idx = 0 to 1\n'
+            '    pick_tf = if step_idx > 0\n'
+            '        "240"\n    else\n        "1D"\n'
+            '    got_v := request.security(syminfo.tickerid, pick_tf, bar_index)\n'
+            'qty_v = 1 + int(got_v) % 5\n'
+            'if bar_index > 6 and bar_index % 7 == 3\n'
+            '    strategy.entry("Long", strategy.long, qty = qty_v)\n'
+            'if bar_index > 6 and bar_index % 7 == 5\n'
+            '    strategy.close("Long")\n')
+    cpp = transpile(pine)
+    assert registrations(cpp) == [
+        '0, "240", input_tf_, false, false',
+        '1, "1D", input_tf_, false, false',
+    ]
+    setup = cpp.split("void configure_security_evaluators()", 1)[1].split(
+        "\n    }\n", 1)[0]
+    assert "pick_tf" not in setup and "step_idx" not in setup
+    body = chart_body(cpp)
+    selected = re.search(
+        r"const std::string _pf_selected_tf = pick_tf(?:\[0\])?;", body)
+    assert selected is not None
+    assert body.index("for (") < selected.start() < body.index("qty_v")
+    assert_selection_tail(
+        body,
+        'if (_pf_selected_tf == "240") return _req_sec_0;',
+        'if (_pf_selected_tf == "1D") return _req_sec_1;',
+    )
+    for sec_id in (0, 1):
+        assert f"_req_sec_{sec_id} = " in cpp
+        assert f"void _eval_security_{sec_id}(" in cpp
+
+
+@pytest.mark.parametrize("payload,element_type", (
+    ("close", "double"), ("bar_index", "int"), ("close > open", "bool"),
+))
+@pytest.mark.parametrize("request_form", ("positional", "keyword"))
+def test_lower_timeframe_array_selects_independent_accumulators(
+        payload, element_type, request_form):
+    arguments = f"syminfo.tickerid, pick_tf, {payload}"
+    if request_form == "keyword":
+        arguments = f"expression = {payload}, timeframe = pick_tf, symbol = syminfo.tickerid"
+    pine = (HEADER + 'pick_tf = close > open ? "30" : "15"\n'
+            + f'parts_v = request.security_lower_tf({arguments})\n'
+            'qty_v = 1 + array.size(parts_v) % 5\n'
+            'if bar_index > 6 and bar_index % 7 == 3\n'
+            '    strategy.entry("Long", strategy.long, qty = qty_v)\n'
+            'if bar_index > 6 and bar_index % 7 == 5\n'
+            '    strategy.close("Long")\n')
+    cpp = transpile(pine)
+    assert re.findall(
+        r"^\s*register_security_lower_tf_eval\((.*)\);$", cpp, re.MULTILINE
+    ) == ['0, "30", input_tf_', '1, "15", input_tf_']
+    assert registrations(cpp) == []
+    body = chart_body(cpp)
+    assert re.search(
+        r"const std::string _pf_selected_tf = pick_tf(?:\[0\])?;", body)
+    assert_selection_tail(
+        body,
+        'if (_pf_selected_tf == "30") return _req_sec_lower_tf_0;',
+        'if (_pf_selected_tf == "15") return _req_sec_lower_tf_1;',
+    )
+    for sec_id in (0, 1):
+        assert f"std::vector<{element_type}> _req_sec_lower_tf_{sec_id}{{}};" in cpp
+        assert (
+            f"if (security_lower_tf_sub_bar_index({sec_id}) == 0)"
+            f" _req_sec_lower_tf_{sec_id}.clear();"
+        ) in cpp
+        assert f"_req_sec_lower_tf_{sec_id}.push_back(" in cpp
+        assert f"case {sec_id}: _eval_security_{sec_id}(" in cpp
+
+
+def test_loop_local_lower_timeframe_alias_selects_each_iterations_array():
+    pine = (HEADER + 'got_count = 0\n'
+            'for sample_index = 0 to 1\n'
+            '    chosen_local = sample_index > 0 ? "30" : "15"\n'
+            '    alias_local = chosen_local\n'
+            '    parts_local = request.security_lower_tf(syminfo.tickerid, alias_local, close)\n'
+            '    got_count := array.size(parts_local)\n'
+            'strategy.entry("Long", strategy.long, qty = got_count + 1)\n')
+    cpp = transpile(pine)
+    assert re.findall(
+        r"^\s*register_security_lower_tf_eval\((.*)\);$", cpp, re.MULTILINE
+    ) == ['0, "30", input_tf_', '1, "15", input_tf_']
+    setup = cpp.split("void configure_security_evaluators()", 1)[1].split(
+        "\n    }\n", 1)[0]
+    assert "sample_index" not in setup and "alias_local" not in setup
+    body = chart_body(cpp)
+    selected = re.search(
+        r"const std::string _pf_selected_tf = alias_local(?:\[0\])?;", body)
+    assert selected is not None and body.index("for (") < selected.start()
+    assert_selection_tail(
+        body,
+        'if (_pf_selected_tf == "30") return _req_sec_lower_tf_0;',
+        'if (_pf_selected_tf == "15") return _req_sec_lower_tf_1;',
+    )
+
+
+@pytest.mark.parametrize("lower_tf", (False, True))
+def test_local_open_timeframe_arm_keeps_the_closed_set_refusal(lower_tf):
+    request_name = "security_lower_tf" if lower_tf else "security"
+    pine = (HEADER + 'if bar_index > 0\n'
+            '    chosen_local = close > open ? str.tostring(bar_index) : "15"\n'
+            f'    got_local = request.{request_name}(syminfo.tickerid, chosen_local, close)\n'
+            '    strategy.entry("Long", strategy.long)\n')
+    with pytest.raises(CompileError) as caught:
+        transpile(pine)
+    (diagnostic,) = caught.value.diagnostics
+    assert diagnostic.code == "PF-E3111"
+    assert diagnostic.args == {"reason": "the timeframe set is not closed at compile time"}
+    assert (diagnostic.location.line, diagnostic.location.col) == (4, 35)
+
+
 @pytest.mark.parametrize("name", ("explicit-price", "explicit-parity",
                                  "hour-fixed-fast", "hour-fixed-slow"))
 def test_fixed_requests_keep_the_original_emission_path(name, monkeypatch):

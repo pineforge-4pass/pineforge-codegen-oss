@@ -229,13 +229,23 @@ class SecurityEmitter:
         self._codegen_error(expr_start(node), message, hint=hint)
 
     def _security_series_tf_sources(self, node, seen=frozenset()):
-        """Follow global aliases of the authored timeframe selection.
+        """Follow exact declaration aliases of the authored timeframe selection.
 
         This walk does not render C++ or allocate emission counters. A request
         which passes the setup proof therefore retains its original emitter.
         """
         if isinstance(node, Identifier):
             name = node.name
+            if not self._security_identifier_is_global_binding(node):
+                binding = self.ctx.identifier_binding_nodes.get(id(node))
+                # Scope labels and spellings are shared by sibling blocks.
+                # Only the declaration this read resolved to supplies its arms.
+                key = ("local", id(binding))
+                if (isinstance(binding, VarDecl) and binding.value is not None
+                        and key not in seen):
+                    return self._security_series_tf_sources(
+                        binding.value, seen | {key})
+                return [node]
             if name in seen:
                 return [node]
             if self._security_identifier_is_global_binding(node):
@@ -253,9 +263,15 @@ class SecurityEmitter:
         leaves = []
         series = []
         normalization_failed = False
+        local_selection = (
+            isinstance(node, Identifier)
+            and not self._security_identifier_is_global_binding(node)
+            and isinstance(self.ctx.identifier_binding_nodes.get(id(node)), VarDecl))
 
         def condition(value):
-            if self._security_tf_expr_is_per_bar(value):
+            # A local selection must run where its binding is visible, even
+            # when its condition happens to be fixed for this run.
+            if local_selection or self._security_tf_expr_is_per_bar(value):
                 series.append(value)
 
         def arm(body, owner):
@@ -344,7 +360,7 @@ class SecurityEmitter:
         extras = []
         next_id = len(self._security_calls)
         for item in self._security_calls:
-            if item.get("dead") or item.get("is_lower_tf_array"):
+            if item.get("dead"):
                 continue
             leaves, series = self._security_series_tf_choices(item["tf_node"])
             if not series:
@@ -398,6 +414,8 @@ class SecurityEmitter:
         when the script already bound the timeframe to a name.
         """
         def result(sec_id):
+            if item.get("is_lower_tf_array"):
+                return f"_req_sec_lower_tf_{sec_id}"
             if isinstance(item["expr_node"], TupleLiteral):
                 return "std::make_tuple(" + ", ".join(
                     f"_req_sec_{sec_id}_{i}" for i in range(item["tuple_size"])) + ")"

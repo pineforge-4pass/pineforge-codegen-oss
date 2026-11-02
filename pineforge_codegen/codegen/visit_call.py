@@ -2458,11 +2458,21 @@ class CallVisitor:
                             ltf_all_args.append(None)
                         ltf_all_args[i] = node.kwargs[pname]
                 ltf_expr_node = ltf_all_args[2] if len(ltf_all_args) > 2 else None
-                for item in self._security_calls:
-                    if not item.get("is_lower_tf_array"):
-                        continue
-                    if item["expr_node"] is ltf_expr_node:
-                        return f"_req_sec_lower_tf_{item['sec_id']}"
+                candidates = [
+                    item for item in self._security_calls
+                    if item.get("is_lower_tf_array")
+                    and not item.get("series_tf_extra")
+                    and item["expr_node"] is ltf_expr_node
+                ]
+                if candidates:
+                    chosen = next(
+                        (item for item in candidates
+                         if item.get("callsite_idx") == self._active_call_site_idx),
+                        candidates[0],
+                    )
+                    if chosen.get("series_tf_sites"):
+                        return self._security_series_tf_value(chosen, ltf_all_args[1])
+                    return f"_req_sec_lower_tf_{chosen['sec_id']}"
                 return "std::vector<double>{}"
             # request.earnings / dividends / splits / financial reading the
             # series recorded under their key (external_requests).
