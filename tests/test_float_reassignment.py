@@ -204,7 +204,10 @@ def test_positive_float_expression_writes_use_double_storage(rhs):
     cpp = transpile(_source(f"int s = n\ns := {rhs}\nplot(s)\n"))
     assert re.search(r"\bdouble s\b", cpp), cpp
     writes = [line for line in cpp.splitlines() if re.search(r"\bs = ", line)]
-    assert all("_pf_v" not in line for line in writes), writes
+    # The narrowing helper's own text: an int cast of the written value. The
+    # state checkpoint lines carry a member named _pf_value_N, which is not it.
+    assert all("(int)_pf_v" not in line and "na<int>" not in line
+               for line in writes), writes
 
 
 FROZEN_CONTROLS = {
