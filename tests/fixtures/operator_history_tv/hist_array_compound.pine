@@ -1,0 +1,11 @@
+//@version=6
+strategy("Collection history operand", currency = currency.NONE, initial_capital = 1000000)
+arr_h = array.from(1.0)
+float acc_h = 0.0
+acc_h += arr_h[1]
+plot(acc_h)
+
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

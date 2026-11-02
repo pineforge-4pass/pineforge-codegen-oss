@@ -26,7 +26,10 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError, Level, Phase
 
 
 def _cpp(body: str, *, header: str = "") -> str:
@@ -213,7 +216,9 @@ def test_non_top_level_and_eager_shapes_keep_the_existing_route():
             "    x := high > low and ta.roc(close, 3) > 0"
         ),
         "var_init": "var float x = close > open ? ta.roc(close, 3) : 0.0",
-        "bool_source": "x = close > open and ta.change(close > open) != 0",
+        # TV accepts the bool comparison: specprobes/P0C2g/chg_bool_ne_false.
+        # The bool source bypasses the numeric source clock and keeps ta::Change.
+        "bool_source": "x = close > open and ta.change(close > open) != false",
     }
     for label, source in cases.items():
         cpp = _cpp(source)
@@ -221,6 +226,19 @@ def test_non_top_level_and_eager_shapes_keep_the_existing_route():
         assert "_pf_lazy_src_hist_" not in cpp, label
         assert "_pf_every_bar_ta_" not in cpp, label
         assert "ta::ROC _ta_roc" in cpp or "ta::Change _ta_change" in cpp, label
+
+
+def test_boolean_change_cannot_be_compared_with_zero():
+    # TV refuses with CE10123: specprobes/P0C2g/chg_bool_ne_zero.
+    with pytest.raises(CompileError) as caught:
+        _cpp("x = close > open and ta.change(close > open) != 0")
+    (diagnostic,) = caught.value.diagnostics
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.code == "PF-E2049"
+    assert diagnostic.args == {"op": "!="}
+    # The relation reports the numeric RHS: two header lines, then 0 at column 49.
+    assert (diagnostic.location.line, diagnostic.location.col) == (3, 49)
 
 
 def test_generated_type_clock_and_history_names_avoid_pine_collisions():
