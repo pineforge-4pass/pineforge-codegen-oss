@@ -29,10 +29,14 @@ generated-C++ logs, requested-value traces and literal trade controls for
 scalar operators, casts, formatting, defaults and let chains; they skip when
 the paired native engine inputs are missing, and they establish
 interpreter/C++ agreement only after they run. The state measurements cover
-these two expressions and two timeframes; longer TA windows, persistent
-`var`/`varip` state and other symbols were not measured. Persistent requested
-state keeps a located refusal; other-symbol series requests retain the
-existing missing-data lowering.
+these two expressions and two timeframes; longer TA windows and other symbols
+were not measured by this kit. Persistent `var`/`varip` state inside the
+requested expression, and a persistent counter declared outside it, are lowered
+with one independent chain per registered timeframe: their values were measured
+against TradingView on five separate sources, not by this kit, and
+`tests/test_security_series_timeframe.py` checks their emitted code. State that
+the replay cannot carry keeps a located refusal with its own reason;
+other-symbol series requests retain the existing missing-data lowering.
 
 The native module takes the hourly OHLCV CSV from
 `PINEFORGE_BTCUSDT_1H_FEED` and uses the usual `PINEFORGE_ENGINE_INCLUDE`,
