@@ -15,6 +15,7 @@ from .finite_ta_length import expand_finite_choice_extrema_lengths
 from .function_overloads import bind_scalar_overloads
 from .library_inline import inline_libraries
 from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
+from .method_binding import validate_call_argument_order
 from .pragmas import extract_pf_trace_pragmas
 from .request_discovery import discover_requests, request_sites
 from .request_feed_inventory import build_request_feed_inventory
@@ -43,6 +44,7 @@ def _parse_bounded(pine_source: str, filename: str, budget: TimeBudget | None = 
                  budget=budget).parse()
     check_ast_depth(ast, filename)
     budget.check(phase=Phase.PARSER)
+    validate_call_argument_order(ast, filename=filename)
     return ast, pragmas, budget
 
 

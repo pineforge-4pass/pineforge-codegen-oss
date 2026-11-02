@@ -91,6 +91,12 @@ lone CR code/comment line endings. A lone CR inside a string is kept as data
 and does not end an unterminated-string recovery. Its normalized source goes
 to pragma extraction and the parser too; direct `Lexer` callers share the rule.
 
+Before lowering, `method_binding.validate_call_argument_order` checks each v6
+call and declaration: a positional argument after a keyword raises PF-E2074
+at that expression's first token. `_parse_bounded`, direct `Analyzer` clients
+and v6 library parsing share this rule, including unused bodies and parameter
+defaults; imported v5 subtrees keep their existing policy.
+
 1. `pragmas.extract_pf_trace_pragmas` — pulls `// @pf-trace name=expr`
   comments out before the lexer strips comments.
 2. `Lexer` → `Parser` → `Program` AST. Before the support check,
