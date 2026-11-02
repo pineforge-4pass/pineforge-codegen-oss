@@ -77,6 +77,60 @@ def test_float_step_loop_from_a_widened_variable_is_refused_like_int(name):
     assert_float_step_refused(pine, location=(line, first, last + 1))
 
 
+CALLABLE_LOOP_START_REFUSALS = {
+    "callable_var_direct": _source("""
+        measure(int seed) =>
+            var int s = seed
+            s := seed
+            s := s / 2
+            s
+        float observed = 0.0
+        for i = measure(5) to 6 by 0.5
+            observed += i
+        plot(observed)
+    """),
+    "callable_var_named": _source("""
+        measure(int seed) =>
+            var int s = seed
+            s := seed
+            s := s / 2
+            s
+        x = measure(n)
+        float observed = 0.0
+        for i = x to 6 by 0.5
+            observed += i
+        plot(observed)
+    """),
+    "callable_local_direct": _source("""
+        measure(int seed) =>
+            int s = seed
+            s := s / 2
+            s
+        float observed = 0.0
+        for i = measure(5) to 6 by 0.5
+            observed += i
+        plot(observed)
+    """),
+    "callable_local_named": _source("""
+        measure(int seed) =>
+            int s = seed
+            s := s / 2
+            s
+        x = measure(n)
+        float observed = 0.0
+        for i = x to 6 by 0.5
+            observed += i
+        plot(observed)
+    """),
+}
+
+
+@pytest.mark.parametrize("name", tuple(CALLABLE_LOOP_START_REFUSALS))
+def test_float_step_loop_from_a_widened_callable_is_refused(name):
+    """TradingView verdict unmeasured; engine refusal pinned so a later change is visible."""
+    assert_float_step_refused(CALLABLE_LOOP_START_REFUSALS[name])
+
+
 # These controls derive from the measured plain-quantity row. They exercise
 # where the quotient is stored, without claiming additional TradingView tapes.
 # Persistent cases reset before dividing so every bar has the measured value.

@@ -3,6 +3,7 @@
   "division_provenance": "The division_start_no_step, division_start_int_step, division_named_start, division_end_only and division_counter_value fixtures copy the measured v01 through v05 scripts byte for byte. fractional_input and fractional_series copy the measured fractional-input.pine and fractional-series.pine byte for byte. All seven exports contain 205 entries. The v01 and v03 exports are the same file. The series export alternates odd n (10.5, 103 entries) and even n (12, 102 entries), starting with odd n. Each sha256 below is the supplied full TradingView export digest; the source hashes identify the copied scripts. Carrier controls derive their 10.5 oracle from fractional_input's identical loop shape; they do not claim separate TradingView tapes.",
   "fractional_consumer_provenance": "TradingView accepted descending.pine, array-index.pine and counter-string.pine on 2026-11-02 at 22:59. fractional_descending.pine, fractional_array_index.pine and counter_string.pine copy those sources byte for byte. The descending export has 205 entries of quantity 4.5. The array-index export has 205 entries of quantity 120: indices 2.5, 3.5 and 4.5 truncate to 2, 3 and 4. The counter-string export has 615 entries of quantity 1, with 205 entries for each exact id recorded below. Full export and source digests are the supplied measurement receipts. The counter_tostring known gap records current engine text separately from TradingView's 18-place ids.",
   "reassignment_provenance": "All seven reassignment/helper fixtures copy the measured sources byte for byte. TradingView accepted every source on BINANCE:BTCUSDT 60 with default inputs. reassign_int_hint is the controlling row: an explicit int hint retains the quotient, quantity 2.5 on 205 entries, as do the plain and literal initializers. reassign_series_qty alternates 2.5 (103 entries) and 3.5 (102). reassign_untyped, reassign_typed (float hint) and helper_param each have quantity 10.5 on 205 entries and share fractional_input's supplied export digest. The helper_param source digest is computed from the copied source; export digests are supplied measurements, with no export or C++ hash recapture.",
+  "callable_quantity_provenance": "callable_var_qty.pine and callable_local_qty.pine copy the measured sources byte for byte. TradingView accepted each source on BINANCE:BTCUSDT 60 with default inputs. Each source was exported once; both exports contain 205 entries, all with quantity 2.5. The two exports are byte-equal, with each export digest bound to its own source digest below. The source and export digests are supplied measurement receipts; the supplied verdict table has SHA-256 0167f54f735894bacf4a6beb4b1643dff4ad2590a12015f42f78af0c54ac44a2.",
   "widened_step_provenance": "The widened_float_step and widened_int_hint_float_step fixtures copy the measured sources byte for byte. TradingView refused both on BINANCE:BTCUSDT 60 with default inputs, reporting CE10106. Their check type stays int although the plain-quantity reassignment rows measure a value of 2.5. The source and error-artifact digests are supplied measurement receipts; the supplied verdict table has SHA-256 88b9dd5b851000ca157b7ade785ea20a85c8a2f8c7f10260ea93d1a0aa11763a.",
   "ta_counter_type_receipt": {
     "receipt": "tacarriers-2302",
@@ -19,6 +20,8 @@
   },
   "entries_per_probe": 205,
   "entry_counts": {
+    "callable_var_qty": 205,
+    "callable_local_qty": 205,
     "fractional_descending": 205,
     "fractional_array_index": 205,
     "counter_string": 615
@@ -27,6 +30,8 @@
     "reassign_int_hint": 2.5,
     "reassign_plain_qty": 2.5,
     "reassign_literal_qty": 2.5,
+    "callable_var_qty": 2.5,
+    "callable_local_qty": 2.5,
     "reassign_untyped": 10.5,
     "reassign_typed": 10.5,
     "helper_param": 10.5,
@@ -177,6 +182,8 @@
     "reassign_int_hint": {"source": "reassign_int_hint.pine", "measured_source": "reassign_int_hint.pine", "sha256": "7c4c77e0830bfa3464171ec5562fc4724619a76d8275157a21b517431ce9f7dd", "source_sha256": "c9d7ebf0744337d9a9b6097f394b35dede11a08e7ff60c3cd261c6094e615ac6"},
     "reassign_plain_qty": {"source": "reassign_plain_qty.pine", "measured_source": "reassign_plain_qty.pine", "sha256": "7c4c77e0830bfa3464171ec5562fc4724619a76d8275157a21b517431ce9f7dd", "source_sha256": "907d5827b99cc2279c2afe7f6e83283f2ff39592443595d02f12216cc81d333c"},
     "reassign_literal_qty": {"source": "reassign_literal_qty.pine", "measured_source": "reassign_literal_qty.pine", "sha256": "7c4c77e0830bfa3464171ec5562fc4724619a76d8275157a21b517431ce9f7dd", "source_sha256": "95f293b390973e38f38665adbe3ae946112ab4b7f413a17579d40bb34d790b9e"},
+    "callable_var_qty": {"source": "callable_var_qty.pine", "measured_source": "callable_var_qty.pine", "sha256": "7c4c77e0830bfa3464171ec5562fc4724619a76d8275157a21b517431ce9f7dd", "source_sha256": "4e9d77ca008bc0542b07593977b00ff112f7696ce64e8d1206693452175b42b7"},
+    "callable_local_qty": {"source": "callable_local_qty.pine", "measured_source": "callable_local_qty.pine", "sha256": "7c4c77e0830bfa3464171ec5562fc4724619a76d8275157a21b517431ce9f7dd", "source_sha256": "04374d2c8500f4b9d9911df542735fcc2ec1359595edaa06ebf180e137a37a99"},
     "reassign_series_qty": {"source": "reassign_series_qty.pine", "measured_source": "reassign_series_qty.pine", "sha256": "8b2923a9096d7b7d2a941c0f6bcb54a11e04a96714606dca91352d87b5b996dc", "source_sha256": "0ba66e2669200eed53015f3f9a8f5e7baf3cefa6ecc12e2caa1d82835635a565"},
     "reassign_untyped": {"source": "reassign_untyped.pine", "measured_source": "reassign_untyped.pine", "sha256": "3aa0f43925521663a43f0421f5f4d8d0cee5f2925eeb09d0d22078c2d75aaa62", "source_sha256": "21896d14a3b77e0b889d804a4287b34422678aab64db2015d8ec5e35782c9ab1"},
     "reassign_typed": {"source": "reassign_typed.pine", "measured_source": "reassign_typed.pine", "sha256": "3aa0f43925521663a43f0421f5f4d8d0cee5f2925eeb09d0d22078c2d75aaa62", "source_sha256": "1dfba9ed13151c4446d50dc871044df5c904e4f99a650de91155cb7ef2722e2c"},

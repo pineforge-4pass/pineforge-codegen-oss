@@ -38,6 +38,7 @@ REASSIGNMENT_TAPES = (
     "reassign_int_hint", "reassign_plain_qty", "reassign_literal_qty",
     "reassign_series_qty", "reassign_untyped", "reassign_typed",
 )
+CALLABLE_QUANTITY_TAPES = ("callable_var_qty", "callable_local_qty")
 # Each twin is an engine-vs-engine control, not TradingView evidence.
 REASSIGNMENT_TAPE_TWINS = {
     name: ("s := s / 2", "s := s * 0.5") for name in REASSIGNMENT_TAPES
@@ -303,7 +304,8 @@ def test_tradingview_evidence_has_complete_sha256():
 
 
 @pytest.mark.parametrize("name", (
-    *REASSIGNMENT_TAPES, HELPER_PARAMETER_GAP, *DIVISION_TAPE_TWINS,
+    *REASSIGNMENT_TAPES, *CALLABLE_QUANTITY_TAPES,
+    HELPER_PARAMETER_GAP, *DIVISION_TAPE_TWINS,
 ))
 def test_division_fixture_is_the_measured_source(name):
     evidence = TV["evidence"][name]
