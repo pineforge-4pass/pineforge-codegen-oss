@@ -4182,10 +4182,36 @@ class TypeInferer:
             cached = self._program_has_bool_text = self._contains_bool_text(self.ctx.ast)
         return cached
 
+    def _bool_text_storage_type(self, node) -> str:
+        """The emitted value's type at a text boundary, leaving storage alone."""
+        if isinstance(node, Identifier):
+            name = node.name
+            series_param = self._current_func_series_param_types.get(name)
+            if series_param is not None:
+                return series_param
+            param = self._current_func_param_types.get(name)
+            if param is not None:
+                return param
+            if self._identifier_reads_series(node):
+                return self._series_type_for(name)
+            local = self._current_func_local_types.get(name)
+            if local is not None:
+                return local
+            if name not in self._current_func_locals:
+                # Hoisted globals use the initializer's emitted type, which
+                # can differ from the analyzer's compatibility PineType.
+                slot = self._slot_scalar_cpp_type(name)
+                if slot is not None:
+                    return slot
+        return self._infer_type(node)
+
     def _bool_text_condition(self, node, value: str) -> str:
         """Read a legacy bool slot as a value, without changing that slot."""
-        if self._infer_type(node) != "std::string":
+        storage = self._bool_text_storage_type(node)
+        if storage == "bool":
             return value
+        if storage != "std::string":
+            return self._coerce_bool_expr(value, node)
         return evaluate_args_once(
             [value], {0},
             lambda args: f"(!({args[0]}).empty() && ({args[0]})[0] != '\\0')",
@@ -4194,9 +4220,9 @@ class TypeInferer:
 
     def _legacy_bool_string_value(self, node, value: str) -> str:
         """Carry a bool across a legacy string parameter or return boundary."""
-        if (self._infer_type(node) != "std::string"
+        if (self._bool_text_storage_type(node) != "std::string"
                 and self._has_bool_text() and self._text_type(node) == "bool"):
-            return f"std::string(1, static_cast<char>({value}))"
+            return f"std::string(1, static_cast<char>({self._coerce_bool_expr(value, node)}))"
         return value
 
     def _infer_type(

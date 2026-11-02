@@ -859,7 +859,10 @@ class StmtVisitor:
                 node.name,
                 target_cpp_type=(
                     target_cpp_type
-                    if target_cpp_type in DRAWING_TYPE_TO_CPP.values()
+                    if (target_cpp_type in DRAWING_TYPE_TO_CPP.values()
+                        or (target_cpp_type == "std::string"
+                            and self._has_bool_text()
+                            and self._text_type(node.value) == "bool"))
                     else self._series_handle_target(node.name)
                 ),
             )

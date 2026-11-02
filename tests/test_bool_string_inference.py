@@ -1,9 +1,14 @@
-"""Bool text follows Pine's true/false spelling without changing numeric text."""
+"""Pine reference: bools print true/false, including through legacy storage.
+
+Every text row compiles and runs against the paired runtime. Its oracle is a
+Pine ``if`` which prints a literal, independently of the text conversion and
+its transport. These are Pine reference rows, not newly measured TV tapes.
+Complete-C++ compatibility controls deliberately retain their frozen reference.
+"""
 
 from __future__ import annotations
 
 import datetime as dt
-import re
 
 import pytest
 
@@ -18,7 +23,6 @@ from tests._pine_libraries import Layout
 
 
 HEADER = '//@version=6\nstrategy("Bool text", overlay=true)\n'
-BOOL_TEXT = '? std::string("true") : std::string("false")'
 NUMERIC_REFERENCE = "883221a00585e16a8e9802b4c16a7c85bf8fa4b8"
 TOSTRING_CALLS = (
     "str.tostring({value})",
@@ -33,17 +37,116 @@ def _source(body: str, expression: str) -> str:
             'strategy.entry("L", strategy.long, comment = text)\n')
 
 
+@pytest.fixture(scope="module")
+def native_env(tmp_path_factory):
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("bool_text_feed")
+    # The existing native session probe's two US trading days, including
+    # pre/post-market. Vary close independently so TA/transport rows see both
+    # bool values and warm-up; no expected text comes from generated C++.
+    stamps = [
+        int(dt.datetime(2025, 1, day, 14, tzinfo=dt.timezone.utc).timestamp() * 1000)
+        + step * 900_000
+        for day in (6, 7) for step in range(30)
+    ]
+    closes = (100.5, 99.5, 101.5, 98.5, 100.0, 102.0, 97.0)
+    feed = base / "chart.csv"
+    feed.write_text(
+        "timestamp,open,high,low,close,volume\n"
+        + "".join(f"{stamp},100,103,96,{closes[index % len(closes)]},1\n"
+                  for index, stamp in enumerate(stamps)),
+        encoding="utf-8",
+    )
+    aux = base / "minutes.csv"
+    aux.write_text(
+        "timestamp,open,high,low,close,volume\n"
+        + "".join(f"{stamp + minute * 60_000},100,103,96,"
+                  f"{closes[index % len(closes)]},1\n"
+                  for index, stamp in enumerate(stamps) for minute in range(15)),
+        encoding="utf-8",
+    )
+    return engine, feed, len(stamps), aux
+
+
+def _run_native(tmp_path, native_env, source, *, extra_flags=()):
+    engine, feed, _count, aux = native_env
+    pine = tmp_path / "strategy.pine"
+    pine.write_text(source, encoding="utf-8")
+    translated = transpile_json(pine)
+    assert translated["ok"], translated.get("diagnostics")
+    # This is also the compile check for EVERY registry/shape/keyword row.
+    build_strategy_library(translated["cpp"], tmp_path, extra_flags=extra_flags)
+    _, _records, stderr = run_strategy(
+        engine, tmp_path, feed,
+        {"input_tf": "15", "script_tf": "15",
+         "aux_security_ohlcv_csv": str(aux), "aux_security_input_tf": "1",
+         "runtime_overrides": {"session": "0930-1600",
+                               "timezone": "America/New_York"}},
+        "bool_text",
+    )
+    return stderr
+
+
+def _messages(stderr, tag, count):
+    prefix = f"[INFO] {tag} "
+    rows = [line[len(prefix):].split(" ", 1) for line in stderr.splitlines()
+            if line.startswith(prefix)]
+    assert len(rows) == count, stderr
+    assert all(len(row) == 2 for row in rows), rows
+    result = {int(index): message for index, message in rows}
+    assert len(result) == count, rows
+    return result
+
+
+def _reference_log(condition):
+    # Same authored condition, no tostring, formatter or transported slot.
+    return (f"if {condition}\n"
+            '    log.info("Pine reference {0} true", bar_index)\n'
+            "else\n"
+            '    log.info("Pine reference {0} false", bar_index)\n')
+
+
+def _assert_native_text(tmp_path, native_env, body, expression, condition,
+                        *, history=0, once=False, prefix="", sink="",
+                        order=False, extra_flags=()):
+    """Observe every bar's text and its actual filled entry comment."""
+    command = "order" if order else "entry"
+    # entry reverses automatically; order needs two units after its first fill
+    # to reverse a one-unit position. There is exactly one open trade to read.
+    quantity = "(bar_index == 0 ? 1 : 2)" if order else "1"
+    source = (
+        HEADER + body + f"text = {expression}\n" + sink
+        + _reference_log(condition)
+        + 'log.info("observed {0} {1}", bar_index, text)\n'
+        + 'if bar_index > 0\n'
+        + '    log.info("comment {0} {1}", bar_index - 1, '
+          'strategy.opentrades.entry_comment(0))\n'
+        + f'strategy.{command}("probe", bar_index % 2 == 0 ? strategy.long : '
+          f'strategy.short, qty = {quantity}, comment = text)\n'
+    )
+    stderr = _run_native(tmp_path, native_env, source, extra_flags=extra_flags)
+    count = native_env[2]
+    reference = _messages(stderr, "Pine reference", count)
+    assert set(reference.values()) <= {"true", "false"}, reference
+    expected = {
+        bar: prefix + (reference[0] if once else
+                       reference[bar - history] if bar >= history else "false")
+        for bar in range(count)
+    }
+    assert _messages(stderr, "observed", count) == expected, "Pine reference"
+    assert _messages(stderr, "comment", count - 1) == {
+        bar: expected[bar] for bar in range(count - 1)
+    }, "Pine reference: the filled entry must carry the converted text"
+    return stderr, expected
+
+
 @pytest.mark.parametrize("call", TOSTRING_CALLS)
-@pytest.mark.parametrize("value,rendered", (
-    ("session.isfirstbar_regular", "session_isfirstbar_regular_"),
-    ("session.islastbar_regular", "session_islastbar_regular_"),
-    ("session.isfirstbar", "session_isfirstbar_"),
-    ("barstate.islast", "barstate_islast_"),
-))
-def test_measured_builtin_bools_use_text_conversion(value, rendered, call):
-    cpp = transpile(_source("", call.format(value=value)))
-    assert f"({rendered} {BOOL_TEXT})" in cpp
-    assert f"pine_str_tostring_tv({rendered}," not in cpp
+@pytest.mark.parametrize("value", (
+    "session.isfirstbar_regular", "session.islastbar_regular",
+    "session.isfirstbar", "barstate.islast",
+), ids=lambda value: f"Pine reference-{value}")
+def test_measured_builtin_bools_use_text_conversion(tmp_path, native_env, value, call):
+    _assert_native_text(tmp_path, native_env, "", call.format(value=value), value)
 
 
 @pytest.mark.parametrize("call", TOSTRING_CALLS)
@@ -54,10 +157,11 @@ def test_measured_builtin_bools_use_text_conversion(value, rendered, call):
     "ta.rising(close, 5)",
     "ta.falling(close, 5)",
 ))
-def test_ta_bool_variable_uses_text_conversion(expression, call):
-    cpp = transpile(_source(f"ok = {expression}\n", call.format(value="ok")))
-    assert f"(ok {BOOL_TEXT})" in cpp
-    assert "pine_str_tostring_tv(ok," not in cpp
+def test_ta_bool_variable_uses_text_conversion(tmp_path, native_env, expression, call):
+    _assert_native_text(
+        tmp_path, native_env, f"ok = {expression}\n",
+        call.format(value="ok"), expression,
+    )
 
 
 BUILTIN_BOOLS = sorted({
@@ -95,11 +199,17 @@ BOOL_SOURCE_EXCEPTIONS: dict[str, str] = {}
 @pytest.mark.parametrize("table_name", (
     "ARRAY_FUNCTIONS", "MATRIX_FUNCTIONS", "REQUEST_VALUE_FUNCTIONS",
 ))
-def test_value_registry_declares_collection_and_request_predicates(table_name):
+def test_value_registry_declares_collection_and_request_predicates(
+        tmp_path, native_env, table_name):
     table = getattr(signatures, table_name, None)
     assert isinstance(table, dict) and table, f"missing predicate registry: {table_name}"
     assert any(signature.return_type == PineType.BOOL
                for function in table.values() for signature in function.signatures)
+    name = next(function.name for function in table.values()
+                if any(signature.return_type == PineType.BOOL
+                       for signature in function.signatures))
+    preamble, value = _builtin_source(name)
+    _assert_native_text(tmp_path, native_env, preamble, f"str.tostring({value})", value)
 
 
 def _builtin_source(name):
@@ -140,44 +250,8 @@ def _builtin_source(name):
     return preamble, f"{name}({', '.join(values)})"
 
 
-def _text_assignment(cpp):
-    start = re.search(r"(?m)^\s*text = ", cpp)
-    assert start is not None, cpp
-    depth = 0
-    tokens = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[(){}\[\];]')
-    for token in tokens.finditer(cpp, start.end()):
-        value = token.group()
-        if value in ("(", "{", "["):
-            depth += 1
-        elif value in (")", "}", "]"):
-            depth -= 1
-        elif value == ";" and depth == 0:
-            return cpp[start.end():token.start()].strip()
-    pytest.fail("the text assignment has no terminating semicolon")
-
-
-def _assert_text_assignment(cpp, *, operand=None):
-    # Inspect this entire assignment, including lambdas in its argument.
-    # A conversion in another statement cannot satisfy the assertion.
-    expression = _text_assignment(cpp)
-    assert expression.startswith("("), expression
-    suffix = f" {BOOL_TEXT})"
-    assert expression.endswith(suffix), expression
-    assert "pine_str_tostring_tv(" not in expression
-    condition = expression[1:-len(suffix)]
-    if operand is not None:
-        assert re.search(rf"\b{re.escape(operand)}\b", condition), condition
-    return condition
-
-
-def _stored_condition(name, variable):
-    storage = getattr(signatures, "VARIABLE_STORAGE_COMPATIBILITY", {})
-    if storage.get(name) == PineType.STRING:
-        return f"(!({variable}).empty() && ({variable})[0] != '\\0')"
-    return variable
-
-
-@pytest.mark.parametrize("name", sorted(set(BUILTIN_BOOLS) | set(BOOL_CALLS)))
+@pytest.mark.parametrize("name", sorted(set(BUILTIN_BOOLS) | set(BOOL_CALLS)),
+                         ids=lambda name: f"Pine reference-{name}")
 @pytest.mark.parametrize("shape,call", [
     (shape, call)
     for shape in (
@@ -186,94 +260,136 @@ def _stored_condition(name, variable):
     for call in (TOSTRING_CALLS if shape in ("stored", "local", "parameter")
                  else TOSTRING_CALLS[:1])
 ])
-def test_every_registry_bool_has_bool_text_in_each_shape(name, shape, call):
+def test_every_registry_bool_has_bool_text_in_each_shape(
+        tmp_path, native_env, name, shape, call):
     assert name not in BOOL_SOURCE_EXCEPTIONS, BOOL_SOURCE_EXCEPTIONS.get(name)
     preamble, value = _builtin_source(name)
+    condition = value
     if shape == "parameter":
-        cpp = transpile(_source(
-            f"render(p) => {call.format(value='p')}\n" + preamble,
-            f"render({value})",
-        ))
-        assert f"return ({_stored_condition(name, 'p')} {BOOL_TEXT});" in cpp
-        assert "pine_str_tostring_tv(p," not in cpp
+        preamble = f"render(p) => {call.format(value='p')}\n" + preamble
+        expression = f"render({value})"
     elif shape == "local":
-        cpp = transpile(_source(
-            preamble + f"render() =>\n    flag = {value}\n"
-            + f"    {call.format(value='flag')}\n",
-            "render()",
-        ))
-        assert f"return (flag {BOOL_TEXT});" in cpp
-        assert "pine_str_tostring_tv(flag," not in cpp
+        preamble += (f"render() =>\n    flag = {value}\n"
+                     + f"    {call.format(value='flag')}\n")
+        expression = "render()"
     else:
-        operand = None
         if shape in ("stored", "history"):
             preamble += f"flag = {value}\n"
             value = "flag[1]" if shape == "history" else "flag"
-            operand = "flag"
         elif shape == "array":
             preamble += f"flags = array.from({value})\n"
             value = "array.get(flags, 0)"
-            operand = "flags"
         elif shape == "return":
             preamble += f"predicate() => {value}\n"
             value = "predicate()"
-            operand = None
-        cpp = transpile(_source(preamble, call.format(value=value)))
-        condition = _assert_text_assignment(cpp, operand=operand)
-        if shape == "return":
-            assert re.search(r"\bpredicate(?:_[A-Za-z0-9]+)*\(", condition), condition
-        if shape == "stored":
-            assert condition == _stored_condition(name, "flag")
+        expression = call.format(value=value)
+    _assert_native_text(
+        tmp_path, native_env, preamble, expression, condition,
+        history=1 if shape == "history" else 0,
+    )
 
 
-@pytest.mark.parametrize("body,value", (
-    ("flags = array.from(session.isfirstbar)\n", "flags.get(0)"),
-    ("flags = array.from(ta.crossover(close, open))\n", "flags.get(0)"),
-    ("a = array.from(1, 2)\n", "array.includes(a, 1)"),
-    ("a = array.from(1, 2)\n", "a.includes(1)"),
-    ("a = array.from(1, 2)\nfound = array.includes(a, 1)\n", "found[1]"),
-    ('rb = request.security(syminfo.tickerid, "60", close > open)\n', "rb"),
+@pytest.mark.parametrize("body,value,condition,history", (
+    ("flags = array.from(session.isfirstbar)\n", "flags.get(0)", "session.isfirstbar", 0),
+    ("flags = array.from(ta.crossover(close, open))\n", "flags.get(0)",
+     "ta.crossover(close, open)", 0),
+    ("a = array.from(1, 2)\n", "array.includes(a, 1)", "array.includes(a, 1)", 0),
+    ("a = array.from(1, 2)\n", "a.includes(1)", "array.includes(a, 1)", 0),
+    ("a = array.from(1, 2)\nfound = array.includes(a, 1)\n", "found[1]",
+     "array.includes(a, 1)", 1),
+    ('rb = request.security(syminfo.tickerid, "60", close > open)\n', "rb",
+     'request.security(syminfo.tickerid, "60", close > open)', 0),
     ('flags = request.security_lower_tf(syminfo.tickerid, "1", close > open)\n',
-     "array.get(flags, 0)"),
-    ("", "ta.change(close > open)"),
-    ("", "ta.valuewhen(close > open, close < open, 0)"),
-    ("f(p) => str.tostring(p)\n", "f(session.isfirstbar)"),
-    ("f(p) => str.tostring(p)\n", "f(ta.crossover(close, open))"),
-    ("f(p) => str.tostring(p)\n", "f(barstate.isconfirmed)"),
-    ("f(p) => str.tostring(p)\n", "f(close > open)"),
+     "array.get(flags, 0)", "close > open", 0),
+    ("", "ta.change(close > open)", "ta.change(close > open)", 0),
+    ("", "ta.valuewhen(close > open, close < open, 0)",
+     "ta.valuewhen(close > open, close < open, 0)", 0),
+    ("f(p) => str.tostring(p)\n", "f(session.isfirstbar)", "session.isfirstbar", 0),
+    ("f(p) => str.tostring(p)\n", "f(ta.crossover(close, open))",
+     "ta.crossover(close, open)", 0),
+    ("f(p) => str.tostring(p)\n", "f(barstate.isconfirmed)", "barstate.isconfirmed", 0),
+    ("f(p) => str.tostring(p)\n", "f(close > open)", "close > open", 0),
 ))
-def test_measured_bool_transport_paths(body, value):
-    if value.startswith("f("):
-        cpp = transpile(_source(body, value))
-        assert f"return (p {BOOL_TEXT});" in cpp
-        assert "pine_str_tostring_tv(p," not in cpp
-    else:
-        cpp = transpile(_source(body, f"str.tostring({value})"))
-        _assert_text_assignment(cpp)
+def test_measured_bool_transport_paths(
+        tmp_path, native_env, body, value, condition, history):
+    expression = value if value.startswith("f(") else f"str.tostring({value})"
+    _assert_native_text(
+        tmp_path, native_env, body, expression, condition, history=history,
+    )
 
 
-@pytest.mark.parametrize("body,value", (
-    ("", "true"),
-    ("var bool flag = true\n", "flag"),
-    ("flag = close > open\n", "flag"),
-    ("flag = close > open\n", "flag[1]"),
-    ("var bool flag = false\nflag := close > open\n", "flag"),
-    ("is_up() => close > open\n", "is_up()"),
-    ("", "close > open ? true : false"),
-    ("flags = array.new<bool>(1, true)\n", "array.get(flags, 0)"),
-    ("flags = array.new<bool>(1, true)\n", "flags.get(0)"),
-    ("ok = ta.crossover(close, open)\nalias = ok\n", "alias"),
-    ("ok = ta.crossover(close, open)\n", "ok[1]"),
-    ("var ok = ta.crossover(close, open)\n", "ok"),
-    ("flag = session.isfirstbar_regular\n", "flag[1]"),
+@pytest.mark.parametrize("body,value,condition,history,once", (
+    ("", "true", "true", 0, False),
+    ("var bool flag = true\n", "flag", "true", 0, False),
+    ("flag = close > open\n", "flag", "close > open", 0, False),
+    ("flag = close > open\n", "flag[1]", "close > open", 1, False),
+    ("var bool flag = false\nflag := close > open\n", "flag", "close > open", 0, False),
+    ("is_up() => close > open\n", "is_up()", "close > open", 0, False),
+    ("", "close > open ? true : false", "close > open", 0, False),
+    ("flags = array.new<bool>(1, true)\n", "array.get(flags, 0)", "true", 0, False),
+    ("flags = array.new<bool>(1, true)\n", "flags.get(0)", "true", 0, False),
+    ("ok = ta.crossover(close, open)\nalias = ok\n", "alias",
+     "ta.crossover(close, open)", 0, False),
+    ("ok = ta.crossover(close, open)\n", "ok[1]", "ta.crossover(close, open)", 1, False),
+    ("var ok = ta.crossover(close, open)\n", "ok", "ta.crossover(close, open)", 0, True),
+    ("flag = session.isfirstbar_regular\n", "flag[1]", "session.isfirstbar_regular", 1, False),
     ("render() =>\n    ok = ta.crossover(close, open)\n    str.tostring(ok)\n",
-     None),
-    ("", "session.isfirstbar_regular[1]"),
+     None, "ta.crossover(close, open)", 0, False),
+    ("", "session.isfirstbar_regular[1]", "session.isfirstbar_regular", 1, False),
 ))
-def test_bool_values_keep_their_type_through_text_conversion(body, value):
+def test_bool_values_keep_their_type_through_text_conversion(
+        tmp_path, native_env, body, value, condition, history, once):
     expression = f"str.tostring({value})" if value is not None else "render()"
-    cpp = transpile(_source(body, expression))
-    assert cpp.count(BOOL_TEXT) == 1
+    _assert_native_text(
+        tmp_path, native_env, body, expression, condition,
+        history=history, once=once,
+    )
+
+
+@pytest.mark.parametrize("value", sorted(signatures.VARIABLE_STORAGE_COMPATIBILITY),
+                         ids=lambda value: f"Pine reference-stored-parameter-{value}")
+def test_stored_compat_bool_can_cross_an_untyped_parameter(tmp_path, native_env, value):
+    _assert_native_text(
+        tmp_path, native_env,
+        "render(p) => str.tostring(p)\n" + f"held = {value}\n",
+        "render(held)", value,
+    )
+
+
+@pytest.mark.parametrize("seed", sorted(signatures.VARIABLE_STORAGE_COMPATIBILITY),
+                         ids=lambda seed: f"Pine reference-legacy-{seed}")
+def test_legacy_string_parameter_receives_na_predicate_safely(
+        tmp_path, native_env, seed):
+    # Both calls pass Pine bools. The first call historically inferred a STRING
+    # parameter; the second passes a numeric TA slot whose first value is NaN.
+    # Sanitization makes the old NaN->char UB a runtime failure on every host;
+    # this test never asserts the implementation's cast or helper spelling.
+    _, expected = _assert_native_text(
+        tmp_path, native_env,
+        "render(p) => str.tostring(p)\n"
+        + f"seed = render({seed})\n"
+        + "ok = ta.change(close > open)\n",
+        "render(ok)", "ta.change(close > open)",
+        extra_flags=("-fsanitize=float-cast-overflow",
+                     "-fno-sanitize-recover=float-cast-overflow"),
+    )
+    assert expected[0] == "false", "Pine reference: no previous bool on bar zero"
+
+
+@pytest.mark.parametrize("value", sorted(signatures.VARIABLE_STORAGE_COMPATIBILITY),
+                         ids=lambda value: f"Pine reference-once-{value}")
+def test_legacy_bool_helper_result_is_evaluated_once(tmp_path, native_env, value):
+    _assert_native_text(
+        tmp_path, native_env,
+        "calls = array.new<int>(1, 0)\n"
+        + "predicate() =>\n"
+        + "    calls.set(0, calls.get(0) + 1)\n"
+        + f"    {value}\n"
+        + "rendered = str.tostring(predicate())\n"
+        + "if calls.get(0) != 1\n"
+        + '    runtime.error("text evaluated the predicate more than once")\n',
+        "rendered", value,
+    )
 
 
 @pytest.mark.parametrize("body,expression", (
@@ -321,35 +437,79 @@ def test_str_format_keeps_complete_reference_cpp(tmp_path, initializer):
     ))
 
 
-@pytest.mark.parametrize("statement", (
-    'strategy.entry("L", strategy.long, comment = str.tostring(session.isfirstbar_regular))',
-    'strategy.order("L", strategy.long, comment = str.tostring(session.isfirstbar_regular))',
-    'strategy.close("L", comment = str.tostring(session.isfirstbar_regular))',
-    'strategy.close_all(comment = str.tostring(session.isfirstbar_regular))',
-    'strategy.exit("X", "L", limit = close + 1, comment = str.tostring(session.isfirstbar_regular))',
-    'label.new(bar_index, close, text = str.tostring(session.isfirstbar_regular))',
-    'var mark = label.new(0, close)\nlabel.set_text(mark, str.tostring(session.isfirstbar_regular))',
-    'var mark = label.new(0, close)\nlabel.set_tooltip(mark, str.tostring(session.isfirstbar_regular))',
-    'log.info(str.tostring(session.isfirstbar_regular))',
-    'log.warning(str.tostring(session.isfirstbar_regular))',
-    'log.error(str.tostring(session.isfirstbar_regular))',
-))
-def test_string_consumers_keep_explicit_bool_conversion(statement):
-    cpp = transpile(HEADER + statement + "\n")
-    assert f"(session_isfirstbar_regular_ {BOOL_TEXT})" in cpp
-    assert "pine_str_tostring_tv(session_isfirstbar_regular_," not in cpp
+@pytest.mark.parametrize("consumer", (
+    "entry", "order", "close", "close_all", "exit",
+    "label.new", "label.set_text", "label.set_tooltip",
+    "log.info", "log.warning", "log.error",
+), ids=lambda consumer: f"Pine reference-{consumer}")
+def test_string_consumers_keep_explicit_bool_conversion(
+        tmp_path, native_env, consumer):
+    condition = "session.isfirstbar_regular"
+    conversion = f"str.tostring({condition})"
+    if consumer in ("entry", "order"):
+        _assert_native_text(
+            tmp_path, native_env, "", conversion, condition,
+            order=consumer == "order",
+        )
+    elif consumer in ("close", "close_all", "exit"):
+        command = {
+            "close": f'strategy.close("L", comment = {conversion})',
+            "close_all": f"strategy.close_all(comment = {conversion})",
+            # All test prices exceed one: a sell limit at one fills on the
+            # next bar, so this checks delivered exit text, not order spelling.
+            "exit": f'strategy.exit("X", "L", limit = 1, comment = {conversion})',
+        }[consumer]
+        source = (
+            HEADER + _reference_log(condition)
+            + "if bar_index % 2 == 0\n"
+            + "    if bar_index > 0\n"
+            + '        log.info("delivered {0} {1}", bar_index - 1, '
+              'strategy.closedtrades.exit_comment(strategy.closedtrades - 1))\n'
+            + '    strategy.entry("L", strategy.long, qty = 1)\n'
+            + f"else\n    {command}\n"
+        )
+        stderr = _run_native(tmp_path, native_env, source)
+        count = native_env[2]
+        reference = _messages(stderr, "Pine reference", count)
+        expected = {bar: reference[bar] for bar in range(1, count - 1, 2)}
+        assert _messages(stderr, "delivered", len(expected)) == expected, "Pine reference"
+    elif consumer.startswith("log."):
+        stderr, expected = _assert_native_text(
+            tmp_path, native_env, "", conversion, condition,
+            sink=f"{consumer}(text)\n",
+        )
+        level = {"log.info": "INFO", "log.warning": "WARN", "log.error": "ERROR"}[consumer]
+        actual = [line for line in stderr.splitlines()
+                  if line in (f"[{level}] true", f"[{level}] false")]
+        assert actual == [f"[{level}] {value}" for value in expected.values()], "Pine reference"
+    else:
+        if consumer == "label.new":
+            body = f"mark = label.new(bar_index, close, text = {conversion})\n"
+            expression = "label.get_text(mark)"
+        elif consumer == "label.set_text":
+            body = ("var mark = label.new(0, close)\n"
+                    + f"label.set_text(mark, {conversion})\n")
+            expression = "label.get_text(mark)"
+        else:
+            # Pine has no tooltip getter. Observe the evaluated argument via a
+            # helper's array write, without claiming the inert tooltip is stored.
+            body = (
+                'received = array.new<string>(1, "")\n'
+                + "message() =>\n"
+                + f"    converted = {conversion}\n"
+                + "    received.set(0, converted)\n    converted\n"
+                + "var mark = label.new(0, close)\n"
+                + "label.set_tooltip(mark, message())\n"
+            )
+            expression = "received.get(0)"
+        _assert_native_text(tmp_path, native_env, body, expression, condition)
 
 
-def test_order_comment_transports_the_converted_value():
-    cpp = transpile(
-        HEADER + 'strategy.order("L", strategy.long, qty = 1, '
-        'comment = str.tostring(session.isfirstbar_regular))\n'
+def test_order_comment_transports_the_converted_value(tmp_path, native_env):
+    _assert_native_text(
+        tmp_path, native_env, "", "str.tostring(session.isfirstbar_regular)",
+        "session.isfirstbar_regular", order=True,
     )
-    assert re.search(
-        r'^\s*strategy_order\([^\n]*, \(session_isfirstbar_regular_ '
-        + re.escape(BOOL_TEXT) + r'\)\);$',
-        cpp, re.M,
-    ), cpp
 
 
 @pytest.mark.parametrize("comment", ('"plain"', "str.tostring(close)", 'str.format("{0}", close)'))
@@ -360,19 +520,19 @@ def test_order_comments_without_bool_conversion_keep_reference_cpp(tmp_path, com
     )
 
 
-def test_concatenation_keeps_explicit_bool_conversion():
-    cpp = transpile(_source("", '"x" + str.tostring(session.isfirstbar_regular)'))
-    assert f"(session_isfirstbar_regular_ {BOOL_TEXT})" in cpp
-    assert 'std::string("x") +' in cpp
+def test_concatenation_keeps_explicit_bool_conversion(tmp_path, native_env):
+    _assert_native_text(
+        tmp_path, native_env, "", '"x" + str.tostring(session.isfirstbar_regular)',
+        "session.isfirstbar_regular", prefix="x",
+    )
 
 
-@pytest.mark.parametrize("body,value", (
-    ("", "session.isfirstbar_regular"),
-    ("ok = ta.crossover(close, open)\n", "ok"),
+@pytest.mark.parametrize("body,value,condition", (
+    ("", "session.isfirstbar_regular", "session.isfirstbar_regular"),
+    ("ok = ta.crossover(close, open)\n", "ok", "ta.crossover(close, open)"),
 ))
-def test_string_cast_uses_bool_text_conversion(body, value):
-    cpp = transpile(_source(body, f"string({value})"))
-    assert cpp.count(BOOL_TEXT) == 1
+def test_string_cast_uses_bool_text_conversion(tmp_path, native_env, body, value, condition):
+    _assert_native_text(tmp_path, native_env, body, f"string({value})", condition)
 
 
 @pytest.mark.parametrize("value", ("true", "flag"))
@@ -382,12 +542,16 @@ def test_string_plus_bool_requires_an_explicit_conversion(value):
 
 
 @pytest.mark.parametrize("channel", ("info", "warning", "error"))
-def test_log_format_arguments_keep_their_cpp_bool_type(channel):
-    cpp = transpile(
-        HEADER + f'log.{channel}("{{0}}", session.isfirstbar_regular)\n'
+def test_log_format_arguments_keep_their_cpp_bool_type(tmp_path, native_env, channel):
+    stderr, expected = _assert_native_text(
+        tmp_path, native_env, "", 'str.format("{0}", session.isfirstbar_regular)',
+        "session.isfirstbar_regular",
+        sink=f'log.{channel}("{{0}}", session.isfirstbar_regular)\n',
     )
-    assert "_PFTvFormatValue(session_isfirstbar_regular_)" in cpp
-    assert 'text(value ? "true" : "false")' in cpp
+    level = {"info": "INFO", "warning": "WARN", "error": "ERROR"}[channel]
+    actual = [line for line in stderr.splitlines()
+              if line in (f"[{level}] true", f"[{level}] false")]
+    assert actual == [f"[{level}] {value}" for value in expected.values()], "Pine reference"
 
 
 @pytest.mark.parametrize("statement", (
@@ -442,19 +606,24 @@ def test_bool_conditions_keep_complete_reference_cpp(tmp_path, initializer):
     _assert_reference_cpp(tmp_path, source)
 
 
-@pytest.mark.parametrize("body,value", (
-    ("type State\n    bool active\ns = State.new(barstate.isconfirmed)\n", "s.active"),
-    ("type State\n    bool active\ns = State.new(ta.crossover(close, open))\n", "s.active"),
-    ('m = map.new<string, bool>()\nm.put("a", session.isfirstbar)\n', 'm.get("a")'),
-    ('m = map.new<string, bool>()\nm.put("a", ta.crossover(close, open))\n', 'm.get("a")'),
-    ("flag = not na(ta.pivothigh(high, 2, 2))\n", "flag"),
-    ("flag = ta.crossover(close, open) ? true : false\n", "flag"),
-    ("f(p) => str.tostring(p)\n", "f(close > open)"),
-    ("", "timeframe.isintraday"),
+@pytest.mark.parametrize("body,value,condition", (
+    ("type State\n    bool active\ns = State.new(barstate.isconfirmed)\n",
+     "s.active", "barstate.isconfirmed"),
+    ("type State\n    bool active\ns = State.new(ta.crossover(close, open))\n",
+     "s.active", "ta.crossover(close, open)"),
+    ('m = map.new<string, bool>()\nm.put("a", session.isfirstbar)\n',
+     'm.get("a")', "session.isfirstbar"),
+    ('m = map.new<string, bool>()\nm.put("a", ta.crossover(close, open))\n',
+     'm.get("a")', "ta.crossover(close, open)"),
+    ("flag = not na(ta.pivothigh(high, 2, 2))\n", "flag", "not na(ta.pivothigh(high, 2, 2))"),
+    ("flag = ta.crossover(close, open) ? true : false\n", "flag", "ta.crossover(close, open)"),
+    ("f(p) => str.tostring(p)\n", "f(close > open)", "close > open"),
+    ("", "timeframe.isintraday", "timeframe.isintraday"),
 ))
-def test_correct_bool_text_keeps_complete_reference_cpp(tmp_path, body, value):
+def test_correct_bool_text_keeps_reference_behavior(
+        tmp_path, native_env, body, value, condition):
     expression = value if value.startswith("f(") else f"str.tostring({value})"
-    _assert_reference_cpp(tmp_path, _source(body, expression))
+    _assert_native_text(tmp_path, native_env, body, expression, condition)
 
 
 @pytest.mark.parametrize("call", TOSTRING_CALLS)
@@ -471,15 +640,14 @@ def test_numeric_shadow_does_not_inherit_bool_text(tmp_path, body, call):
 @pytest.mark.parametrize("initializer", (
     "session.isfirstbar", "ta.crossover(close, open)", "array.includes(values, 1)",
 ))
-def test_bool_provenance_crosses_nested_helpers(initializer):
-    cpp = transpile(_source(
+def test_bool_provenance_crosses_nested_helpers(tmp_path, native_env, initializer):
+    _assert_native_text(
+        tmp_path, native_env,
         "values = array.from(1, 2)\n"
         "identity(p) => p\n"
         "render(p) =>\n    local = identity(p)\n    str.tostring(local)\n",
-        f"render({initializer})",
-    ))
-    assert f"return (local {BOOL_TEXT});" in cpp
-    assert "pine_str_tostring_tv(local," not in cpp
+        f"render({initializer})", initializer,
+    )
 
 
 @pytest.mark.parametrize("value", (
@@ -506,6 +674,7 @@ def test_v5_observers_keep_their_accepted_reference_cpp(tmp_path, value):
 
 
 def test_native_session_bool_text_matches_the_numeric_flags(tmp_path):
+    """Pine reference: numeric flags independently determine the text."""
     engine = skip_unless_e2e_env()
     # Two regular US trading days, including pre/post-market bars. Both
     # session boundary flags must take both values; no fixed flag tape is
@@ -589,6 +758,7 @@ def test_native_session_bool_text_matches_the_numeric_flags(tmp_path):
 
 
 def test_native_order_comment_keeps_the_bool_text(tmp_path):
+    """Pine reference: the filled entry comment carries the flag's text."""
     engine = skip_unless_e2e_env()
     start = int(dt.datetime(2025, 1, 6, 14, tzinfo=dt.timezone.utc).timestamp() * 1000)
     feed = tmp_path / "chart.csv"
