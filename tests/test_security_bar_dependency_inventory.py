@@ -1,6 +1,7 @@
 """Inventory coverage for chart-dependent request timeframe conditions."""
 
 import json
+import re
 from collections import Counter
 
 import pytest
@@ -65,19 +66,14 @@ def _script(setup, condition):
 
 
 def _condition_is_per_run_fixed(condition):
-    # Classify the live request itself at import time, including the member
-    # rules beyond _expr_is_stable. Unexpected failures must stop collection.
-    try:
-        result = transpile_full(_script("", condition))
-    except CompileError as error:
-        if (len(error.diagnostics) == 1
-                and error.diagnostics[0].code == "PF-E3110"):
-            return False
-        raise
+    # Partition live output by registrations; coverage below independently
+    # requires every inventoried chart read to use the two-arm lowering.
+    result = transpile_full(_script("", condition))
     assert all(diagnostic.code != "PF-E3110"
                for diagnostic in result["diagnostics"])
-    assert "register_security_eval(" in result["cpp"]
-    return True
+    count = result["cpp"].count("register_security_eval(")
+    assert count in (1, 2)
+    return count == 1
 
 
 def _call_is_per_bar(name):
@@ -165,7 +161,7 @@ PER_RUN_FIXED_VARIABLES = {
 }
 
 # Keep duplicate memberships and partition the same inventories by one proof.
-REFUSAL_ROWS = [
+LOWERING_ROWS = [
     (name, "", _variable_condition(name, pine_type))
     for inventory in VARIABLE_INVENTORIES
     for name, pine_type in sorted(inventory.items())
@@ -175,23 +171,23 @@ ACCEPTANCE_ROWS = [
     # Keep the actual member read live in a helper so registration has an exact
     # call spelling without a second, manually maintained constant-value table.
     (name, f"inventory_condition() => {_variable_condition(name, pine_type)}\n",
-     "inventory_condition()", None)
+     "inventory_condition()")
     for inventory in VARIABLE_INVENTORIES
     for name, pine_type in sorted(inventory.items())
     if name in PER_RUN_FIXED_VARIABLES and name not in EXCLUDED
 ]
-# Known over-refusal, retained by policy: conservative refusal of a fixed-value
-# script. The helper always returns true, but its loop binding lacks fixed proof.
-ACCEPTANCE_ROWS.append((
-    "known-over-refusal-literal-loop-helper",
+# Loop bindings conservatively carry chart dependency even with literal bounds;
+# closed arms now lower instead of refusing that conservative classification.
+LOWERING_ROWS.append((
+    "literal-loop-helper",
     'choose_side() =>\n'
     '    chosen_side = false\n'
     '    for sample_index = 0 to 1\n'
     '        chosen_side := sample_index > 0\n'
     '    chosen_side\n',
-    "choose_side()", "PF-E3110",
+    "choose_side()",
 ))
-REFUSAL_ROWS.extend(
+LOWERING_ROWS.extend(
     _namespace_row(namespace, functions)
     for namespace, functions in sorted(CALL_NAMESPACES.items())
 )
@@ -200,18 +196,18 @@ REFUSAL_ROWS.extend(
 def test_bar_dependency_inventory_coverage():
     assert VARIABLE_INVENTORIES and all(VARIABLE_INVENTORIES)
     assert CALL_INVENTORIES and all(CALL_INVENTORIES.values())
-    assert REFUSAL_ROWS and ACCEPTANCE_ROWS
+    assert LOWERING_ROWS and ACCEPTANCE_ROWS
     members = Counter(
         name for inventory in VARIABLE_INVENTORIES for name in inventory
         if name not in EXCLUDED)
-    refused = Counter(name for name, _setup, _condition in REFUSAL_ROWS
+    lowered = Counter(name for name, _setup, _condition in LOWERING_ROWS
                       if name in members)
-    accepted = Counter(name for name, _setup, _condition, _code in ACCEPTANCE_ROWS
+    accepted = Counter(name for name, _setup, _condition in ACCEPTANCE_ROWS
                        if name in members)
-    assert refused + accepted == members
-    assert refused.keys().isdisjoint(accepted)
+    assert lowered + accepted == members
+    assert lowered.keys().isdisjoint(accepted)
     assert accepted.keys() == PER_RUN_FIXED_VARIABLES
-    row_names = {name for name, _setup, _condition in REFUSAL_ROWS}
+    row_names = {name for name, _setup, _condition in LOWERING_ROWS}
     for inventory in BAR_INVENTORIES:
         assert set(inventory) - EXCLUDED.keys() <= row_names
     for inventory in SIGNATURE_VARIABLE_INVENTORIES:
@@ -229,29 +225,29 @@ def test_bar_dependency_inventory_coverage():
 
 
 def test_per_bar_inventory_members_cannot_enter_acceptance():
-    accepted = {name for name, _setup, _condition, _code in ACCEPTANCE_ROWS}
-    refused = {name for name, _setup, _condition in REFUSAL_ROWS}
-    # Bare bar reads are unconditionally per-bar at security.py:1344.
+    accepted = {name for name, _setup, _condition in ACCEPTANCE_ROWS}
+    lowered = {name for name, _setup, _condition in LOWERING_ROWS}
+    # Bare bar reads are unconditionally per-bar in the shared predicate.
     per_bar = set(BAR_BUILTINS) | set(SECURITY_BAR_FIELDS)
     # Direct strategy members and nested state receivers retain their reads;
-    # namespace constants have no state receiver (security.py:1368).
+    # namespace constants have no state receiver.
     per_bar.update(name for name in sigs.STRATEGY_VARIABLES
                    if name.rpartition(".")[0] == "strategy"
                    or name.rpartition(".")[0] in sigs.STRATEGY_VARIABLES)
     # Other inventoried namespace reads include TA series and session flags;
-    # chart facts are the classifier's explicit exception (security.py:1373).
+    # chart facts are the classifier's explicit exception.
     per_bar.update(name for name in sigs.BUILTIN_VARIABLES
                    if "." in name and name.partition(".")[0] != "chart")
     per_bar.update(sigs.BARSTATE_VARIABLES)
     per_bar.update(f"session.{member}" for member in sigs.SESSION_FLAG_MEMBERS)
     assert accepted.isdisjoint(per_bar)
     assert EXCLUDED.keys().isdisjoint(per_bar)
-    assert per_bar <= refused
-    # Non-pure namespace representatives must also stay refusal rows.
+    assert per_bar <= lowered
+    # Non-pure namespace representatives must also select per bar.
     for namespace, functions in CALL_NAMESPACES.items():
         name, _setup, _condition = _namespace_row(namespace, functions)
         assert name not in accepted
-        assert name in refused
+        assert name in lowered
 
 
 def test_excluded_inventory_members_cannot_form_scalar_conditions():
@@ -281,21 +277,41 @@ def _assert_refusal(pine, line, column):
     assert diagnostic.location.col == column
 
 
-@pytest.mark.parametrize("name,setup,condition", REFUSAL_ROWS,
-                         ids=[row[0] for row in REFUSAL_ROWS])
-def test_inventory_condition_refuses_chart_dependency(name, setup, condition):
-    # Each selected inventory read has a per-bar dependency; scalar-if setup
-    # diagnoses the condition's first token, after the eight-character prefix.
-    _assert_refusal(_script(setup, condition), 3 + setup.count("\n"), 9)
+def _assert_lowering(pine):
+    cpp = transpile_full(pine)["cpp"]
+    # Closed literal arms register in source order; selection reads the
+    # authored timeframe binding once, then compares both arms before stopping.
+    registrations = [
+        part.split(");", 1)[0]
+        for part in cpp.split("register_security_eval(")[1:]
+    ]
+    assert registrations == [
+        '0, "60", input_tf_, false, false',
+        '1, "240", input_tf_, false, false',
+    ]
+    assert all("current_bar_" not in part for part in registrations)
+    body = cpp.split("void on_source_bar(", 1)[1]
+    assert re.search(r"const std::string _pf_selected_tf = tf(?:\[0\])?;", body)
+    assert (
+        '    if (_pf_selected_tf == "60") return _req_sec_0;\n'
+        '    if (_pf_selected_tf == "240") return _req_sec_1;\n'
+        '    _PF_ENGINE_INVARIANT("Requested timeframe matched no registered timeframe", std::logic_error);\n'
+        '}())'
+    ) in body
 
 
-@pytest.mark.parametrize("name,setup,condition,expected_code", ACCEPTANCE_ROWS,
+@pytest.mark.parametrize("name,setup,condition", LOWERING_ROWS,
+                         ids=[row[0] for row in LOWERING_ROWS])
+def test_inventory_condition_selects_chart_dependency(name, setup, condition):
+    # Every inventory condition retains its authored read in the chart body;
+    # its two closed strings are the only values registration consumes.
+    _assert_lowering(_script(setup, condition))
+
+
+@pytest.mark.parametrize("name,setup,condition", ACCEPTANCE_ROWS,
                          ids=[row[0] for row in ACCEPTANCE_ROWS])
-def test_fixed_inventory_condition_registration(name, setup, condition, expected_code):
+def test_fixed_inventory_condition_registration(name, setup, condition, monkeypatch):
     pine = _script(setup, condition)
-    if expected_code is not None:
-        _assert_refusal(pine, 3 + setup.count("\n"), 9)
-        return
     result = transpile_full(pine)
     assert all(diagnostic.code != "PF-E3110"
                for diagnostic in result["diagnostics"])
@@ -314,6 +330,13 @@ def test_fixed_inventory_condition_registration(name, setup, condition, expected
         '    return __selection_value_0;\n'
         '}())'
     )
+    # Preservation pin: fixed conditions keep all output identical when the
+    # expansion hook is absent, including the original single registration.
+    assert result["cpp"].count("register_security_eval(") == 1
+    with monkeypatch.context() as previous:
+        previous.setattr(CodeGen, "_expand_security_series_timeframes",
+                         lambda self: None)
+        assert result["cpp"] == transpile_full(pine)["cpp"]
 
 
 @pytest.mark.parametrize("setup,condition", (
@@ -324,8 +347,10 @@ def test_fixed_inventory_condition_registration(name, setup, condition, expected
     pytest.param("choose_side(float price = close) => price > 0\n",
                  "choose_side()", id="series-default"),
 ))
-def test_indirect_condition_refuses_chart_dependency(setup, condition):
-    _assert_refusal(_script(setup, condition), 3 + setup.count("\n"), 9)
+def test_indirect_condition_selects_chart_dependency(setup, condition):
+    # Tuple provenance and omitted series defaults reach the shared predicate;
+    # both select the same two closed literal arms at chart execution.
+    _assert_lowering(_script(setup, condition))
 
 
 def test_loop_bound_condition_refuses_chart_dependency():
@@ -339,6 +364,16 @@ def test_loop_bound_condition_refuses_chart_dependency():
             '    if value > close\n'
             '        strategy.entry("Long", strategy.long)\n')
     _assert_refusal(pine, 4, 13)
+
+
+def test_lower_timeframe_condition_keeps_chart_dependency_refusal():
+    pine = ('//@version=6\nstrategy("Lower timeframe condition")\n'
+            'tf = if close > open\n    "1"\nelse\n    "5"\n'
+            'values = request.security_lower_tf(syminfo.tickerid, tf, close)\n'
+            'if array.size(values) > 0\n    strategy.entry("Long", strategy.long)\n')
+    # Preservation pin: array requests bypass expansion, so their scalar-if
+    # registration still diagnoses the authored condition at its first token.
+    _assert_refusal(pine, 3, 9)
 
 
 @pytest.mark.parametrize("setup,loop,condition", (

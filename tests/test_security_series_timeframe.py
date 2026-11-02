@@ -291,12 +291,18 @@ def test_select_compares_the_registered_expression_for_each_arm_kind(
     'frame_name()',
     'unknown_frame',
 ))
-def test_computed_string_arm_has_a_located_closed_set_refusal(expression):
-    # The first arm starts at 4:23; its computed string leaves an open set,
-    # even when an individual call could return a familiar timeframe.
+@pytest.mark.parametrize("kind,template,line,column", (
+    ("ternary", 'close > open ? {arm} : "180"\n', 4, 23),
+    ("if", 'if close > open\n    {arm}\nelse\n    "180"\n', 5, 5),
+    ("switch", 'switch close > open\n    true => {arm}\n    => "180"\n', 5, 13),
+))
+def test_computed_string_arm_has_a_located_closed_set_refusal(
+        expression, kind, template, line, column):
+    # Each computed arm leaves an open set, even when its call could return a
+    # familiar timeframe; expansion locates the arm before scalar-if refusal.
     pine = (HEADER + 'frame_name() => "75"\n'
-            f'tf_v = close > open ? {expression} : "180"\n'
-            'got_v = request.security(syminfo.tickerid, tf_v, close)\nplot(got_v)\n')
+            + 'tf_v = ' + template.format(arm=expression)
+            + 'got_v = request.security(syminfo.tickerid, tf_v, close)\nplot(got_v)\n')
     with pytest.raises(CompileError) as caught:
         transpile(pine)
     (diagnostic,) = caught.value.diagnostics
@@ -304,24 +310,30 @@ def test_computed_string_arm_has_a_located_closed_set_refusal(expression):
     assert diagnostic.level == Level.ERROR
     assert diagnostic.phase == Phase.CODEGEN
     assert diagnostic.args == {"reason": "the timeframe set is not closed at compile time"}
-    assert (diagnostic.location.line, diagnostic.location.col) == (4, 23)
+    assert (diagnostic.location.line, diagnostic.location.col) == (line, column)
 
 
 @pytest.mark.parametrize("persistent", ("var", "varip"))
-def test_persistent_requested_expression_keeps_a_located_refusal(persistent):
+@pytest.mark.parametrize("selection,column", (
+    ('close > open ? "75" : "180"\n', 8),
+    ('if close > open\n    "75"\nelse\n    "180"\n', 11),
+    ('switch close > open\n    true => "75"\n    => "180"\n', 15),
+))
+def test_persistent_requested_expression_keeps_a_located_refusal(
+        persistent, selection, column):
     # The requested helper owns persistent storage, unlike independent TA
     # or history buffers; this unmeasured state retains an explicit refusal.
     pine = (HEADER + f"payload() =>\n    {persistent} float saved_v = na\n"
             "    saved_v := nz(saved_v) + close\n    saved_v\n"
-            'tf_v = close > open ? "75" : "180"\n'
-            'got_v = request.security(syminfo.tickerid, tf_v, payload())\nplot(got_v)\n')
+            + 'tf_v = ' + selection
+            + 'got_v = request.security(syminfo.tickerid, tf_v, payload())\nplot(got_v)\n')
     with pytest.raises(CompileError) as caught:
         transpile(pine)
     (diagnostic,) = caught.value.diagnostics
     assert diagnostic.code == "PF-E3111"
     assert diagnostic.args == {
         "reason": "persistent requested expression state is not yet supported"}
-    assert (diagnostic.location.line, diagnostic.location.col) == (7, 8)
+    assert (diagnostic.location.line, diagnostic.location.col) == (7, column)
 
 
 @pytest.mark.parametrize("selection", (

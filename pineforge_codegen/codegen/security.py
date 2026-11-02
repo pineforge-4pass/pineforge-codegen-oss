@@ -249,16 +249,13 @@ class SecurityEmitter:
         return [node]
 
     def _security_series_tf_choices(self, node):
-        """Collect terminal arms and classify conditions with the setup proof."""
+        """Collect terminal arms using the shared chart-dependency predicate."""
         leaves = []
         series = []
         normalization_failed = False
 
         def condition(value):
-            reads: set[str] = set()
-            if (not self._security_tf_replay_reads(
-                    value, reads, condition_functions=True)
-                    or (reads and not self._security_tf_replay_closure(reads)[0])):
+            if self._security_tf_expr_is_per_bar(value):
                 series.append(value)
 
         def arm(body, owner):
@@ -1642,18 +1639,13 @@ class SecurityEmitter:
         return per_bar(node)
 
     def _security_tf_replay_reads(
-        self, node, reads: set[str], seen: frozenset = frozenset(),
-        *, condition_functions: bool = False,
+        self, node, reads: set[str], seen: frozenset = frozenset()
     ) -> bool:
         """Whether ``node``'s first-bar value is computed from literals,
         inputs, ``timeframe.*`` / ``syminfo.*`` / ``format.*``, pure ``math``
         / ``str`` calls and globals built from them; collects into ``reads``
         the reassigned globals it reads and the globals built from one (both
-        computed where they are declared).
-
-        Only the series-timeframe classifier opts into pure user condition
-        bodies; registration replay retains its original proof.
-        """
+        computed where they are declared)."""
         if node is None or isinstance(
             node, (NumberLiteral, StringLiteral, BoolLiteral, NaLiteral, ColorLiteral)
         ):
@@ -1675,28 +1667,12 @@ class SecurityEmitter:
             if self._security_tf_reads_reassigned(value):
                 reads.add(name)
                 return True
-            return self._security_tf_replay_reads(
-                value, reads, seen | {name}, condition_functions=condition_functions)
+            return self._security_tf_replay_reads(value, reads, seen | {name})
         if isinstance(node, MemberAccess):
             return (isinstance(node.object, Identifier)
                     and node.object.name in self._SECURITY_TF_REPLAY_MEMBERS)
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
-            info = (self._func_info_map.get(func_name)
-                    if condition_functions and namespace is None else None)
-            if condition_functions and info is not None and info.node is not None:
-                # Pure helper bodies use the existing let substitution before
-                # the same setup proof; a helper returning an input is not a
-                # chart-series condition merely because it is a user call.
-                try:
-                    normalized = self._security_selection_arms(
-                        IfStmt(condition=node, body=[], else_body=[], loc=node.loc),
-                        registration=False)
-                except CompileError:
-                    return False
-                return self._security_tf_replay_reads(
-                    normalized.condition, reads, seen,
-                    condition_functions=condition_functions)
             if not (
                 (namespace is None and func_name in self._SECURITY_TF_REPLAY_CALLS)
                 or (namespace in self._SECURITY_TF_REPLAY_NAMESPACES
@@ -1706,23 +1682,18 @@ class SecurityEmitter:
             ):
                 return False
             return all(
-                self._security_tf_replay_reads(
-                    arg, reads, seen, condition_functions=condition_functions)
+                self._security_tf_replay_reads(arg, reads, seen)
                 for arg in [*node.args, *node.kwargs.values()]
                 if isinstance(arg, ASTNode)
             )
         if isinstance(node, BinOp):
-            return (self._security_tf_replay_reads(
-                        node.left, reads, seen, condition_functions=condition_functions)
-                    and self._security_tf_replay_reads(
-                        node.right, reads, seen, condition_functions=condition_functions))
+            return (self._security_tf_replay_reads(node.left, reads, seen)
+                    and self._security_tf_replay_reads(node.right, reads, seen))
         if isinstance(node, UnaryOp):
-            return self._security_tf_replay_reads(
-                node.operand, reads, seen, condition_functions=condition_functions)
+            return self._security_tf_replay_reads(node.operand, reads, seen)
         if isinstance(node, Ternary):
             return all(
-                self._security_tf_replay_reads(
-                    part, reads, seen, condition_functions=condition_functions)
+                self._security_tf_replay_reads(part, reads, seen)
                 for part in (node.condition, node.true_val, node.false_val)
             )
         return False

@@ -430,6 +430,7 @@ def test_setup_substitution_preserves_earlier_binding_when_shadowed():
     assert "get_input_int(" in registration(transpile(pine))
 
 
+@pytest.mark.parametrize("kind", ("if", "switch", "ternary"))
 @pytest.mark.parametrize("setup,condition,line", (
     ("", "close > open", 3),
     ("", "volume > 0", 3),
@@ -472,22 +473,36 @@ def test_setup_substitution_preserves_earlier_binding_when_shadowed():
     pytest.param("var step_count = 0\nstep_count += 1\n",
                  "step_count > 3", 5, id="persistent-counter"),
 ))
-def test_expression_only_series_condition_selects_independent_requests(setup, condition, line):
+def test_expression_only_series_condition_selects_independent_requests(
+        setup, condition, line, kind):
+    selection = {
+        "if": f'if {condition}\n    "60"\nelse\n    "240"\n',
+        "switch": f'switch {condition}\n    true => "60"\n    => "240"\n',
+        "ternary": f'{condition} ? "60" : "240"\n',
+    }[kind]
     pine = ('//@version=6\nstrategy("Expression condition")\n'
-            + setup + f'tf = if {condition}\n    "60"\nelse\n    "240"\n'
-            'value = request.security(syminfo.tickerid, tf, close)\nplot(value)\n')
-    # Each registered literal is compared in order before the final invariant stop.
+            + setup + 'tf = ' + selection
+            + 'value = request.security(syminfo.tickerid, tf, close)\nplot(value)\n')
+    # Preservation pins for already-lowered conditions: every form has the
+    # same closed arms; only chart execution reads the authored binding.
     cpp = transpile_full(pine)["cpp"]
-    assert 'register_security_eval(0, "60", input_tf_, false, false)' in cpp
-    assert 'register_security_eval(1, "240", input_tf_, false, false)' in cpp
-    assert "current_bar_" not in registration(cpp)
-    assert "const std::string _pf_selected_tf = " in cpp
+    registrations = [
+        part.split(");", 1)[0]
+        for part in cpp.split("register_security_eval(")[1:]
+    ]
+    assert registrations == [
+        '0, "60", input_tf_, false, false',
+        '1, "240", input_tf_, false, false',
+    ]
+    assert all("current_bar_" not in part for part in registrations)
+    body = cpp.split("void on_source_bar(", 1)[1]
+    assert re.search(r"const std::string _pf_selected_tf = tf(?:\[0\])?;", body)
     assert (
         '    if (_pf_selected_tf == "60") return _req_sec_0;\n'
         '    if (_pf_selected_tf == "240") return _req_sec_1;\n'
         '    _PF_ENGINE_INVARIANT("Requested timeframe matched no registered timeframe", std::logic_error);\n'
         '}())'
-    ) in cpp
+    ) in body
 
 
 @pytest.mark.parametrize("name", (
@@ -579,5 +594,20 @@ def test_expression_only_series_ternary_selects_independent_requests():
     cpp = transpile(pine)
     assert 'register_security_eval(0, "60", input_tf_, false, false)' in cpp
     assert 'register_security_eval(1, "240", input_tf_, false, false)' in cpp
-    assert "current_bar_" not in registration(cpp)
-    assert 'if (_pf_selected_tf == "60") return _req_sec_0;' in cpp
+    registrations = [
+        part.split(");", 1)[0]
+        for part in cpp.split("register_security_eval(")[1:]
+    ]
+    assert registrations == [
+        '0, "60", input_tf_, false, false',
+        '1, "240", input_tf_, false, false',
+    ]
+    assert all("current_bar_" not in part for part in registrations)
+    body = cpp.split("void on_source_bar(", 1)[1]
+    assert re.search(r"const std::string _pf_selected_tf = tf(?:\[0\])?;", body)
+    assert (
+        '    if (_pf_selected_tf == "60") return _req_sec_0;\n'
+        '    if (_pf_selected_tf == "240") return _req_sec_1;\n'
+        '    _PF_ENGINE_INVARIANT("Requested timeframe matched no registered timeframe", std::logic_error);\n'
+        '}())'
+    ) in body
