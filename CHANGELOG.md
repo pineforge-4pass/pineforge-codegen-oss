@@ -33,7 +33,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - Pine v6 calls refuse a positional argument after a named argument with
   `PF-E2074` at that positional expression. The check also covers strategy
   declarations, unused functions and v6 library bodies before lowering.
-- A v6 counted loop whose start has positive int evidence now refuses a
+- A v6 counted loop whose start has positive int check evidence now refuses a
   float-typed step during translation with `PF-E2079` at the step expression
   and the hint "Use an int step or a float counter." An unknown start with
   a positively float step still selects a float counter.
@@ -49,11 +49,15 @@ supported as exact pairs; on the 0.x line they are independent. See the
   relink affected strategies.
 - A v6 counted loop uses a float counter when its start has positive float
   evidence, or when its start is unknown and its step has positive float
-  evidence, including inside a `request.security` helper. A start with positive
-  int evidence keeps an int counter. Without float evidence, the existing int
-  route is unchanged; v5 library loops keep their existing int-counter route.
+  evidence, including inside a `request.security` helper. A start whose value
+  has positive int evidence keeps an int counter. Without float evidence, the
+  existing int route is unchanged; v5 library loops keep their existing
+  int-counter route.
   Counter-family inference follows declaration sources in a dedicated query,
   independently of shared expression and storage inference.
+  A division in a loop start keeps its fractional value (the counter is a
+  float), while the float-step refusal follows TradingView's check type (a
+  division of two ints is int).
 - Float-counter loops accumulate the counter and continue within an absolute
   allowance of the end: `x <= end + kFloatStepTolerance` ascending, with the
   mirrored comparison descending. `0.0 to 0.3 by 0.1` counts four iterations.

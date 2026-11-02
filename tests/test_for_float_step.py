@@ -1,12 +1,19 @@
 """TradingView loop-step type boundaries and integer-loop controls."""
 
+import hashlib
 import re
 
 import pytest
 
 from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.errors import CompileError
-from tests._for_float_step import assert_float_step_refused
+from tests import _compile as compile_env
+from tests._e2e import reference_codegen, transpile_json
+from tests._for_counter_header_cases import MAIN_COMMIT as LOOP_CPP_REFERENCE
+from tests._for_float_step import (
+    DIVISION_STARTS, DIVISION_VALUE_STARTS, DIVISION_VALUE_SUMS,
+    assert_float_step_refused, loop_step_source,
+)
 
 # TradingView refuses this form.
 COUNTER_DEPENDENT_STEP = """//@version=6
@@ -231,6 +238,7 @@ def test_integer_step_expressions_still_translate(step: str) -> None:
 @pytest.mark.parametrize("prefix,start,double_counter", [
     ("", "0.0", True),
     ("", "float(0)", True),
+    ("", "4 / 2.0", True),
     ("", "math.max(0, 0.0)", True),
     ("", "math.round(0, 2)", True),
     ("", "(true ? na : 0.0)", True),
@@ -261,10 +269,116 @@ def test_float_step_refusal_uses_the_same_counter_family_as_emission(
         assert_float_step_refused(source)
 
 
-@pytest.mark.parametrize("argument", ["0", "0.0"])
+@pytest.mark.parametrize("name", sorted(DIVISION_STARTS))
+def test_int_division_start_still_refuses_a_float_step(name):
+    prefix, start = DIVISION_STARTS[name]
+    assert_float_step_refused(loop_step_source(start, prefix=prefix))
+
+
+@pytest.mark.parametrize("name", sorted(DIVISION_STARTS))
+def test_division_start_emits_a_float_counter_with_default_step(name):
+    prefix, start = DIVISION_STARTS[name]
+    cpp = transpile(loop_step_source(start, prefix=prefix, step=None))
+    assert re.search(r"\bfor \(double i = ", cpp), cpp
+    assert not re.search(r"\bfor \(int i = ", cpp), cpp
+    for slot in ("start", "end", "step"):
+        assert re.search(rf"\bdouble _for_{slot}_\d+ = ", cpp), cpp
+    assert cpp.count("static constexpr double kFloatStepTolerance =") == 1
+    assert cpp.count("::kFloatStepTolerance") == 2
+
+
+@pytest.mark.parametrize("start,end,step", [
+    pytest.param("0", "4", "1.0", id="int-literal"),
+    pytest.param("1 + 1", "6", "0.5", id="int-addition"),
+    pytest.param("4 - 2", "6", "0.5", id="int-subtraction"),
+    pytest.param("2 * 1", "6", "0.5", id="int-multiplication"),
+    pytest.param("7 % 4", "6", "0.5", id="int-remainder"),
+])
+def test_integer_start_arithmetic_still_refuses_a_float_step(start, end, step):
+    assert_float_step_refused(loop_step_source(start, end=end, step=step))
+
+
+@pytest.mark.parametrize("name", sorted(DIVISION_VALUE_STARTS))
+def test_division_start_without_step_matches_a_float_start(name):
+    prefix, start, end, twin, twin_end = DIVISION_VALUE_STARTS[name]
+    sources = [
+        loop_step_source(start, prefix=prefix, end=end, step=None),
+        loop_step_source(twin, prefix=prefix, end=twin_end, step=None),
+    ]
+    normalized = []
+    for source in sources:
+        cpp = transpile(source)
+        # Compare all C++ apart from the authored bound expressions that
+        # differ. Header types, step, body and tolerance must match.
+        slots = [("start", 1)]
+        if end != twin_end:
+            slots.append(("end", 2))
+        for slot, count_expected in slots:
+            cpp, count = re.subn(
+                rf"(\b(?:double )?_for_{slot}_\d+ = )[^;\n]+(?=;|\) \{{)",
+                rf"\1<{slot}>", cpp,
+            )
+            assert count == count_expected, cpp
+        normalized.append(cpp)
+    assert normalized[0] == normalized[1]
+
+
+@pytest.mark.parametrize("start,end", [
+    pytest.param("2", "6", id="int-literal"),
+    pytest.param("1 + 1", "6", id="int-addition"),
+    pytest.param("2 * 1", "6", id="int-multiplication"),
+    pytest.param("7 % 4", "6", id="int-remainder"),
+    pytest.param("0", "7 / 2", id="division-only-in-end"),
+])
+def test_integer_counter_keeps_frozen_cpp(start, end, tmp_path):
+    source = loop_step_source(start, end=end, step=None)
+    cpp = transpile(source)
+    assert re.search(r"\bfor \(int i = ", cpp), cpp
+    assert "kFloatStepTolerance" not in cpp
+    # Use the loop inventory's immutable reference, without replacing any
+    # stored hash or excluding any emitted text from the digest.
+    reference = reference_codegen(LOOP_CPP_REFERENCE)
+    assert reference is not None, "Required loop C++ reference unavailable; restore git history."
+    pine = tmp_path / "strategy.pine"
+    pine.write_text(source, encoding="utf-8")
+    before = transpile_json(pine, root=reference)
+    assert before["ok"], before["diagnostics"]
+    assert hashlib.sha256(cpp.encode("utf-8")).hexdigest() == hashlib.sha256(
+        before["cpp"].encode("utf-8"),
+    ).hexdigest()
+
+
+@pytest.mark.parametrize("name", sorted(DIVISION_VALUE_STARTS))
+def test_division_start_preserves_counter_values(name):
+    prefix, start, end, _twin, _twin_end = DIVISION_VALUE_STARTS[name]
+    expected = ",".join(str(value) for value in DIVISION_VALUE_SUMS[name])
+    driver = r'''
+#include <cassert>
+#include <iostream>
+int main() {
+    Bar bars[] = {
+        {10.0, 10.0, 10.0, 10.0, 1.0, 60000},
+        {10.0, 10.0, 10.0, 10.0, 1.0, 120000},
+    };
+    GeneratedStrategy first_bar, second_bar;
+    first_bar.run(bars, 1, "1", "1");
+    second_bar.run(bars, 2, "1", "1");
+    assert(first_bar.last_error().empty());
+    assert(second_bar.last_error().empty());
+    std::cout << first_bar.acc << "," << second_bar.acc;
+}
+'''
+    assert compile_env.run_emitted_tu(
+        transpile(loop_step_source(start, prefix=prefix, end=end, step=None)),
+        driver, opt="-O2", label=name,
+    ) == expected
+
+
+@pytest.mark.parametrize("argument", ["0", "0.0", "4 / 2"])
 def test_untyped_parameter_start_keeps_documented_call_argument_gap(argument):
-    # TradingView refuses the int call and accepts the float call. Shared
-    # parameter inference leaves this start unknown, so both use double here.
+    # TradingView refuses the measured int call and accepts the float call.
+    # Shared inference leaves the parameter unknown even for a division
+    # argument, so each call keeps the float-step route here.
     source = _script(
         "measure(first) =>\n"
         "    float acc = 0.0\n"

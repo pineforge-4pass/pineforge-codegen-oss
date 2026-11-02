@@ -101,6 +101,7 @@ class _CounterQuery:
         # All declaration routes, including Identifier -> VarDecl, share this
         # query-local memo. A provisional unknown also breaks source cycles.
         self.declaration_specs = {}
+        self._value_query = None
 
     def declaration(self, node):
         key = id(node)
@@ -121,12 +122,17 @@ class _CounterQuery:
             self.declaration_specs[key] = spec
         return self.declaration_specs[key]
 
+    def value_spec(self, node):
+        if self._value_query is None:
+            self._value_query = _CounterValueQuery(self)
+        return self._value_query.infer(node)
+
     def counter_spec(self, start, step, *, counter_name=None, step_location=None):
-        spec = self.infer(start)
+        check_spec = self.infer(start)
         step_spec = self.infer(step)
-        # Refusal and counter selection use these same source facts. An int
-        # fallback for an unknown start is not positive int evidence.
-        if spec == _INT and step_spec == _FLOAT and counter_name is not None:
+        # TradingView checks int/int division as int even though its value
+        # can be fractional. Keep that check separate from counter storage.
+        if check_spec == _INT and step_spec == _FLOAT and counter_name is not None:
             step_type, counter_type = "float", "int"
             raise CompileError([Diagnostic(
                 level=Level.ERROR,
@@ -138,8 +144,10 @@ class _CounterQuery:
                 ),
                 hint="Use an int step or a float counter.",
             )])
-        # Unknown starts with a positively float step keep the float route.
-        if spec == _FLOAT or (spec in (None, _NA) and step_spec == _FLOAT):
+        value_spec = self.value_spec(start)
+        # Unknown starts with a positively float step keep the float route;
+        # an int fallback is still not positive int evidence.
+        if value_spec == _FLOAT or (check_spec in (None, _NA) and step_spec == _FLOAT):
             return _FLOAT
         return _INT
 
@@ -283,6 +291,24 @@ class _CounterQuery:
         if name in _ARRAY_ELEMENTS:
             return spec.element
         return None
+
+
+class _CounterValueQuery(_CounterQuery):
+    """Reuse the check recursion with fractional division values and its own memo."""
+
+    def __init__(self, check_query):
+        super().__init__(check_query.sources, check_query.bindings, check_query.scopes)
+        self.check_query = check_query
+
+    def infer(self, node):
+        if isinstance(node, BinOp) and node.op == "/":
+            return _FLOAT
+        return super().infer(node)
+
+    def counter_spec(self, start, step, **kwargs):
+        # A referenced loop counter must use the same check/storage decision
+        # as analysis, including the original check type of its step.
+        return self.check_query.counter_spec(start, step, **kwargs)
 
 
 def for_counter_type(

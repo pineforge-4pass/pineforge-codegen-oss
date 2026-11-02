@@ -1,4 +1,4 @@
-"""Diagnostic assertions shared by the loop source inventories."""
+"""Loop-step sources and diagnostic assertions shared by the inventories."""
 
 import re
 
@@ -6,6 +6,48 @@ import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError, Level, Phase
+
+
+DIVISION_STARTS = {
+    "literal-division": ("", "4 / 2"),
+    "named-division": ("s = 4 / 2\n", "s"),
+    "helper-division": ("startValue() => 4 / 2\n", "startValue()"),
+    "series-division": ("", "bar_index / 2"),
+}
+
+# prefix, start, end, float-start twin, twin end. The default-step sums are
+# 10.5 for odd n and 12 for even n; the integral constant sums to 20.
+DIVISION_VALUE_STARTS = {
+    "fractional-input": (
+        "n = input.int(5)\n", "n / 2", "n / 2 + 2", "2.5", "4.5",
+    ),
+    "fractional-series": (
+        "n = 5 + bar_index % 2\n", "n / 2", "n / 2 + 2",
+        "(bar_index % 2 == 0 ? 2.5 : 3.0)",
+        "(bar_index % 2 == 0 ? 4.5 : 5.0)",
+    ),
+    "fractional-constant": ("", "5 / 2", "4.5", "2.5", "4.5"),
+    "integral-constant": ("", "4 / 2", "6", "2.0", "6"),
+}
+DIVISION_VALUE_SUMS = {
+    "fractional-input": (10.5, 10.5),
+    "fractional-series": (10.5, 12),
+    "fractional-constant": (10.5, 10.5),
+    "integral-constant": (20, 20),
+}
+
+
+def loop_step_source(
+    start: str, *, prefix: str = "", end: str = "6", step: str | None = "0.5",
+) -> str:
+    by = "" if step is None else f" by {step}"
+    return (
+        '//@version=6\nstrategy("Loop step types", currency=currency.NONE)\n'
+        + prefix + "float acc = 0.0\n"
+        f"for i = {start} to {end}{by}\n"
+        "    acc += i\n"
+        "plot(acc)\n"
+    )
 
 
 def assert_float_step_refused(

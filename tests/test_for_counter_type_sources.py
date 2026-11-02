@@ -13,11 +13,14 @@ from pineforge_codegen.analyzer import Analyzer
 from pineforge_codegen.ast_nodes import ForStmt
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.limits import iter_ast_nodes
+from pineforge_codegen.loop_types import LoopTypeSources, _CounterQuery
 from pineforge_codegen.parser import Parser
-from pineforge_codegen.symbols import PineType
+from pineforge_codegen.symbols import PineType, TypeSpec
 from tests import _compile as compile_env
 from tests._for_counter_header_cases import INT_START_SOURCES
-from tests._for_float_step import assert_float_step_refused
+from tests._for_float_step import (
+    DIVISION_STARTS, DIVISION_VALUE_STARTS, assert_float_step_refused, loop_step_source,
+)
 from tests._for_counter_type_source_cases import (
     ARRAY_TYPES, BASELINE, BASELINE_SOURCES, FLOAT_COUNTER_SOURCES,
     INT_COUNTER_SOURCES, MAIN_COMMIT,
@@ -145,6 +148,27 @@ def test_positive_int_parameter_start_refuses_a_float_step():
     assert_float_step_refused(pine, counter="walkIndex", location=(5, 37, 41))
 
 
+@pytest.mark.parametrize("prefix,start", [
+    *(pytest.param(prefix, start, id=name)
+      for name, (prefix, start) in sorted(DIVISION_STARTS.items())),
+    *(pytest.param(prefix, start, id=name)
+      for name, (prefix, start, _end, _twin, _twin_end)
+      in sorted(DIVISION_VALUE_STARTS.items())),
+])
+def test_division_start_has_distinct_check_and_value_specs(prefix, start):
+    pine = loop_step_source(start, prefix=prefix, step=None)
+    ast = Parser(Lexer(pine).tokenize(), source=pine).parse()
+    ctx = Analyzer(ast).analyze()
+    loop = next(node for node, _ in iter_ast_nodes(ast) if isinstance(node, ForStmt))
+    query = _CounterQuery(
+        LoopTypeSources(ast),
+        ctx.identifier_decl_bindings, ctx.identifier_binding_scopes,
+    )
+    assert query.infer(loop.start) == TypeSpec.primitive("int")
+    assert query.value_spec(loop.start) == TypeSpec.primitive("float")
+    assert ctx.for_counter_types[id(loop.start)] == PineType.FLOAT
+
+
 @pytest.mark.parametrize("context", ["chart", "security"])
 @pytest.mark.parametrize("counter_bound", [False, True])
 @pytest.mark.parametrize("prefix,setup,start,step,family", [
@@ -164,6 +188,32 @@ def test_positive_int_parameter_start_refuses_a_float_step():
     ("", "", "(true ? 0 : na)", "0.25", "refused"),
     ("a = array.from(0.0, 1.0)\n", "", "array.size(a)", "0.25", "refused"),
     ("a = array.from(0.0, 1.0)\n", "", "a.size()", "0.25", "refused"),
+    pytest.param("", "", "4 / 2", "0.5", "refused", id="division-start"),
+    pytest.param("", "begin = 4 / 2\n", "begin", "0.5", "refused",
+                 id="named-division-start"),
+    pytest.param("startValue() => 4 / 2\n", "", "startValue()", "0.5", "refused",
+                 id="helper-division-start"),
+    pytest.param("", "", "bar_index / 2", "0.5", "refused", id="series-division-start"),
+    pytest.param("", "", "4 / 2", "1", "double", id="division-int-step"),
+    pytest.param("", "begin = 4 / 2\n", "begin", "1", "double",
+                 id="named-division-int-step"),
+    pytest.param("startValue() => 4 / 2\n", "", "startValue()", "1", "double",
+                 id="helper-division-int-step"),
+    pytest.param("n = input.int(5)\n", "", "n / 2", "1", "double",
+                 id="input-division-int-step"),
+    pytest.param("", "n = 5 + bar_index % 2\n", "n / 2", "1", "double",
+                 id="series-division-int-step"),
+    # Step checking retains the operand join, even when the value query for
+    # a start would see the same division as positively float.
+    pytest.param("", "", "0", "4 / 2", "int", id="int-division-step"),
+    pytest.param("", "", "first", "4 / 2", "int", id="unknown-start-int-division-step"),
+    pytest.param("", "", "0", "4 / 2.0", "refused", id="float-division-step"),
+    # An int step makes these rows depend on division's result family:
+    # an unknown operand must not leave the start on the int fallback.
+    pytest.param("", "", "first / 2", "1", "double", id="division-unknown-left"),
+    pytest.param("", "", "2 / first", "1", "double", id="division-unknown-right"),
+    pytest.param("", "", "na / 2", "1", "double", id="division-na-left"),
+    pytest.param("", "", "2 / na", "1", "double", id="division-na-right"),
 ])
 def test_step_evidence_only_promotes_an_unknown_start(
     context, counter_bound, prefix, setup, start, step, family,

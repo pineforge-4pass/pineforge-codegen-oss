@@ -398,11 +398,13 @@ loop values and `break` / `continue`. A non-na v6 step <= 0 after conversion to
 the counter's type stops the run with "'step' in loop must be greater than
 zero". The float-counter route is v6 only: positive float evidence in the start,
 or an unknown start with positive float evidence in the step, selects a float
-counter. A start with positive int evidence keeps an int counter and its existing
-end/step narrowing. A v6 loop whose start has positive int evidence refuses a
-float-typed step at the step expression (`PF-E2079`), with the hint "Use an int
-step or a float counter." Without float evidence, counters keep their existing
-int route.
+counter. A division in a loop start keeps its fractional value (the counter is
+a float), while the float-step refusal follows TradingView's check type (a
+division of two ints is int). A start whose value has positive int evidence
+keeps an int counter and its existing end/step narrowing. A v6 loop whose start
+has positive int check evidence refuses a float-typed step at the step
+expression (`PF-E2079`), with the hint "Use an int step or a float counter."
+Without float evidence, counters keep their existing int route.
 v5 library bodies keep their int counters and existing step handling. The counter
 now wins over an outer same-named variable. An affine chart loop proved endless
 (its end is affine in its own counter) is stopped with the loop-time error when

@@ -17,8 +17,11 @@ import pytest
 
 from tests import _compile as compile_env
 from pineforge_codegen import transpile
-from tests._e2e import Build, chart_feed_head, execute_all, ok, skip_unless_e2e_env
+from tests._e2e import (
+    Build, assert_same_runs, chart_feed_head, execute_all, ok, skip_unless_e2e_env,
+)
 from tests._for_counter_header_cases import STOP_SOURCES
+from tests._for_float_step import DIVISION_VALUE_STARTS, DIVISION_VALUE_SUMS
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "for_counter_headers"
@@ -332,6 +335,40 @@ def test_counter_binding_compositions(runs, name):
     outcome = ok(runs, name)
     for tag, expected in CONTROLS[name][1].items():
         _assert_quantities(outcome, tag, expected)
+
+
+@pytest.fixture(scope="module")
+def division_runs(tmp_path_factory):
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("for_division_values")
+    feed = chart_feed_head(engine, base, 32)
+    builds = {}
+    for name, (prefix, start, end, twin, twin_end) in DIVISION_VALUE_STARTS.items():
+        for suffix, first, last in (("", start, end), ("_twin", twin, twin_end)):
+            source = _source(
+                prefix + "float acc = 0.0\n"
+                f"for i = {first} to {last}\n"
+                "    acc += i\n"
+            ) + "// @pf-trace acc=acc\n"
+            builds[name + suffix] = Build(source, trace=True)
+    return execute_all(engine, feed, base, builds)
+
+
+@pytest.mark.parametrize("name", sorted(DIVISION_VALUE_STARTS))
+def test_division_start_default_step_values_and_trades(division_runs, name):
+    outcome = ok(division_runs, name)
+    assert_same_runs(outcome, ok(division_runs, name + "_twin"))
+    records = outcome.traces["default"]
+    assert len(records) == 32
+    sums = DIVISION_VALUE_SUMS[name]
+    for bar, record in enumerate(records):
+        assert record["name"] == "acc"
+        assert record["bar_index"] == bar
+        assert record["value"] == sums[bar % 2], record
+    rows = csv.DictReader(outcome.trades["default"].decode("utf-8-sig").splitlines())
+    entries = [row for row in rows if row["Type"].startswith("Entry")]
+    expected_quantities = [sums[bar % 2] for bar in (10, 17, 24)]
+    assert [float(row["Qty"]) for row in entries] == expected_quantities
 
 
 STOP_DRIVER = r'''
