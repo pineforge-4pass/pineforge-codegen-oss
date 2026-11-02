@@ -7,7 +7,9 @@ import re
 import pytest
 
 from pineforge_codegen import transpile, transpile_full
+from pineforge_codegen.ast_nodes import BinOp
 from pineforge_codegen.codegen import CodeGen
+from pineforge_codegen.codegen.timeframe_values import TimeframeValues
 from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._timeframe_value_cases import CASES as SCALAR_CASES
 
@@ -846,6 +848,58 @@ def test_literal_only_conditions_register_only_the_taken_values(case_name):
     ]
 
 
+@pytest.mark.parametrize("mutation", ("disabled", "wrong_way"))
+@pytest.mark.parametrize("fast,slow,disabled_values", (
+    pytest.param(
+        "str.tostring((true and false) ? 480 : 240)",
+        "str.tostring((false or true) ? 1440 : 480)",
+        ("480", "240", "1440"), id="andor"),
+    pytest.param(
+        "str.tostring(240 < 1440 ? 240 : 480)",
+        "str.tostring(240 > 1440 ? 480 : 1440)",
+        ("240", "480", "1440"), id="compare"),
+    pytest.param(
+        "str.tostring(bool(2) ? 240 : 480)",
+        "str.tostring(bool(2) ? 1440 : 480)",
+        ("240", "480", "1440"), id="boolcast"),
+))
+def test_registration_comparison_detects_a_condition_pruning_mutation(
+        fast, slow, disabled_values, mutation, monkeypatch):
+    # Every dead arm is a valid timeframe, so a bad prune reaches the exact
+    # registration assertion rather than failing literal validation first.
+    pine = (HEADER
+            + f'chosen_tf = bar_index % 2 == 0 ? {fast} : {slow}\n'
+            'got_v = request.security(syminfo.tickerid, chosen_tf, close)\nplot(got_v)\n')
+
+    def assert_registered_values(actual):
+        assert actual == [
+            '0, "240", input_tf_, false, false',
+            '1, "1440", input_tf_, false, false',
+        ], "registered timeframes differ from authored values"
+
+    assert_registered_values(registrations(transpile(pine)))
+    original = TimeframeValues._constant_bool
+
+    def mutant(self, node):
+        chosen = original(self, node)
+        if mutation == "disabled":
+            return None
+        return None if chosen is None else not chosen
+
+    monkeypatch.setattr(TimeframeValues, "_constant_bool", mutant)
+    actual = registrations(transpile(pine))
+    if mutation == "disabled":
+        assert actual == [
+            f'{index}, "{value}", input_tf_, false, false'
+            for index, value in enumerate(disabled_values)
+        ]
+    else:
+        assert actual == ['0, "480", input_tf_, false, false']
+    with pytest.raises(
+            AssertionError, match="registered timeframes differ from authored values"):
+        assert_registered_values(actual)
+
+
 @pytest.mark.parametrize("setup,condition", (
     ("", "close > open"),
     ("", "close[1] > open[1]"),
@@ -855,15 +909,38 @@ def test_literal_only_conditions_register_only_the_taken_values(case_name):
     ('pick_frame() => true\n', "pick_frame()"),
 ))
 def test_conditions_with_names_history_inputs_or_helper_calls_keep_both_arms(
-        setup, condition):
+        setup, condition, monkeypatch):
     pine = (HEADER + setup
             + f'chosen_tf = bar_index % 2 == 0 ? str.tostring({condition} ? 240 : 480) : "1440"\n'
             'got_v = request.security(syminfo.tickerid, chosen_tf, close)\nplot(got_v)\n')
-    assert registrations(transpile(pine)) == [
+
+    def assert_registered_values(actual):
+        assert actual == [
+            '0, "240", input_tf_, false, false',
+            '1, "480", input_tf_, false, false',
+            '2, "1440", input_tf_, false, false',
+        ], "registered timeframes differ from authored values"
+
+    assert_registered_values(registrations(transpile(pine)))
+    original = TimeframeValues._constant_bool
+
+    def mutant(self, node):
+        chosen = original(self, node)
+        # Preserve the outer chart-parity split; only the inner condition
+        # under test is incorrectly treated as a proven true condition.
+        if isinstance(node, BinOp) and node.op == "==":
+            return chosen
+        return True if chosen is None else chosen
+
+    monkeypatch.setattr(TimeframeValues, "_constant_bool", mutant)
+    actual = registrations(transpile(pine))
+    assert actual == [
         '0, "240", input_tf_, false, false',
-        '1, "480", input_tf_, false, false',
-        '2, "1440", input_tf_, false, false',
+        '1, "1440", input_tf_, false, false',
     ]
+    with pytest.raises(
+            AssertionError, match="registered timeframes differ from authored values"):
+        assert_registered_values(actual)
 
 
 @pytest.mark.parametrize("selection", (

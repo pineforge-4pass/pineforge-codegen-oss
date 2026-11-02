@@ -40,16 +40,20 @@ def assert_contains_observed(observed, candidates):
     assert set(observed) <= set(candidates), (observed, candidates)
 
 
+def assert_native_inventory(observed, candidates, expected):
+    assert observed == (*expected, *expected)
+    assert candidates == expected, "timeframe inventory differs from authored values"
+    assert_contains_observed(observed, candidates)
+
+
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.name)
 def test_native_selected_timeframe_is_in_the_interpreters_set(case, native_rows):
     outcome = ok(native_rows, case.name)
     observed = selected_strings(outcome)
-    # Authored literal expectations, independent of the folder and formatter.
-    assert observed == (*case.expected, *case.expected)
     evaluator, expression = inventory(case.source())
     candidates = values(evaluator, expression)
-    assert candidates == case.expected
-    assert_contains_observed(observed, candidates)
+    # Authored literal expectations, independent of the folder and formatter.
+    assert_native_inventory(observed, candidates, case.expected)
     if case.request:
         control = ok(native_rows, "literal")
         assert outcome.traces["default"], "no requested-value trace"
@@ -82,6 +86,48 @@ def test_native_comparison_detects_a_fold_rule_mutation(
     # The very same assertion used by each healthy native row must turn red.
     with pytest.raises(AssertionError):
         assert_contains_observed(observed, candidates)
+
+
+@pytest.mark.parametrize("case_name,mutation,mutant_values", (
+    ("andor", "disabled", ("1", "240", "1440")),
+    ("less", "disabled", ("240", "1", "1440")),
+    ("boolcast", "disabled", ("240", "0", "1440")),
+    ("andor", "wrong_way", ("1",)),
+    ("less", "wrong_way", ("1",)),
+    ("boolcast", "wrong_way", ("0",)),
+    ("literal", "too_eager", ("240",)),
+))
+def test_native_comparison_detects_a_condition_pruning_mutation(
+        case_name, mutation, mutant_values, native_rows, monkeypatch):
+    case = BY_NAME[case_name]
+    observed = selected_strings(ok(native_rows, case_name))
+    evaluator, expression = inventory(case.source())
+    assert_native_inventory(
+        observed, values(evaluator, expression), ("240", "1440"))
+    # Bind a fresh, uncached interpreter before patching. The native build
+    # and its logs stay healthy, including when a mutant retains zero.
+    evaluator, expression = inventory(case.source())
+    original = timeframe_values.TimeframeValues._constant_bool
+
+    def mutant(self, node):
+        chosen = original(self, node)
+        if mutation == "disabled":
+            return None
+        if mutation == "wrong_way":
+            return None if chosen is None else not chosen
+        return True if chosen is None else chosen
+
+    monkeypatch.setattr(timeframe_values.TimeframeValues, "_constant_bool", mutant)
+    candidates = values(evaluator, expression)
+    assert candidates == mutant_values
+    # An extra dead arm passes containment, so exact inventory equality is
+    # also part of the same assertion used by every healthy native row.
+    with pytest.raises(
+            AssertionError, match="timeframe inventory differs from authored values"):
+        assert_native_inventory(observed, candidates, ("240", "1440"))
+    if mutation != "disabled":
+        with pytest.raises(AssertionError):
+            assert_contains_observed(observed, candidates)
 
 
 @pytest.mark.parametrize("count", (65, 128))
