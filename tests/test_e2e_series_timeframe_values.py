@@ -34,12 +34,16 @@ END_MS = 1709251200000  # 2024-03-01 00:00 UTC, inclusive
 HOUR_MS = 3_600_000
 
 # Known pre-existing engine difference (a missing second fill), measured on
-# the v1.9.1 tag, main and every head. Cause, as measured: the quantity of that
-# order is na (the daily request is na on the first day). TradingView sizes an
-# order with a na quantity at 100% of equity at the fill bar's open; the
-# engine places no entry there (the same happens for a literal na quantity
-# with no request at all). This pin MUST FLIP to plain equality, by emptying
-# the table, when the root fix lands. Every other cell must remain exactly equal.
+# the v1.9.1 tag, main and every head. Cause, decoded on a literal na-quantity
+# source (the placed set of 178 entries and every quantity equal): the quantity
+# of that order is na (the daily request is na on the first day), so it is
+# sized at the full equity. TradingView cuts that quantity to the symbol's
+# quantity step and then checks that the order is affordable at the fill; the
+# engine applies no quantity step in a plain run, so the uncut quantity costs
+# slightly more than the equity at the fill and the order is declined (the same
+# happens for a literal na quantity with no request at all). This pin MUST FLIP
+# to plain equality, by emptying the table, when the engine applies the step.
+# Every other cell must remain exactly equal.
 KNOWN_TAPE_ONLY = {
     "explicit-parity": (1704132000000,),
     "if-parity": (1704132000000,),
