@@ -21,7 +21,7 @@ OUTSIDE_STATE_REASON = (
     "move the state into a helper used by the requested expression")
 CHART_STATE_REASON = (
     "the requested expression requires chart evaluation, which would share its state "
-    "between timeframes; use a payload that can run entirely on requested bars")
+    "between timeframes; use an expression that can run entirely on the requested bars")
 UNCOPIED_STATE_REASON = (
     "the requested expression state could not receive a separate copy for each timeframe; "
     "remove unused stateful arguments or simplify the stateful helper")
@@ -1785,4 +1785,5 @@ def test_series_timeframe_catalog_lists_distinct_actionable_refusal_reasons():
         OUTSIDE_STATE_REASON,
         CHART_STATE_REASON,
         UNCOPIED_STATE_REASON,
+        "another symbol is not yet supported",
     ]}

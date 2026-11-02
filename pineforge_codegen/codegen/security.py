@@ -7377,7 +7377,7 @@ class SecurityEmitter:
             self._security_series_tf_refusal(
                 item["series_tf_state_node"],
                 "the requested expression requires chart evaluation, which would share its state "
-                "between timeframes; use a payload that can run entirely on requested bars")
+                "between timeframes; use an expression that can run entirely on the requested bars")
         if state and any(
                 (item["sec_id"], decl) not in self._security_series_tf_emitted_state
                 for decl in state):

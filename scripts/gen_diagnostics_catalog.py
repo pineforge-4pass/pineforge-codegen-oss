@@ -1097,9 +1097,10 @@ SERIES_TIMEFRAME_REASONS = [
     "state declared outside the requested expression cannot be replayed by this request; "
     "move the state into a helper used by the requested expression",
     "the requested expression requires chart evaluation, which would share its state "
-    "between timeframes; use a payload that can run entirely on requested bars",
+    "between timeframes; use an expression that can run entirely on the requested bars",
     "the requested expression state could not receive a separate copy for each timeframe; "
     "remove unused stateful arguments or simplify the stateful helper",
+    "another symbol is not yet supported",
 ]
 
 
