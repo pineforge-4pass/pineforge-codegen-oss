@@ -152,6 +152,7 @@ from ..ast_nodes import (
     VarDecl,
 )
 from ..collection_history import history_annotation, literal_offset
+from ..array_binding import bind_array_constructor_arguments
 from ..external_requests import RECORDED_KEY_ANNOTATION, request_stop_marker
 from ..limits import iter_ast_nodes
 from ..security_contexts import ticker_symbol_arg
@@ -695,6 +696,34 @@ class CallVisitor:
             + cpp_type
             + ">(_pf_series_raw); }())"
         )
+
+    def _array_constructor_arg_expr(self, node: ASTNode) -> str:
+        """Keep requested helper bindings while rendering constructor slots."""
+        frame = self._security_fallback_frame
+        if frame is None:
+            return self._visit_expr(node)
+        args = frame["args"]
+        saved_memo = frame["memo"]
+        bindings = {}
+        # A constructor is outside the fallback's pure-call inventory, so
+        # that frame can mark its whole subtree as chart-rendered. Resolve
+        # helper-bound names through its lexical stack even below operators
+        # or builtin calls, while retaining the visitor for everything else.
+        for child, _depth in iter_ast_nodes(node):
+            if (isinstance(child, Identifier) and id(child) not in saved_memo
+                    and id(child) not in bindings
+                    and not self._security_identifier_is_global_binding(child)
+                    and self._security_lookup_helper_binding_context(
+                        child.name, args[5],
+                    ) is not None):
+                bindings[id(child)] = self._build_security_expr(args[0], child, *args[1:])
+        if not bindings:
+            return self._visit_expr(node)
+        frame["memo"] = {**saved_memo, **bindings}
+        try:
+            return self._visit_expr(node)
+        finally:
+            frame["memo"] = saved_memo
 
     def _array_init_value_expr(self, elem_spec: TypeSpec | None, value_node,
                                store: bool = True, render=None) -> str:
@@ -2287,15 +2316,45 @@ class CallVisitor:
                 elem_spec = spec.element if spec.element is not None else TypeSpec.primitive("float")
                 self._reject_unknown_element_type(node, elem_spec)
                 init_default = self._default_for_spec(elem_spec)
-                if node.args:
-                    size_arg = self._visit_expr(node.args[0])
-                    if len(node.args) > 1:
-                        self._warn_narrow_int_element(node.args[1], spec,
-                                                      node.args[1])
-                        init_val = self._array_init_value_expr(elem_spec, node.args[1])
+                size_node, value_node = bind_array_constructor_arguments(node, func_name)
+                if size_node is not None or value_node is not None:
+                    size_arg = (
+                        self._array_constructor_arg_expr(size_node)
+                        if size_node is not None else "0"
+                    )
+                    if value_node is not None:
+                        self._warn_narrow_int_element(value_node, spec, value_node)
+                        init_val = self._array_init_value_expr(
+                            elem_spec, value_node,
+                            render=self._array_constructor_arg_expr,
+                        )
                     else:
                         init_val = init_default
-                    return (
+                    bindings = ""
+                    if node.kwargs and any(
+                        not cpp_is_plain_read(value) for value in (size_arg, init_val)
+                    ):
+                        # C++ function operands have no left-to-right guarantee.
+                        # Stage supplied slots once, in registered formal order.
+                        # Allocate against authored names without renaming them.
+                        occupied = set(getattr(self, "_safe_name_occupied", ()))
+                        values = [size_arg, init_val]
+                        for index, (name, arg) in enumerate(zip(
+                            sigs.ARRAY_NEW_PARAMETERS, (size_node, value_node),
+                        )):
+                            if arg is None:
+                                continue
+                            base = f"_pf_array_new_{name}_arg"
+                            temporary = base
+                            suffix = 2
+                            while temporary in occupied:
+                                temporary = f"{base}_{suffix}"
+                                suffix += 1
+                            occupied.add(temporary)
+                            bindings += f"auto {temporary} = ({values[index]}); "
+                            values[index] = temporary
+                        size_arg, init_val = values
+                    constructor = (
                         "[&](auto _pf_array_new_size, auto _pf_array_new_value){ "
                         "using _pf_array_new_size_type=decltype(_pf_array_new_size); "
                         "if constexpr(!std::is_same_v<_pf_array_new_size_type,bool>) { "
@@ -2311,6 +2370,9 @@ class CallVisitor:
                         f"return {cpp_type}(); }} "
                         f"}}(({size_arg}), ({init_val}))"
                     )
+                    if bindings:
+                        return f"([&](){{ {bindings}return {constructor}; }}())"
+                    return constructor
                 return f"{cpp_type}()"
             if func_name == "from":
                 spec = self._type_spec_from_expr(node) or TypeSpec.array(TypeSpec.primitive("float"))

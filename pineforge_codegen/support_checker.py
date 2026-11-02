@@ -49,6 +49,7 @@ from .ast_nodes import (
     TypeDecl, EnumDecl, MethodDef,
 )
 from .errors import SourceLocation, Diagnostic, CompileError, Level, Phase
+from .array_binding import bind_array_constructor_arguments
 from .builtin_keywords import POSITIONAL_BUILTINS
 from .pine_spelling import expr_start
 from .external_requests import (
@@ -1956,6 +1957,11 @@ class SupportChecker:
             self._err(node, f"array.{name}(...) is not implemented in PineForge runtime.")
             self._visit_children(node)
             return
+        if ns == "array" and (
+            name in ("new", "new_float", "new_int", "new_bool", "new_string")
+            or name in ARRAY_DRAWING_NEW_CTORS
+        ):
+            bind_array_constructor_arguments(node, name)
         if ns == "array" and name in ("new", "from"):
             # The element type names a C++ type in the emitted default
             # initialiser; it must be a Pine type, never arbitrary text.
