@@ -267,6 +267,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._identifier_binding_scopes: dict[int, str | None] = {}
         self._identifier_decl_bindings: dict[int, tuple[int, str] | None] = {}
         self._for_counter_types: dict[int, PineType] = {}
+        self._identifier_binding_nodes: dict[int, ASTNode | None] = {}
         self._ta_counter = 0
         self._fixnan_counter = 0
         # All fixnan member names minted so far (base + clones), for O(1)
@@ -688,6 +689,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             identifier_binding_scopes=dict(self._identifier_binding_scopes),
             identifier_decl_bindings=dict(self._identifier_decl_bindings),
             for_counter_types=dict(self._for_counter_types),
+            identifier_binding_nodes=dict(self._identifier_binding_nodes),
             var_member_init_exprs=self._var_member_init_exprs,
             var_member_metadata_by_node=self._var_member_metadata_by_node,
             var_member_type_specs_by_node=self._var_member_type_specs_by_node,
@@ -4766,6 +4768,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             setattr(sym, "_pf_certain_string", True)
         setattr(sym, "_pf_decl_node_id", id(node))
         setattr(sym, "_pf_decl_binding_name", node.name)
+        setattr(sym, "_pf_decl_node", node)
         self._record_script_block_binding(sym, outer_symbol)
         self._note_member_writer(sym, node.name, node)
         if (type_spec is None
@@ -6065,6 +6068,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._symbols.define(sym)
         setattr(sym, "_pf_decl_node_id", id(node))
         setattr(sym, "_pf_decl_binding_name", node.var)
+        setattr(sym, "_pf_decl_node", node)
 
         old_global = self._global_scope
         self._global_scope = False
@@ -6130,6 +6134,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._symbols.define(sym)
                 setattr(sym, "_pf_decl_node_id", id(node))
                 setattr(sym, "_pf_decl_binding_name", node.var)
+                setattr(sym, "_pf_decl_node", node)
             if node.vars:
                 loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
                 for idx, v in enumerate(node.vars):
@@ -6158,6 +6163,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     self._symbols.define(sym)
                     setattr(sym, "_pf_decl_node_id", id(node))
                     setattr(sym, "_pf_decl_binding_name", v)
+                    setattr(sym, "_pf_decl_node", node)
             for stmt in node.body:
                 self._visit(stmt)
             self._symbols.exit_scope()
@@ -8127,6 +8133,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 and not self._in_v5_library_definition(node)
                 and id(node) not in self._identifier_binding_scopes):
             self._value_bindings.check_use(node)
+        if id(node) not in self._identifier_binding_nodes:
+            self._identifier_binding_nodes[id(node)] = getattr(sym, "_pf_decl_node", None)
         self._identifier_binding_scopes[id(node)] = (
             getattr(sym, "scope", None) if sym is not None else None
         )

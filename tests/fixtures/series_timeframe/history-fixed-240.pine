@@ -1,0 +1,12 @@
+//@version=6
+strategy("Prior close at selected timeframe - fixed 240", currency = currency.USDT, initial_capital = 1000000)
+pf_tf = if bar_index % 2 == 0
+    "60"
+else
+    "240"
+pf_req = request.security(syminfo.tickerid, "240", close[1])
+pf_val = pf_req % 100
+if bar_index > 6 and bar_index % 3 == 0
+    strategy.entry("pf_long", strategy.long, qty = 1 + pf_val / 100)
+if bar_index > 6 and bar_index % 3 == 1
+    strategy.close("pf_long")

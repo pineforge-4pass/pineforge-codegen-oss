@@ -74,15 +74,19 @@ def test_forms_tradingview_accepts_still_translate(body):
     assert isinstance(transpile(HEADER + body + ORDERS), str)
 
 
-def test_series_condition_if_choosing_a_request_timeframe_is_a_labelled_refusal():
-    # TradingView accepts this form and chooses the requested timeframe on every
-    # bar; the setup-time lowering would fix one arm for the whole run. It is
-    # refused with PF-E3110 as a temporary compile gap, not translated: the
-    # refusal rows live in test_security_selection_blocks.py.
+def test_series_condition_if_choosing_a_request_timeframe_selects_per_bar():
+    # Both registered literals are compared before an unmatched value stops.
     body = ('tf_v = if close > open\n'
             '    "60"\n'
             'else\n'
             '    "240"\n'
             'got_v = request.security(syminfo.tickerid, tf_v, close)\n')
-    (diagnostic,) = _refusal(HEADER + body + ORDERS).diagnostics
-    assert diagnostic.code == "PF-E3110"
+    cpp = transpile(HEADER + body + ORDERS)
+    assert 'register_security_eval(0, "60", input_tf_, false, false)' in cpp
+    assert 'register_security_eval(1, "240", input_tf_, false, false)' in cpp
+    assert (
+        '    if (_pf_selected_tf == "60") return _req_sec_0;\n'
+        '    if (_pf_selected_tf == "240") return _req_sec_1;\n'
+        '    _PF_ENGINE_INVARIANT("Requested timeframe matched no registered timeframe", std::logic_error);\n'
+        '}())'
+    ) in cpp

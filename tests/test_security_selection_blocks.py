@@ -398,6 +398,28 @@ def test_pure_bindings_translate_in_both_request_positions(position, arm_kind):
     assert isinstance(transpile_full(variant(position, arm_kind))["cpp"], str)
 
 
+def test_unresolved_series_timeframe_tuple_keeps_the_setup_refusal(monkeypatch):
+    # Setup normalization expands pick before pair(): close is in BAR_FIELDS,
+    # outside BAR_BUILTINS and the script's history variables, so it fails as a name.
+    pine = variant("timeframe-if", "tuple").replace(
+        "pick = input.bool(true)", "pick = close > open")
+    with pytest.raises(CompileError) as caught:
+        transpile_full(pine)
+    (diagnostic,) = caught.value.diagnostics
+    assert diagnostic.code == "PF-E3078"
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.phase == Phase.CODEGEN
+    assert diagnostic.args == {
+        "request_name": "security", "expr_name": "undefined or non-setup name close"}
+    assert (diagnostic.location.line, diagnostic.location.col) == (4, 8)
+    with monkeypatch.context() as previous:
+        previous.setattr(CodeGen, "_expand_security_series_timeframes",
+                         lambda self: None, raising=False)
+        with pytest.raises(CompileError) as original:
+            transpile_full(pine)
+    assert caught.value.diagnostics == original.value.diagnostics
+
+
 def test_setup_substitution_preserves_earlier_binding_when_shadowed():
     pine = ('//@version=6\nstrategy("Local scope")\n'
             'candidate = input.int(60)\npick = input.bool(true)\n'
@@ -408,6 +430,7 @@ def test_setup_substitution_preserves_earlier_binding_when_shadowed():
     assert "get_input_int(" in registration(transpile(pine))
 
 
+@pytest.mark.parametrize("kind", ("if", "switch", "ternary"))
 @pytest.mark.parametrize("setup,condition,line", (
     ("", "close > open", 3),
     ("", "volume > 0", 3),
@@ -417,30 +440,69 @@ def test_setup_substitution_preserves_earlier_binding_when_shadowed():
     ("", "time > 0", 3),
     ("", "barstate.isfirst", 3),
     ("prior_value = close - open\n", "prior_value > 0", 4),
+    # The helper reads close/open, so its call inherits their chart clock.
+    pytest.param("is_big() => close > open\n", "is_big()", 4,
+                 id="function-reading-prices"),
+    # Both calls reach the same price reads through the inner body.
+    pytest.param("is_big() => close > open\n"
+                 "choose_long() => is_big()\n", "choose_long()", 5,
+                 id="function-calling-series-function"),
+    # The helper's result changes with the implicit bar-index read.
+    pytest.param("past_start() => bar_index > 3\n", "past_start()", 4,
+                 id="function-reading-bar-index"),
+    # A positional argument contributes reads even when the body only returns it.
+    pytest.param("choose_long(bool enabled) => enabled\n",
+                 "choose_long(close > open)", 4,
+                 id="series-positional-argument"),
+    # Named binding preserves the argument's close/open dependency.
+    pytest.param("choose_long(bool enabled) => enabled\n",
+                 "choose_long(enabled = close > open)", 4,
+                 id="series-keyword-argument"),
+    # The reassignment contributes price reads absent from the initializer.
+    pytest.param("chosen_side = true\nchosen_side := close > open\n",
+                 "chosen_side", 5, id="reassigned-series-global"),
+    # Control dependence on close/open also makes a literal assignment vary.
+    pytest.param("chosen_side = true\nif close > open\n"
+                 "    chosen_side := false\n",
+                 "chosen_side", 6, id="series-controlled-global-assignment"),
+    # An input initializer cannot erase a subsequent per-bar assignment.
+    pytest.param('chosen_side = input.bool(true, "Choose long")\n'
+                 "chosen_side := close > open\n", "chosen_side", 5,
+                 id="reassigned-input-global"),
+    # Compound writes to persistent storage accumulate across chart executions.
+    pytest.param("var step_count = 0\nstep_count += 1\n",
+                 "step_count > 3", 5, id="persistent-counter"),
 ))
-def test_expression_only_setup_refuses_series_condition(setup, condition, line):
-    """This refusal is labelled as a temporary located refusal of a shape
-    that did not compile before this change; it is listed as a compile gap,
-    and a TradingView value comparison will lift it.
-    """
+def test_expression_only_series_condition_selects_independent_requests(
+        setup, condition, line, kind):
+    selection = {
+        "if": f'if {condition}\n    "60"\nelse\n    "240"\n',
+        "switch": f'switch {condition}\n    true => "60"\n    => "240"\n',
+        "ternary": f'{condition} ? "60" : "240"\n',
+    }[kind]
     pine = ('//@version=6\nstrategy("Expression condition")\n'
-            + setup + f'tf = if {condition}\n    "60"\nelse\n    "240"\n'
-            'value = request.security(syminfo.tickerid, tf, close)\nplot(value)\n')
-    # Setup replay cannot prove these reads; expr_start places each at column 9.
-    with pytest.raises(CompileError) as caught:
-        transpile_full(pine)
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.code == "PF-E3110"
-    assert diagnostic.level == Level.ERROR
-    assert diagnostic.phase == Phase.CODEGEN
-    assert diagnostic.args == {}
-    assert diagnostic.message == (
-        "A requested timeframe cannot be chosen by a condition that reads "
-        "a chart series value."
-    )
-    assert diagnostic.location.line == line
-    assert diagnostic.location.col == 9
+            + setup + 'tf = ' + selection
+            + 'value = request.security(syminfo.tickerid, tf, close)\nplot(value)\n')
+    # Preservation pins for already-lowered conditions: every form has the
+    # same closed arms; only chart execution reads the authored binding.
+    cpp = transpile_full(pine)["cpp"]
+    registrations = [
+        part.split(");", 1)[0]
+        for part in cpp.split("register_security_eval(")[1:]
+    ]
+    assert registrations == [
+        '0, "60", input_tf_, false, false',
+        '1, "240", input_tf_, false, false',
+    ]
+    assert all("current_bar_" not in part for part in registrations)
+    body = cpp.split("void on_source_bar(", 1)[1]
+    assert re.search(r"const std::string _pf_selected_tf = tf(?:\[0\])?;", body)
+    assert (
+        '    if (_pf_selected_tf == "60") return _req_sec_0;\n'
+        '    if (_pf_selected_tf == "240") return _req_sec_1;\n'
+        '    _PF_ENGINE_INVARIANT("Requested timeframe matched no registered timeframe", std::logic_error);\n'
+        '}())'
+    ) in body
 
 
 @pytest.mark.parametrize("name", (
@@ -462,9 +524,90 @@ def test_expression_only_constant_setup_condition_remains_accepted():
     assert "if (true)" in registration(transpile(pine))
 
 
-def test_expression_only_series_ternary_keeps_its_registration():
+@pytest.mark.parametrize("setup,condition,rendered", (
+    # A body containing true leaves the ordinary zero-argument call in setup.
+    pytest.param("use_long() => true\n", "use_long()", "use_long()",
+                 id="constant-function"),
+    # The chart-type visitor spells the standard-chart predicate as true.
+    pytest.param("", "chart.is_standard", "true", id="chart-type"),
+    # Input substitution emits the getter with the authored title and default.
+    pytest.param('use_long = input.bool(true, "Use long")\n',
+                 "use_long", 'get_input_bool("Use long", true)', id="input"),
+    # The timeframe visitor reads the run's script_tf_ through tf_is_intraday.
+    pytest.param("", "timeframe.isintraday", "tf_is_intraday(script_tf_)",
+                 id="timeframe-member"),
+    # A boolean literal renders as its lowercase C++ spelling.
+    pytest.param("", "true", "true", id="literal"),
+    # The input read stays in the helper; setup retains the ordinary call.
+    pytest.param('enabled = input.bool(true, "Enabled")\n'
+                 "choose_long() => enabled\n",
+                 "choose_long()", "choose_long()", id="function-reading-input"),
+    # Symbol facts add no bar state or function variant to the call.
+    pytest.param('choose_long() => syminfo.type == "crypto"\n',
+                 "choose_long()", "choose_long()", id="function-reading-symbol"),
+    # Timeframe facts stay inside the same unmodified helper call.
+    pytest.param("choose_long() => timeframe.isintraday\n",
+                 "choose_long()", "choose_long()", id="function-reading-timeframe"),
+    # Pure literal computations create no stateful call-site suffix.
+    pytest.param('choose_long() => str.length(str.tostring(math.abs(-12))) > 0\n',
+                 "choose_long()", "choose_long()", id="function-with-pure-calls"),
+    # Both fixed bodies remain ordinary calls, including the outer call at setup.
+    pytest.param("use_long() => true\nchoose_long() => use_long()\n",
+                 "choose_long()", "choose_long()", id="transitive-constant-function"),
+    # A single boolean argument needs neither staging nor a variant suffix.
+    pytest.param("choose_long(bool enabled) => enabled\n",
+                 "choose_long(true)", "choose_long(true)", id="constant-argument"),
+    # A replayable reassigned global is rendered as its shadowing setup local.
+    pytest.param("chosen_side = true\n"
+                 "chosen_side := timeframe.isintraday\n",
+                 "chosen_side", "chosen_side", id="reassigned-fixed-global"),
+    # A nonpersistent declaration resets before its self-referential write.
+    pytest.param("chosen_side = true\nchosen_side := not chosen_side\n",
+                 "chosen_side", "chosen_side", id="reset-fixed-global"),
+))
+def test_expression_only_fixed_setup_condition_keeps_registration(setup, condition, rendered):
+    pine = ('//@version=6\nstrategy("Fixed condition")\n'
+            + setup + f'tf = if {condition}\n    "60"\nelse\n    "240"\n'
+            'value = request.security(syminfo.tickerid, tf, close)\n'
+            'if value > close\n    strategy.entry("Long", strategy.long)\n')
+    result = transpile_full(pine)
+    assert result["diagnostics"] == []
+    # The ordinary scalar-if visitor allocates slot 0 and assigns each string arm.
+    assert registration(result["cpp"]) == (
+        '0, ([&]() -> std::string {\n'
+        '    std::string __selection_value_0 = na<std::string>();\n'
+        f'    if ({rendered}) {{\n'
+        '        __selection_value_0 = std::string("60");\n'
+        '    } else {\n'
+        '        __selection_value_0 = std::string("240");\n'
+        '    }\n'
+        '    return __selection_value_0;\n'
+        '}())'
+    )
+
+
+def test_expression_only_series_ternary_selects_independent_requests():
     pine = ('//@version=6\nstrategy("Expression condition")\n'
             'tf = close > open ? "60" : "240"\n'
             'value = request.security(syminfo.tickerid, tf, close)\nplot(value)\n')
-    # Preservation pin: scalar ternaries retain the ordinary substitution path.
-    assert "current_bar_.close" in registration(transpile(pine))
+    # A ternary uses the same two literal registrations as an if expression.
+    cpp = transpile(pine)
+    assert 'register_security_eval(0, "60", input_tf_, false, false)' in cpp
+    assert 'register_security_eval(1, "240", input_tf_, false, false)' in cpp
+    registrations = [
+        part.split(");", 1)[0]
+        for part in cpp.split("register_security_eval(")[1:]
+    ]
+    assert registrations == [
+        '0, "60", input_tf_, false, false',
+        '1, "240", input_tf_, false, false',
+    ]
+    assert all("current_bar_" not in part for part in registrations)
+    body = cpp.split("void on_source_bar(", 1)[1]
+    assert re.search(r"const std::string _pf_selected_tf = tf(?:\[0\])?;", body)
+    assert (
+        '    if (_pf_selected_tf == "60") return _req_sec_0;\n'
+        '    if (_pf_selected_tf == "240") return _req_sec_1;\n'
+        '    _PF_ENGINE_INVARIANT("Requested timeframe matched no registered timeframe", std::logic_error);\n'
+        '}())'
+    ) in body

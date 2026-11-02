@@ -214,6 +214,334 @@ class SecurityEmitter:
 
     Mixed into ``CodeGen``; not intended to be instantiated standalone."""
 
+    def _security_series_tf_refusal(self, node, reason: str) -> None:
+        """Keep unsupported dynamic contexts located at their first token."""
+        from ..diagnostic_codes import render_diagnostic
+        from ..pine_spelling import expr_start
+
+        # Persistent reads need storage owned by each requested evaluator,
+        # either helper cells or the fixed path's mutable-global replay.
+        # The "another symbol" reason is reserved and currently unreachable:
+        # foreign series-timeframe requests are replaced before analysis.
+        message, hint = render_diagnostic("PF-E3111", {"reason": reason})
+        self._codegen_error(expr_start(node), message, hint=hint)
+
+    def _security_series_tf_local_binding(self, node):
+        """A lexical declaration, even when analysis uses global storage."""
+        if not isinstance(node, Identifier):
+            return None
+        binding = self.ctx.identifier_binding_nodes.get(id(node))
+        if isinstance(binding, VarDecl) and (
+                not self._security_identifier_is_global_binding(node)
+                or id(binding) not in self._security_series_tf_global_declarations):
+            return binding
+        return None
+
+    def _security_series_tf_sources(self, node, seen=frozenset()):
+        """Follow exact declaration aliases of the authored timeframe selection.
+
+        This walk does not render C++ or allocate emission counters. A request
+        which passes the setup proof therefore retains its original emitter.
+        """
+        if isinstance(node, Identifier):
+            name = node.name
+            binding = self._security_series_tf_local_binding(node)
+            if binding is not None or not self._security_identifier_is_global_binding(node):
+                # Scope labels and spellings are shared by sibling blocks.
+                # Only the declaration this read resolved to supplies its arms.
+                key = ("local", id(binding))
+                if (isinstance(binding, VarDecl) and binding.value is not None
+                        and key not in seen):
+                    return self._security_series_tf_sources(
+                        binding.value, seen | {key})
+                return [node]
+            if name in seen:
+                return [node]
+            if self._security_identifier_is_global_binding(node):
+                if (name in self._input_backed_vars or name in self._timeframe_period_vars
+                        or isinstance(self._known_vars.get(name), str)):
+                    return [node]
+                value = (getattr(self.ctx, "global_expr_map", {}) or {}).get(name)
+                if value is not None:
+                    return self._security_series_tf_sources(
+                        value, seen | {name})
+        return [node]
+
+    def _security_series_tf_choices(self, node):
+        """Collect terminal arms using the shared chart-dependency predicate."""
+        leaves = []
+        series = []
+        has_computed_value = False
+        has_series_condition = False
+        block_selection = False
+        normalization_failed = False
+        local_selection = self._security_series_tf_local_binding(node) is not None
+
+        def condition(value):
+            nonlocal has_series_condition
+            # A local selection must run where its binding is visible, even
+            # when its condition happens to be fixed for this run.
+            if local_selection or self._security_tf_expr_is_per_bar(value):
+                series.append(value)
+                has_series_condition = True
+
+        def arm(body, owner):
+            if not body:
+                # An unmatched selection requests the chart timeframe.
+                leaves.append(MemberAccess(
+                    object=Identifier(name="timeframe", loc=owner.loc),
+                    member="period", loc=owner.loc))
+            elif isinstance(body[-1], (IfStmt, SwitchStmt)):
+                walk(body[-1])
+            else:
+                walk(self._security_selection_arm_expr(body, owner))
+
+        def walk(value):
+            nonlocal normalization_failed, block_selection, has_computed_value
+            sources = self._security_series_tf_sources(value)
+            if len(sources) != 1 or sources[0] is not value:
+                for source in sources:
+                    walk(source)
+                return
+            if isinstance(value, Ternary):
+                condition(value.condition)
+                walk(value.true_val)
+                walk(value.false_val)
+            elif isinstance(value, (IfStmt, SwitchStmt)):
+                if self._security_selection_has_block_arms(value):
+                    block_selection = True
+                    try:
+                        value = self._security_selection_arms(
+                            value, registration=False, series_timeframe=True)
+                    except CompileError:
+                        # Unresolved block bindings keep the original emitter
+                        # and diagnostics, even with a series condition. Such
+                        # selections cannot yet be expanded into closed arms.
+                        normalization_failed = True
+                        return
+                self._check_security_tf_arms(value, set())
+                if isinstance(value, IfStmt):
+                    condition(value.condition)
+                    arm(value.body, value)
+                    arm(value.else_body, value)
+                else:
+                    if value.expr is not None:
+                        condition(value.expr)
+                    for case, body in value.cases:
+                        condition(case)
+                        arm(body, value)
+                    arm(value.default_body, value)
+            else:
+                # A call or operator can carry a choice in its operands or
+                # pure helper body. Do not mistake that value for a fixed arm.
+                # An opaque call with no explicit bar read keeps its existing
+                # registration path; conservative implicit-state classification
+                # alone must not introduce a new closed-set requirement.
+                if (isinstance(value, (FuncCall, BinOp, UnaryOp))
+                        and (local_selection or self._security_tf_expr_is_per_bar(
+                            value, implicit_calls=False))):
+                    series.append(value)
+                    has_computed_value = True
+                leaves.append(value)
+
+        walk(node)
+        setup_error = None
+        if (not normalization_failed and not has_series_condition
+                and has_computed_value and block_selection):
+            try:
+                # Keep the original, more specific arm diagnostic if the new
+                # value proof cannot extend a setup-controlled block selection.
+                self._substitute_tf_input_reads(node, set())
+            except CompileError as error:
+                setup_error = error
+        dependencies = [] if normalization_failed else series
+        return leaves, dependencies, setup_error
+
+    def _security_series_tf_state_declarations(self, root) -> tuple[set[int], set[int]]:
+        """Separate payload-owned state from persistent outside bindings.
+
+        Entering a helper body or an expression owns its declarations.
+        Following a value binding only enters its initializer, never owns
+        that binding's storage. Compare declaration identities after the walk
+        so a helper-local read can precede the visit to its declaration.
+        """
+        from ..limits import syntax_children
+        from ..security_contexts import ScriptIndex
+
+        index = ScriptIndex(self.ctx.ast, self.ctx.method_call_bindings)
+        writes: dict[tuple, list[ASTNode]] = {}
+        for node, _depth in iter_ast_nodes(self.ctx.ast):
+            if isinstance(node, Assignment) and isinstance(node.target, Identifier):
+                binding = index.refs.get(id(node.target))
+                if binding is not None:
+                    writes.setdefault(binding, []).append(node.value)
+        pending = [root]
+        seen: set[int] = set()
+        owned: set[int] = set()
+        referenced: set[int] = set()
+        while pending:
+            value = pending.pop()
+            if not isinstance(value, ASTNode) or id(value) in seen:
+                continue
+            seen.add(id(value))
+            if isinstance(value, VarDecl) and (value.is_var or value.is_varip):
+                owned.add(id(value))
+            if isinstance(value, Identifier):
+                binding = index.refs.get(id(value))
+                decl = index.decls.get(binding)
+                if decl is not None:
+                    if decl.is_var or decl.is_varip:
+                        referenced.add(id(decl))
+                    pending.append(decl.value)
+                pending.extend(writes.get(binding, ()))
+            if isinstance(value, FuncCall):
+                info = self._func_info_map.get(index.call_target(value))
+                if info is not None and info.node is not None:
+                    pending.append(info.node)
+            pending.extend(syntax_children(value))
+        return owned, referenced - owned
+
+    def _expand_security_series_timeframes(self) -> None:
+        """Give every closed arm its own continuously evaluated request state."""
+        from ..security_contexts import context_key
+        from ..limits import MAX_SECURITY_TIMEFRAME_VALUES
+        from .timeframe_values import OpenTimeframeSet, TimeframeValues
+
+        extras = []
+        values = None
+        self._security_series_tf_global_declarations = {
+            id(stmt) for stmt in self.ctx.ast.body if isinstance(stmt, VarDecl)}
+        next_id = len(self._security_calls)
+        for item in self._security_calls:
+            if item.get("dead"):
+                continue
+            # Choice discovery validates selection arms too, before the later
+            # evaluator loop sets this flag for timeframe resolution.
+            self._security_tf_lower = bool(item.get("is_lower_tf_array"))
+            leaves, series, setup_error = self._security_series_tf_choices(
+                item["tf_node"])
+            if not series:
+                continue
+            if item.get("foreign"):
+                self._security_series_tf_refusal(
+                    series[0], "another symbol is not yet supported")
+            local_state, outside_state = self._security_series_tf_state_declarations(
+                item["expr_node"])
+            # Reuse exactly the fixed request's replay plan. A same-spelled
+            # helper/block binding is not the global that plan carries.
+            rebound_state = {
+                id(info.decl_node)
+                for name in item.get("mutable_globals", ())
+                if (info := self._global_mutable_infos.get(name)) is not None
+            }
+            if outside_state - rebound_state:
+                self._security_series_tf_refusal(
+                    series[0],
+                    "state declared outside the requested expression cannot be replayed by this request; "
+                    "move the state into a helper used by the requested expression")
+            self._security_series_tf_local_decls.update(local_state)
+            arms = []
+            keys = set()
+            computed = False
+            for leaf in leaves:
+                resolved = self._substitute_tf_input_reads(leaf, set())
+                allowed = isinstance(resolved, StringLiteral) or (
+                    isinstance(resolved, MemberAccess)
+                    and isinstance(resolved.object, Identifier)
+                    and resolved.object.name == "timeframe")
+                if isinstance(resolved, FuncCall):
+                    name, namespace = self._resolve_callee(resolved.callee)
+                    allowed = (namespace == "input" or (
+                        namespace is None and name == "input")) and (
+                            self._infer_type(resolved) == "std::string")
+                if allowed:
+                    candidates = [resolved]
+                else:
+                    computed = True
+                    if values is None:
+                        values = TimeframeValues(self)
+                    try:
+                        # Interpret the authored leaf, not setup substitution:
+                        # input defaults and first-bar values are not constants.
+                        candidates = values.strings(leaf)
+                    except (OpenTimeframeSet, ValueError, TypeError, KeyError,
+                            ArithmeticError, RecursionError):
+                        if setup_error is not None:
+                            raise setup_error
+                        # Closing open inventories needs the run-time
+                        # registration spec, including reached-request limits.
+                        self._security_series_tf_refusal(
+                            leaf, "the timeframe set is not closed at compile time")
+                for candidate in candidates:
+                    key = context_key(candidate)
+                    if key not in keys:
+                        keys.add(key)
+                        arms.append(candidate)
+                    if computed and len(arms) > MAX_SECURITY_TIMEFRAME_VALUES:
+                        # The run-time registration spec must also replace
+                        # this finite-inventory bound for larger/open sets.
+                        self._security_series_tf_refusal(
+                            leaf, "the timeframe set is not closed at compile time")
+            original = dict(item)
+            sites = []
+            for arm_index, leaf in enumerate(arms):
+                sec_id = item["sec_id"] if arm_index == 0 else next_id
+                site = item if arm_index == 0 else dict(original)
+                site["sec_id"] = sec_id
+                site["tf_node"] = leaf
+                if local_state:
+                    site["series_tf_local_decls"] = frozenset(local_state)
+                if outside_state:
+                    site["series_tf_outside_decls"] = frozenset(outside_state)
+                if local_state or outside_state:
+                    site["series_tf_state_node"] = series[0]
+                sites.append(sec_id)
+                if arm_index:
+                    site["series_tf_extra"] = True
+                    extras.append(site)
+                    next_id += 1
+            item["series_tf_sites"] = sites
+        self._security_calls.extend(extras)
+
+    def _security_series_tf_value(self, item, tf_node) -> str:
+        """Select by the authored chart value, preserving its lazy evaluation.
+
+        Reading the actual argument also preserves declaration order and global
+        bindings. Expanding its condition here would evaluate it twice
+        when the script already bound the timeframe to a name.
+        """
+        def result(sec_id):
+            if item.get("is_lower_tf_array"):
+                return f"_req_sec_lower_tf_{sec_id}"
+            if isinstance(item["expr_node"], TupleLiteral):
+                return "std::make_tuple(" + ", ".join(
+                    f"_req_sec_{sec_id}_{i}" for i in range(item["tuple_size"])) + ")"
+            return f"_req_sec_{sec_id}"
+
+        target = "_pf_selected_tf"
+        occupied = {self._safe_name(node.name) for node in self._walk_ast(self.ctx.ast)
+                    if isinstance(node, (Identifier, VarDecl))}
+        while target in occupied:
+            target += "_"
+        value = self._visit_expr(tf_node)
+        lines = ["([&]() {", f"    const std::string {target} = {value};"]
+        sites = item["series_tf_sites"]
+        for sec_id in sites:
+            info = self._security_eval_info[sec_id]
+            tf = info["tf"]
+            arm = (f'"{self._cpp_string_escape(tf)}"' if tf is not None
+                   else info["tf_expr"])
+            # Missing string values denote the chart timeframe in a selection.
+            condition = f"{target} == {arm}"
+            if arm == "script_tf_":
+                condition = f"({target}.empty() || {condition})"
+            lines.append(f"    if ({condition}) return {result(sec_id)};")
+        lines.extend((
+            '    _PF_ENGINE_INVARIANT("Requested timeframe matched no registered timeframe", std::logic_error);',
+            "}())",
+        ))
+        return "\n".join(lines)
+
     def _resolve_security_tf(self, tf_node, containing_func: str):
         """Resolve a ``request.security`` timeframe argument to ``(tf_str, tf_expr)``.
 
@@ -245,6 +573,20 @@ class SecurityEmitter:
             return None, self._security_tf_runtime_expr(tf_node)
         if isinstance(tf_node, Identifier):
             name = tf_node.name
+            binding = self.ctx.identifier_binding_nodes.get(id(tf_node))
+            if (not self._security_identifier_is_global_binding(tf_node)
+                    and isinstance(binding, VarDecl)
+                    and isinstance(binding.value, IfStmt)
+                    and not self._security_selection_has_block_arms(binding.value)
+                    and any(
+                        isinstance(self.ctx.identifier_binding_nodes.get(id(part)),
+                                   (ForStmt, ForInStmt))
+                        for selection, _ in iter_ast_nodes(binding.value)
+                        if isinstance(selection, IfStmt)
+                        for part, _ in iter_ast_nodes(selection.condition))):
+                # A local initializer is not available at registration time,
+                # but its condition still owns a chart-dependency diagnostic.
+                self._check_security_tf_if_conditions(binding.value)
             if name in self._timeframe_period_vars:
                 return None, "script_tf_"
             if (name in self._known_vars and name not in self._input_backed_vars
@@ -415,24 +757,21 @@ class SecurityEmitter:
         if isinstance(node, SwitchStmt):
             return self._security_tf_switch_runtime_expr(node, resolving or set())
         if isinstance(node, IfStmt):
-            from ..diagnostic_codes import render_diagnostic
-            from ..pine_spelling import expr_start
-
-            # Scalar if arms need the same setup proof as replayed conditions.
-            # Keep the authored condition for the first-token diagnostic span.
-            for selection, _depth in iter_ast_nodes(node):
-                if not isinstance(selection, IfStmt):
-                    continue
-                condition = self._substitute_tf_input_reads(
-                    selection.condition, resolving or set())
-                reads: set[str] = set()
-                if (not self._security_tf_replay_reads(condition, reads)
-                        or (reads and not self._security_tf_replay_closure(reads)[0])):
-                    message, hint = render_diagnostic("PF-E3110", {})
-                    self._codegen_error(
-                        expr_start(selection.condition), message, hint=hint)
+            self._check_security_tf_if_conditions(node)
         substituted = self._substitute_tf_input_reads(node, resolving or set())
         return self._visit_expr(substituted)
+
+    def _check_security_tf_if_conditions(self, node: IfStmt) -> None:
+        from ..diagnostic_codes import render_diagnostic
+        from ..pine_spelling import expr_start
+
+        # Keep the authored condition for the first-token diagnostic span.
+        for selection, _depth in iter_ast_nodes(node):
+            if (isinstance(selection, IfStmt)
+                    and self._security_tf_expr_is_per_bar(selection.condition)):
+                message, hint = render_diagnostic("PF-E3110", {})
+                self._codegen_error(
+                    expr_start(selection.condition), message, hint=hint)
 
     def _security_tf_if_runtime_expr(self, node: IfStmt) -> str:
         """Render normalized setup arms without entering statement emission.
@@ -853,7 +1192,8 @@ class SecurityEmitter:
         return result
 
     def _security_selection_arms(self, node, *, registration: bool,
-                                 resolving: set[str] | None = None):
+                                 resolving: set[str] | None = None,
+                                 series_timeframe: bool = False):
         """Substitute local lets in source order, with a fresh scope per arm.
 
         Registration-safe means every leaf is a constant, input read or
@@ -918,6 +1258,13 @@ class SecurityEmitter:
             if isinstance(value, (IfStmt, SwitchStmt)):
                 return self._security_selection_as_ternary(selection(value, env))
             if isinstance(value, FuncCall):
+                if series_timeframe:
+                    # Keep authored calls for the value-set proof; a condition
+                    # may also read TA without being evaluated at registration.
+                    return replace(
+                        value, args=[expression(arg, env) for arg in value.args],
+                        kwargs={key: expression(arg, env) if isinstance(arg, ASTNode) else arg
+                                for key, arg in value.kwargs.items()})
                 name, namespace = self._resolve_callee(value.callee)
                 info = self._func_info_map.get(name) if namespace is None else None
                 if info is not None and info.node is not None:
@@ -974,7 +1321,8 @@ class SecurityEmitter:
                     if stmt.is_var or stmt.is_varip:
                         fail(stmt, "statement", "persistent declaration")
                     result = expression(stmt.value, env)
-                    if stmt.type_hint in ("int", "float", "bool", "string"):
+                    if stmt.type_hint in ("int", "float", "bool", "string") and not (
+                            series_timeframe and stmt.type_hint == "string"):
                         result = FuncCall(callee=Identifier(name=stmt.type_hint, loc=stmt.loc),
                                           args=[result], loc=stmt.loc)
                     env[stmt.name] = result
@@ -1297,6 +1645,116 @@ class SecurityEmitter:
                         for child in stmt.else_body or ())
             )
         return False
+
+    # Shared subpaths are explored again without memoization, so work can grow
+    # with the number of paths. Active functions and persistent global cycles
+    # count as per-bar; ordinary global cycles stop at their resetting binding.
+    # These path checks make traversal finite. Loop bindings count as per-bar;
+    # other unknown identifiers retain their existing fixed classification.
+    def _security_tf_expr_is_per_bar(self, node, *, implicit_calls: bool = True) -> bool:
+        """Follow bar dependencies without requiring a setup replay proof.
+
+        Arguments and user bodies both contribute reads. Recursive calls and
+        persistent value cycles are conservatively treated as per-bar.
+        This inspection never rewrites the expression or emits C++.
+        Computed timeframe values can disable implicit call state so an opaque
+        call accepted by the setup emitter keeps that path in the absence of
+        explicit chart dependencies. Selection conditions retain the full rule.
+        """
+        from .visit_expr import _BUILTIN_NAMESPACE_NAMES
+
+        expressions = getattr(self.ctx, "global_expr_map", {}) or {}
+
+        def per_bar(value, local=frozenset(), active=frozenset()):
+            if isinstance(value, (list, tuple)):
+                return any(per_bar(part, local, active) for part in value)
+            if isinstance(value, dict):
+                return any(per_bar(part, local, active) for part in value.values())
+            if not isinstance(value, ASTNode):
+                return False
+            if isinstance(value, Identifier):
+                name = value.name
+                binding = self.ctx.identifier_binding_nodes.get(id(value))
+                if isinstance(binding, (ForStmt, ForInStmt)):
+                    return True
+                global_binding = self._security_identifier_is_global_binding(value)
+                if name in local and not global_binding:
+                    # The enclosing body also inspects every local definition.
+                    return False
+                if name in BAR_BUILTINS or name in SECURITY_BAR_FIELDS:
+                    return True
+                if self._binding_is_series(name):
+                    return True
+                info = self._global_mutable_infos.get(name)
+                key = ("global", name)
+                if key in active:
+                    # Ordinary declarations reset before each bar's writes;
+                    # persistent self-dependence carries the previous bar.
+                    return info is None or info.is_var
+                if info is not None:
+                    return per_bar(info.source_stmts, frozenset(), active | {key})
+                if name in expressions:
+                    return per_bar(expressions[name], frozenset(), active | {key})
+                return False
+            if isinstance(value, Subscript):
+                return True
+            if isinstance(value, MemberAccess):
+                obj = value.object
+                if (isinstance(obj, Identifier) and obj.name not in local
+                        and not self._security_identifier_is_global_binding(obj)
+                        and obj.name in _BUILTIN_NAMESPACE_NAMES):
+                    if self._expr_is_stable(value):
+                        return False
+                    qualified = f"{obj.name}.{value.member}"
+                    # Chart/timeframe/symbol facts and namespace constants
+                    # have no chart clock; these inventories hold bar reads.
+                    return (
+                        obj.name == "barstate"
+                        or (qualified in sigs.BUILTIN_VARIABLES
+                            and obj.name != "chart")
+                        or qualified in sigs.STRATEGY_VARIABLES
+                        or self._get_ta_site(value) is not None
+                    )
+                return per_bar(obj, local, active)
+            if isinstance(value, FuncCall):
+                name, namespace = self._resolve_callee(value.callee)
+                if per_bar([*value.args, *value.kwargs.values()], local, active):
+                    return True
+                info = self._func_info_map.get(name) if namespace is None else None
+                if info is not None and info.node is not None:
+                    key = ("function", name)
+                    if key in active:
+                        return True
+                    defaults = self._user_call_args_with_defaults(name, value)
+                    if defaults is not None and per_bar(defaults, local, active):
+                        return True
+                    bound = set(info.node.params) | self._collect_binding_names(
+                        info.node.body)
+                    return per_bar(info.node.body, frozenset(bound), active | {key})
+                # Pure builtin calls inherit their arguments' dependencies.
+                # Other calls can read implicit chart state even with no args.
+                return implicit_calls and not (
+                    (namespace is None and name in self._SECURITY_TF_REPLAY_CALLS)
+                    or (namespace in _SECURITY_PURE_CALL_NAMESPACES
+                        and (namespace, name) not in _SECURITY_IMPURE_CALLS)
+                    or (namespace == "timeframe"
+                        and name in self._SECURITY_TF_REPLAY_TIMEFRAME_CALLS)
+                )
+            if isinstance(value, (VarDecl, TupleAssign)):
+                return per_bar(value.value, local, active)
+            if isinstance(value, Assignment):
+                if value.op != ":=" and isinstance(value.target, Identifier):
+                    info = self._global_mutable_infos.get(value.target.name)
+                    if info is not None and info.is_var:
+                        return True
+                return per_bar(value.value, local, active)
+            return any(
+                per_bar(part, local, active)
+                for field, part in vars(value).items()
+                if field not in ("loc", "annotations")
+            )
+
+        return per_bar(node)
 
     def _security_tf_replay_reads(
         self, node, reads: set[str], seen: frozenset = frozenset()
@@ -4009,8 +4467,9 @@ class SecurityEmitter:
         def scan_body(body, series: set[str]) -> bool:
             for stmt in body or []:
                 if isinstance(stmt, VarDecl):
-                    if ((stmt.is_var or stmt.name in series)
-                            and is_string_decl(stmt)):
+                    persistent = stmt.is_var or (
+                        stmt.is_varip and id(stmt) in self._security_series_tf_local_decls)
+                    if (persistent or stmt.name in series) and is_string_decl(stmt):
                         return True
                     if scan_expr(stmt.value):
                         return True
@@ -4141,7 +4600,10 @@ class SecurityEmitter:
                 self._activate_callable_collection_binding(stmt.name, spec)
 
             if isinstance(stmt, VarDecl):
-                is_persistent_var = stmt.is_var
+                if stmt.is_varip:
+                    self._security_check_helper_varip(
+                        stmt, plan["call_node"], sec_id=sec_id)
+                is_persistent_var = stmt.is_var or stmt.is_varip
                 if stmt.name in local_series_names or is_persistent_var:
                     binding = active_bindings.get(stmt.name)
                     if binding is None:
@@ -4162,6 +4624,7 @@ class SecurityEmitter:
                     )
                     active_bindings[stmt.name] = binding
                     if is_persistent_var:
+                        self._security_series_tf_emitted_state.add((sec_id, id(stmt)))
                         self._security_persistent_helper_series.add(series_name)
                     cpp_type = None
                     if is_persistent_var or self._security_string_series_declared:
@@ -5169,13 +5632,8 @@ class SecurityEmitter:
                     node,
                     "request.security multi-statement helpers may only use local declarations, assignments, and if-branches before the final expression",
                 )
-            if isinstance(stmt, VarDecl):
-                if stmt.is_varip:
-                    self._codegen_error(
-                        node,
-                        "request.security does not support helper-local varip state",
-                        hint="Use var for requested-context bar state; varip tick state is unavailable in batch backtests.",
-                    )
+            if isinstance(stmt, VarDecl) and stmt.is_varip:
+                self._security_check_helper_varip(stmt, node)
             if isinstance(stmt, Assignment):
                 target_name = self._get_target_name(stmt.target)
                 if target_name is None:
@@ -5187,12 +5645,26 @@ class SecurityEmitter:
         local_series_names = sorted(set(self.ctx.func_series_vars.get(fi.name, set())) - set(params))
         return {
             "mode": "linear",
+            "call_node": node,
             "func_info": fi,
             "binding_stack": bound_stack,
             "expr": final_expr,
             "body": stmt_body,
             "local_series_names": local_series_names,
         }
+
+    def _security_check_helper_varip(
+        self, stmt: VarDecl, node: ASTNode, *, sec_id: int | None = None,
+    ) -> None:
+        """Expanded arms use historical bar state; fixed requests keep their gate."""
+        allowed = (self._security_series_tf_local_decls if sec_id is None
+                   else self._security_calls[sec_id].get("series_tf_local_decls", ()))
+        if id(stmt) not in allowed:
+            self._codegen_error(
+                node,
+                "request.security does not support helper-local varip state",
+                hint="Use var for requested-context bar state; varip tick state is unavailable in batch backtests.",
+            )
 
     def _security_tuple_value_fields(
         self,
@@ -5350,7 +5822,9 @@ class SecurityEmitter:
 
         def visit_stmt(stmt, conditional: bool) -> None:
             if isinstance(stmt, VarDecl):
-                if stmt.is_var and conditional:
+                persistent = stmt.is_var or (
+                    stmt.is_varip and id(stmt) in self._security_series_tf_local_decls)
+                if persistent and conditional:
                     self._codegen_error(
                         stmt,
                         "request.security helper-local var declarations inside "
@@ -5364,7 +5838,7 @@ class SecurityEmitter:
                 # current linear emitter hoists nested helper statements ahead
                 # of that guard, so treat the initializer as conditional and
                 # fail closed until it can preserve that execution boundary.
-                visit_expr(stmt.value, conditional or stmt.is_var)
+                visit_expr(stmt.value, conditional or persistent)
                 return
             if isinstance(stmt, IfStmt):
                 visit_expr(stmt.condition, conditional)
@@ -6395,6 +6869,7 @@ class SecurityEmitter:
         info = self._global_mutable_infos.get(node.name)
         if info is None:
             return
+        self._security_series_tf_emitted_state.add((sec_id, id(node)))
 
         pad = "    " * indent
         state_name = self._security_state_name(sec_id, node.name)
@@ -6865,6 +7340,10 @@ class SecurityEmitter:
         with a warning: a requested ``f()`` beside the chart's ``g`` would mix
         two bars. A failure of that emission is the script's own and
         propagates, as does a limit error."""
+        state = (set(item.get("series_tf_local_decls", ()))
+                 | set(item.get("series_tf_outside_decls", ())))
+        self._security_series_tf_emitted_state.difference_update(
+            (item["sec_id"], decl) for decl in state)
         snapshot = self._security_state_snapshot()
         body: list[str] = []
         self._security_requested_calls = True
@@ -6892,6 +7371,22 @@ class SecurityEmitter:
         else:
             if self._security_requested_used and self._security_chart_read is not None:
                 reason = self._security_chart_read
+        if state and (reason is not None or self._security_chart_read is not None):
+            # A chart fallback can call the ordinary function member and
+            # share its state across arms.
+            self._security_series_tf_refusal(
+                item["series_tf_state_node"],
+                "the requested expression requires chart evaluation, which would share its state "
+                "between timeframes; use an expression that can run entirely on the requested bars")
+        if state and any(
+                (item["sec_id"], decl) not in self._security_series_tf_emitted_state
+                for decl in state):
+            # Every declaration must have reached this site's requested cells
+            # or mutable-global copies, including its declaration/once seed.
+            self._security_series_tf_refusal(
+                item["series_tf_state_node"],
+                "the requested expression state could not receive a separate copy for each timeframe; "
+                "remove unused stateful arguments or simplify the stateful helper")
         if reason is None:
             lines.extend(body)
             self._security_eval_info[item["sec_id"]]["chart_fallback"] = False
@@ -9328,6 +9823,7 @@ class SecurityEmitter:
             value = build(node.value)
             value = self._security_local_value(value, node.value, cpp_type, args[5])
             if node.is_var or node.is_varip:
+                self._security_series_tf_emitted_state.add((args[0], id(node)))
                 ref = self._security_helper_series_ref(name)
                 seed = self._security_helper_series_ref(f"{name}@var_seed")
                 lines.extend((
@@ -9473,6 +9969,18 @@ class SecurityEmitter:
             if isinstance(n, FuncCall):
                 return "a user call it cannot inline"
             if isinstance(n, Subscript):
+                obj = n.object
+                if (self._security_calls[sec_id].get("series_tf_outside_decls")
+                        and isinstance(obj, Identifier)
+                        and self._security_identifier_is_global_binding(obj)
+                        and obj.name in mutable_names
+                        and (info := self._global_mutable_infos.get(obj.name)) is not None
+                        and info.is_series):
+                    # The fixed path renders this history through the visitor
+                    # and rewrites its receiver to this site's Series. It is
+                    # requested history even though the builder delegates it.
+                    stack.append(n.index)
+                    continue
                 return "history it does not keep on the requested clock"
             return f"a {type(n).__name__}"
         return None

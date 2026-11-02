@@ -1,0 +1,11 @@
+//@version=6
+strategy("Workaround: both timeframes requested, value chosen per bar (close vs open)", currency = currency.NONE, initial_capital = 1000000)
+// Each literal request advances independently before its value is selected.
+got_a = request.security(syminfo.tickerid, "240", bar_index)
+got_b = request.security(syminfo.tickerid, "1D", bar_index)
+got_v = close > open ? got_a : got_b
+qty_v = 1 + got_v % 5
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = qty_v)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

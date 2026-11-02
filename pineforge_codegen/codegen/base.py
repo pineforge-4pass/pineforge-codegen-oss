@@ -780,6 +780,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._dead_fixnan_indices: set[int] = set()
         self._switch_counter = 0
         self._security_inline_counter = 0
+        # Declaration identities are membership keys, never emission order.
+        self._security_series_tf_local_decls: set[int] = set()
+        self._security_series_tf_emitted_state: set[tuple[int, int]] = set()
         # Codegen-only requested argument-history plans. Inner values are
         # frozen records, so speculative evaluator restore is two levels deep.
         self._security_arg_inventory: dict[int, dict] = {}
@@ -1175,6 +1178,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._security_ta_variant_names: dict[tuple[int, int, tuple], str] = {}
         # Reassigned globals a timeframe reads (``_security_tf_replay_prologue``).
         self._security_tf_mutable_reads: set[str] = set()
+        self._expand_security_series_timeframes()
         for item in self._security_calls:
             sec_id = item["sec_id"]
             tf_node = item["tf_node"]

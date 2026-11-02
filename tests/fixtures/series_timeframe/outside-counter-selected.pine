@@ -1,0 +1,12 @@
+//@version=6
+strategy("Value probe: the requested expression reads a counter declared outside it", currency = currency.NONE, initial_capital = 1000000)
+// The counter lives at the top level of the script; the requested expression reads it.
+var int runs_v = 0
+runs_v += 1
+pick_tf = close > open ? "240" : "1D"
+got_v = request.security(syminfo.tickerid, pick_tf, runs_v)
+qty_v = 1 + got_v % 5
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = qty_v)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

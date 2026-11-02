@@ -646,9 +646,10 @@ class _Taint:
         return ((ns is None and name in _NA_SAFE_CALLS) or ns in _NA_SAFE_NAMESPACES
                 or (ns == "str" and name in _NA_SAFE_STR))
 
-    def _is_pure(self, ns, name) -> bool:
+    @staticmethod
+    def _is_pure(ns, name) -> bool:
         """A built-in that changes nothing but its own result."""
-        if self._is_na_safe(ns, name):
+        if _Taint._is_na_safe(ns, name):
             return True
         if ns in ("str", "timeframe", "syminfo", "ticker", "input", "chart.point"):
             return True
