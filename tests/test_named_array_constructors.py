@@ -124,12 +124,10 @@ CONSTRUCTORS = [
     ("2, na, initial_value = na", "PF-E2024",
      "argument 'initial_value' passed both positionally and by keyword", "na"),
     ("2, na, 9", "PF-E2026", "too many positional arguments", "9"),
-    ("size = 2, 7", "PF-E5083", "positional argument after a keyword argument", "7"),
-    ("initial_value = na, 2", "PF-E5083", "positional argument after a keyword argument", "2"),
 ])
 def test_constructor_refuses_invalid_bindings_at_the_argument(ctor, arguments, code, reason, argument):
-    # Base silently ignored unknown/duplicate/extra slots and rebound a
-    # positional after a keyword. These are binding errors, before fill typing.
+    # Base silently ignored unknown/duplicate/extra slots.
+    # These are binding errors, before fill typing.
     line = f"values = array.{ctor}({arguments})"
     with pytest.raises(CompileError) as raised:
         transpile(HEADER + line + "\n")

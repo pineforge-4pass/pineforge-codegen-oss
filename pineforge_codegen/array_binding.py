@@ -23,22 +23,13 @@ def bind_array_constructor_arguments(
 ) -> tuple[ASTNode | None, ...]:
     """Return supplied arguments in parameter order, with holes left as None.
 
-    Written order is syntax provenance only: Pine refuses a positional after
-    a keyword, but evaluates valid constructor arguments in formal order.
+    Written order is syntax provenance only: refusing a positional after a
+    keyword belongs to the generic argument-order rule. Valid constructor
+    arguments are evaluated in formal order.
     Defaults and element typing belong to the existing constructor lowering.
     """
     names = sigs.ARRAY_NEW_PARAMETERS
     key = f"array.{method}"
-    order = (node.annotations or {}).get(
-        "call_arg_order", (*node.args, *node.kwargs.values()))
-    keyword_nodes = {id(arg) for arg in node.kwargs.values()}
-    seen_keyword = False
-    for arg in order:
-        if id(arg) in keyword_nodes:
-            seen_keyword = True
-        elif seen_keyword:
-            _error(arg, f"{key}: positional argument after a keyword argument")
-
     names_count = len(names)
     args_count = len(node.args)
     if args_count > names_count:
