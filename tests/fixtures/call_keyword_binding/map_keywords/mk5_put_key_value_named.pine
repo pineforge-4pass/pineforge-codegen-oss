@@ -1,0 +1,11 @@
+//@version=6
+strategy("Map put key and value named", initial_capital = 1000000, currency = currency.NONE)
+values = map.new<string, float>()
+map.put(values, key = "a", value = 4.0)
+metric = map.get(values, "a")
+if metric < 0
+    strategy.cancel("L")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

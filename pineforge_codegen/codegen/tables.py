@@ -1050,8 +1050,7 @@ MAP_METHODS = {
 }
 
 # Declared signature order after removing the method receiver ``id``.  This is
-# consumed by the typed-map UDF-parameter lane; established global/local and
-# namespace map lowerings intentionally retain their existing output.
+# consumed by every map-call route, with ``id`` restored for namespace calls.
 MAP_METHOD_KWARGS: dict[str, list[str]] = {
     "put": ["key", "value"],
     "get": ["key"],

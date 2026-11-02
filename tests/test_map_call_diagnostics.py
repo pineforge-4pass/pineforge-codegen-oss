@@ -391,27 +391,6 @@ observed = probe()
             _typed_method_source('target.get("x", "y")'),
             "map.get: too many positional arguments (expected 1, got 2)",
         ),
-        (
-            _functional_source('map.get(id=target, key="x")'),
-            (
-                "map.get: keyword arguments are not supported "
-                "for this functional call form"
-            ),
-        ),
-        (
-            _functional_source('map.get(target, key="x")'),
-            (
-                "map.get: keyword arguments are not supported "
-                "for this functional call form"
-            ),
-        ),
-        (
-            _functional_source('target.get(key="x")'),
-            (
-                "map.get: keyword arguments are not supported "
-                "for this receiver-method call form"
-            ),
-        ),
     ],
 )
 def test_invalid_map_bindings_raise_stable_compile_errors(source: str, message: str):
@@ -421,3 +400,19 @@ def test_invalid_map_bindings_raise_stable_compile_errors(source: str, message: 
     assert caught.value.diagnostics[0].phase is Phase.CODEGEN
     assert caught.value.diagnostics[0].message == message
     assert str(caught.value).startswith("invalid-map-call.pine:")
+
+
+@pytest.mark.parametrize(
+    ("expression", "positional"),
+    [
+        ('map.get(id=target, key="x")', 'map.get(target, "x")'),
+        ('map.get(target, key="x")', 'map.get(target, "x")'),
+        ('target.get(key="x")', 'target.get("x")'),
+    ],
+)
+def test_valid_map_keyword_bindings_transpile(expression: str, positional: str):
+    assert transpile(
+        _functional_source(expression), filename="valid-map-call.pine"
+    ) == transpile(
+        _functional_source(positional), filename="valid-map-call.pine"
+    )

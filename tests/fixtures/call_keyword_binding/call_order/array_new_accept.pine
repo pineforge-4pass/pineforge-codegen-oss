@@ -1,0 +1,12 @@
+//@version=6
+strategy("Generic array named initializer", initial_capital = 1000000, currency = currency.NONE)
+// Both arrays contain three copies of 2.0; reversed keywords are legal.
+values = array.new<float>(3, initial_value = 2.0)
+other = array.new<float>(initial_value = 2.0, size = 3)
+metric = array.get(values, 0) + array.get(other, 0)
+if metric < 0
+    strategy.cancel("L")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

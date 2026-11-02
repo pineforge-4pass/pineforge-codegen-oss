@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 
+from .. import signatures as sigs
 from ..ast_nodes import FuncCall, Identifier, MemberAccess
 from ..symbols import method_receiver_type_name
 from .tables import (
@@ -627,28 +628,29 @@ class DrawingVisitor:
         # Preserve the unsupported arbitrary-map-receiver boundary. Namespace
         # functional calls are established; method calls must use a named
         # global/local/parameter receiver.
+        param_names = sigs.get_param_names("map", method)
+        if param_names is None:
+            return False
+        if ns != "map":
+            if not isinstance(receiver, Identifier):
+                return False
+            param_names = param_names[1:]
+
+        # A valid named binding has the same void result as its positional
+        # twin. Leave malformed bindings to the map emitter's diagnostics.
+        if len(node.args) > len(param_names):
+            return False
+        if any(name not in param_names for name in node.kwargs):
+            return False
+        if any(name in node.kwargs for name in param_names[:len(node.args)]):
+            return False
+        provided = set(param_names[:len(node.args)]) | set(node.kwargs)
+        if provided != set(param_names):
+            return False
         if ns == "map":
-            # The established namespace-functional form has a positional map
-            # receiver.  Keyword-only receiver routing remains unsupported
-            # and must retain its pre-KI-48g fallback output.
-            expected_arity = 1 if method == "clear" else 2
-            return len(node.args) == expected_arity and not node.kwargs
-        if not isinstance(node.callee.object, Identifier):
-            return False
-        name = node.callee.object.name
-        param_spec = getattr(self, "_current_func_param_specs", {}).get(name)
-        if method == "clear":
-            if node.args or node.kwargs:
-                return False
-        elif param_spec is not None and param_spec.kind == "map":
-            if not (
-                (len(node.args) == 1 and not node.kwargs)
-                or (not node.args and set(node.kwargs) == {"id2"})
-            ):
-                return False
-        elif len(node.args) != 1 or node.kwargs:
-            return False
-        recv_spec = param_spec or self._type_spec_from_expr(node.callee.object)
+            return True
+        param_spec = getattr(self, "_current_func_param_specs", {}).get(receiver.name)
+        recv_spec = param_spec or direct_spec
         return recv_spec is not None and recv_spec.kind == "map"
 
     # ------------------------------------------------------------------

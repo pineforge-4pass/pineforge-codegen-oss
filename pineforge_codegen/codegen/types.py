@@ -1967,8 +1967,9 @@ class TypeInferer:
             if namespace == "map" and func_name in {
                 "put", "get", "remove", "contains", "size", "keys",
                 "values", "copy", "put_all", "clear",
-            } and node.args:
-                receiver_spec = self._type_spec_from_expr(node.args[0])
+            }:
+                receiver_node = node.args[0] if node.args else node.kwargs.get("id")
+                receiver_spec = self._type_spec_from_expr(receiver_node)
                 if receiver_spec is not None and receiver_spec.kind == "map":
                     if func_name in ("put", "get", "remove"):
                         return receiver_spec.value
