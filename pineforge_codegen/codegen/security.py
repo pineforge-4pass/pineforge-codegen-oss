@@ -86,7 +86,7 @@ from ..external_requests import _nodes as walk_request_nodes
 from ..limits import iter_ast_nodes
 from .helpers import na_preserving_int_cast, unary_sign_cpp
 from ..security_contexts import GLOBAL_ANNOTATION, UNREACHED_ANNOTATION
-from ..symbols import PineType, method_receiver_type_name
+from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .tables import (
     ARRAY_JOURNAL_DELTA_METHODS, ARRAY_JOURNAL_FULL_METHODS, MATRIX_VOID_METHODS,
     BAR_BUILTINS, DRAWING_TYPE_TO_CPP, MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_BAR_FIELDS,
@@ -2946,13 +2946,18 @@ class SecurityEmitter:
                                 return
                             if isinstance(stmt, (ForStmt, WhileStmt)):
                                 header, counter = self._security_loop_parts(stmt)
-                                for part in header:
-                                    if part is not None:
-                                        walk(part, local_stack)
                                 body_bindings = dict(current)
                                 if counter:
                                     body_bindings[counter] = (
                                         self._security_loop_counter_binding(plan, counter))
+                                header_stack = (
+                                    plan["binding_stack"] + (body_bindings,)
+                                    if counter and self._for_header_reads_new_counter(stmt)
+                                    else local_stack
+                                )
+                                for index, part in enumerate(header):
+                                    if part is not None:
+                                        walk(part, local_stack if index == 0 else header_stack)
                                 for child in stmt.body:
                                     walk_stmt(child, body_bindings)
                                 return
@@ -3415,13 +3420,18 @@ class SecurityEmitter:
                                 return
                             if isinstance(stmt, (ForStmt, WhileStmt)):
                                 header, counter = self._security_loop_parts(stmt)
-                                for part in header:
-                                    if part is not None:
-                                        walk(part, local_stack)
                                 body_bindings = dict(current)
                                 if counter:
                                     body_bindings[counter] = (
                                         self._security_loop_counter_binding(plan, counter))
+                                header_stack = (
+                                    plan["binding_stack"] + (body_bindings,)
+                                    if counter and self._for_header_reads_new_counter(stmt)
+                                    else local_stack
+                                )
+                                for index, part in enumerate(header):
+                                    if part is not None:
+                                        walk(part, local_stack if index == 0 else header_stack)
                                 for child in stmt.body:
                                     walk_stmt(child, body_bindings)
                                 return
@@ -4486,6 +4496,10 @@ class SecurityEmitter:
             pad = "    " * indent
             self._security_check_loop_body(stmt, plan, set(active_bindings))
             runtime_stack_local = plan["binding_stack"] + (active_bindings,)
+            pine_v5 = (
+                (getattr(plan["func_info"].node, "annotations", None) or {})
+                .get("pine_version") == 5
+            )
 
             def build(expr) -> tuple[str, bool]:
                 before = len(lines)
@@ -4496,35 +4510,108 @@ class SecurityEmitter:
                 return cpp, len(lines) == before
 
             body_bindings = dict(active_bindings)
+
+            def emit_body(body_indent: int) -> None:
+                loop_depth[0] += 1
+                saved_scope = self._security_open_scope()
+                saved_counted = self._current_counted_loop_vars
+                saved_loop = self._current_loop_vars
+                saved_loop_specs = self._current_loop_var_specs
+                if isinstance(stmt, ForStmt) and stmt.var:
+                    self._current_counted_loop_vars = saved_counted | {stmt.var}
+                    if counter_cpp_type == "double":
+                        self._current_loop_vars = saved_loop | {stmt.var}
+                        self._current_loop_var_specs = {
+                            **saved_loop_specs, stmt.var: TypeSpec.primitive("float"),
+                        }
+                try:
+                    for child in stmt.body:
+                        emit_stmt(child, body_bindings, body_indent)
+                finally:
+                    self._current_counted_loop_vars = saved_counted
+                    self._current_loop_vars = saved_loop
+                    self._current_loop_var_specs = saved_loop_specs
+                    self._security_scope_path = saved_scope
+                    loop_depth[0] -= 1
+
             if isinstance(stmt, ForStmt):
+                counter_cpp_type = self._security_for_counter_cpp_type(
+                    stmt.start, runtime_stack_local, step=stmt.step, pine_v5=pine_v5,
+                )
                 start_cpp, _ = build(stmt.start)
+                if self._for_header_reads_new_counter(stmt):
+                    base = self._security_next_inline_name(
+                        sec_id, plan["func_info"].name, "for")
+                    names = tuple(
+                        f"{base}_{part}" for part in ("start", "end", "step", "down")
+                    )
+                    var = self._security_next_inline_name(
+                        sec_id, plan["func_info"].name, stmt.var)
+                    body_bindings[stmt.var] = var
+                    self._security_local_cpp_types[var] = counter_cpp_type
+                    header_stack = plan["binding_stack"] + (body_bindings,)
+
+                    def render_bound(expr) -> str:
+                        prelude: list[str] = []
+                        cpp = self._build_security_expr(
+                            sec_id, expr, None, ta_results, resolving,
+                            security_mutable_names, header_stack, prelude,
+                        )
+                        # A helper call can need statements. Keep those in the
+                        # expression so each end refresh evaluates them too.
+                        if prelude:
+                            return "([&]() {\n" + "\n".join(prelude) + f"\nreturn {cpp}; }}())"
+                        return cpp
+
+                    initial_start = (
+                        self._coerce_double_slot(f"({start_cpp})", stmt.start)
+                        if counter_cpp_type == "double"
+                        else self._coerce_int_slot(f"({start_cpp})", stmt.start, "int")
+                    )
+                    with self._counter_bound_binding(stmt, counter_cpp_type):
+                        # Share the initial direction read and the end re-read
+                        # at the start counter with chart loops.
+                        self._emit_counter_bound_loop(
+                            stmt, lines, indent, start=start_cpp, var=var,
+                            start_cpp=initial_start,
+                            names=names, render=render_bound, emit_body=emit_body,
+                            counter_cpp_type=counter_cpp_type,
+                            guard_na=True, pine_v5=pine_v5,
+                        )
+                    return
                 end_cpp, end_inline = build(stmt.end)
                 step_cpp = build(stmt.step)[0] if stmt.step is not None else "1"
-                start_cpp = self._coerce_int_slot(f"({start_cpp})", stmt.start, "int")
-                end_cpp = self._coerce_int_slot(f"({end_cpp})", stmt.end, "int")
-                step_cpp = self._coerce_int_slot(f"({step_cpp})", stmt.step, "int")
+                if counter_cpp_type == "double":
+                    start_cpp = self._coerce_double_slot(f"({start_cpp})", stmt.start)
+                    end_cpp = self._coerce_double_slot(f"({end_cpp})", stmt.end)
+                    step_cpp = self._coerce_double_slot(f"({step_cpp})", stmt.step)
+                else:
+                    start_cpp = self._coerce_int_slot(f"({start_cpp})", stmt.start, "int")
+                    end_cpp = self._coerce_int_slot(f"({end_cpp})", stmt.end, "int")
+                    step_cpp = self._coerce_int_slot(f"({step_cpp})", stmt.step, "int")
                 base = self._security_next_inline_name(
                     sec_id, plan["func_info"].name, "for")
                 s_var, e_var, st_var, dn_var = (
                     f"{base}_start", f"{base}_end", f"{base}_step", f"{base}_down")
                 var = self._security_next_inline_name(
                     sec_id, plan["func_info"].name, stmt.var or "i")
-                lines.append(f"{pad}int {s_var} = {start_cpp};")
-                lines.append(f"{pad}int {e_var} = {end_cpp};")
-                lines.append(f"{pad}int {st_var} = {step_cpp};")
+                lines.append(f"{pad}{counter_cpp_type} {s_var} = {start_cpp};")
+                lines.append(f"{pad}{counter_cpp_type} {e_var} = {end_cpp};")
+                lines.append(f"{pad}{counter_cpp_type} {st_var} = {step_cpp};")
+                self._emit_for_step_stop(stmt, st_var, lines, indent, pine_v5=pine_v5)
                 lines.append(f"{pad}if (!is_na({st_var}) && {st_var} < 0) {st_var} = -{st_var};")
                 lines.append(f"{pad}if ({st_var} == 0) {st_var} = 1;")
                 lines.append(f"{pad}const bool {dn_var} = ({s_var} > {e_var});")
                 refresh = f", {e_var} = {end_cpp}" if end_inline else ""
                 lines.append(
-                    f"{pad}for (int {var} = {s_var}; "
+                    f"{pad}for ({counter_cpp_type} {var} = {s_var}; "
                     f"!is_na({s_var}) && !is_na({e_var}) && !is_na({st_var}) && "
                     f"({dn_var} ? ({var} >= {e_var}) : ({var} <= {e_var})); "
                     f"{var} += ({dn_var} ? -{st_var} : {st_var}){refresh}) {{"
                 )
                 if stmt.var:
                     body_bindings[stmt.var] = var
-                    self._security_local_cpp_types[var] = "int"
+                    self._security_local_cpp_types[var] = counter_cpp_type
             else:
                 cond_cpp, cond_inline = build(stmt.condition)
                 if not cond_inline:
@@ -4536,21 +4623,7 @@ class SecurityEmitter:
                 lines.append(
                     f"{pad}while ({self._coerce_bool_expr(cond_cpp, stmt.condition)}) {{"
                 )
-            loop_depth[0] += 1
-            saved_scope = self._security_open_scope()
-            # The counter is a counted loop's binder, ``for (int i = ...)``,
-            # as on the chart: never na, and its products past int32 are
-            # 64-bit (``_int_arith_leaves_int32``; the payload's BinOp).
-            saved_counted = self._current_counted_loop_vars
-            if isinstance(stmt, ForStmt) and stmt.var:
-                self._current_counted_loop_vars = saved_counted | {stmt.var}
-            try:
-                for child in stmt.body:
-                    emit_stmt(child, body_bindings, indent + 1)
-            finally:
-                self._current_counted_loop_vars = saved_counted
-                self._security_scope_path = saved_scope
-                loop_depth[0] -= 1
+            emit_body(indent + 1)
             lines.append(f"{pad}}}")
 
         for stmt in plan["body"]:
@@ -4566,6 +4639,12 @@ class SecurityEmitter:
             runtime_stack,
             lines,
         )
+
+    def _security_for_counter_cpp_type(
+        self, start, bindings, *, step=None, pine_v5: bool = False,
+    ) -> str:
+        """Use the same declaration evidence as chart loops and analysis."""
+        return self._for_counter_cpp_type(start, step=step, pine_v5=pine_v5)
 
     def _security_binding_stack_signature(
         self,
@@ -5726,17 +5805,19 @@ class SecurityEmitter:
                     walk_block(stmt.else_body, scopes)
                 elif isinstance(stmt, (ForStmt, WhileStmt)):
                     header, counter = self._security_loop_parts(stmt)
-                    for part in header:
-                        walk_expr(part, scopes)
-                    walk_block(stmt.body, scopes + ({counter} if counter else set(),))
+                    counter_scope = scopes + ({counter} if counter else set(),)
+                    for index, part in enumerate(header):
+                        walk_expr(part, scopes if index == 0 else counter_scope)
+                    walk_block(stmt.body, counter_scope)
                 else:
                     walk_expr(stmt, scopes)
 
         outer = (set(bound_locals or ()),)
         header, counter = self._security_loop_parts(loop)
-        for part in header:
-            walk_expr(part, outer)
-        walk_block(loop.body, outer + ({counter} if counter else set(),))
+        counter_scope = outer + ({counter} if counter else set(),)
+        for index, part in enumerate(header):
+            walk_expr(part, outer if index == 0 else counter_scope)
+        walk_block(loop.body, counter_scope)
 
     @staticmethod
     def _security_arm_reassigned_names(body) -> set[str]:
@@ -6179,20 +6260,25 @@ class SecurityEmitter:
 
                         if isinstance(stmt, (ForStmt, WhileStmt)):
                             header, counter = self._security_loop_parts(stmt)
-                            for part in header:
-                                if part is not None:
-                                    self._collect_security_ta_binding_stacks(
-                                        part,
-                                        resolving,
-                                        local_stack,
-                                        collected,
-                                        inline_ta_indices,
-                                        True,
-                                    )
                             body_bindings = dict(active_bindings)
                             if counter:
                                 body_bindings[counter] = (
                                     self._security_loop_counter_binding(plan, counter))
+                            header_stack = (
+                                plan["binding_stack"] + (body_bindings,)
+                                if counter and self._for_header_reads_new_counter(stmt)
+                                else local_stack
+                            )
+                            for index, part in enumerate(header):
+                                if part is not None:
+                                    self._collect_security_ta_binding_stacks(
+                                        part,
+                                        resolving,
+                                        local_stack if index == 0 else header_stack,
+                                        collected,
+                                        inline_ta_indices,
+                                        True,
+                                    )
                             for child in stmt.body:
                                 collect_stmt(child, body_bindings)
                             # A local the loop reassigns holds the value its

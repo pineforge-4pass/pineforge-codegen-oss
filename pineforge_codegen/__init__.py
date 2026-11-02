@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from .lexer import Lexer
 from .parser import Parser
 from .analyzer import Analyzer
+from .analyzer.value_bindings import ValueBindings
 from .codegen import CodeGen
 from .cpp_allowlist import REASONS, check_generated_cpp
 from .diagnostic_codes import diagnostics_catalog, render_diagnostic
@@ -84,6 +85,7 @@ def _generate(pine_source: str, check_support: bool, filename: str,
             if any(d.level == Level.ERROR for d in support_diagnostics):
                 raise CompileError(support_diagnostics)
         budget.check(phase=Phase.ANALYZER)
+        ValueBindings(ast, filename, budget).resolve()
         sites = request_sites(ast)
         ast = lower_no_data_requests(ast)
         ast = specialize_security_contexts(ast, filename=filename)

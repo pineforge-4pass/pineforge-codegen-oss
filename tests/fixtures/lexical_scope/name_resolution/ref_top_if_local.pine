@@ -1,0 +1,13 @@
+//@version=6
+strategy("Script branch declaration order", overlay = true, initial_capital = 1000000)
+// A script branch has the same read-before-local-declaration rule as a function branch.
+signalValue = 0.0
+if close > open
+    value = lateValue
+    float lateValue = close - open
+    signalValue := value
+plot(signalValue, "signal")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

@@ -1,0 +1,17 @@
+//@version=6
+strategy("Sibling branch visibility", overlay = true, initial_capital = 1000000)
+// A declaration in the first branch never binds the second branch's read.
+probe() =>
+    total = 0.0
+    if close > open
+        float branchValue = close - open
+        total := branchValue
+    else
+        total := branchValue
+    total
+signalValue = probe()
+plot(signalValue, "signal")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

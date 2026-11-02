@@ -1,0 +1,12 @@
+//@version=6
+strategy("Loop zero literal step", initial_capital = 1000000, currency = currency.NONE)
+float acc = 0.0
+for i = 0 to 3 by 0
+    acc := acc + 1.0
+    if acc > 20.0
+        break
+// 4 if the zero step is read as one; 21 if it never advances and the break ends it; no trades if TradingView stops the run
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = acc)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

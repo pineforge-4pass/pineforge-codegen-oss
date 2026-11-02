@@ -20,11 +20,58 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
-## Unreleased
+## Unreleased (next release)
 
 - Pine v6 calls refuse a positional argument after a named argument with
   `PF-E2074` at that positional expression. The check also covers strategy
   declarations, unused functions and v6 library bodies before lowering.
+- Counted loops can read their own counter in the end and step expressions,
+  including when it shadows an outer binding and inside a `request.security`
+  helper. The counter now wins over an outer same-named variable. The step is
+  read once at counter 0. TradingView measurements establish that direction
+  is fixed from the start and the first end read at counter 0, then an end
+  that reads this counter is read again at the start before the first
+  continuation test. The v6 end also refreshes between iterations. A non-positive
+  v6 step stops the run instead of being converted into a positive step. A float
+  step against an int counter, refused by TradingView, now stops the run when
+  it narrows to zero or below; earlier releases replaced a zero narrowed step
+  with 1. This changes generated C++ for explicit-step loops; regenerate and
+  relink affected strategies. With a start positively typed int, TradingView
+  refuses a counter-dependent float step or a float step read from
+  a variable; PineForge still accepts the variable form and now builds the
+  counter-dependent form, which previously failed to build.
+- A v6 counted loop uses a float counter when its start has positive float
+  evidence, or when its start is unknown and its step has positive float
+  evidence, including inside a `request.security` helper. A start with positive
+  int evidence keeps an int counter. Without float evidence, the existing int
+  route is unchanged; v5 library loops keep their existing int-counter route.
+  Counter-family inference follows declaration sources in a dedicated query,
+  independently of shared expression and storage inference.
+- Known loop gaps: an end bound that is exactly its own counter runs indefinitely
+  here, while TradingView stops it; a start with positive int evidence and a
+  float step is refused by TradingView, while a step narrowed to zero or below
+  stops here with RE10021 at bar 0. A float counter passed to
+  an untyped helper truncates here, while TradingView passes the fractional
+  value (accumulating `twice(x)` from 0.0 to 1.0 by 0.25 gives 2 here and 5
+  on TradingView). `array.from(x)` can also truncate a float counter through
+  inferred `array<int>` storage. An unknown start from an untyped parameter
+  with a positively float step now selects a float counter, independently
+  of shared parameter inference. Inexact steps can differ at
+  the last iteration:
+  `0.0 to 0.3 by 0.1` counts three here and four on TradingView, whereas
+  `0.0 to 1.0 by 0.1` counts eleven on both. Block-local/enclosing-counter
+  bindings and stops inside `request.security` have no TradingView tape.
+  This change merges first; a follow-up change closes the endless-bound hang,
+  with no codegen release in between.
+- A Pine v6 function or method reading a later local without an earlier
+  visible binding is refused during analysis at the read (`PF-E2075`),
+  using the same declaration-order rule as later globals (`PF-E2053`).
+  Reading a loop counter or `for ... in` binder after its loop without
+  another visible binding is now refused at translate time (`PF-E2054`);
+  these reads were previously accepted.
+  TradingView accepts a namespace call after an expired block local with the
+  same name; PineForge's analysis no longer refuses it, but code generation
+  still rejects some such calls (a known gap).
 
 ## 1.9.1 — 2026-10-31
 

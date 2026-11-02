@@ -1,0 +1,21 @@
+//@version=6
+strategy("Loop results are outer bindings", currency = currency.NONE, initial_capital = 1000000)
+// Derived: each terminal loop returns its last body value through a function result.
+countedValue() =>
+    for i = 0 to 1
+        close + i
+elementValue() =>
+    values = array.from(close, open)
+    for value in values
+        value
+whileValue() =>
+    int remaining = 1
+    while remaining > 0
+        remaining := remaining - 1
+        close
+signalValue = countedValue() + elementValue() + whileValue()
+plot(signalValue)
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

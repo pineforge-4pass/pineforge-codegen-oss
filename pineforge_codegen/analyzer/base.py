@@ -31,8 +31,9 @@ from ..symbols import (
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from ..limits import TimeBudget, iter_ast_nodes
+from ..loop_types import LoopTypeSources, for_counter_type
 from ..security_contexts import (
-    GLOBAL_ANNOTATION, PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series,
+    PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series,
 )
 from ..session_reads import emitted_session_reads
 from ..collection_history import (
@@ -264,6 +265,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # provenance to distinguish true global aliases from same-named local
         # shadows after the analyzer's scope stack has unwound.
         self._identifier_binding_scopes: dict[int, str | None] = {}
+        self._identifier_decl_bindings: dict[int, tuple[int, str] | None] = {}
+        self._for_counter_types: dict[int, PineType] = {}
         self._ta_counter = 0
         self._fixnan_counter = 0
         # All fixnan member names minted so far (base + clones), for O(1)
@@ -609,6 +612,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         """Run semantic analysis and return the analyzer context."""
         self._ensure_pine_v6()
         validate_call_argument_order(self._ast, filename=self._filename)
+        from .value_bindings import ValueBindings
+        self._value_bindings = ValueBindings(self._ast, self._filename, self._budget)
+        self._value_bindings.resolve()
         self._check_direct_terminal_array_element_callee_shadows()
         self._visit(self._ast)
         if self._operator_condition_errors:
@@ -680,6 +686,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             global_var_decls=self._global_var_decls,
             global_expr_map=pure_global_expr_map,
             identifier_binding_scopes=dict(self._identifier_binding_scopes),
+            identifier_decl_bindings=dict(self._identifier_decl_bindings),
+            for_counter_types=dict(self._for_counter_types),
             var_member_init_exprs=self._var_member_init_exprs,
             var_member_metadata_by_node=self._var_member_metadata_by_node,
             var_member_type_specs_by_node=self._var_member_type_specs_by_node,
@@ -6022,6 +6030,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return body_type
 
     def _visit_ForStmt(self, node: ForStmt) -> PineType:
+        # The start is outside this loop's binder. Record its lexical reads
+        # before defining a same-named counter for the end, step and body.
+        start_global = self._global_scope
+        self._global_scope = False
+        try:
+            self._visit(node.start)
+        finally:
+            self._global_scope = start_global
         outer_symbol = self._symbols.resolve(node.var)
         outer_spec = (
             getattr(outer_symbol, "type_spec", None)
@@ -6031,7 +6047,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._symbols.enter_scope("for")
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
 
-        # Define loop variable
+        # Preserve legacy symbol storage for collection and callable inference.
+        # The dedicated counter family must not widen those shared paths.
         sym = Symbol(
             name=node.var,
             pine_type=PineType.INT,
@@ -6053,10 +6070,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._global_scope = False
         self._block_node_stack.append(node)
         try:
-            self._visit(node.start)
             self._visit(node.end)
             if node.step:
                 self._visit(node.step)
+            sources = getattr(self, "_loop_type_sources", None)
+            if sources is None:
+                sources = self._loop_type_sources = LoopTypeSources(self._ast)
+            # Both header slots now have their source-scope bindings recorded.
+            self._for_counter_types[id(node.start)] = for_counter_type(
+                node.start, sources,
+                self._identifier_decl_bindings, self._identifier_binding_scopes,
+                step=node.step,
+                pine_v5=self._pine_version != 6 or self._in_v5_library_definition(node),
+            )
             for stmt in node.body:
                 self._visit(stmt)
         finally:
@@ -8076,6 +8102,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         sym = self._symbols.resolve(node.name)
         block_owner = getattr(sym, "_pf_script_block_owner", None)
+        if id(node) not in self._identifier_decl_bindings:
+            # Later type queries can revisit this node after its source scope
+            # unwinds. Preserve the declaration resolved in that source scope.
+            declaration = getattr(sym, "_pf_decl_node_id", None)
+            self._identifier_decl_bindings[id(node)] = (
+                (declaration, getattr(sym, "_pf_decl_binding_name", node.name))
+                if declaration is not None else None
+            )
         if (id(node) not in self._identifier_binding_scopes
                 and node.name in BUILTIN_VARS
                 and node.name not in BAR_FIELDS
@@ -8092,28 +8126,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if (self._pine_version == 6
                 and not self._in_v5_library_definition(node)
                 and id(node) not in self._identifier_binding_scopes):
-            if (block_owner is not None
-                    and not getattr(sym, "_pf_script_block_has_outer", False)
-                    and all(
-                        id(body) != block_owner
-                        for body in self._block_node_stack
-                    )):
-                self._error(
-                    f"Block-local variable '{node.name}' is read outside its block.",
-                    node.loc,
-                )
-            if (sym is None
-                    and self._enclosing_func_names
-                    and node.name in self._direct_program_binding_names
-                    and not (node.annotations or {}).get(GLOBAL_ANNOTATION)):
-                # A payload argument copied into a helper carries its own
-                # provenance. It is evaluated at the call site, so it is not
-                # an authored read in the helper definition.
-                self._error(
-                    f"Global variable '{node.name}' is read before its declaration "
-                    "in a function.",
-                    node.loc,
-                )
+            self._value_bindings.check_use(node)
         self._identifier_binding_scopes[id(node)] = (
             getattr(sym, "scope", None) if sym is not None else None
         )

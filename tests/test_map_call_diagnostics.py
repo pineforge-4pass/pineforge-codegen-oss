@@ -6,10 +6,12 @@ scaffold or exception wrappers; test_checked_settings tests actual emissions.
 
 from __future__ import annotations
 
+import csv
 from hashlib import sha256
 
 import pytest
 
+from tests._e2e import Build, chart_feed_head, execute_all, ok, skip_unless_e2e_env
 from tests._legacy_cpp import legacy_cpp, without_restore_script_state, without_source_rename
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError, Level, Phase
@@ -212,21 +214,6 @@ observed = holder.values.get("key")
     assert _run_observed(transpile(source)) == 7.0
 
 
-_BLOCK_LOCAL_MAP_ISOLATION_SOURCE = '''//@version=6
-strategy("block map isolation")
-target = map.new<string, int>()
-observed = 0
-if bar_index >= 0
-    map = map.new<string, int>()
-    map.put("local", 9)
-    observed := map.get("local")
-if bar_index >= 0
-    map.put(target, "sibling", 2)
-    observed := observed * 10 + map.get(target, "sibling")
-map.put(target, "outside", 3)
-observed := observed * 10 + map.get(target, "outside")
-'''
-
 _BLOCK_LOCAL_VALUES_ISOLATION_SOURCE = '''//@version=6
 strategy("block map isolation")
 target = map.new<string, int>()
@@ -243,18 +230,64 @@ observed := observed * 10 + map.get(target, "outside")
 '''
 
 
-def test_map_namespace_read_rejects_an_expired_block_local():
-    with pytest.raises(CompileError) as caught:
-        transpile(_BLOCK_LOCAL_MAP_ISOLATION_SOURCE, filename="block-map.pine")
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.code == "PF-E2054"
-    assert diagnostic.message == "Block-local variable 'map' is read outside its block."
-    assert diagnostic.level is Level.ERROR
-    assert diagnostic.phase is Phase.ANALYZER
-    assert diagnostic.location.file == "block-map.pine"
-    # Lines 5-8 own map; the sibling's first read is line 10 after four spaces.
-    assert (diagnostic.location.line, diagnostic.location.col) == (10, 5)
+def test_map_namespace_call_after_an_expired_block_local():
+    """TradingView accepts namespace map calls after the local's scope ends."""
+    source = '''//@version=6
+strategy("pq2c", currency=currency.NONE, initial_capital=1000000)
+target = map.new<string, int>()
+if bar_index >= 0
+    map = map.new<string, int>()
+map.put(target, "outside", 3)
+observed = map.get(target, "outside")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")
+'''
+    cpp = transpile(source)
+    assert "class GeneratedStrategy" in cpp
+
+
+_EXPIRED_MAP_LOCAL_VALUE_SOURCE = '''//@version=6
+strategy("Map value after an expired block local named map", currency=currency.NONE, initial_capital=1000000)
+target = map.new<string, int>()
+if bar_index >= 0
+    map = map.new<string, int>()
+map.put(target, "first", 3)
+map.put(target, "second", 4)
+tradeQty = (map.get(target, "first") + 10 * map.get(target, "second") + 100 * map.size(target)) / 100.0
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = tradeQty)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")
+'''
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(_EXPIRED_MAP_LOCAL_VALUE_SOURCE, id="map"),
+        pytest.param(
+            _EXPIRED_MAP_LOCAL_VALUE_SOURCE.replace("    map = ", "    scratch = "),
+            id="scratch",
+        ),
+    ],
+)
+def test_map_namespace_calls_after_expired_local_match_tradingview_quantity(
+    source, tmp_path,
+):
+    """TradingView measured entry quantity 2.43; the neutral-name twin agrees.
+
+    Tape sha256: 927f04c9d4efc9ba9801f3c67d55516549e682408dfa1e404ea8e00b80eeadee.
+    """
+    engine = skip_unless_e2e_env()
+    feed = chart_feed_head(engine, tmp_path, 64)
+    runs = execute_all(engine, feed, tmp_path, {"map_value": Build(source)})
+    outcome = ok(runs, "map_value")
+    rows = csv.DictReader(outcome.trades["default"].decode("utf-8-sig").splitlines())
+    quantities = [float(row["Qty"]) for row in rows if row["Type"].startswith("Entry")]
+    assert quantities, "Expected entries from the TradingView-measured source"
+    assert all(quantity == 2.43 for quantity in quantities), quantities
 
 
 def test_map_namespace_calls_after_a_differently_named_block_local_runtime():

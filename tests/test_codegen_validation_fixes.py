@@ -669,7 +669,7 @@ def test_callable_tuple_binding_shadows_global_series_as_scalar():
     compile_cpp(cpp, label="callable-tuple-binding-shadows-global-series")
 
 
-def test_counted_loop_dynamic_end_uses_outer_same_named_series():
+def test_counted_loop_dynamic_end_counter_shadows_outer_same_named_series():
     cpp = _cpp(
         "lag(series float value) => value[1]\n"
         "i = close + 2\n"
@@ -679,17 +679,13 @@ def test_counted_loop_dynamic_end_uses_outer_same_named_series():
         "    total += i\n"
         "plot(prior + total)"
     )
-    # The ``to`` expression reads the OUTER series ``i[0]``, not the loop
-    # binder. It is a double, so the int loop bound also carries the
-    # na-preserving narrowing (see test_na_int_narrowing.py); what this test
-    # pins is which ``i`` the lambda reads.
-    assert (
-        "auto _for_end_eval_0 = [&]() { return [&](){ auto _pf_v = ((i[0])); "
-    ) in cpp
-    assert "int _for_end_0 = _for_end_eval_0();" in cpp
-    assert "_for_end_0 = _for_end_eval_0()" in cpp
-    assert "_for_end_0 = (i)" not in cpp
-    compile_cpp(cpp, label="counted-loop-dynamic-end-outer-series")
+    # TV probes a1/a2/a3 show that the counter shadows an outer binding in
+    # both end and step. The outer series remains available outside the loop.
+    assert "int i = 0;" in cpp
+    assert "int _for_end_0 = (i);" in cpp
+    assert "_for_end_0 = (i)" in cpp
+    assert "_for_end_eval_0" not in cpp
+    compile_cpp(cpp, label="counted-loop-dynamic-end-counter-shadows-series")
 
 
 def test_udf_tuple_history_binding_uses_exact_call_site_series_storage():

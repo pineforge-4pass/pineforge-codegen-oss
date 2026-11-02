@@ -1,0 +1,8 @@
+//@version=6
+strategy("Counter source type", currency=currency.NONE)
+measure(bool c, int n) =>
+    x = if c
+        n + 1
+    x
+value = measure(close > open, 2)
+plot(value)

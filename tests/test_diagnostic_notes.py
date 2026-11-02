@@ -45,6 +45,7 @@ CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2066", "PF-E2067", "PF-E2068", "PF-E2069",
                      "PF-E2070", "PF-E2071", "PF-E2072", "PF-E2073",
                      "PF-E2074",  # Positional arguments after keyword arguments.
+                     "PF-E2075",  # A name read where its declaration is not visible.
                      "PF-E2076", "PF-E2077", "PF-E2078",
                      "PF-E3102", "PF-E3103", "PF-E3104", "PF-E3105", "PF-E3110",
                      "PF-E5080", "PF-E5081", "PF-E5082", "PF-E5083", "PF-W1553"}
