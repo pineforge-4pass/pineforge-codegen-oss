@@ -1718,6 +1718,7 @@ class TopLevelEmitter:
                     func_name_i, namespace_i = self._resolve_callee(stmt.value.callee)
                     is_static_global_input = (
                         stmt.name in self._global_member_vars
+                        and not self._decl_binding_is_series(id(stmt), stmt.name)
                         and not self._is_source_input(stmt.value)
                         and stmt.name not in self._array_vars
                         and stmt.name not in getattr(self, "_matrix_specs", {})

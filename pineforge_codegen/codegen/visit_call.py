@@ -3302,10 +3302,35 @@ class CallVisitor:
             )
             fi = self._func_info_map[func_name]
             declared = self.ctx.func_declared_param_type_specs.get(func_name, ())
+            call_site_idx = self._callable_target_callsite_idx(fi, node)
+            if (self._current_instance_name, id(node)) in self._instance_dispatch:
+                # Instance dispatch uses the written callee's type profile,
+                # including inherited calls composed from its natural cs0.
+                call_site_idx = self.ctx.func_call_cs_map.get(id(node), (None, 0))[1]
+            variant_param_types = self.ctx.func_callsite_param_types.get(
+                (fi.name, call_site_idx), (),
+            ) if call_site_idx is not None else ()
+            param_specs = getattr(fi, "param_type_specs", ()) or ()
+            param_names = fi.node.params if fi.node is not None else ()
+            series_params = self.ctx.func_series_vars.get(fi.name, set())
             for index, arg in enumerate(ordered_arg_nodes):
-                if (index < len(all_args) and index < len(fi.param_types)
-                        and fi.param_types[index] == PineType.STRING
-                        and (index >= len(declared) or declared[index] is None)):
+                if (index >= len(all_args) or index >= len(param_names)
+                        or (index < len(declared) and declared[index] is not None)
+                        or param_names[index] in series_params):
+                    continue
+                # Match the emitted scalar parameter: a clone's primitive
+                # profile takes precedence over the base FuncInfo inference.
+                if index < len(variant_param_types) and variant_param_types[index] in {
+                    PineType.INT, PineType.FLOAT, PineType.BOOL,
+                    PineType.STRING, PineType.COLOR,
+                }:
+                    is_string_param = variant_param_types[index] == PineType.STRING
+                elif index < len(param_specs) and param_specs[index] is not None:
+                    is_string_param = self._type_spec_to_cpp(param_specs[index]) == "std::string"
+                else:
+                    is_string_param = (index < len(fi.param_types)
+                                       and fi.param_types[index] == PineType.STRING)
+                if is_string_param:
                     all_args[index] = self._legacy_bool_string_value(arg, all_args[index])
         # Default args (parser does not store defaults): isInSession(sess, res = timeframe.period)
         if namespace is None and func_name in self._func_names:
@@ -3666,26 +3691,14 @@ class CallVisitor:
             stop_arg = self._visit_expr(p.get("stop")) if "stop" in p else "na<double>()"
             oca_name = self._visit_expr(p.get("oca_name")) if "oca_name" in p else '""'
             oca_type = self._visit_expr(p.get("oca_type")) if "oca_type" in p else "0"
-            parameters = {
+            record_order_call(self, node, "order", {
                 "id": (order_id, p.get("id")), "direction": (direction, direction_node),
                 "qty": (qty, p.get("qty"), "0"),
                 "limit": (limit_arg, p.get("limit"), "na<double>()"),
                 "stop": (stop_arg, p.get("stop"), "na<double>()"),
                 "oca_name": (oca_name, p.get("oca_name"), '""'),
                 "oca_type": (oca_type, p.get("oca_type"), "0"),
-            }
-            # This path historically omitted comments altogether. Transport a
-            # bool conversion through the comment slot as the other order
-            # commands do, keeping calls outside that text repair unchanged.
-            comment_node = p.get("comment")
-            comment_suffix = ""
-            if self._contains_bool_text(comment_node):
-                comment = self._visit_expr(comment_node)
-                parameters["comment"] = (comment, comment_node, '""')
-                comment_suffix = f", {comment}"
-            record_order_call(self, node, "order", parameters)
-            if comment_suffix:
-                return f"strategy_order({order_id}, {direction}, {qty}, {limit_arg}, {stop_arg}, {oca_name}, {oca_type}{comment_suffix})"
+            })
             return f"strategy_order({order_id}, {direction}, {qty}, {limit_arg}, {stop_arg}, {oca_name}, {oca_type})"
 
         if func_name == "risk":

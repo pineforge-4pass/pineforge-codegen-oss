@@ -108,12 +108,8 @@ def _reference_log(condition):
 
 def _assert_native_text(tmp_path, native_env, body, expression, condition,
                         *, history=0, once=False, prefix="", sink="",
-                        order=False, extra_flags=()):
+                        extra_flags=()):
     """Observe every bar's text and its actual filled entry comment."""
-    command = "order" if order else "entry"
-    # entry reverses automatically; order needs two units after its first fill
-    # to reverse a one-unit position. There is exactly one open trade to read.
-    quantity = "(bar_index == 0 ? 1 : 2)" if order else "1"
     source = (
         HEADER + body + f"text = {expression}\n" + sink
         + _reference_log(condition)
@@ -121,8 +117,8 @@ def _assert_native_text(tmp_path, native_env, body, expression, condition,
         + 'if bar_index > 0\n'
         + '    log.info("comment {0} {1}", bar_index - 1, '
           'strategy.opentrades.entry_comment(0))\n'
-        + f'strategy.{command}("probe", bar_index % 2 == 0 ? strategy.long : '
-          f'strategy.short, qty = {quantity}, comment = text)\n'
+        + 'strategy.entry("probe", bar_index % 2 == 0 ? strategy.long : '
+          'strategy.short, qty = 1, comment = text)\n'
     )
     stderr = _run_native(tmp_path, native_env, source, extra_flags=extra_flags)
     count = native_env[2]
@@ -438,7 +434,7 @@ def test_str_format_keeps_complete_reference_cpp(tmp_path, initializer):
 
 
 @pytest.mark.parametrize("consumer", (
-    "entry", "order", "close", "close_all", "exit",
+    "entry", "close", "close_all", "exit",
     "label.new", "label.set_text", "label.set_tooltip",
     "log.info", "log.warning", "log.error",
 ), ids=lambda consumer: f"Pine reference-{consumer}")
@@ -446,10 +442,9 @@ def test_string_consumers_keep_explicit_bool_conversion(
         tmp_path, native_env, consumer):
     condition = "session.isfirstbar_regular"
     conversion = f"str.tostring({condition})"
-    if consumer in ("entry", "order"):
+    if consumer == "entry":
         _assert_native_text(
             tmp_path, native_env, "", conversion, condition,
-            order=consumer == "order",
         )
     elif consumer in ("close", "close_all", "exit"):
         command = {
@@ -505,13 +500,6 @@ def test_string_consumers_keep_explicit_bool_conversion(
         _assert_native_text(tmp_path, native_env, body, expression, condition)
 
 
-def test_order_comment_transports_the_converted_value(tmp_path, native_env):
-    _assert_native_text(
-        tmp_path, native_env, "", "str.tostring(session.isfirstbar_regular)",
-        "session.isfirstbar_regular", order=True,
-    )
-
-
 @pytest.mark.parametrize("comment", ('"plain"', "str.tostring(close)", 'str.format("{0}", close)'))
 def test_order_comments_without_bool_conversion_keep_reference_cpp(tmp_path, comment):
     _assert_reference_cpp(
@@ -558,9 +546,10 @@ def test_log_format_arguments_keep_their_cpp_bool_type(tmp_path, native_env, cha
     'alert(str.tostring(session.isfirstbar_regular), alert.freq_all)',
     'alertcondition(session.isfirstbar_regular, title = "first", message = "first")',
     'label.new(bar_index, close, tooltip = str.tostring(session.isfirstbar_regular))',
+    'strategy.order("L", strategy.long, qty = 1, comment = str.tostring(session.isfirstbar_regular))',
 ))
 def test_omitted_text_sinks_keep_reference_cpp(tmp_path, statement):
-    """Compatibility control: these sinks do not currently deliver any text."""
+    """Frozen-C++ control: alerts, constructor tooltip and order comment are omitted."""
     reference = reference_codegen(NUMERIC_REFERENCE)
     assert reference is not None, "required C++ reference is unavailable"
     pine = tmp_path / "strategy.pine"
@@ -570,6 +559,30 @@ def test_omitted_text_sinks_keep_reference_cpp(tmp_path, statement):
     assert current["ok"], current.get("diagnostics")
     assert previous["ok"], previous.get("diagnostics")
     assert current["cpp"] == previous["cpp"]
+
+
+@pytest.mark.parametrize("body,comment", (
+    ("", "str.tostring(session.isfirstbar_regular)"),
+    ("flag = ta.crossover(close, open)\n", "str.tostring(flag)"),
+    ("flag = close > open\n", "str.tostring(flag[1])"),
+    ("", '"x" + str.tostring(session.isfirstbar_regular)'),
+    ("", "string(session.isfirstbar_regular)"),
+))
+def test_order_with_a_bool_text_comment_compiles_and_runs(
+        tmp_path, native_env, body, comment):
+    """The engine's order carries no comment, so a bool text there must not break the build.
+
+    A script that compiled and ran before the bool-text change keeps compiling and
+    running, and the order itself is still placed: the position grows.
+    """
+    source = (
+        HEADER + body
+        + f'strategy.order("L", strategy.long, qty = 1, comment = {comment})\n'
+        + 'log.info("ran {0} {1}", bar_index, strategy.position_size)\n'
+    )
+    stderr = _run_native(tmp_path, native_env, source)
+    ran = _messages(stderr, "ran", native_env[2])
+    assert float(ran[native_env[2] - 1]) > 0, "the order was placed and filled"
 
 
 def _assert_reference_cpp(tmp_path, source):
@@ -755,43 +768,3 @@ def test_native_session_bool_text_matches_the_numeric_flags(tmp_path):
         assert {int(line[3]): line[4] for line in lines} == {
             bar: "true" if value == 1.0 else "false" for bar, value in values.items()
         }
-
-
-def test_native_order_comment_keeps_the_bool_text(tmp_path):
-    """Pine reference: the filled entry comment carries the flag's text."""
-    engine = skip_unless_e2e_env()
-    start = int(dt.datetime(2025, 1, 6, 14, tzinfo=dt.timezone.utc).timestamp() * 1000)
-    feed = tmp_path / "chart.csv"
-    feed.write_text(
-        "timestamp,open,high,low,close,volume\n"
-        + "".join(f"{start + index * 900_000},100,101,99,100.5,1\n"
-                  for index in range(6)),
-        encoding="utf-8",
-    )
-    pine = tmp_path / "strategy.pine"
-    pine.write_text(
-        HEADER
-        + 'if bar_index == 0\n    strategy.order("L", strategy.long, qty = 1, '
-        'comment = str.tostring(session.isfirstbar_regular))\n'
-        + 'if bar_index == 2\n    log.info("comment {0}", '
-        'strategy.opentrades.entry_comment(0))\n'
-        + "// @pf-trace expected=session.isfirstbar_regular\n",
-        encoding="utf-8",
-    )
-    translated = transpile_json(pine)
-    assert translated["ok"], translated.get("diagnostics")
-    build_strategy_library(translated["cpp"], tmp_path)
-    _, records, stderr = run_strategy(
-        engine, tmp_path, feed,
-        {"input_tf": "15", "script_tf": "15",
-         "runtime_overrides": {"session": "0930-1600",
-                               "timezone": "America/New_York"}},
-        "order_text", trace=True,
-    )
-    first = [record["value"] for record in records
-             if record["name"] == "expected" and record["bar_index"] == 0]
-    assert len(first) == 1 and first[0] in (0.0, 1.0)
-    expected = "true" if first[0] == 1.0 else "false"
-    assert [line for line in stderr.splitlines() if line.startswith("[INFO] comment ")] == [
-        f"[INFO] comment {expected}",
-    ]

@@ -669,7 +669,8 @@ class StmtVisitor:
         if is_global_member and isinstance(node.value, FuncCall) and self._is_input_call(node.value):
             func_name_i, namespace_i = self._resolve_callee(node.value.callee)
             is_static_global_input = (
-                not self._is_source_input(node.value)
+                not declaration_is_series
+                and not self._is_source_input(node.value)
                 and node.name not in self._array_vars
                 and node.name not in getattr(self, "_matrix_specs", {})
                 and node.name not in getattr(self, "_map_vars", {})
