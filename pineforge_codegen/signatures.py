@@ -717,6 +717,8 @@ TIMEFRAME_VARIABLES: dict[str, PineType] = {
     "timeframe.period": S,
     "timeframe.multiplier": I,
     "timeframe.isintraday": B,
+    "timeframe.isminutes": B,
+    "timeframe.isseconds": B,
     "timeframe.isdaily": B,
     "timeframe.isweekly": B,
     "timeframe.ismonthly": B,
@@ -887,19 +889,20 @@ def is_intrinsic_function(namespace: str | None, func_name: str) -> bool:
     return False
 
 
+def get_variable_type(namespace: str | None, name: str) -> PineType:
+    """Return a builtin variable's declared type, or UNKNOWN for other names."""
+    if namespace is None:
+        return BUILTIN_VARIABLES.get(name, PineType.UNKNOWN)
+    full = f"{namespace}.{name}"
+    for table in (
+        STRATEGY_VARIABLES, BARSTATE_VARIABLES, SYMINFO_VARIABLES,
+        TIMEFRAME_VARIABLES, BUILTIN_VARIABLES, DISPLAY_VARIABLES,
+    ):
+        if full in table:
+            return table[full]
+    return PineType.UNKNOWN
+
+
 def is_intrinsic_variable(namespace: str | None, name: str) -> bool:
     """Check if a name is a known TradingView built-in variable."""
-    if namespace is None:
-        return name in BUILTIN_VARIABLES
-    full = f"{namespace}.{name}"
-    if (full in STRATEGY_VARIABLES
-            or full in BARSTATE_VARIABLES
-            or full in SYMINFO_VARIABLES
-            or full in TIMEFRAME_VARIABLES
-            or full in BUILTIN_VARIABLES
-            or full in DISPLAY_VARIABLES):
-        return True
-    # e.g. strategy + "opentrades.capital_held" -> strategy.opentrades.capital_held
-    if namespace == "strategy" and "." in name:
-        return f"strategy.{name}" in STRATEGY_VARIABLES
-    return False
+    return get_variable_type(namespace, name) != PineType.UNKNOWN

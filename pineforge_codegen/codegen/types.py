@@ -79,7 +79,6 @@ from .tables import (
     DRAWING_TYPE_TO_CPP,
     MATRIX_RETURNING_METHODS,
     PINE_TYPE_TO_CPP,
-    TA_RETURNS_BOOL,
     _matrix_functional_receiver,
     checked_array_slice,
     ARRAY_JOURNAL_DELTA_METHODS,
@@ -3499,7 +3498,9 @@ class TypeInferer:
                 # ``compute()``/``recompute()``, which returns a double even
                 # where Pine's type is an int (``ta.highestbars``,
                 # ``ta.barssince``, ...).
-                return func_name not in TA_RETURNS_BOOL
+                return sigs.get_return_type(
+                    "ta", func_name, len(node.args) + len(node.kwargs),
+                ) != PineType.BOOL
         return self._infer_type(node) == "double"
 
     def _slot_scalar_cpp_type(self, name: str) -> str | None:
@@ -4186,6 +4187,11 @@ class TypeInferer:
             # A callable-result history read keeps the callable's scalar
             # family. Collection subscripts follow separate element-type paths.
             return self._infer_type(node.object)
+        if (not self._pine_v5_body and isinstance(node, Subscript)
+                and self._infer_type(node.object) == "bool"):
+            # Bool expression history (including builtin namespace members)
+            # has the same text spelling as its current value.
+            return "bool"
         if isinstance(node, NumberLiteral):
             return "double" if isinstance(node.value, float) else "int"
         if isinstance(node, BoolLiteral):
@@ -4353,7 +4359,9 @@ class TypeInferer:
             site = self._get_ta_site(node)
             if site is not None:
                 ta_name = self._ta_name_from_site(site)
-                return "bool" if ta_name in TA_RETURNS_BOOL else "double"
+                return ("bool" if sigs.get_return_type(
+                    "ta", ta_name, len(node.args) + len(node.kwargs),
+                ) == PineType.BOOL else "double")
             if func_name and sigs.is_intrinsic_function(namespace, func_name):
                 ret = sigs.get_return_type(namespace, func_name, len(node.args))
                 return PINE_TYPE_TO_CPP.get(ret, "double")
@@ -4369,6 +4377,11 @@ class TypeInferer:
             return "bool"
         if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
             ename = node.object.name
+            # v5 retains its prior bool namespace families: discovering more
+            # would expand the existing refusals of third-state observers.
+            if (sigs.get_variable_type(ename, node.member) == PineType.BOOL
+                    and (not self._pine_v5_body or ename in ("chart", "timeframe"))):
+                return "bool"
             if ename == "color":
                 return "int64_t"
             if ename in self._enum_defs and node.member in self._enum_defs[ename]:
@@ -4388,15 +4401,6 @@ class TypeInferer:
                     return "std::string"
                 if node.member == "multiplier":
                     return "int"
-                return "bool"
-            # chart.is_* are Pine bools (the emitter lowers them to C++
-            # ``true``/``false``): str.tostring(chart.is_standard) reads "true"
-            # on TradingView (lab tv pf-krunerr-env-facts, 2026-09-26), not the
-            # numeric "1".
-            if ename == "chart" and node.member in (
-                    "is_standard", "is_heikinashi", "is_kagi", "is_linebreak",
-                    "is_pnf", "is_range", "is_renko"):
-                return "bool"
             # syminfo.* type inference: look up in SYMINFO_MEMBER_MAP
             # and derive C++ type from the expression (na<T>() or function call).
             if ename == "syminfo":
