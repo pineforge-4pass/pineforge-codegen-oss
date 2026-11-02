@@ -16,6 +16,15 @@ from tests._timeframe_value_cases import CASES as SCALAR_CASES
 
 FIXTURES = Path(__file__).parent / "fixtures" / "series_timeframe"
 HEADER = '//@version=6\nstrategy("Selected timeframe", currency = currency.NONE)\n'
+OUTSIDE_STATE_REASON = (
+    "state declared outside the requested expression cannot be replayed by this request; "
+    "move the state into a helper used by the requested expression")
+CHART_STATE_REASON = (
+    "the requested expression requires chart evaluation, which would share its state "
+    "between timeframes; use a payload that can run entirely on requested bars")
+UNCOPIED_STATE_REASON = (
+    "the requested expression state could not receive a separate copy for each timeframe; "
+    "remove unused stateful arguments or simplify the stateful helper")
 
 
 def source(name):
@@ -813,9 +822,16 @@ def test_persistent_requested_expression_has_independent_bar_counters(
             rf'_security_helper_series_\["(_sec{sec_id}_{helper}_\d+_{counter})"\]',
             body))
         keys.append(key)
-        assert_counter_protocol(body, sec_id, key)
+        check = lambda candidate: assert_counter_result(candidate, sec_id, key)
+        check(body)
         ref = f'_security_helper_series_["{key}"]'
         assert f"_req_sec_{sec_id} = {ref}[0];" in body
+        assert_body_mutation_rejected(
+            body, check, f"_req_sec_{sec_id} = {ref}[0];",
+            f"_req_sec_{sec_id} = 0;")
+        assert_body_mutation_rejected(
+            body, check, f"{ref}.update({ref}[0] + 1);",
+            f"{ref}.update({ref}[0] + 2);")
         assert ref not in chart_body(cpp)
         assert not re.search(rf"\b{helper}(?:_cs\d+)?\(", body)
         assert f"case {sec_id}: _eval_security_{sec_id}(bar, is_complete); break;" in cpp
@@ -829,21 +845,131 @@ def test_persistent_requested_expression_has_independent_bar_counters(
     )
 
 
-def assert_counter_protocol(body, sec_id, key):
+def assert_persistent_helper_protocol(body, sec_id, key, initializer, update):
     ref = f'_security_helper_series_["{key}"]'
     seed = f'_security_helper_series_["{key}@var_seed"]'
     assert (
         f"        if ({ref}.size() == 0) {{\n"
-        f"            {seed}.push(0);\n"
+        f"            {seed}.push({initializer});\n"
         f"            {ref}.push({seed}[0]);\n"
         f"        }} else if (security_series_slot_is_new({sec_id})) {{\n"
         f"            {ref}.push({ref}[0]);\n"
         f"        }} else {{\n"
         f"            {ref}.update({ref}.size() > 1 ? {ref}[1] : {seed}[0]);\n"
         f"        }}\n"
-        f"        {ref}.update({ref}[0] + 1);"
+        f"        {update}"
     ) in body
-    assert body.count(f"{ref}.update({ref}[0] + 1);") == 1
+    assert body.count(update) == 1
+
+
+def assert_counter_protocol(body, sec_id, key):
+    ref = f'_security_helper_series_["{key}"]'
+    assert_persistent_helper_protocol(
+        body, sec_id, key, "0", f"{ref}.update({ref}[0] + 1);")
+
+
+def assert_counter_result(body, sec_id, key):
+    assert_counter_protocol(body, sec_id, key)
+    assert f'_req_sec_{sec_id} = _security_helper_series_["{key}"][0];' in body
+
+
+def assert_counter_sum_result(body, sec_id, keys, global_counter=None):
+    terms = []
+    if global_counter is not None:
+        assert_global_counter_protocol(body, sec_id, global_counter)
+        terms.append(f"_sec{sec_id}_{global_counter}")
+    for key in keys:
+        assert_counter_protocol(body, sec_id, key)
+        terms.append(f'_security_helper_series_["{key}"][0]')
+    assert len(terms) == 2
+    assert f"_req_sec_{sec_id} = ({terms[0]} + {terms[1]});" in body
+
+
+def assert_body_mutation_rejected(body, check, original, replacement):
+    # Start with a real accepted body; a missing surgery target is a failure,
+    # rather than a mutation control that silently tests the unchanged body.
+    check(body)
+    assert original != replacement and body.count(original) == 1
+    mutated = body.replace(original, replacement, 1)
+    assert mutated != body
+    with pytest.raises(AssertionError):
+        check(mutated)
+
+
+def assert_global_na_result(body, sec_id, expression):
+    state = f"_sec{sec_id}_saved_v"
+    if expression == "saved_v[1]":
+        assert f"{state}.push(na<double>());" in body
+        result = f"{state}[1]"
+    else:
+        assert f"{state} = na<double>();" in body
+        result = state
+        if expression == "payload()":
+            (result,) = re.findall(
+                rf"double (_sec{sec_id}_payload_\d+_local_v) = {state};", body)
+    assert f"_req_sec_{sec_id} = {result};" in body
+    return result
+
+
+def assert_float_accumulator_result(body, sec_id, key):
+    ref = f'_security_helper_series_["{key}"]'
+    # The authored nz reads the prior requested value, then adds this
+    # requested bar's close, with a missing once-only seed.
+    nz_value = (f"([&]{{ auto _nz_v = ({ref}[0]); "
+                "return is_na(_nz_v) ? (0.0) : _nz_v; }())")
+    update = f"{ref}.update(({nz_value} + bar.close));"
+    assert_persistent_helper_protocol(body, sec_id, key, "na<double>()", update)
+    assert f"_req_sec_{sec_id} = {ref}[0];" in body
+    assert "current_bar_" not in body
+    return update
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+@pytest.mark.parametrize("selection", (
+    'close > open ? "75" : "180"\n',
+    'if close > open\n    "75"\nelse\n    "180"\n',
+    'switch close > open\n    true => "75"\n    => "180"\n',
+))
+def test_original_float_accumulator_has_independent_requested_state(
+        persistent, selection):
+    # Keep the six original sources from a53bfc5e, now accepted rather than
+    # blanket-refused. Integer counter controls do not cover this recurrence.
+    pine = (HEADER + f"payload() =>\n    {persistent} float saved_v = na\n"
+            "    saved_v := nz(saved_v) + close\n    saved_v\n"
+            + 'tf_v = ' + selection
+            + 'got_v = request.security(syminfo.tickerid, tf_v, payload())\nplot(got_v)\n')
+    cpp = transpile(pine)
+    assert registrations(cpp) == [
+        '0, "75", input_tf_, false, false',
+        '1, "180", input_tf_, false, false',
+    ]
+    keys = []
+    for sec_id in (0, 1):
+        body = requested_body(cpp, sec_id)
+        (key,) = set(re.findall(
+            rf'_security_helper_series_\["(_sec{sec_id}_payload_\d+_saved_v)"\]', body))
+        keys.append(key)
+        check = lambda candidate: assert_float_accumulator_result(candidate, sec_id, key)
+        update = check(body)
+        ref = f'_security_helper_series_["{key}"]'
+        assert_body_mutation_rejected(
+            body, check, f'_security_helper_series_["{key}@var_seed"].push(na<double>());',
+            f'_security_helper_series_["{key}@var_seed"].push(0);')
+        assert_body_mutation_rejected(
+            body, check, update, update.replace("bar.close", "current_bar_.close"))
+        assert_body_mutation_rejected(
+            body, check, update, f"{ref}.update((0.0 + bar.close));")
+        assert_body_mutation_rejected(
+            body, check, f"_req_sec_{sec_id} = {ref}[0];",
+            f"_req_sec_{sec_id} = 0;")
+        assert ref not in chart_body(cpp)
+        assert ref not in requested_body(cpp, 1 - sec_id)
+        assert not re.search(r"\bpayload(?:_cs\d+)?\(", body)
+    assert len(set(keys)) == 2
+    assert_selection_tail(
+        chart_body(cpp),
+        'if (_pf_selected_tf == "75") return _req_sec_0;',
+        'if (_pf_selected_tf == "180") return _req_sec_1;')
 
 
 @pytest.mark.parametrize("persistent", ("var", "varip"))
@@ -869,6 +995,17 @@ def test_global_persistent_requested_expression_uses_each_sites_replay(
         state = f"_sec{sec_id}_saved_v"
         assert f"if (!{state}_initialized)" in body
         assert f"{state}_initialized = true;" in body
+        history = expression == "saved_v[1]"
+        check = lambda candidate: assert_global_na_result(candidate, sec_id, expression)
+        check(body)
+        initializer = (f"{state}.push(na<double>());" if history
+                       else f"{state} = na<double>();")
+        assert_body_mutation_rejected(
+            body, check, initializer, initializer.replace("na<double>()", "0"))
+        result = assert_global_na_result(body, sec_id, expression)
+        assert_body_mutation_rejected(
+            body, check, f"_req_sec_{sec_id} = {result};",
+            f"_req_sec_{sec_id} = 0;")
         assert f"_sec{1 - sec_id}_saved_v" not in body
         assert not re.search(r"\bsaved_v\b", body)
         assert not re.search(r"\bpayload(?:_cs\d+)?\(", body)
@@ -903,6 +1040,15 @@ def assert_global_counter_protocol(body, sec_id, counter):
         f"        }}\n"
     ) in body
     assert body.count(f"{state} += 1;") == 1
+
+
+def assert_requested_greater_condition(body, sec_id):
+    # Both operands and the authored operator belong to the requested bar.
+    assert re.search(
+        rf"if \([^\n]*bar\.close[^\n]*bar\.open[^\n]*"
+        rf"\(_pfc_l > _pfc_r\)[^\n]*\) \{{\n"
+        rf"            _sec{sec_id}_count_v \+= 1;\n"
+        r"        \}", body)
 
 
 @pytest.mark.parametrize("persistent", ("var", "varip"))
@@ -956,10 +1102,10 @@ def test_conditionally_written_counter_replays_the_requested_bar_condition(persi
     for sec_id in (0, 1):
         body = requested_body(cpp, sec_id)
         assert_global_counter_protocol(body, sec_id, "count_v")
-        assert re.search(
-            rf"if \([^\n]*bar\.close[^\n]*bar\.open[^\n]*\) \{{\n"
-            rf"            _sec{sec_id}_count_v \+= 1;\n"
-            r"        \}", body)
+        check = lambda candidate: assert_requested_greater_condition(candidate, sec_id)
+        check(body)
+        assert_body_mutation_rejected(
+            body, check, "(_pfc_l > _pfc_r)", "(_pfc_l < _pfc_r)")
         assert "current_bar_" not in body
         assert not re.search(r"\bcount_v\b", body)
 
@@ -1010,7 +1156,22 @@ def test_global_replay_and_helper_owned_counter_both_belong_to_the_site(persiste
         assert_global_counter_protocol(body, sec_id, "count_v")
         (key,) = set(re.findall(
             rf'_security_helper_series_\["(_sec{sec_id}_payload_\d+_tally_v)"\]', body))
-        assert_counter_protocol(body, sec_id, key)
+        check = lambda candidate: assert_counter_sum_result(
+            candidate, sec_id, (key,), global_counter="count_v")
+        check(body)
+        ref = f'_security_helper_series_["{key}"]'
+        result = f"_req_sec_{sec_id} = (_sec{sec_id}_count_v + {ref}[0]);"
+        for replacement in (
+                f"_req_sec_{sec_id} = 0;",
+                f"_req_sec_{sec_id} = _sec{sec_id}_count_v;",
+                f"_req_sec_{sec_id} = {ref}[0];"):
+            assert_body_mutation_rejected(body, check, result, replacement)
+        assert_body_mutation_rejected(
+            body, check, f"{ref}.update({ref}[0] + 1);",
+            f"{ref}.update({ref}[0] + 2);")
+        assert_body_mutation_rejected(
+            body, check, f"_sec{sec_id}_count_v += 1;",
+            f"_sec{sec_id}_count_v += 2;")
         assert not re.search(r"\b(?:count_v|tally_v)\b", body)
 
 
@@ -1047,7 +1208,7 @@ def test_unreplayable_global_writes_keep_the_existing_series_refusal(
         transpile(expanded)
     assert caught.value.diagnostics[0].code == "PF-E3111"
     assert caught.value.diagnostics[0].args == {
-        "reason": "persistent requested expression state is not yet supported"}
+        "reason": CHART_STATE_REASON}
     assert (caught.value.diagnostics[0].location.line,
             caught.value.diagnostics[0].location.col) == (
                 prefix.count("\n"), 8)
@@ -1064,7 +1225,7 @@ def test_state_in_the_requesting_helper_stays_outside_the_payload(persistent):
         transpile(pine)
     assert caught.value.diagnostics[0].code == "PF-E3111"
     assert caught.value.diagnostics[0].args == {
-        "reason": "persistent requested expression state is not yet supported"}
+        "reason": OUTSIDE_STATE_REASON}
 
 
 @pytest.mark.parametrize("persistent", ("var", "varip"))
@@ -1079,7 +1240,7 @@ def test_requesting_helpers_state_cannot_borrow_a_same_named_globals_replay(pers
         transpile(pine)
     assert caught.value.diagnostics[0].code == "PF-E3111"
     assert caught.value.diagnostics[0].args == {
-        "reason": "persistent requested expression state is not yet supported"}
+        "reason": OUTSIDE_STATE_REASON}
 
 
 @pytest.mark.parametrize("persistent", ("var", "varip"))
@@ -1093,7 +1254,7 @@ def test_method_payload_cannot_hide_a_global_persistent_read(persistent):
         transpile(pine)
     assert caught.value.diagnostics[0].code == "PF-E3111"
     assert caught.value.diagnostics[0].args == {
-        "reason": "persistent requested expression state is not yet supported"}
+        "reason": OUTSIDE_STATE_REASON}
 
 
 @pytest.mark.parametrize("persistent", ("var", "varip"))
@@ -1110,7 +1271,26 @@ def test_global_counter_read_through_a_chart_fallback_keeps_its_refusal(persiste
         transpile(prefix + 'got_v = request.security(syminfo.tickerid, tf_v, ' + suffix)
     assert caught.value.diagnostics[0].code == "PF-E3111"
     assert caught.value.diagnostics[0].args == {
-        "reason": "persistent requested expression state is not yet supported"}
+        "reason": CHART_STATE_REASON}
+
+
+def assert_selection_counter_result(body, sec_id, key):
+    ref = f'_security_helper_series_["{key}"]'
+    seed = f'_security_helper_series_["{key}@var_seed"]'
+    assert f"{seed}.push(0);" in body
+    assert f"security_series_slot_is_new({sec_id})" in body
+    assert f"{ref}.push({ref}[0]);" in body
+    assert f"{ref}.update({ref}.size() > 1 ? {ref}[1] : {seed}[0]);" in body
+    assert body.count(f"{ref}.update(({ref}[0] + 1));") == 1
+    targets = re.findall(
+        rf"_req_sec_{sec_id} = \(\[&\]\(\) -> int \{{\n"
+        r"    int (__selection_value_\d+) = na<int>\(\);", body)
+    assert len(targets) == 1
+    target = targets[0]
+    assert f"{target} = {ref}[0];" in body
+    assert f"{target} = 0;" in body
+    assert f"    return {target};\n}}());" in body
+    return target
 
 
 @pytest.mark.parametrize("persistent", ("var", "varip"))
@@ -1131,6 +1311,15 @@ def test_requested_selection_owns_its_persistent_declaration(persistent):
         assert f"security_series_slot_is_new({sec_id})" in body
         assert f"{ref}.push({ref}[0]);" in body
         assert f"{ref}.update({ref}.size() > 1 ? {ref}[1] : {seed}[0]);" in body
+        check = lambda candidate: assert_selection_counter_result(candidate, sec_id, key)
+        target = check(body)
+        assert_body_mutation_rejected(
+            body, check, f"{ref}.update(({ref}[0] + 1));",
+            f"{ref}.update(({ref}[0] + 2));")
+        assert_body_mutation_rejected(
+            body, check, f"{target} = {ref}[0];", f"{target} = 0;")
+        assert_body_mutation_rejected(
+            body, check, f"return {target};", "return 0;")
         assert ref not in requested_body(cpp, 1 - sec_id)
 
 
@@ -1147,7 +1336,15 @@ def test_nested_helper_counter_shadows_unused_global_state(persistent):
         body = requested_body(cpp, sec_id)
         (key,) = set(re.findall(
             rf'_security_helper_series_\["(_sec{sec_id}_payload_\d+_saved_v)"\]', body))
-        assert_counter_protocol(body, sec_id, key)
+        check = lambda candidate: assert_counter_result(candidate, sec_id, key)
+        check(body)
+        ref = f'_security_helper_series_["{key}"]'
+        assert_body_mutation_rejected(
+            body, check, f"_req_sec_{sec_id} = {ref}[0];",
+            f"_req_sec_{sec_id} = 0;")
+        assert_body_mutation_rejected(
+            body, check, f"{ref}.update({ref}[0] + 1);",
+            f"{ref}.update({ref}[0] + 2);")
         assert "forward_count(" not in body and "payload(" not in body
 
 
@@ -1162,11 +1359,23 @@ def test_each_helper_call_in_one_payload_keeps_its_own_counter(persistent):
     all_keys = set()
     for sec_id in (0, 1):
         body = requested_body(cpp, sec_id)
-        keys = set(re.findall(
-            rf'_security_helper_series_\["(_sec{sec_id}_payload_\d+_saved_v)"\]', body))
+        keys = tuple(dict.fromkeys(re.findall(
+            rf'_security_helper_series_\["(_sec{sec_id}_payload_\d+_saved_v)"\]', body)))
         assert len(keys) == 2
+        check = lambda candidate: assert_counter_sum_result(candidate, sec_id, keys)
+        check(body)
+        first, second = (f'_security_helper_series_["{key}"][0]' for key in keys)
+        result = f"_req_sec_{sec_id} = ({first} + {second});"
+        for replacement in (
+                f"_req_sec_{sec_id} = 0;",
+                f"_req_sec_{sec_id} = {first};",
+                f"_req_sec_{sec_id} = {second};"):
+            assert_body_mutation_rejected(body, check, result, replacement)
         for key in keys:
-            assert_counter_protocol(body, sec_id, key)
+            ref = f'_security_helper_series_["{key}"]'
+            assert_body_mutation_rejected(
+                body, check, f"{ref}.update({ref}[0] + 1);",
+                f"{ref}.update({ref}[0] + 2);")
         assert all_keys.isdisjoint(keys)
         all_keys.update(keys)
     assert len(all_keys) == 4
@@ -1182,7 +1391,51 @@ def test_stateful_payload_cannot_fall_back_to_a_chart_helper_call(persistent):
         transpile(pine)
     assert caught.value.diagnostics[0].code == "PF-E3111"
     assert caught.value.diagnostics[0].args == {
-        "reason": "persistent requested expression state is not yet supported"}
+        "reason": CHART_STATE_REASON}
+
+
+@pytest.mark.parametrize("body,reason,line,column", (
+    pytest.param(
+        "read_value() =>\n"
+        "    var int saved_v = 0\n"
+        "    saved_v += 1\n"
+        '    tf_v = close > open ? "45" : "2D"\n'
+        "    request.security(syminfo.tickerid, tf_v, saved_v)\n"
+        "plot(read_value())\n",
+        OUTSIDE_STATE_REASON, 6, 12, id="outside-state-cannot-be-replayed"),
+    pytest.param(
+        "payload() =>\n"
+        "    var int saved_v = 0\n"
+        "    saved_v += 1\n"
+        "    saved_v\n"
+        'tf_v = close > open ? "45" : "2D"\n'
+        "got_v = request.security(syminfo.tickerid, tf_v, nz(payload()))\n"
+        "plot(got_v)\n",
+        CHART_STATE_REASON, 7, 8, id="chart-evaluation-would-share-state"),
+    pytest.param(
+        "payload() =>\n"
+        "    var int saved_v = 0\n"
+        "    saved_v += 1\n"
+        "    saved_v\n"
+        "ignore_value(float unused_v) => close\n"
+        'tf_v = close > open ? "45" : "2D"\n'
+        "got_v = request.security(syminfo.tickerid, tf_v, ignore_value(payload()))\n"
+        "plot(got_v)\n",
+        UNCOPIED_STATE_REASON, 8, 8, id="unused-stateful-argument-has-no-copy"),
+))
+def test_each_persistent_refusal_cause_has_its_own_located_reason(
+        body, reason, line, column):
+    # All three rows use the public pipeline. In the last row the state
+    # inventory enters payload(), but ignore_value's result never reads its
+    # parameter, so requested emission neither falls back nor creates a cell.
+    with pytest.raises(CompileError) as caught:
+        transpile(HEADER + body)
+    (diagnostic,) = caught.value.diagnostics
+    assert diagnostic.code == "PF-E3111"
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.phase == Phase.CODEGEN
+    assert diagnostic.args == {"reason": reason}
+    assert (diagnostic.location.line, diagnostic.location.col) == (line, column)
 
 
 @pytest.mark.parametrize("persistent", ("var", "varip"))
@@ -1523,11 +1776,13 @@ def test_chart_dependent_fixture_cpp_is_unchanged_by_constant_condition_pruning(
     assert actual == transpile(source(name))
 
 
-def test_series_timeframe_catalog_lists_only_the_two_remaining_refusal_reasons():
+def test_series_timeframe_catalog_lists_distinct_actionable_refusal_reasons():
     from pineforge_codegen import diagnostics_catalog
 
     reason = diagnostics_catalog()["codes"]["PF-E3111"]["args"]["reason"]
     assert reason == {"kind": "vocab", "values": [
         "the timeframe set is not closed at compile time",
-        "persistent requested expression state is not yet supported",
+        OUTSIDE_STATE_REASON,
+        CHART_STATE_REASON,
+        UNCOPIED_STATE_REASON,
     ]}

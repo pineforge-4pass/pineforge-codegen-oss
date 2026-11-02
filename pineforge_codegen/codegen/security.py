@@ -436,7 +436,9 @@ class SecurityEmitter:
             }
             if outside_state - rebound_state:
                 self._security_series_tf_refusal(
-                    series[0], "persistent requested expression state is not yet supported")
+                    series[0],
+                    "state declared outside the requested expression cannot be replayed by this request; "
+                    "move the state into a helper used by the requested expression")
             self._security_series_tf_local_decls.update(local_state)
             arms = []
             keys = set()
@@ -7369,17 +7371,22 @@ class SecurityEmitter:
         else:
             if self._security_requested_used and self._security_chart_read is not None:
                 reason = self._security_chart_read
-        if state and (
-                reason is not None or self._security_chart_read is not None
-                or any((item["sec_id"], decl) not in self._security_series_tf_emitted_state
-                       for decl in state)):
+        if state and (reason is not None or self._security_chart_read is not None):
             # A chart fallback can call the ordinary function member and
-            # share its state across arms. Newly admitted state must instead
-            # have been emitted into this site's requested-context cells or
-            # mutable-global copies, including their declaration/once seed.
+            # share its state across arms.
             self._security_series_tf_refusal(
                 item["series_tf_state_node"],
-                "persistent requested expression state is not yet supported")
+                "the requested expression requires chart evaluation, which would share its state "
+                "between timeframes; use a payload that can run entirely on requested bars")
+        if state and any(
+                (item["sec_id"], decl) not in self._security_series_tf_emitted_state
+                for decl in state):
+            # Every declaration must have reached this site's requested cells
+            # or mutable-global copies, including its declaration/once seed.
+            self._security_series_tf_refusal(
+                item["series_tf_state_node"],
+                "the requested expression state could not receive a separate copy for each timeframe; "
+                "remove unused stateful arguments or simplify the stateful helper")
         if reason is None:
             lines.extend(body)
             self._security_eval_info[item["sec_id"]]["chart_fallback"] = False
