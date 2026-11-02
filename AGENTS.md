@@ -430,7 +430,7 @@ to transpile: when the engine cannot express what such a script asks for, it
 keeps its current lowering and gets a WARNING naming the approximation and
 the missing engine capability. Refuse only a spelling TradingView itself
 rejects, or one that already failed the C++ compile (supervisor rule, since
-C4 W8 lost 15 excellent campaign probes to a refusal of a working shape). The
+C4 W8 lost 15 excellent campaign probes to a refusal of a working shape). The one exception is a labelled temporary refusal of an exact proven shape that would otherwise compile to a wrong value; it carries its own catalog code, is listed as a compile gap, and is lifted when the form is measured. The
 taxonomy:
 
 

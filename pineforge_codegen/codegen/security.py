@@ -414,6 +414,23 @@ class SecurityEmitter:
             return self._security_tf_switch_runtime_expr(substituted, resolving or set())
         if isinstance(node, SwitchStmt):
             return self._security_tf_switch_runtime_expr(node, resolving or set())
+        if isinstance(node, IfStmt):
+            from ..diagnostic_codes import render_diagnostic
+            from ..pine_spelling import expr_start
+
+            # Scalar if arms need the same setup proof as replayed conditions.
+            # Keep the authored condition for the first-token diagnostic span.
+            for selection, _depth in iter_ast_nodes(node):
+                if not isinstance(selection, IfStmt):
+                    continue
+                condition = self._substitute_tf_input_reads(
+                    selection.condition, resolving or set())
+                reads: set[str] = set()
+                if (not self._security_tf_replay_reads(condition, reads)
+                        or (reads and not self._security_tf_replay_closure(reads)[0])):
+                    message, hint = render_diagnostic("PF-E3110", {})
+                    self._codegen_error(
+                        expr_start(selection.condition), message, hint=hint)
         substituted = self._substitute_tf_input_reads(node, resolving or set())
         return self._visit_expr(substituted)
 
