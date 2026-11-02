@@ -651,6 +651,11 @@ reading a later local without an earlier visible binding reports `PF-E2075`
 at that identifier; a later direct global retains `PF-E2053`. Earlier outer
 bindings remain visible before a local shadow is declared.
 
+A Pine v6 `for` loop whose counter start has positive int evidence reports
+`PF-E2079` for a float-typed step. This fatal analyzer diagnostic points at the
+step expression, with the hint "Use an int step or a float counter."
+Unknown starts are not refused by this diagnostic.
+
 Every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
 `CompileError`'s `diagnostics`, and in the glue envelopes) carries the stable
 `code` and `args` introduced in 1.2.0. Since 1.5.0 it also carries

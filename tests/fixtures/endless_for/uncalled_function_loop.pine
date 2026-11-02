@@ -1,0 +1,11 @@
+//@version=6
+strategy("Endless loop inside a function that is never called", initial_capital = 1000000, currency = currency.NONE)
+spin() =>
+    float acc = 0.0
+    for i = 0 to i
+        acc := acc + 1
+    acc
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("M", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close_all()

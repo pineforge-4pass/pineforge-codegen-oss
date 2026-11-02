@@ -13,10 +13,14 @@ from pineforge_codegen.analyzer import Analyzer
 from pineforge_codegen.ast_nodes import ForStmt
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.limits import iter_ast_nodes
+from pineforge_codegen.loop_types import LoopTypeSources, _CounterQuery
 from pineforge_codegen.parser import Parser
-from pineforge_codegen.symbols import PineType
+from pineforge_codegen.symbols import PineType, TypeSpec
 from tests import _compile as compile_env
 from tests._for_counter_header_cases import INT_START_SOURCES
+from tests._for_float_step import (
+    DIVISION_STARTS, DIVISION_VALUE_STARTS, assert_float_step_refused, loop_step_source,
+)
 from tests._for_counter_type_source_cases import (
     ARRAY_TYPES, BASELINE, BASELINE_SOURCES, FLOAT_COUNTER_SOURCES,
     INT_COUNTER_SOURCES, MAIN_COMMIT,
@@ -135,29 +139,192 @@ int main() {
     ) == expected
 
 
-def test_positive_int_start_keeps_the_existing_fractional_step_stop():
-    # A declared int parameter is positive int evidence. The narrowed stop
-    # remains the known gap against TradingView's refusal of this float step.
+def test_positive_int_parameter_start_refuses_a_float_step():
+    # A declared int parameter supplies positive int evidence to the same
+    # query that keeps an untyped parameter on the float route.
     pine = BASELINE_SOURCES["unknown_parameter"].replace(
         "measure(first) =>", "measure(int first) =>",
     ).replace("measure(0.0)", "measure(0)")
-    cpp = transpile(pine)
-    assert re.search(r"\bfor \(int walkIndex = ", cpp), cpp
-    driver = r'''
-#include <cassert>
-#include <iostream>
-int main() {
-    GeneratedStrategy strategy;
-    Bar bar{10.0, 10.0, 10.0, 10.0, 1.0, 60000};
-    strategy.run(&bar, 1, "1", "1");
-    assert(strategy.trade_count() == 0);
-    std::cout << strategy.last_error();
-}
-'''
-    error = compile_env.run_emitted_tu(
-        cpp, driver, opt="-O2", label="int parameter fractional step",
+    assert_float_step_refused(pine, counter="walkIndex", location=(5, 37, 41))
+
+
+def _analyzed_counter_start(pine):
+    ast = Parser(Lexer(pine).tokenize(), source=pine).parse()
+    ctx = Analyzer(ast).analyze()
+    loop = next(node for node, _ in iter_ast_nodes(ast) if isinstance(node, ForStmt))
+    query = _CounterQuery(
+        LoopTypeSources(ast),
+        ctx.identifier_decl_bindings, ctx.identifier_binding_scopes,
     )
-    assert "'step' in loop must be greater than zero" in error
+    return loop, ctx, query
+
+
+@pytest.mark.parametrize("name", ["highest", "lowest"])
+@pytest.mark.parametrize("arguments", ["bar_index, 3", "source=bar_index, length=3"])
+def test_highest_and_lowest_int_sources_accept_a_float_step(name, arguments):
+    # TradingView accepts both overloads: the result is float even on int data.
+    pine = loop_step_source(f"ta.{name}({arguments})")
+    loop, ctx, query = _analyzed_counter_start(pine)
+    assert query.infer(loop.start) == TypeSpec.primitive("float")
+    assert query.value_spec(loop.start) == TypeSpec.primitive("float")
+    assert ctx.for_counter_types[id(loop.start)] == PineType.FLOAT
+    cpp = transpile(pine)
+    assert re.search(r"\bfor \(double i = ", cpp), cpp
+    for slot in ("start", "end", "step"):
+        assert re.search(rf"\bdouble _for_{slot}_\d+ = ", cpp), cpp
+
+
+@pytest.mark.parametrize("start", [
+    "ta.change(bar_index)",
+    "ta.change(bar_index, 2)",  # TradingView CE10106, receipt tacarriers-2302
+    "ta.median(bar_index, 3)",  # TradingView CE10106, receipt tacarriers-2302
+    "ta.mode(bar_index, 3)",  # TradingView CE10106, receipt tacarriers-2302
+    "ta.range(bar_index, 3)",  # TradingView CE10106, receipt tacarriers-2302
+])
+def test_measured_source_typed_ta_calls_still_refuse_an_int_source_float_step(start):
+    # TradingView refuses these int-source forms; division value typing must
+    # not widen their check result to the registry's default float.
+    assert_float_step_refused(loop_step_source(start))
+    pine = loop_step_source(start, step=None)
+    loop, ctx, query = _analyzed_counter_start(pine)
+    assert query.infer(loop.start) == TypeSpec.primitive("int")
+    assert query.value_spec(loop.start) == TypeSpec.primitive("int")
+    assert ctx.for_counter_types[id(loop.start)] == PineType.INT
+
+
+@pytest.mark.parametrize("start", [
+    "ta.max(bar_index)",  # TradingView ACCEPTED, receipt tacarriers-2302
+    "ta.min(bar_index)",  # TradingView ACCEPTED, receipt tacarriers-2302
+    "ta.percentile_nearest_rank(bar_index, 3, 50)",  # TradingView ACCEPTED, receipt tacarriers-2302
+])
+def test_measured_float_result_ta_calls_accept_an_int_source_float_step(start):
+    pine = loop_step_source(start)
+    loop, ctx, query = _analyzed_counter_start(pine)
+    assert query.infer(loop.start) == TypeSpec.primitive("float")
+    assert query.value_spec(loop.start) == TypeSpec.primitive("float")
+    assert ctx.for_counter_types[id(loop.start)] == PineType.FLOAT
+    cpp = transpile(pine)
+    assert re.search(r"\bfor \(double i = ", cpp), cpp
+    assert not re.search(r"\bfor \(int i = ", cpp), cpp
+    for slot in ("start", "end", "step"):
+        assert re.search(rf"\bdouble _for_{slot}_\d+ = ", cpp), cpp
+
+
+def test_highest_one_argument_accepts_a_float_step():
+    # TradingView ACCEPTED, receipt tacarriers-2302: compile evidence only,
+    # with zero entries. This row claims no measured runtime quantity.
+    pine = loop_step_source("ta.highest(3)")
+    loop, ctx, query = _analyzed_counter_start(pine)
+    assert query.infer(loop.start) == TypeSpec.primitive("float")
+    assert query.value_spec(loop.start) == TypeSpec.primitive("float")
+    assert ctx.for_counter_types[id(loop.start)] == PineType.FLOAT
+    assert re.search(r"\bfor \(double i = ", transpile(pine))
+
+
+def test_valuewhen_keeps_its_existing_source_typed_check():
+    # No receipt, kept as on main.
+    start = "ta.valuewhen(true, bar_index, 0)"
+    assert_float_step_refused(loop_step_source(start))
+    loop, ctx, query = _analyzed_counter_start(loop_step_source(start, step=None))
+    assert query.infer(loop.start) == TypeSpec.primitive("int")
+    assert query.value_spec(loop.start) == TypeSpec.primitive("int")
+    assert ctx.for_counter_types[id(loop.start)] == PineType.INT
+
+
+def test_requested_expression_helper_division_start_uses_a_double_counter():
+    # The expression-only helper runs before the loop; requested helper loops
+    # cannot contain a user-function call in their header or body.
+    pine = """//@version=6
+strategy("Requested fractional start", currency=currency.NONE)
+n = input.int(5)
+start_value() => n / 2
+measure() =>
+    first = start_value()
+    float acc = 0.0
+    for i = first to first + 2
+        acc += i
+    acc
+plot(request.security(syminfo.tickerid, timeframe.period, measure()))
+"""
+    loop, ctx, query = _analyzed_counter_start(pine)
+    assert query.infer(loop.start) == TypeSpec.primitive("int")
+    assert query.value_spec(loop.start) == TypeSpec.primitive("float")
+    assert ctx.for_counter_types[id(loop.start)] == PineType.FLOAT
+    cpp = transpile(pine)
+    begin = cpp.index("void _eval_security_0(")
+    evaluator = cpp[begin:cpp.index("void evaluate_security(", begin)]
+    assert re.search(r"\bfor \(double _sec0_measure_\d+_i = ", evaluator), evaluator
+    assert not re.search(r"\bfor \(int _sec0_measure_\d+_i = ", evaluator), evaluator
+    for slot in ("start", "end", "step"):
+        assert re.search(
+            rf"\bdouble _sec0_measure_\d+_for_{slot} = ", evaluator,
+        ), evaluator
+
+
+@pytest.mark.parametrize("prefix,start,family", [
+    *(pytest.param(prefix, start, family, id=name)
+      for name, (prefix, start, family) in sorted(DIVISION_STARTS.items())),
+    *(pytest.param(prefix, start, family, id=name)
+      for name, (prefix, start, _end, _twin, _twin_end, family)
+      in sorted(DIVISION_VALUE_STARTS.items())),
+])
+def test_division_start_has_distinct_check_and_value_specs(prefix, start, family):
+    pine = loop_step_source(start, prefix=prefix, step=None)
+    ast = Parser(Lexer(pine).tokenize(), source=pine).parse()
+    ctx = Analyzer(ast).analyze()
+    loop = next(node for node, _ in iter_ast_nodes(ast) if isinstance(node, ForStmt))
+    query = _CounterQuery(
+        LoopTypeSources(ast),
+        ctx.identifier_decl_bindings, ctx.identifier_binding_scopes,
+    )
+    assert query.infer(loop.start) == TypeSpec.primitive("int")
+    expected = "float" if family == "double" else "int"
+    assert query.value_spec(loop.start) == TypeSpec.primitive(expected)
+    assert ctx.for_counter_types[id(loop.start)] == (
+        PineType.FLOAT if family == "double" else PineType.INT
+    )
+
+
+@pytest.mark.parametrize("prefix,start,family", [
+    pytest.param("", "(+4) / (-2)", "int", id="parenthesized-signs"),
+    pytest.param("const int n = 8\nconst int d = 4\n", "n / d", "int",
+                 id="declared-constants"),
+    pytest.param("unit = 2\nn = unit * unit\nd = +unit\n", "n / d", "int",
+                 id="inferred-constant-aliases"),
+    pytest.param("", "(3 * 4 + 6 - 2) / (1 + 1)", "int", id="integer-arithmetic"),
+    pytest.param("", "(8 / 2) / (6 / 3)", "int", id="nested-exact-divisions"),
+    pytest.param("", "(11 % 4) / 3", "int", id="integer-remainder"),
+    pytest.param("", "(-11 % 4) / -3", "int", id="negative-remainder"),
+    pytest.param("", "0 / 2", "int", id="zero-result"),
+    pytest.param("", "(5 / 2) * 2 / 2", "double", id="fractional-intermediate"),
+    pytest.param("", "4 / (2 - 2)", "double", id="zero-constant-divisor"),
+    pytest.param("", "(4 % 0) / 2", "double", id="zero-remainder-divisor"),
+    pytest.param("n = 4\nn += 1\n", "n / 2", "double", id="reassigned-name"),
+    pytest.param("var int n = 4\n", "n / 2", "double", id="persistent-name"),
+    pytest.param("series int n = 4\n", "n / 2", "double", id="series-qualifier"),
+    pytest.param("simple int n = 4\n", "n / 2", "double", id="simple-qualifier"),
+    pytest.param("", "int(4) / 2", "double", id="call-operand"),
+    pytest.param("n = int(4)\n", "n / 2", "double", id="call-alias"),
+    pytest.param("", "4.0 / 2", "double", id="float-literal"),
+    pytest.param("float n = 4\n", "n / 2", "double", id="float-alias"),
+])
+def test_division_integrality_requires_constant_integer_operands(prefix, start, family):
+    pine = loop_step_source(start, prefix=prefix, step=None)
+    ast = Parser(Lexer(pine).tokenize(), source=pine).parse()
+    ctx = Analyzer(ast).analyze()
+    loop = next(node for node, _ in iter_ast_nodes(ast) if isinstance(node, ForStmt))
+    query = _CounterQuery(
+        LoopTypeSources(ast),
+        ctx.identifier_decl_bindings, ctx.identifier_binding_scopes,
+    )
+    assert query.value_spec(loop.start) == TypeSpec.primitive(
+        "int" if family == "int" else "float",
+    )
+    assert ctx.for_counter_types[id(loop.start)] == (
+        PineType.INT if family == "int" else PineType.FLOAT
+    )
+    cpp = transpile(pine)
+    assert re.search(rf"\bfor \({family} i = ", cpp), cpp
 
 
 @pytest.mark.parametrize("context", ["chart", "security"])
@@ -169,22 +336,53 @@ int main() {
     ("", "", "first", "1", "int"),
     ("", "stride = ta.median(1, 2)\n", "first", "stride", "int"),
     ("", "", "0", "1", "int"),
-    ("", "", "0", "0.25", "int"),
-    ("", "int begin = 0\n", "begin", "0.25", "int"),
-    ("", "", "int(first)", "0.25", "int"),
-    ("begin = input.int(0)\n", "", "begin", "0.25", "int"),
-    ("", "", "bar_index", "0.25", "int"),
-    ("", "", "math.floor(first)", "0.25", "int"),
-    ("", "", "math.round(first)", "0.25", "int"),
-    ("", "", "(true ? 0 : na)", "0.25", "int"),
-    ("a = array.from(0.0, 1.0)\n", "", "array.size(a)", "0.25", "int"),
-    ("a = array.from(0.0, 1.0)\n", "", "a.size()", "0.25", "int"),
+    ("", "", "0", "0.25", "refused"),
+    ("", "int begin = 0\n", "begin", "0.25", "refused"),
+    ("", "", "int(first)", "0.25", "refused"),
+    ("begin = input.int(0)\n", "", "begin", "0.25", "refused"),
+    ("", "", "bar_index", "0.25", "refused"),
+    ("", "", "math.floor(first)", "0.25", "refused"),
+    ("", "", "math.round(first)", "0.25", "refused"),
+    ("", "", "(true ? 0 : na)", "0.25", "refused"),
+    ("a = array.from(0.0, 1.0)\n", "", "array.size(a)", "0.25", "refused"),
+    ("a = array.from(0.0, 1.0)\n", "", "a.size()", "0.25", "refused"),
+    pytest.param("", "", "4 / 2", "0.5", "refused", id="division-start"),
+    pytest.param("", "begin = 4 / 2\n", "begin", "0.5", "refused",
+                 id="named-division-start"),
+    pytest.param("startValue() => 4 / 2\n", "", "startValue()", "0.5", "refused",
+                 id="helper-division-start"),
+    pytest.param("", "", "bar_index / 2", "0.5", "refused", id="series-division-start"),
+    pytest.param("", "", "4 / 2", "1", "int", id="division-int-step"),
+    pytest.param("", "begin = 4 / 2\n", "begin", "1", "int",
+                 id="named-division-int-step"),
+    # Evaluate the expression-only helper before the loop. Requested helper
+    # loops cannot contain a user function call in their header or body.
+    pytest.param("startValue() => 4 / 2\n", "begin = startValue()\n", "begin", "1", "int",
+                 id="helper-division-int-step"),
+    pytest.param("n = input.int(5)\n", "", "n / 2", "1", "double",
+                 id="input-division-int-step"),
+    pytest.param("", "n = 5 + bar_index % 2\n", "n / 2", "1", "double",
+                 id="series-division-int-step"),
+    # Step checking retains the operand join independently of the constant
+    # proof used to choose storage for a division in the start.
+    pytest.param("", "", "0", "4 / 2", "int", id="int-division-step"),
+    pytest.param("", "", "first", "4 / 2", "int", id="unknown-start-int-division-step"),
+    pytest.param("", "", "0", "4 / 2.0", "refused", id="float-division-step"),
+    # An int step makes these rows depend on division's result family:
+    # an unknown operand must not leave the start on the int fallback.
+    pytest.param("", "", "first / 2", "1", "double", id="division-unknown-left"),
+    pytest.param("", "", "2 / first", "1", "double", id="division-unknown-right"),
+    pytest.param("", "", "na / 2", "1", "double", id="division-na-left"),
+    pytest.param("", "", "2 / na", "1", "double", id="division-na-right"),
 ])
 def test_step_evidence_only_promotes_an_unknown_start(
     context, counter_bound, prefix, setup, start, step, family,
 ):
     # Derive the family from authored evidence, never a signature's FLOAT
     # default or the analyzer's guessed storage for an untyped parameter.
+    # The literal int start with float end and step is measured in
+    # tradingview_quantities.json: int_start_float_end_float_step.
+    # Other start expressions and requested/bound compositions are derived.
     end = "(walkIndex >= 0 ? 1.0 : 1.0)" if counter_bound else "1.0"
     body = (
         setup + "float acc = 0.0\n"
@@ -201,6 +399,9 @@ def test_step_evidence_only_promotes_an_unknown_start(
         + "".join("    " + line + "\n" for line in body.splitlines())
         + f"plot({call})\n"
     )
+    if family == "refused":
+        assert_float_step_refused(pine, counter="walkIndex")
+        return
     cpp = transpile(pine)
     counter = "walkIndex" if context == "chart" else r"\w+_\d+_walkIndex"
     assert re.search(rf"\b{family} {counter} = ", cpp), cpp
@@ -214,12 +415,9 @@ def test_step_evidence_only_promotes_an_unknown_start(
 
 
 @pytest.mark.parametrize("name,pine", sorted(INT_START_SOURCES.items()))
-def test_existing_positive_int_start_evidence_wins_over_a_float_step(name, pine):
+def test_existing_positive_int_start_evidence_refuses_a_float_step(name, pine):
     # Reuse every existing integer source, including nullable ternaries,
     # array sizes, trade counts and int-returning math/TA calls.
     source = pine.replace(" to 0\n", " to 0 by 0.25\n")
     assert source != pine
-    cpp = transpile(source)
-    counter = "walkIndex" if name.startswith("chart_") else r"\w+_\d+_walkIndex"
-    assert re.search(rf"\bfor \(int {counter} = ", cpp), cpp
-    assert not re.search(rf"\bdouble {counter} = ", cpp), cpp
+    assert_float_step_refused(source, counter="walkIndex")

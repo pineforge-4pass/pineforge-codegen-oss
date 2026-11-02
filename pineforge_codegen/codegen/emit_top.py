@@ -233,6 +233,11 @@ class TopLevelEmitter:
         # in favour of fully qualified names emitted at each call site.
         lines.append("using namespace pineforge;")
         lines.append("")
+        from .endless_for import plan_endless_for_loops
+        self._endless_for_actions = plan_endless_for_loops(self.ctx.ast)
+        if "stop" in self._endless_for_actions.values():
+            lines.append("inline constexpr int kLoopTimeLimitMs = 2000;")
+            lines.append("")
         lines.append(RUN_STOP_SHIMS_CPP)
         self._emit_ta_compat_shims(lines)
         if getattr(self, "_uses_drawing", False):
@@ -1722,12 +1727,9 @@ class TopLevelEmitter:
                     )
                     if is_static_global_input:
                         safe = self._safe_name(stmt.name)
-                        default = self._get_input_default(stmt.value)
-                        default_cpp = self._visit_expr(default) if default is not None else "0"
                         title = self._get_input_title(stmt.value, var_name=stmt.name)
-                        getter = self._input_getter_for_call(stmt.value, func_name_i, namespace_i)
-                        default_cpp = self._coerce_string_input_default(getter, default_cpp)
-                        cpp_val = f'{getter}({self._input_key_literal(title)}, {default_cpp})'
+                        cpp_val = self._render_input_value(
+                            stmt.value, func_name_i, namespace_i, title)
                         static_vars.append(f"{safe} = {cpp_val};")
 
         if static_vars:

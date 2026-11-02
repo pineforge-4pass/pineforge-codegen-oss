@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from .ast_nodes import (
-    BinOp, ExprStmt, ForStmt, FuncCall, FuncDef, Identifier, IfStmt,
+    Assignment, BinOp, ExprStmt, ForStmt, FuncCall, FuncDef, Identifier, IfStmt,
     MemberAccess, NaLiteral, NumberLiteral, Subscript, SwitchStmt, Ternary,
     TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from .limits import iter_ast_nodes
+from .errors import CompileError, Diagnostic, Level, Phase
 from .symbols import PineType, TypeSpec
 from . import signatures as sigs
 
@@ -33,7 +34,8 @@ _FLOAT_CALLS = {
         "linreg", "rsi", "stoch", "cci", "mfi", "mom", "roc", "cmo",
         "tsi", "wpr", "cog", "bbw", "kcw", "atr", "tr", "stdev",
         "variance", "sar", "percentrank", "percentile_linear_interpolation",
-        "dev", "cum", "correlation", "rci",
+        "dev", "cum", "correlation", "rci", "highest", "lowest",
+        "max", "min", "percentile_nearest_rank",
     }),
 }
 _ARRAY_ELEMENTS = frozenset({
@@ -79,7 +81,11 @@ class LoopTypeSources:
         self.declarations = {}
         self.functions = {}
         self.parameter_hints = {}
+        self.reassigned_names = set()
         for node, _depth in iter_ast_nodes(ast):
+            # Conservatively deny constant proofs for a name written anywhere.
+            if isinstance(node, Assignment) and isinstance(node.target, Identifier):
+                self.reassigned_names.add(node.target.name)
             if isinstance(node, (VarDecl, TupleAssign, ForStmt, FuncDef)):
                 self.declarations[id(node)] = node
             if isinstance(node, FuncDef):
@@ -100,6 +106,7 @@ class _CounterQuery:
         # All declaration routes, including Identifier -> VarDecl, share this
         # query-local memo. A provisional unknown also breaks source cycles.
         self.declaration_specs = {}
+        self._value_query = None
 
     def declaration(self, node):
         key = id(node)
@@ -120,12 +127,32 @@ class _CounterQuery:
             self.declaration_specs[key] = spec
         return self.declaration_specs[key]
 
-    def counter_spec(self, start, step):
-        spec = self.infer(start)
-        # TradingView refuses a float step with an int counter. For an unknown
-        # start, a positively float step therefore has only one TradingView-valid
-        # counter type: float. Positive int starts keep their existing route.
-        if spec == _FLOAT or (spec in (None, _NA) and self.infer(step) == _FLOAT):
+    def value_spec(self, node):
+        if self._value_query is None:
+            self._value_query = _CounterValueQuery(self)
+        return self._value_query.infer(node)
+
+    def counter_spec(self, start, step, *, counter_name=None, step_location=None):
+        check_spec = self.infer(start)
+        step_spec = self.infer(step)
+        # TradingView checks int/int division as int even though its value
+        # can be fractional. Keep that check separate from counter storage.
+        if check_spec == _INT and step_spec == _FLOAT and counter_name is not None:
+            step_type, counter_type = "float", "int"
+            raise CompileError([Diagnostic(
+                level=Level.ERROR,
+                phase=Phase.ANALYZER,
+                location=step_location or step.loc,
+                message=(
+                    f"The step of a 'for' loop has type {step_type}, "
+                    f"but counter '{counter_name}' has type {counter_type}."
+                ),
+                hint="Use an int step or a float counter.",
+            )])
+        value_spec = self.value_spec(start)
+        # Unknown starts with a positively float step keep the float route;
+        # an int fallback is still not positive int evidence.
+        if value_spec == _FLOAT or (check_spec in (None, _NA) and step_spec == _FLOAT):
             return _FLOAT
         return _INT
 
@@ -226,11 +253,8 @@ class _CounterQuery:
         if namespace is None and name in {"nz", "fixnan", "input"}:
             return self.infer(argument(0, "defval" if name == "input" else "source"))
         if namespace == "ta" and name in {
-            "change", "valuewhen", "median", "mode", "max", "min",
-            "highest", "lowest", "range", "percentile_nearest_rank",
+            "change", "valuewhen", "median", "mode", "range",
         }:
-            if name in {"highest", "lowest"} and len(node.args) == 1 and not node.kwargs:
-                return _FLOAT  # This overload reads the declared float high/low.
             return self.infer(argument(1 if name == "valuewhen" else 0, "source"))
         if namespace == "request" and name == "security":
             return self.infer(argument(2, "expression"))
@@ -271,10 +295,72 @@ class _CounterQuery:
         return None
 
 
+class _CounterValueQuery(_CounterQuery):
+    """Keep fractional division values unless literal arithmetic proves an int."""
+
+    def __init__(self, check_query):
+        super().__init__(check_query.sources, check_query.bindings, check_query.scopes)
+        self.check_query = check_query
+        self.integer_constants = {}
+
+    def _integer_constant(self, node):
+        """Prove an integer using only immutable literal arithmetic."""
+        key = id(node)
+        if key in self.integer_constants:
+            return self.integer_constants[key]
+        # Memoize failures too; a provisional failure breaks alias cycles.
+        self.integer_constants[key] = None
+        value = None
+        if isinstance(node, NumberLiteral) and type(node.value) is int:
+            value = node.value
+        elif isinstance(node, Identifier):
+            binding = self.bindings.get(key)
+            declaration = self.sources.declarations.get(binding[0]) if binding else None
+            if (isinstance(declaration, VarDecl)
+                    and not declaration.is_var and not declaration.is_varip
+                    and declaration.name not in self.sources.reassigned_names
+                    and declaration.type_hint in (None, "int")
+                    and (declaration.annotations or {}).get("qualifier") in (None, "const")):
+                value = self._integer_constant(declaration.value)
+        elif isinstance(node, UnaryOp) and node.op in {"+", "-"}:
+            operand = self._integer_constant(node.operand)
+            if operand is not None:
+                value = -operand if node.op == "-" else operand
+        elif isinstance(node, BinOp) and node.op in {"+", "-", "*", "/", "%"}:
+            left = self._integer_constant(node.left)
+            right = self._integer_constant(node.right)
+            if left is not None and right is not None:
+                if node.op == "+":
+                    value = left + right
+                elif node.op == "-":
+                    value = left - right
+                elif node.op == "*":
+                    value = left * right
+                elif right != 0:
+                    if node.op == "/" and left % right == 0:
+                        value = left // right
+                    elif node.op == "%":
+                        remainder = abs(left) % abs(right)
+                        value = -remainder if left < 0 else remainder
+        self.integer_constants[key] = value
+        return value
+
+    def infer(self, node):
+        if isinstance(node, BinOp) and node.op == "/":
+            return _INT if self._integer_constant(node) is not None else _FLOAT
+        return super().infer(node)
+
+    def counter_spec(self, start, step, **kwargs):
+        # A referenced loop counter must use the same check/storage decision
+        # as analysis, including the original check type of its step.
+        return self.check_query.counter_spec(start, step, **kwargs)
+
+
 def for_counter_type(
     start, sources, bindings, scopes, *, step=None, pine_v5=False, counter_types=None,
+    counter_name=None, step_location=None,
 ):
-    """Choose FLOAT from the start, or a float step when the start is unknown."""
+    """Choose the counter family; analysis also validates a named counter's step."""
     if pine_v5:
         return PineType.INT
     if counter_types is not None and id(start) in counter_types:
@@ -282,4 +368,7 @@ def for_counter_type(
         # Reuse that decision rather than a later coarse symbol/storage type.
         return counter_types[id(start)]
     query = _CounterQuery(sources, bindings, scopes)
-    return PineType.FLOAT if query.counter_spec(start, step) == _FLOAT else PineType.INT
+    spec = query.counter_spec(
+        start, step, counter_name=counter_name, step_location=step_location,
+    )
+    return PineType.FLOAT if spec == _FLOAT else PineType.INT

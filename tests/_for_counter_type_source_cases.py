@@ -57,14 +57,17 @@ FLOAT_COUNTER_SOURCES = {
     "float_tuple_call",
     "float_tuple_literal",
     "for_local_float",
+    # TradingView types ta.max and ta.min as float even for an int source
+    # (it accepts them as the start of a float-step loop: compile verdicts
+    # for ta.max(bar_index) and ta.min(bar_index)), so the counter is a double.
+    "ta_int_max",
+    "ta_int_min",
     "unknown_parameter",
 }
 INT_COUNTER_SOURCES = {
     "int_chain",
     "int_tuple_call",
     "int_tuple_literal",
-    "ta_int_max",
     "ta_int_median",
-    "ta_int_min",
     "ta_int_mode",
 }

@@ -1,0 +1,11 @@
+//@version=6
+strategy("synthetic fractional counter array index", currency=currency.NONE, initial_capital=1000000000000)
+n = input.int(5, "Numerator")
+array<float> pf_values = array.from(10.0, 20.0, 30.0, 40.0, 50.0, 60.0)
+float pf_sum = 0
+for i = n / 2 to n / 2 + 2
+    pf_sum += array.get(pf_values, i)
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty=pf_sum)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

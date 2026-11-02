@@ -118,6 +118,7 @@ from ..ast_nodes import (
     WhileStmt,
 )
 from .strategy_declaration import DECLARATION_CONSTANTS, NamedConstant
+from .color_constants import color_literal_to_int64 as _color_literal_to_int64
 from .helpers import pine_index_int_cast, unary_sign_cpp
 from .types import COLLECTION_MUTATING_METHODS
 from .tables import (
@@ -138,29 +139,6 @@ from .tables import (
     TA_COMPUTE_ARGS,
     TA_IMPLICIT_COMPUTE_FULL,
 )
-
-
-def _color_literal_to_int64(value: str) -> str:
-    """Lower a Pine hex color literal to a packed ARGB int64 C++ literal.
-
-    Pine ``#RRGGBB`` is opaque; ``#RRGGBBAA`` carries an explicit alpha
-    (opacity, FF = opaque). The engine packs colors as ``0xAARRGGBB``
-    (see color.hpp: ``red == 0xFFFF0000``), so we reorder to alpha-first
-    and emit an ``int64_t`` literal — matching ``get_input_int64`` and
-    ``pine_color::*``. A malformed literal falls back to 0 (transparent).
-    """
-    h = value.lstrip("#").strip()
-    if len(h) == 6:
-        rr, gg, bb, aa = h[0:2], h[2:4], h[4:6], "ff"
-    elif len(h) == 8:
-        rr, gg, bb, aa = h[0:2], h[2:4], h[4:6], h[6:8]
-    else:
-        return "0"
-    try:
-        int(rr + gg + bb + aa, 16)  # validate hex
-    except ValueError:
-        return "0"
-    return f"0x{aa}{rr}{gg}{bb}LL"
 
 
 # Valid Pine v6 bare builtins that have no value in a batch backtest (no live

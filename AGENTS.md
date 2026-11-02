@@ -97,6 +97,12 @@ at that expression's first token. `_parse_bounded`, direct `Analyzer` clients
 and v6 library parsing share this rule, including unused bodies and parameter
 defaults; imported v5 subtrees keep their existing policy.
 
+In call argument lists, the parser accepts a primitive type keyword
+(`int`, `float`, `bool`, `string`) followed by `=` as an argument label.
+It records the token text as the label and retains written argument order
+and source locations. Declaration names and type annotations keep their
+existing parser grammar.
+
 1. `pragmas.extract_pf_trace_pragmas` — pulls `// @pf-trace name=expr`
   comments out before the lexer strips comments.
 2. `Lexer` → `Parser` → `Program` AST. Before the support check,
@@ -392,16 +398,36 @@ loop values and `break` / `continue`. A non-na v6 step <= 0 after conversion to
 the counter's type stops the run with "'step' in loop must be greater than
 zero". The float-counter route is v6 only: positive float evidence in the start,
 or an unknown start with positive float evidence in the step, selects a float
-counter. A start with positive int evidence keeps an int counter and its existing
-end/step narrowing. With a float step that narrows to zero or below, that route
-stops with RE10021 at bar 0, a known gap against TradingView's refusal of a float
-step with an int counter (`by 0.5` narrows to 0, where earlier releases replaced
-it with 1). Without float evidence, counters keep their existing int route.
+counter. A division in a loop start keeps its fraction unless it is a constant
+division with an exact integer result, which keeps the int route. The float-step
+refusal follows TradingView's check type (a division of two ints is int).
+A start whose value has positive int evidence
+keeps an int counter and its existing end/step narrowing. A v6 loop whose start
+has positive int check evidence refuses a float-typed step at the step
+expression (`PF-E2079`), with the hint "Use an int step or a float counter."
+Without float evidence, counters keep their existing int route.
 v5 library bodies keep their int counters and existing step handling. The counter
-now wins over an outer same-named variable; an end bound that is exactly its own
-counter never ends here, while TradingView stops it (a follow-up change).
+now wins over an outer same-named variable. An affine chart loop proved endless
+(its end is affine in its own counter) is stopped with the loop-time error when
+its result reaches an effect. Omission is limited to an unused loop statement
+with no calls, whose writes have no readers except self-updates, a break
+condition or one further unused variable declaration. Other flagged loops stop
+when their result is read in a shape not measured, where TradingView may drop
+them. Endless loops in functions, methods and `request.security` still never end
+here while TradingView stops them; data-dependent endless loops still hang.
 
-The 22 measured entry-quantity probes in `fixtures/for_counter_headers` are
+A float-counter loop accumulates its counter by repeated double addition.
+TradingView's measured loop-end rule admits a counter whose excess beyond
+the end, computed as one double subtraction in the loop's direction, is
+strictly below `1e-10`. The named value `kTvFloatStepEnd` is emitted only
+when a float-counter loop exists. Measured on TradingView at the 0.3 scale
+(counted up to a 9.999e-11 shortfall, not counted from 1.0e-10) and at counter
+magnitudes of about 1, 1e3, 1e6 and 1e9; no magnitude-independent constant
+is claimed; not a constant TradingView publishes.
+A positive infinite step leaves the counter beyond the finite bound after
+one iteration; the difference comparison needs no non-finite-step guard.
+
+The measured entry-quantity probes in `fixtures/for_counter_headers` include
 `end_reads_counter` = 1, `end_reads_counter_other` = 3,
 `step_reads_counter` = 15, `end_reads_outer_value` = 2,
 `step_reads_outer_int` = 7, `a1_shadow_end_outer_int` = 3,
@@ -415,19 +441,25 @@ The 22 measured entry-quantity probes in `fixtures/for_counter_headers` are
 `fstep_b_body_local_start` = 1.07 and `fstep_c_array_bounds` = 1.03. The measured
 `first_end_read_start_two_zero_entries` starts its accumulator at 0 and has
 zero entries. Non-positive-step probes also measure no-trade stops.
-Known gaps: a start with positive int evidence and a float step is refused by
-TradingView; here a narrowed non-positive step stops with RE10021 at bar 0;
-the endless own-counter bound hangs here pending a follow-up change; a float
-counter passed to an untyped helper truncates here while TradingView passes
-the fractional value (`twice(x)` accumulates 2 here versus 5 on TradingView).
+The additional inexact-step probes and export hashes are recorded in
+`tradingview_quantities.json`: `0.0 to 0.3 by 0.1` counts four iterations,
+while `0.0 to 2999.9999999999 by 1000.0` counts three. These rows reject
+end comparisons that lose the accumulated last iteration or round the end
+up before comparing it. Additional recorded counts exercise the measured
+end difference in both directions and at the measured counter magnitudes.
+Known gaps: a float counter passed to an untyped helper truncates here while
+TradingView passes the fractional value (`twice(x)` accumulates 2 here versus 5
+on TradingView).
 `array.from(x)` can also truncate a float counter through inferred `array<int>`
 storage. An untyped parameter can leave the start unknown; a positively float
 step then selects a float counter without changing shared parameter inference.
-The inexact-step last iteration differs: TradingView counts
-`0.0 to 0.3 by 0.1` as four iterations, PineForge as three, while
-`0.0 to 1.0 by 0.1` counts eleven on both. Block-local/enclosing-counter
-bindings, end bounds that change direction during iteration and stops inside
-`request.security` have no TradingView tape. Integer-counter controls are guarded
+For `f(x)` containing `for v = x to 1.0 by 0.25`, TradingView refuses `f(0)`
+with CE10106 and accepts `f(0.0)`. PineForge accepts and runs both with a float
+counter because this inference cannot distinguish their call-argument types;
+refusing the unknown start would also refuse the valid float-argument call.
+Block-local/enclosing-counter bindings, end bounds that change direction during
+iteration and stops inside `request.security` have no TradingView tape.
+Integer-counter controls are guarded
 against previous generated C++ apart from the added step-stop statement.
 
 Per-bar `request.security` timeframes can have a closed set by value:
@@ -448,6 +480,13 @@ that replay cannot carry retain PF-E3111.
 A stateful expanded evaluator cannot fall back to a chart helper call;
 conditional helper declarations and unsupported state types keep their gates.
 Fixed requests retain their helper-local `varip` refusal.
+Registry builtins with verified keyword names
+(`IntrinsicFunc.keyword_names_verified`) declare their complete keyword set
+through their signature parameters. These names are validated before lowering
+and again at the shared keyword merge; unknown names report PF-E2027 at the
+keyword. Other records keep their existing binding policy. `math.pow`
+declares `base, exponent`; both named forms emit the positional expression.
+Argument ordering remains the separate PF-E2074 validation.
 
 An aggregate `var` initializer that reads a statement-computed value (directly,
 through a user helper, or through another declaration-site `var`) runs at its
@@ -524,6 +563,25 @@ TV-valid input is a defect: fix it with the correct lowering; never keep it
 with a warning.
 
 This exception covers only constructs PineForge refuses today. A form that compiles today keeps compiling: if its lowering is approximate, that is recorded as a defect and fixed by the correct lowering. A wrong value is never kept behind a warning, and such a form is never newly refused as unproven. A located refusal is allowed only as a labelled temporary fallback for one exact proven shape, listed as a compile gap.
+
+Input defaults use the input family's Pine type and qualifier contract.
+An explicit `const color` carrier with a proven initializer supplies its
+packed value to the getter and settings descriptor before `on_bar`; the
+manifest reads that descriptor. `codegen/constant_values.py` resolves lexical
+bindings on the support checker's AST, after `rename_block_locals`, using
+the existing bounded scalar and color evaluators. Reassigned, persistent and
+inferred carriers remain compile gaps; an initializer alone cannot prove
+the value at a later call. The proof applies in every statement context,
+including function bodies and switch arms. Existing direct builders keep
+their lowering and metadata unless their arguments read proven const
+carriers; those use the same packed proof. Static input initialization uses
+`_render_input_value`, as statement reads and settings descriptors do, so
+it cannot read an uninitialized carrier member in place of that proof.
+
+If the required evidence and value checks are unavailable for a shape, the
+existing located PF-E1006 is retained as a PineForge limitation and is listed
+as a compile gap. A located refusal of a spelling TradingView rejects follows
+its general grammar, type and qualifier rule.
 
 The taxonomy:
 

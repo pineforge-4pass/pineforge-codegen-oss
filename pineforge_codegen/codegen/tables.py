@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import re
 
+from ..intrinsic_binding import validate_intrinsic_keywords
+from ..signatures import IntrinsicFunc
 from ..symbols import PineType
 from .helpers import (
     evaluate_args_once, na_preserving_int_cast, pine_index_int_cast,
@@ -1400,12 +1402,17 @@ STR_ARGS_READ_REPEATEDLY = {
 # kwarg merge helper (used by visitor / dispatch sites that accept kwargs)
 # ---------------------------------------------------------------------------
 
-def _merge_kwargs(args: list, kwargs: dict, param_names: list | None, visit_expr) -> list:
+def _merge_kwargs(args: list, kwargs: dict, param_names: list | None, visit_expr,
+                  *, intrinsic: IntrinsicFunc | None = None) -> list:
     """Merge positional + kwargs into a unified positional list of C++ exprs.
 
     ``param_names`` is the declared signature order from
     ``signatures.py``. ``visit_expr`` is a callable applied to each kept
-    AST node; pass ``lambda x: x`` when the caller wants raw nodes back."""
+    AST node; pass ``lambda x: x`` when the caller wants raw nodes back.
+    Registry callers supply their record so verified keyword names are checked
+    before any argument is evaluated or omitted.
+    """
+    validate_intrinsic_keywords(intrinsic, kwargs)
     if not kwargs or not param_names:
         return [visit_expr(a) for a in args]
     merged = list(args)

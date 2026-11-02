@@ -103,6 +103,7 @@ from ..ast_nodes import (
 )
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from ..external_requests import UNPINNED_ANNOTATION
+from .for_loops import for_continuation
 from .tables import (
     ARRAY_NEW_CTORS,
     DRAWING_TYPE_TO_CPP,
@@ -1737,6 +1738,24 @@ class StmtVisitor:
 
     def _visit_for(self, node: ForStmt, lines: list[str], indent: int,
                    value_target: tuple[str, str | None] | None = None) -> None:
+        action = getattr(self, "_endless_for_actions", {}).get(id(node))
+        if action is not None:
+            # Keep lexical/naming bookkeeping (including nested loop tokens)
+            # identical for statements after this one; discard only its text.
+            saved_tv_float_step_end = self._uses_tv_float_step_end
+            try:
+                self._visit_counter_bound_for(node, [], indent, value_target)
+            finally:
+                self._uses_tv_float_step_end = saved_tv_float_step_end
+            if action == "stop":
+                pad = "    " * indent
+                lines.append(
+                    f'{pad}pine_runtime_error(std::string("Error on bar ") '
+                    '+ std::to_string(bar_index_) '
+                    '+ ": Loop takes too long to execute (> " '
+                    '+ std::to_string(::kLoopTimeLimitMs) + " ms)");'
+                )
+            return
         if self._for_header_reads_new_counter(node):
             self._visit_counter_bound_for(node, lines, indent, value_target)
             return
@@ -1800,15 +1819,23 @@ class StmtVisitor:
         # Pine v6 evaluates ``to`` before every iteration; v5 (a v5 library's
         # body) fixes it before the first one.
         refresh = "" if self._pine_v5_body else f", {e_var} = {end_cpp}"
+        continuation = self._for_continuation(
+            counter_cpp_type, var, e_var, step_var, down_var,
+        )
         lines.append(
             f"{pad}for ({counter_cpp_type} {var} = {s_var}; "
             f"{na_guard}"
-            f"({down_var} ? ({var} >= {e_var}) : ({var} <= {e_var})); "
+            f"{continuation}; "
             f"{var} += ({down_var} ? -{step_var} : {step_var})"
             f"{refresh}) {{"
         )
         self._emit_counted_loop_body(node, lines, indent + 1, value_target)
         lines.append(f"{pad}}}")
+
+    def _for_continuation(self, counter_cpp_type, var, end, step, down) -> str:
+        if counter_cpp_type == "double":
+            self._uses_tv_float_step_end = True
+        return for_continuation(counter_cpp_type, var, end, step, down)
 
     def _for_header_reads_new_counter(self, node: ForStmt) -> bool:
         """The loop's own counter wins in end/step, including over outer names."""
@@ -1925,9 +1952,12 @@ class StmtVisitor:
         # A continue advances the counter and refreshes the end; break does
         # neither. Initial direction and the once-read step stay fixed.
         refresh = "" if pine_v5 else f", {e_var} = {end_cpp}"
+        continuation = self._for_continuation(
+            counter_cpp_type, var, e_var, step_var, down_var,
+        )
         lines.append(
             f"{inner}for (; {na_guard}"
-            f"({down_var} ? ({var} >= {e_var}) : ({var} <= {e_var})); "
+            f"{continuation}; "
             f"{var} += ({down_var} ? -{step_var} : {step_var})"
             f"{refresh}) {{"
         )
