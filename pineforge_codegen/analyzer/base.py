@@ -8244,7 +8244,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
             # timeframe.*
             if ns == "timeframe":
-                return PineType.STRING
+                return sigs.TIMEFRAME_VARIABLES.get(
+                    f"timeframe.{node.member}", PineType.STRING)
 
             # barstate.* (ishistory, isrealtime, islast, isfirst, etc.)
             if ns == "barstate":

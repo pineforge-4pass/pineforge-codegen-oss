@@ -130,6 +130,8 @@ class StmtVisitor:
             if self._budget_visit_count % 128 == 0:
                 self._budget.check(node.loc, Phase.CODEGEN)
         pad = "    " * indent
+        if self._emit_security_selection_stmt(node, lines, pad):
+            return
 
         if isinstance(node, StrategyDecl):
             return
@@ -1673,10 +1675,14 @@ class StmtVisitor:
                                 indent: int) -> None:
         """Emit one lexical branch/loop body with its exact var remap."""
         saved = self._push_block_var_remap(body)
+        scope = (self._security_open_scope()
+                 if getattr(self, "_security_selection_context", None) is not None else None)
         try:
             for stmt in body:
                 self._visit_stmt(stmt, lines, indent)
         finally:
+            if scope is not None:
+                self._security_scope_path = scope
             self._pop_block_var_remap(saved)
 
     def _emit_block_with_assign(
@@ -1689,6 +1695,8 @@ class StmtVisitor:
     ) -> None:
         """Expression-body counterpart of :meth:`_visit_block_statements`."""
         saved = self._push_block_var_remap(body)
+        scope = (self._security_open_scope()
+                 if getattr(self, "_security_selection_context", None) is not None else None)
         try:
             self._emit_body_with_assign(
                 body,
@@ -1698,6 +1706,8 @@ class StmtVisitor:
                 target_cpp_type=target_cpp_type,
             )
         finally:
+            if scope is not None:
+                self._security_scope_path = scope
             self._pop_block_var_remap(saved)
 
     def _visit_if(self, node: IfStmt, lines: list[str], indent: int) -> None:
@@ -2411,6 +2421,18 @@ class StmtVisitor:
         for i, stmt in enumerate(body):
             if i == len(body) - 1:
                 # Last statement — try to turn into assignment
+                context = getattr(self, "_security_selection_context", None)
+                if (context is not None and isinstance(stmt, VarDecl)
+                        and id(stmt) in context["declarations"]):
+                    self._visit_stmt(stmt, lines, indent)
+                    name = context["declarations"][id(stmt)]
+                    cpp = (self._security_helper_series_value(name, "0")
+                           if stmt.is_var or stmt.is_varip else name)
+                    cpp = self._coerce_int_slot(
+                        cpp, stmt.value, self._int_slot_cpp_type(None, target_cpp_type))
+                    lines.append(
+                        f"{'    ' * indent}{self._array_journal_initializer(target, cpp)}")
+                    return
                 if isinstance(stmt, ExprStmt):
                     # Check if it's a skip expr
                     if self._is_skip_expr(stmt.expr):

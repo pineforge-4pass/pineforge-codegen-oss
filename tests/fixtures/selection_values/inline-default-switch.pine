@@ -1,0 +1,15 @@
+//@version=6
+strategy("Inline default switch", currency = currency.NONE, initial_capital = 1000000)
+// Derived: a default arm uses the same inline ExprStmt wrapper as a case arm.
+pick = bar_index % 3
+value = switch pick
+    0 => 1.0
+    1 => 2.0
+    => switch bar_index % 2
+        0 => 3.0
+        => 4.0
+plot(value, "selected")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

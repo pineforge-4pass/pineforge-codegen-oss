@@ -1,0 +1,11 @@
+//@version=6
+strategy("Literal loop bounds", currency = currency.NONE, initial_capital = 1000000)
+// Derived: inclusive bounds 0 through 1 execute two increments on each bar.
+value = 0.0
+for i = 0 to 1 by 1
+    value += 1.0
+plot(value, "selected")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

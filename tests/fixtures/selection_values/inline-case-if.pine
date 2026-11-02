@@ -1,0 +1,14 @@
+//@version=6
+strategy("Inline case if", currency = currency.NONE, initial_capital = 1000000)
+// Derived: ExprStmt(IfStmt) misses the same scalar-dispatch branches as SwitchStmt.
+value = switch bar_index % 3
+    0 => if bar_index % 2 == 0
+        1.0
+    else
+        2.0
+    => 3.0
+plot(value, "selected")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")
