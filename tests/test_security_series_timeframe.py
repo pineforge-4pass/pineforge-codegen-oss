@@ -787,7 +787,8 @@ def test_selected_tuple_values_retain_the_existing_storage_shape(payload, slots)
 
 
 @pytest.mark.parametrize("name", ("sma-parity", "history-parity"))
-def test_exported_state_values_follow_the_signal_bars_selected_fixed_arm(name):
+def test_fixture_self_consistency_state_values_follow_the_selected_fixed_arm(name):
+    """Fixture self-consistency: exported selected values equal the fixed arm."""
     # Data preservation pin: even signal indices choose 60, odd ones 240;
     # every selected exported quantity equals that arm's fixed quantity.
     rows = [row for row in export_rows("tv_state_entries.tsv") if row["source"] == name]
@@ -798,7 +799,8 @@ def test_exported_state_values_follow_the_signal_bars_selected_fixed_arm(name):
         assert row["selected"] == row[f"fixed_{arm}"]
 
 
-def test_exported_price_forms_have_the_same_entry_quantities():
+def test_fixture_self_consistency_price_forms_have_the_same_entry_quantities():
+    """Fixture self-consistency: the two exported price forms agree."""
     # Data preservation pin: the if and ternary exports use the same chart
     # condition and agree on every recorded entry quantity.
     rows = {row["source"]: row for row in export_rows("tv_bar_quantities.tsv")}
@@ -806,7 +808,8 @@ def test_exported_price_forms_have_the_same_entry_quantities():
     assert rows["if-price"]["sha256"] == rows["ternary-price"]["sha256"]
 
 
-def test_exported_hour_forms_have_the_same_entry_quantities():
+def test_fixture_self_consistency_hour_forms_have_the_same_entry_quantities():
+    """Fixture self-consistency: exported hour selections agree by fill time."""
     # Data preservation pin: the if and ternary price conditions select the
     # same hour values at matching fill times; fixed controls remain separate.
     rows = export_rows("tv_hour_entries.tsv")
