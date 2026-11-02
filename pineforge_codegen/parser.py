@@ -1755,6 +1755,9 @@ class Parser:
                     )
                 self._advance()  # consume =
                 val = self._parse_expression()
+                val.annotations = {
+                    **(val.annotations or {}), "keyword_location": self._loc(key_tok),
+                }
                 kwargs[key_tok.value] = val
                 call_arg_order.append(val)
             else:

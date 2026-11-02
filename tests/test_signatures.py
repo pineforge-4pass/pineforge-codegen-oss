@@ -649,7 +649,7 @@ class TestMathKwargs:
         assert "std::sqrt" in cpp
 
     def test_math_pow_kwargs(self):
-        cpp = _generate(_pine('x = math.pow(base=2.0, exp=3.0)'))
+        cpp = _generate(_pine('x = math.pow(base=2.0, exponent=3.0)'))
         assert "std::pow" in cpp
 
     def test_math_log_kwargs(self):

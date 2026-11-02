@@ -475,6 +475,13 @@ that replay cannot carry retain PF-E3111.
 A stateful expanded evaluator cannot fall back to a chart helper call;
 conditional helper declarations and unsupported state types keep their gates.
 Fixed requests retain their helper-local `varip` refusal.
+Registry builtins with verified keyword names
+(`IntrinsicFunc.keyword_names_verified`) declare their complete keyword set
+through their signature parameters. These names are validated before lowering
+and again at the shared keyword merge; unknown names report PF-E2027 at the
+keyword. Other records keep their existing binding policy. `math.pow`
+declares `base, exponent`; both named forms emit the positional expression.
+Argument ordering remains the separate PF-E2074 validation.
 
 An aggregate `var` initializer that reads a statement-computed value (directly,
 through a user helper, or through another declaration-site `var`) runs at its

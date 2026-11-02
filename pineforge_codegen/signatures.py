@@ -40,6 +40,9 @@ class IntrinsicFunc:
     """Complete intrinsic function definition with all overloads."""
     name: str                    # e.g. "ta.sma" or "math.abs"
     signatures: list[FuncSig] = field(default_factory=list)
+    # Declared parameter names are the complete, verified keyword set.
+    # False preserves the record's existing keyword policy.
+    keyword_names_verified: bool = False
 
     @property
     def primary(self) -> FuncSig:
@@ -73,8 +76,10 @@ def _sig(params: list[tuple], ret: PineType = PineType.FLOAT,
                    returns_tuple=returns_tuple, tuple_count=tuple_count)
 
 
-def _func(name: str, *sigs: FuncSig) -> IntrinsicFunc:
-    return IntrinsicFunc(name=name, signatures=list(sigs))
+def _func(name: str, *sigs: FuncSig,
+          keyword_names_verified: bool = False) -> IntrinsicFunc:
+    return IntrinsicFunc(name=name, signatures=list(sigs),
+                         keyword_names_verified=keyword_names_verified)
 
 
 # Shortcuts for common param types
@@ -234,8 +239,11 @@ _ta("pivot_point_levels",
 
 MATH_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 
-def _math(short_name: str, *sigs: FuncSig) -> None:
-    MATH_FUNCTIONS[short_name] = _func(f"math.{short_name}", *sigs)
+def _math(short_name: str, *sigs: FuncSig,
+          keyword_names_verified: bool = False) -> None:
+    MATH_FUNCTIONS[short_name] = _func(
+        f"math.{short_name}", *sigs, keyword_names_verified=keyword_names_verified,
+    )
 
 # Arithmetic
 _math("abs",    _sig([("x", F)]))
@@ -261,7 +269,7 @@ _math("avg",
       _sig([("x", F), ("y", F), ("z", F), ("w", F), ("u", F)]),
       _sig([("x", F), ("y", F), ("z", F), ("w", F), ("u", F), ("v", F)]))
 _math("sum",    _sig([("source", F), ("length", I)]))  # rolling sum → math::Sum in runtime
-_math("pow",    _sig([("base", F), ("exp", F)]))
+_math("pow", _sig([("base", F), ("exponent", F)]), keyword_names_verified=True)
 _math("sqrt",   _sig([("x", F)]))
 _math("exp",    _sig([("x", F)]))
 _math("log",    _sig([("x", F)]))
@@ -765,6 +773,22 @@ def merge_kwargs_to_positional(
     while merged and merged[-1] is None:
         merged.pop()
     return merged
+
+
+def get_intrinsic(namespace: str | None, func_name: str) -> IntrinsicFunc | None:
+    """Look up a registry record and its keyword-name validation policy."""
+    registry = {
+        "ta": TA_FUNCTIONS,
+        "math": MATH_FUNCTIONS,
+        "strategy": STRATEGY_FUNCTIONS,
+        "str": STR_FUNCTIONS,
+        "input": INPUT_FUNCTIONS,
+        "map": MAP_FUNCTIONS,
+        "syminfo": SYMINFO_FUNCTIONS,
+        "request": REQUEST_FUNCTIONS,
+        None: BUILTIN_FUNCTIONS,
+    }.get(namespace)
+    return registry.get(func_name) if registry is not None else None
 
 
 def get_param_names(namespace: str | None, func_name: str) -> list[str] | None:
