@@ -63,9 +63,11 @@ with `fixed_60` and `fixed_240`, using the same half-up column precision.
 Each report prints and records exact/different counts, without treating
 different quantities as equal. All three sources must still have exactly
 the tape's 477 entry times, with no engine-only or tape-only entries.
-These reports MUST be turned into exact equality assertions when the
-quantity computation's root fix lands. Counts of these quantity differences
-are left to the native run to measure.
+The six last-digit reports are pinned exactly in both directions (equal count,
+different count, fingerprint of the different times), and the pins must be
+removed, with the reports turned into exact assertions, when the engine's
+quantity computation is fixed. Counts of these quantity differences are left
+to the native run to measure.
 
 `test_native_selected_matches_engine_fixed_arm[history|sma]` verifies these
 two lowered sources against the engine's own fixed-arm runs. Every raw

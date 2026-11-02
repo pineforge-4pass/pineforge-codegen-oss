@@ -13,7 +13,7 @@ import datetime as dt
 import hashlib
 import io
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
@@ -34,13 +34,56 @@ END_MS = 1709251200000  # 2024-03-01 00:00 UTC, inclusive
 HOUR_MS = 3_600_000
 
 # Known pre-existing engine difference (a missing second fill), measured on
-# main and every head. This pin MUST FLIP to plain equality, by emptying the
-# table, when the root fix lands. Every other cell must remain exactly equal.
+# the v1.9.1 tag, main and every head. Cause, as measured: the quantity of that
+# order is na (the daily request is na on the first day). TradingView sizes an
+# order with a na quantity at 100% of equity at the fill bar's open; the
+# engine places no entry there (the same happens for a literal na quantity
+# with no request at all). This pin MUST FLIP to plain equality, by emptying
+# the table, when the root fix lands. Every other cell must remain exactly equal.
 KNOWN_TAPE_ONLY = {
     "explicit-parity": (1704132000000,),
     "if-parity": (1704132000000,),
 }
 STATE_SOURCES = ("history-parity", "sma-parity")
+
+# Values are measured on the native run (engine a3e7822e, the BTCUSDT hourly
+# feed of 1,441 bars); this pin is exact in both directions. Keys: the six
+# reports below. Each value has equal (int), different (int), and
+# different_sha256 (hex str: sha256 of the sorted different entry times as
+# decimal milliseconds, one per line). In these logs the engine's raw quantity
+# is above the tape's on every different entry (never below) and by at most
+# one unit of the tape's last digit. This MUST become plain equality (empty
+# this table and turn the reports into exact assertions, 477 equal and 0
+# different) when the engine's quantity computation is fixed at its root (the
+# order quantity cut to the symbol's quantity step). The pin also moves with
+# ANY change of the engine's order-quantity rounding: a change of these
+# numbers means verify the fix, then re-measure and update or empty the pin.
+LAST_DIGIT_BASELINE: dict[str, dict] = {
+    "history-parity": {
+        "equal": 226, "different": 251,
+        "different_sha256": "9b48153973aa82d14d8e1d2a89acaad38215086de4624f10101241383497f261",
+    },
+    "history-fixed-60": {
+        "equal": 240, "different": 237,
+        "different_sha256": "7b33fe3eba1402876117b22d2ae9886b2497d624f56c41557e78ce0555f28376",
+    },
+    "history-fixed-240": {
+        "equal": 227, "different": 250,
+        "different_sha256": "a32bfbdae576d58918a3074abcb2983e63b5368a1759cfaa1190b2b03eab23cd",
+    },
+    "sma-parity": {
+        "equal": 254, "different": 223,
+        "different_sha256": "d81b0b67ea825ae98b1c12a1e29bbb5a731846b314329cbb0da09f96b0241172",
+    },
+    "sma-fixed-60": {
+        "equal": 255, "different": 222,
+        "different_sha256": "fd80e1e9ee8462bcb421d8721d0686741d364285c638a219e9855583ad8caa97",
+    },
+    "sma-fixed-240": {
+        "equal": 232, "different": 245,
+        "different_sha256": "0ade63cc2a5a99971f62bf8879372f7e891fcefd9b188af34c19c5006591a253",
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -251,6 +294,32 @@ def _assert_state_structure(comparison: Comparison, label: str) -> None:
     assert comparison.common == 477, f"{label}: {comparison.summary()}"
 
 
+def _different_fingerprint(comparison: Comparison) -> str:
+    stamps = "".join(f"{stamp}\n" for stamp in sorted(comparison.different))
+    return hashlib.sha256(stamps.encode("ascii")).hexdigest()
+
+
+def _assert_last_digit_baseline(
+        comparison: Comparison, source: str, baseline_table: dict[str, dict],
+        label: str) -> None:
+    different = len(comparison.different)
+    fingerprint = _different_fingerprint(comparison)
+    measured = (f"measured equal={comparison.equal} different={different} "
+                f"different_sha256={fingerprint}")
+    assert source in baseline_table, (
+        f"{label}: {source}: native measurement has not been pinned for this report; "
+        f"{measured}")
+    pin = baseline_table[source]
+    message = (f"{label}: {source}: {measured}; "
+               f"pinned equal={pin['equal']} different={pin['different']} "
+               f"different_sha256={pin['different_sha256']}")
+    if different < pin["different"]:
+        message += "; verify the fix and empty the pin"
+    assert (comparison.equal == pin["equal"]
+            and different == pin["different"]
+            and fingerprint == pin["different_sha256"]), message
+
+
 def _selected_fixed_comparison(
         selected: dict[int, Decimal], fixed: dict[str, dict[int, Decimal]],
         arms: dict[int, str]) -> Comparison:
@@ -400,9 +469,10 @@ def test_native_entry_quantities_match_committed_tape_rules(
             _write_log(tmp_path / source, source,
                        _join_log(fixed_entries, fixed_tape, fixed_comparison))
             reports.append((source, fixed_comparison))
-        # Report every source before asserting structure, retaining all cells.
+        # Report every source before any assertion, retaining all cells.
         for source, report in reports:
             _assert_state_structure(report, source)
+            _assert_last_digit_baseline(report, source, LAST_DIGIT_BASELINE, source)
     else:
         # No warm-up entries are excluded, including the first scheduled fill.
         _assert_matches(comparison, f"{case.fixture}; join-log={destination}")
@@ -440,6 +510,118 @@ TAPE_CHECK_CASES = CASES + tuple(
          "tv_state_entries.tsv", source, f"fixed_{arm}")
     for source in STATE_SOURCES for arm in ("60", "240")
 )
+STATE_TAPE_CHECK_CASES = tuple(
+    case for case in TAPE_CHECK_CASES if case.tape == "tv_state_entries.tsv"
+)
+
+
+@pytest.mark.parametrize("case", STATE_TAPE_CHECK_CASES, ids=lambda case: case.fixture)
+def test_last_digit_baseline_self_check_accepts_exact_pin(case: Case) -> None:
+    tape = _tape_entries(case)
+    changed = dict(tape)
+    stamps = sorted(tape)[:2]
+    for stamp in stamps:
+        changed[stamp] += _quantum(tape)
+    comparison = _compare(changed, tape)
+    assert comparison.equal == 475
+    assert comparison.different == tuple(stamps)
+    baseline = {case.fixture: {
+        "equal": comparison.equal,
+        "different": len(comparison.different),
+        "different_sha256": hashlib.sha256(
+            "".join(f"{stamp}\n" for stamp in stamps).encode("ascii")).hexdigest(),
+    }}
+    _assert_last_digit_baseline(comparison, case.fixture, baseline, "synthetic tape")
+
+
+@pytest.mark.parametrize("case", STATE_TAPE_CHECK_CASES, ids=lambda case: case.fixture)
+@pytest.mark.parametrize("change", ("added", "removed", "moved", "equal"))
+def test_last_digit_baseline_self_check_rejects_changed_pin(case: Case, change: str) -> None:
+    tape = _tape_entries(case)
+    first, second, third = sorted(tape)[:3]
+    changed = dict(tape)
+    quantum = _quantum(tape)
+    for stamp in (first, second):
+        changed[stamp] += quantum
+    original = _compare(changed, tape)
+    assert original.equal == 475
+    assert original.different == (first, second)
+    baseline = {case.fixture: {
+        "equal": original.equal,
+        "different": len(original.different),
+        "different_sha256": hashlib.sha256(
+            f"{first}\n{second}\n".encode("ascii")).hexdigest(),
+    }}
+    if change == "added":
+        changed[third] += quantum
+        expected_different, expected_equal = (first, second, third), 474
+    elif change == "removed":
+        changed[first] = tape[first]
+        expected_different, expected_equal = (second,), 476
+    elif change == "moved":
+        changed[first] = tape[first]
+        changed[third] += quantum
+        expected_different, expected_equal = (second, third), 475
+    else:
+        # Remove an unchanged cell: only equal changes among the pinned fields.
+        del changed[third]
+        expected_different, expected_equal = (first, second), 474
+    comparison = _compare(changed, tape)
+    assert comparison.different == expected_different
+    assert comparison.equal == expected_equal
+    with pytest.raises(AssertionError) as error:
+        _assert_last_digit_baseline(comparison, case.fixture, baseline, "synthetic tape")
+    message = str(error.value)
+    fingerprint = hashlib.sha256(
+        "".join(f"{stamp}\n" for stamp in expected_different).encode("ascii")).hexdigest()
+    assert (f"measured equal={expected_equal} different={len(expected_different)} "
+            f"different_sha256={fingerprint}") in message
+    pin = baseline[case.fixture]
+    assert (f"pinned equal={pin['equal']} different={pin['different']} "
+            f"different_sha256={pin['different_sha256']}") in message
+    assert "synthetic tape" in message and case.fixture in message
+    assert ("verify the fix and empty the pin" in message) == (change == "removed")
+
+
+@pytest.mark.parametrize("case", STATE_TAPE_CHECK_CASES, ids=lambda case: case.fixture)
+def test_last_digit_baseline_self_check_requires_measurement(case: Case) -> None:
+    tape = _tape_entries(case)
+    changed = dict(tape)
+    changed[min(tape)] += _quantum(tape)
+    comparison = _compare(changed, tape)
+    with pytest.raises(AssertionError, match="native measurement has not been pinned") as error:
+        _assert_last_digit_baseline(comparison, case.fixture, {}, "synthetic tape")
+    assert case.fixture in str(error.value)
+
+
+@pytest.mark.parametrize("case", STATE_TAPE_CHECK_CASES, ids=lambda case: case.fixture)
+def test_different_fingerprint_self_check_empty(case: Case) -> None:
+    tape = _tape_entries(case)
+    comparison = _compare(dict(tape), tape)
+    assert comparison.different == ()
+    assert _different_fingerprint(comparison) == hashlib.sha256(b"").hexdigest()
+
+
+@pytest.mark.parametrize("case", STATE_TAPE_CHECK_CASES, ids=lambda case: case.fixture)
+def test_different_fingerprint_self_check_sorts_times(case: Case) -> None:
+    tape = _tape_entries(case)
+    first, second, third = sorted(tape)[:3]
+    changed = dict(tape)
+    for stamp in (first, third):
+        changed[stamp] += _quantum(tape)
+    comparison = _compare(changed, tape)
+    expected = hashlib.sha256(f"{first}\n{third}\n".encode("ascii")).hexdigest()
+    assert comparison.different == (first, third)
+    assert _different_fingerprint(comparison) == expected
+    assert _different_fingerprint(replace(comparison, different=(third, first))) == expected
+    assert _different_fingerprint(_compare(dict(reversed(changed.items())), tape)) == expected
+    changed[first] = tape[first]
+    changed[second] += _quantum(tape)
+    moved = _compare(changed, tape)
+    assert moved.different == (second, third)
+    assert _different_fingerprint(moved) == hashlib.sha256(
+        f"{second}\n{third}\n".encode("ascii")).hexdigest()
+    assert _different_fingerprint(moved) != expected
 
 
 def _tape_control(case: Case) -> tuple[dict[int, Decimal], dict[int, Decimal]]:
