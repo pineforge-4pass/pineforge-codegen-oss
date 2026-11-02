@@ -85,7 +85,7 @@ CARRIER_SOURCES = {
 }
 
 CARRIER_FAMILIES = {
-    name: "int" if name in {"reassignment", "helper_parameter"} else "double"
+    name: "int" if name == "helper_parameter" else "double"
     for name in CARRIER_SOURCES
 }
-KNOWN_CARRIER_GAPS = {"reassignment", "helper_parameter"}
+KNOWN_CARRIER_GAPS = {"helper_parameter"}

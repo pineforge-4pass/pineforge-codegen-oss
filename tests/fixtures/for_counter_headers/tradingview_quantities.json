@@ -2,6 +2,7 @@
   "provenance": "TradingView measurements, 2026-11-02. Each sha256 is the SHA-256 of that probe's TradingView export: the trades list or the reply that stops the run. Each source_sha256 identifies the measured source, not necessarily the repository fixture. The export files are not stored in the repository. For float_counter_*, first_end_read_*, int_counter_float_end and step_reads_counter_descending, fixtures preserve the measured expressions but may change strategy titles, comments and whitespace; float_counter_helper_value also places the helper body on its declaration line. The float-counter value and thirteen older iteration-count rows were measured on BINANCE:BTCUSDT 60, including seven tolerance-bracket probes at 12:22; each quantity holds on all 205 entries. The four additional large/small-step rows preserve every source byte except the strategy title; counts 3, 4, 3 and 3 are encoded as entry quantities 1.03, 1.04, 1.03 and 1.03 on all 180 exported entries. Their trade schedule is every eight bars from bar 0, with a close on the next bar. The first_end_read_start_two_down and first_end_read_start_two_up probes were measured at 11:57 on BINANCE:BTCUSDT 60; their exports have identical bytes and all 205 entries have quantity 1.1. The zero-entry probe is recorded separately because its accumulator starts at 0. The fstep_* sources are exact copies of the accepted TradingView scripts; their entry quantities encode 5, 7 and 3 loop iterations as 1 + count / 100. Their trade schedule is every eight bars from bar 0, with a close on the next bar. Compile-refusal spans use TradingView's 1-based inclusive end columns.",
   "division_provenance": "The division_start_no_step, division_start_int_step, division_named_start, division_end_only and division_counter_value fixtures copy the measured v01 through v05 scripts byte for byte. fractional_input and fractional_series copy the measured fractional-input.pine and fractional-series.pine byte for byte. All seven exports contain 205 entries. The v01 and v03 exports are the same file. The series export alternates odd n (10.5, 103 entries) and even n (12, 102 entries), starting with odd n. Each sha256 below is the supplied full TradingView export digest; the source hashes identify the copied scripts. Carrier controls derive their 10.5 oracle from fractional_input's identical loop shape; they do not claim separate TradingView tapes.",
   "fractional_consumer_provenance": "TradingView accepted descending.pine, array-index.pine and counter-string.pine on 2026-11-02 at 22:59. fractional_descending.pine, fractional_array_index.pine and counter_string.pine copy those sources byte for byte. The descending export has 205 entries of quantity 4.5. The array-index export has 205 entries of quantity 120: indices 2.5, 3.5 and 4.5 truncate to 2, 3 and 4. The counter-string export has 615 entries of quantity 1, with 205 entries for each exact id recorded below. Full export and source digests are the supplied measurement receipts. The counter_tostring known gap records current engine text separately from TradingView's 18-place ids.",
+  "reassignment_provenance": "All seven reassignment/helper fixtures copy the measured sources byte for byte. TradingView accepted every source on BINANCE:BTCUSDT 60 with default inputs. reassign_int_hint is the controlling row: an explicit int hint retains the quotient, quantity 2.5 on 205 entries, as do the plain and literal initializers. reassign_series_qty alternates 2.5 (103 entries) and 3.5 (102). reassign_untyped, reassign_typed (float hint) and helper_param each have quantity 10.5 on 205 entries and share fractional_input's supplied export digest. The helper_param source digest is computed from the copied source; export digests are supplied measurements, with no export or C++ hash recapture.",
   "ta_counter_type_receipt": {
     "receipt": "tacarriers-2302",
     "sha256": "be854854835eed60f33abe809a60e100cf978a304ba68138a332ef9d1124d1cc",
@@ -22,6 +23,12 @@
     "counter_string": 615
   },
   "entry_quantities": {
+    "reassign_int_hint": 2.5,
+    "reassign_plain_qty": 2.5,
+    "reassign_literal_qty": 2.5,
+    "reassign_untyped": 10.5,
+    "reassign_typed": 10.5,
+    "helper_param": 10.5,
     "end_reads_counter": 1,
     "end_reads_counter_other": 3,
     "step_reads_counter": 15,
@@ -72,6 +79,11 @@
     "counter_string": 1
   },
   "entry_quantity_patterns": {
+    "reassign_series_qty": {
+      "quantities": [2.5, 3.5],
+      "counts": [103, 102],
+      "order": "Alternating n = 5, n = 7, starting with n = 5"
+    },
     "fractional_series": {
       "quantities": [10.5, 12],
       "counts": [103, 102],
@@ -119,6 +131,12 @@
     }
   },
   "known_gaps": {
+    "helper_parameter_fraction": {
+      "probe": "helper_param",
+      "reason": "The source value query has no call-argument environment for an untyped parameter. The default-step helper counter stays int and loses the quotient before summation.",
+      "current_entry_quantity": 9,
+      "tradingview_entry_quantity": 10.5
+    },
     "untyped_parameter_start": "For f(x) containing for v = x to 1.0 by 0.25, TradingView refuses f(0) with CE10106 (helper_int_argument_float_step) and accepts f(0.0). PineForge accepts and runs both with a float counter because this inference cannot distinguish their call-argument types; refusing the unknown start would also refuse the valid float-argument call.",
     "counter_tostring": {
       "probe": "counter_string",
@@ -139,6 +157,13 @@
   "runtime_error_bar": 0,
   "runtime_error_trade_count": 0,
   "evidence": {
+    "reassign_int_hint": {"source": "reassign_int_hint.pine", "measured_source": "reassign_int_hint.pine", "sha256": "7c4c77e0830bfa3464171ec5562fc4724619a76d8275157a21b517431ce9f7dd", "source_sha256": "c9d7ebf0744337d9a9b6097f394b35dede11a08e7ff60c3cd261c6094e615ac6"},
+    "reassign_plain_qty": {"source": "reassign_plain_qty.pine", "measured_source": "reassign_plain_qty.pine", "sha256": "7c4c77e0830bfa3464171ec5562fc4724619a76d8275157a21b517431ce9f7dd", "source_sha256": "907d5827b99cc2279c2afe7f6e83283f2ff39592443595d02f12216cc81d333c"},
+    "reassign_literal_qty": {"source": "reassign_literal_qty.pine", "measured_source": "reassign_literal_qty.pine", "sha256": "7c4c77e0830bfa3464171ec5562fc4724619a76d8275157a21b517431ce9f7dd", "source_sha256": "95f293b390973e38f38665adbe3ae946112ab4b7f413a17579d40bb34d790b9e"},
+    "reassign_series_qty": {"source": "reassign_series_qty.pine", "measured_source": "reassign_series_qty.pine", "sha256": "8b2923a9096d7b7d2a941c0f6bcb54a11e04a96714606dca91352d87b5b996dc", "source_sha256": "0ba66e2669200eed53015f3f9a8f5e7baf3cefa6ecc12e2caa1d82835635a565"},
+    "reassign_untyped": {"source": "reassign_untyped.pine", "measured_source": "reassign_untyped.pine", "sha256": "3aa0f43925521663a43f0421f5f4d8d0cee5f2925eeb09d0d22078c2d75aaa62", "source_sha256": "21896d14a3b77e0b889d804a4287b34422678aab64db2015d8ec5e35782c9ab1"},
+    "reassign_typed": {"source": "reassign_typed.pine", "measured_source": "reassign_typed.pine", "sha256": "3aa0f43925521663a43f0421f5f4d8d0cee5f2925eeb09d0d22078c2d75aaa62", "source_sha256": "1dfba9ed13151c4446d50dc871044df5c904e4f99a650de91155cb7ef2722e2c"},
+    "helper_param": {"source": "helper_param.pine", "measured_source": "helper_param.pine", "sha256": "3aa0f43925521663a43f0421f5f4d8d0cee5f2925eeb09d0d22078c2d75aaa62", "source_sha256": "ffa8cd5728b85a0c53b10d2b4131cc74cf40fa625d9e675b7716ca3259d0aead"},
     "end_reads_counter": {"sha256": "e84496c2adc3436a4dd5d64496b684eea53b2daaa097ec550f5cb21459deb35b", "source_sha256": "6e7c9ac5494f2e85a31efcb856358ef0133cbf149d4b93447cb15ee9ee1ed522"},
     "end_reads_counter_other": {"sha256": "7d393ff77e70190a9bea3317c4ee9fc02152af0499f3bdabd39561d7e6e2f7e0", "source_sha256": "8149b6a265232fb359219a2124b1ae9a98e9f861df9f5282f5da4d0c1de3ee1f"},
     "step_reads_counter": {"sha256": "535bcd7cc99c8146a45e46ad9d0aff6da7c740cc58a4f57eecdf1d2c10d3856e", "source_sha256": "b61b4c7933e515491fdb16425c99ae51b944078eab5175b4087c6c3a7efdb323"},
