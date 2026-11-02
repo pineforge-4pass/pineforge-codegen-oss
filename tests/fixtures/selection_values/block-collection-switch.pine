@@ -1,0 +1,14 @@
+//@version=6
+strategy("Collection block switch", currency = currency.NONE, initial_capital = 1000000)
+// Derived: nested selection assigns an array ID; reading its element yields 1/2/3.
+values = switch bar_index % 3
+    0 =>
+        switch bar_index % 2
+            0 => array.from(1.0)
+            => array.from(2.0)
+    => array.from(3.0)
+plot(array.get(values, 0), "selected")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

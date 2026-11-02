@@ -1,0 +1,11 @@
+//@version=6
+strategy("Literal field default", currency = currency.NONE, initial_capital = 1000000)
+// Derived: NumberLiteral is handled by scalar dispatch; omitted field default is always 1.
+type Sample
+    float value = 1.0
+sample = Sample.new()
+plot(sample.value, "selected")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

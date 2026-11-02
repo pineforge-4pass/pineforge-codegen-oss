@@ -7,8 +7,8 @@ population script with the shape). It now lowers to the ternary chain of its
 arms: the requested bar computes the arm the selector takes, and no other.
 TradingView's tape of ``xa_switch_helper`` (``fixtures/xsym_tv``) spells the
 60-minute RSI and its SMA on every close; under the override ``MA = EMA`` the
-probe trades like its literal twin. A switch with a multi-statement arm is
-refused by name.
+probe trades like its literal twin. Pure arm locals substitute into the
+selected value; stateful calls in substituted initializers remain refused.
 """
 
 from __future__ import annotations
@@ -47,10 +47,13 @@ def test_switch_local_in_helper_replays_tradingview_tape(tmp_path_factory):
     assert {t["exit_time"]: t["exit_comment"] for t in overridden} == exits["ema"]
 
 
-def test_switch_with_a_block_arm_is_refused():
+def test_switch_with_stateful_arm_initializer_is_refused():
     src = source("xa_switch_helper", XSYM_TV).replace(
         '"EMA" => ta.ema(r, 5)', '"EMA" =>\n            e = ta.ema(r, 5)\n            e')
     with pytest.raises(CompileError) as err:
         transpile(src)
-    assert [d.message for d in err.value.diagnostics] == [
-        "request.security helper switch arms must each be one expression"]
+    # A TA initializer has a per-bar state update, so let duplication is unsafe.
+    assert len(err.value.diagnostics) == 1
+    assert err.value.diagnostics[0].code == "PF-E3078"
+    assert "call without purity proof ta.ema" in err.value.diagnostics[0].message
+    assert err.value.diagnostics[0].location.line > 0

@@ -312,9 +312,9 @@ plot(x)
 def test_shadowed_numeric_builtin_does_not_take_finite_choice_route(
     shadowed: str,
 ) -> None:
-    # The existing stable-length path happens to accept this authored-invalid
-    # comparator.  This pass must decline it; fixing general annotation/type
-    # enforcement is deliberately outside the Wellman lowering.
+    # The comparator is authored-invalid (bool against int).  The operator
+    # typing relation now refuses it at the comparison, so the finite-choice
+    # route is never reached; before it, this pass had to decline it.
     src = f"""//@version=6
 strategy("finite choice builtin shadow")
 a = input.int(2, "A", minval=1)
@@ -325,8 +325,8 @@ x = ta.lowest(low, n)
 plot(x)
 """
 
-    cpp = transpile(src)
-    assert "pf_ta_length_choice" not in cpp
+    with pytest.raises(CompileError, match="cannot combine bool and int"):
+        transpile(src)
 
 
 @pytest.mark.parametrize("qualifier", ["var", "varip"])

@@ -1,0 +1,15 @@
+//@version=6
+strategy("If loop end", currency = currency.NONE, initial_capital = 1000000)
+// Boundary probe: dedented by can complete a header after an if-valued end.
+value = 0.0
+for i = 0 to if true
+    1
+else
+    2
+by 1
+    value += 1.0
+plot(value, "selected")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

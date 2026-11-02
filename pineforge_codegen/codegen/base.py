@@ -549,6 +549,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # string local read with history) live in their own map; the member
         # is declared when a payload's helper holds one.
         self._security_string_series_declared: bool = False
+        self._security_persistent_helper_series: set[str] = set()
         self._security_string_series: set[str] = set()
         # Color var state shares the numeric double map, but reads retain the
         # ordinary packed-ARGB int64_t type (including its na sentinel).
@@ -1268,6 +1269,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "symbol_node": item.get("symbol_node"),
                 "ignore_invalid_node": item.get("ignore_invalid_node"),
             })
+        self._security_selection_local_members = self._security_selection_local_member_names()
+        self._global_member_vars.difference_update(self._security_selection_local_members)
         self._register_global_aggregate_member_types()
         self._uses_map = self._detect_map_usage()
         self._uses_matrix = self._detect_matrix_usage()
@@ -5759,6 +5762,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         #     (so user-defined functions can reference them)
         seen_global = set()
         for name, ptype in self.ctx.global_var_decls:
+            if name in self._security_selection_local_members:
+                continue
             exact_scalar_override = (
                 name in self._qualified_func_var_raw_names
                 and name in self._ordinary_global_binding_names

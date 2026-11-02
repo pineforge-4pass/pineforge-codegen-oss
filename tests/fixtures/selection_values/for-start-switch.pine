@@ -1,0 +1,14 @@
+//@version=6
+strategy("Compound loop start", currency = currency.NONE, initial_capital = 1000000)
+// Boundary probe: a dedented to token can complete a header after a switch-valued start.
+value = 0.0
+for i = switch 0
+    0 => 0
+    => 1
+to 1
+    value += 1.0
+plot(value, "selected")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

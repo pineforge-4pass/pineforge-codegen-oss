@@ -1,0 +1,22 @@
+[
+  {
+    "name": "close",
+    "source": "//@version=6\nstrategy(\"F1 parity probe\", pyramiding = 0, calc_on_every_tick = false, calc_on_order_fills = false, process_orders_on_close = false, default_qty_type = strategy.fixed, default_qty_value = 1, initial_capital = 1000000)\nbool f1_bool = \"a\" == 1\nfloat f1_leaf_715 = f1_bool ? close : -1.0\nfloat f1_signal_715 = float(f1_leaf_715) + (0.11)\nfloat f1_qty_715 = 1.0 + math.abs(nz(f1_signal_715, -0.75)) % 7.0\nvar string f1_active_715 = \"\"\nvar string f1_value_715 = \"\"\nif bar_index % 20 == 5 and strategy.position_size == 0\n    f1_value_715 := str.tostring(f1_signal_715)\n    f1_active_715 := \"f1-\" + f1_value_715\n    strategy.entry(f1_active_715, strategy.long, qty = f1_qty_715)\nif bar_index % 20 == 15 and strategy.position_size != 0\n    strategy.close(f1_active_715, comment = f1_value_715)\n"
+  },
+  {
+    "name": "high",
+    "source": "//@version=6\nstrategy(\"F1 parity probe\", pyramiding = 0, calc_on_every_tick = false, calc_on_order_fills = false, process_orders_on_close = false, default_qty_type = strategy.fixed, default_qty_value = 1, initial_capital = 1000000)\nbool f1_bool = \"a\" == 1\nfloat f1_leaf_717 = f1_bool ? high : -1.0\nfloat f1_signal_717 = float(f1_leaf_717) + (0.33)\nfloat f1_qty_717 = 1.0 + math.abs(nz(f1_signal_717, -0.75)) % 7.0\nvar string f1_active_717 = \"\"\nvar string f1_value_717 = \"\"\nif bar_index % 20 == 5 and strategy.position_size == 0\n    f1_value_717 := str.tostring(f1_signal_717)\n    f1_active_717 := \"f1-\" + f1_value_717\n    strategy.entry(f1_active_717, strategy.long, qty = f1_qty_717)\nif bar_index % 20 == 15 and strategy.position_size != 0\n    strategy.close(f1_active_717, comment = f1_value_717)\n"
+  },
+  {
+    "name": "hl2",
+    "source": "//@version=6\nstrategy(\"F1 parity probe\", pyramiding = 0, calc_on_every_tick = false, calc_on_order_fills = false, process_orders_on_close = false, default_qty_type = strategy.fixed, default_qty_value = 1, initial_capital = 1000000)\nbool f1_bool = \"a\" == 1\nfloat f1_leaf_719 = f1_bool ? hl2 : -1.0\nfloat f1_signal_719 = float(f1_leaf_719) + (0.55)\nfloat f1_qty_719 = 1.0 + math.abs(nz(f1_signal_719, -0.75)) % 7.0\nvar string f1_active_719 = \"\"\nvar string f1_value_719 = \"\"\nif bar_index % 20 == 5 and strategy.position_size == 0\n    f1_value_719 := str.tostring(f1_signal_719)\n    f1_active_719 := \"f1-\" + f1_value_719\n    strategy.entry(f1_active_719, strategy.long, qty = f1_qty_719)\nif bar_index % 20 == 15 and strategy.position_size != 0\n    strategy.close(f1_active_719, comment = f1_value_719)\n"
+  },
+  {
+    "name": "low",
+    "source": "//@version=6\nstrategy(\"F1 parity probe\", pyramiding = 0, calc_on_every_tick = false, calc_on_order_fills = false, process_orders_on_close = false, default_qty_type = strategy.fixed, default_qty_value = 1, initial_capital = 1000000)\nbool f1_bool = \"a\" == 1\nfloat f1_leaf_718 = f1_bool ? low : -1.0\nfloat f1_signal_718 = float(f1_leaf_718) + (0.44)\nfloat f1_qty_718 = 1.0 + math.abs(nz(f1_signal_718, -0.75)) % 7.0\nvar string f1_active_718 = \"\"\nvar string f1_value_718 = \"\"\nif bar_index % 20 == 5 and strategy.position_size == 0\n    f1_value_718 := str.tostring(f1_signal_718)\n    f1_active_718 := \"f1-\" + f1_value_718\n    strategy.entry(f1_active_718, strategy.long, qty = f1_qty_718)\nif bar_index % 20 == 15 and strategy.position_size != 0\n    strategy.close(f1_active_718, comment = f1_value_718)\n"
+  },
+  {
+    "name": "open",
+    "source": "//@version=6\nstrategy(\"F1 parity probe\", pyramiding = 0, calc_on_every_tick = false, calc_on_order_fills = false, process_orders_on_close = false, default_qty_type = strategy.fixed, default_qty_value = 1, initial_capital = 1000000)\nbool f1_bool = \"a\" == 1\nfloat f1_leaf_716 = f1_bool ? open : -1.0\nfloat f1_signal_716 = float(f1_leaf_716) + (0.22)\nfloat f1_qty_716 = 1.0 + math.abs(nz(f1_signal_716, -0.75)) % 7.0\nvar string f1_active_716 = \"\"\nvar string f1_value_716 = \"\"\nif bar_index % 20 == 5 and strategy.position_size == 0\n    f1_value_716 := str.tostring(f1_signal_716)\n    f1_active_716 := \"f1-\" + f1_value_716\n    strategy.entry(f1_active_716, strategy.long, qty = f1_qty_716)\nif bar_index % 20 == 15 and strategy.position_size != 0\n    strategy.close(f1_active_716, comment = f1_value_716)\n"
+  }
+]

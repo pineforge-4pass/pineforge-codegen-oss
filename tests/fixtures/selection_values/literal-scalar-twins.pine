@@ -1,0 +1,18 @@
+//@version=6
+strategy("Scalar selection references", currency = currency.NONE, initial_capital = 1000000)
+// Derived: direct ternaries encode the block probes without passing statement nodes to scalar dispatch.
+n = bar_index
+caseValue = n % 3 == 0 ? (n % 2 == 0 ? 1.0 : 2.0) : 3.0
+defaultValue = n % 3 == 0 ? 1.0 : n % 3 == 1 ? 2.0 : n % 2 == 0 ? 3.0 : 4.0
+deepValue = n % 3 != 0 ? 4.0 : n % 2 != 0 ? 3.0 : n % 5 == 0 ? 1.0 : 2.0
+x = (n % 2 == 0 ? 1.0 : -1.0) * close
+y = x + 0.125
+commaValue = x >= 0 ? (y > 0 ? y + 1.0 : -y + 0.5) : -x
+plot(caseValue, "case")
+plot(defaultValue, "default")
+plot(deepValue, "deep")
+plot(commaValue, "comma")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

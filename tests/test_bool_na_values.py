@@ -379,10 +379,10 @@ if bar_index % 20 == 15
             HEADER + "type Box\n    bool flag = na\nb = Box.new()\nplot(b.flag ? 1 : 0)\n",
             id="bool-field-default",
         ),
-        # A bare na condition keeps its existing numeric truth conversion.
+        # Explicit bool conversion supplies a valid Pine v6 condition.
         pytest.param(
-            HEADER + "x = na ? 1 : 0\nplot(x)\n",
-            id="bare-na-condition",
+            HEADER + "x = bool(na) ? 1 : 0\nplot(x)\n",
+            id="converted-na-condition",
         ),
     ],
 )

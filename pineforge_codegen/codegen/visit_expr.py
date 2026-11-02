@@ -89,7 +89,7 @@ from __future__ import annotations
 
 from .run_stops import request_stop
 
-from ..errors import Phase
+from ..errors import CodegenInvariantError, Phase
 from ..symbols import TypeSpec
 from ..external_requests import UNPINNED_ANNOTATION
 from ..ast_nodes import (
@@ -98,17 +98,24 @@ from ..ast_nodes import (
     BinOp,
     BoolLiteral,
     ColorLiteral,
+    ExprStmt,
+    ForInStmt,
+    ForStmt,
     FuncCall,
     Identifier,
+    IfStmt,
     MemberAccess,
     NaLiteral,
     NumberLiteral,
     StrategyDecl,
     StringLiteral,
     Subscript,
+    SwitchStmt,
     Ternary,
     TupleLiteral,
     UnaryOp,
+    VarDecl,
+    WhileStmt,
 )
 from .strategy_declaration import DECLARATION_CONSTANTS, NamedConstant
 from .helpers import pine_index_int_cast, unary_sign_cpp
@@ -255,7 +262,7 @@ class ExprVisitor:
 
     def _visit_expr(self, node: ASTNode | None) -> str:
         if node is None:
-            return "/* null */"
+            raise CodegenInvariantError(node)
         if self._budget is not None:
             self._budget_visit_count += 1
             if self._budget_visit_count % 128 == 0:
@@ -307,7 +314,87 @@ class ExprVisitor:
                 )
             elems = ", ".join(elems)
             return f"std::make_tuple({elems})"
-        return "/* unknown */"
+        if isinstance(node, (IfStmt, SwitchStmt)):
+            return self._selection_value_expr(node)
+        raise CodegenInvariantError(node)
+
+    def _selection_value_expr(self, node: IfStmt | SwitchStmt) -> str:
+        """Materialize an admitted block value with the typed statement emitter.
+
+        The lambda preserves branch laziness and evaluates a switch selector
+        once. Its target supplies the same typed missing value as a declaration.
+        """
+        cpp_type, initial = self._selection_expression_slot(node)
+        target = f"__selection_value_{self._switch_counter}"
+        self._switch_counter += 1
+        lines = [
+            f"([&]() -> {cpp_type} {{",
+            f"    {cpp_type} {target} = {initial};",
+        ]
+        frame = self._security_fallback_frame
+        saved_args = None
+        if getattr(self, "_security_selection_context", None) is not None and frame is not None:
+            # An inlined helper's statements must sit inside this lambda.
+            saved_args = frame["args"]
+            frame["args"] = saved_args[:6] + (lines,)
+        try:
+            self._visit_selection_value(
+                node, target, lines, 1,
+                target_cpp_type=cpp_type, slot_cpp_type=cpp_type,
+            )
+        finally:
+            if saved_args is not None:
+                frame["args"] = saved_args
+        lines.extend((f"    return {target};", "}())"))
+        return "\n".join(lines)
+
+    def _selection_expression_slot(self, node) -> tuple[str, str]:
+        """The actual result type and missing value of a materialized block."""
+        pending = [node]
+        types = []
+        while pending:
+            value = pending.pop()
+            if value is None or self._selection_node_is_na(value):
+                continue
+            if isinstance(value, IfStmt):
+                pending.extend(self._selection_terminal_expr(body)
+                               for body in (value.body, value.else_body))
+                continue
+            if isinstance(value, SwitchStmt):
+                pending.extend(self._selection_terminal_expr(body)
+                               for _, body in value.cases)
+                pending.append(self._selection_terminal_expr(value.default_body))
+                continue
+            if isinstance(value, (ForStmt, ForInStmt, WhileStmt)):
+                pending.append(self._selection_terminal_expr(value.body))
+                continue
+            if isinstance(value, TupleLiteral):
+                elements = self._infer_selection_tuple_types(node, len(value.elements))
+                return (f"std::tuple<{', '.join(elements)}>",
+                        self._tuple_default_expr(elements))
+            if isinstance(value, FuncCall) and isinstance(value.callee, Identifier):
+                info = self._func_info_map.get(value.callee.name)
+                if info is not None and info.returns_tuple:
+                    elements = self._infer_selection_tuple_types(
+                        node, info.tuple_element_count,
+                    )
+                    return (f"std::tuple<{', '.join(elements)}>",
+                            self._tuple_default_expr(elements))
+            spec = self._type_spec_from_expr(value)
+            types.append(self._type_spec_to_cpp(spec)
+                         if spec is not None and spec.kind != "primitive"
+                         else self._tail_value_cpp_type(
+                             value if isinstance(value, (Assignment, VarDecl))
+                             else ExprStmt(expr=value))
+                         or self._infer_type(value))
+        if types and set(types) <= {"int", "int64_t", "double"}:
+            cpp_type = ("double" if "double" in types else
+                        "int64_t" if "int64_t" in types else "int")
+        else:
+            cpp_type = types[0] if types else self._infer_type(node)
+        initial = (self._na_value_for_type(cpp_type)
+                   if cpp_type in self._UNMATCHED_NA_SLOTS else f"{cpp_type}{{}}")
+        return cpp_type, initial
 
     # A ``?:`` chain continued in its false arms (``a ? x : b ? y : z``) of at
     # least this many links is emitted without the per-link brackets: they add
