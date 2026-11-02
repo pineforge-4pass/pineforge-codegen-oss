@@ -1,0 +1,10 @@
+//@version=6
+strategy("Int start, float end, int step", initial_capital = 1000000, currency = currency.NONE)
+float acc = 0.0
+for i = 0 to 4.0 by 1
+    acc := acc + i + 1
+// TradingView keeps an int counter with a float end bound and an int step.
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = acc)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

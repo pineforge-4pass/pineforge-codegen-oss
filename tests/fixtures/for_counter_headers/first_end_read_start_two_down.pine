@@ -1,0 +1,10 @@
+//@version=6
+strategy("First end read with a descending direction", initial_capital = 1000000, currency = currency.NONE)
+float acc = 1.1
+for i = 2 to (i == 2 ? 3 : 1)
+    acc := acc + i + 1
+// TradingView measurement: quantity 1.1, so the loop runs zero iterations.
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = acc)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

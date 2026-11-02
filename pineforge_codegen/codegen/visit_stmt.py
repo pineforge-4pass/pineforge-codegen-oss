@@ -73,6 +73,8 @@ classes from ``..ast_nodes``.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from ..errors import Phase
 from ..ast_nodes import (
     ASTNode,
@@ -1735,7 +1737,11 @@ class StmtVisitor:
 
     def _visit_for(self, node: ForStmt, lines: list[str], indent: int,
                    value_target: tuple[str, str | None] | None = None) -> None:
+        if self._for_header_reads_new_counter(node):
+            self._visit_counter_bound_for(node, lines, indent, value_target)
+            return
         pad = "    " * indent
+        counter_cpp_type = self._for_counter_cpp_type(node.start, step=node.step)
         start = self._visit_expr(node.start)
         end = self._visit_expr(node.end)
         step = self._visit_expr(node.step) if node.step is not None else "1"
@@ -1756,40 +1762,26 @@ class StmtVisitor:
         e_var = f"_for_end_{fid}"
         step_var = f"_for_step_{fid}"
         down_var = f"_for_down_{fid}"
-        end_mentions_binder = bool(
-            node.var
-            and any(
-                isinstance(part, Identifier) and part.name == node.var
-                for part in self._walk_ast(node.end)
-            )
-        )
-        end_eval = f"_for_end_eval_{fid}" if end_mentions_binder else None
-        # ``from``/``to``/``by`` land in ``int`` slots. A double-valued bound
-        # (an array size, an na-able expression, ...) narrows there, which is
-        # undefined for na — so spell the conversion out. A bound that IS na
-        # then reads as na<int>() (INT_MIN), and the loop must run zero times
-        # rather than descend two billion steps toward it, so the guarded form
-        # also tests the bounds. Loops whose bounds were already integral emit
-        # exactly as before.
-        start_cpp = self._coerce_int_slot(f"({start})", node.start, "int")
-        end_cpp = self._coerce_int_slot(f"({end})", node.end, "int")
-        step_cpp = self._coerce_int_slot(f"({step})", node.step, "int")
+        # The dedicated counter query selects every header slot. Float counters
+        # keep their raw step; integer counters retain the existing na-safe narrowing.
+        if counter_cpp_type == "double":
+            start_cpp = self._coerce_double_slot(f"({start})", node.start)
+            end_cpp = self._coerce_double_slot(f"({end})", node.end)
+            step_cpp = self._coerce_double_slot(f"({step})", node.step)
+        else:
+            start_cpp = self._coerce_int_slot(f"({start})", node.start, "int")
+            end_cpp = self._coerce_int_slot(f"({end})", node.end, "int")
+            step_cpp = self._coerce_int_slot(f"({step})", node.step, "int")
         na_capable = (
-            start_cpp != f"({start})"
+            counter_cpp_type == "double"
+            or start_cpp != f"({start})"
             or end_cpp != f"({end})"
             or step_cpp != f"({step})"
         )
-        if end_eval is not None:
-            # The ``to`` expression is authored outside the loop-binder scope,
-            # but its refresh executes inside the generated C++ ``for`` where
-            # the binder would shadow a same-named outer member/parameter. A
-            # pre-binder lambda preserves the authored lexical binding while
-            # still reevaluating the expression after every iteration.
-            lines.append(f"{pad}auto {end_eval} = [&]() {{ return {end_cpp}; }};")
-        lines.append(f"{pad}int {s_var} = {start_cpp};")
-        end_expr = f"{end_eval}()" if end_eval is not None else end_cpp
-        lines.append(f"{pad}int {e_var} = {end_expr};")
-        lines.append(f"{pad}int {step_var} = {step_cpp};")
+        lines.append(f"{pad}{counter_cpp_type} {s_var} = {start_cpp};")
+        lines.append(f"{pad}{counter_cpp_type} {e_var} = {end_cpp};")
+        lines.append(f"{pad}{counter_cpp_type} {step_var} = {step_cpp};")
+        self._emit_for_step_stop(node, step_var, lines, indent)
         if na_capable:
             # ``-na<int>()`` would overflow; leave an na step alone and let the
             # loop condition reject it.
@@ -1807,9 +1799,9 @@ class StmtVisitor:
         )
         # Pine v6 evaluates ``to`` before every iteration; v5 (a v5 library's
         # body) fixes it before the first one.
-        refresh = "" if self._pine_v5_body else f", {e_var} = {end_expr}"
+        refresh = "" if self._pine_v5_body else f", {e_var} = {end_cpp}"
         lines.append(
-            f"{pad}for (int {var} = {s_var}; "
+            f"{pad}for ({counter_cpp_type} {var} = {s_var}; "
             f"{na_guard}"
             f"({down_var} ? ({var} >= {e_var}) : ({var} <= {e_var})); "
             f"{var} += ({down_var} ? -{step_var} : {step_var})"
@@ -1818,11 +1810,180 @@ class StmtVisitor:
         self._emit_counted_loop_body(node, lines, indent + 1, value_target)
         lines.append(f"{pad}}}")
 
+    def _for_header_reads_new_counter(self, node: ForStmt) -> bool:
+        """The loop's own counter wins in end/step, including over outer names."""
+        return any(
+            self._for_expr_reads_new_counter(node, expression)
+            for expression in (node.end, node.step)
+        )
+
+    def _for_expr_reads_new_counter(self, node: ForStmt, expression) -> bool:
+        """Find reads resolved to this counter, including helper arguments."""
+        binding = (id(node), node.var)
+        return bool(node.var) and any(
+            isinstance(part, Identifier)
+            and self.ctx.identifier_decl_bindings.get(id(part)) == binding
+            for part in self._walk_ast(expression)
+        )
+
+    def _emit_for_step_stop(
+        self, node: ForStmt, step_var: str, lines: list[str], indent: int,
+        *, pine_v5: bool | None = None,
+    ) -> None:
+        """Use the runtime.error stop path for v6's RE10021."""
+        if pine_v5 is None:
+            pine_v5 = self._pine_v5_body
+        if node.step is not None and not pine_v5:
+            pad = "    " * indent
+            lines.append(
+                f"{pad}if (!is_na({step_var}) && {step_var} <= 0) "
+                """pine_runtime_error("'step' in loop must be greater than zero");"""
+            )
+
+    def _visit_counter_bound_for(
+        self, node: ForStmt, lines: list[str], indent: int,
+        value_target: tuple[str, str | None] | None = None,
+    ) -> None:
+        """Render chart expressions around the shared counter-bound loop."""
+        counter_cpp_type = self._for_counter_cpp_type(node.start, step=node.step)
+        start = self._visit_expr(node.start)
+        start_cpp = (
+            self._coerce_double_slot(f"({start})", node.start)
+            if counter_cpp_type == "double"
+            else self._coerce_int_slot(f"({start})", node.start, "int")
+        )
+        fid = self._for_counter
+        self._for_counter += 1
+        names = tuple(f"_for_{part}_{fid}" for part in ("start", "end", "step", "down"))
+        with self._counter_bound_binding(node, counter_cpp_type):
+            self._emit_counter_bound_loop(
+                node, lines, indent, start=start, var=self._safe_name(node.var),
+                start_cpp=start_cpp, names=names, render=self._visit_expr,
+                counter_cpp_type=counter_cpp_type,
+                emit_body=lambda body_indent: self._emit_loop_body(
+                    node.body, lines, body_indent, value_target,
+                ),
+            )
+
+    def _emit_counter_bound_loop(
+        self, node: ForStmt, lines: list[str], indent: int, *,
+        start: str, start_cpp: str, var: str, names: tuple[str, str, str, str],
+        counter_cpp_type: str, render, emit_body,
+        guard_na: bool = False, pine_v5: bool | None = None,
+    ) -> None:
+        """Shared chart/security lowering; callers supply lexical renderers.
+
+        ``start`` has already been rendered outside the counter's binding.
+        Header expressions and the body are rendered with that binding active.
+        """
+        if pine_v5 is None:
+            pine_v5 = self._pine_v5_body
+        s_var, e_var, step_var, down_var = names
+        pad = "    " * indent
+        inner = "    " * (indent + 1)
+        lines.append(f"{pad}{{")
+        lines.append(f"{inner}{counter_cpp_type} {s_var} = {start_cpp};")
+        # TradingView measures the v6 step and direction's end at counter 0,
+        # then re-reads a counter-dependent end at the start before testing.
+        initial_counter = s_var if pine_v5 else "0"
+        lines.append(f"{inner}{counter_cpp_type} {var} = {initial_counter};")
+        end = render(node.end)
+        step = render(node.step) if node.step is not None else "1"
+        if counter_cpp_type == "double":
+            end_cpp = self._coerce_double_slot(f"({end})", node.end)
+            step_cpp = self._coerce_double_slot(f"({step})", node.step)
+        else:
+            end_cpp = self._coerce_int_slot(f"({end})", node.end, "int")
+            step_cpp = self._coerce_int_slot(f"({step})", node.step, "int")
+        na_capable = (
+            guard_na
+            or counter_cpp_type == "double"
+            or start_cpp != f"({start})"
+            or end_cpp != f"({end})"
+            or step_cpp != f"({step})"
+        )
+        lines.append(f"{inner}{counter_cpp_type} {e_var} = {end_cpp};")
+        lines.append(f"{inner}{counter_cpp_type} {step_var} = {step_cpp};")
+        self._emit_for_step_stop(node, step_var, lines, indent + 1, pine_v5=pine_v5)
+        if na_capable:
+            lines.append(
+                f"{inner}if (!is_na({step_var}) && {step_var} < 0)"
+                f" {step_var} = -{step_var};"
+            )
+        else:
+            lines.append(f"{inner}if ({step_var} < 0) {step_var} = -{step_var};")
+        lines.append(f"{inner}if ({step_var} == 0) {step_var} = 1;")
+        lines.append(f"{inner}const bool {down_var} = ({s_var} > {e_var});")
+        if not pine_v5:
+            lines.append(f"{inner}{var} = {s_var};")
+            if self._for_expr_reads_new_counter(node, node.end):
+                lines.append(f"{inner}{e_var} = {end_cpp};")
+        na_guard = (
+            f"!is_na({s_var}) && !is_na({e_var}) && !is_na({step_var}) && "
+            if na_capable else ""
+        )
+        # A continue advances the counter and refreshes the end; break does
+        # neither. Initial direction and the once-read step stay fixed.
+        refresh = "" if pine_v5 else f", {e_var} = {end_cpp}"
+        lines.append(
+            f"{inner}for (; {na_guard}"
+            f"({down_var} ? ({var} >= {e_var}) : ({var} <= {e_var})); "
+            f"{var} += ({down_var} ? -{step_var} : {step_var})"
+            f"{refresh}) {{"
+        )
+        emit_body(indent + 2)
+        lines.append(f"{inner}}}")
+        lines.append(f"{pad}}}")
+
+    @contextmanager
+    def _counter_bound_binding(self, node: ForStmt, counter_cpp_type: str):
+        """Shadow outer storage and parameter representations in the header."""
+        safe = self._safe_name(node.var)
+        saved_remap = self._active_var_remap
+        saved_series = self._current_func_series_params
+        mappings = (
+            "_current_func_param_types", "_current_func_param_specs",
+            "_current_func_series_param_types", "_current_func_local_types",
+        )
+        saved = {name: getattr(self, name) for name in mappings}
+        self._active_var_remap = {
+            key: value for key, value in saved_remap.items() if key != safe
+        }
+        self._current_func_series_params = saved_series - {node.var}
+        for name, mapping in saved.items():
+            setattr(self, name, {
+                key: value for key, value in mapping.items() if key != node.var
+            })
+        try:
+            with self._counted_loop_binding(node, counter_cpp_type):
+                yield
+        finally:
+            self._active_var_remap = saved_remap
+            self._current_func_series_params = saved_series
+            for name, mapping in saved.items():
+                setattr(self, name, mapping)
+
     def _emit_counted_loop_body(
         self, node: ForStmt, lines: list[str], indent: int,
         value_target: tuple[str, str | None] | None = None,
     ) -> None:
         """Emit a counted loop's body with its lexical counter binding."""
+        counter_cpp_type = self._for_counter_cpp_type(node.start, step=node.step)
+        binding = (
+            self._counter_bound_binding(node, counter_cpp_type)
+            if counter_cpp_type == "double"
+            else self._counted_loop_binding(node, counter_cpp_type)
+        )
+        with binding:
+            self._emit_loop_body(node.body, lines, indent, value_target)
+
+    @contextmanager
+    def _counted_loop_binding(
+        self, node: ForStmt, counter_cpp_type: str | None = None,
+    ):
+        """The same primitive counter scope for header reads and the body."""
+        if counter_cpp_type is None:
+            counter_cpp_type = self._for_counter_cpp_type(node.start, step=node.step)
         # Register the loop counter so reads of it inside the body resolve (the
         # unknown-identifier guard in _visit_ident would otherwise flag it).
         saved_loop = self._current_loop_vars
@@ -1833,7 +1994,9 @@ class StmtVisitor:
         self._current_counted_loop_vars = set(self._current_counted_loop_vars)
         if node.var:
             self._current_loop_vars.add(node.var)
-            self._current_loop_var_specs[node.var] = TypeSpec.primitive("int")
+            self._current_loop_var_specs[node.var] = TypeSpec.primitive(
+                "float" if counter_cpp_type == "double" else "int",
+            )
             self._current_counted_loop_vars.add(node.var)
         _blk_saved = self._push_block_var_remap(node)
         if node.var:
@@ -1844,12 +2007,12 @@ class StmtVisitor:
             self._lexical_series_bindings[node.var] = False
             self._lexical_known_var_tombstones.add(node.var)
         try:
-            self._emit_loop_body(node.body, lines, indent, value_target)
+            yield
         finally:
             self._pop_block_var_remap(_blk_saved)
-        self._current_loop_vars = saved_loop
-        self._current_loop_var_specs = saved_loop_specs
-        self._current_counted_loop_vars = saved_counted
+            self._current_loop_vars = saved_loop
+            self._current_loop_var_specs = saved_loop_specs
+            self._current_counted_loop_vars = saved_counted
 
     def _emit_closed_trade_fold(
         self, node: ForStmt, plan, lines: list[str], indent: int, var: str,

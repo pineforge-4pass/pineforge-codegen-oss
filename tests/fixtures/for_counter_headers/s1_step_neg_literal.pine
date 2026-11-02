@@ -1,0 +1,10 @@
+//@version=6
+strategy("Loop negative literal step", initial_capital = 1000000, currency = currency.NONE)
+float acc = 0.0
+for i = 5 to 1 by -2
+    acc := acc + i
+// 9 if the loop counts down 5, 3, 1; no trades if TradingView stops the run
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = acc)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

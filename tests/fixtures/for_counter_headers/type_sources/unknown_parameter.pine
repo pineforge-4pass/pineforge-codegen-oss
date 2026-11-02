@@ -1,0 +1,9 @@
+//@version=6
+strategy("Counter source type", currency=currency.NONE)
+measure(first) =>
+    float subtotal = 0.0
+    for walkIndex = first to 1.0 by 0.25
+        subtotal += 1.0
+    subtotal
+acc = measure(0.0)
+plot(acc)

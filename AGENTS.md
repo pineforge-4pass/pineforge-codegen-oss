@@ -136,6 +136,10 @@ pineforge_codegen/
 ├── builtin_keywords.py             nz / fixnan keyword arguments rewritten
 │                                   to their positions after the support
 │                                   check (TradingView's parameter order)
+├── loop_types.py                   Counted-loop counter-family evidence,
+│                                   shared by analyzer and emitter, with a
+│                                   memo per declaration in each query;
+│                                   independent of shared storage inference.
 ├── pragmas.py                      // @pf-trace extraction
 ├── library_modules.py              A Pine library source parsed as a
 │                                   module: its library() declaration,
@@ -356,6 +360,59 @@ forms lower as their positional twins; unknown, duplicate, missing and excess
 arguments keep the existing map diagnostics. Named receivers retain the map's
 value and collection result types, including direct function returns.
 
+A counted `for` whose end or step reads its own counter binds that name to
+the counter, including over an outer variable, parameter, block binding or
+enclosing counter, and regardless of later global declarations. The start is
+evaluated outside that binding; the v6 step is read once with the counter at
+its default 0. TradingView measurements establish that direction is fixed
+from the start and the first end read at counter 0, then a counter-dependent
+end is read again at the start counter before the first continuation test.
+Subsequent v6 end reads follow each increment before the next iteration.
+An end with no read resolved to this loop's counter gets no additional read
+before the first test. Chart and `request.security` helper loops share this
+lowering, including
+loop values and `break` / `continue`. A non-na v6 step <= 0 after conversion to
+the counter's type stops the run with "'step' in loop must be greater than
+zero". The float-counter route is v6 only: positive float evidence in the start,
+or an unknown start with positive float evidence in the step, selects a float
+counter. A start with positive int evidence keeps an int counter and its existing
+end/step narrowing. With a float step that narrows to zero or below, that route
+stops with RE10021 at bar 0, a known gap against TradingView's refusal of a float
+step with an int counter (`by 0.5` narrows to 0, where earlier releases replaced
+it with 1). Without float evidence, counters keep their existing int route.
+v5 library bodies keep their int counters and existing step handling. The counter
+now wins over an outer same-named variable; an end bound that is exactly its own
+counter never ends here, while TradingView stops it (a follow-up change).
+
+The 22 measured entry-quantity probes in `fixtures/for_counter_headers` are
+`end_reads_counter` = 1, `end_reads_counter_other` = 3,
+`step_reads_counter` = 15, `end_reads_outer_value` = 2,
+`step_reads_outer_int` = 7, `a1_shadow_end_outer_int` = 3,
+`a2_shadow_step_outer_int` = 15, `a3_shadow_step_parameter` = 15,
+`b1_end_counter_later_global` = 3, `sec1_end_counter_in_security` = 3,
+`z1_step_nonzero_start` = 15, `float_counter_float_step` = 5,
+`float_counter_no_step` = 3, `float_counter_unit_step` = 15,
+`int_counter_float_end` = 15, `first_end_read_start_two_down` = 1.1,
+`first_end_read_start_two_up` = 1.1, `float_counter_value` = 2.5,
+`float_counter_tenth_step_to_one` = 11, `fstep_a_param_start` = 1.05,
+`fstep_b_body_local_start` = 1.07 and `fstep_c_array_bounds` = 1.03. The measured
+`first_end_read_start_two_zero_entries` starts its accumulator at 0 and has
+zero entries. Non-positive-step probes also measure no-trade stops.
+Known gaps: a start with positive int evidence and a float step is refused by
+TradingView; here a narrowed non-positive step stops with RE10021 at bar 0;
+the endless own-counter bound hangs here pending a follow-up change; a float
+counter passed to an untyped helper truncates here while TradingView passes
+the fractional value (`twice(x)` accumulates 2 here versus 5 on TradingView).
+`array.from(x)` can also truncate a float counter through inferred `array<int>`
+storage. An untyped parameter can leave the start unknown; a positively float
+step then selects a float counter without changing shared parameter inference.
+The inexact-step last iteration differs: TradingView counts
+`0.0 to 0.3 by 0.1` as four iterations, PineForge as three, while
+`0.0 to 1.0 by 0.1` counts eleven on both. Block-local/enclosing-counter
+bindings, end bounds that change direction during iteration and stops inside
+`request.security` have no TradingView tape. Integer-counter controls are guarded
+against previous generated C++ apart from the added step-stop statement.
+
 An aggregate `var` initializer that reads a statement-computed value (directly,
 through a user helper, or through another declaration-site `var`) runs at its
 declaration under the existing once flag. An earlier reassignment or collection
@@ -426,12 +483,13 @@ an internal `IndexError`. `tests/test_arrseg_coded_run_stops.py` checks both
 macro paths, every nullable-array trait and native `run_json` envelopes.
 
 A change must never make a script that transpiles and compiles today fail
-to transpile: when the engine cannot express what such a script asks for, it
-keeps its current lowering and gets a WARNING naming the approximation and
-the missing engine capability. Refuse only a spelling TradingView itself
-rejects, or one that already failed the C++ compile (supervisor rule, since
-C4 W8 lost 15 excellent campaign probes to a refusal of a working shape). The one exception is a labelled temporary refusal of an exact proven shape that would otherwise compile to a wrong value; it carries its own catalog code, is listed as a compile gap, and is lifted when the form is measured. The
-taxonomy:
+to transpile. A lowering that produces a value different from TradingView on
+TV-valid input is a defect: fix it with the correct lowering; never keep it
+with a warning.
+
+This exception covers only constructs PineForge refuses today. A form that compiles today keeps compiling: if its lowering is approximate, that is recorded as a defect and fixed by the correct lowering. A wrong value is never kept behind a warning, and such a form is never newly refused as unproven. A located refusal is allowed only as a labelled temporary fallback for one exact proven shape, listed as a compile gap.
+
+The taxonomy:
 
 
 | Bucket                           | What                                                                 |

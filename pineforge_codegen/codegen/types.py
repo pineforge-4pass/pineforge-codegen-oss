@@ -50,6 +50,7 @@ from ..cpp_names import cpp_identifier_fragment
 from ..errors import Phase
 from ..external_requests import UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
+from ..loop_types import LoopTypeSources, for_counter_type
 from ..matrix_overloads import matrix_sum_has_rhs
 from ..symbols import (
     PineType,
@@ -3371,6 +3372,23 @@ class TypeInferer:
         r"^\s*(?:\(\s*)*[-+]?(?:0[xX][0-9a-fA-F]+|\d+)(?:LL|ULL|L|U)?"
         r"(?:\s*\))*\s*$"
     )
+
+    def _for_counter_cpp_type(
+        self, start, *, step=None, pine_v5: bool | None = None,
+    ) -> str:
+        """Choose counter storage with the dedicated source-evidence query."""
+        if pine_v5 is None:
+            pine_v5 = self._pine_v5_body
+        sources = getattr(self, "_loop_type_sources", None)
+        if sources is None:
+            sources = self._loop_type_sources = LoopTypeSources(self.ctx.ast)
+        counter_type = for_counter_type(
+            start, sources,
+            self.ctx.identifier_decl_bindings, self.ctx.identifier_binding_scopes,
+            step=step, pine_v5=pine_v5,
+            counter_types=self.ctx.for_counter_types,
+        )
+        return "double" if counter_type == PineType.FLOAT else "int"
 
     def _emitted_value_is_double(self, node) -> bool:
         """True when the C++ expression emitted for ``node`` has type ``double``.

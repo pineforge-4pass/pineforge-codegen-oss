@@ -1,0 +1,7 @@
+//@version=6
+strategy("Counter source type", currency=currency.NONE)
+first = ta.min(3)
+float acc = 0.0
+for walkIndex = first to 0
+    acc += walkIndex
+plot(acc)

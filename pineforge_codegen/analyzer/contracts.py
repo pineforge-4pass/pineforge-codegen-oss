@@ -250,6 +250,12 @@ class AnalyzerContext:
     # name lookup is not enough once a UDF parameter, block local, or loop
     # iterator shadows a same-spelled global binding.
     identifier_binding_scopes: dict = field(default_factory=dict)  # id(Identifier) -> scope name | None
+    # First lexical resolution to an exact declaration binder. Scope names
+    # such as "for" are shared by sibling and nested loops.
+    identifier_decl_bindings: dict = field(default_factory=dict)  # id(Identifier) -> (id(declaration), name) | None
+    # Dedicated source-evidence family of each counted loop, keyed by start.
+    # Legacy symbol storage remains independent (collection/callable inference).
+    for_counter_types: dict = field(default_factory=dict)  # id(start) -> PineType
     var_member_init_exprs: dict = field(default_factory=dict)  # var-member name -> init AST expr
     # id(VarDecl) -> (node, emitted member name, PineType, rendered initializer,
     #                 is function/method scoped)
