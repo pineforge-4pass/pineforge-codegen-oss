@@ -63,6 +63,15 @@ supported as exact pairs; on the 0.x line they are independent. See the
   bindings and stops inside `request.security` have no TradingView tape.
   This change merges first; a follow-up change closes the endless-bound hang,
   with no codegen release in between.
+- A Pine v6 function or method reading a later local without an earlier
+  visible binding is refused during analysis at the read (`PF-E2075`),
+  using the same declaration-order rule as later globals (`PF-E2053`).
+  Reading a loop counter or `for ... in` binder after its loop without
+  another visible binding is now refused at translate time (`PF-E2054`);
+  these reads were previously accepted.
+  TradingView accepts a namespace call after an expired block local with the
+  same name; PineForge's analysis no longer refuses it, but code generation
+  still rejects some such calls (a known gap).
 
 ## 1.9.1 — 2026-10-31
 

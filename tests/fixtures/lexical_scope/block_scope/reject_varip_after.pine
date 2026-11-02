@@ -1,0 +1,12 @@
+//@version=6
+strategy("Varip local outside loop", currency = currency.NONE)
+// Derived: varip changes persistence, not the enclosing declaration block.
+float signalValue = 0.0
+for i = 0 to 1
+    varip float inside = close
+    signalValue := inside
+signalValue := inside
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

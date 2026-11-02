@@ -33,7 +33,7 @@ from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from ..limits import TimeBudget, iter_ast_nodes
 from ..loop_types import LoopTypeSources, for_counter_type
 from ..security_contexts import (
-    GLOBAL_ANNOTATION, PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series,
+    PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series,
 )
 from ..session_reads import emitted_session_reads
 from ..collection_history import (
@@ -612,6 +612,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         """Run semantic analysis and return the analyzer context."""
         self._ensure_pine_v6()
         validate_call_argument_order(self._ast, filename=self._filename)
+        from .value_bindings import ValueBindings
+        self._value_bindings = ValueBindings(self._ast, self._filename, self._budget)
+        self._value_bindings.resolve()
         self._check_direct_terminal_array_element_callee_shadows()
         self._visit(self._ast)
         if self._operator_condition_errors:
@@ -8123,28 +8126,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if (self._pine_version == 6
                 and not self._in_v5_library_definition(node)
                 and id(node) not in self._identifier_binding_scopes):
-            if (block_owner is not None
-                    and not getattr(sym, "_pf_script_block_has_outer", False)
-                    and all(
-                        id(body) != block_owner
-                        for body in self._block_node_stack
-                    )):
-                self._error(
-                    f"Block-local variable '{node.name}' is read outside its block.",
-                    node.loc,
-                )
-            if (sym is None
-                    and self._enclosing_func_names
-                    and node.name in self._direct_program_binding_names
-                    and not (node.annotations or {}).get(GLOBAL_ANNOTATION)):
-                # A payload argument copied into a helper carries its own
-                # provenance. It is evaluated at the call site, so it is not
-                # an authored read in the helper definition.
-                self._error(
-                    f"Global variable '{node.name}' is read before its declaration "
-                    "in a function.",
-                    node.loc,
-                )
+            self._value_bindings.check_use(node)
         self._identifier_binding_scopes[id(node)] = (
             getattr(sym, "scope", None) if sym is not None else None
         )

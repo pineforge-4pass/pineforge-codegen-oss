@@ -1,0 +1,14 @@
+//@version=6
+strategy("Counter explicitly captured", currency = currency.NONE, initial_capital = 1000000)
+// Derived: 0 then 1 are assigned to the outer capture; the last value is 1.
+float signalValue = 0.25
+int captured = 0
+for i = 0 to 1
+    signalValue := close - open
+    captured := i
+signalValue := signalValue + captured
+plot(signalValue)
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

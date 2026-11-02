@@ -8,7 +8,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen.analyzer import Analyzer
-from pineforge_codegen.errors import CompileError
+from pineforge_codegen.errors import CompileError, Level, Phase
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from tests._compile import compile_cpp
@@ -1366,44 +1366,67 @@ def test_expired_block_tuple_binding_does_not_shadow_element_callee(
 
 
 @pytest.mark.parametrize(
-    "body",
+    "body, error_line",
     (
-        '''    first_value = array.from(produce()).copy().get(0)
+        ('''    first_value = array.from(produce()).copy().get(0)
     local_value = first_value
     local_value
-''',
-        '''    local_value = array.from(produce()).copy().get(0)
+''', None),
+        ('''    local_value = array.from(produce()).copy().get(0)
     local_value := "replacement"
     local_value
-''',
-        '''    [local_value, other] = if true
+''', None),
+        ('''    [local_value, other] = if true
         [array.from(produce()).copy().get(0), 1]
     else
         [array.from(produce()).copy().get(0), 1]
     local_value
-''',
-        '''    if close > open
+''', None),
+        ('''    if close > open
         local_value = array.from(produce()).copy().get(0)
     local_value
-''',
-        '''    local_value = array.from(produce()).copy().get(0)
+''', 8),
+        ('''    local_value = array.from(produce()).copy().get(0)
     extras = array.from(local_value)
     local_value
-''',
+''', None),
     ),
 )
 def test_forward_local_identity_non_direct_bindings_remain_fail_closed(
-    body: str,
+    body: str, error_line: int | None,
 ):
+    # Keep the forward call for the None rows. Only the expired-read row
+    # defines the producer first so it reaches the block-scope diagnostic.
+    producer = 'produce() =>\n    "x"\n'
     source = (
         "//@version=6\n"
         'strategy("Forward non-direct local boundary")\n'
+        f"{producer if error_line is not None else ''}"
         "blocked() =>\n"
         f"{body}"
-        "produce() =>\n"
-        '    "x"\n'
+        f"{producer if error_line is None else ''}"
         "observed = blocked()\n"
     )
+
+    if error_line is not None:
+        # TradingView refuses the expired read after resolving the earlier
+        # producer definition.
+        with pytest.raises(CompileError) as caught:
+            transpile(source)
+        diagnostic, = caught.value.diagnostics
+        assert diagnostic.level is Level.ERROR
+        assert diagnostic.phase is Phase.ANALYZER
+        assert diagnostic.code == "PF-E2054"
+        assert diagnostic.args == {"name": "local_value"}
+        assert diagnostic.message == (
+            "Block-local variable 'local_value' is read outside its block."
+        )
+        assert (
+            diagnostic.location.line,
+            diagnostic.location.col,
+            diagnostic.location.end_col,
+        ) == (error_line, 5, 16)
+        return
 
     cpp = transpile(source)
     assert "std::string blocked(" not in cpp
