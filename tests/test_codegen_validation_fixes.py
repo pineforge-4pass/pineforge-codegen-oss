@@ -675,15 +675,16 @@ def test_counted_loop_dynamic_end_counter_shadows_outer_same_named_series():
         "i = close + 2\n"
         "prior = lag(i)\n"
         "total = 0.0\n"
-        "for i = 0 to i\n"
+        "for i = 0 to 10 - i\n"
         "    total += i\n"
         "plot(prior + total)"
     )
     # TV probes a1/a2/a3 show that the counter shadows an outer binding in
     # both end and step. The outer series remains available outside the loop.
+    # The decreasing end keeps this shadowing probe finite.
     assert "int i = 0;" in cpp
-    assert "int _for_end_0 = (i);" in cpp
-    assert "_for_end_0 = (i)" in cpp
+    assert "int _for_end_0 = ((10 - i));" in cpp
+    assert ", _for_end_0 = ((10 - i))) {" in cpp
     assert "_for_end_eval_0" not in cpp
     compile_cpp(cpp, label="counted-loop-dynamic-end-counter-shadows-series")
 

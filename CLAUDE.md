@@ -398,8 +398,14 @@ stops with RE10021 at bar 0, a known gap against TradingView's refusal of a floa
 step with an int counter (`by 0.5` narrows to 0, where earlier releases replaced
 it with 1). Without float evidence, counters keep their existing int route.
 v5 library bodies keep their int counters and existing step handling. The counter
-now wins over an outer same-named variable; an end bound that is exactly its own
-counter never ends here, while TradingView stops it (a follow-up change).
+now wins over an outer same-named variable. An affine chart loop proved endless
+(its end is affine in its own counter) is stopped with the loop-time error when
+its result reaches an effect. Omission is limited to an unused loop statement
+with no calls, whose writes have no readers except self-updates, a break
+condition or one further unused variable declaration. Other flagged loops stop
+when their result is read in a shape not measured, where TradingView may drop
+them. Endless loops in functions, methods and `request.security` still never end
+here while TradingView stops them; data-dependent endless loops still hang.
 
 The 22 measured entry-quantity probes in `fixtures/for_counter_headers` are
 `end_reads_counter` = 1, `end_reads_counter_other` = 3,
@@ -417,7 +423,7 @@ The 22 measured entry-quantity probes in `fixtures/for_counter_headers` are
 zero entries. Non-positive-step probes also measure no-trade stops.
 Known gaps: a start with positive int evidence and a float step is refused by
 TradingView; here a narrowed non-positive step stops with RE10021 at bar 0;
-the endless own-counter bound hangs here pending a follow-up change; a float
+a float
 counter passed to an untyped helper truncates here while TradingView passes
 the fractional value (`twice(x)` accumulates 2 here versus 5 on TradingView).
 `array.from(x)` can also truncate a float counter through inferred `array<int>`

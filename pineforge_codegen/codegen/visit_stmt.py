@@ -1737,6 +1737,20 @@ class StmtVisitor:
 
     def _visit_for(self, node: ForStmt, lines: list[str], indent: int,
                    value_target: tuple[str, str | None] | None = None) -> None:
+        action = getattr(self, "_endless_for_actions", {}).get(id(node))
+        if action is not None:
+            # Keep lexical/naming bookkeeping (including nested loop tokens)
+            # identical for statements after this one; discard only its text.
+            self._visit_counter_bound_for(node, [], indent, value_target)
+            if action == "stop":
+                pad = "    " * indent
+                lines.append(
+                    f'{pad}pine_runtime_error(std::string("Error on bar ") '
+                    '+ std::to_string(bar_index_) '
+                    '+ ": Loop takes too long to execute (> " '
+                    '+ std::to_string(::kLoopTimeLimitMs) + " ms)");'
+                )
+            return
         if self._for_header_reads_new_counter(node):
             self._visit_counter_bound_for(node, lines, indent, value_target)
             return

@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "runs": {
+    "dead_counter_with_break": {
+      "entries": 205,
+      "quantity": 1,
+      "tape_sha256": "e84496c2adc3436a4dd5d64496b684eea53b2daaa097ec550f5cb21459deb35b",
+      "source_sha256": "3105568893ed044d323ae64126aa5b40d6446a58e7416eef0682c3a44f26b4ad"
+    },
+    "dead_counter": {
+      "entries": 205,
+      "quantity": 1,
+      "tape_sha256": "e84496c2adc3436a4dd5d64496b684eea53b2daaa097ec550f5cb21459deb35b",
+      "source_sha256": "eb8336c39c93a1d0f4acc0f222fb06a4fce41ea8803adea9ca58a6b802087cbb"
+    },
+    "dead_counter_plus_one": {
+      "entries": 205,
+      "quantity": 1,
+      "tape_sha256": "e84496c2adc3436a4dd5d64496b684eea53b2daaa097ec550f5cb21459deb35b",
+      "source_sha256": "babe3a410d9e98f45d5e165be60e57732e1251718255828551e272d58741e84a"
+    },
+    "dead_nonzero_start": {
+      "entries": 205,
+      "quantity": 1,
+      "tape_sha256": "e84496c2adc3436a4dd5d64496b684eea53b2daaa097ec550f5cb21459deb35b",
+      "source_sha256": "251870f3004e4f79e79698d380d9598d7d580b8ebbdcf57b3c490bc4efba9ed9"
+    },
+    "dead_chain": {
+      "entries": 205,
+      "quantity": 1,
+      "tape_sha256": "767e24ad6352fc4688d73b0e2f7578793fa4ea9b2e7c2251953eccf14ae7fff3",
+      "source_sha256": "565e7fb7e3e92e4e1ae4cdb99a4c07b33e346c386912861c9b58d2302e9ebb08"
+    },
+    "uncalled_function_loop": {
+      "entries": 205,
+      "quantity": 1,
+      "loop_action": "unchanged",
+      "tape_sha256": "767e24ad6352fc4688d73b0e2f7578793fa4ea9b2e7c2251953eccf14ae7fff3",
+      "source_sha256": "897669b6b774688ce1de81365ec561af584ca71a0c5c1724aa8bbb1ab7f194d7"
+    },
+    "function_called_in_dead_branch": {
+      "entries": 205,
+      "quantity": 1,
+      "loop_action": "unchanged",
+      "tape_sha256": "767e24ad6352fc4688d73b0e2f7578793fa4ea9b2e7c2251953eccf14ae7fff3",
+      "source_sha256": "4cb393035849b04cabe05c43f35b33e6ed891be23a75e1f8b39585c8a5841835"
+    }
+  },
+  "stops": {
+    "live_counter": {
+      "error_sha256": "34d754a874f4b0c659308818fb6c8f65a397303e94ced0941fd759ce3659fdb8",
+      "source_sha256": "0a8a0fd92eea7baf7e34aa4be7dc486f18bad7ab8ecd5374857e58219a5b0d1f"
+    },
+    "live_counter_plus_one": {
+      "error_sha256": "ddcec2bd7880c3c4599d1d2690dbea81823fa336a7fce8a0d1549af4c88d1a36",
+      "source_sha256": "3dd939191d0787cd45305b5c825a5eead5a10d64287f3e98be8919b2de8283f8"
+    },
+    "live_nonzero_start": {
+      "error_sha256": "c4a5e68b96acd8290564d5acfd2e4097090cd969cdd27499cd8b5fb760ffe8ae",
+      "source_sha256": "aa31b1c392c0e99dd1a1cb42968c783b63bb69b28959b4003e9da23ae3df8635"
+    },
+    "live_single_bar_read": {
+      "error_sha256": "2c776ec50af88b01f9a60748ff33dea7d47c679714fe08a8c0fea2de75a7984c",
+      "source_sha256": "ad36354ca9d6bd3e55d56577ff774d3a7115928b4d83516c4c18e1bf5336f142"
+    },
+    "live_untaken_branch_read": {
+      "error_sha256": "a140213d4d8d9b97fe01bb6284cd660d8d1e81815fd28ec1052f3bf97fc2c855",
+      "source_sha256": "b5821f6944dc363aec5e3afc74675fbc7ce1c688fdcc1b8f55a3097c8e0d10a7"
+    }
+  },
+  "stop": {
+    "code": "RE10022",
+    "bar_index": 0,
+    "maxTimeMs": 2000,
+    "message": "Error on bar {bar_index}: Loop takes too long to execute (> {maxTimeMs} ms)"
+  },
+  "break_control": {
+    "end_bounds": ["i", "i + 1", "i - 1"],
+    "break_at": 100000,
+    "entry_quantity": 1.1
+  }
+}

@@ -22,6 +22,14 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- An affine chart loop proved endless is stopped with the loop-time error when
+  its result reaches an effect. Omission is limited to an unused loop statement
+  with no calls, whose writes have no readers except self-updates, a break
+  condition or one further unused variable declaration. Other flagged loops
+  stop when their result is read in a shape not measured, where TradingView
+  may drop them. Endless loops in functions, methods and `request.security`
+  still never end here while TradingView stops them; data-dependent endless
+  loops still hang.
 - Pine v6 calls refuse a positional argument after a named argument with
   `PF-E2074` at that positional expression. The check also covers strategy
   declarations, unused functions and v6 library bodies before lowering.
@@ -47,8 +55,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
   route is unchanged; v5 library loops keep their existing int-counter route.
   Counter-family inference follows declaration sources in a dedicated query,
   independently of shared expression and storage inference.
-- Known loop gaps: an end bound that is exactly its own counter runs indefinitely
-  here, while TradingView stops it; a start with positive int evidence and a
+- Known loop gaps: a start with positive int evidence and a
   float step is refused by TradingView, while a step narrowed to zero or below
   stops here with RE10021 at bar 0. A float counter passed to
   an untyped helper truncates here, while TradingView passes the fractional
@@ -61,8 +68,6 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `0.0 to 0.3 by 0.1` counts three here and four on TradingView, whereas
   `0.0 to 1.0 by 0.1` counts eleven on both. Block-local/enclosing-counter
   bindings and stops inside `request.security` have no TradingView tape.
-  This change merges first; a follow-up change closes the endless-bound hang,
-  with no codegen release in between.
 - A Pine v6 function or method reading a later local without an earlier
   visible binding is refused during analysis at the read (`PF-E2075`),
   using the same declaration-order rule as later globals (`PF-E2053`).

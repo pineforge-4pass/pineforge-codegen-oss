@@ -233,6 +233,11 @@ class TopLevelEmitter:
         # in favour of fully qualified names emitted at each call site.
         lines.append("using namespace pineforge;")
         lines.append("")
+        from .endless_for import plan_endless_for_loops
+        self._endless_for_actions = plan_endless_for_loops(self.ctx.ast)
+        if "stop" in self._endless_for_actions.values():
+            lines.append("inline constexpr int kLoopTimeLimitMs = 2000;")
+            lines.append("")
         lines.append(RUN_STOP_SHIMS_CPP)
         self._emit_ta_compat_shims(lines)
         if getattr(self, "_uses_drawing", False):
