@@ -503,8 +503,8 @@ def test_state_tape_selected_equals_authored_fixed_arm(source: str) -> None:
             f"{fixed_column}={row[fixed_column]}")
 
 
-# Synthetic comparator controls below are not native evidence. They use real
-# tape cells to exercise the same assertions used by the engine rows.
+# Synthetic controls below are not native evidence. Tape controls start from
+# committed exports; raw CSV controls use independently authored bytes.
 TAPE_CHECK_CASES = CASES + tuple(
     Case(f"{source.removesuffix('-parity')}-fixed-{arm}",
          "tv_state_entries.tsv", source, f"fixed_{arm}")
@@ -513,6 +513,125 @@ TAPE_CHECK_CASES = CASES + tuple(
 STATE_TAPE_CHECK_CASES = tuple(
     case for case in TAPE_CHECK_CASES if case.tape == "tv_state_entries.tsv"
 )
+
+
+@pytest.mark.parametrize("case", TAPE_CHECK_CASES, ids=lambda case: case.fixture)
+@pytest.mark.parametrize("sign", (-1, 1))
+def test_join_self_check_pins_literal_export_precision(case: Case, sign: int) -> None:
+    tape = _tape_entries(case)
+    # Independent export contract: never derive the perturbation from _quantum.
+    quantum = {
+        "tv_bar_quantities.tsv": Decimal("0.00001"),
+        "tv_hour_entries.tsv": Decimal("0.01"),
+        "tv_state_entries.tsv": Decimal("0.00001"),
+    }[case.tape]
+    assert _quantum(tape) == quantum
+    engine = dict(tape)
+    # Compare complete synthetic entries, including the parity export's
+    # fractional cell: native missing-fill exceptions do not apply here.
+    _assert_matches(_compare(engine, tape), case.fixture)
+    stamp = min(tape)
+    if case.column == "entry_quantities":
+        assert tape[stamp] == Decimal("2")  # An integer-valued counter cell.
+    engine[stamp] += sign * quantum
+    comparison = _compare(engine, tape)
+    assert comparison.different == (stamp,)
+    assert comparison.equal == len(tape) - 1
+    assert comparison.engine_only == comparison.tape_only == ()
+    assert not comparison.matches
+    with pytest.raises(AssertionError, match="different="):
+        _assert_matches(comparison, case.fixture)
+
+
+@pytest.mark.parametrize(
+    "case", tuple(case for case in TAPE_CHECK_CASES
+                  if case.tape == "tv_bar_quantities.tsv"),
+    ids=lambda case: case.fixture,
+)
+@pytest.mark.parametrize("spelling", ("1", "1.23456"), ids=("integer", "fractional"))
+@pytest.mark.parametrize("sign", (-1, 1))
+def test_join_self_check_counter_cell_spelling(
+        case: Case, spelling: str, sign: int) -> None:
+    tape = _tape_entries(case)
+    assert _quantum(tape) == Decimal("0.00001")
+    stamp = min(tape)
+    # Synthetic cell spellings, not new native expectations. The price-counter
+    # exports have no fractional cells; retain their independent column scale
+    # while exercising both a bare "1" and a five-place fractional spelling.
+    tape[stamp] = Decimal(spelling)
+    assert _quantum(tape) == Decimal("0.00001")
+    engine = dict(tape)
+    _assert_matches(_compare(engine, tape), case.fixture)
+    engine[stamp] += sign * Decimal("0.00001")
+    comparison = _compare(engine, tape)
+    assert comparison.different == (stamp,)
+    assert comparison.equal == len(tape) - 1
+    assert comparison.engine_only == comparison.tape_only == ()
+    assert not comparison.matches
+    with pytest.raises(AssertionError, match="different="):
+        _assert_matches(comparison, case.fixture)
+
+
+# Minimal native CSV projection: these are the three columns _engine_entries
+# reads. tests/_e2e.py::run_strategy returns the runner's bytes unchanged.
+# The blobs are authored here, never serialized from the parser's output.
+@pytest.mark.parametrize("bom", (b"", b"\xef\xbb\xbf"), ids=("plain", "bom"))
+@pytest.mark.parametrize(
+    "changed_quantity", ("1.234567890", "1.234567892"), ids=("minus-1e-9", "plus-1e-9"),
+)
+def test_engine_entries_self_check_preserves_raw_quantity(
+        bom: bytes, changed_quantity: str) -> None:
+    blob = (
+        b"Type,Date and time,Qty\n"
+        b"Entry long,2024-01-01 00:00,1.234567891\n"
+        b"Entry short,2024-01-01 01:00,2.345678912\n"
+    )
+    entries = _engine_entries(bom + blob)
+    assert entries == {
+        1704067200000: Decimal("1.234567891"),
+        1704070800000: Decimal("2.345678912"),
+    }
+    changed_blob = blob.replace(b"1.234567891", changed_quantity.encode("ascii"))
+    changed = _engine_entries(bom + changed_blob)
+    assert changed == {
+        1704067200000: Decimal(changed_quantity),
+        1704070800000: Decimal("2.345678912"),
+    }
+    assert changed != entries
+    arms = {1704067200000: "60", 1704070800000: "240"}
+    fixed = {"60": entries, "240": entries}
+    comparison = _selected_fixed_comparison(changed, fixed, arms)
+    assert comparison.different == (1704067200000,)
+    assert comparison.equal == 1
+    with pytest.raises(AssertionError, match="selected_raw, fixed_raw"):
+        _assert_selected_matches_fixed(changed, fixed, arms, "synthetic CSV")
+
+
+@pytest.mark.parametrize("bom", (b"", b"\xef\xbb\xbf"), ids=("plain", "bom"))
+def test_engine_entries_self_check_entry_kinds_and_utc(bom: bytes) -> None:
+    blob = (
+        b"Type,Date and time,Qty\n"
+        b"Entry long,2024-01-01 00:00,1.234567891\n"
+        b"Exit long,2024-01-01 00:00,9.876543219\n"
+        b"Entry short,2024-01-01 01:00,2.345678912\n"
+        b"Exit short,2024-01-01 02:00,8.765432198\n"
+    )
+    # Calendar literals: Jan 1 2024 00:00 UTC and one hour later.
+    assert _engine_entries(bom + blob) == {
+        1704067200000: Decimal("1.234567891"),
+        1704070800000: Decimal("2.345678912"),
+    }
+
+
+@pytest.mark.parametrize("bom", (b"", b"\xef\xbb\xbf"), ids=("plain", "bom"))
+def test_engine_entries_self_check_rejects_duplicate_labels(bom: bytes) -> None:
+    blob = (
+        b"Type,Date and time,Qty\n"
+        b"Entry long,2024-01-01 00:00,1.234567891\n"
+        b"Entry short,2024-01-01 00:00,2.345678912\n"
+    )
+    with pytest.raises(AssertionError, match="duplicate entry time: 1704067200000"):
+        _engine_entries(bom + blob)
 
 
 @pytest.mark.parametrize("case", STATE_TAPE_CHECK_CASES, ids=lambda case: case.fixture)
