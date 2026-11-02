@@ -620,7 +620,10 @@ class ExprVisitor:
             return (
                 f"(({condition}) ? ({true_value}) : ({false_value}))"
             )
-        return self._visit_expr(value_node)
+        value = self._visit_expr(value_node)
+        if target_cpp_type == "std::string":
+            return self._legacy_bool_string_value(value_node, value)
+        return value
 
     def _unpinned_read(self, node: ASTNode) -> str:
         """A read of a request no data is pinned for

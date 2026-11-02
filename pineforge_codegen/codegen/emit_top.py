@@ -2518,6 +2518,9 @@ class TopLevelEmitter:
             rhs_return_cpp_type = ret_type
         else:
             rhs_return_cpp_type = None
+        if (ret_type == "std::string" and self._has_bool_text()
+                and self._text_type(self._selection_terminal_expr(node.body)) == "bool"):
+            rhs_return_cpp_type = "std::string"
 
         # For per-call-site variants, suffix the function name and activate TA + var remapping
         func_name = (

@@ -169,7 +169,8 @@ _ta("crossunder", _sig([("source1", F), ("source2", F)], ret=B))
 _ta("cross",      _sig([("source1", F), ("source2", F)], ret=B))
 _ta("rising",     _sig([("source", F), ("length", I)], ret=B))
 _ta("falling",    _sig([("source", F), ("length", I)], ret=B))
-_ta("change",     _sig([("source", F), ("length", I, 1)]))
+_ta("change",     _sig([("source", F), ("length", I, 1)]),
+                  _sig([("source", B), ("length", I, 1)], ret=B))
 
 # --- Extremes & Lookback ---
 # ta.highest / ta.lowest have TWO overloads:
@@ -226,7 +227,8 @@ _ta("dev",     _sig([("source", F), ("length", I)]))
 # --- Cumulative & Historical ---
 _ta("cum",        _sig([("source", F)]))
 _ta("barssince",  _sig([("condition", B)], ret=I))
-_ta("valuewhen",  _sig([("condition", B), ("source", F), ("occurrence", I)]))
+_ta("valuewhen",  _sig([("condition", B), ("source", F), ("occurrence", I)]),
+                  _sig([("condition", B), ("source", B), ("occurrence", I)], ret=B))
 _ta("correlation", _sig([("source1", F), ("source2", F), ("length", I)]))
 
 # --- Chart all-time extremes (single series) ---
@@ -423,6 +425,25 @@ _map("copy",     _sig([("id", F)], ret=F))
 _map("put_all",  _sig([("id", F), ("id2", F)], ret=VOID))
 
 
+# Scalar collection predicates. Collection storage and argument validation
+# retain their TypeSpec-aware dispatch; these signatures describe Pine values
+# independently of the historical C++ storage family.
+ARRAY_FUNCTIONS: dict[str, IntrinsicFunc] = {
+    "includes": _func("array.includes", _sig([("id", F), ("value", F)], ret=B)),
+    "every": _func("array.every", _sig([("id", F)], ret=B)),
+    "some": _func("array.some", _sig([("id", F)], ret=B)),
+}
+
+MATRIX_FUNCTIONS: dict[str, IntrinsicFunc] = {
+    name: _func(f"matrix.{name}", _sig([("id", F)], ret=B))
+    for name in (
+        "is_square", "is_identity", "is_diagonal", "is_antidiagonal",
+        "is_symmetric", "is_antisymmetric", "is_triangular",
+        "is_stochastic", "is_binary", "is_zero",
+    )
+}
+
+
 # ============================================================================
 # syminfo.* functions
 # ============================================================================
@@ -444,6 +465,17 @@ REQUEST_FUNCTIONS: dict[str, IntrinsicFunc] = {
     "currency_rate": _func(
         "request.currency_rate",
         _sig([("from", S), ("to", S), ("ignore_invalid_currency", B, False)]),
+    ),
+}
+
+# Requests with payload-dependent returns keep their custom registration and
+# argument binder. The bool overload describes the value, without changing the
+# numeric storage chosen by that registration.
+REQUEST_VALUE_FUNCTIONS: dict[str, IntrinsicFunc] = {
+    "security": _func(
+        "request.security",
+        _sig([("symbol", S), ("timeframe", S), ("expression", F)]),
+        _sig([("symbol", S), ("timeframe", S), ("expression", B)], ret=B),
     ),
 }
 
@@ -538,6 +570,27 @@ _input("text_area", _sig([("defval", S), ("title", S, "")] + _C, ret=S))
 # identity, which the existing enum resolver checks, not a primitive proof.
 _input("enum",   _sig([("defval", F), ("title", S, "")] + _C, ret=I),
        default_type=PineType.UNKNOWN)
+
+
+# Value-level inventory, including namespaces whose storage/binding has a
+# dedicated implementation. The legacy arity-only lookup below deliberately
+# remains separate: it cannot select a payload- or source-dependent overload.
+FUNCTION_REGISTRIES = (
+    TA_FUNCTIONS, MATH_FUNCTIONS, STRATEGY_FUNCTIONS, STR_FUNCTIONS,
+    MAP_FUNCTIONS, ARRAY_FUNCTIONS, MATRIX_FUNCTIONS, SYMINFO_FUNCTIONS,
+    REQUEST_FUNCTIONS, REQUEST_VALUE_FUNCTIONS, BUILTIN_FUNCTIONS,
+    INPUT_FUNCTIONS,
+)
+
+
+def get_value_function(name: str) -> IntrinsicFunc | None:
+    """Find a builtin's declared overloads by its full Pine name."""
+    short_name = name.rsplit(".", 1)[-1]
+    for registry in FUNCTION_REGISTRIES:
+        function = registry.get(short_name) or registry.get(name)
+        if function is not None and function.name == name:
+            return function
+    return None
 
 
 # ============================================================================
@@ -725,6 +778,14 @@ TIMEFRAME_VARIABLES: dict[str, PineType] = {
     "timeframe.isdwm": B,
     "timeframe.main_period": S,
     "timeframe.isticks": B,
+}
+
+# These previously unregistered values inherited the analyzer's string
+# fallback. Keep that storage contract separate from their correct Pine type:
+# a bool assigned there is a single byte, decoded only at a text conversion.
+VARIABLE_STORAGE_COMPATIBILITY: dict[str, PineType] = {
+    "timeframe.isminutes": S,
+    "timeframe.isseconds": S,
 }
 
 # display.* plot_display constants (PineScript v6 — values for C++ codegen)

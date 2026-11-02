@@ -79,6 +79,7 @@ from .tables import (
     DRAWING_TYPE_TO_CPP,
     MATRIX_RETURNING_METHODS,
     PINE_TYPE_TO_CPP,
+    TA_RETURNS_BOOL,
     _matrix_functional_receiver,
     checked_array_slice,
     ARRAY_JOURNAL_DELTA_METHODS,
@@ -3498,9 +3499,7 @@ class TypeInferer:
                 # ``compute()``/``recompute()``, which returns a double even
                 # where Pine's type is an int (``ta.highestbars``,
                 # ``ta.barssince``, ...).
-                return sigs.get_return_type(
-                    "ta", func_name, len(node.args) + len(node.kwargs),
-                ) != PineType.BOOL
+                return func_name not in TA_RETURNS_BOOL
         return self._infer_type(node) == "double"
 
     def _slot_scalar_cpp_type(self, name: str) -> str | None:
@@ -4149,6 +4148,57 @@ class TypeInferer:
             return "std::vector<double>"
         return "double"
 
+    def _text_type(self, node) -> str:
+        """Pine bool provenance is consumed only by explicit text conversion."""
+        if not self._pine_v5_body:
+            from .bool_text import BoolTextTypes
+            query = getattr(self, "_bool_text_types", None)
+            if query is None:
+                query = self._bool_text_types = BoolTextTypes(
+                    self.ctx, self._type_spec_from_hint_name,
+                    getattr(self, "_budget", None),
+                )
+            if query.is_bool(
+                node, getattr(self, "_active_func_name", None),
+                getattr(self, "_active_call_site_idx", None),
+            ):
+                return "bool"
+        return self._infer_type(node)
+
+    def _contains_bool_text(self, node) -> bool:
+        if node is None or self._pine_v5_body:
+            return False
+        self._text_type(node)
+        return self._bool_text_types.contains_conversion(
+            node, getattr(self, "_active_func_name", None),
+            getattr(self, "_active_call_site_idx", None),
+        )
+
+    def _has_bool_text(self) -> bool:
+        if self._pine_v5_body:
+            return False
+        cached = getattr(self, "_program_has_bool_text", None)
+        if cached is None:
+            cached = self._program_has_bool_text = self._contains_bool_text(self.ctx.ast)
+        return cached
+
+    def _bool_text_condition(self, node, value: str) -> str:
+        """Read a legacy bool slot as a value, without changing that slot."""
+        if self._infer_type(node) != "std::string":
+            return value
+        return evaluate_args_once(
+            [value], {0},
+            lambda args: f"(!({args[0]}).empty() && ({args[0]})[0] != '\\0')",
+            "_pf_text_bool_",
+        )
+
+    def _legacy_bool_string_value(self, node, value: str) -> str:
+        """Carry a bool across a legacy string parameter or return boundary."""
+        if (self._infer_type(node) != "std::string"
+                and self._has_bool_text() and self._text_type(node) == "bool"):
+            return f"std::string(1, static_cast<char>({value}))"
+        return value
+
     def _infer_type(
         self,
         node,
@@ -4187,11 +4237,6 @@ class TypeInferer:
             # A callable-result history read keeps the callable's scalar
             # family. Collection subscripts follow separate element-type paths.
             return self._infer_type(node.object)
-        if (not self._pine_v5_body and isinstance(node, Subscript)
-                and self._infer_type(node.object) == "bool"):
-            # Bool expression history (including builtin namespace members)
-            # has the same text spelling as its current value.
-            return "bool"
         if isinstance(node, NumberLiteral):
             return "double" if isinstance(node.value, float) else "int"
         if isinstance(node, BoolLiteral):
@@ -4359,9 +4404,7 @@ class TypeInferer:
             site = self._get_ta_site(node)
             if site is not None:
                 ta_name = self._ta_name_from_site(site)
-                return ("bool" if sigs.get_return_type(
-                    "ta", ta_name, len(node.args) + len(node.kwargs),
-                ) == PineType.BOOL else "double")
+                return "bool" if ta_name in TA_RETURNS_BOOL else "double"
             if func_name and sigs.is_intrinsic_function(namespace, func_name):
                 ret = sigs.get_return_type(namespace, func_name, len(node.args))
                 return PINE_TYPE_TO_CPP.get(ret, "double")
@@ -4377,11 +4420,6 @@ class TypeInferer:
             return "bool"
         if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
             ename = node.object.name
-            # v5 retains its prior bool namespace families: discovering more
-            # would expand the existing refusals of third-state observers.
-            if (sigs.get_variable_type(ename, node.member) == PineType.BOOL
-                    and (not self._pine_v5_body or ename in ("chart", "timeframe"))):
-                return "bool"
             if ename == "color":
                 return "int64_t"
             if ename in self._enum_defs and node.member in self._enum_defs[ename]:
@@ -4401,6 +4439,12 @@ class TypeInferer:
                     return "std::string"
                 if node.member == "multiplier":
                     return "int"
+                return "bool"
+            # Chart predicates are emitted as C++ bool literals.
+            if ename == "chart" and node.member in (
+                    "is_standard", "is_heikinashi", "is_kagi", "is_linebreak",
+                    "is_pnf", "is_range", "is_renko"):
+                return "bool"
             # syminfo.* type inference: look up in SYMINFO_MEMBER_MAP
             # and derive C++ type from the expression (na<T>() or function call).
             if ename == "syminfo":

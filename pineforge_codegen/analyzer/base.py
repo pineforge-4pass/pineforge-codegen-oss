@@ -8181,11 +8181,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Handle specific namespaces
         if isinstance(node.object, Identifier):
             ns = node.object.name
-            # Preserve builtin predicates through aliases and series storage,
-            # rather than inheriting the namespace's numeric fallback.
-            if (not self._in_v5_library_definition(node)
-                    and sigs.get_variable_type(ns, node.member) == PineType.BOOL):
-                return PineType.BOOL
 
             # strategy.* variables and constants
             if ns == "strategy":
@@ -8287,8 +8282,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
             # timeframe.*
             if ns == "timeframe":
-                return sigs.TIMEFRAME_VARIABLES.get(
-                    f"timeframe.{node.member}", PineType.STRING)
+                key = f"timeframe.{node.member}"
+                return sigs.VARIABLE_STORAGE_COMPATIBILITY.get(
+                    key, sigs.TIMEFRAME_VARIABLES.get(key, PineType.STRING))
 
             # barstate.* (ishistory, isrealtime, islast, isfirst, etc.)
             if ns == "barstate":

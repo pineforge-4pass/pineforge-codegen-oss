@@ -701,14 +701,6 @@ class CallHandlers:
         self._ta_call_sites.append(site)
         self._ta_member_names.add(site.member_name)
 
-        # Keep predicate results boolean in their bindings and history buffers,
-        # so codegen's identifier inference can select Pine's bool text form.
-        # Numeric TA results retain their existing storage family.
-        if (not self._in_v5_library_definition(node)
-                and sigs.get_return_type(
-                    "ta", func_name, len(node.args) + len(node.kwargs),
-                ) == PineType.BOOL):
-            return PineType.BOOL
         return PineType.FLOAT
 
     def _security_symbol_is_heikinashi(self, node, _seen=None) -> bool:

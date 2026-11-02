@@ -2800,13 +2800,13 @@ class CallVisitor:
                 # ``str.tostring(na)`` ("NaN"), whose formatter a script
                 # without str.tostring does not declare.
                 return "na<std::string>()"
-            inferred = self._infer_type(arg)
+            inferred = self._text_type(arg)
             if inferred == "std::string":
                 return self._visit_expr(arg)
             if inferred == "bool":
                 if self._pine_v5_body:
                     self._refuse_v5_bool_na_observer(node, "string()", [arg])
-                visited = self._visit_expr(arg)
+                visited = self._bool_text_condition(arg, self._visit_expr(arg))
                 return f'(({visited}) ? std::string("true") : std::string("false"))'
             return self._visit_str_call("tostring", node)
 
@@ -3300,6 +3300,13 @@ class CallVisitor:
                 func_name, ordered_arg_nodes, all_args,
                 self.ctx.func_call_cs_map.get(id(node), (None, None))[1],
             )
+            fi = self._func_info_map[func_name]
+            declared = self.ctx.func_declared_param_type_specs.get(func_name, ())
+            for index, arg in enumerate(ordered_arg_nodes):
+                if (index < len(all_args) and index < len(fi.param_types)
+                        and fi.param_types[index] == PineType.STRING
+                        and (index >= len(declared) or declared[index] is None)):
+                    all_args[index] = self._legacy_bool_string_value(arg, all_args[index])
         # Default args (parser does not store defaults): isInSession(sess, res = timeframe.period)
         if namespace is None and func_name in self._func_names:
             fi = self._func_info_map.get(func_name)
@@ -3659,14 +3666,26 @@ class CallVisitor:
             stop_arg = self._visit_expr(p.get("stop")) if "stop" in p else "na<double>()"
             oca_name = self._visit_expr(p.get("oca_name")) if "oca_name" in p else '""'
             oca_type = self._visit_expr(p.get("oca_type")) if "oca_type" in p else "0"
-            record_order_call(self, node, "order", {
+            parameters = {
                 "id": (order_id, p.get("id")), "direction": (direction, direction_node),
                 "qty": (qty, p.get("qty"), "0"),
                 "limit": (limit_arg, p.get("limit"), "na<double>()"),
                 "stop": (stop_arg, p.get("stop"), "na<double>()"),
                 "oca_name": (oca_name, p.get("oca_name"), '""'),
                 "oca_type": (oca_type, p.get("oca_type"), "0"),
-            })
+            }
+            # This path historically omitted comments altogether. Transport a
+            # bool conversion through the comment slot as the other order
+            # commands do, keeping calls outside that text repair unchanged.
+            comment_node = p.get("comment")
+            comment_suffix = ""
+            if self._contains_bool_text(comment_node):
+                comment = self._visit_expr(comment_node)
+                parameters["comment"] = (comment, comment_node, '""')
+                comment_suffix = f", {comment}"
+            record_order_call(self, node, "order", parameters)
+            if comment_suffix:
+                return f"strategy_order({order_id}, {direction}, {qty}, {limit_arg}, {stop_arg}, {oca_name}, {oca_type}{comment_suffix})"
             return f"strategy_order({order_id}, {direction}, {qty}, {limit_arg}, {stop_arg}, {oca_name}, {oca_type})"
 
         if func_name == "risk":
@@ -3914,13 +3933,14 @@ class CallVisitor:
                             f"::pineforge::source::pine_enum_str_at("
                             f"{self._safe_name(et)}_str_values, {n}, {var})"
                         )
-            inferred = self._infer_type(val_arg) if val_arg is not None else ""
+            inferred = self._text_type(val_arg) if val_arg is not None else ""
             if inferred == "std::string":
                 return args[0] if args else 'std::string("")'
             if inferred == "bool":
                 if self._pine_v5_body:
                     self._refuse_v5_bool_na_observer(node, "str.tostring()", [val_arg])
-                return (f'({args[0]} ? std::string("true") : '
+                condition = self._bool_text_condition(val_arg, args[0])
+                return (f'({condition} ? std::string("true") : '
                         'std::string("false"))')
             if len(args) >= 2:
                 return f"pine_str_tostring_tv({args[0]}, {args[1]}, syminfo_mintick_)"
