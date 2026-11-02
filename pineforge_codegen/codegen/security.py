@@ -3236,6 +3236,7 @@ class SecurityEmitter:
             node.kwargs,
             sigs.get_param_names("math", func_name),
             visit,
+            intrinsic=sigs.get_intrinsic("math", func_name),
         )
         if func_name == "round" and len(args) == 2:
             return _math_round_digits_expr(args)

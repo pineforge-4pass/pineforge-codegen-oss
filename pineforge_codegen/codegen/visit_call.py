@@ -153,6 +153,7 @@ from ..ast_nodes import (
 )
 from ..collection_history import history_annotation, literal_offset
 from ..external_requests import RECORDED_KEY_ANNOTATION, request_stop_marker
+from ..intrinsic_binding import validate_intrinsic_keywords
 from ..limits import iter_ast_nodes
 from ..security_contexts import ticker_symbol_arg
 from ..symbols import TypeSpec, method_receiver_type_name
@@ -2405,6 +2406,7 @@ class CallVisitor:
                 args = _merge_kwargs(
                     node.args, node.kwargs,
                     sigs.get_param_names("request", func_name), self._visit_expr,
+                    intrinsic=sigs.get_intrinsic("request", func_name),
                 )
                 effects = [f"(void)({arg})" for arg in args]
                 effects += [request_stop(marker), "na<double>()"]
@@ -2631,7 +2633,10 @@ class CallVisitor:
                 return lowered
             node = self._check_time_bars_back(func_name, node)
         if func_name == "time" and namespace is None and (node.args or node.kwargs):
-            args = _merge_kwargs(node.args, node.kwargs, sigs.get_param_names(None, "time"), self._visit_expr)
+            args = _merge_kwargs(
+                node.args, node.kwargs, sigs.get_param_names(None, "time"),
+                self._visit_expr, intrinsic=sigs.get_intrinsic(None, "time"),
+            )
             tf_e = args[0] if len(args) > 0 else 'script_tf_'
             sess = args[1] if len(args) > 1 else 'std::string("")'
             tz_e = args[2] if len(args) > 2 else 'std::string("")'
@@ -2642,7 +2647,10 @@ class CallVisitor:
         # time_close(timeframe) or time_close(tf, session, tz) — same
         # session-tz default as time() above.
         if func_name == "time_close" and namespace is None and (node.args or node.kwargs):
-            args = _merge_kwargs(node.args, node.kwargs, sigs.get_param_names(None, "time_close"), self._visit_expr)
+            args = _merge_kwargs(
+                node.args, node.kwargs, sigs.get_param_names(None, "time_close"),
+                self._visit_expr, intrinsic=sigs.get_intrinsic(None, "time_close"),
+            )
             tf_e = args[0] if len(args) > 0 else 'script_tf_'
             sess = args[1] if len(args) > 1 else 'std::string("")'
             tz_e = args[2] if len(args) > 2 else 'std::string("")'
@@ -2722,6 +2730,7 @@ class CallVisitor:
                     node.args, node.kwargs,
                     sigs.get_param_names(None, "timestamp"),
                     lambda a: a,
+                    intrinsic=sigs.get_intrinsic(None, "timestamp"),
                 )
                 if len(merged) < 3 or any(a is None for a in merged[:3]):
                     self._codegen_error(
@@ -2824,6 +2833,7 @@ class CallVisitor:
                     node.kwargs,
                     sigs.get_param_names("ta", "pivot_point_levels"),
                     self._visit_expr,
+                    intrinsic=sigs.get_intrinsic("ta", "pivot_point_levels"),
                 )
             else:
                 args = [self._visit_expr(a) for a in node.args]
@@ -3258,7 +3268,8 @@ class CallVisitor:
                 # Known intrinsic — use signature registry for kwargs resolution
                 param_names = sigs.get_param_names(namespace, func_name)
                 merged = _merge_kwargs(
-                    node.args, node.kwargs, param_names, lambda a: a
+                    node.args, node.kwargs, param_names, lambda a: a,
+                    intrinsic=sigs.get_intrinsic(namespace, func_name),
                 )
                 ordered_arg_nodes = list(merged)
                 all_args = [self._visit_expr(a) for a in merged]
@@ -3874,10 +3885,12 @@ class CallVisitor:
 
     def _visit_str_call(self, func_name: str, node) -> str:
         args = _merge_kwargs(node.args, node.kwargs,
-                             sigs.get_param_names("str", func_name), self._visit_expr)
+                             sigs.get_param_names("str", func_name), self._visit_expr,
+                             intrinsic=sigs.get_intrinsic("str", func_name))
         arg_nodes = _merge_kwargs(
             node.args, node.kwargs,
             sigs.get_param_names("str", func_name), lambda a: a,
+            intrinsic=sigs.get_intrinsic("str", func_name),
         )
 
         if func_name == "repeat":
@@ -4004,7 +4017,10 @@ class CallVisitor:
         return f'std::string("") /* unsupported: str.{comment_name} */'
 
     def _visit_math_call(self, func_name: str, node: FuncCall) -> str:
-        args = _merge_kwargs(node.args, node.kwargs, sigs.get_param_names("math", func_name), self._visit_expr)
+        args = _merge_kwargs(
+            node.args, node.kwargs, sigs.get_param_names("math", func_name),
+            self._visit_expr, intrinsic=sigs.get_intrinsic("math", func_name),
+        )
         # Handle special cases first
         if func_name == "round" and len(args) == 2:
             return _math_round_digits_expr(args)
@@ -4051,6 +4067,11 @@ class CallVisitor:
         """
         # sig_key is like "strategy.entry" -> namespace="strategy", func_name="entry"
         parts = sig_key.split(".", 1)
+        validate_intrinsic_keywords(
+            sigs.get_intrinsic(parts[0], parts[1]) if len(parts) == 2
+            else sigs.get_intrinsic(None, sig_key),
+            node.kwargs,
+        )
         if len(parts) == 2:
             param_names = sigs.get_param_names(parts[0], parts[1]) or []
         else:

@@ -349,6 +349,14 @@ tests/
 
 ## Support contracts
 
+Registry builtins with verified keyword names
+(`IntrinsicFunc.keyword_names_verified`) declare their complete keyword set
+through their signature parameters. These names are validated before lowering
+and again at the shared keyword merge; unknown names report PF-E2027 at the
+keyword. Other records keep their existing binding policy. `math.pow`
+declares `base, exponent`; both named forms emit the positional expression.
+Argument ordering remains the separate PF-E2074 validation.
+
 An aggregate `var` initializer that reads a statement-computed value (directly,
 through a user helper, or through another declaration-site `var`) runs at its
 declaration under the existing once flag. An earlier reassignment or collection
