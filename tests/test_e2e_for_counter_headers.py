@@ -51,10 +51,9 @@ DIVISION_TAPE_TWINS = {
 # a documented discrepancy, retaining TradingView's measured 5 in the quantities file.
 HELPER_VALUE_GAP = "float_counter_helper_value"
 MATCHING_MEASURED = tuple(name for name in MEASURED if name != HELPER_VALUE_GAP)
-# These existing measured rows pin the absolute bracket about
-# [5.6e-17, 9.98e-11]: 1e-17 loses the fourth 0.3-by-0.1 iteration;
-# 1e-10 wrongly admits the fourth 2999.9999999999-by-1000.0 iteration.
-ABSOLUTE_TOLERANCE_BOUNDARY_PROBES = (
+# These measured rows distinguish accumulated rounding near 0.3 from an
+# end shortfall at a larger scale. Both use TradingView's recorded quantities.
+END_DIFFERENCE_PROBES = (
     "float_counter_tenth_step_to_three_tenths",
     "float_counter_mid_step_short_end",
 )
@@ -229,6 +228,12 @@ def runs(run_environment):
             builds[f"{name}_bound"] = Build(bound)
             builds[f"{name}_in_security"] = Build(_in_security(pine))
             builds[f"{name}_bound_in_security"] = Build(_in_security(bound))
+            builds[f"{name}_inputs"] = Build(_with_input_header(pine))
+            builds[f"{name}_siblings"] = Build(_with_sibling_loop(pine))
+            for position in ("before", "after"):
+                builds[f"{name}_omitted_{position}"] = Build(
+                    _with_omitted_loop(pine, position),
+                )
     for name in REAL_SCRIPTS:
         builds[name] = Build((FIXTURES / f"{name}.pine").read_text(encoding="utf-8"))
     for name, (pine, _) in CONTROLS.items():
@@ -302,7 +307,7 @@ def test_fractional_counter_tape_translates_with_a_double_counter(name):
 
 @pytest.mark.parametrize("name", tuple(
     name for name in MATCHING_MEASURED
-    if name not in ABSOLUTE_TOLERANCE_BOUNDARY_PROBES
+    if name not in END_DIFFERENCE_PROBES
 ))
 def test_tradingview_entry_quantities(runs, name):
     _assert_quantities(
@@ -310,8 +315,8 @@ def test_tradingview_entry_quantities(runs, name):
     )
 
 
-@pytest.mark.parametrize("name", ABSOLUTE_TOLERANCE_BOUNDARY_PROBES)
-def test_tradingview_absolute_tolerance_bracket(runs, name):
+@pytest.mark.parametrize("name", END_DIFFERENCE_PROBES)
+def test_tradingview_end_differences(runs, name):
     _assert_quantities(
         ok(runs, name), "default", TV["entry_quantities"][name], probe=name,
     )
@@ -331,7 +336,10 @@ def test_documented_untyped_helper_fraction_gap(runs, suffix):
 
 
 @pytest.mark.parametrize("name", FLOAT_CONTINUATION_PROBES)
-@pytest.mark.parametrize("suffix", ["_bound", "_in_security", "_bound_in_security"])
+@pytest.mark.parametrize("suffix", [
+    "_bound", "_in_security", "_bound_in_security", "_inputs", "_siblings",
+    "_omitted_before", "_omitted_after",
+])
 def test_float_continuation_routes_follow_measured_counts(runs, name, suffix):
     _assert_quantities(ok(runs, f"{name}{suffix}"), "default",
                        TV["entry_quantities"][name])
@@ -508,6 +516,49 @@ def _with_counter_bound_step(pine: str) -> str:
     )
 
 
+def _with_input_header(pine: str) -> str:
+    def bind(match):
+        return (
+            f'first = input.float({match["start"]}, "First")\n'
+            f'last = input.float({match["end"]}, "Last")\n'
+            f'stride = input.float({match["step"]}, "Stride")\n'
+            f'for {match["counter"]} = first to last by stride'
+        )
+
+    result, count = re.subn(
+        r"(?m)^for (?P<counter>\w+) = (?P<start>.+?) to (?P<end>.+?)"
+        r" by (?P<step>[^\n]+)$",
+        bind, pine,
+    )
+    assert count == 1
+    return result
+
+
+def _with_sibling_loop(pine: str) -> str:
+    lines = pine.splitlines()
+    loop = next(i for i, line in enumerate(lines) if line.startswith("for "))
+    tail = next(i for i, line in enumerate(lines) if line.startswith("if bar_index"))
+    # Run the same measured loop twice; average the two counts into one order.
+    return "\n".join([
+        *lines[:tail], *lines[loop:tail],
+        *(line.replace("qty = acc", "qty = acc / 2") for line in lines[tail:]),
+        "",
+    ])
+
+
+def _with_omitted_loop(pine: str, position: str) -> str:
+    lines = pine.splitlines()
+    tail = next(i for i, line in enumerate(lines) if line.startswith("if bar_index"))
+    at = 2 if position == "before" else tail
+    return "\n".join([
+        *lines[:at],
+        "float unused = 0.0",
+        "for unusedIndex = 0.0 to unusedIndex by 0.1",
+        "    unused += 1",
+        *lines[at:], "",
+    ])
+
+
 # DERIVED, no TradingView tape: exact binary step 0.25 gives
 # (1.0 - 0.0) / 0.25 + 1 = 5 iterations, each adding 1.0.
 _FLOAT_COUNTER_SOURCE = _source("""
@@ -529,8 +580,8 @@ DERIVED_FLOAT_SOURCES = {
 
 # DERIVED, without a TradingView tape: math.exp lowers to std::exp and
 # overflows to +inf. A finite bound admits the initial counter once, then
-# the absolute allowance leaves end +/- allowance finite and rejects the
-# infinite counter after its first increment.
+# the difference to the end rejects the infinite counter after its first
+# increment.
 NONFINITE_FLOAT_SOURCES = {}
 for _direction, _start, _end in (("up", "0.0", "1.0"), ("down", "1.0", "0.0")):
     _pine = _source(f"""
@@ -558,6 +609,56 @@ def test_derived_float_counter_quantities(runs, name):
 @pytest.mark.parametrize("name", sorted(NONFINITE_FLOAT_SOURCES))
 def test_infinite_float_step_terminates_after_one_iteration(runs, name):
     _assert_quantities(ok(runs, name), "default", 1)
+
+
+@pytest.mark.parametrize("tail", ["", "plot(acc)\n"], ids=["omitted", "stopped"])
+@pytest.mark.parametrize("finite_loop_at", [None, "before", "after"])
+def test_removed_float_loops_keep_their_runtime_behavior(tail, finite_loop_at):
+    compile_env.skip_if_no_engine_lib()
+    removed = (
+        "float acc = 0.0\n"
+        "for i = 0.0 to i by 0.1\n"
+        "    acc += 1\n"
+        + tail
+    )
+    finite = (
+        "float count = 0.0\n"
+        "for j = 0.0 to 0.3 by 0.1\n"
+        "    count += 1\n"
+        "plot(count)\n"
+    )
+    body = (
+        finite + removed if finite_loop_at == "before"
+        else removed + finite if finite_loop_at == "after"
+        else removed
+    )
+    driver = r'''
+#include <cassert>
+#include <iostream>
+#include <string>
+int main() {
+    Bar bar{10.0, 10.0, 10.0, 10.0, 1.0, 60000};
+    GeneratedStrategy strategy;
+    strategy.run(&bar, 1, "1", "1");
+    if (@STOPPED@) {
+        assert(strategy.last_error().find("Loop takes too long") != std::string::npos);
+    } else {
+        assert(strategy.last_error().empty());
+    }
+    @FINITE_COUNT@
+    std::cout << "matched loop behavior";
+}
+'''
+    finite_count = ""
+    if finite_loop_at is not None and not tail:
+        expected = TV["entry_quantities"]["float_counter_tenth_step_to_three_tenths"]
+        finite_count = f"assert(strategy.count == {expected});"
+    driver = driver.replace("@STOPPED@", "true" if tail else "false")
+    driver = driver.replace("@FINITE_COUNT@", finite_count)
+    pine = '//@version=6\nstrategy("Removed float loop", currency=currency.NONE)\n' + body
+    assert compile_env.run_emitted_tu(
+        transpile(pine), driver, opt="-O2", label="removed_float_loop",
+    ) == "matched loop behavior"
 
 
 @pytest.mark.parametrize("context", ["chart", "security"])

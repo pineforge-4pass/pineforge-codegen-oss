@@ -1742,11 +1742,11 @@ class StmtVisitor:
         if action is not None:
             # Keep lexical/naming bookkeeping (including nested loop tokens)
             # identical for statements after this one; discard only its text.
-            saved_float_tolerance = self._uses_float_step_tolerance
+            saved_tv_float_step_end = self._uses_tv_float_step_end
             try:
                 self._visit_counter_bound_for(node, [], indent, value_target)
             finally:
-                self._uses_float_step_tolerance = saved_float_tolerance
+                self._uses_tv_float_step_end = saved_tv_float_step_end
             if action == "stop":
                 pad = "    " * indent
                 lines.append(
@@ -1834,7 +1834,7 @@ class StmtVisitor:
 
     def _for_continuation(self, counter_cpp_type, var, end, step, down) -> str:
         if counter_cpp_type == "double":
-            self._uses_float_step_tolerance = True
+            self._uses_tv_float_step_end = True
         return for_continuation(counter_cpp_type, var, end, step, down)
 
     def _for_header_reads_new_counter(self, node: ForStmt) -> bool:

@@ -132,68 +132,8 @@ def test_int_or_unresolved_start_keeps_int_header_slots(name, pine):
     counter = _counter_pattern(name.split("_", 1)[0], "walkIndex")
     assert re.search(rf"\bfor \(int {counter} = ", cpp), cpp
     assert not re.search(rf"\bdouble {counter} = ", cpp), cpp
-    assert "kFloatStepTolerance" not in cpp
     for slot in ("start", "end", "step"):
         assert re.search(rf"\bint \w+(?:_{slot}_\d+|_{slot}) = ", cpp), cpp
-
-
-@pytest.mark.parametrize("context", ["chart", "security"])
-@pytest.mark.parametrize("counter_bound", [False, True])
-@pytest.mark.parametrize("start,step,cpp_type", [
-    ("0.0", "0.1", "double"),
-    ("1.0", "0.1", "double"),
-    ("0.0", "math.exp(1000.0)", "double"),
-    ("1.0", "math.exp(1000.0)", "double"),
-    ("0", "1", "int"),
-])
-def test_only_float_continuations_use_the_absolute_allowance(
-    context, counter_bound, start, step, cpp_type,
-):
-    if counter_bound:
-        step = f"(walkIndex >= 0 ? {step} : {step})"
-    pine = _loop_source(
-        "float acc = 0.0\n"
-        f"for walkIndex = {start} to 0.3 by {step}\n"
-        "    acc += 1",
-        context,
-    )
-    cpp = transpile(pine)
-    counter = _counter_pattern(context, "walkIndex")
-    loop = re.search(
-        rf"\bfor \((?:{cpp_type} {counter} = \w+)?;"
-        rf"(?P<condition>[^;]*\b{counter}\b[^;]*);",
-        cpp,
-    )
-    assert loop is not None, cpp
-    condition = loop["condition"]
-    if cpp_type == "int":
-        assert "kFloatStepTolerance" not in cpp
-        assert re.search(r"\? \(\w+ >= \w+\) : \(\w+ <= \w+\)", condition)
-        return
-    assert cpp.count("static constexpr double kFloatStepTolerance =") == 1
-    literal = re.search(r"kFloatStepTolerance = ([0-9.eE+-]+);", cpp)
-    assert literal is not None
-    assert 0 < float(literal[1]) < 1e-9
-    assert re.search(
-        r"\? \(\w+ >= \w+ - ::kFloatStepTolerance\)"
-        r" : \(\w+ <= \w+ \+ ::kFloatStepTolerance\)",
-        condition,
-    ), condition
-    # Accumulation preserves the measured large-magnitude count.
-    assert re.search(r"\w+ \+= \(\w+ \? -\w+ : \w+\)", cpp)
-
-
-def test_multiple_float_loops_share_one_tolerance_definition():
-    cpp = transpile(_loop_source(
-        "float acc = 0.0\n"
-        "for walkIndex = 0.0 to 0.3 by 0.1\n"
-        "    acc += 1\n"
-        "for otherIndex = 0.0 to 0.6 by 0.2\n"
-        "    acc += 1",
-        "chart",
-    ))
-    assert cpp.count("static constexpr double kFloatStepTolerance =") == 1
-    assert cpp.count("::kFloatStepTolerance") == 4
 
 
 # The chart route retains v5's int counter even for a float start.

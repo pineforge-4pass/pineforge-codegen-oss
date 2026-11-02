@@ -285,11 +285,6 @@ def test_division_start_emits_its_value_family_with_default_step(name):
     assert not re.search(rf"\bfor \({other} i = ", cpp), cpp
     for slot in ("start", "end", "step"):
         assert re.search(rf"\b{family} _for_{slot}_\d+ = ", cpp), cpp
-    if family == "double":
-        assert cpp.count("static constexpr double kFloatStepTolerance =") == 1
-        assert cpp.count("::kFloatStepTolerance") == 2
-    else:
-        assert "kFloatStepTolerance" not in cpp
 
 
 @pytest.mark.parametrize("start,end,step", [
@@ -330,9 +325,7 @@ def test_division_start_without_step_matches_a_float_start(name):
         assert re.search(rf"\bfor \({family} i = ", cpp), cpp
         for slot in ("start", "end", "step"):
             assert re.search(rf"\b{family} _for_{slot}_\d+ = ", cpp), cpp
-        assert cpp.count("static constexpr double kFloatStepTolerance =") == 1
-        assert cpp.count("::kFloatStepTolerance") == 2
-        # All other C++ bytes, including the end, step, body and tolerance,
+        # All other C++ bytes, including the end, step and body,
         # must match the twin whose Pine source differs only in the start.
         normalized.append(_normalize_declared_loop_start(cpp, family))
     assert normalized[0] == normalized[1]
@@ -353,7 +346,6 @@ def test_proved_integral_division_matches_an_int_start(start, twin, tmp_path):
         assert re.search(r"\bfor \(int i = ", cpp), cpp
         for slot in ("start", "end", "step"):
             assert re.search(rf"\bint _for_{slot}_\d+ = ", cpp), cpp
-        assert "kFloatStepTolerance" not in cpp
         # Division already emits an na-preserving cast and guards where a
         # literal does not. Preserve every byte of BOTH frozen outputs.
         pine = tmp_path / "strategy.pine"
@@ -382,8 +374,6 @@ def test_unproved_division_uses_double_headers(prefix, start):
     assert not re.search(r"\bfor \(int i = ", cpp), cpp
     for slot in ("start", "end", "step"):
         assert re.search(rf"\bdouble _for_{slot}_\d+ = ", cpp), cpp
-    assert cpp.count("static constexpr double kFloatStepTolerance =") == 1
-    assert cpp.count("::kFloatStepTolerance") == 2
     assert_float_step_refused(loop_step_source(start, prefix=prefix))
 
 
@@ -407,7 +397,6 @@ def test_integer_counter_keeps_frozen_cpp(prefix, start, end, tmp_path):
     assert re.search(r"\bfor \(int i = ", cpp), cpp
     for slot in ("start", "end", "step"):
         assert re.search(rf"\bint _for_{slot}_\d+ = ", cpp), cpp
-    assert "kFloatStepTolerance" not in cpp
     # Use the loop inventory's immutable reference, without replacing any
     # stored hash or excluding any emitted text from the digest.
     reference = reference_codegen(LOOP_CPP_REFERENCE)
@@ -510,49 +499,3 @@ def test_top_level_v5_keeps_its_existing_version_diagnostic(source: str) -> None
     diagnostic, = caught.value.diagnostics
     assert diagnostic.code != "PF-E2079"
     assert diagnostic.message == "PineForge supports PineScript v6 only (found //@version=5)."
-
-
-@pytest.mark.parametrize("tail", ["", "plot(acc)\n"], ids=["omitted", "stopped"])
-@pytest.mark.parametrize("finite_loop_at", [None, "before", "after"])
-def test_removed_float_loops_do_not_request_a_tolerance(tail, finite_loop_at):
-    removed = (
-        "float acc = 0.0\n"
-        "for i = 0.0 to i by 0.1\n"
-        "    acc += 1\n"
-        + tail
-    )
-    finite = (
-        "float count = 0.0\n"
-        "for j = 0.0 to 0.3 by 0.1\n"
-        "    count += 1\n"
-        "plot(count)\n"
-    )
-    body = (
-        finite + removed if finite_loop_at == "before"
-        else removed + finite if finite_loop_at == "after"
-        else removed
-    )
-    cpp = transpile(_script(body))
-    assert not re.search(r"\bfor \(double i\b", cpp)
-    expected_definitions = int(finite_loop_at is not None)
-    assert cpp.count("static constexpr double kFloatStepTolerance =") == expected_definitions
-    assert ("Loop takes too long" in cpp) == bool(tail)
-
-
-def test_variable_step_does_not_scale_the_emitted_allowance():
-    cpp = transpile(_script(
-        'stride = input.float(0.1, "Stride")\n'
-        'limit = input.float(0.3, "Limit")\n'
-        "float acc = 0.0\n"
-        "for x = 0.0 to limit by stride\n"
-        "    acc += 1\n"
-        "plot(acc)\n"
-    ))
-    loop = re.search(r"\bfor \(double x = \w+; (?P<condition>[^;]+);", cpp)
-    assert loop is not None, cpp
-    # Each allowance is only the constant: neither step nor end scales it.
-    assert re.search(
-        r"\(\w+ \? \(x >= \w+ - ::kFloatStepTolerance\)"
-        r" : \(x <= \w+ \+ ::kFloatStepTolerance\)\)$",
-        loop["condition"],
-    ), loop["condition"]

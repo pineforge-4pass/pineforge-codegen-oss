@@ -259,7 +259,6 @@ plot(request.security(syminfo.tickerid, timeframe.period, measure()))
         assert re.search(
             rf"\bdouble _sec0_measure_\d+_for_{slot} = ", evaluator,
         ), evaluator
-    assert "::kFloatStepTolerance" in evaluator
 
 
 @pytest.mark.parametrize("prefix,start,family", [

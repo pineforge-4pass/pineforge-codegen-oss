@@ -58,17 +58,18 @@ supported as exact pairs; on the 0.x line they are independent. See the
   A division in a loop start keeps its fraction unless it is a constant
   division with an exact integer result, which keeps the int route. The float-step
   refusal follows TradingView's check type (a division of two ints is int).
-- Float-counter loops accumulate the counter and continue within an absolute
-  allowance of the end: `x <= end + kFloatStepTolerance` ascending, with the
-  mirrored comparison descending. `0.0 to 0.3 by 0.1` counts four iterations.
-  `kFloatStepTolerance = 1e-12` is emitted only for float-counter loops and
-  chosen inside the measured bracket about `[5.6e-17, 9.98e-11]` in the units
-  of the counter; it is not a TradingView constant. Measurements at very large
-  and very small steps rule out an allowance relative to the step or to the end.
-  `0.0 to 2999.9999999999 by 1000.0` counts three iterations; together with
-  the `0.3 by 0.1` row it excludes absolute allowances of `1e-10` and `1e-17`,
-  respectively. A positive infinite step exits after one iteration with a
-  finite end and needs no non-finite-step guard.
+- Float-counter loops accumulate the counter by repeated double addition.
+  TradingView's measured loop-end rule admits a counter whose excess beyond
+  the end, computed as one double subtraction in the loop's direction, is
+  strictly below `1e-10`. The named value `kTvFloatStepEnd` is emitted only
+  for float-counter loops. Measured on TradingView at the 0.3 scale (counted
+  up to a 9.999e-11 shortfall, not counted from 1.0e-10) and at counter
+  magnitudes of about 1, 1e3, 1e6 and 1e9; no magnitude-independent constant
+  is claimed; not a constant TradingView publishes.
+  `0.0 to 0.3 by 0.1` counts four iterations;
+  `0.0 to 2999.9999999999 by 1000.0` counts three.
+  A positive infinite step exits after one iteration with a finite end
+  and needs no non-finite-step guard.
 - Known loop gaps: a float counter passed to
   an untyped helper truncates here, while TradingView passes the fractional
   value (accumulating `twice(x)` from 0.0 to 1.0 by 0.25 gives 2 here and 5
@@ -80,9 +81,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
   accepts `f(0.0)`. PineForge accepts and runs both with a float counter
   because this inference cannot distinguish their call-argument types;
   refusing the unknown start would also refuse the valid float-argument call.
-  Shortfalls inside the measured tolerance
-  bracket have no pinned TradingView count. Block-local/enclosing-counter
-  bindings and stops inside `request.security` have no TradingView tape.
+  Block-local/enclosing-counter bindings and stops inside `request.security`
+  have no TradingView tape.
 - A Pine v6 function or method reading a later local without an earlier
   visible binding is refused during analysis at the read (`PF-E2075`),
   using the same declaration-order rule as later globals (`PF-E2053`).

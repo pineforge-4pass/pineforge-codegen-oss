@@ -10,11 +10,10 @@
     "compile_only_zero_entries": ["ta.highest(3)"],
     "ta.valuewhen": "no receipt, kept as on main"
   },
-  "float_step_tolerance": {
-    "measured_absolute_bracket": "about [5.6e-17, 9.98e-11] in the units of the counter, from double arithmetic over all 18 measured rows",
-    "choice": "kFloatStepTolerance = 1e-12 is chosen inside the measured bracket; it is not a TradingView constant",
-    "rule": "Accumulate the counter; continue within an absolute allowance of the end: x <= end + kFloatStepTolerance ascending, x >= end - kFloatStepTolerance descending",
-    "measurement": "Measurements at very large and very small steps rule out an allowance relative to the step or to the end. An absolute allowance of 1e-10 fails float_counter_mid_step_short_end; 1e-17 fails float_counter_tenth_step_to_three_tenths and float_counter_fifth_step_to_three_fifths. The large-magnitude row does not constrain the allowance in this bracket."
+  "float_step_end_rule": {
+    "rule": "Accumulate the counter by repeated double addition. Continue while its excess beyond the end, computed as one double subtraction in the loop's direction, is strictly below 1e-10.",
+    "measurement": "TradingView counted shortfalls up to 9.999e-11 at the 0.3 scale and did not count them from 1.0e-10. Also measured at counter magnitudes of about 1, 1e3, 1e6 and 1e9; no magnitude-independent constant is claimed; not a constant TradingView publishes.",
+    "provenance": "The 72 recorded counts are read from c2_end_rule_tapes.json. Its inputs block preserves the sealed count TSV and measurement record SHA-256 digests. The older entry quantities and evidence below remain unchanged."
   },
   "entries_per_probe": 205,
   "entry_counts": {

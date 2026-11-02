@@ -416,15 +416,16 @@ when their result is read in a shape not measured, where TradingView may drop
 them. Endless loops in functions, methods and `request.security` still never end
 here while TradingView stops them; data-dependent endless loops still hang.
 
-A float-counter loop accumulates its counter and continues while
-`x <= end + kFloatStepTolerance` (the mirrored test when descending), within
-an absolute allowance of the end in the units of the counter.
-`kFloatStepTolerance = 1e-12` is emitted only when a float-counter loop exists.
-It is chosen inside the measured bracket about `[5.6e-17, 9.98e-11]`;
-it is not a TradingView constant. Measurements at very large and very small
-steps rule out an allowance relative to the step or to the end.
+A float-counter loop accumulates its counter by repeated double addition.
+TradingView's measured loop-end rule admits a counter whose excess beyond
+the end, computed as one double subtraction in the loop's direction, is
+strictly below `1e-10`. The named value `kTvFloatStepEnd` is emitted only
+when a float-counter loop exists. Measured on TradingView at the 0.3 scale
+(counted up to a 9.999e-11 shortfall, not counted from 1.0e-10) and at counter
+magnitudes of about 1, 1e3, 1e6 and 1e9; no magnitude-independent constant
+is claimed; not a constant TradingView publishes.
 A positive infinite step leaves the counter beyond the finite bound after
-one iteration; the absolute allowance needs no non-finite-step guard.
+one iteration; the difference comparison needs no non-finite-step guard.
 
 The measured entry-quantity probes in `fixtures/for_counter_headers` include
 `end_reads_counter` = 1, `end_reads_counter_other` = 3,
@@ -443,7 +444,9 @@ zero entries. Non-positive-step probes also measure no-trade stops.
 The additional inexact-step probes and export hashes are recorded in
 `tradingview_quantities.json`: `0.0 to 0.3 by 0.1` counts four iterations,
 while `0.0 to 2999.9999999999 by 1000.0` counts three. These rows reject
-absolute allowances of `1e-17` and `1e-10`, respectively.
+end comparisons that lose the accumulated last iteration or round the end
+up before comparing it. Additional recorded counts exercise the measured
+end difference in both directions and at the measured counter magnitudes.
 Known gaps: a float counter passed to an untyped helper truncates here while
 TradingView passes the fractional value (`twice(x)` accumulates 2 here versus 5
 on TradingView).
@@ -454,7 +457,6 @@ For `f(x)` containing `for v = x to 1.0 by 0.25`, TradingView refuses `f(0)`
 with CE10106 and accepts `f(0.0)`. PineForge accepts and runs both with a float
 counter because this inference cannot distinguish their call-argument types;
 refusing the unknown start would also refuse the valid float-argument call.
-Shortfalls inside the measured tolerance bracket are not pinned by a measurement.
 Block-local/enclosing-counter bindings, end bounds that change direction during
 iteration and stops inside `request.security` have no TradingView tape.
 Integer-counter controls are guarded
