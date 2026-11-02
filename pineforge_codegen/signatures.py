@@ -867,9 +867,17 @@ def get_intrinsic(namespace: str | None, func_name: str) -> IntrinsicFunc | None
         "map": MAP_FUNCTIONS,
         "syminfo": SYMINFO_FUNCTIONS,
         "request": REQUEST_FUNCTIONS,
+        "array": ARRAY_FUNCTIONS,
+        "matrix": MATRIX_FUNCTIONS,
         None: BUILTIN_FUNCTIONS,
     }.get(namespace)
-    return registry.get(func_name) if registry is not None else None
+    record = registry.get(func_name) if registry is not None else None
+    if record is None and namespace == "request":
+        # request.security keeps its custom binder; its value-level record is
+        # reachable here too. These records declare no verified keyword names,
+        # so every keyword check treats them as it treated an unknown call.
+        record = REQUEST_VALUE_FUNCTIONS.get(func_name)
+    return record
 
 
 def get_param_names(namespace: str | None, func_name: str) -> list[str] | None:
