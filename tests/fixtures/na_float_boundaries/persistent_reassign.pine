@@ -1,0 +1,6 @@
+//@version=6
+strategy("p9", currency=currency.USDT)
+int n = bar_index
+var float x = na
+x := n[1]
+plot(x)

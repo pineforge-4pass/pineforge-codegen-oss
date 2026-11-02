@@ -113,13 +113,19 @@ class TaSiteHelper:
         "vwap_anchored": frozenset({1}),
         "vwap_anchored_bands": frozenset({1}),
     }
+    _TA_INT_COMPUTE_ARGS = {
+        "change": frozenset({1}),
+        "valuewhen": frozenset({2}),
+    }
 
     def _ta_compute_arg_cpp(self, ta_name: str, position: int, node) -> str:
-        """Render one TA compute argument with Pine bool truthiness."""
+        """Render a TA value in its numeric or boolean destination family."""
         rendered = self._visit_expr(node)
         if position in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()):
             return self._coerce_bool_expr(rendered, node)
-        return rendered
+        if position in self._TA_INT_COMPUTE_ARGS.get(ta_name, ()):
+            return rendered
+        return self._coerce_int_slot(rendered, node, "double")
 
     def _ta_compute_args_for_site(self, site: "TACallSite") -> str:
         """``_ta_compute_args_for_site_base`` plus, for a site whose length the
@@ -1344,23 +1350,22 @@ class TaSiteHelper:
         mutable globals get rebound to the security-context shadows."""
         ta_name = self._ta_name_from_site(site)
 
+        def visit_compute(arg, position):
+            rendered = self._build_security_expr(
+                sec_id, arg, None, ta_results,
+                security_mutable_names=security_mutable_names,
+                helper_binding_stack=helper_binding_stack,
+                emitted_lines=emitted_lines,
+            )
+            if position in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()):
+                return self._coerce_bool_expr(rendered, arg)
+            if position in self._TA_INT_COMPUTE_ARGS.get(ta_name, ()):
+                return rendered
+            return self._security_float_cpp(rendered, arg, helper_binding_stack)
+
         if site.class_name in ("_PFAnchoredVWAP", "_PFAnchoredVWAPBands"):
             explicit = [
-                self._coerce_bool_expr(
-                    self._build_security_expr(
-                        sec_id, a, None, ta_results,
-                        security_mutable_names=security_mutable_names,
-                        helper_binding_stack=helper_binding_stack,
-                        emitted_lines=emitted_lines,
-                    ),
-                    a,
-                ) if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()) else
-                self._build_security_expr(
-                    sec_id, a, None, ta_results,
-                    security_mutable_names=security_mutable_names,
-                    helper_binding_stack=helper_binding_stack,
-                    emitted_lines=emitted_lines,
-                )
+                visit_compute(a, i)
                 for i, a in enumerate(site.compute_args)
             ]
             if len(explicit) < 2:
@@ -1372,21 +1377,7 @@ class TaSiteHelper:
 
         if site.class_name == "_PFPivotPointLevels":
             explicit = [
-                self._coerce_bool_expr(
-                    self._build_security_expr(
-                        sec_id, a, None, ta_results,
-                        security_mutable_names=security_mutable_names,
-                        helper_binding_stack=helper_binding_stack,
-                        emitted_lines=emitted_lines,
-                    ),
-                    a,
-                ) if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()) else
-                self._build_security_expr(
-                    sec_id, a, None, ta_results,
-                    security_mutable_names=security_mutable_names,
-                    helper_binding_stack=helper_binding_stack,
-                    emitted_lines=emitted_lines,
-                )
+                visit_compute(a, i)
                 for i, a in enumerate(site.compute_args)
             ]
             if len(explicit) < 3:
@@ -1400,30 +1391,7 @@ class TaSiteHelper:
             implicit = TA_IMPLICIT_COMPUTE_FULL[ta_name].replace("current_bar_.", "bar.")
             if site.compute_args:
                 explicit = ", ".join(
-                    (
-                        self._coerce_bool_expr(
-                            self._build_security_expr(
-                                sec_id,
-                                a,
-                                None,
-                                ta_results,
-                                security_mutable_names=security_mutable_names,
-                                helper_binding_stack=helper_binding_stack,
-                                emitted_lines=emitted_lines,
-                            ),
-                            a,
-                        )
-                        if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ())
-                        else self._build_security_expr(
-                            sec_id,
-                            a,
-                            None,
-                            ta_results,
-                            security_mutable_names=security_mutable_names,
-                            helper_binding_stack=helper_binding_stack,
-                            emitted_lines=emitted_lines,
-                        )
-                    )
+                    visit_compute(a, i)
                     for i, a in enumerate(site.compute_args)
                 )
                 if ta_name in self._TA_IMPLICIT_REPLACE:
@@ -1433,30 +1401,7 @@ class TaSiteHelper:
 
         if site.compute_args:
             explicit = ", ".join(
-                (
-                    self._coerce_bool_expr(
-                        self._build_security_expr(
-                            sec_id,
-                            a,
-                            None,
-                            ta_results,
-                            security_mutable_names=security_mutable_names,
-                            helper_binding_stack=helper_binding_stack,
-                            emitted_lines=emitted_lines,
-                        ),
-                        a,
-                    )
-                    if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ())
-                    else self._build_security_expr(
-                        sec_id,
-                        a,
-                        None,
-                        ta_results,
-                        security_mutable_names=security_mutable_names,
-                        helper_binding_stack=helper_binding_stack,
-                        emitted_lines=emitted_lines,
-                    )
-                )
+                visit_compute(a, i)
                 for i, a in enumerate(site.compute_args)
             )
             if ta_name in TA_IMPLICIT_APPEND:

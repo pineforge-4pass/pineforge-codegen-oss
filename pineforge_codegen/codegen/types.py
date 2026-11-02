@@ -942,25 +942,166 @@ class TypeInferer:
         return ((runtime, True)
                 if self._slot_scalar_cpp_type(name) == "int" else None)
 
-    def _int_operand_may_be_na(self, node, owner_info=None) -> bool:
-        """Whether a 32-bit int operand ``_narrow_int_bound`` accepts can be
-        ``na``: a leaf that is a parameter, a local or a script variable
-        (``_narrow_int_name_info``). Literals, inlined constants, inputs, a
-        counted loop's binder and the bar index cannot."""
-        if isinstance(node, NumberLiteral):
+    def _int_operand_may_be_na(self, node, scope_info=None, *, _seen=frozenset()) -> bool:
+        """Whether an integer source can produce ``na``, independent of width.
+
+        Prove literals, input.int and generic integer input calls, current
+        calendar readings, collection dimensions and counted binders before
+        following aliases. Other input functions retain conservative guards.
+        Unproved parameters, history and mutable storage remain guarded.
+        """
+        if isinstance(node, (NumberLiteral, BoolLiteral, ColorLiteral, StringLiteral)):
             return False
         if isinstance(node, UnaryOp):
-            return self._int_operand_may_be_na(node.operand, owner_info)
+            return self._int_operand_may_be_na(node.operand, scope_info, _seen=_seen)
         if isinstance(node, BinOp):
-            return (self._int_operand_may_be_na(node.left, owner_info)
-                    or self._int_operand_may_be_na(node.right, owner_info))
+            return (self._int_operand_may_be_na(node.left, scope_info, _seen=_seen)
+                    or self._int_operand_may_be_na(node.right, scope_info, _seen=_seen))
         if isinstance(node, Ternary):
-            return (self._int_operand_may_be_na(node.true_val, owner_info)
-                    or self._int_operand_may_be_na(node.false_val, owner_info))
+            return (self._int_operand_may_be_na(node.true_val, scope_info, _seen=_seen)
+                    or self._int_operand_may_be_na(node.false_val, scope_info, _seen=_seen))
         if isinstance(node, Identifier):
-            info = self._narrow_int_name_info(node.name, owner_info)
+            if (scope_info is None
+                    and node.name in {"time", "timenow", "last_bar_time",
+                                      "year", "month", "dayofmonth", "dayofweek",
+                                      "hour", "minute", "second", "weekofyear"}
+                    and not self._known_var_is_lexically_shadowed(node.name)
+                    and node.name not in self._current_func_param_types
+                    and node.name not in self._known_vars
+                    and not (node.annotations or {}).get("tuple_builtin_binding")):
+                return False
+            if (scope_info is None and not getattr(self, "_int_width_scan_depth", 0)
+                    and node.name not in _seen
+                    and node.name not in self._global_mutable_infos
+                    and not self._known_var_is_lexically_shadowed(node.name)
+                    and node.name not in self._current_func_param_types
+                    and node.name not in self._current_func_local_types
+                    and node.name not in self._current_loop_vars):
+                value = getattr(self.ctx, "global_expr_map", {}).get(node.name)
+                if value is not None and not self._emitted_value_is_double(value):
+                    return self._int_operand_may_be_na(
+                        value, _seen=_seen | {node.name})
+            if (scope_info is None and node.name not in _seen
+                    and node.name in self._current_func_local_types):
+                function = self._func_info_map.get(getattr(self, "_active_func_name", None))
+                if function is not None:
+                    writes = [
+                        child for child in self._walk_ast_list(function.node.body)
+                        if (isinstance(child, VarDecl) and child.name == node.name)
+                        or (isinstance(child, Assignment)
+                            and isinstance(child.target, Identifier)
+                            and child.target.name == node.name)
+                        or (isinstance(child, TupleAssign) and node.name in child.names)
+                        or (isinstance(child, ForStmt) and child.var == node.name)
+                        or (isinstance(child, ForInStmt)
+                            and (child.var == node.name or node.name in (child.vars or ())))
+                    ]
+                    if len(writes) == 1 and isinstance(writes[0], VarDecl):
+                        value = writes[0].value
+                        if self._pure_int_literal_value(value) is not None:
+                            return False
+                        if (value is not None
+                                and not self._emitted_value_is_double(value)
+                                and not self._int_operand_may_be_na(
+                                    value, _seen=_seen | {node.name})):
+                            return False
+            info = self._narrow_int_name_info(node.name, scope_info)
             return info is None or info[1]
+        if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
+            if node.object.name == "timeframe" and node.member == "multiplier":
+                return False
+            if (node.object.name == "strategy"
+                    and node.member in self._INTEGRAL_STRATEGY_MEMBERS):
+                return False
+        if (isinstance(node, FuncCall) and isinstance(node.callee, Identifier)
+                and node.callee.name == "nz" and node.args):
+            return (len(node.args) > 1
+                    and (self._emitted_value_is_double(node.args[1])
+                         or self._int_operand_may_be_na(node.args[1], scope_info, _seen=_seen)))
+        if isinstance(node, FuncCall):
+            function, namespace = self._resolve_callee(node.callee)
+            if ((namespace == "input" and function == "int")
+                    or (namespace is None and function == "input"
+                        and self._generic_input_cpp_type(node) == "int")):
+                # input.int and generic integer input supply a value on every
+                # execution, including when setup substitutes the call for its
+                # declared name.
+                return False
+            if (namespace is None
+                    and function in {"timestamp", "year", "month", "dayofmonth",
+                                     "dayofweek", "hour", "minute", "second",
+                                     "weekofyear"}):
+                return any(self._int_operand_may_be_na(arg, scope_info, _seen=_seen)
+                           for arg in (*node.args, *node.kwargs.values()))
+        if (isinstance(node, FuncCall) and isinstance(node.callee, MemberAccess)
+                and node.callee.member in ("size", "rows", "columns", "elements_count")):
+            receiver = node.callee.object
+            member = node.callee.member
+            spec, method = self._typed_user_method_info(receiver, member)
+            if method is None:
+                if spec is not None and (
+                    (spec.kind in ("array", "map") and member == "size")
+                    or (spec.kind == "matrix" and member in ("rows", "columns", "elements_count"))
+                ):
+                    return False
+                if isinstance(receiver, Identifier) and (
+                    (receiver.name in ("array", "map") and member == "size")
+                    or (receiver.name == "matrix" and member in ("rows", "columns", "elements_count"))
+                ):
+                    return False
         return True
+
+    def _integer_na_operand(self, node) -> bool:
+        """An emitted integer expression whose value can be missing."""
+        return (node is not None
+                and not self._emitted_value_is_double(node)
+                and self._infer_type(node) in ("int", "int64_t", "double")
+                and self._int_operand_may_be_na(node))
+
+    @staticmethod
+    def _tuple_slot_types(cpp_type: str | None) -> list[str]:
+        """Split an emitted tuple's element types, retaining nested templates."""
+        if not cpp_type or not cpp_type.startswith("std::tuple<"):
+            return []
+        result, start, depth = [], len("std::tuple<"), 0
+        for index in range(start, len(cpp_type) - 1):
+            token = cpp_type[index]
+            if token == "<":
+                depth += 1
+            elif token == ">":
+                depth -= 1
+            elif token == "," and depth == 0:
+                result.append(cpp_type[start:index].strip())
+                start = index + 1
+        result.append(cpp_type[start:-1].strip())
+        return result
+
+    def _na_arithmetic_cpp(self, node, left: str, right: str, lower) -> str:
+        """Evaluate operands once, testing their original types before arithmetic."""
+        operation = lower("_pna_l", "_pna_r")
+        return (
+            f"([&]() {{ auto _pna_l = ({left}); "
+            f"auto _pna_r = ({right}); "
+            f"using _pf_val_t = decltype({operation}); "
+            f"return ({self._integer_missing_cpp('_pna_l')} || {self._integer_missing_cpp('_pna_r')}) "
+            f"? na<_pf_val_t>() : {operation}; }}())"
+        )
+
+    def _numeric_unary_cpp(self, node, operand: str,
+                           source_is_double: bool | None = None) -> str:
+        """Keep the integer result family and test missingness before a sign."""
+        from .helpers import unary_sign_cpp
+
+        if source_is_double is None:
+            source_is_double = not self._integer_na_operand(node.operand)
+        if node.op not in ("+", "-") or source_is_double:
+            return unary_sign_cpp(node.op, operand)
+        operation = unary_sign_cpp(node.op, "_pf_sign_v")
+        return (
+            f"([&]() {{ auto _pf_sign_v = ({operand}); "
+            f"using _pf_val_t = decltype({operation}); "
+            f"return {self._integer_missing_cpp('_pf_sign_v')} ? na<_pf_val_t>() : {operation}; }}())"
+        )
 
     def _na_aware_wide_is_double(self, node) -> bool:
         """Whether ``node`` is a 64-bit ``+ - *`` (``_int_arith_leaves_int32``)
@@ -3411,6 +3552,9 @@ class TypeInferer:
         if isinstance(node, Subscript) and isinstance(node.object, Identifier):
             # A history read keeps the series' element type.
             base = node.object.name
+            parameters = getattr(self, "_current_func_series_param_types", {})
+            if base in parameters:
+                return parameters[base] == "double"
             if base in self._INTEGRAL_BUILTINS:
                 return False
             if base in self.ctx.series_vars or base in self.ctx.series_bar_fields:
@@ -3448,10 +3592,15 @@ class TypeInferer:
                     or self._emitted_value_is_double(node.false_val))
         if isinstance(node, Identifier):
             name = node.name
+            tuple_type = (
+                getattr(self, "_tuple_binding_cpp_types_by_name", {}).get(name)
+                if (node.annotations or {}).get("tuple_builtin_binding") else None
+            )
+            if tuple_type is not None:
+                return tuple_type == "double"
             if name in getattr(self, "_current_loop_vars", set()):
-                # A counted-loop binder is emitted as ``for (int i = ...)``,
-                # whatever ``_infer_type`` reports for the Pine binding.
-                return False
+                spec = getattr(self, "_current_loop_var_specs", {}).get(name)
+                return spec is not None and spec.kind == "primitive" and spec.name == "float"
             if (name in self._INTEGRAL_BUILTINS
                     and name not in self._current_func_param_types
                     and name not in self._known_vars):
@@ -3470,6 +3619,14 @@ class TypeInferer:
                     return declared == "double"
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            if isinstance(node.callee, MemberAccess) and node.callee.member == "get":
+                spec, method = self._typed_user_method_info(
+                    node.callee.object, node.callee.member)
+                if spec is None and namespace == "matrix" and node.args:
+                    spec = self._type_spec_from_expr(node.args[0])
+                if (method is None and spec is not None and spec.kind == "matrix"
+                        and spec.element is not None and spec.element.name in ("int", "float")):
+                    return True
             if (namespace, func_name) in self._DOUBLE_EMITTING_INT_CALLS:
                 # The 2-arg precision overload is a float in Pine as well and
                 # falls through to the generic check.
@@ -3504,23 +3661,23 @@ class TypeInferer:
         """The C++ type of the storage a write to the scalar ``name`` lands in.
 
         Reads the declaration sites in the order the emitter itself uses:
-        ``var`` member, function-local, parameter, then hoisted global member.
+        function-local, parameter, ``var`` member, then hoisted global member.
         Unlike ``_na_reassign_cpp_type`` the global case mirrors
         ``base.generate``'s member layout (``_infer_type`` of the initializer)
         rather than the analyzer's ``PineType``: the two disagree for
         e.g. ``x = math.round(...)``, and the declaration is the real storage.
         """
-        for vname, ptype, _init in self.ctx.var_members:
-            if vname == name:
-                if self._numeric_na_member(name):
-                    return "double"
-                return PINE_TYPE_TO_CPP.get(ptype, "double")
         local = getattr(self, "_current_func_local_types", {}).get(name)
         if local is not None:
             return local
         param = getattr(self, "_current_func_param_types", {}).get(name)
         if param is not None:
             return param
+        for vname, ptype, _init in self.ctx.var_members:
+            if vname == name:
+                if self._numeric_na_member(name):
+                    return "double"
+                return PINE_TYPE_TO_CPP.get(ptype, "double")
         for gname, gptype in self.ctx.global_var_decls:
             if gname != name:
                 continue
@@ -3682,17 +3839,20 @@ class TypeInferer:
         )
 
     def _global_float_na_selection(self, name: str, ptype: PineType) -> bool:
-        """A Pine float keeps float storage for a nullable int ternary."""
+        """Explicit floats and nullable float selections retain double storage."""
         expr = getattr(self.ctx, "global_expr_map", {}).get(name)
         return (
             ptype == PineType.FLOAT
-            and isinstance(expr, Ternary)
-            and self._selection_contains_na(expr)
+            and (
+                (isinstance(expr, Ternary) and self._selection_contains_na(expr))
+                or any(isinstance(stmt, VarDecl) and stmt.name == name
+                       and stmt.type_hint == "float" for stmt in self.ctx.ast.body)
+            )
         )
 
     def _int_slot_cpp_type(self, name: str | None,
                            declared: str | None = None) -> str | None:
-        """``"int"``/``"int64_t"`` when a write to this slot narrows, else ``None``.
+        """The numeric destination family of a scalar or series write.
 
         ``declared`` short-circuits the lookup for an emitter that already
         knows the storage type it is about to spell (a local declaration).
@@ -3704,17 +3864,19 @@ class TypeInferer:
         else:
             resolved = self._slot_scalar_cpp_type(name)
             if (resolved == "int" and name is not None
+                    and name not in getattr(self, "_current_func_local_types", {})
+                    and name not in getattr(self, "_current_func_param_types", {})
                     and self._is_int64_builtin_init(name)):
                 resolved = "int64_t"
-        return resolved if resolved in (*NA_PRESERVING_INT_TYPES, "bool") else None
+        return resolved if resolved in (*NA_PRESERVING_INT_TYPES, "bool", "double") else None
 
     def _func_param_int_cpp_type(self, fi, index: int,
                                  call_site_idx: int | None) -> str | None:
-        """``"int"``/``"int64_t"`` when parameter ``index`` of ``fi`` is an integer.
+        """The numeric C++ family of scalar parameter ``index`` of ``fi``.
 
         Mirrors the parameter-type branches of ``emit_top._emit_func_def`` in
-        the same order, keeping only the outcomes that are integers: a value
-        crossing into one of those parameters narrows, and Pine's ``color`` is
+        the same order, keeping integer and float outcomes. A value crossing
+        into an integer parameter narrows, and Pine's ``color`` is
         one of them (the engine packs a color as an integer). History
         parameters become ``const Series<T>&`` and are not a narrowing slot.
         """
@@ -3744,16 +3906,17 @@ class TypeInferer:
             return {
                 PineType.INT: "int64_t",
                 PineType.COLOR: "int64_t",
+                PineType.FLOAT: "double",
             }.get(variant[index])
         specs = getattr(fi, "param_type_specs", []) or []
         if index < len(specs) and specs[index] is not None:
             cpp_t = self._wide_declared_int_param(
                 fi, index, self._type_spec_to_cpp(specs[index]))
-            return cpp_t if cpp_t in NA_PRESERVING_INT_TYPES else None
+            return cpp_t if cpp_t in (*NA_PRESERVING_INT_TYPES, "double") else None
         if index < len(fi.param_types):
             cpp_t = self._wide_declared_int_param(
                 fi, index, PINE_TYPE_TO_CPP.get(fi.param_types[index], "double"))
-            return cpp_t if cpp_t in NA_PRESERVING_INT_TYPES else None
+            return cpp_t if cpp_t in (*NA_PRESERVING_INT_TYPES, "double") else None
         return None
 
     def _func_param_is_bool(self, fi, index: int,
@@ -3821,7 +3984,7 @@ class TypeInferer:
 
     def _coerce_int_slot(self, cpp_val: str, node, target_cpp_type: str | None,
                          *, value_is_double: bool | None = None) -> str:
-        """Route a value into an ``int``/``int64_t`` slot without losing ``na``.
+        """Route a value into a numeric destination without losing ``na``.
 
         A double NaN cannot be narrowed implicitly, and an integer na
         sentinel cannot cross into the other integer width without losing
@@ -3830,6 +3993,11 @@ class TypeInferer:
         ``value_is_double`` overrides the AST judgement for emitters that
         build their own expression text.
         """
+        if target_cpp_type == "double":
+            if (value_is_double is True
+                    or (node is not None and not self._integer_na_operand(node))):
+                return cpp_val
+            return self._coerce_double_slot(cpp_val, node)
         if target_cpp_type == "bool":
             return self._coerce_bool_expr(cpp_val, node)
         if target_cpp_type not in NA_PRESERVING_INT_TYPES:
@@ -3857,6 +4025,8 @@ class TypeInferer:
             source_cpp_type = "int64_t"
         if (source_cpp_type in NA_PRESERVING_INT_TYPES
                 and source_cpp_type != target_cpp_type):
+            return na_preserving_int_cast(cpp_val, target_cpp_type)
+        if isinstance(node, (BinOp, UnaryOp)) and self._integer_na_operand(node):
             return na_preserving_int_cast(cpp_val, target_cpp_type)
         return cpp_val
 
@@ -3886,13 +4056,17 @@ class TypeInferer:
             return cpp_val
         if cpp_val in {"na<int>()", "na<int64_t>()"}:
             return "na<double>()"
+        occupied = set(re.findall(r"\b[A-Za-z_]\w*\b", cpp_val))
+        temporary = "_pf_w"
+        while temporary in occupied:
+            temporary += "_"
         # A bool (TradingView refuses one here: CE10123, CE10173) is 1 or 0,
         # never na, whatever is_na() of a bool resolves to.
-        return (f"[&](){{ auto _pf_w = ({cpp_val}); "
-                f"if constexpr (std::is_floating_point_v<decltype(_pf_w)> "
-                f"|| std::is_same_v<decltype(_pf_w), bool>) "
-                f"return (double)_pf_w; "
-                f"else return is_na(_pf_w) ? na<double>() : (double)_pf_w; }}()")
+        return (f"[&](){{ auto {temporary} = ({cpp_val}); "
+                f"if constexpr (std::is_floating_point_v<decltype({temporary})> "
+                f"|| std::is_same_v<decltype({temporary}), bool>) "
+                f"return (double){temporary}; "
+                f"else return is_na({temporary}) ? na<double>() : (double){temporary}; }}()")
 
     def _coerce_int_slot_with_cast(
         self, cpp_val: str, node, target_cpp_type: str
@@ -4196,6 +4370,12 @@ class TypeInferer:
             return "double"
         if isinstance(node, Identifier):
             tuple_binding = (node.annotations or {}).get("tuple_builtin_binding")
+            tuple_type = (
+                getattr(self, "_tuple_binding_cpp_types_by_name", {}).get(node.name)
+                if tuple_binding else None
+            )
+            if tuple_type is not None:
+                return tuple_type
             if not tuple_binding and node.name in ("time", "time_close", "timenow"):
                 return "int64_t"
             if (node.name in BAR_FIELDS
@@ -4221,6 +4401,13 @@ class TypeInferer:
             if node.name in getattr(self, "_current_func_local_types", {}):
                 return self._current_func_local_types[node.name]
             if node.name in getattr(self, "_current_loop_vars", set()):
+                if node.name in self._current_counted_loop_vars:
+                    # Scalar aliases of a counted binder keep their established
+                    # double storage; the operand proof knows the binder is int.
+                    return "double"
+                spec = getattr(self, "_current_loop_var_specs", {}).get(node.name)
+                if spec is not None:
+                    return self._type_spec_to_cpp(spec)
                 return "double"
             sym = self._variable_symbol(node.name)
             if (sym is not None and sym.pine_type == PineType.INT
@@ -4642,3 +4829,13 @@ class TypeInferer:
             for cpp_t in types
         ]
         return f"std::tuple<{', '.join(types)}>({', '.join(values)})"
+
+    @staticmethod
+    def _integer_missing_cpp(value: str) -> str:
+        """Test only integer missingness; floating arithmetic keeps its rules."""
+        return (
+            "[](auto _pf_v) { "
+            "if constexpr (std::is_integral_v<decltype(_pf_v)> "
+            "&& !std::is_same_v<decltype(_pf_v), bool>) return is_na(_pf_v); "
+            f"else return false; }}({value})"
+        )

@@ -356,6 +356,10 @@ gives every field.
 
 ### Transpile a file to a `.cpp`
 
+Missing integers stay `na` when used as floats, including history reads,
+assignments and float parameters. Regenerate C++ and relink strategy libraries
+to apply corrections to previously generated code.
+
 ```python
 from pathlib import Path
 from pineforge_codegen import transpile

@@ -178,7 +178,16 @@ def _assert_calendar_locals(cpp: str) -> None:
 def test_calendar_locals_survive_mutable_request_names(calendar, name, read, sum_prefix):
     body = _evaluator(transpile(_source(name, read, calendar)))
     _assert_calendar_locals(body)
-    assert sum_prefix in body  # A replayed assignment cannot satisfy the payload's sum.
+    # The potentially missing integer is staged before the unchanged calendar lambda.
+    left, calendar_prefix = sum_prefix[1:].split(" + ", 1)
+    operands = f"auto _pna_l = ({left}); auto _pna_r = ({calendar_prefix}"
+    assert operands in body
+    calendar_end = body.index(CALENDAR_BODY, body.index(operands)) + len(CALENDAR_BODY)
+    addition = body[calendar_end:]
+    assert addition.startswith("); using _pf_val_t = decltype((_pna_l + _pna_r)); ")
+    assert addition.split("}())", 1)[0].endswith(
+        "? na<_pf_val_t>() : (_pna_l + _pna_r); "
+    )
     assert "pine_year(bar.timestamp, syminfo_.timezone)" in body  # Fields use the requested bar.
 
 

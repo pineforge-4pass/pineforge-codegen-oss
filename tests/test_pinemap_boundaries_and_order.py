@@ -16,6 +16,7 @@ from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
 from tests import _compile as compile_env
 from tests.test_pinemap_semantics import _compile_and_run
+from tests._numeric_expected import integer_arithmetic, integer_store, require_numeric_hunk
 
 
 @pytest.mark.parametrize(
@@ -213,6 +214,9 @@ observed = combine(left, right)
 '''
     cpp = transpile(source)
     assert "__pf_call_arg_" not in cpp
+    # Integer arithmetic changes only this return; the whole remaining file is frozen.
+    value = integer_store(integer_arithmetic(integer_arithmetic("a", "*", "10"), "+", "b"))
+    cpp = require_numeric_hunk(cpp, "return ((a * 10) + b);", f"return {value};")
     assert sha256(legacy_cpp(cpp).encode()).hexdigest() == (
         "3c67b8679b04e6b38515841884119fb50fe21569aa080d964b225d047dfd7987"
     )

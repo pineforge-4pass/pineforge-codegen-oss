@@ -216,7 +216,10 @@ def test_a_reassigned_wide_constant_is_no_32_bit_operand():
     # of a 32-bit operand (exact to 2**53 only).
     cpp = transpile(HEAD + "var int g = 3000000001\ng := g + 0\n"
                     "var int z = 3000000000\nz := g * 30000001\nplot(z)\n")
-    assert "z = (g * 30000001);" in cpp
+    from tests._numeric_expected import integer_arithmetic, integer_store
+    # The arithmetic keeps its integer width while preserving a missing operand.
+    value = integer_store(integer_arithmetic("g", "*", "30000001"), "int64_t")
+    assert f"z = {value};" in cpp
     compile_cpp(cpp)
 
 
@@ -227,7 +230,12 @@ def test_an_input_bound_named_by_a_constant_reads_it_everywhere():
     cpp = transpile(HEAD + "MAXD = 2000\ndays = input.int(30, minval = 1, maxval = MAXD)\n"
                     "a = days * 1000000\nf(MAXD) => days * 1000000 + MAXD\nplot(a + f(1))\n")
     assert "a = (days * 1000000);" in cpp
-    assert "return ((days * 1000000) + MAXD);" in cpp
+    from tests._numeric_expected import integer_arithmetic, integer_to_double
+    # The input product is present; the integer parameter can still be missing.
+    # The existing double return must convert that sum without narrowing it.
+    assert "double f(int MAXD)" in cpp
+    value = integer_to_double(integer_arithmetic("(days * 1000000)", "+", "MAXD"))
+    assert f"return {value};" in cpp
     compile_cpp(cpp)
 
 

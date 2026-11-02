@@ -30,6 +30,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   may drop them. Endless loops in functions, methods and `request.security`
   still never end here while TradingView stops them; data-dependent endless
   loops still hang.
+- Missing integer values remain `na` in float writes, numeric selections,
+  float arguments and arithmetic. Explicit float declarations keep fractional
+  values after integer initialization. Regenerate C++ and relink strategies.
+
 - Pine v6 calls refuse a positional argument after a named argument with
   `PF-E2074` at that positional expression. The check also covers strategy
   declarations, unused functions and v6 library bodies before lowering.

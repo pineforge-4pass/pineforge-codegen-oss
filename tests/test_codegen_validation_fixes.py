@@ -179,7 +179,9 @@ def test_bar_index_history_series_is_pushed_from_offset_helper():
         "if (history_advances_new_bar()) bar_index.push(pine_bar_index());" in cpp
     )
     assert "else bar_index.update(pine_bar_index());" in cpp
-    assert "(pine_bar_index() - past)" in cpp
+    from tests._numeric_expected import integer_arithmetic
+    # A missing history value stays missing before the subtraction.
+    assert integer_arithmetic("pine_bar_index()", "-", "past") in cpp
 
 
 def test_security_param_tf_mixed_with_non_literal_callsite_rejected():

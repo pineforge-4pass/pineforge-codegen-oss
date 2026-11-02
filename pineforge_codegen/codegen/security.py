@@ -179,6 +179,7 @@ class _SecurityHelperArgumentFrame(dict):
         super().__init__(values)
         self.caller_stack = caller_stack
         self.call = call
+        self.float_parameters: frozenset[str] = frozenset()
         # Runtime metadata only: the dict's values remain the authored ASTs,
         # which key TA discovery and binding signatures.
         self.samples: dict[str, _SecurityArgumentSample] = {}
@@ -1850,7 +1851,8 @@ class SecurityEmitter:
         if op == ":=":
             lines.append(f"{pad}{safe} = {self._coerce_int_slot(val_cpp, value, int_slot)};")
             return
-        rhs = self._compound_assign_rhs(safe, op, val_cpp)
+        rhs = self._compound_assign_rhs(
+            safe, op, val_cpp, Identifier(name=name), value)
         if rhs is not None:
             rhs = self._coerce_int_slot(rhs, value, int_slot, value_is_double=True)
         else:
@@ -2177,6 +2179,13 @@ class SecurityEmitter:
             )
             return bound, lexical_stack
         return None
+
+    @staticmethod
+    def _security_float_parameter(name, bindings) -> bool:
+        for frame in reversed(bindings or ()):
+            if name in frame:
+                return name in getattr(frame, "float_parameters", ())
+        return False
 
     def _security_index_reads_helper_local(
         self,
@@ -4221,13 +4230,22 @@ class SecurityEmitter:
             helper_binding_stack,
             emitted_lines,
         )
-        args = _merge_kwargs(
+        arg_nodes = _merge_kwargs(
             node.args,
             node.kwargs,
             sigs.get_param_names("math", func_name),
-            visit,
+            lambda arg: arg,
             intrinsic=sigs.get_intrinsic("math", func_name),
         )
+        intrinsic = sigs.MATH_FUNCTIONS.get(func_name)
+        params = (max(intrinsic.signatures, key=lambda sig: len(sig.params)).params
+                  if intrinsic is not None else [])
+        args = [
+            self._security_float_cpp(visit(arg), arg, helper_binding_stack)
+            if index < len(params) and params[index].pine_type == PineType.FLOAT
+            else visit(arg)
+            for index, arg in enumerate(arg_nodes)
+        ]
         if func_name == "round" and len(args) == 2:
             return _math_round_digits_expr(args)
         if func_name == "round_to_mintick":
@@ -4318,12 +4336,64 @@ class SecurityEmitter:
             return expr_cpp
         if value is None or isinstance(value, NaLiteral):
             return f"na<{cpp_type}>()"
+        if cpp_type == "double":
+            return self._security_float_cpp(expr_cpp, value, helper_binding_stack)
         if cpp_type in ("int", "int64_t", "bool"):
             return self._coerce_int_slot(
                 expr_cpp, value, cpp_type,
                 value_is_double=self._security_emits_double(value, helper_binding_stack),
             )
         return expr_cpp
+
+    def _security_float_cpp(self, rendered, node, bindings=()) -> str:
+        """Adapt a builder-owned value without re-evaluating it on the chart."""
+        if not self._security_integer_na_operand(node, bindings):
+            return rendered
+        return self._coerce_double_slot(rendered, None)
+
+    def _security_integer_na_operand(self, node, bindings=(), depth=0) -> bool:
+        """Resolve integer missingness on the same bindings as the evaluator."""
+        if node is None or depth > 64:
+            return node is not None
+        if self._security_emits_double(node, bindings):
+            return False
+        if isinstance(node, Identifier):
+            if not self._security_identifier_is_global_binding(node):
+                context = self._security_lookup_helper_binding_context(node.name, bindings)
+                if context is not None:
+                    value, stack = context
+                    if isinstance(value, ASTNode):
+                        return self._security_integer_na_operand(value, stack, depth + 1)
+                    if value in getattr(self, "_security_counted_loop_bindings", ()):
+                        # The binding identifies the counter even if an inner
+                        # declaration later shadows its authored spelling.
+                        return False
+                    return (
+                        self._security_local_cpp_types.get(value) in (None, "int", "int64_t")
+                        and self._infer_type(node) in ("int", "int64_t", "double")
+                    )
+            value = getattr(self.ctx, "global_expr_map", {}).get(node.name)
+            if value is not None and node.name not in self._global_mutable_infos:
+                return self._security_integer_na_operand(value, (), depth + 1)
+        if isinstance(node, FuncCall) and self._security_user_call_key(node) is not None:
+            plan = self._security_helper_call_plan(node, bindings)
+            if plan["mode"] != "linear":
+                return self._security_integer_na_operand(
+                    plan["expr"], plan["binding_stack"], depth + 1)
+            # A materialized integer result can be missing even when its
+            # chart-side return inference uses a floating fallback.
+            return self._infer_type(node) in ("int", "int64_t", "double")
+        if isinstance(node, UnaryOp):
+            return node.op in ("+", "-") and self._security_integer_na_operand(
+                node.operand, bindings, depth + 1)
+        if isinstance(node, BinOp) and node.op not in ("+", "-", "*", "/", "%"):
+            return False
+        if isinstance(node, (BinOp, Ternary)):
+            sides = ((node.left, node.right) if isinstance(node, BinOp)
+                     else (node.true_val, node.false_val))
+            return any(self._security_integer_na_operand(side, bindings, depth + 1)
+                       for side in sides)
+        return self._integer_na_operand(node)
 
     def _security_helper_series_ref(self, series_name: str) -> str:
         """The map entry holding one helper series (string values in their
@@ -4642,6 +4712,9 @@ class SecurityEmitter:
                         self._security_store_string_series(stmt, series_name)
                         if stmt.value is None or isinstance(stmt.value, NaLiteral):
                             expr_cpp = "na<std::string>()"
+                    if not is_color_state and cpp_type != "std::string":
+                        expr_cpp = self._security_float_cpp(
+                            expr_cpp, stmt.value, runtime_stack_local)
                     if is_persistent_var:
                         if not is_color_state and cpp_type == "int64_t":
                             # Preserve the epoch-width refusal and diagnostic.
@@ -4760,27 +4833,52 @@ class SecurityEmitter:
                         expr_cpp = "na<std::string>()"
                     elif series_name in self._security_color_series:
                         expr_cpp = self._security_color_series_store(expr_cpp)
+                    else:
+                        expr_cpp = self._security_float_cpp(
+                            expr_cpp, stmt.value, runtime_stack_local)
                 elif stmt.op == ":=":
                     expr_cpp = self._security_local_value(
                         expr_cpp, stmt.value, self._security_local_cpp_types.get(binding),
                         runtime_stack_local,
                     )
+                elif self._security_local_cpp_types.get(binding) == "double":
+                    expr_cpp = self._security_float_cpp(
+                        expr_cpp, stmt.value, runtime_stack_local)
                 if series_name is not None:
                     ref = self._security_helper_series_ref(series_name)
                     if stmt.op == ":=":
                         lines.append(f'{pad}{ref}.update({expr_cpp});')
                     else:
                         op_char = stmt.op[0]
-                        lines.append(
-                            f'{pad}{ref}.update('
-                            f'{_series_expr(series_name, "0")} {op_char} {expr_cpp});'
-                        )
+                        current = _series_expr(series_name, "0")
+                        rhs = self._compound_assign_rhs(
+                            current, stmt.op, expr_cpp, stmt.target, stmt.value)
+                        if rhs is None:
+                            rhs = f"{current} {op_char} {expr_cpp}"
+                        lines.append(f'{pad}{ref}.update({rhs});')
                     return
 
                 if stmt.op == ":=":
                     lines.append(f"{pad}{binding} = {expr_cpp};")
                 else:
-                    lines.append(f"{pad}{binding} {stmt.op} {expr_cpp};")
+                    if (self._security_local_cpp_types.get(binding) == "double"
+                            and stmt.op in ("+=", "-=", "*=")
+                            and not self._security_integer_na_operand(
+                                stmt.value, runtime_stack_local)):
+                        # Native compound assignment preserves a missing target
+                        # when the RHS cannot supply an integer sentinel.
+                        rhs = None
+                    else:
+                        rhs = self._compound_assign_rhs(
+                            binding, stmt.op, expr_cpp, stmt.target, stmt.value)
+                    if rhs is None:
+                        lines.append(f"{pad}{binding} {stmt.op} {expr_cpp};")
+                    else:
+                        result = BinOp(left=stmt.target, op=stmt.op[0], right=stmt.value)
+                        rhs = self._security_local_value(
+                            rhs, result, self._security_local_cpp_types.get(binding),
+                            runtime_stack_local)
+                        lines.append(f"{pad}{binding} = {rhs};")
                 return
 
             if isinstance(stmt, IfStmt):
@@ -4979,10 +5077,12 @@ class SecurityEmitter:
                 loop_depth[0] += 1
                 saved_scope = self._security_open_scope()
                 saved_counted = self._current_counted_loop_vars
+                saved_bindings = getattr(self, "_security_counted_loop_bindings", frozenset())
                 saved_loop = self._current_loop_vars
                 saved_loop_specs = self._current_loop_var_specs
                 if isinstance(stmt, ForStmt) and stmt.var:
                     self._current_counted_loop_vars = saved_counted | {stmt.var}
+                    self._security_counted_loop_bindings = saved_bindings | {var}
                     if counter_cpp_type == "double":
                         self._current_loop_vars = saved_loop | {stmt.var}
                         self._current_loop_var_specs = {
@@ -4993,6 +5093,7 @@ class SecurityEmitter:
                         emit_stmt(child, body_bindings, body_indent)
                 finally:
                     self._current_counted_loop_vars = saved_counted
+                    self._security_counted_loop_bindings = saved_bindings
                     self._current_loop_vars = saved_loop
                     self._current_loop_var_specs = saved_loop_specs
                     self._security_scope_path = saved_scope
@@ -5511,6 +5612,12 @@ class SecurityEmitter:
                 frames = (_SecurityHelperArgumentFrame(written, base_stack, method=True),)
                 if declared:
                     frames += (_SecurityHelperArgumentFrame(declared, (), method=True),)
+                float_parameters = frozenset(
+                    param for index, param in enumerate(params)
+                    if self._func_param_int_cpp_type(
+                        fi, index, self._callable_target_callsite_idx(fi, node)) == "double")
+                for frame in frames:
+                    frame.float_parameters = float_parameters
                 return fi, base_stack + frames
         if not isinstance(node.callee, Identifier):
             self._codegen_error(
@@ -5558,6 +5665,10 @@ class SecurityEmitter:
             base_stack,
             call=node,
         )
+        new_frame.float_parameters = frozenset(
+            param for index, param in enumerate(params)
+            if self._func_param_int_cpp_type(
+                fi, index, self._callable_target_callsite_idx(fi, node)) == "double")
         return fi, base_stack + (new_frame,)
 
     def _security_helper_call_plan(
@@ -7875,6 +7986,8 @@ class SecurityEmitter:
                     # members``): it narrows na-preserving into the integer
                     # element (quirk 9).
                     el_cpp = na_preserving_int_cast(el_cpp, elem_t)
+                elif elem_t == "double":
+                    el_cpp = self._security_float_cpp(el_cpp, el)
                 lines.append(f"        _req_sec_{sec_id}_{i} = {el_cpp};")
             self._emit_security_ohlc_hist_pushes(sec_id, lines)
             self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
@@ -7890,6 +8003,18 @@ class SecurityEmitter:
             emitted_lines=lines,
         )
         if item.get("is_lower_tf_array"):
+            # Match the accumulator's element type before adapting its value.
+            # An integer sentinel must not pass through a floating NaN.
+            ctype = self._infer_cpp_type_for_security_elem(expr_node)
+            if ctype not in ("double", "int", "bool"):
+                ctype = "double"
+            if ctype == "double":
+                expr_cpp = self._security_float_cpp(expr_cpp, expr_node)
+            elif ctype == "int":
+                expr_cpp = self._coerce_int_slot(
+                    expr_cpp, expr_node, ctype,
+                    value_is_double=self._security_emits_double(expr_node, ()),
+                )
             # ``request.security_lower_tf`` accumulates one element per
             # synthesised sub-bar of the current chart bar. The runtime's
             # ``feed_security_eval_state`` resets ``lower_tf_sub_bar_index``
@@ -7904,6 +8029,7 @@ class SecurityEmitter:
                 f"        _req_sec_lower_tf_{sec_id}.push_back({expr_cpp});"
             )
         else:
+            expr_cpp = self._security_float_cpp(expr_cpp, expr_node)
             lines.append(f"        _req_sec_{sec_id} = {expr_cpp};")
         self._emit_security_ohlc_hist_pushes(sec_id, lines)
         self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
@@ -8402,7 +8528,7 @@ class SecurityEmitter:
                     if series_name is not None:
                         return self._security_helper_series_value(series_name, "0")
                     return bound
-                return self._build_security_expr(
+                rendered = self._build_security_expr(
                     sec_id,
                     bound,
                     ta_range,
@@ -8412,6 +8538,9 @@ class SecurityEmitter:
                     bound_stack,
                     emitted_lines,
                 )
+                if self._security_float_parameter(expr_node.name, helper_binding_stack):
+                    rendered = self._security_float_cpp(rendered, bound, bound_stack)
+                return rendered
             bar_fields = {
                 **SECURITY_BAR_FIELD_EXPRS,
                 "hl2": "((bar.high + bar.low) / 2.0)",
@@ -8477,6 +8606,10 @@ class SecurityEmitter:
                     emitted_lines,
                 )
                 resolving.remove(expr_node.name)
+                symbol = self._variable_symbol(expr_node.name)
+                if (symbol is not None
+                        and self._global_float_na_selection(expr_node.name, symbol.pine_type)):
+                    resolved = self._security_float_cpp(resolved, value)
                 if shares:
                     # A lowering that emitted no statement is one expression,
                     # which any scope can read; one that did is read in its
@@ -9005,6 +9138,12 @@ class SecurityEmitter:
                     expr_node, left, right,
                     lambda left, right: self._wide_int_arith_cpp(
                         expr_node, left, right, lower))
+            if (expr_node.op in ("+", "-", "*", "/", "%")
+                    and any(self._security_integer_na_operand(side, helper_binding_stack)
+                            for side in (expr_node.left, expr_node.right))):
+                return self._left_operand_first(
+                    expr_node, left, right,
+                    lambda a, b: self._na_arithmetic_cpp(expr_node, a, b, lower))
             return self._left_operand_first(expr_node, left, right, lower)
 
         if isinstance(expr_node, UnaryOp):
@@ -9013,7 +9152,12 @@ class SecurityEmitter:
             )
             if expr_node.op == "not":
                 return f"!({self._coerce_bool_expr(operand, expr_node.operand)})"
-            return unary_sign_cpp(expr_node.op, operand)
+            return self._numeric_unary_cpp(
+                expr_node, operand,
+                source_is_double=(
+                    not self._security_integer_na_operand(
+                        expr_node.operand, helper_binding_stack)),
+            )
 
         if isinstance(expr_node, Ternary):
             cond = self._build_security_expr(
@@ -9025,6 +9169,10 @@ class SecurityEmitter:
             fv = self._build_security_expr(
                 sec_id, expr_node.false_val, ta_range, ta_results, resolving, security_mutable_names, helper_binding_stack, emitted_lines
             )
+            if (self._security_emits_double(expr_node.true_val, helper_binding_stack)
+                    or self._security_emits_double(expr_node.false_val, helper_binding_stack)):
+                tv = self._security_float_cpp(tv, expr_node.true_val, helper_binding_stack)
+                fv = self._security_float_cpp(fv, expr_node.false_val, helper_binding_stack)
             cond = self._coerce_bool_expr(cond, expr_node.condition)
             return f"(({cond}) ? ({tv}) : ({fv}))"
 
@@ -9251,6 +9399,7 @@ class SecurityEmitter:
                 security_mutable_names, helper_binding_stack, emitted_lines,
             )
             if expr_node.callee.name == "float":
+                x = self._security_float_cpp(x, expr_node.args[0], helper_binding_stack)
                 return f"(double)({x})"
             return na_preserving_int_cast(x)
 
@@ -10067,11 +10216,22 @@ class SecurityEmitter:
                             return (series_name not in self._security_string_series
                                     and series_name not in self._security_color_series)
                         return self._security_local_cpp_types.get(bound) == "double"
+                    if (self._security_float_parameter(node.name, helper_binding_stack)
+                            and self._infer_type(bound) in ("int", "int64_t", "double")
+                            and self._int_operand_may_be_na(bound)):
+                        return True
                     return self._security_emits_double(bound, bound_stack, depth + 1)
             else:
                 global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
                 if (node.name in global_expr_map
                         and node.name not in self._global_mutable_infos):
+                    symbol = self._variable_symbol(node.name)
+                    value = global_expr_map[node.name]
+                    if (symbol is not None
+                            and self._global_float_na_selection(node.name, symbol.pine_type)
+                            and self._infer_type(value) in ("int", "int64_t", "double")
+                            and self._int_operand_may_be_na(value)):
+                        return True
                     return self._security_emits_double(
                         global_expr_map[node.name], (), depth + 1
                     )

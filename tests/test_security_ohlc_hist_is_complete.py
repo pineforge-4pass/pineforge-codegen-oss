@@ -79,7 +79,9 @@ plot(close)
     cpp = transpile(src)
     body = _eval_body(cpp)
     assert "Series<int64_t> _sec0_hist_time" in cpp
-    assert "_req_sec_0 = _sec0_hist_time[0];" in body
+    from tests._numeric_expected import integer_to_double
+    # The timestamp history can be missing before the first completed bar.
+    assert f"_req_sec_0 = {integer_to_double('_sec0_hist_time[0]')};" in body
     assert "time[1]" not in body
     assert "current_bar_.timestamp" not in body
     guard_idx = body.index("if (is_complete) {")
