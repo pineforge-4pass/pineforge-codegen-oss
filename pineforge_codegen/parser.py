@@ -1729,8 +1729,9 @@ class Parser:
         call_arg_order: list = []
 
         while not self._check(TokenType.RPAREN) and not self._at_end():
-            # Detect kwargs: IDENT = value (but not IDENT == value)
-            if (self._current().type == TokenType.IDENT
+            # A call label may be an identifier or a type keyword, before =.
+            if ((self._current().type == TokenType.IDENT
+                    or self._current().type in TYPE_KEYWORDS)
                     and self._peek().type == TokenType.EQUALS
                     and self._peek(2).type != TokenType.EQUALS):
                 key_tok = self._advance()

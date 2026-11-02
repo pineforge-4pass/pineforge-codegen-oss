@@ -97,6 +97,12 @@ at that expression's first token. `_parse_bounded`, direct `Analyzer` clients
 and v6 library parsing share this rule, including unused bodies and parameter
 defaults; imported v5 subtrees keep their existing policy.
 
+In call argument lists, the parser accepts a primitive type keyword
+(`int`, `float`, `bool`, `string`) followed by `=` as an argument label.
+It records the token text as the label and retains written argument order
+and source locations. Declaration names and type annotations keep their
+existing parser grammar.
+
 1. `pragmas.extract_pf_trace_pragmas` — pulls `// @pf-trace name=expr`
   comments out before the lexer strips comments.
 2. `Lexer` → `Parser` → `Program` AST. Before the support check,
