@@ -26,8 +26,35 @@ def registrations(cpp):
     return re.findall(r"^\s*register_security_eval\((.*)\);$", cpp, re.MULTILINE)
 
 
+def member_body(cpp, signature):
+    openings = list(re.finditer(
+        rf"^    {re.escape(signature)} \{{\n", cpp, re.MULTILINE))
+    assert len(openings) == 1, f"Expected one definition of {signature}"
+    start = openings[0].end()
+    depth = 1
+    # Selector lambdas can use their own indentation. Count braces outside
+    # quoted literals and comments so their blocks stay inside the member.
+    for token in re.finditer(
+            r"""//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[{}]""",
+            cpp[start:], re.DOTALL):
+        if token.group() == "{":
+            depth += 1
+        elif token.group() == "}":
+            depth -= 1
+            if depth == 0:
+                body = cpp[start:start + token.start()].rstrip(" \t")
+                assert body.strip(), f"Expected a nonempty body for {signature}"
+                return body
+    raise AssertionError(f"Unterminated definition of {signature}")
+
+
 def chart_body(cpp):
-    return cpp.split("void on_source_bar(", 1)[1]
+    return member_body(cpp, "void on_source_bar(const Bar& bar) override")
+
+
+def requested_body(cpp, sec_id):
+    return member_body(
+        cpp, f"void _eval_security_{sec_id}(const Bar& bar, bool is_complete)")
 
 
 def assert_selection_tail(cpp, *branches):
@@ -43,6 +70,75 @@ def assert_selection_tail(cpp, *branches):
 def export_rows(name):
     with (FIXTURES / name).open(encoding="utf-8", newline="") as stream:
         return list(csv.DictReader(stream, delimiter="\t"))
+
+
+def test_body_helpers_extract_complete_members_without_neighboring_methods():
+    cpp = r"""class ExtractionSample {
+    void preceding_member() {
+        preceding_counter += 1;
+    }
+    void on_source_bar(const Bar& bar) override {
+        chart_counter += 1;
+        selected_result = ([&]() {
+    if (chart_counter > 0) {
+        return chart_counter;
+    }
+    return 0;
+}());
+        const char* message_text = "a brace } and an escaped quote \" {";
+        const char brace_character = '}';
+        // } must not close the member.
+        /* { Neither should a block comment's brace. */
+        chart_snapshot = chart_counter;
+    }
+    void _eval_security_0(const Bar& bar, bool is_complete) {
+        if (is_complete) {
+            requested_counter_alpha += 1;
+        }
+        requested_result_alpha = requested_counter_alpha;
+    }
+    void _eval_security_1(const Bar& bar, bool is_complete) {
+        requested_counter_beta += 1;
+        requested_result_beta = requested_counter_beta;
+    }
+    void following_member() {
+        following_counter += 1;
+    }
+};
+"""
+    assert chart_body(cpp) == r"""        chart_counter += 1;
+        selected_result = ([&]() {
+    if (chart_counter > 0) {
+        return chart_counter;
+    }
+    return 0;
+}());
+        const char* message_text = "a brace } and an escaped quote \" {";
+        const char brace_character = '}';
+        // } must not close the member.
+        /* { Neither should a block comment's brace. */
+        chart_snapshot = chart_counter;
+"""
+    assert requested_body(cpp, 0) == """        if (is_complete) {
+            requested_counter_alpha += 1;
+        }
+        requested_result_alpha = requested_counter_alpha;
+"""
+    assert requested_body(cpp, 1) == """        requested_counter_beta += 1;
+        requested_result_beta = requested_counter_beta;
+"""
+
+
+@pytest.mark.parametrize("cpp", (
+    "class ExtractionSample {};\n",
+    "    void on_source_bar(const Bar& bar) override {\n        chart_counter += 1;\n",
+    "    void on_source_bar(const Bar& bar) override {\n    }\n",
+    "    void on_source_bar(const Bar& bar) override {\n        chart_counter += 1;\n    }\n"
+    "    void on_source_bar(const Bar& bar) override {\n        chart_counter += 2;\n    }\n",
+))
+def test_chart_body_rejects_missing_unterminated_empty_or_duplicate_members(cpp):
+    with pytest.raises(AssertionError):
+        chart_body(cpp)
 
 
 @pytest.mark.parametrize("name,timeframes", (
@@ -731,10 +827,6 @@ def test_persistent_requested_expression_has_independent_bar_counters(
         f'if (_pf_selected_tf == "{fast_tf}") return _req_sec_0;',
         f'if (_pf_selected_tf == "{slow_tf}") return _req_sec_1;',
     )
-
-
-def requested_body(cpp, sec_id):
-    return cpp.split(f"void _eval_security_{sec_id}(", 1)[1].split("\n    }\n", 1)[0]
 
 
 def assert_counter_protocol(body, sec_id, key):
