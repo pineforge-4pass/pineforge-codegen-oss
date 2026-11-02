@@ -398,6 +398,28 @@ def test_pure_bindings_translate_in_both_request_positions(position, arm_kind):
     assert isinstance(transpile_full(variant(position, arm_kind))["cpp"], str)
 
 
+def test_unresolved_series_timeframe_tuple_keeps_the_setup_refusal(monkeypatch):
+    # Setup normalization expands pick before pair(): close is in BAR_FIELDS,
+    # outside BAR_BUILTINS and the script's history variables, so it fails as a name.
+    pine = variant("timeframe-if", "tuple").replace(
+        "pick = input.bool(true)", "pick = close > open")
+    with pytest.raises(CompileError) as caught:
+        transpile_full(pine)
+    (diagnostic,) = caught.value.diagnostics
+    assert diagnostic.code == "PF-E3078"
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.phase == Phase.CODEGEN
+    assert diagnostic.args == {
+        "request_name": "security", "expr_name": "undefined or non-setup name close"}
+    assert (diagnostic.location.line, diagnostic.location.col) == (4, 8)
+    with monkeypatch.context() as previous:
+        previous.setattr(CodeGen, "_expand_security_series_timeframes",
+                         lambda self: None, raising=False)
+        with pytest.raises(CompileError) as original:
+            transpile_full(pine)
+    assert caught.value.diagnostics == original.value.diagnostics
+
+
 def test_setup_substitution_preserves_earlier_binding_when_shadowed():
     pine = ('//@version=6\nstrategy("Local scope")\n'
             'candidate = input.int(60)\npick = input.bool(true)\n'
@@ -450,29 +472,22 @@ def test_setup_substitution_preserves_earlier_binding_when_shadowed():
     pytest.param("var step_count = 0\nstep_count += 1\n",
                  "step_count > 3", 5, id="persistent-counter"),
 ))
-def test_expression_only_setup_refuses_series_condition(setup, condition, line):
-    """This refusal is labelled as a temporary located refusal of a shape
-    that did not compile before this change; it is listed as a compile gap,
-    and a TradingView value comparison will lift it.
-    """
+def test_expression_only_series_condition_selects_independent_requests(setup, condition, line):
     pine = ('//@version=6\nstrategy("Expression condition")\n'
             + setup + f'tf = if {condition}\n    "60"\nelse\n    "240"\n'
             'value = request.security(syminfo.tickerid, tf, close)\nplot(value)\n')
-    # Each condition reaches a bar read; expr_start places its first token at column 9.
-    with pytest.raises(CompileError) as caught:
-        transpile_full(pine)
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.code == "PF-E3110"
-    assert diagnostic.level == Level.ERROR
-    assert diagnostic.phase == Phase.CODEGEN
-    assert diagnostic.args == {}
-    assert diagnostic.message == (
-        "A requested timeframe cannot be chosen by a condition that reads "
-        "a chart series value."
-    )
-    assert diagnostic.location.line == line
-    assert diagnostic.location.col == 9
+    # Each registered literal is compared in order before the final invariant stop.
+    cpp = transpile_full(pine)["cpp"]
+    assert 'register_security_eval(0, "60", input_tf_, false, false)' in cpp
+    assert 'register_security_eval(1, "240", input_tf_, false, false)' in cpp
+    assert "current_bar_" not in registration(cpp)
+    assert "const std::string _pf_selected_tf = " in cpp
+    assert (
+        '    if (_pf_selected_tf == "60") return _req_sec_0;\n'
+        '    if (_pf_selected_tf == "240") return _req_sec_1;\n'
+        '    _PF_ENGINE_INVARIANT("Requested timeframe matched no registered timeframe", std::logic_error);\n'
+        '}())'
+    ) in cpp
 
 
 @pytest.mark.parametrize("name", (
@@ -556,9 +571,13 @@ def test_expression_only_fixed_setup_condition_keeps_registration(setup, conditi
     )
 
 
-def test_expression_only_series_ternary_keeps_its_registration():
+def test_expression_only_series_ternary_selects_independent_requests():
     pine = ('//@version=6\nstrategy("Expression condition")\n'
             'tf = close > open ? "60" : "240"\n'
             'value = request.security(syminfo.tickerid, tf, close)\nplot(value)\n')
-    # Preservation pin: scalar ternaries retain the ordinary substitution path.
-    assert "current_bar_.close" in registration(transpile(pine))
+    # A ternary uses the same two literal registrations as an if expression.
+    cpp = transpile(pine)
+    assert 'register_security_eval(0, "60", input_tf_, false, false)' in cpp
+    assert 'register_security_eval(1, "240", input_tf_, false, false)' in cpp
+    assert "current_bar_" not in registration(cpp)
+    assert 'if (_pf_selected_tf == "60") return _req_sec_0;' in cpp

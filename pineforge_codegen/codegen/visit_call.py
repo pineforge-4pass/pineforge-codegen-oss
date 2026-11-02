@@ -2411,6 +2411,7 @@ class CallVisitor:
                 candidates = [
                     item for item in self._security_calls
                     if not item.get("is_lower_tf_array")
+                    and not item.get("series_tf_extra")
                     and (exprn := item["expr_node"]) is not None
                     and (len(all_args) > 2 and exprn is all_args[2])
                 ]
@@ -2427,6 +2428,8 @@ class CallVisitor:
                 expr_node = chosen["expr_node"] if chosen else None
 
                 if sec_id is not None and expr_node is not None:
+                    if chosen.get("series_tf_sites"):
+                        return self._security_series_tf_value(chosen, all_args[1])
                     if isinstance(expr_node, TupleLiteral):
                         parts = []
                         for i, el in enumerate(expr_node.elements):

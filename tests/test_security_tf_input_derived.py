@@ -171,16 +171,19 @@ def test_green_timeframe_period_tf_unchanged():
 
 
 def test_green_series_dependent_tf_characterized():
-    # A tf that depends on genuine per-bar state (close/open) is OUT OF SCOPE:
-    # not input-derived, so the fix leaves it verbatim (reads current_bar_).
+    # Replace the old frozen-condition pin: each literal arm now registers
+    # independently, and the chart chooses its current requested value per bar.
     src = (
         PRELUDE
         + 'tf = close > open ? "60" : "15"\n'
         + "x = request.security(syminfo.tickerid, tf, close)\nplot(x)\n"
     )
-    line = _register_lines(src)[0]
-    assert "current_bar_.close" in line, line
-    assert "get_input_string" not in line, line
+    lines = _register_lines(src)
+    assert lines == [
+        'register_security_eval(0, "60", input_tf_, false, false);',
+        'register_security_eval(1, "15", input_tf_, false, false);',
+    ]
+    assert all("current_bar_" not in line for line in lines)
 
 
 def test_green_non_tf_security_args_unaffected():

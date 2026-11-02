@@ -1175,6 +1175,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._security_ta_variant_names: dict[tuple[int, int, tuple], str] = {}
         # Reassigned globals a timeframe reads (``_security_tf_replay_prologue``).
         self._security_tf_mutable_reads: set[str] = set()
+        self._expand_security_series_timeframes()
         for item in self._security_calls:
             sec_id = item["sec_id"]
             tf_node = item["tf_node"]
