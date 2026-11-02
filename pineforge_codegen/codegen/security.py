@@ -223,8 +223,6 @@ class SecurityEmitter:
         # one-bar history values at two timeframes. Longer windows have not
         # been measured; var/varip payload state and other symbols remain
         # outside that evidence.
-        # The "another symbol" reason is reserved and currently unreachable:
-        # foreign series-timeframe requests are replaced before analysis.
         message, hint = render_diagnostic("PF-E3111", {"reason": reason})
         self._codegen_error(expr_start(node), message, hint=hint)
 
@@ -408,10 +406,9 @@ class SecurityEmitter:
                 item["tf_node"])
             if not series:
                 continue
-            if item.get("foreign"):
-                self._security_series_tf_refusal(
-                    series[0], "another symbol is not yet supported")
             if self._security_series_tf_has_state(item["expr_node"]):
+                # Closing this disagreement needs a TV tape per persistent
+                # state form, then independent state on each requested clock.
                 self._security_series_tf_refusal(
                     series[0], "persistent requested expression state is not yet supported")
             arms = []
@@ -442,6 +439,8 @@ class SecurityEmitter:
                             ArithmeticError, RecursionError):
                         if setup_error is not None:
                             raise setup_error
+                        # Closing open inventories needs the run-time
+                        # registration spec, including reached-request limits.
                         self._security_series_tf_refusal(
                             leaf, "the timeframe set is not closed at compile time")
                 for candidate in candidates:
@@ -450,6 +449,8 @@ class SecurityEmitter:
                         keys.add(key)
                         arms.append(candidate)
                     if computed and len(arms) > MAX_SECURITY_TIMEFRAME_VALUES:
+                        # The run-time registration spec must also replace
+                        # this finite-inventory bound for larger/open sets.
                         self._security_series_tf_refusal(
                             leaf, "the timeframe set is not closed at compile time")
             original = dict(item)

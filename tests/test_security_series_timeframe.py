@@ -9,6 +9,7 @@ import pytest
 from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.errors import CompileError, Level, Phase
+from tests._timeframe_value_cases import CASES as SCALAR_CASES
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "series_timeframe"
@@ -815,3 +816,141 @@ def test_exported_hour_forms_have_the_same_entry_quantities():
             (row["entry_time_utc8"], row["quantity"]))
     assert values["hour-if-price"] == values["hour-ternary-price"]
     assert values["hour-fixed-fast"] != values["hour-fixed-slow"]
+
+
+@pytest.mark.parametrize("case", SCALAR_CASES, ids=lambda case: case.name)
+def test_authored_scalar_inventory_rows_without_the_engine(case):
+    from tests._timeframe_value_cases import inventory, values
+
+    evaluator, expression = inventory(case.source())
+    assert values(evaluator, expression) == case.expected
+    if case.request:
+        assert registrations(transpile(case.source())) == [
+            f'{index}, "{value}", input_tf_, false, false'
+            for index, value in enumerate(case.expected)
+        ]
+
+
+@pytest.mark.parametrize("case_name", ("andor", "less", "boolcast"))
+def test_literal_only_conditions_register_only_the_taken_values(case_name):
+    from tests._timeframe_value_cases import BY_NAME
+
+    # Dead 1-minute and zero arms used to stop these otherwise valid sources.
+    cpp = transpile(BY_NAME[case_name].source())
+    assert registrations(cpp) == [
+        '0, "240", input_tf_, false, false',
+        '1, "1440", input_tf_, false, false',
+    ]
+
+
+@pytest.mark.parametrize("setup,condition", (
+    ("", "close > open"),
+    ("", "close[1] > open[1]"),
+    ("", "true or close > open"),
+    ('pick_v = input.bool(true)\n', "pick_v"),
+    ('pick_v = true\n', "pick_v"),
+    ('pick_frame() => true\n', "pick_frame()"),
+))
+def test_conditions_with_names_history_inputs_or_helper_calls_keep_both_arms(
+        setup, condition):
+    pine = (HEADER + setup
+            + f'chosen_tf = bar_index % 2 == 0 ? str.tostring({condition} ? 240 : 480) : "1440"\n'
+            'got_v = request.security(syminfo.tickerid, chosen_tf, close)\nplot(got_v)\n')
+    assert registrations(transpile(pine)) == [
+        '0, "240", input_tf_, false, false',
+        '1, "480", input_tf_, false, false',
+        '2, "1440", input_tf_, false, false',
+    ]
+
+
+@pytest.mark.parametrize("selection", (
+    'if true and false\n        str.tostring(1)\n    else\n        str.tostring(240)\n',
+    'switch\n        true and false => str.tostring(1)\n'
+    '        true => str.tostring(240)\n        => str.tostring(0)\n',
+    'switch true\n        false => str.tostring(1)\n'
+    '        true => str.tostring(240)\n        => str.tostring(0)\n',
+))
+def test_literal_only_boolean_block_selections_inside_helpers_prune_dead_arms(selection):
+    pine = (HEADER + 'frame_text() =>\n    ' + selection
+            + 'chosen_tf = bar_index % 2 == 0 ? frame_text() : "1440"\n'
+            'got_v = request.security(syminfo.tickerid, chosen_tf, close)\nplot(got_v)\n')
+    assert registrations(transpile(pine)) == [
+        '0, "240", input_tf_, false, false',
+        '1, "1440", input_tf_, false, false',
+    ]
+
+
+@pytest.mark.parametrize("arm,code,args,hint,column", (
+    ('str.format("{0}", 1440)', "PF-E1091",
+     {"timeframe": "1,440", "digits": "1,440"}, "non-integer timeframe magnitude '1,440'", 48),
+    ("str.tostring(0)", "PF-E1092",
+     {"timeframe": "0"}, "timeframe magnitude must be positive", 50),
+))
+def test_unreached_invalid_computed_arm_is_refused_during_translation(
+        arm, code, args, hint, column):
+    # bar_index is never negative in a run; this is still not a literal-only
+    # condition. The early inventory validates the unselected arm.
+    pine = (HEADER + f'chosen_tf = bar_index >= 0 ? "240" : {arm}\n'
+            'got_v = request.security(syminfo.tickerid, chosen_tf, close)\nplot(got_v)\n')
+    with pytest.raises(CompileError) as caught:
+        transpile(pine)
+    (diagnostic,) = caught.value.diagnostics
+    assert diagnostic.code == code
+    assert diagnostic.args == args
+    assert diagnostic.hint == hint
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.phase == Phase.CODEGEN
+    # Computed literal candidates retain the original call's '(' location.
+    assert (diagnostic.location.line, diagnostic.location.col) == (3, column)
+    assert f"invalid timeframe literal '{args['timeframe']}'" in diagnostic.message
+
+
+@pytest.mark.parametrize("count", (65, 128))
+def test_large_closed_inventory_registers_all_values_before_the_first_bar(count):
+    from tests._timeframe_value_cases import quota_source
+
+    # An authored inventory size, not the implementation's configured cap.
+    cpp = transpile(quota_source(count))
+    assert registrations(cpp) == [
+        f'{index}, "{index + 1}D", input_tf_, false, false'
+        for index in range(count)
+    ]
+
+
+def test_pure_but_unevaluated_string_call_has_a_located_open_set_refusal():
+    from pineforge_codegen.external_requests import _Taint
+
+    assert _Taint._is_pure("str", "upper")
+    pine = (HEADER + 'chosen_tf = close > open ? str.upper("240") : "1440"\n'
+            'got_v = request.security(syminfo.tickerid, chosen_tf, close)\nplot(got_v)\n')
+    with pytest.raises(CompileError) as caught:
+        transpile(pine)
+    (diagnostic,) = caught.value.diagnostics
+    assert diagnostic.code == "PF-E3111"
+    assert diagnostic.args == {"reason": "the timeframe set is not closed at compile time"}
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.phase == Phase.CODEGEN
+    assert (diagnostic.location.line, diagnostic.location.col) == (3, 28)
+
+
+@pytest.mark.parametrize("name", (
+    "if-price", "ternary-price", "if-parity", "hour-if-price", "hour-if-parity",
+    "hour-ternary-price", "sma-parity", "history-parity",
+))
+def test_chart_dependent_fixture_cpp_is_unchanged_by_constant_condition_pruning(
+        name, monkeypatch):
+    from pineforge_codegen.codegen.timeframe_values import TimeframeValues
+
+    actual = transpile(source(name))
+    monkeypatch.setattr(TimeframeValues, "_constant_bool", lambda self, node: None)
+    assert actual == transpile(source(name))
+
+
+def test_series_timeframe_catalog_lists_only_the_two_remaining_refusal_reasons():
+    from pineforge_codegen import diagnostics_catalog
+
+    reason = diagnostics_catalog()["codes"]["PF-E3111"]["args"]["reason"]
+    assert reason == {"kind": "vocab", "values": [
+        "the timeframe set is not closed at compile time",
+        "persistent requested expression state is not yet supported",
+    ]}

@@ -1,7 +1,7 @@
 """Conservative value sets for computed requested timeframes.
 
-Selections contribute every arm, including setup-only selections: their union
-is a safe superset without evaluating a chart condition during registration.
+Selections contribute every arm unless a literal-only boolean proves which
+arm is taken. Chart and setup-input conditions retain their full union.
 Unknown values and unsupported semantics invalidate the entire proof.
 """
 
@@ -134,6 +134,35 @@ class TimeframeValues:
             raise OpenTimeframeSet
         return value
 
+    def _constant_bool(self, node):
+        """Prove a boolean from literals, operators and primitive casts only.
+
+        Do not resolve names, inputs, history or helper calls, even when an
+        environment happens to give them one value. Those conditions retain
+        both arms. Primitive casts of literals include ``bool(2)``.
+        """
+        pending = [node]
+        while pending:
+            expr = pending.pop()
+            self._tick()
+            if isinstance(expr, (StringLiteral, NumberLiteral, BoolLiteral)):
+                continue
+            if isinstance(expr, UnaryOp):
+                pending.append(expr.operand)
+            elif isinstance(expr, BinOp):
+                pending.extend((expr.left, expr.right))
+            elif isinstance(expr, Ternary):
+                pending.extend((expr.condition, expr.true_val, expr.false_val))
+            elif (isinstance(expr, FuncCall)
+                  and isinstance(expr.callee, Identifier)
+                  and expr.callee.name in ("int", "float", "bool")
+                  and len(expr.args) == 1 and not expr.kwargs):
+                pending.extend(expr.args)
+            else:
+                return None
+        value, proven = fold_constant_expression(node, {}, {})
+        return value if proven and type(value) is bool else None
+
     def _evaluate(self, node, env):
         if (node.annotations or {}).get("pine_version") == 5:
             raise OpenTimeframeSet
@@ -151,18 +180,30 @@ class TimeframeValues:
             return self._typed(values, decl.type_hint)
         if isinstance(node, Ternary):
             self._condition(node.condition)
+            chosen = self._constant_bool(node.condition)
+            if chosen is not None:
+                return self._values(node.true_val if chosen else node.false_val, env)
             return (*self._values(node.true_val, env),
                     *self._values(node.false_val, env))
         if isinstance(node, (IfStmt, SwitchStmt)):
             if isinstance(node, IfStmt):
                 self._condition(node.condition)
-                bodies = (node.body, node.else_body)
+                chosen = self._constant_bool(node.condition)
+                bodies = ((node.body if chosen else node.else_body,)
+                          if chosen is not None else (node.body, node.else_body))
             else:
                 if node.expr is not None:
                     self._condition(node.expr)
                 for case, _body in node.cases:
                     self._condition(case)
                 bodies = [body for _case, body in node.cases] + [node.default_body]
+                chosen = (True if node.expr is None
+                          else self._constant_bool(node.expr))
+                cases = [self._constant_bool(case) for case, _body in node.cases]
+                if chosen is not None and all(case is not None for case in cases):
+                    bodies = [next((body for case, (_expr, body)
+                                    in zip(cases, node.cases) if case == chosen),
+                                   node.default_body)]
             return self._bounded(value for body in bodies
                                  for value in self._block(body, env))
         if isinstance(node, UnaryOp):
@@ -289,9 +330,11 @@ class TimeframeValues:
             return value
         if type(value) is bool:
             return "true" if value else "false"
-        # Integral values in the bounded scalar range have an exact decimal
-        # spelling under both Pine formatters. Fractional rounding, mintick,
-        # patterns and non-finite values require a separate rendering proof.
+        # Engine 6fa23a06, src/str_utils.cpp:18-25 and :569-600, renders
+        # shortest round-trip decimal digits (pinned by the earlier number
+        # rendering tape). Bounded integral floats therefore spell as integers.
+        # Fractional rounding, mintick, patterns and non-finite values need
+        # a separate rendering proof.
         if type(value) not in (int, float) or not float(value).is_integer():
             raise OpenTimeframeSet
         return format(int(value), ",d" if grouping else "d")
