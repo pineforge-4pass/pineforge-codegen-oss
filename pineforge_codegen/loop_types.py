@@ -129,6 +129,13 @@ class LoopTypeSources:
                 continue
             if node.annotations:
                 node.annotations.pop(FLOAT_REASSIGNMENT, None)
+            # A variable whose name is declared more than once in a file (sibling
+            # locals, a local shadowing a global or a parameter, repeated helper
+            # clones) is not widened.
+            # The emitter's by-name storage lookup
+            # (pineforge_codegen/codegen/types.py:3505, _slot_scalar_cpp_type) scans
+            # var_members, function locals, parameters and global members by name;
+            # it cannot tell two same-named bindings apart.
             if ((node.annotations or {}).get("pine_version") != 5
                     and self.name_declarations[node.name] == {key}):
                 candidates[key] = []

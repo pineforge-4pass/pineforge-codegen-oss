@@ -10,8 +10,16 @@ from textwrap import dedent
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.analyzer.value_bindings import ValueBindings
+from pineforge_codegen.ast_nodes import ForStmt, FuncDef
+from pineforge_codegen.lexer import Lexer
+from pineforge_codegen.limits import iter_ast_nodes
+from pineforge_codegen.loop_types import LoopTypeSources, _CounterQuery
+from pineforge_codegen.parser import Parser
+from pineforge_codegen.symbols import TypeSpec
 from tests import _compile as compile_env
 from tests._e2e import reference_codegen, transpile_json
+from tests._for_float_step import assert_float_step_refused
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "for_counter_headers"
@@ -184,7 +192,11 @@ def test_scope_storage_keeps_the_measured_quotient(name):
     assert float(actual) == TV["entry_quantities"]["reassign_int_hint"]
 
 
-def test_explicit_int_storage_and_loop_keep_the_same_fraction():
+def test_explicit_int_loop_is_consistent_with_the_untyped_loop_measurement():
+    """CONSISTENCY row: the same loop shape as the measured untyped source.
+
+    TradingView was not run on this explicit-int loop source; it is not a tape row.
+    """
     pine = _source("""
         int s = n
         s := s / 2
@@ -201,6 +213,7 @@ def test_explicit_int_storage_and_loop_keep_the_same_fraction():
 
 @pytest.mark.parametrize("rhs", ("math.sqrt(n)", "n * 0.5", "float(n)"))
 def test_positive_float_expression_writes_use_double_storage(rhs):
+    """engine-vs-engine control, not TradingView evidence."""
     cpp = transpile(_source(f"int s = n\ns := {rhs}\nplot(s)\n"))
     assert re.search(r"\bdouble s\b", cpp), cpp
     writes = [line for line in cpp.splitlines() if re.search(r"\bs = ", line)]
@@ -259,3 +272,63 @@ def test_integer_and_unmeasured_controls_keep_complete_frozen_cpp(name, tmp_path
     before = transpile_json(path, root=reference)
     assert before["ok"], before["diagnostics"]
     assert transpile(pine) == before["cpp"]
+
+
+def _parameter_loop_source(parameter: str) -> str:
+    return _source(f"""
+        f({parameter}) =>
+            float total = 0.0
+            for i = p to 6 by 0.5
+                total += i
+            total
+        plot(f(2))
+    """)
+
+
+# Known safe-direction difference: TradingView refuses the registry probe
+# f(float p) => p; f(2) with CE10106, while PineForge translates it.
+# These parameter-loop rows make no TradingView agreement claim.
+@pytest.mark.parametrize("parameter,expected", [
+    ("int p", TypeSpec.primitive("int")),
+    ("float p", TypeSpec.primitive("float")),
+    ("p", None),
+])
+def test_declaration_bound_parameter_check_uses_its_own_hint(parameter, expected):
+    pine = _parameter_loop_source(parameter)
+    ast = Parser(Lexer(pine).tokenize(), source=pine).parse()
+    bindings = ValueBindings(ast, "parameter.pine")
+    bindings.resolve()
+    function = next(node for node, _ in iter_ast_nodes(ast) if isinstance(node, FuncDef))
+    loop = next(node for node, _ in iter_ast_nodes(ast) if isinstance(node, ForStmt))
+    assert bindings.declaration_bindings[id(loop.start)] == (id(function), "p")
+    query = _CounterQuery(LoopTypeSources(ast), bindings.declaration_bindings, {})
+    # The function returns a float total regardless of its parameter hint.
+    # Following that return instead makes the int and untyped rows fail.
+    assert query.infer(loop.start) == expected
+
+
+# Analyzer parameter symbols have no declaration identity in the counter map.
+# The frozen query already reads their hints: int refuses the float step;
+# float and untyped starts translate with double counters.
+@pytest.mark.parametrize("parameter,accepted", [
+    pytest.param("int p", False, id="int_parameter"),
+    pytest.param("float p", True, id="float_parameter"),
+    pytest.param("p", True, id="untyped_parameter"),
+])
+def test_parameter_loop_start_is_unchanged_by_the_storage_fix(
+    parameter, accepted, tmp_path,
+):
+    reference = reference_codegen(CPP_REFERENCE)
+    assert reference is not None, "Required C++ reference unavailable; restore git history."
+    pine = _parameter_loop_source(parameter)
+    path = tmp_path / "strategy.pine"
+    path.write_text(pine, encoding="utf-8")
+    before = transpile_json(path, root=reference)
+    assert before["ok"] is accepted, before["diagnostics"]
+    if not accepted:
+        assert "PF-E2079" in {diagnostic["code"] for diagnostic in before["diagnostics"]}
+        assert_float_step_refused(pine)
+    else:
+        cpp = transpile(pine)
+        assert re.search(r"\bfor \(double i = ", cpp), cpp
+        assert cpp == before["cpp"]

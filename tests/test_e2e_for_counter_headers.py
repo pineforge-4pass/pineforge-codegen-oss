@@ -38,10 +38,12 @@ REASSIGNMENT_TAPES = (
     "reassign_int_hint", "reassign_plain_qty", "reassign_literal_qty",
     "reassign_series_qty", "reassign_untyped", "reassign_typed",
 )
+# Each twin is an engine-vs-engine control, not TradingView evidence.
 REASSIGNMENT_TAPE_TWINS = {
     name: ("s := s / 2", "s := s * 0.5") for name in REASSIGNMENT_TAPES
 }
 # These twins change authored Pine expressions, never emitted C++ or a tape.
+# Each twin is an engine-vs-engine control, not TradingView evidence.
 DIVISION_TAPE_TWINS = {
     "division_start_no_step": ("for i = 5 / 2 to", "for i = 2.5 to"),
     "division_start_int_step": ("for i = 7 / 2 to", "for i = 3.5 to"),
@@ -415,6 +417,7 @@ def test_counter_binding_compositions(runs, name):
 
 @pytest.mark.parametrize("name", tuple(DIVISION_TAPE_TWINS))
 def test_division_tape_fixture_keeps_its_counter_family_and_twin(runs, name):
+    """engine-vs-engine control, not TradingView evidence."""
     pine = (FIXTURES / f"{name}.pine").read_text(encoding="utf-8")
     cpp = transpile(pine)
     family = "int" if name == "division_end_only" else "double"
@@ -428,12 +431,14 @@ def test_division_tape_fixture_keeps_its_counter_family_and_twin(runs, name):
 
 @pytest.mark.parametrize("name", REASSIGNMENT_TAPES)
 def test_reassignment_tape_matches_its_fraction_preserving_twin(runs, name):
+    """engine-vs-engine control, not TradingView evidence."""
     assert_same_runs(ok(runs, name), ok(runs, name + "_twin"))
 
 
 @pytest.mark.parametrize("name", PATTERN_MEASURED)
 @pytest.mark.parametrize("suffix", ["", "_renamed", "_twin"])
 def test_tradingview_alternating_entry_quantities(runs, name, suffix):
+    # The _twin suffix is an engine-vs-engine control, not TradingView evidence.
     outcome = ok(runs, name + suffix)
     rows = csv.DictReader(outcome.trades["default"].decode("utf-8-sig").splitlines())
     entries = [row for row in rows if row["Type"].startswith("Entry")]
@@ -454,6 +459,7 @@ def test_known_gap_counter_tostring(runs, run_environment, suffix):
     Quantity and entry counts match the tape; ids are a known formatter gap.
     This row must flip to the recorded TV ids when the formatter is fixed.
     """
+    # The _twin suffix is an engine-vs-engine control, not TradingView evidence.
     gap = TV["known_gaps"]["counter_tostring"]
     name = gap["probe"]
     pattern = TV["entry_id_patterns"][name]
