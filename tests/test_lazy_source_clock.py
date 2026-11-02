@@ -216,7 +216,7 @@ def test_non_top_level_and_eager_shapes_keep_the_existing_route():
             "    x := high > low and ta.roc(close, 3) > 0"
         ),
         "var_init": "var float x = close > open ? ta.roc(close, 3) : 0.0",
-        # TV accepts the bool comparison: specprobes/P0C2g/chg_bool_ne_false.
+        # TradingView accepts the bool comparison.
         # The bool source bypasses the numeric source clock and keeps ta::Change.
         "bool_source": "x = close > open and ta.change(close > open) != false",
     }
@@ -229,7 +229,7 @@ def test_non_top_level_and_eager_shapes_keep_the_existing_route():
 
 
 def test_boolean_change_cannot_be_compared_with_zero():
-    # TV refuses with CE10123: specprobes/P0C2g/chg_bool_ne_zero.
+    # TradingView refuses this comparison with CE10123.
     with pytest.raises(CompileError) as caught:
         _cpp("x = close > open and ta.change(close > open) != 0")
     (diagnostic,) = caught.value.diagnostics

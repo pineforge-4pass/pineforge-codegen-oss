@@ -76,7 +76,7 @@ if bar_index % 20 == 15
     pytest.param(
         '//@version=6\nstrategy("Unavailable condition")\nif na\n    strategy.entry("L", strategy.long)\n',
         "PF-E2046", (3, 4),
-        # TV CE10101: specprobes/P0C2/if_na_cond/error.json.
+        # TradingView refuses this condition with CE10101.
         # The condition relation rejects na; it begins after "if " at 3:4.
         id="na_condition",
     ),
