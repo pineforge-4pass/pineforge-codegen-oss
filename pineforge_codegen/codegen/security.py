@@ -1294,6 +1294,10 @@ class SecurityEmitter:
             )
         return False
 
+    # Shared subpaths are explored again without memoization, so work can grow
+    # with the number of paths. Active functions and persistent global cycles
+    # count as per-bar; ordinary global cycles stop at their resetting binding.
+    # These path checks make traversal finite. Unknown identifiers count as fixed.
     def _security_tf_expr_is_per_bar(self, node) -> bool:
         """Follow bar dependencies without requiring a setup replay proof.
 
