@@ -135,6 +135,15 @@ class ValueBindings(DiagnosticsHelper):
             return None
         return BindingInfo(use.binding.kind, use.binding.callable)
 
+    @staticmethod
+    def declaration_of(node: Identifier) -> tuple[int, str] | None:
+        """Read an authored variable declaration without visiting its use."""
+        use = (node.annotations or {}).get(_VALUE_USE)
+        if (not isinstance(use, _ValueUse) or use.binding is None
+                or use.binding.kind not in ("global", "local")):
+            return None
+        return use.binding.declaration, use.binding.name
+
     def check_use(self, node: Identifier) -> None:
         use = (node.annotations or {}).get(_VALUE_USE)
         if (not isinstance(use, _ValueUse) or use.binding is not None

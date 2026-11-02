@@ -178,22 +178,28 @@ def _stored_condition(name, variable):
 
 
 @pytest.mark.parametrize("name", sorted(set(BUILTIN_BOOLS) | set(BOOL_CALLS)))
-@pytest.mark.parametrize("shape", (
-    "direct", "stored", "parameter", "array", "history", "local", "return",
-))
-def test_every_registry_bool_has_bool_text_in_each_shape(name, shape):
+@pytest.mark.parametrize("shape,call", [
+    (shape, call)
+    for shape in (
+        "direct", "stored", "parameter", "array", "history", "local", "return",
+    )
+    for call in (TOSTRING_CALLS if shape in ("stored", "local", "parameter")
+                 else TOSTRING_CALLS[:1])
+])
+def test_every_registry_bool_has_bool_text_in_each_shape(name, shape, call):
     assert name not in BOOL_SOURCE_EXCEPTIONS, BOOL_SOURCE_EXCEPTIONS.get(name)
     preamble, value = _builtin_source(name)
     if shape == "parameter":
         cpp = transpile(_source(
-            "render(p) => str.tostring(p)\n" + preamble,
+            f"render(p) => {call.format(value='p')}\n" + preamble,
             f"render({value})",
         ))
         assert f"return ({_stored_condition(name, 'p')} {BOOL_TEXT});" in cpp
         assert "pine_str_tostring_tv(p," not in cpp
     elif shape == "local":
         cpp = transpile(_source(
-            preamble + f"render() =>\n    flag = {value}\n    str.tostring(flag)\n",
+            preamble + f"render() =>\n    flag = {value}\n"
+            + f"    {call.format(value='flag')}\n",
             "render()",
         ))
         assert f"return (flag {BOOL_TEXT});" in cpp
@@ -212,7 +218,7 @@ def test_every_registry_bool_has_bool_text_in_each_shape(name, shape):
             preamble += f"predicate() => {value}\n"
             value = "predicate()"
             operand = None
-        cpp = transpile(_source(preamble, f"str.tostring({value})"))
+        cpp = transpile(_source(preamble, call.format(value=value)))
         condition = _assert_text_assignment(cpp, operand=operand)
         if shape == "return":
             assert re.search(r"\bpredicate(?:_[A-Za-z0-9]+)*\(", condition), condition
@@ -283,7 +289,13 @@ def test_bool_values_keep_their_type_through_text_conversion(body, value):
     ("", "str.tostring(1.25, format.percent)"),
     ("", "str.tostring(1250, format.volume)"),
     ("average = ta.sma(close, 5)\n", "str.tostring(average)"),
+    ("average = ta.sma(close, 5)\n", "str.tostring(value = average)"),
+    ("average = ta.sma(close, 5)\n",
+     'str.tostring(format = "#.##", value = average)'),
     ("elapsed = ta.barssince(close > open)\n", "str.tostring(elapsed)"),
+    ("elapsed = ta.barssince(close > open)\n", "str.tostring(value = elapsed)"),
+    ("elapsed = ta.barssince(close > open)\n",
+     'str.tostring(format = "#.##", value = elapsed)'),
     ("price = close\n", "str.tostring(price[1])"),
     ("", "str.tostring(ta.sma(close, 5)[1])"),
 ))
@@ -445,11 +457,13 @@ def test_correct_bool_text_keeps_complete_reference_cpp(tmp_path, body, value):
     _assert_reference_cpp(tmp_path, _source(body, expression))
 
 
+@pytest.mark.parametrize("call", TOSTRING_CALLS)
 @pytest.mark.parametrize("body", (
-    "flag = session.isfirstbar\nrender() =>\n    flag = 2.5\n    str.tostring(flag)\n",
-    "flag = ta.crossover(close, open)\nrender(flag) => str.tostring(flag)\n",
+    "flag = session.isfirstbar\nrender() =>\n    flag = 2.5\n    {conversion}\n",
+    "flag = ta.crossover(close, open)\nrender(flag) => {conversion}\n",
 ))
-def test_numeric_shadow_does_not_inherit_bool_text(tmp_path, body):
+def test_numeric_shadow_does_not_inherit_bool_text(tmp_path, body, call):
+    body = body.format(conversion=call.format(value="flag"))
     argument = "render(2.5)" if "render(flag)" in body else "render()"
     _assert_reference_cpp(tmp_path, _source(body, argument))
 

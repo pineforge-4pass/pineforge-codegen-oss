@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from .. import signatures
+from ..analyzer.value_bindings import ValueBindings
 from ..ast_nodes import (
     Assignment, BinOp, BoolLiteral, ExprStmt, FuncCall, FuncDef, Identifier,
     IfStmt, MemberAccess, MethodDef, NumberLiteral, StringLiteral, Subscript,
@@ -54,7 +55,7 @@ class BoolTextTypes:
                 self.nodes[id(node)] = node
                 self.owners[id(node)] = owner
                 if isinstance(node, Assignment) and isinstance(node.target, Identifier):
-                    binding = ctx.identifier_decl_bindings.get(id(node.target))
+                    binding = self._binding_of(node.target)
                     if binding is not None:
                         self.writes[binding].append(node.value)
 
@@ -84,6 +85,14 @@ class BoolTextTypes:
                 args = list(binding.args_by_param)
                 self.user_calls[call_id] = (info, args)
                 self.calls[name].append((self.nodes[call_id], args))
+
+    def _binding_of(self, node: Identifier) -> tuple[int, str] | None:
+        # Some analyzer dispatchers leave keyword values unvisited. The lexical
+        # pass still bound those reads; use that identity only in this query.
+        # A visited read's snapshot remains authoritative, including None.
+        if id(node) in self.ctx.identifier_decl_bindings:
+            return self.ctx.identifier_decl_bindings[id(node)]
+        return ValueBindings.declaration_of(node)
 
     @staticmethod
     def _arguments(names, call, receiver=None):
@@ -136,7 +145,7 @@ class BoolTextTypes:
                 visiting.remove(guard)
 
         def identifier(value, env):
-            binding = self.ctx.identifier_decl_bindings.get(id(value))
+            binding = self._binding_of(value)
             if binding is not None:
                 declaration = self.nodes.get(binding[0])
                 if not isinstance(declaration, VarDecl):
@@ -299,7 +308,7 @@ class BoolTextTypes:
                 return False
             seen.add(id(value))
             if isinstance(value, Identifier):
-                binding = self.ctx.identifier_decl_bindings.get(id(value))
+                binding = self._binding_of(value)
                 declaration = self.nodes.get(binding[0]) if binding else None
                 if isinstance(declaration, VarDecl):
                     return (visit(declaration.value)
