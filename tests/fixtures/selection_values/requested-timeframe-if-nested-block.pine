@@ -1,0 +1,18 @@
+//@version=6
+strategy("Requested timeframe if with else-if block arms", currency = currency.NONE, initial_capital = 1000000)
+// else-if chain, each arm a two-statement block, plus a plain default arm.
+pick_n = input.int(1, "Pick", minval = 1, maxval = 3)
+tf = if pick_n == 1
+    first_tf = "60"
+    first_tf
+else if pick_n == 2
+    second_tf = "240"
+    second_tf
+else
+    timeframe.period
+value = request.security(syminfo.tickerid, tf, close)
+plot(value, "selected")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

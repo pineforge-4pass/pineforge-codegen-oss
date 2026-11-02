@@ -1,0 +1,14 @@
+//@version=6
+strategy("Requested timeframe if", currency = currency.NONE, initial_capital = 1000000)
+// Boundary probe: registration's switch special case does not itself handle an IfStmt alias.
+pick = input.bool(true, "Choose chart")
+tf = if pick
+    timeframe.period
+else
+    "1D"
+value = request.security(syminfo.tickerid, tf, close)
+plot(value, "selected")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")
