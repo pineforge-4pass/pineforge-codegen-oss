@@ -27,6 +27,11 @@ _PRIMITIVES = {
 }
 
 
+def _bindings_key(bindings):
+    """A hashable, name-ordered copy of (function, parameter) -> type bindings."""
+    return tuple(sorted(bindings.items()))
+
+
 class BoolTextTypes:
     """Follow exact bindings and written arguments without re-running analysis.
 
@@ -281,7 +286,7 @@ class BoolTextTypes:
         def spec(value, env):
             if value is None:
                 return None
-            key = (id(value), tuple(sorted(env.items())))
+            key = (id(value), _bindings_key(env))
             if key in cache:
                 return cache[key]
             if key in visiting:
