@@ -430,6 +430,15 @@ bindings, end bounds that change direction during iteration and stops inside
 `request.security` have no TradingView tape. Integer-counter controls are guarded
 against previous generated C++ apart from the added step-stop statement.
 
+Per-bar `request.security` timeframes can have a closed set by value:
+`codegen/timeframe_values.py` unions selection arms through pure scalar
+operators, exact integral string conversions, plain indexed `str.format`
+and pure v6 helpers (including inlined libraries). Unknown values,
+unproved formatting, persistent storage and writes keep PF-E3111.
+`limits.py` names the inventory and deterministic work bounds. The authored
+timeframe still runs at the call; each value has its own registered stream.
+Existing literal/input/chart-period arms retain their emitter.
+
 An aggregate `var` initializer that reads a statement-computed value (directly,
 through a user helper, or through another declaration-site `var`) runs at its
 declaration under the existing once flag. An earlier reassignment or collection

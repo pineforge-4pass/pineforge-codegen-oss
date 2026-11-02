@@ -472,8 +472,118 @@ def test_select_compares_the_registered_expression_for_each_arm_kind(
 @pytest.mark.parametrize("expression", (
     '"7" + "5"',
     'str.format("{0}", 75)',
-    'str.tostring(bar_index)',
     'frame_name()',
+))
+@pytest.mark.parametrize("template", (
+    'close > open ? {arm} : "180"\n',
+    'if close > open\n    {arm}\nelse\n    "180"\n',
+    'switch close > open\n    true => {arm}\n    => "180"\n',
+))
+def test_computed_constant_arms_register_their_values(expression, template):
+    pine = (HEADER + 'frame_name() => "75"\n'
+            + 'tf_v = ' + template.format(arm=expression)
+            + 'got_v = request.security(syminfo.tickerid, tf_v, close)\nplot(got_v)\n')
+    cpp = transpile(pine)
+    assert registrations(cpp) == [
+        '0, "75", input_tf_, false, false',
+        '1, "180", input_tf_, false, false',
+    ]
+    assert_selection_tail(
+        chart_body(cpp),
+        'if (_pf_selected_tf == "75") return _req_sec_0;',
+        'if (_pf_selected_tf == "180") return _req_sec_1;',
+    )
+    assert re.search(r"const std::string _pf_selected_tf = [^;]*tf_v",
+                     chart_body(cpp))
+
+
+@pytest.mark.parametrize("setup,expression,timeframes", (
+    ("", 'close > open ? "2" + "40" : "1" + "D"', ("240", "1D")),
+    ('minutes_v = close > open ? 240 : 1440\n',
+     'str.tostring(minutes_v)', ("240", "1440")),
+    ('minutes_v = close > open ? 240 : 1440\n',
+     'str.tostring(value = minutes_v)', ("240", "1440")),
+    ('minutes_v = close > open ? 240.0 : 1440.0\n',
+     'str.tostring(minutes_v)', ("240", "1440")),
+    ("", 'str.tostring((close > open ? 4 : 24) * 60)', ("240", "1440")),
+    ("", 'str.tostring((close > open ? 480 : 2880) / 2)', ("240", "1440")),
+    ("", 'str.format("{0}", close > open ? 75 : 180)', ("75", "180")),
+    ("", '(close > open ? "2" : "1") + (volume > 0 ? "40" : "D")',
+     ("240", "2D", "140", "1D")),
+    ('frame_text(int amount_v) => str.tostring(amount_v)\n'
+     'minutes_v = close > open ? 240 : 1440\n',
+     'frame_text(minutes_v)', ("240", "1440")),
+    ('frame_text(int amount_v) => str.tostring(amount_v)\n'
+     'minutes_v = close > open ? 240 : 1440\n',
+     'frame_text(amount_v = minutes_v)', ("240", "1440")),
+    ('frame_text() => close > open ? "240" : "1D"\n',
+     'frame_text()', ("240", "1D")),
+    ('frame_text() =>\n    if close > open\n        "2" + "40"\n'
+     '    else\n        "1" + "D"\n',
+     'frame_text()', ("240", "1D")),
+    ('frame_text() =>\n    switch close > open\n'
+     '        true => "2" + "40"\n        => "1" + "D"\n',
+     'frame_text()', ("240", "1D")),
+    ('join_text(string first_piece, string last_piece) =>\n'
+     '    string joined_piece = first_piece + last_piece\n    joined_piece\n',
+     'join_text(close > open ? "2" : "1", "D")', ("2D", "1D")),
+    ('join_text(string first_piece, string last_piece = "D") =>\n'
+     '    first_piece + last_piece\n',
+     'join_text(close > open ? "2" : "1")', ("2D", "1D")),
+    ('amount_v = 15\n'
+     'frame_text(int amount_v) => str.tostring(amount_v)\n'
+     'minutes_v = close > open ? 240 : 1440\n',
+     'frame_text(minutes_v)', ("240", "1440")),
+    ('base_piece = "2"\n'
+     'frame_text() =>\n    first_piece = base_piece\n'
+     '    string base_piece = "1"\n    first_piece + "D"\n',
+     'close > open ? frame_text() : "1D"', ("2D", "1D")),
+    ('frame_text() => "2" + "40"\n',
+     'close > open ? frame_text() : "240"', ("240",)),
+))
+def test_values_beneath_pure_operations_register_every_possible_result(
+        setup, expression, timeframes):
+    pine = (HEADER + setup + f'chosen_tf = {expression}\n'
+            'got_v = request.security(syminfo.tickerid, chosen_tf, close)\n'
+            'plot(got_v)\n')
+    cpp = transpile(pine)
+    assert registrations(cpp) == [
+        f'{index}, "{value}", input_tf_, false, false'
+        for index, value in enumerate(timeframes)
+    ]
+    body = chart_body(cpp)
+    assert re.search(r"const std::string _pf_selected_tf = [^;]*chosen_tf", body)
+    assert_selection_tail(body, *(
+        f'if (_pf_selected_tf == "{value}") return _req_sec_{index};'
+        for index, value in enumerate(timeframes)
+    ))
+    assert all("current_bar_" not in line for line in registrations(cpp))
+
+
+def test_imported_pure_string_helper_has_the_same_value_inventory():
+    libraries = {"pftest/FrameText/1": (
+        '//@version=6\nlibrary("FrameText")\n'
+        'export frame_text(int amount_v) => str.tostring(amount_v)\n'
+    )}
+    pine = (HEADER + 'import pftest/FrameText/1 as frames_lib\n'
+            'minutes_v = close > open ? 240 : 1440\n'
+            'chosen_tf = frames_lib.frame_text(minutes_v)\n'
+            'got_v = request.security(syminfo.tickerid, chosen_tf, close)\n'
+            'plot(got_v)\n')
+    cpp = transpile(pine, libraries=libraries)
+    assert registrations(cpp) == [
+        '0, "240", input_tf_, false, false',
+        '1, "1440", input_tf_, false, false',
+    ]
+    assert_selection_tail(
+        chart_body(cpp),
+        'if (_pf_selected_tf == "240") return _req_sec_0;',
+        'if (_pf_selected_tf == "1440") return _req_sec_1;',
+    )
+
+
+@pytest.mark.parametrize("expression", (
+    'str.tostring(bar_index)',
     'unknown_frame',
 ))
 @pytest.mark.parametrize("kind,template,line,column", (
@@ -483,8 +593,8 @@ def test_select_compares_the_registered_expression_for_each_arm_kind(
 ))
 def test_computed_string_arm_has_a_located_closed_set_refusal(
         expression, kind, template, line, column):
-    # Each computed arm leaves an open set, even when its call could return a
-    # familiar timeframe; expansion locates the arm before scalar-if refusal.
+    # A bar counter is unbounded and the unknown name has no value proof.
+    # Expansion locates the arm before the scalar-if refusal.
     pine = (HEADER + 'frame_name() => "75"\n'
             + 'tf_v = ' + template.format(arm=expression)
             + 'got_v = request.security(syminfo.tickerid, tf_v, close)\nplot(got_v)\n')
@@ -496,6 +606,48 @@ def test_computed_string_arm_has_a_located_closed_set_refusal(
     assert diagnostic.phase == Phase.CODEGEN
     assert diagnostic.args == {"reason": "the timeframe set is not closed at compile time"}
     assert (diagnostic.location.line, diagnostic.location.col) == (line, column)
+
+
+@pytest.mark.parametrize("setup,expression", (
+    ("", "str.tostring(bar_index)"),
+    ("", 'str.tostring(close > open ? 75.25 : 180.0)'),
+    ("", 'str.tostring(close > open ? 75 : 180, "#.0")'),
+    ("", """str.format("'{0}'", close > open ? 75 : 180)"""),
+    ('minutes_v = close > open ? 240 : 1440\nminutes_v := bar_index\n',
+     'str.tostring(minutes_v)'),
+    ('frame_text() =>\n    var string saved_tf = "75"\n    saved_tf\n',
+     'close > open ? frame_text() : "180"'),
+    ('frame_text() =>\n    array.push(array.new_int(), 75)\n    "75"\n',
+     'close > open ? frame_text() : "180"'),
+))
+def test_unbounded_stateful_and_unproved_formatting_values_stay_open(setup, expression):
+    pine = (HEADER + setup + f'chosen_tf = {expression}\n'
+            'got_v = request.security(syminfo.tickerid, chosen_tf, close)\n'
+            'plot(got_v)\n')
+    with pytest.raises(CompileError) as caught:
+        transpile(pine)
+    assert caught.value.diagnostics[0].code == "PF-E3111"
+    assert caught.value.diagnostics[0].args == {
+        "reason": "the timeframe set is not closed at compile time"}
+
+
+def test_value_set_limit_refuses_instead_of_truncating_the_inventory():
+    from pineforge_codegen.limits import MAX_SECURITY_TIMEFRAME_VALUES
+
+    # One more distinct result than the configured capacity, all valid minute
+    # strings. Expected failure is fixed; it is never derived by the interpreter.
+    arms = "\n".join(
+        f'    {index} => str.tostring({index + 1})'
+        for index in range(MAX_SECURITY_TIMEFRAME_VALUES))
+    pine = (HEADER + 'chosen_tf = switch bar_index\n' + arms
+            + f'\n    => str.tostring({MAX_SECURITY_TIMEFRAME_VALUES + 1})\n'
+            'got_v = request.security(syminfo.tickerid, chosen_tf, close)\n'
+            'plot(got_v)\n')
+    with pytest.raises(CompileError) as caught:
+        transpile(pine)
+    assert caught.value.diagnostics[0].code == "PF-E3111"
+    assert caught.value.diagnostics[0].args == {
+        "reason": "the timeframe set is not closed at compile time"}
 
 
 @pytest.mark.parametrize("persistent", ("var", "varip"))

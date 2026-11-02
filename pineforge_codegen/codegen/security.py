@@ -320,6 +320,10 @@ class SecurityEmitter:
                         arm(body, value)
                     arm(value.default_body, value)
             else:
+                # A call or operator can carry a choice in its operands or
+                # pure helper body. Do not mistake that value for a fixed arm.
+                if isinstance(value, (FuncCall, BinOp, UnaryOp)):
+                    condition(value)
                 leaves.append(value)
 
         walk(node)
@@ -356,8 +360,11 @@ class SecurityEmitter:
     def _expand_security_series_timeframes(self) -> None:
         """Give every closed arm its own continuously evaluated request state."""
         from ..security_contexts import context_key
+        from ..limits import MAX_SECURITY_TIMEFRAME_VALUES
+        from .timeframe_values import OpenTimeframeSet, TimeframeValues
 
         extras = []
+        values = None
         next_id = len(self._security_calls)
         for item in self._security_calls:
             if item.get("dead"):
@@ -373,6 +380,7 @@ class SecurityEmitter:
                     series[0], "persistent requested expression state is not yet supported")
             arms = []
             keys = set()
+            computed = False
             for leaf in leaves:
                 resolved = self._substitute_tf_input_reads(leaf, set())
                 allowed = isinstance(resolved, StringLiteral) or (
@@ -384,13 +392,28 @@ class SecurityEmitter:
                     allowed = (namespace == "input" or (
                         namespace is None and name == "input")) and (
                             self._infer_type(resolved) == "std::string")
-                if not allowed:
-                    self._security_series_tf_refusal(
-                        leaf, "the timeframe set is not closed at compile time")
-                key = context_key(resolved)
-                if key not in keys:
-                    keys.add(key)
-                    arms.append(resolved)
+                if allowed:
+                    candidates = [resolved]
+                else:
+                    computed = True
+                    if values is None:
+                        values = TimeframeValues(self)
+                    try:
+                        # Interpret the authored leaf, not setup substitution:
+                        # input defaults and first-bar values are not constants.
+                        candidates = values.strings(leaf)
+                    except (OpenTimeframeSet, ValueError, TypeError, KeyError,
+                            ArithmeticError, RecursionError):
+                        self._security_series_tf_refusal(
+                            leaf, "the timeframe set is not closed at compile time")
+                for candidate in candidates:
+                    key = context_key(candidate)
+                    if key not in keys:
+                        keys.add(key)
+                        arms.append(candidate)
+                    if computed and len(arms) > MAX_SECURITY_TIMEFRAME_VALUES:
+                        self._security_series_tf_refusal(
+                            leaf, "the timeframe set is not closed at compile time")
             original = dict(item)
             sites = []
             for arm_index, leaf in enumerate(arms):
@@ -1162,8 +1185,8 @@ class SecurityEmitter:
                 return self._security_selection_as_ternary(selection(value, env))
             if isinstance(value, FuncCall):
                 if series_timeframe:
-                    # Keep calls as calls: a condition may read TA, but a
-                    # computed string arm must not become a literal by inlining.
+                    # Keep authored calls for the value-set proof; a condition
+                    # may also read TA without being evaluated at registration.
                     return replace(
                         value, args=[expression(arg, env) for arg in value.args],
                         kwargs={key: expression(arg, env) if isinstance(arg, ASTNode) else arg
