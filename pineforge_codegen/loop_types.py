@@ -34,7 +34,7 @@ _FLOAT_CALLS = {
         "linreg", "rsi", "stoch", "cci", "mfi", "mom", "roc", "cmo",
         "tsi", "wpr", "cog", "bbw", "kcw", "atr", "tr", "stdev",
         "variance", "sar", "percentrank", "percentile_linear_interpolation",
-        "dev", "cum", "correlation", "rci",
+        "dev", "cum", "correlation", "rci", "highest", "lowest",
     }),
 }
 _ARRAY_ELEMENTS = frozenset({
@@ -253,11 +253,14 @@ class _CounterQuery:
             return self.infer(argument(0, "defval" if name == "input" else "source"))
         if namespace == "ta" and name in {
             "change", "valuewhen", "median", "mode", "max", "min",
-            "highest", "lowest", "range", "percentile_nearest_rank",
+            "range", "percentile_nearest_rank",
         }:
-            if name in {"highest", "lowest"} and len(node.args) == 1 and not node.kwargs:
-                return _FLOAT  # This overload reads the declared float high/low.
-            return self.infer(argument(1 if name == "valuewhen" else 0, "source"))
+            source = self.infer(argument(1 if name == "valuewhen" else 0, "source"))
+            if source == _INT and name not in {"change", "valuewhen"}:
+                # No TradingView int-result receipt yet for these six calls.
+                # Leave the check unknown until their overloads are measured.
+                return None
+            return source
         if namespace == "request" and name == "security":
             return self.infer(argument(2, "expression"))
         if namespace == "array":

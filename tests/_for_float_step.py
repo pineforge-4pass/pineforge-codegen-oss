@@ -17,8 +17,7 @@ DIVISION_STARTS = {
 
 # prefix, start, end, value twin, twin end, counter family. Twins share all
 # declarations and the end expression, differing only in the start expression.
-# The default-step sums are 10.5 for odd n and 12 for even n; the integral
-# constant sums to 20.
+# Measured quantities live in fixtures/for_counter_headers/tradingview_quantities.json.
 DIVISION_VALUE_STARTS = {
     "fractional-input": (
         "n = input.int(5)\n", "n / 2", "n / 2 + 2", "n * 0.5", "n / 2 + 2", "double",
@@ -29,12 +28,6 @@ DIVISION_VALUE_STARTS = {
     ),
     "fractional-constant": ("", "5 / 2", "4.5", "2.5", "4.5", "double"),
     "integral-constant": ("", "4 / 2", "6", "2", "6", "int"),
-}
-DIVISION_VALUE_SUMS = {
-    "fractional-input": (10.5, 10.5),
-    "fractional-series": (10.5, 12),
-    "fractional-constant": (10.5, 10.5),
-    "integral-constant": (20, 20),
 }
 
 

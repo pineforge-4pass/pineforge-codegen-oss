@@ -8,6 +8,7 @@ TradingView tapes. Every assertion reads the compiled strategy's trade output.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -21,12 +22,23 @@ from tests._e2e import (
     Build, assert_same_runs, chart_feed_head, execute_all, ok, skip_unless_e2e_env,
 )
 from tests._for_counter_header_cases import STOP_SOURCES
-from tests._for_float_step import DIVISION_VALUE_STARTS, DIVISION_VALUE_SUMS
+from tests._for_fractional_carriers import CARRIER_SOURCES, KNOWN_CARRIER_GAPS
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "for_counter_headers"
 TV = json.loads((FIXTURES / "tradingview_quantities.json").read_text(encoding="utf-8"))
 MEASURED = tuple(TV["entry_quantities"])
+PATTERN_MEASURED = tuple(TV["entry_quantity_patterns"])
+# These twins change authored Pine expressions, never emitted C++ or a tape.
+DIVISION_TAPE_TWINS = {
+    "division_start_no_step": ("for i = 5 / 2 to", "for i = 2.5 to"),
+    "division_start_int_step": ("for i = 7 / 2 to", "for i = 3.5 to"),
+    "division_named_start": ("s = n / 2", "s = 2.5"),
+    "division_end_only": ("for i = 0 to 7 / 2", "for i = 0 to 3.5"),
+    "division_counter_value": ("for i = 9 / 2 to", "for i = 4.5 to"),
+    "fractional_input": ("for i = n / 2 to", "for i = n * 0.5 to"),
+    "fractional_series": ("for i = n / 2 to", "for i = n * 0.5 to"),
+}
 # Shared parameter inference still truncates this float counter. Run it as
 # a documented discrepancy, retaining TradingView's measured 5 in the quantities file.
 HELPER_VALUE_GAP = "float_counter_helper_value"
@@ -180,7 +192,7 @@ def runs(tmp_path_factory):
     # schedule closes its final entry at bar 1442, so include that bar too.
     feed = chart_feed_head(engine, base, FEED_BARS)
     builds = {}
-    for name in (*MEASURED, *ZERO_ENTRY_PROBES):
+    for name in (*MEASURED, *PATTERN_MEASURED, *ZERO_ENTRY_PROBES):
         # Includes the float-start probes with TradingView's measured
         # quantities and export hashes in tradingview_quantities.json.
         pine = (FIXTURES / f"{name}.pine").read_text(encoding="utf-8")
@@ -190,6 +202,10 @@ def runs(tmp_path_factory):
             rf"\b{counters[-1] if counters else 'i'}\b", "sampleIndex", pine,
         )
         builds[f"{name}_renamed"] = Build(renamed)
+        if name in DIVISION_TAPE_TWINS:
+            before, after = DIVISION_TAPE_TWINS[name]
+            assert pine.count(before) == 1, name
+            builds[f"{name}_twin"] = Build(pine.replace(before, after))
         if name in FIRST_END_READ_PROBES:
             # A requested-context composition of the measured chart source;
             # this is derived coverage, not an additional TradingView tape.
@@ -204,6 +220,8 @@ def runs(tmp_path_factory):
     for name, (pine, _) in CONTROLS.items():
         overrides = {"First": 4} if name == "nonzero_input_start" else None
         builds[name] = Build(pine, overrides=overrides)
+    for name, pine in CARRIER_SOURCES.items():
+        builds[f"carrier_{name}"] = Build(pine)
     for name, pine in DERIVED_FLOAT_SOURCES.items():
         builds[name] = Build(pine)
     for name, pine in NONFINITE_FLOAT_SOURCES.items():
@@ -236,7 +254,7 @@ def _assert_quantities(
 
 
 def test_tradingview_evidence_has_complete_sha256():
-    for name in (*MEASURED, *ZERO_ENTRY_PROBES, *TV["runtime_errors"]):
+    for name in (*MEASURED, *PATTERN_MEASURED, *ZERO_ENTRY_PROBES, *TV["runtime_errors"]):
         for field in ("sha256", "source_sha256"):
             assert re.fullmatch(
                 r"[0-9a-fA-F]{64}", TV["evidence"][name][field] or ""
@@ -246,6 +264,15 @@ def test_tradingview_evidence_has_complete_sha256():
             assert re.fullmatch(
                 r"[0-9a-fA-F]{64}", refusal[field] or ""
             ), (name, field)
+
+
+@pytest.mark.parametrize("name", tuple(DIVISION_TAPE_TWINS))
+def test_division_fixture_is_the_measured_source(name):
+    evidence = TV["evidence"][name]
+    assert evidence["source"] == f"{name}.pine"
+    assert hashlib.sha256((FIXTURES / evidence["source"]).read_bytes()).hexdigest() == (
+        evidence["source_sha256"]
+    )
 
 
 @pytest.mark.parametrize("name", tuple(
@@ -337,38 +364,54 @@ def test_counter_binding_compositions(runs, name):
         _assert_quantities(outcome, tag, expected)
 
 
-@pytest.fixture(scope="module")
-def division_runs(tmp_path_factory):
-    engine = skip_unless_e2e_env()
-    base = tmp_path_factory.mktemp("for_division_values")
-    feed = chart_feed_head(engine, base, 32)
-    builds = {}
-    for name, (prefix, start, end, twin, twin_end, _family) in DIVISION_VALUE_STARTS.items():
-        for suffix, first, last in (("", start, end), ("_twin", twin, twin_end)):
-            source = _source(
-                prefix + "float acc = 0.0\n"
-                f"for i = {first} to {last}\n"
-                "    acc += i\n"
-            ) + "// @pf-trace acc=acc\n"
-            builds[name + suffix] = Build(source, trace=True)
-    return execute_all(engine, feed, base, builds)
+@pytest.mark.parametrize("name", tuple(DIVISION_TAPE_TWINS))
+def test_division_tape_fixture_keeps_its_counter_family_and_twin(runs, name):
+    pine = (FIXTURES / f"{name}.pine").read_text(encoding="utf-8")
+    cpp = transpile(pine)
+    family = "int" if name == "division_end_only" else "double"
+    assert re.search(rf"\bfor \({family} i = ", cpp), cpp
+    for slot in ("start", "end", "step"):
+        assert re.search(rf"\b{family} _for_{slot}_\d+ = ", cpp), cpp
+    # Scalar tape quantities are checked by test_tradingview_entry_quantities;
+    # the series tape's ordered quantities are checked separately below.
+    assert_same_runs(ok(runs, name), ok(runs, name + "_twin"))
 
 
-@pytest.mark.parametrize("name", sorted(DIVISION_VALUE_STARTS))
-def test_division_start_default_step_values_and_trades(division_runs, name):
-    outcome = ok(division_runs, name)
-    assert_same_runs(outcome, ok(division_runs, name + "_twin"))
-    records = outcome.traces["default"]
-    assert len(records) == 32
-    sums = DIVISION_VALUE_SUMS[name]
-    for bar, record in enumerate(records):
-        assert record["name"] == "acc"
-        assert record["bar_index"] == bar
-        assert record["value"] == sums[bar % 2], record
+@pytest.mark.parametrize("name", PATTERN_MEASURED)
+@pytest.mark.parametrize("suffix", ["", "_renamed", "_twin"])
+def test_tradingview_alternating_entry_quantities(runs, name, suffix):
+    outcome = ok(runs, name + suffix)
     rows = csv.DictReader(outcome.trades["default"].decode("utf-8-sig").splitlines())
     entries = [row for row in rows if row["Type"].startswith("Entry")]
-    expected_quantities = [sums[bar % 2] for bar in (10, 17, 24)]
-    assert [float(row["Qty"]) for row in entries] == expected_quantities
+    pattern = TV["entry_quantity_patterns"][name]
+    quantities = [float(row["Qty"]) for row in entries]
+    assert len(quantities) == TV["entries_per_probe"]
+    assert quantities == [
+        pattern["quantities"][index % len(pattern["quantities"])]
+        for index in range(TV["entries_per_probe"])
+    ], TV["evidence"][name]["sha256"]
+    assert [quantities.count(qty) for qty in pattern["quantities"]] == pattern["counts"]
+
+
+@pytest.mark.parametrize("name", sorted(CARRIER_SOURCES.keys() - KNOWN_CARRIER_GAPS))
+def test_fractional_start_carrier_matches_the_measured_loop_shape(runs, name):
+    """Derived from fractional_input's tape for the same default-step sum."""
+    _assert_quantities(
+        ok(runs, f"carrier_{name}"), "default",
+        TV["entry_quantities"]["fractional_input"], probe="fractional_input",
+    )
+
+
+def test_known_gap_reassignment_fraction(runs):
+    """TradingView gives 10.5 and we give 9; flips when reassignment keeps the fraction."""
+    assert TV["entry_quantities"]["fractional_input"] == 10.5
+    _assert_quantities(ok(runs, "carrier_reassignment"), "default", 9)
+
+
+def test_known_gap_helper_parameter_fraction(runs):
+    """TradingView gives 10.5 and we give 9; flips when a helper parameter keeps the fraction."""
+    assert TV["entry_quantities"]["fractional_input"] == 10.5
+    _assert_quantities(ok(runs, "carrier_helper_parameter"), "default", 9)
 
 
 STOP_DRIVER = r'''

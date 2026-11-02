@@ -148,6 +148,96 @@ def test_positive_int_parameter_start_refuses_a_float_step():
     assert_float_step_refused(pine, counter="walkIndex", location=(5, 37, 41))
 
 
+def _analyzed_counter_start(pine):
+    ast = Parser(Lexer(pine).tokenize(), source=pine).parse()
+    ctx = Analyzer(ast).analyze()
+    loop = next(node for node, _ in iter_ast_nodes(ast) if isinstance(node, ForStmt))
+    query = _CounterQuery(
+        LoopTypeSources(ast),
+        ctx.identifier_decl_bindings, ctx.identifier_binding_scopes,
+    )
+    return loop, ctx, query
+
+
+@pytest.mark.parametrize("name", ["highest", "lowest"])
+@pytest.mark.parametrize("arguments", ["bar_index, 3", "source=bar_index, length=3"])
+def test_highest_and_lowest_int_sources_accept_a_float_step(name, arguments):
+    # TradingView accepts both overloads: the result is float even on int data.
+    pine = loop_step_source(f"ta.{name}({arguments})")
+    loop, ctx, query = _analyzed_counter_start(pine)
+    assert query.infer(loop.start) == TypeSpec.primitive("float")
+    assert query.value_spec(loop.start) == TypeSpec.primitive("float")
+    assert ctx.for_counter_types[id(loop.start)] == PineType.FLOAT
+    cpp = transpile(pine)
+    assert re.search(r"\bfor \(double i = ", cpp), cpp
+    for slot in ("start", "end", "step"):
+        assert re.search(rf"\bdouble _for_{slot}_\d+ = ", cpp), cpp
+
+
+@pytest.mark.parametrize("start", [
+    "ta.change(bar_index)",
+    "ta.valuewhen(true, bar_index, 0)",
+])
+def test_measured_source_typed_ta_calls_still_refuse_an_int_source_float_step(start):
+    # TradingView refuses both int-source forms; division value typing must
+    # not widen their check result to the registry's default float.
+    assert_float_step_refused(loop_step_source(start))
+    pine = loop_step_source(start, step=None)
+    loop, ctx, query = _analyzed_counter_start(pine)
+    assert query.infer(loop.start) == TypeSpec.primitive("int")
+    assert ctx.for_counter_types[id(loop.start)] == PineType.INT
+
+
+@pytest.mark.parametrize("start", [
+    "ta.median(bar_index, 3)",  # no TradingView receipt yet
+    "ta.mode(bar_index, 3)",  # no TradingView receipt yet
+    "ta.max(bar_index)",  # no TradingView receipt yet
+    "ta.min(bar_index)",  # no TradingView receipt yet
+    "ta.range(bar_index, 3)",  # no TradingView receipt yet
+    "ta.percentile_nearest_rank(bar_index, 3, 50)",  # no TradingView receipt yet
+])
+def test_unmeasured_int_source_ta_check_type_stays_temporarily_unknown(start):
+    pine = loop_step_source(start)
+    loop, ctx, query = _analyzed_counter_start(pine)
+    assert query.infer(loop.start) is None
+    assert query.value_spec(loop.start) is None
+    assert ctx.for_counter_types[id(loop.start)] == PineType.FLOAT
+    cpp = transpile(pine)
+    assert re.search(r"\bfor \(double i = ", cpp), cpp
+    assert not re.search(r"\bfor \(int i = ", cpp), cpp
+
+
+def test_requested_expression_helper_division_start_uses_a_double_counter():
+    # The expression-only helper runs before the loop; requested helper loops
+    # cannot contain a user-function call in their header or body.
+    pine = """//@version=6
+strategy("Requested fractional start", currency=currency.NONE)
+n = input.int(5)
+start_value() => n / 2
+measure() =>
+    first = start_value()
+    float acc = 0.0
+    for i = first to first + 2
+        acc += i
+    acc
+plot(request.security(syminfo.tickerid, timeframe.period, measure()))
+"""
+    loop, ctx, query = _analyzed_counter_start(pine)
+    assert query.infer(loop.start) == TypeSpec.primitive("int")
+    assert query.value_spec(loop.start) == TypeSpec.primitive("float")
+    assert ctx.for_counter_types[id(loop.start)] == PineType.FLOAT
+    cpp = transpile(pine)
+    begin = cpp.index("void _eval_security_0(")
+    evaluator = cpp[begin:cpp.index("void evaluate_security(", begin)]
+    assert re.search(r"\bfor \(double _sec0_measure_\d+_i = ", evaluator), evaluator
+    assert not re.search(r"\bfor \(int _sec0_measure_\d+_i = ", evaluator), evaluator
+    for slot in ("start", "end", "step"):
+        assert re.search(
+            rf"\bdouble _sec0_measure_\d+_for_{slot} = ", evaluator,
+        ), evaluator
+    assert "::kFloatStepTolerance" in evaluator
+
+
 @pytest.mark.parametrize("prefix,start,family", [
     *(pytest.param(prefix, start, family, id=name)
       for name, (prefix, start, family) in sorted(DIVISION_STARTS.items())),

@@ -11,9 +11,10 @@ from tests import _compile as compile_env
 from tests._e2e import reference_codegen, transpile_json
 from tests._for_counter_header_cases import MAIN_COMMIT as LOOP_CPP_REFERENCE
 from tests._for_float_step import (
-    DIVISION_STARTS, DIVISION_VALUE_STARTS, DIVISION_VALUE_SUMS,
+    DIVISION_STARTS, DIVISION_VALUE_STARTS,
     assert_float_step_refused, loop_step_source,
 )
+from tests._for_fractional_carriers import CARRIER_FAMILIES, CARRIER_SOURCES
 
 # TradingView refuses this form.
 COUNTER_DEPENDENT_STEP = """//@version=6
@@ -386,17 +387,26 @@ def test_unproved_division_uses_double_headers(prefix, start):
     assert_float_step_refused(loop_step_source(start, prefix=prefix))
 
 
-@pytest.mark.parametrize("start,end", [
-    pytest.param("2", "6", id="int-literal"),
-    pytest.param("1 + 1", "6", id="int-addition"),
-    pytest.param("2 * 1", "6", id="int-multiplication"),
-    pytest.param("7 % 4", "6", id="int-remainder"),
-    pytest.param("0", "7 / 2", id="division-only-in-end"),
+@pytest.mark.parametrize("prefix,start,end", [
+    pytest.param("", "2", "6", id="int-literal"),
+    pytest.param("", "1 + 1", "6", id="int-addition"),
+    pytest.param("", "2 * 1", "6", id="int-multiplication"),
+    pytest.param("", "7 % 4", "6", id="int-remainder"),
+    pytest.param("", "0", "7 / 2", id="division-only-in-end"),
+    pytest.param("n = input.int(5)\n", "int(n / 2)", "6", id="explicit-int-division"),
+    pytest.param("n = input.int(5)\n", "math.floor(n / 2)", "6", id="floor-division"),
+    pytest.param("n = input.int(5)\n", "math.round(n / 2)", "6", id="round-division"),
+    pytest.param("n = input.int(5)\n", "n % 2", "6", id="input-remainder"),
+    pytest.param("n = input.int(5)\n", "n * 2", "12", id="input-product"),
+    pytest.param("a = array.from(1, 2, 3, 4, 5)\n", "0", "array.size(a) / 2",
+                 id="array-size-division-only-in-end"),
 ])
-def test_integer_counter_keeps_frozen_cpp(start, end, tmp_path):
-    source = loop_step_source(start, end=end, step=None)
+def test_integer_counter_keeps_frozen_cpp(prefix, start, end, tmp_path):
+    source = loop_step_source(start, prefix=prefix, end=end, step=None)
     cpp = transpile(source)
     assert re.search(r"\bfor \(int i = ", cpp), cpp
+    for slot in ("start", "end", "step"):
+        assert re.search(rf"\bint _for_{slot}_\d+ = ", cpp), cpp
     assert "kFloatStepTolerance" not in cpp
     # Use the loop inventory's immutable reference, without replacing any
     # stored hash or excluding any emitted text from the digest.
@@ -412,9 +422,8 @@ def test_integer_counter_keeps_frozen_cpp(start, end, tmp_path):
 
 
 @pytest.mark.parametrize("name", sorted(DIVISION_VALUE_STARTS))
-def test_division_start_preserves_counter_values(name):
-    prefix, start, end, _twin, _twin_end, _family = DIVISION_VALUE_STARTS[name]
-    expected = ",".join(str(value) for value in DIVISION_VALUE_SUMS[name])
+def test_division_start_preserves_its_twins_counter_values(name):
+    prefix, start, end, twin, twin_end, _family = DIVISION_VALUE_STARTS[name]
     driver = r'''
 #include <cassert>
 #include <iostream>
@@ -431,10 +440,29 @@ int main() {
     std::cout << first_bar.acc << "," << second_bar.acc;
 }
 '''
-    assert compile_env.run_emitted_tu(
-        transpile(loop_step_source(start, prefix=prefix, end=end, step=None)),
-        driver, opt="-O2", label=name,
-    ) == expected
+    # This is a differential control. The actual per-entry quantity oracle is
+    # the recorded TradingView export in test_e2e_for_counter_headers.
+    outputs = [
+        compile_env.run_emitted_tu(
+            transpile(loop_step_source(first, prefix=prefix, end=last, step=None)),
+            driver, opt="-O2", label=name + suffix,
+        )
+        for suffix, first, last in (("", start, end), ("_twin", twin, twin_end))
+    ]
+    assert outputs[0] == outputs[1]
+
+
+@pytest.mark.parametrize("name", sorted(CARRIER_SOURCES))
+def test_fractional_carrier_keeps_its_current_counter_family(name):
+    # A double counter alone cannot establish value parity: the separately
+    # named native gaps catch a fraction lost before the loop starts.
+    family = CARRIER_FAMILIES[name]
+    cpp = transpile(CARRIER_SOURCES[name])
+    assert re.search(rf"\bfor \({family} i = ", cpp), cpp
+    other = "int" if family == "double" else "double"
+    assert not re.search(rf"\bfor \({other} i = ", cpp), cpp
+    for slot in ("start", "end", "step"):
+        assert re.search(rf"\b{family} _for_{slot}_\d+ = ", cpp), cpp
 
 
 @pytest.mark.parametrize("argument", ["0", "0.0", "4 / 2"])

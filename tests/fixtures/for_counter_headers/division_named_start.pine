@@ -1,0 +1,12 @@
+//@version=6
+strategy("value probe: named division start", initial_capital = 1000000, currency = currency.NONE)
+// same as v01 through a variable: float counter sum 16, truncated int counter sum 20.
+n = 5
+s = n / 2
+float acc = 0.0
+for i = s to 6
+    acc := acc + i
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1 + acc / 100)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

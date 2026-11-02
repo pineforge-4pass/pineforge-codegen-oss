@@ -1,5 +1,6 @@
 {
   "provenance": "TradingView measurements, 2026-11-02. Each sha256 is the SHA-256 of that probe's TradingView export: the trades list or the reply that stops the run. Each source_sha256 identifies the measured source, not necessarily the repository fixture. The export files are not stored in the repository. For float_counter_*, first_end_read_*, int_counter_float_end and step_reads_counter_descending, fixtures preserve the measured expressions but may change strategy titles, comments and whitespace; float_counter_helper_value also places the helper body on its declaration line. The float-counter value and thirteen older iteration-count rows were measured on BINANCE:BTCUSDT 60, including seven tolerance-bracket probes at 12:22; each quantity holds on all 205 entries. The four additional large/small-step rows preserve every source byte except the strategy title; counts 3, 4, 3 and 3 are encoded as entry quantities 1.03, 1.04, 1.03 and 1.03 on all 180 exported entries. Their trade schedule is every eight bars from bar 0, with a close on the next bar. The first_end_read_start_two_down and first_end_read_start_two_up probes were measured at 11:57 on BINANCE:BTCUSDT 60; their exports have identical bytes and all 205 entries have quantity 1.1. The zero-entry probe is recorded separately because its accumulator starts at 0. The fstep_* sources are exact copies of the accepted TradingView scripts; their entry quantities encode 5, 7 and 3 loop iterations as 1 + count / 100. Their trade schedule is every eight bars from bar 0, with a close on the next bar. Compile-refusal spans use TradingView's 1-based inclusive end columns.",
+  "division_provenance": "The division_start_no_step, division_start_int_step, division_named_start, division_end_only and division_counter_value fixtures copy the measured v01 through v05 scripts byte for byte. fractional_input and fractional_series copy the measured fractional-input.pine and fractional-series.pine byte for byte. All seven exports contain 205 entries. The v01 and v03 exports are the same file. The series export alternates odd n (10.5, 103 entries) and even n (12, 102 entries), starting with odd n. Each sha256 below is the supplied full TradingView export digest; the source hashes identify the copied scripts. Carrier controls derive their 10.5 oracle from fractional_input's identical loop shape; they do not claim separate TradingView tapes.",
   "float_step_tolerance": {
     "measured_absolute_bracket": "about [5.6e-17, 9.98e-11] in the units of the counter, from double arithmetic over all 18 measured rows",
     "choice": "kFloatStepTolerance = 1e-12 is chosen inside the measured bracket; it is not a TradingView constant",
@@ -46,7 +47,20 @@
     "float_counter_mid_step_short_end": 1.03,
     "fstep_a_param_start": 1.05,
     "fstep_b_body_local_start": 1.07,
-    "fstep_c_array_bounds": 1.03
+    "fstep_c_array_bounds": 1.03,
+    "division_start_no_step": 1.16,
+    "division_start_int_step": 1.165,
+    "division_named_start": 1.16,
+    "division_end_only": 1.06,
+    "division_counter_value": 4.5,
+    "fractional_input": 10.5
+  },
+  "entry_quantity_patterns": {
+    "fractional_series": {
+      "quantities": [10.5, 12],
+      "counts": [103, 102],
+      "order": "Alternating odd n, even n, starting with odd n"
+    }
   },
   "trade_schedules": {
     "float_counter_large_step": {"period": 8, "first_entry_bar": 0, "close_delay": 1},
@@ -131,6 +145,13 @@
     "fstep_a_param_start": {"sha256": "911608833e6f02374d11915e81985fa0cca14ab88053317ed413551adb64059c", "source_sha256": "096dcb41a868d376eb82fa5bbb7c94269229b0ecbfab6409869caba56fbbd74e"},
     "fstep_b_body_local_start": {"sha256": "796704b642eb27b4df7e4867140abae7930ee125fd47c04c8750a6bea1a65920", "source_sha256": "3237f997e24c8cb0cd34d5b5653aee6b8a6674a748f8fa05a8932463371fd52c"},
     "fstep_c_array_bounds": {"sha256": "c152179bb7615af5f831fd56aae6791e4c12a8e992a9a690549e1ab8b1d42db7", "source_sha256": "f304b32d237feffb84a75447a6104a61e017823005368a33ac9cab5c326d6a1c"},
+    "division_start_no_step": {"source": "division_start_no_step.pine", "measured_source": "v01_div_start_no_step.pine", "sha256": "601626fe43567172236ad8415b1cb0668e2f2f068d9db964505c0eb9ea792492", "source_sha256": "0d8a3e294351e3c077e64874bb69b0a4ebfac415e2763551eeb4391f0888ccab"},
+    "division_start_int_step": {"source": "division_start_int_step.pine", "measured_source": "v02_div_start_int_step.pine", "sha256": "227702b9125ac563b483ac9cde191d2fd165a84cd319da505a80e52014b7fd67", "source_sha256": "d632c352de6f15c35836ec9654444223581e688c3be84b4151e2f6b2862395b1"},
+    "division_named_start": {"source": "division_named_start.pine", "measured_source": "v03_div_named_start.pine", "sha256": "601626fe43567172236ad8415b1cb0668e2f2f068d9db964505c0eb9ea792492", "source_sha256": "3e98f880302ce87dd0926cbcbee58fa10b2d672bd6e7f6903d3c248d8159def6"},
+    "division_end_only": {"source": "division_end_only.pine", "measured_source": "v04_div_in_end_only.pine", "sha256": "ed918b8cab3dce893fa4742c9e623554208b3b0111f5e776c483009ae8029d55", "source_sha256": "ae887887d0ed3e3e3dab066b52f9987e8019ce8da500d96cdf177ce62b206acb"},
+    "division_counter_value": {"source": "division_counter_value.pine", "measured_source": "v05_div_start_uses_counter_value.pine", "sha256": "5937a1a604eaccad590bd5c048fc03e2135247b480d43031a792179aca0d3414", "source_sha256": "247254f382f52f5dec88b892aa7fd3b12586a36930d373a19cfd2cf267d534fb"},
+    "fractional_input": {"source": "fractional_input.pine", "measured_source": "fractional-input.pine", "sha256": "3aa0f43925521663a43f0421f5f4d8d0cee5f2925eeb09d0d22078c2d75aaa62", "source_sha256": "7d28e6e5a0fcad872ae300e63e096ba8e6573a7329843762360988c52ca0f02b"},
+    "fractional_series": {"source": "fractional_series.pine", "measured_source": "fractional-series.pine", "sha256": "1f5d502ce06983f69a6c3df3292179fa69a5de3cb423fee0beff66d97def5bdb", "source_sha256": "38921b7dc9bcd94450bbaa78d352d9546bf6db8e8c602cf86e126570db4ce73b"},
     "s1_step_neg_literal": {"sha256": "2cfe027222a5e99a8aea754cf09dd9e67cb38fbf539d0764fef38a7109a9c038", "source_sha256": "1de17a8b9b8778c5c13d2dac528f0e8d01ed04accd42225addb476861c580069"},
     "s2_step_zero_literal": {"sha256": "72f8208f27a9c6e25cfc796a39c282aa0a22b7b6df9d51f5e95a2226147262e5", "source_sha256": "7f5d5e82820b27068929c020ad684ee151544b78918cf967ebf56edf49fe5859"},
     "s3_step_neg_variable": {"sha256": "288ff78c63007ccaa0297b7f9d762da761811dd003f0c0ff31bc7909b36676e3", "source_sha256": "9a4fb83eb9ab0c57f938060c345673d354bc6dae46097d9309af1d58ced09640"},
