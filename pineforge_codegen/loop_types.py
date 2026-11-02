@@ -178,6 +178,9 @@ class LoopTypeSources:
 
 
 class _CounterQuery:
+    # Fractional reassignment changes values, not the declared check type.
+    _use_reassignment_values = False
+
     def __init__(self, sources, bindings, scopes):
         self.sources = sources
         self.bindings = bindings
@@ -193,7 +196,10 @@ class _CounterQuery:
             self.declaration_specs[key] = None
             if isinstance(node, VarDecl):
                 spec = (
-                    _FLOAT if (node.annotations or {}).get(FLOAT_REASSIGNMENT) else
+                    _FLOAT if (
+                        self._use_reassignment_values
+                        and (node.annotations or {}).get(FLOAT_REASSIGNMENT)
+                    ) else
                     _hint_spec(node.type_hint) if node.type_hint else
                     self.infer(node.value)
                 )
@@ -383,6 +389,8 @@ class _CounterQuery:
 
 class _NumericValueQuery(_CounterQuery):
     """One value query for storage and counters, including integral proofs."""
+
+    _use_reassignment_values = True
 
     def __init__(self, check_query):
         super().__init__(check_query.sources, check_query.bindings, check_query.scopes)

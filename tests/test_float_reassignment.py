@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -56,6 +57,19 @@ def test_measured_reassignment_forms_use_double_storage(name):
     _assert_fractional_storage(
         transpile((FIXTURES / f"{name}.pine").read_text(encoding="utf-8")),
     )
+
+
+@pytest.mark.parametrize("name", (
+    "widened_float_step", "widened_int_hint_float_step",
+))
+def test_float_step_loop_from_a_widened_variable_is_refused_like_int(name):
+    source = (FIXTURES / f"{name}.pine").read_bytes()
+    pine = source.decode("utf-8")
+    refusal = TV["compile_refusals"][name]
+    assert refusal["verdict"] == "REFUSED"
+    assert refusal["code"] == "CE10106"
+    assert hashlib.sha256(source).hexdigest() == refusal["source_sha256"]
+    assert_float_step_refused(pine)
 
 
 # These controls derive from the measured plain-quantity row. They exercise
@@ -211,6 +225,20 @@ def test_explicit_int_loop_is_consistent_with_the_untyped_loop_measurement():
     assert float(actual) == TV["entry_quantities"]["reassign_untyped"]
 
 
+@pytest.mark.parametrize("hint", ("", "int "))
+@pytest.mark.parametrize("step", ("", " by 1"))
+def test_widened_loop_start_keeps_double_storage_with_an_integer_step(hint, step):
+    cpp = transpile(_source(f"""
+        {hint}s = n
+        s := s / 2
+        float observed = 0.0
+        for i = s to s + 2{step}
+            observed += i
+    """))
+    _assert_fractional_storage(cpp)
+    assert re.search(r"\bfor \(double i = ", cpp), cpp
+
+
 @pytest.mark.parametrize("rhs", ("math.sqrt(n)", "n * 0.5", "float(n)"))
 def test_positive_float_expression_writes_use_double_storage(rhs):
     """engine-vs-engine control, not TradingView evidence."""
@@ -285,8 +313,9 @@ def _parameter_loop_source(parameter: str) -> str:
     """)
 
 
-# Known safe-direction difference: TradingView refuses the registry probe
-# f(float p) => p; f(2) with CE10106, while PineForge translates it.
+# Known gap: TradingView refuses the registry probe
+# f(float p) => p; f(2) with CE10106, while PineForge translates it
+# (accepting what TradingView refuses is a disagreement too).
 # These parameter-loop rows make no TradingView agreement claim.
 @pytest.mark.parametrize("parameter,expected", [
     ("int p", TypeSpec.primitive("int")),

@@ -3,6 +3,7 @@
   "division_provenance": "The division_start_no_step, division_start_int_step, division_named_start, division_end_only and division_counter_value fixtures copy the measured v01 through v05 scripts byte for byte. fractional_input and fractional_series copy the measured fractional-input.pine and fractional-series.pine byte for byte. All seven exports contain 205 entries. The v01 and v03 exports are the same file. The series export alternates odd n (10.5, 103 entries) and even n (12, 102 entries), starting with odd n. Each sha256 below is the supplied full TradingView export digest; the source hashes identify the copied scripts. Carrier controls derive their 10.5 oracle from fractional_input's identical loop shape; they do not claim separate TradingView tapes.",
   "fractional_consumer_provenance": "TradingView accepted descending.pine, array-index.pine and counter-string.pine on 2026-11-02 at 22:59. fractional_descending.pine, fractional_array_index.pine and counter_string.pine copy those sources byte for byte. The descending export has 205 entries of quantity 4.5. The array-index export has 205 entries of quantity 120: indices 2.5, 3.5 and 4.5 truncate to 2, 3 and 4. The counter-string export has 615 entries of quantity 1, with 205 entries for each exact id recorded below. Full export and source digests are the supplied measurement receipts. The counter_tostring known gap records current engine text separately from TradingView's 18-place ids.",
   "reassignment_provenance": "All seven reassignment/helper fixtures copy the measured sources byte for byte. TradingView accepted every source on BINANCE:BTCUSDT 60 with default inputs. reassign_int_hint is the controlling row: an explicit int hint retains the quotient, quantity 2.5 on 205 entries, as do the plain and literal initializers. reassign_series_qty alternates 2.5 (103 entries) and 3.5 (102). reassign_untyped, reassign_typed (float hint) and helper_param each have quantity 10.5 on 205 entries and share fractional_input's supplied export digest. The helper_param source digest is computed from the copied source; export digests are supplied measurements, with no export or C++ hash recapture.",
+  "widened_step_provenance": "The widened_float_step and widened_int_hint_float_step fixtures copy the measured sources byte for byte. TradingView refused both on BINANCE:BTCUSDT 60 with default inputs, reporting CE10106. Their check type stays int although the plain-quantity reassignment rows measure a value of 2.5. The source and error-artifact digests are supplied measurement receipts; the supplied verdict table has SHA-256 88b9dd5b851000ca157b7ade785ea20a85c8a2f8c7f10260ea93d1a0aa11763a.",
   "ta_counter_type_receipt": {
     "receipt": "tacarriers-2302",
     "sha256": "be854854835eed60f33abe809a60e100cf978a304ba68138a332ef9d1124d1cc",
@@ -128,6 +129,20 @@
       "span": "5:31-5:34",
       "source_sha256": "9c6aaeb9578724c1fddc0296a679395dd00f0271968d059709cc52d38655a1ec",
       "error_json_sha256": "074376481bdab118aebc8fe4548b73616cca98d27e93c1432992435c9d9b85c5"
+    },
+    "widened_float_step": {
+      "source_shape": "n = input.int(5); s = n; s := s / 2; for i = s to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "source_sha256": "7e4b1ac7f4804d94a18e4d2e25c5b73ca8a53f8dfcbec37828468342c885376f",
+      "error_json_sha256": "15fae462d3cc80171955e5f8f1109ee8036f5f40fa22b3d73898da517f457d7a"
+    },
+    "widened_int_hint_float_step": {
+      "source_shape": "n = input.int(5); int s = n; s := s / 2; for i = s to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "source_sha256": "436c4da2f6674e4b32770a88957ed0c3b775d6fcc206a89796d7b7f8bd0f2f69",
+      "error_json_sha256": "cd67711a0727c06058e5f74d8b50eaa92a07dfcab7e652e669baa8191738594b"
     }
   },
   "known_gaps": {
