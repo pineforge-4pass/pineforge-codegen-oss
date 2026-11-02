@@ -144,9 +144,9 @@ ACCEPTED = [
                  id="declaration-reversed"),
     pytest.param('value = request.security(syminfo.tickerid, "60", '
                  'expression=math.pow(close, 2))\n', id="request-nested"),
-    pytest.param("unused() => math.pow(exp=3, base=close)\nvalue = close\n",
+    pytest.param("unused() => ta.sma(length=3, source=close)\nvalue = close\n",
                  id="unused-function"),
-    pytest.param("if false\n    value = math.pow(close, exp=3)\n",
+    pytest.param("if false\n    value = ta.sma(close, length=3)\n",
                  id="dead-branch"),
     pytest.param("var items = array.new<float>()\nstrategy.close_all()\n",
                  id="empty-calls"),
@@ -297,9 +297,9 @@ def test_imported_unused_v6_library_body_is_validated():
 def test_v5_library_policy_stays_unchanged():
     # This task establishes a v6 rule; a v5 policy change needs its own evidence.
     library = LIBRARY.replace("//@version=6", "//@version=5")
-    library += "export power(float x) => math.pow(exp=3, x)\n"
+    library += "export average(float x) => ta.sma(length=3, x)\n"
     assert parse_library_module(LIBRARY_PATH, library).pine_version == 5
-    source = HEADER + 'import pftest/ArgumentOrder/1 as lib\nvalue = lib.power(close)\n'
+    source = HEADER + 'import pftest/ArgumentOrder/1 as lib\nvalue = lib.average(close)\n'
     assert "class GeneratedStrategy" in transpile(source, libraries={LIBRARY_PATH: library})
 
 
