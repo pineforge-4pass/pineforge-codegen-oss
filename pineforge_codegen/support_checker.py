@@ -74,6 +74,7 @@ from .codegen.drawing import (
     LINE_METHODS, LINE_NOOP, BOX_METHODS, BOX_NOOP,
     LABEL_METHODS, LABEL_NOOP, LINEFILL_METHODS, LINEFILL_NOOP,
 )
+from .codegen.constant_values import ConstantResolver
 
 
 # ---------------------------------------------------------------------------
@@ -1311,6 +1312,11 @@ class SupportChecker:
             )
             return
         if not self._is_color_constant_or_builder(defval):
+            resolver = getattr(self, "_constant_default_resolver", None)
+            if resolver is None:
+                resolver = self._constant_default_resolver = ConstantResolver(self._ast)
+            if resolver.input_default(node) is not None:
+                return
             self._err(
                 node,
                 "input.color(...) defval must be a color constant "

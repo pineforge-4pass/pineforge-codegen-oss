@@ -559,6 +559,25 @@ with a warning.
 
 This exception covers only constructs PineForge refuses today. A form that compiles today keeps compiling: if its lowering is approximate, that is recorded as a defect and fixed by the correct lowering. A wrong value is never kept behind a warning, and such a form is never newly refused as unproven. A located refusal is allowed only as a labelled temporary fallback for one exact proven shape, listed as a compile gap.
 
+Input defaults use the input family's Pine type and qualifier contract.
+An explicit `const color` carrier with a proven initializer supplies its
+packed value to the getter and settings descriptor before `on_bar`; the
+manifest reads that descriptor. `codegen/constant_values.py` resolves lexical
+bindings on the support checker's AST, after `rename_block_locals`, using
+the existing bounded scalar and color evaluators. Reassigned, persistent and
+inferred carriers remain compile gaps; an initializer alone cannot prove
+the value at a later call. The proof applies in every statement context,
+including function bodies and switch arms. Existing direct builders keep
+their lowering and metadata unless their arguments read proven const
+carriers; those use the same packed proof. Static input initialization uses
+`_render_input_value`, as statement reads and settings descriptors do, so
+it cannot read an uninitialized carrier member in place of that proof.
+
+If the required evidence and value checks are unavailable for a shape, the
+existing located PF-E1006 is retained as a PineForge limitation and is listed
+as a compile gap. A located refusal of a spelling TradingView rejects follows
+its general grammar, type and qualifier rule.
+
 The taxonomy:
 
 

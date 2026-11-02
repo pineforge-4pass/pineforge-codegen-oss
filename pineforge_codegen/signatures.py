@@ -35,6 +35,13 @@ class FuncSig:
     tuple_count: int = 0         # number of tuple elements
 
 
+@dataclass(frozen=True)
+class InputDefaultContract:
+    """The Pine base type and qualifier required of an input default."""
+    pine_type: PineType
+    qualifier: str = "const"
+
+
 @dataclass
 class IntrinsicFunc:
     """Complete intrinsic function definition with all overloads."""
@@ -43,6 +50,7 @@ class IntrinsicFunc:
     # Declared parameter names are the complete, verified keyword set.
     # False preserves the record's existing keyword policy.
     keyword_names_verified: bool = False
+    default_contract: InputDefaultContract | None = None
 
     @property
     def primary(self) -> FuncSig:
@@ -497,8 +505,14 @@ _builtin("input",
 
 INPUT_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 
-def _input(short_name: str, *sigs: FuncSig) -> None:
-    INPUT_FUNCTIONS[short_name] = _func(f"input.{short_name}", *sigs)
+def _input(short_name: str, *sigs: FuncSig,
+           default_type: PineType | None = None, default_qualifier: str = "const") -> None:
+    intrinsic = _func(f"input.{short_name}", *sigs)
+    intrinsic.default_contract = InputDefaultContract(
+        default_type if default_type is not None else sigs[0].params[0].pine_type,
+        default_qualifier,
+    )
+    INPUT_FUNCTIONS[short_name] = intrinsic
 
 # Common trailing: tooltip, inline, group, display (plot_display), confirm
 _C = [("tooltip", S, None), ("inline", S, None), ("group", S, None),
@@ -510,16 +524,20 @@ _input("float",  _sig([("defval", F), ("title", S, ""), ("minval", F, None),
                        ("maxval", F, None), ("step", F, None)] + _C, ret=F))
 _input("bool",   _sig([("defval", B), ("title", S, "")] + _C, ret=B))
 _input("string", _sig([("defval", S), ("title", S, ""), ("options", S, None)] + _C, ret=S))
-_input("source", _sig([("defval", F), ("title", S, "")] + _C, ret=F))
-_input("color",  _sig([("defval", I), ("title", S, "")] + _C, ret=I))
+_input("source", _sig([("defval", F), ("title", S, "")] + _C, ret=F),
+       default_qualifier="series")
+_input("color",  _sig([("defval", I), ("title", S, "")] + _C, ret=I),
+       default_type=PineType.COLOR)
 _input("timeframe", _sig([("defval", S, ""), ("title", S, "")] + _C, ret=S))
 _input("session", _sig([("defval", S, ""), ("title", S, "")] + _C, ret=S))
 _input("symbol", _sig([("defval", S, ""), ("title", S, "")] + _C, ret=S))
 _input("price",  _sig([("defval", F), ("title", S, "")] + _C, ret=F))
 _input("time",   _sig([("defval", I), ("title", S, "")] + _C, ret=I))
 _input("text_area", _sig([("defval", S), ("title", S, "")] + _C, ret=S))
-# defval is an enum member (typed as float in Pine's overloads; value is int index)
-_input("enum",   _sig([("defval", F), ("title", S, "")] + _C, ret=I))
+# The erased signature uses float; the default must carry a declared enum
+# identity, which the existing enum resolver checks, not a primitive proof.
+_input("enum",   _sig([("defval", F), ("title", S, "")] + _C, ret=I),
+       default_type=PineType.UNKNOWN)
 
 
 # ============================================================================

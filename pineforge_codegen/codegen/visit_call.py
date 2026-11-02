@@ -164,6 +164,7 @@ from ..method_binding import (
     signature_from_callable,
 )
 from .. import signatures as sigs
+from .color_constants import color_arguments
 from .drawing import ALL_DRAWING_METHODS
 from .helpers import (
     color_alpha_cast, cpp_is_plain_read, evaluate_args_once,
@@ -3745,25 +3746,12 @@ class CallVisitor:
     _FROM_GRADIENT_PARAMS = (
         "value", "bottom_value", "top_value", "bottom_color", "top_color",
     )
-    # TradingView's parameter names of the other color.* functions.
-    _COLOR_PARAMS = {
-        "new": ("color", "transp"),
-        "rgb": ("red", "green", "blue", "transp"),
-        "r": ("color",), "g": ("color",), "b": ("color",), "t": ("color",),
-    }
-
     def _color_arg_nodes(self, func_name: str, node) -> list:
         """The argument nodes of a ``color.*`` call in parameter order: the
         positional ones, then each keyword in its parameter's slot, up to the
         last one given (``color.new(transp = 40, color = c)`` is
         ``color.new(c, 40)``). A slot nothing fills is None."""
-        params = self._COLOR_PARAMS.get(func_name, ())
-        bound = list(node.args)
-        for index, name in enumerate(params):
-            if index >= len(node.args) and name in node.kwargs:
-                bound += [None] * (index + 1 - len(bound))
-                bound[index] = node.kwargs[name]
-        return bound
+        return color_arguments(func_name, node)
 
     # Builtins whose call has no state and no side effect.
     _PURE_CALL_NAMESPACES = frozenset({"color", "math", "str"})
