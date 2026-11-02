@@ -17,6 +17,23 @@ class Phase(Enum):
     CODEGEN = "CODEGEN"
 
 
+class CodegenInvariantError(BaseException):
+    """An AST value reached emission without a lowering implementation.
+
+    Resolution fallbacks catch Exception to retry ordinary expressions.
+    A missing lowering must escape those retries to the translation boundary.
+    _generate, the only production caller that constructs CodeGen, is the
+    only boundary: it catches this across construction and generation and
+    exposes a located CompileError, or an explicit internal error if the node
+    has no source location. Direct CodeGen users must handle it themselves.
+    """
+
+    def __init__(self, node):
+        self.node = node
+        self.node_kind = type(node).__name__
+        super().__init__(f"No value lowering for AST node {self.node_kind}")
+
+
 @dataclass
 class SourceLocation:
     file: str

@@ -4447,6 +4447,8 @@ class TypeInferer:
                 last = node.body[-1]
                 if isinstance(last, ExprStmt):
                     return self._infer_type(last.expr)
+                if isinstance(last, (IfStmt, SwitchStmt)):
+                    return self._infer_type(last)
             return "double"
         if isinstance(node, SwitchStmt):
             if self._selection_contains_na(node):
@@ -4466,6 +4468,8 @@ class TypeInferer:
                     last = case_body[-1]
                     if isinstance(last, ExprStmt):
                         return self._infer_type(last.expr)
+                    if isinstance(last, (IfStmt, SwitchStmt)):
+                        return self._infer_type(last)
             return "double"
         return "double"
 

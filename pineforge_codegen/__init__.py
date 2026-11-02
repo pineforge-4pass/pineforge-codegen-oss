@@ -8,7 +8,9 @@ from .analyzer import Analyzer
 from .codegen import CodeGen
 from .cpp_allowlist import REASONS, check_generated_cpp
 from .diagnostic_codes import diagnostics_catalog, render_diagnostic
-from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+from .errors import (
+    CodegenInvariantError, CompileError, Diagnostic, Level, Phase, SourceLocation,
+)
 from .external_requests import lower_no_data_requests
 from .builtin_keywords import bind_builtin_keywords
 from .finite_ta_length import expand_finite_choice_extrema_lengths
@@ -105,8 +107,22 @@ def _generate(pine_source: str, check_support: bool, filename: str,
         # consumes them directly from the context to emit the on_bar tail
         # ``if (trace_enabled_) { trace(...); ... }`` block.
         ctx.pf_trace_pragmas = pragmas
-        gen = CodeGen(ctx, budget=budget)
-        cpp = gen.generate()
+        try:
+            gen = CodeGen(ctx, budget=budget)
+            cpp = gen.generate()
+        except CodegenInvariantError as error:
+            node_kind = error.node_kind
+            location = getattr(error.node, "loc", None)
+            if location is None:
+                raise RuntimeError(
+                    f"Internal error: AST node '{node_kind}' has no source "
+                    "location for its missing value lowering."
+                ) from error
+            raise CompileError([Diagnostic(
+                level=Level.ERROR, phase=Phase.CODEGEN, location=location,
+                message=f"Internal error: no value lowering for AST node '{node_kind}'.",
+                hint="Report this translator error to PineForge.",
+            )]) from error
         budget.check(phase=Phase.CODEGEN)
         apart = gen.block_locals_needing_names - renamed
         if apart:
