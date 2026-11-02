@@ -219,9 +219,8 @@ class SecurityEmitter:
         from ..diagnostic_codes import render_diagnostic
         from ..pine_spelling import expr_start
 
-        # Independent requested histories and helper-owned counters match
-        # measured values at two timeframes. Persistent bindings outside the
-        # payload and other symbols remain outside that evidence.
+        # Persistent reads need storage owned by each requested evaluator,
+        # either helper cells or the fixed path's mutable-global replay.
         # The "another symbol" reason is reserved and currently unreachable:
         # foreign series-timeframe requests are replaced before analysis.
         message, hint = render_diagnostic("PF-E3111", {"reason": reason})
@@ -428,7 +427,14 @@ class SecurityEmitter:
                     series[0], "another symbol is not yet supported")
             local_state, outside_state = self._security_series_tf_state_declarations(
                 item["expr_node"])
-            if outside_state:
+            # Reuse exactly the fixed request's replay plan. A same-spelled
+            # helper/block binding is not the global that plan carries.
+            rebound_state = {
+                id(info.decl_node)
+                for name in item.get("mutable_globals", ())
+                if (info := self._global_mutable_infos.get(name)) is not None
+            }
+            if outside_state - rebound_state:
                 self._security_series_tf_refusal(
                     series[0], "persistent requested expression state is not yet supported")
             self._security_series_tf_local_decls.update(local_state)
@@ -483,6 +489,9 @@ class SecurityEmitter:
                 site["tf_node"] = leaf
                 if local_state:
                     site["series_tf_local_decls"] = frozenset(local_state)
+                if outside_state:
+                    site["series_tf_outside_decls"] = frozenset(outside_state)
+                if local_state or outside_state:
                     site["series_tf_state_node"] = series[0]
                 sites.append(sec_id)
                 if arm_index:
@@ -6858,6 +6867,7 @@ class SecurityEmitter:
         info = self._global_mutable_infos.get(node.name)
         if info is None:
             return
+        self._security_series_tf_emitted_state.add((sec_id, id(node)))
 
         pad = "    " * indent
         state_name = self._security_state_name(sec_id, node.name)
@@ -7328,9 +7338,10 @@ class SecurityEmitter:
         with a warning: a requested ``f()`` beside the chart's ``g`` would mix
         two bars. A failure of that emission is the script's own and
         propagates, as does a limit error."""
-        local_state = item.get("series_tf_local_decls", ())
+        state = (set(item.get("series_tf_local_decls", ()))
+                 | set(item.get("series_tf_outside_decls", ())))
         self._security_series_tf_emitted_state.difference_update(
-            (item["sec_id"], decl) for decl in local_state)
+            (item["sec_id"], decl) for decl in state)
         snapshot = self._security_state_snapshot()
         body: list[str] = []
         self._security_requested_calls = True
@@ -7358,13 +7369,14 @@ class SecurityEmitter:
         else:
             if self._security_requested_used and self._security_chart_read is not None:
                 reason = self._security_chart_read
-        if local_state and (
+        if state and (
                 reason is not None or self._security_chart_read is not None
                 or any((item["sec_id"], decl) not in self._security_series_tf_emitted_state
-                       for decl in local_state)):
+                       for decl in state)):
             # A chart fallback can call the ordinary function member and
             # share its state across arms. Newly admitted state must instead
-            # have been emitted into this site's requested-context cells.
+            # have been emitted into this site's requested-context cells or
+            # mutable-global copies, including their declaration/once seed.
             self._security_series_tf_refusal(
                 item["series_tf_state_node"],
                 "persistent requested expression state is not yet supported")
@@ -9950,6 +9962,18 @@ class SecurityEmitter:
             if isinstance(n, FuncCall):
                 return "a user call it cannot inline"
             if isinstance(n, Subscript):
+                obj = n.object
+                if (self._security_calls[sec_id].get("series_tf_outside_decls")
+                        and isinstance(obj, Identifier)
+                        and self._security_identifier_is_global_binding(obj)
+                        and obj.name in mutable_names
+                        and (info := self._global_mutable_infos.get(obj.name)) is not None
+                        and info.is_series):
+                    # The fixed path renders this history through the visitor
+                    # and rewrites its receiver to this site's Series. It is
+                    # requested history even though the builder delegates it.
+                    stack.append(n.index)
+                    continue
                 return "history it does not keep on the requested clock"
             return f"a {type(n).__name__}"
         return None

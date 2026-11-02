@@ -755,33 +755,219 @@ def assert_counter_protocol(body, sec_id, key):
 
 
 @pytest.mark.parametrize("persistent", ("var", "varip"))
-@pytest.mark.parametrize("selection,column", (
-    ('close > open ? "75" : "180"\n', 8),
-    ('if close > open\n    "75"\nelse\n    "180"\n', 11),
-    ('switch close > open\n    true => "75"\n    => "180"\n', 15),
+@pytest.mark.parametrize("selection", (
+    'close > open ? "75" : "180"\n',
+    'if close > open\n    "75"\nelse\n    "180"\n',
+    'switch close > open\n    true => "75"\n    => "180"\n',
 ))
 @pytest.mark.parametrize("expression", ("saved_v", "payload()", "saved_v[1]"))
-def test_global_persistent_requested_expression_keeps_a_located_refusal(
-        persistent, selection, column, expression):
+def test_global_persistent_requested_expression_uses_each_sites_replay(
+        persistent, selection, expression):
     pine = (HEADER + f"{persistent} float saved_v = na\n"
             "payload() =>\n    local_v = saved_v\n    local_v\n"
             + 'tf_v = ' + selection
             + f'got_v = request.security(syminfo.tickerid, tf_v, {expression})\nplot(got_v)\n')
-    with pytest.raises(CompileError) as caught:
-        transpile(pine)
-    (diagnostic,) = caught.value.diagnostics
-    assert diagnostic.code == "PF-E3111"
-    assert diagnostic.args == {
-        "reason": "persistent requested expression state is not yet supported"}
-    assert (diagnostic.location.line, diagnostic.location.col) == (7, column)
+    cpp = transpile(pine)
+    assert registrations(cpp) == [
+        '0, "75", input_tf_, false, false',
+        '1, "180", input_tf_, false, false',
+    ]
+    for sec_id in (0, 1):
+        body = requested_body(cpp, sec_id)
+        state = f"_sec{sec_id}_saved_v"
+        assert f"if (!{state}_initialized)" in body
+        assert f"{state}_initialized = true;" in body
+        assert f"_sec{1 - sec_id}_saved_v" not in body
+        assert not re.search(r"\bsaved_v\b", body)
+        assert not re.search(r"\bpayload(?:_cs\d+)?\(", body)
+    assert "_sec0_saved_v" not in chart_body(cpp)
+    assert "_sec1_saved_v" not in chart_body(cpp)
 
 
 @pytest.mark.parametrize("persistent", ("var", "varip"))
-def test_reassigned_alias_cannot_hide_global_persistent_state(persistent):
+def test_reassigned_alias_uses_the_replayed_global_counter(persistent):
     pine = (HEADER + f"{persistent} int saved_v = 0\n"
             "saved_v += 1\nalias_v = 0\nalias_v := saved_v\n"
             'tf_v = close > open ? "45" : "2D"\n'
             'got_v = request.security(syminfo.tickerid, tf_v, alias_v)\nplot(got_v)\n')
+    cpp = transpile(pine)
+    for sec_id in (0, 1):
+        body = requested_body(cpp, sec_id)
+        assert_global_counter_protocol(body, sec_id, "saved_v")
+        assert f"_sec{sec_id}_alias_v = 0;" in body
+        assert f"_sec{sec_id}_alias_v = _sec{sec_id}_saved_v;" in body
+        assert f"_req_sec_{sec_id} = _sec{sec_id}_alias_v;" in body
+        assert body.index(f"_sec{sec_id}_saved_v += 1;") < body.index(
+            f"_sec{sec_id}_alias_v = _sec{sec_id}_saved_v;")
+        assert not re.search(r"\b(?:saved_v|alias_v)\b", body)
+
+
+def assert_global_counter_protocol(body, sec_id, counter):
+    state = f"_sec{sec_id}_{counter}"
+    assert (
+        f"        if (!{state}_initialized) {{\n"
+        f"            {state} = 0;\n"
+        f"            {state}_initialized = true;\n"
+        f"        }}\n"
+    ) in body
+    assert body.count(f"{state} += 1;") == 1
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+@pytest.mark.parametrize("counter,fast_tf,slow_tf", (
+    ("count_v", "45", "2D"),
+    ("tally_v", "90", "3D"),
+))
+@pytest.mark.parametrize("expression", ("{counter}", "read_count()", "{counter}[1]"))
+def test_outside_counter_chain_is_independent_of_the_chart_and_other_arm(
+        persistent, counter, fast_tf, slow_tf, expression):
+    pine = (HEADER + f"{persistent} int {counter} = 0\n{counter} += 1\n"
+            f"read_count() =>\n    local_v = {counter}\n    local_v\n"
+            f'tf_v = close > open ? "{fast_tf}" : "{slow_tf}"\n'
+            'got_v = request.security(syminfo.tickerid, tf_v, '
+            + expression.format(counter=counter) + ')\n'
+            + f'chart_v = {counter}\nplot(got_v + chart_v)\n')
+    cpp = transpile(pine)
+    assert registrations(cpp) == [
+        f'{i}, "{tf}", input_tf_, false, false'
+        for i, tf in enumerate((fast_tf, slow_tf))
+    ]
+    for sec_id in (0, 1):
+        body = requested_body(cpp, sec_id)
+        state = f"_sec{sec_id}_{counter}"
+        assert f"if (!{state}_initialized)" in body
+        assert f"{state}_initialized = true;" in body
+        assert f"_sec{1 - sec_id}_{counter}" not in body
+        assert not re.search(rf"\b{counter}\b", body)
+        assert not re.search(r"\bread_count(?:_cs\d+)?\(", body)
+        if expression == "{counter}[1]":
+            assert f"{state}.push(0);" in body
+            assert f"security_series_slot_is_new({sec_id})" in body
+            assert f"{state}.push({state}[0]);" in body
+            assert body.count(f"{state}.update({state}[0] + 1);") == 1
+            assert f"_req_sec_{sec_id} = {state}[1];" in body
+        else:
+            assert_global_counter_protocol(body, sec_id, counter)
+    chart = chart_body(cpp)
+    assert not re.search(rf"\b_sec\d+_{counter}\b", chart)
+    assert re.search(rf"\bchart_v\s*=\s*{counter}(?:\[0\])?;", chart)
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+def test_conditionally_written_counter_replays_the_requested_bar_condition(persistent):
+    pine = (HEADER + f"{persistent} int count_v = 0\n"
+            "if close > open\n    count_v += 1\n"
+            'tf_v = close > open ? "45" : "2D"\n'
+            'got_v = request.security(syminfo.tickerid, tf_v, count_v)\n'
+            'plot(got_v + count_v)\n')
+    cpp = transpile(pine)
+    for sec_id in (0, 1):
+        body = requested_body(cpp, sec_id)
+        assert_global_counter_protocol(body, sec_id, "count_v")
+        assert re.search(
+            rf"if \([^\n]*bar\.close[^\n]*bar\.open[^\n]*\) \{{\n"
+            rf"            _sec{sec_id}_count_v \+= 1;\n"
+            r"        \}", body)
+        assert "current_bar_" not in body
+        assert not re.search(r"\bcount_v\b", body)
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+def test_two_requests_get_four_global_counter_chains_and_keep_chart_storage(persistent):
+    pine = (HEADER + f"{persistent} int count_v = 0\ncount_v += 1\n"
+            'first_tf = close > open ? "45" : "2D"\n'
+            'second_tf = close < open ? "75" : "180"\n'
+            'first_v = request.security(syminfo.tickerid, first_tf, count_v)\n'
+            'second_v = request.security(syminfo.tickerid, second_tf, count_v)\n'
+            'chart_v = count_v\nplot(first_v + second_v + chart_v)\n')
+    cpp = transpile(pine)
+    assert registrations(cpp) == [
+        '0, "45", input_tf_, false, false',
+        '1, "75", input_tf_, false, false',
+        '2, "2D", input_tf_, false, false',
+        '3, "180", input_tf_, false, false',
+    ]
+    for sec_id in range(4):
+        body = requested_body(cpp, sec_id)
+        assert_global_counter_protocol(body, sec_id, "count_v")
+        assert f"_req_sec_{sec_id} = _sec{sec_id}_count_v;" in body
+        assert set(re.findall(r"\b_sec\d+_count_v\b", body)) == {
+            f"_sec{sec_id}_count_v"}
+        assert not re.search(r"\bcount_v\b", body)
+    chart = chart_body(cpp)
+    assert "chart_v = count_v;" in chart
+    assert not re.search(r"\b_sec\d+_count_v\b", chart)
+    assert_selection_tail(
+        cpp, 'if (_pf_selected_tf == "45") return _req_sec_0;',
+        'if (_pf_selected_tf == "2D") return _req_sec_2;')
+    assert_selection_tail(
+        cpp, 'if (_pf_selected_tf == "75") return _req_sec_1;',
+        'if (_pf_selected_tf == "180") return _req_sec_3;')
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+def test_global_replay_and_helper_owned_counter_both_belong_to_the_site(persistent):
+    pine = (HEADER + f"{persistent} int count_v = 0\ncount_v += 1\n"
+            f"payload() =>\n    {persistent} int tally_v = 0\n"
+            "    tally_v += 1\n    count_v + tally_v\n"
+            'tf_v = close > open ? "45" : "2D"\n'
+            'got_v = request.security(syminfo.tickerid, tf_v, payload())\nplot(got_v)\n')
+    cpp = transpile(pine)
+    for sec_id in (0, 1):
+        body = requested_body(cpp, sec_id)
+        assert_global_counter_protocol(body, sec_id, "count_v")
+        (key,) = set(re.findall(
+            rf'_security_helper_series_\["(_sec{sec_id}_payload_\d+_tally_v)"\]', body))
+        assert_counter_protocol(body, sec_id, key)
+        assert not re.search(r"\b(?:count_v|tally_v)\b", body)
+
+
+def test_outside_counter_value_probe_has_two_replayed_chains():
+    cpp = transpile(source("outside-counter-selected"))
+    assert registrations(cpp) == [
+        '0, "240", input_tf_, false, false',
+        '1, "1D", input_tf_, false, false',
+    ]
+    for sec_id in (0, 1):
+        body = requested_body(cpp, sec_id)
+        assert_global_counter_protocol(body, sec_id, "runs_v")
+        assert f"_req_sec_{sec_id} = _sec{sec_id}_runs_v;" in body
+        assert not re.search(r"\bruns_v\b", body)
+    assert not re.search(r"\b_sec\d+_runs_v\b", chart_body(cpp))
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+@pytest.mark.parametrize("mutation,code", (
+    ("for index_v = 0 to 1\n    count_v += 1\n", "PF-E3041"),
+    ("switch\n    close > open => count_v += 1\n    => count_v += 2\n", "PF-E3040"),
+))
+def test_unreplayable_global_writes_keep_the_existing_series_refusal(
+        persistent, mutation, code):
+    prefix = (HEADER + f"{persistent} int count_v = 0\n" + mutation
+              + 'tf_v = close > open ? "45" : "2D"\n')
+    suffix = "count_v)\nplot(got_v)\n"
+    fixed = prefix + 'got_v = request.security(syminfo.tickerid, "45", ' + suffix
+    with pytest.raises(CompileError) as caught:
+        transpile(fixed)
+    assert caught.value.diagnostics[0].code == code
+    expanded = prefix + 'got_v = request.security(syminfo.tickerid, tf_v, ' + suffix
+    with pytest.raises(CompileError) as caught:
+        transpile(expanded)
+    assert caught.value.diagnostics[0].code == "PF-E3111"
+    assert caught.value.diagnostics[0].args == {
+        "reason": "persistent requested expression state is not yet supported"}
+    assert (caught.value.diagnostics[0].location.line,
+            caught.value.diagnostics[0].location.col) == (
+                prefix.count("\n"), 8)
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+def test_state_in_the_requesting_helper_stays_outside_the_payload(persistent):
+    pine = (HEADER + f"read_value() =>\n    {persistent} int saved_v = 0\n"
+            "    saved_v += 1\n"
+            '    tf_v = close > open ? "45" : "2D"\n'
+            '    request.security(syminfo.tickerid, tf_v, saved_v)\n'
+            'plot(read_value())\n')
     with pytest.raises(CompileError) as caught:
         transpile(pine)
     assert caught.value.diagnostics[0].code == "PF-E3111"
@@ -790,8 +976,9 @@ def test_reassigned_alias_cannot_hide_global_persistent_state(persistent):
 
 
 @pytest.mark.parametrize("persistent", ("var", "varip"))
-def test_state_in_the_requesting_helper_stays_outside_the_payload(persistent):
-    pine = (HEADER + f"read_value() =>\n    {persistent} int saved_v = 0\n"
+def test_requesting_helpers_state_cannot_borrow_a_same_named_globals_replay(persistent):
+    pine = (HEADER + "var int saved_v = 100\n"
+            f"read_value() =>\n    {persistent} int saved_v = 0\n"
             "    saved_v += 1\n"
             '    tf_v = close > open ? "45" : "2D"\n'
             '    request.security(syminfo.tickerid, tf_v, saved_v)\n'
@@ -812,6 +999,23 @@ def test_method_payload_cannot_hide_a_global_persistent_read(persistent):
             'plot(got_v)\n')
     with pytest.raises(CompileError) as caught:
         transpile(pine)
+    assert caught.value.diagnostics[0].code == "PF-E3111"
+    assert caught.value.diagnostics[0].args == {
+        "reason": "persistent requested expression state is not yet supported"}
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+def test_global_counter_read_through_a_chart_fallback_keeps_its_refusal(persistent):
+    prefix = (HEADER + f"{persistent} int count_v = 0\ncount_v += 1\n"
+              "read_count() =>\n    local_v = count_v\n    local_v\n"
+              'tf_v = close > open ? "45" : "2D"\n')
+    suffix = "nz(read_count()))\nplot(got_v)\n"
+    fixed = transpile_full(
+        prefix + 'got_v = request.security(syminfo.tickerid, "45", ' + suffix)
+    assert any("read_count" in diagnostic.message and "chart" in diagnostic.message
+               for diagnostic in fixed["diagnostics"])
+    with pytest.raises(CompileError) as caught:
+        transpile(prefix + 'got_v = request.security(syminfo.tickerid, tf_v, ' + suffix)
     assert caught.value.diagnostics[0].code == "PF-E3111"
     assert caught.value.diagnostics[0].args == {
         "reason": "persistent requested expression state is not yet supported"}

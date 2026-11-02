@@ -442,7 +442,9 @@ The requested expression's own scalar `var` state uses independent helper
 series and once seeds per registered timeframe and helper call. Expanded
 arms also admit helper-local `varip` on the historical requested-bar protocol:
 new requested bars carry the prior value, repeated evaluations roll back.
-Outside persistent bindings (including reads through aliases) retain PF-E3111.
+Outside persistent bindings use the fixed request's mutable-global replay
+independently per registered stream, including aliases and history; bindings
+that replay cannot carry retain PF-E3111.
 A stateful expanded evaluator cannot fall back to a chart helper call;
 conditional helper declarations and unsupported state types keep their gates.
 Fixed requests retain their helper-local `varip` refusal.
