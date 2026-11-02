@@ -69,7 +69,12 @@ def test_float_step_loop_from_a_widened_variable_is_refused_like_int(name):
     assert refusal["verdict"] == "REFUSED"
     assert refusal["code"] == "CE10106"
     assert hashlib.sha256(source).hexdigest() == refusal["source_sha256"]
-    assert_float_step_refused(pine)
+    # TradingView's recorded span "line:first-last" (last inclusive) is the
+    # step literal; the engine's location is the same columns, end exclusive.
+    start, end = refusal["span"].split("-")
+    line, first = (int(part) for part in start.split(":"))
+    _, last = (int(part) for part in end.split(":"))
+    assert_float_step_refused(pine, location=(line, first, last + 1))
 
 
 # These controls derive from the measured plain-quantity row. They exercise

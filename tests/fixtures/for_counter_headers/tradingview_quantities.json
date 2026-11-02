@@ -134,6 +134,7 @@
       "source_shape": "n = input.int(5); s = n; s := s / 2; for i = s to 6 by 0.5",
       "verdict": "REFUSED",
       "code": "CE10106",
+      "span": "7:19-7:21",
       "source_sha256": "7e4b1ac7f4804d94a18e4d2e25c5b73ca8a53f8dfcbec37828468342c885376f",
       "error_json_sha256": "15fae462d3cc80171955e5f8f1109ee8036f5f40fa22b3d73898da517f457d7a"
     },
@@ -141,6 +142,7 @@
       "source_shape": "n = input.int(5); int s = n; s := s / 2; for i = s to 6 by 0.5",
       "verdict": "REFUSED",
       "code": "CE10106",
+      "span": "7:19-7:21",
       "source_sha256": "436c4da2f6674e4b32770a88957ed0c3b775d6fcc206a89796d7b7f8bd0f2f69",
       "error_json_sha256": "cd67711a0727c06058e5f74d8b50eaa92a07dfcab7e652e669baa8191738594b"
     }
