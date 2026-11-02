@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .ast_nodes import (
-    BinOp, ExprStmt, ForStmt, FuncCall, FuncDef, Identifier, IfStmt,
+    Assignment, BinOp, ExprStmt, ForStmt, FuncCall, FuncDef, Identifier, IfStmt,
     MemberAccess, NaLiteral, NumberLiteral, Subscript, SwitchStmt, Ternary,
     TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
@@ -80,7 +80,11 @@ class LoopTypeSources:
         self.declarations = {}
         self.functions = {}
         self.parameter_hints = {}
+        self.reassigned_names = set()
         for node, _depth in iter_ast_nodes(ast):
+            # Conservatively deny constant proofs for a name written anywhere.
+            if isinstance(node, Assignment) and isinstance(node.target, Identifier):
+                self.reassigned_names.add(node.target.name)
             if isinstance(node, (VarDecl, TupleAssign, ForStmt, FuncDef)):
                 self.declarations[id(node)] = node
             if isinstance(node, FuncDef):
@@ -294,15 +298,58 @@ class _CounterQuery:
 
 
 class _CounterValueQuery(_CounterQuery):
-    """Reuse the check recursion with fractional division values and its own memo."""
+    """Keep fractional division values unless literal arithmetic proves an int."""
 
     def __init__(self, check_query):
         super().__init__(check_query.sources, check_query.bindings, check_query.scopes)
         self.check_query = check_query
+        self.integer_constants = {}
+
+    def _integer_constant(self, node):
+        """Prove an integer using only immutable literal arithmetic."""
+        key = id(node)
+        if key in self.integer_constants:
+            return self.integer_constants[key]
+        # Memoize failures too; a provisional failure breaks alias cycles.
+        self.integer_constants[key] = None
+        value = None
+        if isinstance(node, NumberLiteral) and type(node.value) is int:
+            value = node.value
+        elif isinstance(node, Identifier):
+            binding = self.bindings.get(key)
+            declaration = self.sources.declarations.get(binding[0]) if binding else None
+            if (isinstance(declaration, VarDecl)
+                    and not declaration.is_var and not declaration.is_varip
+                    and declaration.name not in self.sources.reassigned_names
+                    and declaration.type_hint in (None, "int")
+                    and (declaration.annotations or {}).get("qualifier") in (None, "const")):
+                value = self._integer_constant(declaration.value)
+        elif isinstance(node, UnaryOp) and node.op in {"+", "-"}:
+            operand = self._integer_constant(node.operand)
+            if operand is not None:
+                value = -operand if node.op == "-" else operand
+        elif isinstance(node, BinOp) and node.op in {"+", "-", "*", "/", "%"}:
+            left = self._integer_constant(node.left)
+            right = self._integer_constant(node.right)
+            if left is not None and right is not None:
+                if node.op == "+":
+                    value = left + right
+                elif node.op == "-":
+                    value = left - right
+                elif node.op == "*":
+                    value = left * right
+                elif right != 0:
+                    if node.op == "/" and left % right == 0:
+                        value = left // right
+                    elif node.op == "%":
+                        remainder = abs(left) % abs(right)
+                        value = -remainder if left < 0 else remainder
+        self.integer_constants[key] = value
+        return value
 
     def infer(self, node):
         if isinstance(node, BinOp) and node.op == "/":
-            return _FLOAT
+            return _INT if self._integer_constant(node) is not None else _FLOAT
         return super().infer(node)
 
     def counter_spec(self, start, step, **kwargs):

@@ -271,20 +271,24 @@ def test_float_step_refusal_uses_the_same_counter_family_as_emission(
 
 @pytest.mark.parametrize("name", sorted(DIVISION_STARTS))
 def test_int_division_start_still_refuses_a_float_step(name):
-    prefix, start = DIVISION_STARTS[name]
+    prefix, start, _family = DIVISION_STARTS[name]
     assert_float_step_refused(loop_step_source(start, prefix=prefix))
 
 
 @pytest.mark.parametrize("name", sorted(DIVISION_STARTS))
-def test_division_start_emits_a_float_counter_with_default_step(name):
-    prefix, start = DIVISION_STARTS[name]
+def test_division_start_emits_its_value_family_with_default_step(name):
+    prefix, start, family = DIVISION_STARTS[name]
     cpp = transpile(loop_step_source(start, prefix=prefix, step=None))
-    assert re.search(r"\bfor \(double i = ", cpp), cpp
-    assert not re.search(r"\bfor \(int i = ", cpp), cpp
+    assert re.search(rf"\bfor \({family} i = ", cpp), cpp
+    other = "int" if family == "double" else "double"
+    assert not re.search(rf"\bfor \({other} i = ", cpp), cpp
     for slot in ("start", "end", "step"):
-        assert re.search(rf"\bdouble _for_{slot}_\d+ = ", cpp), cpp
-    assert cpp.count("static constexpr double kFloatStepTolerance =") == 1
-    assert cpp.count("::kFloatStepTolerance") == 2
+        assert re.search(rf"\b{family} _for_{slot}_\d+ = ", cpp), cpp
+    if family == "double":
+        assert cpp.count("static constexpr double kFloatStepTolerance =") == 1
+        assert cpp.count("::kFloatStepTolerance") == 2
+    else:
+        assert "kFloatStepTolerance" not in cpp
 
 
 @pytest.mark.parametrize("start,end,step", [
@@ -298,9 +302,23 @@ def test_integer_start_arithmetic_still_refuses_a_float_step(start, end, step):
     assert_float_step_refused(loop_step_source(start, end=end, step=step))
 
 
-@pytest.mark.parametrize("name", sorted(DIVISION_VALUE_STARTS))
+def _normalize_declared_loop_start(cpp, family):
+    # Only the declaration's initializer may differ. In particular, do not
+    # match an end refresh in the for header or stop at an inline lambda's ';'.
+    cpp, count = re.subn(
+        rf"(?m)^(\s*{family} _for_start_\d+ = )[^\n]*(;\n)",
+        r"\1<start>\2", cpp,
+    )
+    assert count == 1, cpp
+    return cpp
+
+
+@pytest.mark.parametrize("name", [
+    name for name, row in sorted(DIVISION_VALUE_STARTS.items()) if row[-1] == "double"
+])
 def test_division_start_without_step_matches_a_float_start(name):
-    prefix, start, end, twin, twin_end = DIVISION_VALUE_STARTS[name]
+    prefix, start, end, twin, twin_end, family = DIVISION_VALUE_STARTS[name]
+    assert end == twin_end
     sources = [
         loop_step_source(start, prefix=prefix, end=end, step=None),
         loop_step_source(twin, prefix=prefix, end=twin_end, step=None),
@@ -308,19 +326,64 @@ def test_division_start_without_step_matches_a_float_start(name):
     normalized = []
     for source in sources:
         cpp = transpile(source)
-        # Compare all C++ apart from the authored bound expressions that
-        # differ. Header types, step, body and tolerance must match.
-        slots = [("start", 1)]
-        if end != twin_end:
-            slots.append(("end", 2))
-        for slot, count_expected in slots:
-            cpp, count = re.subn(
-                rf"(\b(?:double )?_for_{slot}_\d+ = )[^;\n]+(?=;|\) \{{)",
-                rf"\1<{slot}>", cpp,
-            )
-            assert count == count_expected, cpp
-        normalized.append(cpp)
+        assert re.search(rf"\bfor \({family} i = ", cpp), cpp
+        for slot in ("start", "end", "step"):
+            assert re.search(rf"\b{family} _for_{slot}_\d+ = ", cpp), cpp
+        assert cpp.count("static constexpr double kFloatStepTolerance =") == 1
+        assert cpp.count("::kFloatStepTolerance") == 2
+        # All other C++ bytes, including the end, step, body and tolerance,
+        # must match the twin whose Pine source differs only in the start.
+        normalized.append(_normalize_declared_loop_start(cpp, family))
     assert normalized[0] == normalized[1]
+
+
+@pytest.mark.parametrize("start,twin", [
+    pytest.param("4 / 2", "2", id="four-over-two"),
+    pytest.param("8 / 4", "2", id="eight-over-four"),
+    pytest.param("-4 / 2", "-2", id="negative-four-over-two"),
+])
+def test_proved_integral_division_matches_an_int_start(start, twin, tmp_path):
+    reference = reference_codegen(LOOP_CPP_REFERENCE)
+    assert reference is not None, "Required loop C++ reference unavailable; restore git history."
+    headers = []
+    for first in (start, twin):
+        source = loop_step_source(first, step=None)
+        cpp = transpile(source)
+        assert re.search(r"\bfor \(int i = ", cpp), cpp
+        for slot in ("start", "end", "step"):
+            assert re.search(rf"\bint _for_{slot}_\d+ = ", cpp), cpp
+        assert "kFloatStepTolerance" not in cpp
+        # Division already emits an na-preserving cast and guards where a
+        # literal does not. Preserve every byte of BOTH frozen outputs.
+        pine = tmp_path / "strategy.pine"
+        pine.write_text(source, encoding="utf-8")
+        before = transpile_json(pine, root=reference)
+        assert before["ok"], before["diagnostics"]
+        assert cpp == before["cpp"]
+        end = re.search(r"(?m)^ *int _for_end_\d+ = (.+);$", cpp)
+        step = re.search(r"(?m)^ *int _for_step_\d+ = (.+);$", cpp)
+        body = re.search(r"(?m)^ *for \(int i = [^\n]+\{\n(?P<body>.*?)^ *}", cpp, re.S)
+        assert end and step and body, cpp
+        headers.append((end[1], step[1], body["body"]))
+    assert headers[0] == headers[1]
+
+
+@pytest.mark.parametrize("prefix,start", [
+    pytest.param("", "5 / 2", id="five-over-two"),
+    pytest.param("", "4 / 3", id="four-over-three"),
+    pytest.param("n = input.int(5)\n", "n / 2", id="input"),
+    pytest.param("n = 5 + bar_index % 2\n", "n / 2", id="series"),
+    pytest.param("", "4 / 0", id="zero-divisor"),
+])
+def test_unproved_division_uses_double_headers(prefix, start):
+    cpp = transpile(loop_step_source(start, prefix=prefix, step=None))
+    assert re.search(r"\bfor \(double i = ", cpp), cpp
+    assert not re.search(r"\bfor \(int i = ", cpp), cpp
+    for slot in ("start", "end", "step"):
+        assert re.search(rf"\bdouble _for_{slot}_\d+ = ", cpp), cpp
+    assert cpp.count("static constexpr double kFloatStepTolerance =") == 1
+    assert cpp.count("::kFloatStepTolerance") == 2
+    assert_float_step_refused(loop_step_source(start, prefix=prefix))
 
 
 @pytest.mark.parametrize("start,end", [
@@ -350,7 +413,7 @@ def test_integer_counter_keeps_frozen_cpp(start, end, tmp_path):
 
 @pytest.mark.parametrize("name", sorted(DIVISION_VALUE_STARTS))
 def test_division_start_preserves_counter_values(name):
-    prefix, start, end, _twin, _twin_end = DIVISION_VALUE_STARTS[name]
+    prefix, start, end, _twin, _twin_end, _family = DIVISION_VALUE_STARTS[name]
     expected = ",".join(str(value) for value in DIVISION_VALUE_SUMS[name])
     driver = r'''
 #include <cassert>

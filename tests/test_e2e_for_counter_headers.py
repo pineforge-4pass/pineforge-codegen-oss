@@ -343,7 +343,7 @@ def division_runs(tmp_path_factory):
     base = tmp_path_factory.mktemp("for_division_values")
     feed = chart_feed_head(engine, base, 32)
     builds = {}
-    for name, (prefix, start, end, twin, twin_end) in DIVISION_VALUE_STARTS.items():
+    for name, (prefix, start, end, twin, twin_end, _family) in DIVISION_VALUE_STARTS.items():
         for suffix, first, last in (("", start, end), ("_twin", twin, twin_end)):
             source = _source(
                 prefix + "float acc = 0.0\n"

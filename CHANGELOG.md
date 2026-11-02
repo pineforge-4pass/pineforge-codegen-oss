@@ -55,9 +55,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   int-counter route.
   Counter-family inference follows declaration sources in a dedicated query,
   independently of shared expression and storage inference.
-  A division in a loop start keeps its fractional value (the counter is a
-  float), while the float-step refusal follows TradingView's check type (a
-  division of two ints is int).
+  A division in a loop start keeps its fraction unless it is a constant
+  division with an exact integer result, which keeps the int route. The float-step
+  refusal follows TradingView's check type (a division of two ints is int).
 - Float-counter loops accumulate the counter and continue within an absolute
   allowance of the end: `x <= end + kFloatStepTolerance` ascending, with the
   mirrored comparison descending. `0.0 to 0.3 by 0.1` counts four iterations.

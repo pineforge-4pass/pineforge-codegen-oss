@@ -148,14 +148,14 @@ def test_positive_int_parameter_start_refuses_a_float_step():
     assert_float_step_refused(pine, counter="walkIndex", location=(5, 37, 41))
 
 
-@pytest.mark.parametrize("prefix,start", [
-    *(pytest.param(prefix, start, id=name)
-      for name, (prefix, start) in sorted(DIVISION_STARTS.items())),
-    *(pytest.param(prefix, start, id=name)
-      for name, (prefix, start, _end, _twin, _twin_end)
+@pytest.mark.parametrize("prefix,start,family", [
+    *(pytest.param(prefix, start, family, id=name)
+      for name, (prefix, start, family) in sorted(DIVISION_STARTS.items())),
+    *(pytest.param(prefix, start, family, id=name)
+      for name, (prefix, start, _end, _twin, _twin_end, family)
       in sorted(DIVISION_VALUE_STARTS.items())),
 ])
-def test_division_start_has_distinct_check_and_value_specs(prefix, start):
+def test_division_start_has_distinct_check_and_value_specs(prefix, start, family):
     pine = loop_step_source(start, prefix=prefix, step=None)
     ast = Parser(Lexer(pine).tokenize(), source=pine).parse()
     ctx = Analyzer(ast).analyze()
@@ -165,8 +165,53 @@ def test_division_start_has_distinct_check_and_value_specs(prefix, start):
         ctx.identifier_decl_bindings, ctx.identifier_binding_scopes,
     )
     assert query.infer(loop.start) == TypeSpec.primitive("int")
-    assert query.value_spec(loop.start) == TypeSpec.primitive("float")
-    assert ctx.for_counter_types[id(loop.start)] == PineType.FLOAT
+    expected = "float" if family == "double" else "int"
+    assert query.value_spec(loop.start) == TypeSpec.primitive(expected)
+    assert ctx.for_counter_types[id(loop.start)] == (
+        PineType.FLOAT if family == "double" else PineType.INT
+    )
+
+
+@pytest.mark.parametrize("prefix,start,family", [
+    pytest.param("", "(+4) / (-2)", "int", id="parenthesized-signs"),
+    pytest.param("const int n = 8\nconst int d = 4\n", "n / d", "int",
+                 id="declared-constants"),
+    pytest.param("unit = 2\nn = unit * unit\nd = +unit\n", "n / d", "int",
+                 id="inferred-constant-aliases"),
+    pytest.param("", "(3 * 4 + 6 - 2) / (1 + 1)", "int", id="integer-arithmetic"),
+    pytest.param("", "(8 / 2) / (6 / 3)", "int", id="nested-exact-divisions"),
+    pytest.param("", "(11 % 4) / 3", "int", id="integer-remainder"),
+    pytest.param("", "(-11 % 4) / -3", "int", id="negative-remainder"),
+    pytest.param("", "0 / 2", "int", id="zero-result"),
+    pytest.param("", "(5 / 2) * 2 / 2", "double", id="fractional-intermediate"),
+    pytest.param("", "4 / (2 - 2)", "double", id="zero-constant-divisor"),
+    pytest.param("", "(4 % 0) / 2", "double", id="zero-remainder-divisor"),
+    pytest.param("n = 4\nn += 1\n", "n / 2", "double", id="reassigned-name"),
+    pytest.param("var int n = 4\n", "n / 2", "double", id="persistent-name"),
+    pytest.param("series int n = 4\n", "n / 2", "double", id="series-qualifier"),
+    pytest.param("simple int n = 4\n", "n / 2", "double", id="simple-qualifier"),
+    pytest.param("", "int(4) / 2", "double", id="call-operand"),
+    pytest.param("n = int(4)\n", "n / 2", "double", id="call-alias"),
+    pytest.param("", "4.0 / 2", "double", id="float-literal"),
+    pytest.param("float n = 4\n", "n / 2", "double", id="float-alias"),
+])
+def test_division_integrality_requires_constant_integer_operands(prefix, start, family):
+    pine = loop_step_source(start, prefix=prefix, step=None)
+    ast = Parser(Lexer(pine).tokenize(), source=pine).parse()
+    ctx = Analyzer(ast).analyze()
+    loop = next(node for node, _ in iter_ast_nodes(ast) if isinstance(node, ForStmt))
+    query = _CounterQuery(
+        LoopTypeSources(ast),
+        ctx.identifier_decl_bindings, ctx.identifier_binding_scopes,
+    )
+    assert query.value_spec(loop.start) == TypeSpec.primitive(
+        "int" if family == "int" else "float",
+    )
+    assert ctx.for_counter_types[id(loop.start)] == (
+        PineType.INT if family == "int" else PineType.FLOAT
+    )
+    cpp = transpile(pine)
+    assert re.search(rf"\bfor \({family} i = ", cpp), cpp
 
 
 @pytest.mark.parametrize("context", ["chart", "security"])
@@ -194,17 +239,19 @@ def test_division_start_has_distinct_check_and_value_specs(prefix, start):
     pytest.param("startValue() => 4 / 2\n", "", "startValue()", "0.5", "refused",
                  id="helper-division-start"),
     pytest.param("", "", "bar_index / 2", "0.5", "refused", id="series-division-start"),
-    pytest.param("", "", "4 / 2", "1", "double", id="division-int-step"),
-    pytest.param("", "begin = 4 / 2\n", "begin", "1", "double",
+    pytest.param("", "", "4 / 2", "1", "int", id="division-int-step"),
+    pytest.param("", "begin = 4 / 2\n", "begin", "1", "int",
                  id="named-division-int-step"),
-    pytest.param("startValue() => 4 / 2\n", "", "startValue()", "1", "double",
+    # Evaluate the expression-only helper before the loop. Requested helper
+    # loops cannot contain a user function call in their header or body.
+    pytest.param("startValue() => 4 / 2\n", "begin = startValue()\n", "begin", "1", "int",
                  id="helper-division-int-step"),
     pytest.param("n = input.int(5)\n", "", "n / 2", "1", "double",
                  id="input-division-int-step"),
     pytest.param("", "n = 5 + bar_index % 2\n", "n / 2", "1", "double",
                  id="series-division-int-step"),
-    # Step checking retains the operand join, even when the value query for
-    # a start would see the same division as positively float.
+    # Step checking retains the operand join independently of the constant
+    # proof used to choose storage for a division in the start.
     pytest.param("", "", "0", "4 / 2", "int", id="int-division-step"),
     pytest.param("", "", "first", "4 / 2", "int", id="unknown-start-int-division-step"),
     pytest.param("", "", "0", "4 / 2.0", "refused", id="float-division-step"),
