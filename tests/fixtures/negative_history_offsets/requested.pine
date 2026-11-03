@@ -1,0 +1,14 @@
+//@version=6
+strategy("requested history offsets")
+a = input.int(30, "a")
+b = input.int(31, "b")
+sample = request.security(syminfo.tickerid, "60", close[a - b])
+present = request.security(syminfo.tickerid, "60", close)
+previous = request.security(syminfo.tickerid, "60", close[1])
+if bar_index == 10
+    strategy.entry("p", strategy.long, qty = na(sample) ? 7 : sample)
+if bar_index == 11
+    strategy.close_all()
+// @pf-trace sample=sample
+// @pf-trace present=present
+// @pf-trace previous=previous

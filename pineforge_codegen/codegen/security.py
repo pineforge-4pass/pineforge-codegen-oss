@@ -2736,19 +2736,22 @@ class SecurityEmitter:
             bound_idx = self._literal_int_for_security_index(bound.index)
             local_idx = self._literal_int_for_security_index(local_index)
             if bound_idx is not None and local_idx is not None:
-                combined_index = NumberLiteral(value=bound_idx + local_idx)
+                combined_index = NumberLiteral(
+                    value=bound_idx + local_idx, loc=local_index.loc)
             else:
                 combined_index = BinOp(
                     left=bound.index,
                     op="+",
                     right=local_index,
+                    loc=local_index.loc,
                 )
-            return Subscript(object=bound.object, index=combined_index)
+            return Subscript(
+                object=bound.object, index=combined_index, loc=source_node.loc)
         if (
             isinstance(bound, Identifier)
             and self._security_bar_history_field(bound) is not None
         ):
-            return Subscript(object=bound, index=local_index)
+            return Subscript(object=bound, index=local_index, loc=source_node.loc)
         sampled = self._security_derived_argument_history(
             bound, source_node, helper_binding_stack)
         if sampled is not None:
@@ -8530,6 +8533,7 @@ class SecurityEmitter:
                 sec_id, expr_node.index, ta_range, ta_results, resolving,
                 security_mutable_names, helper_binding_stack, emitted_lines,
             )
+            offset = self._history_offset_cpp(offset, expr_node.index)
             return (f"([&]() -> double {{ auto _pf_bar_back = ({offset}); "
                     f"if (is_na(_pf_bar_back) || {member} - _pf_bar_back < 0) "
                     f"return na<double>(); return (double)({member} - _pf_bar_back); }}())")
@@ -8560,19 +8564,21 @@ class SecurityEmitter:
                     bound, bound_stack = binding
                     if isinstance(bound, str):
                         series_name = self._security_series_binding_target(bound)
+                        index_cpp = self._build_security_expr(
+                            sec_id,
+                            expr_node.index,
+                            ta_range,
+                            ta_results,
+                            resolving,
+                            security_mutable_names,
+                            helper_binding_stack,
+                            emitted_lines,
+                        )
+                        index_cpp = self._history_offset_cpp(index_cpp, expr_node.index)
                         if series_name is not None:
-                            index_cpp = self._build_security_expr(
-                                sec_id,
-                                expr_node.index,
-                                ta_range,
-                                ta_results,
-                                resolving,
-                                security_mutable_names,
-                                helper_binding_stack,
-                                emitted_lines,
-                            )
                             return self._security_helper_series_value(series_name, index_cpp)
-                        return bound
+                        return (f"([&]() -> decltype(auto) {{ (void)({index_cpp}); "
+                                f"return ({bound}); }}())")
                     # Function parameters retain Pine's series identity. Apply
                     # history to the supported bound bar series and compose
                     # nested offsets before lowering. Unsupported scalar/
@@ -8582,7 +8588,8 @@ class SecurityEmitter:
                         expr_node.index, helper_binding_stack
                     )
                     if resolved_local_index is not None:
-                        local_index = NumberLiteral(value=resolved_local_index)
+                        local_index = NumberLiteral(
+                            value=resolved_local_index, loc=expr_node.index.loc)
                     else:
                         # ``src[k]`` with ``k`` a helper local (``src[mHiAgo]``):
                         # the index belongs to this helper's scope, not to the
@@ -8600,7 +8607,7 @@ class SecurityEmitter:
                             helper_binding_stack,
                             emitted_lines,
                         )
-                        local_index = Identifier(name=index_name)
+                        local_index = Identifier(name=index_name, loc=expr_node.index.loc)
                     composed = self._compose_security_helper_history_subscript(
                         bound,
                         local_index,
@@ -8609,6 +8616,42 @@ class SecurityEmitter:
                     )
                     if isinstance(composed, _SecurityArgumentHistoryRead):
                         return f"{composed.member}[{composed.offset}]"
+                    if isinstance(bound, Subscript):
+                        bound_offset = self._resolve_security_index_literal(
+                            bound.index, bound_stack)
+                        if not (bound_offset is not None and bound_offset >= 0
+                                and resolved_local_index is not None
+                                and resolved_local_index >= 0):
+                            # The argument's history and the helper's history
+                            # are separate evaluated reads. Validate each before
+                            # adding: a negative one cannot be cancelled by the
+                            # other, nor may an integer na become an ordinary
+                            # sum. Each offset keeps its own scope and location.
+                            bound_cpp = self._build_security_expr(
+                                sec_id, bound.index, ta_range, ta_results,
+                                resolving, security_mutable_names, bound_stack,
+                                emitted_lines,
+                            )
+                            bound_cpp = self._history_offset_cpp(bound_cpp, bound.index)
+                            local_cpp = (
+                                str(resolved_local_index)
+                                if resolved_local_index is not None
+                                else self._security_raw_cpp[index_name]
+                            )
+                            local_cpp = self._history_offset_cpp(
+                                local_cpp, expr_node.index)
+                            combined_name = f"__pf_security_combined_index_{id(expr_node)}"
+                            self._security_raw_cpp[combined_name] = (
+                                f"([&]() -> int64_t {{ "
+                                f"int _pf_history_bound = {bound_cpp}; "
+                                f"int _pf_history_local = {local_cpp}; "
+                                f"if (is_na(_pf_history_bound) || is_na(_pf_history_local)) "
+                                f"return na<int64_t>(); "
+                                f"return static_cast<int64_t>(_pf_history_bound) "
+                                f"+ _pf_history_local; }}())"
+                            )
+                            composed.index = Identifier(
+                                name=combined_name, loc=expr_node.index.loc)
                     return self._build_security_expr(
                         sec_id,
                         composed,
@@ -8654,9 +8697,7 @@ class SecurityEmitter:
                         helper_binding_stack,
                         emitted_lines,
                     )
-                    index_cpp = self._coerce_int_slot_with_cast(
-                        index_cpp, expr_node.index, "int"
-                    )
+                    index_cpp = self._history_offset_cpp(index_cpp, expr_node.index)
                     return (
                         f"([&]() -> {cpp_t} {{ "
                         f"int _hidx = {index_cpp}; "
@@ -8741,9 +8782,7 @@ class SecurityEmitter:
                     helper_binding_stack,
                     emitted_lines,
                 )
-                index_cpp = self._coerce_int_slot_with_cast(
-                    index_cpp, expr_node.index, "int"
-                )
+                index_cpp = self._history_offset_cpp(index_cpp, expr_node.index)
                 if self._security_reads_global_history(sec_id, expr_node):
                     # Read with history on the requested clock (a read under a
                     # builtin keeps the chart's series and never gets here):
@@ -8867,9 +8906,7 @@ class SecurityEmitter:
                         )
                     finally:
                         self._security_index_inputs = saved_index_inputs
-                    index_cpp = self._coerce_int_slot_with_cast(
-                        index_cpp, expr_node.index, "int"
-                    )
+                    index_cpp = self._history_offset_cpp(index_cpp, expr_node.index)
                     result_key = (idx, sig)
                     self._security_note_ta_read(result_key)
                     if result_key not in ta_results:
@@ -8896,7 +8933,7 @@ class SecurityEmitter:
                     return (
                         "([&]() -> double { "
                         f"int _hidx = {index_cpp}; "
-                        "if (is_na(_hidx) || _hidx < 0) return na<double>(); "
+                        "if (is_na(_hidx)) return na<double>(); "
                         f"return (_hidx == 0) ? {current} : {hist}[_hidx - 1]; "
                         "}())"
                     )

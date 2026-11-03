@@ -2042,13 +2042,60 @@ class ExprVisitor:
     def _history_offset_cpp(self, idx: str, index_node) -> str:
         """The ``int`` offset of a history read, safe right after a ``[``.
 
-        A double index narrows through the na-preserving lambda
-        ``[&](){ ... }()`` (``_coerce_int_slot``); spelled straight after a
-        subscript's ``[`` it reads ``[[``, which C++ parses as an attribute,
-        so a lambda offset is parenthesized. TradingView truncates a
-        fractional index toward zero (``x[5.5]`` reads ``x[5]``), as the
-        cast does.
+        Check an evaluated offset in its original numeric type: narrowing
+        first can turn a negative value into zero or the missing sentinel.
+        Missing offsets still read na, and finite nonnegative fractions
+        truncate toward zero. Keep the check inside the read so a lazy edge
+        neither evaluates the offset nor stops until it reaches that read.
         """
+        if not (isinstance(index_node, NumberLiteral) and index_node.value >= 0):
+            loc = getattr(index_node, "loc", None)
+            # Calls and postfix nodes locate an internal token. Follow their
+            # leading expressions, keeping any earlier enclosing span start
+            # (for example, a unary sign) without changing the authored AST.
+            start_node = index_node
+            while start_node is not None:
+                if isinstance(start_node, FuncCall):
+                    start_node = start_node.callee
+                elif isinstance(start_node, (MemberAccess, Subscript)):
+                    start_node = start_node.object
+                elif isinstance(start_node, BinOp):
+                    start_node = start_node.left
+                elif isinstance(start_node, Ternary):
+                    start_node = start_node.condition
+                elif isinstance(start_node, UnaryOp):
+                    start_node = start_node.operand
+                else:
+                    break
+                start_loc = getattr(start_node, "loc", None)
+                if start_loc is not None and (
+                    loc is None or (
+                        start_loc.file == loc.file
+                        and (start_loc.line, start_loc.col) < (loc.line, loc.col)
+                    )
+                ):
+                    loc = start_loc
+            where = (f"line {loc.line}, column {loc.col}" if loc is not None
+                     else "unknown source location")
+            if loc is not None and loc.file:
+                where += f" in {loc.file}"
+            message = self._cpp_string_escape(
+                f"History offset must be non-negative at {where}"
+            )
+            narrowed = pine_index_int_cast("_pf_history_offset")
+            return (
+                f"([&]() -> int {{ auto _pf_history_offset = ({idx}); "
+                f"using _pf_history_offset_type = "
+                f"std::decay_t<decltype(_pf_history_offset)>; "
+                f"if constexpr (!std::is_same_v<_pf_history_offset_type, bool>) {{ "
+                f"if (is_na(_pf_history_offset)) return na<int>(); }} "
+                f'if (_pf_history_offset < 0) pine_runtime_error("{message}"); '
+                f"if (static_cast<long double>(_pf_history_offset) >= 2147483648.0L) "
+                f"return na<int>(); "
+                f"return {narrowed}; }}())"
+            )
+        # Preserve the established spelling for nonnegative literal offsets.
+        # A lambda immediately after '[' would be parsed as a C++ attribute.
         idx_int = self._coerce_int_slot(idx, index_node, "int")
         if (idx_int == idx
                 and not self._emitted_value_is_double(index_node)):
@@ -2171,14 +2218,12 @@ class ExprVisitor:
         self._refuse_mutable_chart_point_history(node)
         self._refuse_field_value_history(node)
         idx = self._visit_expr(node.index)
-        # Series::operator[] accepts C++ int. A Pine int can be backed by an
-        # int64_t timestamp slot; implicitly narrowing its na sentinel to int
-        # turns it into zero on arm64 and reads the current bar. Preserve the
-        # original value type before narrowing every dynamic series offset.
+        # Every evaluated history offset shares the located check, before
+        # narrowing to the runtime Series' int index.
         series_idx = (
             idx if (isinstance(node.index, NumberLiteral)
                     and isinstance(node.index.value, int))
-            else pine_index_int_cast(idx)
+            else self._history_offset_cpp(idx, node.index)
         )
         if isinstance(node.object, Identifier):
             name = node.object.name
@@ -2194,6 +2239,9 @@ class ExprVisitor:
             # Function parameters are scalars — src[0] → src, src[N>0] → src
             if name in self._current_func_param_types:
                 self._warn_untracked_reference_history(node)
+                if not isinstance(node.index, NumberLiteral):
+                    return (f"([&]() -> decltype(auto) {{ (void)({series_idx}); "
+                            f"return ({self._safe_name(name)}); }}())")
                 return self._safe_name(name)
             if name in BAR_FIELDS or name in BAR_SERIES_PUSH:
                 # Index matches Pine: [0] current bar, [k] k bars ago (runtime Series deque).
@@ -2219,7 +2267,7 @@ class ExprVisitor:
                 receiver = self._collection_receiver_expr(name)
                 if spec.kind == "array":
                     return self._legacy_array_history_element(
-                        receiver, spec, series_idx,
+                        receiver, spec, pine_index_int_cast(idx),
                         mutable=getattr(self, "_udt_assignment_target", None) is node,
                     )
                 return f"{receiver}[{idx}]"
@@ -2294,16 +2342,12 @@ class ExprVisitor:
                 return (
                     f"([&]() -> {cpp_t} {{ "
                     f"if (_use_precalc) {{ "
-                    f"auto _pf_hist_offset_raw = ({idx}); "
-                    f"if (is_na(_pf_hist_offset_raw)) return na<{cpp_t}>(); "
-                    f"long double _pf_hist_offset_numeric = "
-                    f"static_cast<long double>(_pf_hist_offset_raw); "
-                    f"if (bar_index_ < 0 || _pf_hist_offset_numeric < 0.0L || "
-                    f"_pf_hist_offset_numeric > "
-                    f"static_cast<long double>(bar_index_)) "
+                    f"int _pf_hist_offset_int = {idx_int}; "
+                    f"if (is_na(_pf_hist_offset_int) || bar_index_ < 0 || "
+                    f"_pf_hist_offset_int > bar_index_) "
                     f"return na<{cpp_t}>(); "
                     f"std::size_t _pf_hist_offset = "
-                    f"static_cast<std::size_t>(_pf_hist_offset_numeric); "
+                    f"static_cast<std::size_t>(_pf_hist_offset_int); "
                     f"std::size_t _pf_hist_bar = "
                     f"static_cast<std::size_t>(bar_index_) - _pf_hist_offset; "
                     f"if (_pf_hist_bar >= {precalc}.size()) "
@@ -2360,12 +2404,15 @@ class ExprVisitor:
                     and name not in self.ctx.series_vars
                     and name not in self._var_names):
                 self._warn_untracked_reference_history(node)
+                if not isinstance(node.index, NumberLiteral):
+                    return (f"([&]() -> decltype(auto) {{ (void)({series_idx}); "
+                            f"return ({obj}); }}())")
                 return obj
-        idx_int = self._history_offset_cpp(idx, node.index)
         object_spec = self._type_spec_from_expr(node.object)
         if object_spec is not None and object_spec.kind == "array":
             return self._legacy_array_history_element(
-                obj, object_spec, idx_int,
+                obj, object_spec, pine_index_int_cast(idx),
                 mutable=getattr(self, "_udt_assignment_target", None) is node,
             )
+        idx_int = self._history_offset_cpp(idx, node.index)
         return f"{obj}[{idx_int}]"

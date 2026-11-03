@@ -1,0 +1,9 @@
+//@version=6
+strategy("repro", overlay = true, pyramiding = 10)
+a = input.int(30, "a")
+b = input.int(31, "b")
+float v = close[a - b]
+if bar_index == 10
+    strategy.entry("p", strategy.long, qty = na(v) ? 7 : v == close ? 1 : v == close[1] ? 2 : 3)
+if bar_index == 11
+    strategy.close_all()

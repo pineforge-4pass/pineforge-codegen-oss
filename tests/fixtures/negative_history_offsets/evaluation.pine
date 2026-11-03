@@ -1,0 +1,16 @@
+//@version=6
+strategy("history offset evaluation")
+units = input.int(0, "Units")
+enabled = input.bool(true, "Enabled")
+var hits = array.new_int(1, 0)
+next_offset(int k) =>
+    array.set(hits, 0, array.get(hits, 0) + 1)
+    k
+sample = enabled ? close[next_offset(units)] : close
+calls = array.get(hits, 0)
+if bar_index == 10
+    strategy.entry("p", strategy.long, qty = na(sample) ? 7 : sample)
+if bar_index == 11
+    strategy.close_all()
+// @pf-trace sample=sample
+// @pf-trace calls=calls

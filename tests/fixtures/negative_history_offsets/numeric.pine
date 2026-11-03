@@ -1,0 +1,14 @@
+//@version=6
+strategy("numeric history offsets")
+units = input.int(0, "Units")
+denominator = input.int(1, "Denominator")
+missing = input.bool(false, "Missing")
+integer_mode = input.bool(false, "Integer mode")
+int whole = missing ? na : units
+fractional = missing ? na : units / denominator
+sample = integer_mode ? close[whole] : close[fractional]
+if bar_index == 10
+    strategy.entry("p", strategy.long, qty = na(sample) ? 7 : sample)
+if bar_index == 11
+    strategy.close_all()
+// @pf-trace sample=sample

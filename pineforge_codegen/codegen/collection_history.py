@@ -383,7 +383,13 @@ class CollectionHistoryEmitter:
         if use == "reference" and offset == 0:
             cpp_type = self._type_spec_to_cpp(annotation["spec"])
             return f"_PFArrayHistoryValue<{cpp_type}>({current})"
-        if use == "loop" or offset == 0:
+        if offset == 0:
+            return current
+        if use == "loop":
+            if offset is None:
+                index = self._collection_history_offset_cpp(node)
+                return (f"([&]() -> decltype(auto) {{ (void)({index}); "
+                        f"return ({current}); }}())")
             return current
         member = self._collection_history_member(self._collection_history_of(annotation))
         index = self._collection_history_offset_cpp(node)
