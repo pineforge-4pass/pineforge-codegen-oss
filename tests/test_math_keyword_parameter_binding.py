@@ -473,3 +473,159 @@ def test_native_variadic_positional_values_follow_independent_bar_oracles(path):
             for count, oracle in expectations
         ]
         _assert_values(row, expected)
+
+
+# Constant-foldable unary calls use independent, nonzero header values.
+# round_to_mintick depends on symbol data and keeps its existing body controls.
+_HEADER_UNARY_CONSTANTS = (
+    ("abs", "number", "-2.5", 2.5),
+    ("ceil", "number", "2.25", 3),
+    ("floor", "number", "3.75", 3),
+    ("round", "number", "2.5", 3),
+    ("sign", "number", "2.5", 1),
+    ("sqrt", "number", "6.25", 2.5),
+    ("exp", "number", "1.0", math.e),
+    ("log", "number", "math.e", 1.0),
+    ("log10", "number", "100.0", 2.0),
+    ("sin", "angle", "math.pi / 2", 1.0),
+    ("cos", "angle", "math.pi / 3", 0.5),
+    ("tan", "angle", "math.pi / 4", 1.0),
+    ("asin", "angle", "1.0", math.pi / 2),
+    ("acos", "angle", "-1.0", math.pi),
+    ("atan", "angle", "1.0", math.pi / 4),
+    ("todegrees", "radians", "math.pi / 2", 90.0),
+    ("toradians", "degrees", "90.0", math.pi / 2),
+)
+_HEADER_UNARY_IDS = [row[0] for row in _HEADER_UNARY_CONSTANTS]
+
+
+def _header_source(expression: str) -> str:
+    return ('//@version=6\nstrategy("Math header constants",\n'
+            f'    default_qty_value={expression})\n')
+
+
+def _analyze_header(source: str):
+    # Deliberately bypass normalization, support checking and CodeGen.
+    return Analyzer(_parse(source), filename="math_keywords.pine").analyze()
+
+
+def _assert_direct_header_refusal(source, keyword, code, arguments):
+    with pytest.raises(CompileError) as caught:
+        _analyze_header(source)
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.code == code
+    assert diagnostic.args == arguments
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert (diagnostic.message, diagnostic.hint) == render_diagnostic(code, arguments)
+    start = source.index(f"{keyword} =")
+    line = source.count("\n", 0, start) + 1
+    col = start - source.rfind("\n", 0, start)
+    assert diagnostic.location.file == "math_keywords.pine"
+    assert (diagnostic.location.line, diagnostic.location.col,
+            diagnostic.location.end_col) == (line, col, col + len(keyword))
+
+
+@pytest.mark.parametrize("short_name,keyword,value,expected",
+                         _HEADER_UNARY_CONSTANTS, ids=_HEADER_UNARY_IDS)
+def test_direct_analyzer_header_canonical_names_keep_constant_values(
+    short_name, keyword, value, expected,
+):
+    for arguments in (value, f"{keyword} = {value}"):
+        source = _header_source(f"math.{short_name}({arguments})")
+        actual = _analyze_header(source).strategy_params["default_qty_value"]
+        assert actual == pytest.approx(expected)
+        assert type(actual) is type(expected)
+
+
+@pytest.mark.parametrize("short_name,keyword,value,expected",
+                         _HEADER_UNARY_CONSTANTS, ids=_HEADER_UNARY_IDS)
+@pytest.mark.parametrize("wrong_name", ("x", "pf_unknown"))
+def test_direct_analyzer_header_wrong_names_are_located_refusals(
+    short_name, keyword, value, expected, wrong_name,
+):
+    source = _header_source(f"math.{short_name}(\n        {wrong_name} = {value})")
+    _assert_direct_header_refusal(source, wrong_name, "PF-E5090", {
+        "function": f"math.{short_name}", "name": wrong_name,
+        "accepted": "number, precision" if short_name == "round" else keyword,
+    })
+
+
+@pytest.mark.parametrize("arguments", (
+    "2.675, 2",
+    "number = 2.675, precision = 2",
+    "precision = 2, number = 2.675",
+    "2.675, precision = 2",
+))
+def test_direct_analyzer_header_round_precision_keeps_its_value(arguments):
+    source = _header_source(f"math.round({arguments})")
+    actual = _analyze_header(source).strategy_params["default_qty_value"]
+    assert actual == pytest.approx(2.68)
+    assert type(actual) is float
+
+
+@pytest.mark.parametrize("arguments", (
+    "2.0, 3.0",
+    "base = 2.0, exponent = 3.0",
+    "exponent = 3.0, base = 2.0",
+    "2.0, exponent = 3.0",
+))
+def test_direct_analyzer_header_pow_keeps_its_value(arguments):
+    source = _header_source(f"math.pow({arguments})")
+    actual = _analyze_header(source).strategy_params["default_qty_value"]
+    assert actual == 8.0
+    assert type(actual) is float
+
+
+@pytest.mark.parametrize("short_name,arguments,wrong_name,accepted", (
+    ("round", "number = 2.675, digits = 2", "digits", "number, precision"),
+    ("round", "precision = 2, number0 = 2.675", "number0", "number, precision"),
+    ("pow", "base = 2.0, power = 3.0", "power", "base, exponent"),
+    ("pow", "x = 2.0, exponent = 3.0", "x", "base, exponent"),
+))
+def test_direct_analyzer_header_later_keywords_are_located_refusals(
+    short_name, arguments, wrong_name, accepted,
+):
+    source = _header_source(f"math.{short_name}({arguments})")
+    _assert_direct_header_refusal(source, wrong_name, "PF-E5090", {
+        "function": f"math.{short_name}", "name": wrong_name, "accepted": accepted,
+    })
+
+
+@pytest.mark.parametrize("short_name", ("max", "min", "avg"))
+@pytest.mark.parametrize("arguments,keyword", _VARIADIC_KEYWORDS)
+def test_direct_analyzer_header_variadic_calls_refuse_every_keyword(
+    short_name, arguments, keyword,
+):
+    arguments = (arguments.replace("close", "5.0").replace("open", "2.0")
+                 .replace("bar_index", "7"))
+    source = _header_source(f"math.{short_name}(\n        {arguments})")
+    _assert_direct_header_refusal(source, keyword, "PF-E5089", {
+        "function": f"math.{short_name}",
+    })
+
+
+@pytest.mark.parametrize("short_name,oracle", (
+    ("max", max), ("min", min), ("avg", lambda values: sum(values) / len(values)),
+))
+@pytest.mark.parametrize("count", _VARIADIC_COUNTS)
+def test_direct_analyzer_header_variadic_positionals_keep_all_values(short_name, oracle, count):
+    values = (5.0, 2.0, 7.0, 3.0, 9.0, 1.0, 8.0, 4.0, 6.0)[:count]
+    source = _header_source(f"math.{short_name}({', '.join(map(str, values))})")
+    actual = _analyze_header(source).strategy_params["default_qty_value"]
+    assert actual == pytest.approx(oracle(values))
+    assert type(actual) is float
+
+
+def test_direct_analyzer_header_keyword_policy_follows_the_record(monkeypatch):
+    from dataclasses import replace
+
+    record = replace(signatures.MATH_FUNCTIONS["atan2"], variadic=True)
+    monkeypatch.setitem(signatures.MATH_FUNCTIONS, "atan2", record)
+    source = _header_source("math.atan2(y = 1.0, x = 1.0)")
+    _assert_direct_header_refusal(source, "y", "PF-E5089", {
+        "function": "math.atan2",
+    })
+    positional = _header_source("math.atan2(1.0, 1.0)")
+    actual = _analyze_header(positional).strategy_params["default_qty_value"]
+    assert actual == pytest.approx(math.pi / 4)

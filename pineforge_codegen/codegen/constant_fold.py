@@ -17,8 +17,9 @@ from ..ast_nodes import (
     BinOp, BoolLiteral, FuncCall, Identifier, MemberAccess, NaLiteral,
     NumberLiteral, StringLiteral, Ternary, UnaryOp,
 )
+from ..intrinsic_binding import validate_intrinsic_keywords
 from ..limits import MAX_NESTING_DEPTH, MAX_SOURCE_CHARS
-from ..signatures import get_param_names
+from ..signatures import get_intrinsic, get_param_names
 
 
 def _pine_remainder(left: int | float | bool, right: int | float | bool):
@@ -189,6 +190,8 @@ def _constant_arguments(call):
         return call.args
     spelling = _pine_spelling(call.callee)
     namespace, _, name = spelling.rpartition(".")
+    if namespace == "math":
+        validate_intrinsic_keywords(get_intrinsic(namespace, name), call.kwargs)
     names = get_param_names(namespace or None, name)
     if names is None or len(call.args) > len(names):
         raise ValueError("not a constant call signature")

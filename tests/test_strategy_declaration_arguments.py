@@ -9,8 +9,11 @@ from pathlib import Path
 import pytest
 
 from pineforge_codegen import transpile, transpile_full
+from pineforge_codegen.analyzer import Analyzer
 from pineforge_codegen.diagnostic_codes import render_diagnostic
 from pineforge_codegen.errors import CompileError, Level, Phase
+from pineforge_codegen.lexer import Lexer
+from pineforge_codegen.parser import Parser
 from tests._compile import run_emitted_tu
 from tests.test_order_shapes import receipt
 from tests.test_source_host_config_codegen import _constructor
@@ -86,6 +89,12 @@ int main() {
 
 def _source(declaration: str, body: str = _ONE_ENTRY, prefix: str = "") -> str:
     return f"//@version=6\n{prefix}{declaration}\n{body}"
+
+
+def _analyze(source: str):
+    program = Parser(Lexer(source, filename="settings.pine").tokenize(),
+                     source=source).parse()
+    return Analyzer(program, filename="settings.pine").analyze()
 
 
 def _run(cpp: str, *, distinct_prices: bool = False):
@@ -373,6 +382,7 @@ def test_constant_selection_never_hides_a_series_dependency(expression):
         transpile(_source(f'strategy("Dependencies", pyramiding={expression})', body=""))
 
 
+@pytest.mark.parametrize("path", ("public", "unchecked", "direct"))
 @pytest.mark.parametrize("name,value,expected", [
     ("default_qty_value", "8 / 2", 4.0),  # Pine v6 divides constant integers as floating point.
     ("precision", "int(8 / 2)", 4),  # The explicit integer cast restores an integer constant.
@@ -384,13 +394,18 @@ def test_constant_selection_never_hides_a_series_dependency(expression):
     ("overlay", "not (1 < 2)", False),  # One is less than two, so its negation is false.
     ("precision", "false ? int(1 / 0) : 4", 4),  # The constant condition leaves the invalid arm unevaluated.
 ])
-def test_constant_operators_use_pine_values(name, value, expected):
-    result = transpile_full(_source(f'strategy("Constant operators", {name}={value})', body=""))
-    assert result["strategyParams"][name] == expected
-    assert type(result["strategyParams"][name]) is type(expected)
+def test_constant_operators_use_pine_values(name, value, expected, path):
+    source = _source(f'strategy("Constant operators", {name}={value})', body="")
+    if path == "direct":
+        parameters = _analyze(source).strategy_params
+    else:
+        parameters = transpile_full(source, check_support=path == "public")["strategyParams"]
+    assert parameters[name] == expected
+    assert type(parameters[name]) is type(expected)
 
 
-@pytest.mark.parametrize("check_support", (True, False))
+@pytest.mark.parametrize("path", ("public", "unchecked", "direct"))
+@pytest.mark.parametrize("placement", ("header", "alias", "unselected"))
 @pytest.mark.parametrize("setting,expression,keyword,code,arguments", [
     pytest.param(
         "pyramiding", "math.max(y=5, x=2)", "y", "PF-E5089",
@@ -403,12 +418,21 @@ def test_constant_operators_use_pine_values(name, value, expected):
     ),
 ])
 def test_math_keywords_in_declaration_constants_are_located_refusals(
-    setting, expression, keyword, code, arguments, check_support,
+    setting, expression, keyword, code, arguments, path, placement,
 ):
     # Preserve the exact TV-invalid expressions that used to be positive rows.
-    source = _source(f'strategy("Constant operators", {setting}={expression})', body="")
+    prefix, value = "", expression
+    if placement == "alias":
+        prefix, value = f"pf_header_value = {expression}\n", "pf_header_value"
+    elif placement == "unselected":
+        value = f"true ? 7 : {expression}"
+    source = _source(f'strategy("Constant operators", {setting}={value})',
+                     body="", prefix=prefix)
     with pytest.raises(CompileError) as caught:
-        transpile(source, filename="settings.pine", check_support=check_support)
+        if path == "direct":
+            _analyze(source)
+        else:
+            transpile(source, filename="settings.pine", check_support=path == "public")
     diagnostic, = caught.value.diagnostics
     assert diagnostic.code == code
     assert diagnostic.args == arguments
