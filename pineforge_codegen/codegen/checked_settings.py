@@ -205,6 +205,8 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
         elif namespace == "input" and func_name == "enum":
             value_type = "enum"
             declared = getattr(arguments.get("options"), "elements", None)
+            if declared is not None:
+                declared = [emitter._fold_enum_input_member(node, member) for member in declared]
             enum_members = ([default] if isinstance(default, MemberAccess) else []) + list(declared or [])
             enum_names = {member.object.name for member in enum_members
                           if isinstance(member, MemberAccess) and isinstance(member.object, Identifier)}

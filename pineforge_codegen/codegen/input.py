@@ -102,6 +102,12 @@ class InputHelper:
         func_name, namespace = self._resolve_callee(node.callee)
         if namespace != "input" or func_name != "enum" or not isinstance(default, Identifier):
             return default
+        return self._fold_enum_input_member(node, default)
+
+    def _fold_enum_input_member(self, node: FuncCall, member):
+        """Resolve a default or option through immutable declarations before the call."""
+        if not isinstance(member, Identifier):
+            return member
         declarations = {}
         reassigned = self._find_reassigned_vars()
         for statement in self.ctx.ast.body:
@@ -109,22 +115,22 @@ class InputHelper:
                 break
             if isinstance(statement, VarDecl):
                 declarations.setdefault(statement.name, []).append(statement)
-        candidate = default
+        candidate = member
         visited = set()
         while isinstance(candidate, Identifier) and candidate.name not in visited:
             visited.add(candidate.name)
             bindings = declarations.get(candidate.name, [])
             if len(bindings) != 1 or candidate.name in reassigned:
-                return default
+                return member
             declaration = bindings[0]
             if declaration.is_var or declaration.is_varip:
-                return default
+                return member
             candidate = declaration.value
         if isinstance(candidate, MemberAccess) and isinstance(candidate.object, Identifier):
             members = self._enum_defs.get(candidate.object.name, [])
             if candidate.member in members:
                 return candidate
-        return default
+        return member
 
     def _input_default_value(self, node: FuncCall) -> tuple[bool, object]:
         """``(True, value)`` when the defval is the constant a ``v = input...``
@@ -619,6 +625,8 @@ class InputHelper:
                 opts_node = merged[oi]
                 elems = getattr(opts_node, "elements", None)
                 if elems is not None:
+                    if namespace == "input" and func_name == "enum":
+                        elems = [self._fold_enum_input_member(node, e) for e in elems]
                     vals = [self._literal_or_none(e) for e in elems]
                     # any non-const element -> omit the whole options list
                     if vals and all(isinstance(v, str) for v in vals):
