@@ -134,6 +134,7 @@ type Count
 method store(Stamp self, int value) =>
     self.t := value
 method store(Count self, int value) =>
+    int base = self.n
     value
 var s = Stamp.new()
 var c = Count.new()
@@ -148,8 +149,8 @@ ok = got == time and total == 6 ? 1 : 0
 
 
 @pytest.mark.parametrize("tail", [
-    "    int copied = value",
-    "    int copied = 0\n    copied := value",
+    "    int base = self.t\n    int copied = value",
+    "    int base = self.t\n    int copied = 0\n    copied := value",
     "    if bar_index == 0\n        self.t := value\n    else\n        self.t := value",
     "    switch\n        bar_index == 0 => self.t := value\n        => self.t := value",
 ])
