@@ -714,8 +714,9 @@ class CallVisitor:
         )
         if (elem_spec is not None and elem_spec.kind == "primitive"
                 and elem_spec.name == "float"
-                and isinstance(value_node, Ternary)
-                and self._selection_contains_na(value_node)):
+                and ((isinstance(value_node, Ternary)
+                      and self._selection_contains_na(value_node))
+                     or self._infer_type(value_node) == "int64_t")):
             rendered = self._coerce_double_slot(rendered, value_node)
         if (elem_spec is not None and elem_spec.kind == "primitive"
                 and elem_spec.name == "bool"):
@@ -730,13 +731,10 @@ class CallVisitor:
             # narrow implicitly.
             return na_preserving_int_cast(rendered, "int")
         if (store and elem_spec is not None and elem_spec.kind == "primitive"
-                and elem_spec.name == "int64"
-                and self._holds_na_aware_wide_double(value_node)
-                and self._emitted_value_is_double(value_node)):
-            # A 64-bit product over an operand that can be na is a double
-            # (``_wide_int_arith_cpp``): an epoch array's element narrows it
-            # na-preserving too.
-            return na_preserving_int_cast(rendered, "int64_t")
+                and elem_spec.name == "int64"):
+            # int(na) carries the narrow integer sentinel; a timestamp array
+            # must translate it, as well as double NaN, at the element store.
+            return self._coerce_int_slot(rendered, value_node, "int64_t")
         return rendered
 
     def _array_method_args(
@@ -796,8 +794,10 @@ class CallVisitor:
             optional = MATRIX_OPTIONAL_PARAMS.get(method, {})
             aliases = MATRIX_METHOD_KWARG_ALIASES.get(method, {})
             receiver = MATRIX_RECEIVER_KEYWORD.get(method, "id")
-        elif method in CHECKED_ARRAY_METHOD_KWARGS:
-            slots = list(CHECKED_ARRAY_METHOD_KWARGS[method])
+        elif (method in CHECKED_ARRAY_METHOD_KWARGS
+              or (functional and method == "push")):
+            slots = (["value"] if method == "push"
+                     else list(CHECKED_ARRAY_METHOD_KWARGS[method]))
             optional = ARRAY_OPTIONAL_PARAMS.get(method, {})
             aliases = {}
             receiver = "id"
@@ -1582,6 +1582,7 @@ class CallVisitor:
             if param_index < len(param_specs)
             else None
         )
+        param_spec = self._array_param_spec(func_info, param_index, param_spec)
         method_series = self.ctx.func_series_vars.get(func_info.name, set())
         if (param_spec is not None
                 and (param_spec.kind in {"map", "matrix"}
@@ -1591,26 +1592,31 @@ class CallVisitor:
             # positional/keyword/default merging. Lower a bare ``na`` (and
             # nullable selections containing it) against the declared exact
             # parameter type instead of the legacy numeric ``na<double>()``.
-            return self._visit_rhs_value(
-                arg_node,
-                target_cpp_type=(
-                    self._func_param_int_cpp_type(
-                        func_info, param_index,
-                        self._callable_target_callsite_idx(func_info, call_node),
-                    )
-                    or self._type_spec_to_cpp(param_spec)
-                ),
+            target_cpp_type = (
+                self._func_param_int_cpp_type(
+                    func_info, param_index,
+                    self._callable_target_callsite_idx(func_info, call_node),
+                )
+                or self._type_spec_to_cpp(param_spec)
             )
+            cpp = self._visit_rhs_value(arg_node, target_cpp_type=target_cpp_type)
+            return (self._coerce_int_slot(cpp, arg_node, target_cpp_type)
+                    if target_cpp_type == "int64_t" else cpp)
         if param_name not in method_series:
             cpp = self._visit_expr(arg_node)
             int_cpp = self._func_param_int_cpp_type(
                 func_info, param_index,
                 self._callable_target_callsite_idx(func_info, call_node))
-            if (int_cpp is not None
-                    and self._holds_na_aware_wide_double(arg_node)
+            if int_cpp == "int64_t":
+                cpp = self._coerce_int_slot(cpp, arg_node, int_cpp)
+            elif (int_cpp is not None
+                    and (self._holds_na_aware_wide_double(arg_node)
+                         or isinstance(arg_node, (Identifier, Subscript)))
                     and self._emitted_value_is_double(arg_node)):
-                # A double-valued 64-bit product (``_wide_int_arith_cpp``)
-                # narrows na-preserving into an integer parameter (quirk 9).
+                # An integer stored as double (including a bare-na global)
+                # must translate NaN to the parameter's integer sentinel.
+                # Same-width integer reads and direct numeric selections
+                # retain their existing argument expression.
                 cpp = na_preserving_int_cast(cpp, int_cpp)
             return cpp
         expected_cpp_type = self._series_param_element_cpp_type(
@@ -2264,6 +2270,9 @@ class CallVisitor:
                 target = getattr(self, "_array_ctor_target_name", None)
                 if target is not None:
                     spec = self._widen_array_spec_for_name(target, spec)
+                expected = getattr(self, "_array_ctor_expected", None)
+                if expected is not None and expected[0] is node:
+                    spec = expected[1]
                 cpp_type = self._type_spec_to_cpp(spec)
                 elem_spec = spec.element if spec.element is not None else TypeSpec.primitive("float")
                 self._reject_unknown_element_type(node, elem_spec)
@@ -2314,6 +2323,9 @@ class CallVisitor:
                             and declared.element != spec.element):
                         spec = declared
                     spec = self._widen_array_spec_for_name(target, spec)
+                expected = getattr(self, "_array_ctor_expected", None)
+                if expected is not None and expected[0] is node:
+                    spec = expected[1]
                 elem_spec = spec.element
                 self._reject_unknown_element_type(node, elem_spec)
                 for a in node.args:
@@ -3026,20 +3038,38 @@ class CallVisitor:
                     # narrowing. Pine ``int`` UDT fields are emitted as
                     # ``int64_t`` (see base.py) but are initialised from
                     # ``na<double>()`` / doubles in places, so cast to the
-                    # field's type. ``na<double>()`` for an int field → 0.
-                    f_cpp_type = self._type_spec_to_cpp(field_specs.get(f.name) or self._type_spec_from_hint_name(f.type_name))
+                    # field's type while retaining the missing sentinel.
+                    field_spec = (field_specs.get(f.name)
+                                  or self._type_spec_from_hint_name(f.type_name))
+                    field_spec = self._array_widths.widen(
+                        field_spec, {("field", namespace, f.name)})
+                    f_cpp_type = self._type_spec_to_cpp(field_spec)
                     if f_cpp_type == "int":
                         f_cpp_type = "int64_t"
-                    val = self._visit_rhs_value(
-                        value_node,
-                        target_cpp_type=(
-                            f_cpp_type
-                            if (self._is_nullable_collection_cpp_type(f_cpp_type)
-                                or f_cpp_type in self._udt_defs
-                                or f_cpp_type in DRAWING_TYPE_TO_CPP.values())
-                            else None
-                        ),
-                    )
+                    previous_expected = getattr(self, "_array_ctor_expected", None)
+                    if (field_spec is not None and field_spec.kind == "array"
+                            and field_spec.element == TypeSpec.primitive("int64")):
+                        # Request lowering can copy the constructor AST. Its
+                        # resolved field target remains authoritative even
+                        # when the copied call has no entry in the width plan.
+                        # Only this actual constructor receives the context.
+                        self._array_ctor_expected = (value_node, field_spec)
+                    try:
+                        val = self._visit_rhs_value(
+                            value_node,
+                            target_cpp_type=(
+                                f_cpp_type
+                                if (self._is_nullable_collection_cpp_type(f_cpp_type)
+                                    or (f_cpp_type == "std::vector<int64_t>"
+                                        and ("field", namespace, f.name)
+                                            in self._array_widths.wide)
+                                    or f_cpp_type in self._udt_defs
+                                    or f_cpp_type in DRAWING_TYPE_TO_CPP.values())
+                                else None
+                            ),
+                        )
+                    finally:
+                        self._array_ctor_expected = previous_expected
                     if f_cpp_type == "int64_t":
                         val = self._coerce_int_slot(val, value_node, "int64_t")
                         if val == "na<double>()":
@@ -3052,9 +3082,7 @@ class CallVisitor:
                           and val == "na<double>()"):
                         val = f"{f_cpp_type}{{}}"
                     array_field = self._udt_array_field_cpp(
-                        field_specs.get(f.name)
-                        or self._type_spec_from_hint_name(f.type_name),
-                        namespace)
+                        field_spec, namespace)
                     if array_field is not None:
                         val = (f"{array_field}()" if val == "na<double>()"
                                else self._udt_array_field_value(
@@ -3218,7 +3246,8 @@ class CallVisitor:
             if fi_lookup is not None:
                 param_specs = getattr(fi_lookup, "param_type_specs", []) or []
                 if arg_idx < len(param_specs):
-                    param_spec = param_specs[arg_idx]
+                    param_spec = self._array_param_spec(
+                        fi_lookup, arg_idx, param_specs[arg_idx])
                     if (param_spec is not None
                             and (param_spec.kind in {"map", "matrix"}
                                  or self._selection_contains_na(arg_node))):

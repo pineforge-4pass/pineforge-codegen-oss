@@ -1277,6 +1277,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             })
         self._security_selection_local_members = self._security_selection_local_member_names()
         self._global_member_vars.difference_update(self._security_selection_local_members)
+        from .array_field_width import prepare_array_widths
+        prepare_array_widths(self)
         self._register_global_aggregate_member_types()
         self._uses_map = self._detect_map_usage()
         self._uses_matrix = self._detect_matrix_usage()
@@ -1317,6 +1319,24 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # flags share the class-member namespace with those fresh members, so
         # allocating the flags here would not yet have the complete collision
         # inventory.
+
+        self._discard_wide_int_constant_folds()
+
+    def _discard_wide_int_constant_folds(self) -> None:
+        """Read widened callable values from their emitted storage.
+
+        Stable UDF folding substitutes actuals before arithmetic, losing the
+        wide parameter's binary64 boundary: an exact integer difference can
+        disagree with the callable's result. Resolve those dependencies only
+        after the callable and collection inventories have been initialized.
+        Aliases follow their declaration bindings through the same query.
+        """
+        for stmt in self.ctx.ast.body:
+            if (isinstance(stmt, VarDecl)
+                    and stmt.name in self._known_vars
+                    and stmt.name not in self._input_backed_vars
+                    and self._crosses_wide_int_boundary(stmt.value, None, set())):
+                self._known_vars.pop(stmt.name)
 
     def _scalar_var_init_depends_on_runtime_input(self, init_ast) -> bool:
         """Whether a nominally constant initializer depends on input state.
@@ -5289,6 +5309,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # bar/TA expressions never leak into namespace-scope C++ initializers.
         if self._udt_has_array_fields():
             lines.append(UDT_ARRAY_FIELD_CPP)
+        from .array_field_width import timestamp_array_fields
+        timestamp_fields = timestamp_array_fields(self)
         for type_name, fields in self._udt_defs.items():
             record_type = self._udt_record_cpp_type(type_name)
             lines.append(f"struct {record_type} {{")
@@ -5298,6 +5320,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if f.name in omitted:
                     continue
                 spec = field_specs.get(f.name) or self._type_spec_from_hint_name(f.type_name)
+                if (type_name, f.name) in timestamp_fields:
+                    spec = TypeSpec.array(TypeSpec.primitive("int64"))
                 array_field = self._udt_array_field_cpp(spec, type_name)
                 if array_field is not None:
                     lines.append(f"    {array_field} {self._safe_name(f.name)} = {array_field}();")

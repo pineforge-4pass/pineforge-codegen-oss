@@ -289,10 +289,12 @@ class StmtVisitor:
         elif isinstance(node, TupleAssign):
             self._visit_tuple_assign(node, lines, pad)
             tuple_cpp_types = self._tuple_binding_cpp_types(node)
-            if getattr(self, "_active_func_name", None) is not None:
-                for name in node.names:
-                    if name and name != "_":
-                        self._activate_callable_collection_binding(name, None)
+            for name in node.names:
+                if name and name != "_":
+                    spec = self._array_widths.bindings.get((id(node), name))
+                    if (spec is not None
+                            or getattr(self, "_active_func_name", None) is not None):
+                        self._activate_callable_collection_binding(name, spec)
             scalar_names = [
                 name
                 for name in node.names
@@ -712,14 +714,25 @@ class StmtVisitor:
                     else self._type_spec_from_expr(node.value)
                         or self._array_spec_for_name(node.name),
                 )
+                storage = self._array_widths.nodes.get(id(node), ())
+                if not self._array_widths.wide.isdisjoint(storage):
+                    spec = self._array_widths.widen(
+                        self._array_widths.specs.get(id(node), spec), storage)
                 previous_target = getattr(self, "_array_ctor_target_name", None)
+                previous_expected = getattr(self, "_array_ctor_expected", None)
                 self._array_ctor_target_name = node.name
+                if not self._array_widths.wide.isdisjoint(storage):
+                    self._array_ctor_expected = (node.value, spec)
                 try:
                     init = self._visit_expr(node.value)
                 finally:
                     self._array_ctor_target_name = previous_target
+                    self._array_ctor_expected = previous_expected
                 self._array_vars.add(node.name)
-                self._collection_types.setdefault(node.name, spec)
+                if not self._array_widths.wide.isdisjoint(storage):
+                    self._collection_types[node.name] = spec
+                else:
+                    self._collection_types.setdefault(node.name, spec)
                 cpp_type = self._type_spec_to_cpp(spec)
                 if is_global_member:
                     lines.append(f"{pad}{safe} = {init};")
