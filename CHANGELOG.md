@@ -22,6 +22,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Consumed `if`/`switch` selections mixing value and void arms now report located `PF-E5088`; requested void selections keep `PF-E3102`.
 - An affine chart loop proved endless is stopped with the loop-time error when
   its result reaches an effect. Omission is limited to an unused loop statement
   with no calls, whose writes have no readers except self-updates, a break

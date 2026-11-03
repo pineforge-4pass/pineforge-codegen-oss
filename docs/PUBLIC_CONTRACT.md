@@ -7,6 +7,8 @@ Text marked **since 1.5.0** describes diagnostic additions that 1.4.0 and
 earlier releases do not have: the `note` severity, the `user_message` template
 and the eleven codes that became notes.
 
+Consumed `if`/`switch` selections with both a value arm and a void arm report `PF-E5088` at the selection; statement selections, implicit missing arms and uniformly value or void arms retain their policy, and requested void selections keep `PF-E3102`.
+
 ## Identifiers in generated C++
 
 Legal Pine identifiers that collide with C++ keywords, engine names or emitter

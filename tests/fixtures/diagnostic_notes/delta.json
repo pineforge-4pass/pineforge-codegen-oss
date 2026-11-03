@@ -3,6 +3,9 @@
   "allowed_added_fields": [
     "user_message"
   ],
+  "catalog_additions": [
+    "PF-E5088"
+  ],
   "severity_changes": {
     "PF-W1505": {
       "before": "warning",
