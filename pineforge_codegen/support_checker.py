@@ -2355,7 +2355,7 @@ class SupportChecker:
                 "request.security lookahead must be barmerge.lookahead_on or barmerge.lookahead_off.",
                 hint="Use barmerge.lookahead_* constants selected by values fixed before the first bar.",
             )
-        if self._is_barmerge_member(lookahead_node, "lookahead_on"):
+        if self._lookahead_can_be_on(lookahead_node):
             # lookahead_on is supported by codegen + engine: base.py forwards
             # the flag into _security_eval_info, emit_top.py registers it via
             # register_security_eval(..., lookahead_on=true), and the engine
@@ -2860,12 +2860,33 @@ class SupportChecker:
     def _is_lookahead_value(self, node: ASTNode) -> bool:
         if self._is_barmerge_member(node, "lookahead_on", "lookahead_off"):
             return True
+        return self._resolve_lookahead_value(node) is not None
+
+    def _resolve_lookahead_value(self, node: ASTNode | None):
+        if node is None:
+            return None
         from .security_contexts import ScriptIndex, resolve_barmerge_value
 
         index = getattr(self, "_barmerge_index", None)
         if index is None:
             index = self._barmerge_index = ScriptIndex(self._ast)
-        return resolve_barmerge_value(index, node, "lookahead_on", "lookahead_off") is not None
+        return resolve_barmerge_value(index, node, "lookahead_on", "lookahead_off")
+
+    def _lookahead_can_be_on(self, node: ASTNode | None) -> bool:
+        """Inspect result arms of the same immutable value used at registration."""
+        pending = [self._resolve_lookahead_value(node)]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, Ternary):
+                if self._is_constant_bool(value.condition, True):
+                    pending.append(value.true_val)
+                elif self._is_constant_bool(value.condition, False):
+                    pending.append(value.false_val)
+                else:
+                    pending.extend((value.true_val, value.false_val))
+            elif self._is_barmerge_member(value, "lookahead_on"):
+                return True
+        return False
 
     def _is_current_symbol_expr(
         self, node: ASTNode, _seen: frozenset[object] = frozenset(),

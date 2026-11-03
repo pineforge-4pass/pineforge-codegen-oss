@@ -214,6 +214,7 @@ def resolve_barmerge_value(prog: ScriptIndex, expr, *allowed: str):
     series or mutable storage. Return None when that cannot be established.
     The checker and emitter use the same rule.
     """
+    # Successes are independent of seen; failed or seen-blocked walks are not cached.
     memo: dict[tuple[int, bool], ASTNode] = {}
 
     def arm(body, enum, seen):
