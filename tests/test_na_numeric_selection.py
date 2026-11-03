@@ -763,8 +763,10 @@ def test_method_integer_consumers_keep_their_signature_and_argument_expression(
     cpp = transpile(_source(body + _CONSUMERS))
     _assert_nullable_target(cpp)
     # An int identity method keeps its parameter and return, including a defaulted call.
+    # Its receiver is read first (the method refuses an unused first parameter).
     assert (
         "    int _udt_Holder_take(Holder self, int value) {\n"
+        "        self;\n"
         "        return value;\n"
         "    }"
     ) in cpp

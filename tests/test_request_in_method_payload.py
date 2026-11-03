@@ -27,14 +27,14 @@ _CASES = [
     ),
     pytest.param(
         'method sample(float anchor, float source) => '
-        'request.security(syminfo.tickerid, "60", source)\n',
+        'anchor * 0 + request.security(syminfo.tickerid, "60", source)\n',
         "close.sample(close - open)", "close - open",
         ("6 6", "-6 -6"),  # The second argument is the hourly body, independent of anchor.
         id="second-parameter",
     ),
     pytest.param(
         'method sample(float anchor, float bias, float source) => '
-        'request.security(syminfo.tickerid, "60", source + bias)\n',
+        'anchor * 0 + request.security(syminfo.tickerid, "60", source + bias)\n',
         "close.sample(source = close - open, bias = 2.0)", "close - open + 2.0",
         ("8 8", "-4 -4"),  # The third parameter contributes 6 + 2 and -6 + 2.
         id="third-parameter-keyword",
