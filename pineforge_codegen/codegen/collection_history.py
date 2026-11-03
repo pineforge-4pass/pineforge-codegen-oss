@@ -218,7 +218,8 @@ class CollectionHistoryEmitter:
         return None
 
     def _legacy_array_history_element(self, receiver: str, spec: TypeSpec,
-                                      offset: str, mutable: bool = False) -> str:
+                                      offset: str, mutable: bool = False,
+                                      offset_check: str = "") -> str:
         element_cpp = self._type_spec_to_cpp(spec.element)
         capture = ""
         if mutable and receiver in getattr(self, "_array_journal_members", {}):
@@ -233,6 +234,7 @@ class CollectionHistoryEmitter:
                 f"([&]() -> decltype(auto) {{ "
                 f"auto& _pf_history_array = {receiver}; "
                 f"const int _pf_history_offset = {offset}; "
+                f"{offset_check}"
                 f"if (_pf_history_offset < 0 || "
                 f"static_cast<size_t>(_pf_history_offset) >= _pf_history_array.size()) "
                 f'_PF_ARRAY_STOP("index_out_of_bounds", nullptr, '
@@ -244,6 +246,7 @@ class CollectionHistoryEmitter:
             f"([&]() -> {element_cpp} {{ "
             f"const auto& _pf_history_array = {receiver}; "
             f"const int _pf_history_offset = {offset}; "
+            f"{offset_check}"
             f"if (_pf_history_offset < 0 || "
             f"static_cast<size_t>(_pf_history_offset) >= _pf_history_array.size()) "
             f"return na<{element_cpp}>(); "

@@ -8591,6 +8591,7 @@ class SecurityEmitter:
                     # nested offsets before lowering. Unsupported scalar/
                     # expression bindings fail closed in the shared helper.
                     local_index = expr_node.index
+                    combines_offsets = isinstance(bound, Subscript)
                     resolved_local_index = self._resolve_security_index_literal(
                         expr_node.index, helper_binding_stack
                     )
@@ -8613,8 +8614,11 @@ class SecurityEmitter:
                             helper_binding_stack,
                             emitted_lines,
                         )
-                        self._security_raw_cpp[index_name] = self._checked_history_offset_cpp(
-                            index_cpp, expr_node.index, constant=False,
+                        self._security_raw_cpp[index_name] = (
+                            index_cpp if not combines_offsets
+                            else self._checked_history_offset_cpp(
+                                index_cpp, expr_node.index, constant=False,
+                            )
                         )
                         local_index = Identifier(name=index_name, loc=expr_node.index.loc)
                     offset_overrides = {}
@@ -8641,13 +8645,15 @@ class SecurityEmitter:
                     )
                     if isinstance(composed, _SecurityArgumentHistoryRead):
                         return f"{composed.member}[{composed.offset}]"
-                    # Both authored offsets were checked above. The combined
-                    # offset is an internal address calculation, whose old
-                    # narrowing and missing-value behavior must remain intact.
-                    composed.index.annotations = {
-                        **(composed.index.annotations or {}),
-                        "pf_checked_history_offset": True,
-                    }
+                    # A direct field keeps the authored offset's check at
+                    # its consuming initializer. Composed offsets were
+                    # checked individually above; their sum is only an
+                    # internal address calculation.
+                    if combines_offsets:
+                        composed.index.annotations = {
+                            **(composed.index.annotations or {}),
+                            "pf_checked_history_offset": True,
+                        }
                     # Keep the original index nodes for type/width queries;
                     # only their emitted values gain the check.
                     saved_offsets = getattr(self, "_security_history_offset_overrides", {})
@@ -8700,8 +8706,8 @@ class SecurityEmitter:
                         helper_binding_stack,
                         emitted_lines,
                     )
-                    index_cpp = self._checked_history_offset_cpp(
-                        index_cpp, expr_node.index, constant=False,
+                    index_cpp, offset_check = self._history_offset_initializer_cpp(
+                        index_cpp, expr_node.index, "_hidx", constant=False,
                     )
                     index_cpp = self._coerce_int_slot_with_cast(
                         index_cpp, expr_node.index, "int"
@@ -8709,6 +8715,7 @@ class SecurityEmitter:
                     return (
                         f"([&]() -> {cpp_t} {{ "
                         f"int _hidx = {index_cpp}; "
+                        f"{offset_check}"
                         f"if (is_na(_hidx)) return na<{cpp_t}>(); "
                         f"return (_hidx <= 0) ? {current} : {hist}[_hidx - 1]; "
                         f"}}())"
@@ -8790,8 +8797,8 @@ class SecurityEmitter:
                     helper_binding_stack,
                     emitted_lines,
                 )
-                index_cpp = self._checked_history_offset_cpp(
-                    index_cpp, expr_node.index,
+                index_cpp, offset_check = self._history_offset_initializer_cpp(
+                    index_cpp, expr_node.index, "_hidx",
                     constant=self._resolve_security_index_literal(
                         expr_node.index, helper_binding_stack) is not None,
                 )
@@ -8842,6 +8849,7 @@ class SecurityEmitter:
                         f"{cpp_t} _hv = ({inner}); "
                         f"if (is_complete) {{ {hist}_next = _hv; {hist}_set = true; }} "
                         f"int _hidx = {index_cpp}; "
+                        f"{offset_check}"
                         f"if (is_na(_hidx)) return na<{cpp_t}>(); "
                         f"return (_hidx <= 0) ? _hv : {hist}[_hidx - 1]; }}())"
                     )
@@ -8849,6 +8857,7 @@ class SecurityEmitter:
                     f"([&]() -> {cpp_t} {{ "
                     f"{cpp_t} _hv = ({inner}); "
                     f"int _hidx = {index_cpp}; "
+                    f"{offset_check}"
                     f"if (is_na(_hidx)) return na<{cpp_t}>(); "
                     f"{cpp_t} _out = (_hidx <= 0) ? _hv : {hist}[_hidx - 1]; "
                     f"if (is_complete) {hist}.push(_hv); "
@@ -8921,8 +8930,8 @@ class SecurityEmitter:
                         )
                     finally:
                         self._security_index_inputs = saved_index_inputs
-                    index_cpp = self._checked_history_offset_cpp(
-                        index_cpp, expr_node.index, constant=False,
+                    index_cpp, offset_check = self._history_offset_initializer_cpp(
+                        index_cpp, expr_node.index, "_hidx", constant=False,
                     )
                     index_cpp = self._coerce_int_slot_with_cast(
                         index_cpp, expr_node.index, "int"
@@ -8953,6 +8962,7 @@ class SecurityEmitter:
                     return (
                         "([&]() -> double { "
                         f"int _hidx = {index_cpp}; "
+                        f"{offset_check}"
                         "if (is_na(_hidx) || _hidx < 0) return na<double>(); "
                         f"return (_hidx == 0) ? {current} : {hist}[_hidx - 1]; "
                         "}())"

@@ -88,7 +88,7 @@ classes from ``..ast_nodes``.
 from __future__ import annotations
 
 from .constant_fold import NON_CONSTANT, fold_constant_expression
-from .run_stops import checked_history_offset, request_stop
+from .run_stops import checked_history_offset, history_offset_guard, request_stop
 
 from ..errors import CodegenInvariantError, Phase
 from ..symbols import TypeSpec
@@ -2080,6 +2080,25 @@ class ExprVisitor:
         line = getattr(getattr(index_node, "loc", None), "line", 0) or 0
         return checked_history_offset(idx, line)
 
+    def _history_offset_initializer_cpp(
+        self, idx: str, index_node, slot: str, *,
+        constant: bool | None = None, value_is_int32: bool = False,
+    ) -> tuple[str, str]:
+        """Keep an int-width initializer and check its slot afterwards.
+
+        The input getter's ABI returns int, even when the authored node is
+        a helper parameter whose type query cannot recover that width.
+        Other widths keep the check before narrowing, so neither a negative
+        fraction nor a wide integer can disappear in the conversion.
+        """
+        checked = self._checked_history_offset_cpp(idx, index_node, constant=constant)
+        if checked == idx:
+            return idx, ""
+        if value_is_int32 or idx.startswith("get_input_int("):
+            line = getattr(getattr(index_node, "loc", None), "line", 0) or 0
+            return idx, history_offset_guard(slot, line)
+        return checked, ""
+
     def _history_offset_cpp(self, idx: str, index_node) -> str:
         """The ``int`` offset of a history read, safe right after a ``[``.
 
@@ -2261,9 +2280,26 @@ class ExprVisitor:
                 )
                 receiver = self._collection_receiver_expr(name)
                 if spec.kind == "array":
+                    legacy_idx, offset_check = self._history_offset_initializer_cpp(
+                        idx, node.index, "_pf_history_offset",
+                        value_is_int32=(
+                            isinstance(node.index, Identifier)
+                            and self._security_fallback_frame is None
+                            and self._infer_type(node.index) == "int"
+                            and self._slot_scalar_cpp_type(node.index.name) == "int"
+                            and not self._is_int64_builtin_init(node.index.name)
+                            and not self._emitted_value_is_double(node.index)
+                        ),
+                    )
+                    legacy_idx = (
+                        idx if (isinstance(node.index, NumberLiteral)
+                                and isinstance(node.index.value, int))
+                        else pine_index_int_cast(legacy_idx)
+                    )
                     return self._legacy_array_history_element(
-                        receiver, spec, series_idx,
+                        receiver, spec, legacy_idx,
                         mutable=getattr(self, "_udt_assignment_target", None) is node,
+                        offset_check=offset_check,
                     )
                 return f"{receiver}[{checked_idx}]"
         # Handle strategy.* history access (e.g., strategy.position_size[1])
