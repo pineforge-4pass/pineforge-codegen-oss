@@ -302,14 +302,19 @@ def test_generated_tu_compiles_without_settings_header(tmp_path, monkeypatch):
     compile_cpp(transpile(SOURCE), label="legacy engine without checked settings header")
 
 
-@pytest.mark.parametrize("options", ["Side.long, alternate", "Side.long, Other.short"])
-def test_enum_options_require_literal_members_of_one_enum(options):
+@pytest.mark.parametrize("options,supported", [
+    ("Side.long, alternate", True), ("Side.long, Other.short", False),
+])
+def test_enum_options_require_immutable_members_of_one_enum(options, supported):
     source = SOURCE.replace('const int FLOOR = 1',
                             'enum Other\n    short\nalternate = Side.short\nconst int FLOOR = 1')
     source = source.replace('options=[Side.long, Side.short]', f'options=[{options}]')
     cpp = transpile(source)
     row = next(line for line in cpp.splitlines() if '{"Side", "enum"' in line)
-    assert ', false,' in row
+    assert f', {str(supported).lower()},' in row
+    if supported:
+        assert '{"Side.long", "Side.short"}' in row
+        assert '{"1", "2"}' in row
 
 
 def test_unresolved_enum_default_does_not_read_script_member_in_receipt():

@@ -392,7 +392,11 @@ member instead of reading an uninitialized script member (the old default was
 incorrectly member zero). Both the getter and deterministic receipt use that
 literal. Unfoldable defaults remain unsupported by checked setters and their
 receipt uses `na` without reading script state; the legacy getter is unchanged.
-Every enum option must be a literal member of one enum for checked support.
+Enum options use the same immutable initializer resolution as defaults:
+an identifier must have one non-reassigned declaration before the input call,
+and every declaration in its chain must be neither `var` nor `varip`.
+Every resolved option and the default must be members of the same enum for
+checked support. Choices retain their written order and member-index encoding.
 Stream begin fails on any script-preparation exception with its message and
 NOT_COMPLETED; ordinary batch preparation failures keep their historical empty
 report, diagnostic and completed status. Legacy exception text is standard-
@@ -543,8 +547,9 @@ them identically.
 - `supported` is `false` for an input the compiled strategy cannot honour: a
   string input whose default or a choice is neither a string literal nor a known
   built-in constant (`size.small`, `position.top_right`, `na`, a reassigned
-  name), or an `input.enum` whose default or choices are not literal members of
-  one enum. Hide such inputs, exclude them from sweeps and optimization, and
+  name), or an `input.enum` whose default or choices do not resolve to members
+  of one enum through direct members or immutable declarations before the call.
+  Hide such inputs, exclude them from sweeps and optimization, and
   do not send a value: the strategy uses its compiled default, and the paired
   engine rejects a supplied value with `setting_unsupported`. Use `supported`
   to determine eligibility rather than `options` emptiness: every unsupported
@@ -567,9 +572,10 @@ them identically.
   series as `default` and the nine native sources (`close`, `high`, `hl2`,
   `hlc3`, `hlcc4`, `low`, `ohlc4`, `open`, `volume`) as `options`; a plain
   `input(close)` keeps its `string` type.
-- An enum input publishes its `Enum.member` choices in declaration order as
-  `options` and keeps its `Enum.member` `default`, which the receipt encodes as
-  the member's index (map it through the receipt's `option_values`).
+- An enum input publishes its `Enum.member` choices as `options` in written
+  option order, or enum declaration order when options are omitted. It keeps
+  its `Enum.member` `default`, which the receipt encodes as the member's index
+  (map it through the receipt's `option_values`).
 - A color input (`input.color`) has `type: "color"`. Its literal-foldable
   `default` is an unsigned packed `0xAARRGGBB` integer (0 through 4294967295),
   where `AA` is opacity: 255 is opaque and 0 is transparent. Named Pine v6
