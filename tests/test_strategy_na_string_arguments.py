@@ -8,8 +8,8 @@ from pineforge_codegen import transpile
 @pytest.mark.parametrize("call,control,callee", [
     ("strategy.exit('Exit', na, profit=30000, loss=30000)",
      "strategy.exit('Exit', profit=30000, loss=30000)", "strategy_exit"),
-    ("strategy.exit('Exit', comment=na)",
-     "strategy.exit('Exit')", "strategy_exit_cancel_bracket"),
+    ("strategy.exit('Exit', profit=30000, comment=na)",
+     "strategy.exit('Exit', profit=30000)", "strategy_exit"),
     ("strategy.entry(na, strategy.long, comment=na, oca_name=na)",
      "strategy.entry('', strategy.long, comment='', oca_name='')", "strategy_entry"),
     ("strategy.order(na, strategy.long, qty=1, oca_name=na)",

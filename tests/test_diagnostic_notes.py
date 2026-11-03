@@ -22,6 +22,35 @@ DELTA = json.loads((FIXTURES / "delta.json").read_text())
 NOTE_CODES = set(DELTA["severity_changes"])
 BEFORE = json.loads((FIXTURES / "catalog.before.json").read_text())["codes"]
 PRODUCT_BEFORE = json.loads((FIXTURES / "product.before.json").read_text())
+CATALOG_ENTRY_ADDITIONS = {
+    "PF-E5084": {
+        "severity": "error",
+        "area": "codegen",
+        "message": "strategy.default_entry_qty() requires a default-quantity query on the engine strategy host.",
+        "hint": "Use the default quantity of strategy.entry() by omitting qty.",
+        "explanation": "The generated strategy host does not expose the quantity calculation previously emitted as calc_qty. A host query is needed to implement default_entry_qty; omit qty on strategy.entry to use the engine's default sizing.",
+        "args": {},
+        "user_message": "The engine strategy host needs a query for the default entry quantity.",
+    },
+    "PF-E5085": {
+        "severity": "error",
+        "area": "codegen",
+        "message": "polyline.all requires an engine polyline handle and live drawing arena.",
+        "hint": None,
+        "explanation": "The paired engine has no Polyline handle or DrawingArena<PolylineRec>. A live polyline collection cannot be represented by a numeric placeholder.",
+        "args": {},
+        "user_message": "The engine needs a polyline handle and live drawing arena.",
+    },
+    "PF-E5086": {
+        "severity": "error",
+        "area": "codegen",
+        "message": "Drawing collection ''{kind}.all'' only supports direct size(), first(), last() and get() reads.",
+        "hint": None,
+        "explanation": "Drawing collections are read-only views of live handles. Only direct reads are lowered; aliases, mutations and other uses are refused instead of exposing a stale mutable copy.",
+        "args": {"kind": {"kind": "identifier"}},
+        "user_message": "Use direct size(), first(), last() or get() reads on ''{kind}.all''.",
+    },
+}
 # Codes added after this snapshot: the continuation and indentation errors
 # (PF-E0038, PF-E0039), the trailing comma and mixed indentation errors
 # (PF-E0040 to PF-E0042), the import refusals with a hint (PF-E2040,
@@ -50,7 +79,7 @@ CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2079",  # A float step against a loop counter with int start evidence.
                      "PF-E3102", "PF-E3103", "PF-E3104", "PF-E3105", "PF-E3110",
                      "PF-E3111",
-                     "PF-E5080", "PF-E5081", "PF-E5082", "PF-E5083", "PF-W1553"}
+                     "PF-E5080", "PF-E5081", "PF-E5082", "PF-E5083", "PF-W1553"} | set(CATALOG_ENTRY_ADDITIONS)
 # The support checker warns, inside a switch arm, what it refuses elsewhere:
 # PF-W1nnn is PF-E1nnn there. Read off the live catalog, so a twin added later
 # is covered by the sentence tests below without an edit here.
@@ -59,6 +88,8 @@ TWINS = sorted("PF-W" + code[4:] for code in diagnostics_catalog()["codes"] if c
 
 def _assert_catalog_delta(catalog):
     assert set(catalog) == set(BEFORE) | CATALOG_ADDITIONS
+    for code, expected in CATALOG_ENTRY_ADDITIONS.items():
+        assert catalog[code] == expected, code
     changed = set()
     for code, old in BEFORE.items():
         entry = dict(catalog[code])
@@ -98,6 +129,7 @@ def test_exact_catalog_delta_and_legacy_pin():
 def test_catalog_legacy_bytes_only_have_the_declared_delta():
     path = Path(__file__).resolve().parents[1] / "pineforge_codegen" / "diagnostics_catalog.json"
     catalog = diagnostics_catalog()["codes"]
+    _assert_catalog_delta(catalog)
     restored = []
     for line in path.read_text().splitlines(keepends=True):
         match = re.match(r'  "(PF-[EW][0-9]{4})": ', line)
