@@ -211,6 +211,8 @@ class _SecurityArgumentHistoryRead:
 @dataclass(frozen=True)
 class _SecurityArgumentSample:
     current: str
+    # None marks an eager current-value argument sampled in caller scope,
+    # without a backing history member; it must never supply a subscript read.
     member: str | None
 
 
