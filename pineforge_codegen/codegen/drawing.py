@@ -301,6 +301,8 @@ class DrawingVisitor:
             y2 = self._visit_expr(vals.get("y2"))
             x1 = self._coerce_int_slot_with_cast(x1, vals.get("x1"), "int64_t")
             x2 = self._coerce_int_slot_with_cast(x2, vals.get("x2"), "int64_t")
+            y1 = self._coerce_int_slot(y1, vals.get("y1"), "double")
+            y2 = self._coerce_int_slot(y2, vals.get("y2"), "double")
             return (f"pf_line_new({arena}, {x1}, (double)({y1}), "
                     f"{x2}, (double)({y2}), {xloc}, {el}, {er})")
 
@@ -317,6 +319,8 @@ class DrawingVisitor:
             bottom = self._visit_expr(vals.get("bottom"))
             left = self._coerce_int_slot_with_cast(left, vals.get("left"), "int64_t")
             right = self._coerce_int_slot_with_cast(right, vals.get("right"), "int64_t")
+            top = self._coerce_int_slot(top, vals.get("top"), "double")
+            bottom = self._coerce_int_slot(bottom, vals.get("bottom"), "double")
             return (f"pf_box_new({arena}, {left}, (double)({top}), "
                     f"{right}, (double)({bottom}), {xloc})")
 
@@ -332,6 +336,7 @@ class DrawingVisitor:
             y = self._visit_expr(vals.get("y"))
             xloc = self._lower_xloc(vals.get("xloc"))
             x = self._coerce_int_slot_with_cast(x, vals.get("x"), "int64_t")
+            y = self._coerce_int_slot(y, vals.get("y"), "double")
             return (f"pf_label_new({arena}, {x}, (double)({y}), "
                     f"{text}, {xloc}, {yloc})")
 
@@ -348,6 +353,8 @@ class DrawingVisitor:
             vals = self._merge_drawing_args(node, ["price"])
             price = (self._visit_expr(vals["price"]) if vals.get("price") is not None
                      else "current_bar_.close")
+            if vals.get("price") is not None:
+                price = self._coerce_int_slot(price, vals["price"], "double")
             return (f"ChartPoint{{ .index=(int64_t)(pine_bar_index()), "
                     f".time=(int64_t)current_bar_.timestamp, .price=({price}) }}")
         if func_name == "from_index":
@@ -355,6 +362,7 @@ class DrawingVisitor:
             idx = self._visit_expr(vals.get("index"))
             price = self._visit_expr(vals.get("price"))
             idx = self._coerce_int_slot_with_cast(idx, vals.get("index"), "int64_t")
+            price = self._coerce_int_slot(price, vals.get("price"), "double")
             return (f"ChartPoint{{ .index={idx}, .time=na<int64_t>(), "
                     f".price=({price}) }}")
         if func_name == "from_time":
@@ -362,6 +370,7 @@ class DrawingVisitor:
             tm = self._visit_expr(vals.get("time"))
             price = self._visit_expr(vals.get("price"))
             tm = self._coerce_int_slot_with_cast(tm, vals.get("time"), "int64_t")
+            price = self._coerce_int_slot(price, vals.get("price"), "double")
             return (f"ChartPoint{{ .index=na<int64_t>(), .time={tm}, "
                     f".price=({price}) }}")
         if func_name == "new":
@@ -371,6 +380,7 @@ class DrawingVisitor:
             price = self._visit_expr(vals.get("price"))
             idx = self._coerce_int_slot_with_cast(idx, vals.get("index"), "int64_t")
             tm = self._coerce_int_slot_with_cast(tm, vals.get("time"), "int64_t")
+            price = self._coerce_int_slot(price, vals.get("price"), "double")
             return (f"ChartPoint{{ .index={idx}, .time={tm}, "
                     f".price=({price}) }}")
         return "ChartPoint{}"
@@ -430,9 +440,11 @@ class DrawingVisitor:
         if m in ("set_x1", "set_x2"):
             return put(f"pf_line_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'))
         if m in ("set_y1", "set_y2"):
-            return put(f"pf_line_{m}", a, r, f"(double)({av[0]})")
+            y = self._coerce_int_slot(av[0], raw[0], "double")
+            return put(f"pf_line_{m}", a, r, f"(double)({y})")
         if m in ("set_xy1", "set_xy2"):
-            return put(f"pf_line_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), f"(double)({av[1]})")
+            y = self._coerce_int_slot(av[1], raw[1], "double")
+            return put(f"pf_line_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), f"(double)({y})")
         if m in ("set_first_point", "set_second_point"):
             return put(f"pf_line_{m}", a, r, av[0])
         if m == "set_xloc":
@@ -450,9 +462,11 @@ class DrawingVisitor:
         if m in ("set_left", "set_right"):
             return put(f"pf_box_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'))
         if m in ("set_top", "set_bottom"):
-            return put(f"pf_box_{m}", a, r, f"(double)({av[0]})")
+            y = self._coerce_int_slot(av[0], raw[0], "double")
+            return put(f"pf_box_{m}", a, r, f"(double)({y})")
         if m in ("set_lefttop", "set_rightbottom"):
-            return put(f"pf_box_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), f"(double)({av[1]})")
+            y = self._coerce_int_slot(av[1], raw[1], "double")
+            return put(f"pf_box_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), f"(double)({y})")
         if m in ("set_top_left_point", "set_bottom_right_point"):
             return put(f"pf_box_{m}", a, r, av[0])
         if m == "set_xloc":
@@ -470,9 +484,11 @@ class DrawingVisitor:
         if m == "set_x":
             return put("pf_label_set_x", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'))
         if m == "set_y":
-            return put("pf_label_set_y", a, r, f"(double)({av[0]})")
+            y = self._coerce_int_slot(av[0], raw[0], "double")
+            return put("pf_label_set_y", a, r, f"(double)({y})")
         if m == "set_xy":
-            return put("pf_label_set_xy", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), f"(double)({av[1]})")
+            y = self._coerce_int_slot(av[1], raw[1], "double")
+            return put("pf_label_set_xy", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), f"(double)({y})")
         if m == "set_point":
             return put("pf_label_set_point", a, r, av[0])
         if m == "set_xloc":

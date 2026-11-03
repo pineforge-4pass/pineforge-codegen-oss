@@ -79,6 +79,7 @@ from ..errors import Phase
 from ..ast_nodes import (
     ASTNode,
     Assignment,
+    BinOp,
     BreakStmt,
     ContinueStmt,
     EnumDecl,
@@ -980,8 +981,8 @@ class StmtVisitor:
             remember_local_type(cpp_type)
             lines.append(f"{pad}{cpp_type} {safe} = {cpp_val};")
 
-    @staticmethod
-    def _compound_assign_rhs(target_read: str, op: str, val_cpp: str) -> str | None:
+    def _compound_assign_rhs(self, target_read: str, op: str, val_cpp: str,
+                             target_node=None, value_node=None) -> str | None:
         """RHS for a compound assignment that must NOT lower to the C++
         compound operator.
 
@@ -993,6 +994,15 @@ class StmtVisitor:
         for operators where the native C++ compound form is correct
         (+=, -=, *=).
         """
+        if (self._infer_type(target_node) != "std::string"
+                and any(self._integer_na_operand(side)
+                        for side in (target_node, value_node))):
+            expression = BinOp(left=target_node, op=op[0], right=value_node)
+            return self._na_arithmetic_cpp(
+                expression, target_read, val_cpp,
+                lambda a, b: self._lower_binop(
+                    expression, a, b, na_checked=True),
+            )
         if op == "/=":
             return f"((double)({target_read}) / (double)({val_cpp}))"
         if op == "%=":
@@ -1086,12 +1096,19 @@ class StmtVisitor:
         self._validate_matrix_reassignment(node, target_name)
 
         # If/switch expression in assignment: x := if cond ...
-        if isinstance(node.value, (IfStmt, SwitchStmt)):
+        if isinstance(node.value, (IfStmt, SwitchStmt)) and node.op == ":=":
             safe = (
                 self._safe_name(target_name)
                 if target_name
                 else self._visit_mutable_expr(node.target)
             )
+            safe = self._active_var_remap.get(safe, safe)
+            if target_name and self._binding_is_series(target_name, safe):
+                value = self._selection_value_expr(
+                    node.value, self._series_type_for(target_name),
+                )
+                lines.append(f"{pad}{safe}.update({value});")
+                return
             selection_cpp_type = self._nullable_collection_target_cpp_type(
                 name=target_name,
                 target_node=node.target if target_name is None else None,
@@ -1163,8 +1180,28 @@ class StmtVisitor:
                     val_cpp = self._coerce_double_slot(val_cpp, node.value)
                 lines.append(f"{pad}{target_cpp} = {val_cpp};")
             else:
-                rhs = self._compound_assign_rhs(target_cpp, node.op, val_cpp)
+                rhs = self._compound_assign_rhs(
+                    target_cpp, node.op, val_cpp, node.target, node.value)
                 if rhs is not None:
+                    if node.op in ("+=", "-=", "*="):
+                        # A checked lvalue is evaluated once, as by native compound assignment.
+                        slot = "_pf_assign_target"
+                        while slot in target_cpp or slot in val_cpp:
+                            slot += "_"
+                        value = "_pf_assign_value"
+                        while value in target_cpp or value in val_cpp:
+                            value += "_"
+                        rhs = self._compound_assign_rhs(
+                            slot, node.op, value, node.target, node.value)
+                        rhs = self._coerce_int_slot(
+                            rhs, node.value, field_int, value_is_double=True,
+                        )
+                        # C++ compound assignment evaluates the RHS before
+                        # checking the target, which the RHS may have resized.
+                        lines.append(f"{pad}{{ auto {value} = ({val_cpp});")
+                        lines.append(f"{pad}    auto&& {slot} = ({target_cpp});")
+                        lines.append(f"{pad}    {slot} = {rhs}; }}")
+                        return
                     rhs = self._coerce_int_slot(
                         rhs, node.value, field_int, value_is_double=True,
                     )
@@ -1197,7 +1234,8 @@ class StmtVisitor:
                 val_cpp = self._coerce_int_slot(val_cpp, node.value, elem_int)
                 lines.append(f"{pad}{safe}.update({val_cpp});")
             else:
-                rhs = self._compound_assign_rhs(f"{safe}[0]", node.op, val_cpp)
+                rhs = self._compound_assign_rhs(
+                    f"{safe}[0]", node.op, val_cpp, node.target, node.value)
                 if rhs is not None:
                     # x /= y → x.update((double)x[0] / (double)y); x %= y → fmod
                     rhs = self._coerce_int_slot(
@@ -1228,7 +1266,8 @@ class StmtVisitor:
                 val_cpp = self._coerce_int_slot(val_cpp, node.value, int_slot)
                 lines.append(f"{pad}{self._array_journal_initializer(safe, val_cpp)}")
             else:
-                rhs = self._compound_assign_rhs(safe, node.op, val_cpp)
+                rhs = self._compound_assign_rhs(
+                    safe, node.op, val_cpp, node.target, node.value)
                 if rhs is not None:
                     # ``/=`` and ``%=`` lower to an always-double form, so an
                     # int target narrows whatever the operands were.
@@ -1259,7 +1298,8 @@ class StmtVisitor:
                 val_cpp = self._coerce_int_slot(val_cpp, node.value, int_slot)
                 lines.append(f"{pad}{safe} = {val_cpp};")
             else:
-                rhs = self._compound_assign_rhs(safe, node.op, val_cpp)
+                rhs = self._compound_assign_rhs(
+                    safe, node.op, val_cpp, node.target, node.value)
                 if rhs is not None:
                     # ``/=`` and ``%=`` lower to an always-double form, so an
                     # int target narrows whatever the operands were.
@@ -1429,6 +1469,18 @@ class StmtVisitor:
                     else f"std::get<{idx}>({temp})"
                 )
                 safe = self._safe_name(name)
+                destination = (
+                    self._series_type_for(name) if name in series_names
+                    else self._slot_scalar_cpp_type(name) if name in global_targets
+                    else None
+                )
+                element_types = self._tuple_binding_cpp_types(node)
+                source = self._tuple_element_value(node.value, idx, None)
+                if (destination == "double" and idx < len(element_types)
+                        and element_types[idx] in ("int", "int64_t")
+                        and (source is None
+                             or self._int_operand_may_be_na(source[0], source[1]))):
+                    value = self._coerce_int_slot(value, None, destination)
                 if name in series_names:
                     if safe in self._active_var_remap:
                         safe = self._active_var_remap[safe]

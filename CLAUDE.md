@@ -780,7 +780,7 @@ you delete or weaken the special case, the test will tell you.
    in Pine v6; both lack `direction`. `TRADE_ACCESSOR_METHODS` is kept
    as the union for back-compat but new code should prefer the side-
    specific constant.
-9. **Preserve `na` at integer width boundaries.** A `double`
+9. **Preserve `na` at numeric boundaries.** A `double`
   expression reaching an `int` / `int64_t` slot, or an integer crossing
    between those widths, must go through
    `helpers.na_preserving_int_cast` (`is_na(_pf_v) ? na<int>() :
@@ -838,6 +838,12 @@ you delete or weaken the special case, the test will tell you.
    field converts the same way: it compiled, but an int na became
    -2147483648 where TradingView's field is na (tape
    `fixtures/array_history_tv/uassign_float`).
+   Float destinations share the same original-type check: an integer `na`
+   becomes floating `na` before a write, numeric branch join or float argument.
+   Explicit float declarations retain double storage, including integer
+   initializers followed by fractional writes. Integer arithmetic checks
+   missing operands before computing; integer destinations retain their type.
+   `tests/test_e2e_na_float_boundaries.py` checks native values and quantities.
 10. **An inline `input.*()` call is one leaf of a TA length.** TA ctor
    args (and derived / user-function lengths) reach the codegen as Pine
    source spellings. `pine_spelling.py` keeps an inline input call whole

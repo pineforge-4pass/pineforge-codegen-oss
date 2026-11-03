@@ -1,0 +1,21 @@
+//@version=6
+strategy("Numeric wide integer carrier", currency=currency.USDT, initial_capital=1000000000, default_qty_type=strategy.fixed)
+qPhase = input.int(0, "phase", options=[0, 1, 2])
+qDepth = input.int(3, "History depth", minval=0, maxval=7)
+qAnchor = input.time(timestamp("01 Jan 2024 00:00 +0000"), "Capture origin")
+qChannel = input.int(0, "channel", options=[0, 1])
+int qEpoch = time
+float qWide = na
+qWide := qEpoch[qDepth]
+float qTracked = qEpoch[qDepth]
+float qPrevious = qTracked[1]
+float qSelected = qChannel == 0 ? qWide : qPrevious
+float qV = (qSelected - qAnchor) / 3600000.0
+qQty = na(qV) ? 1.0 : 2.0 + qV / 100.0
+if bar_index <= 1437 and bar_index % 3 == qPhase
+    strategy.entry("sample", strategy.long, qty=qQty)
+else if strategy.position_size != 0
+    strategy.close_all()
+plot(qSelected)
+// @pf-trace wide=qSelected
+// @pf-trace current=qV

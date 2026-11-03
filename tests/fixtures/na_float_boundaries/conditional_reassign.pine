@@ -1,0 +1,9 @@
+//@version=6
+strategy("p7", currency=currency.USDT, default_qty_type=strategy.fixed)
+int n = bar_index
+float a = na
+if bar_index % 3 == 0
+    a := n[1]
+qty = na(a) ? 1.0 : 2.0 + a / 1000.0
+if bar_index % 3 == 0
+    strategy.entry("sample", strategy.long, qty=qty)

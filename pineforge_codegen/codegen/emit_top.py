@@ -2522,7 +2522,8 @@ class TopLevelEmitter:
             rhs_return_cpp_type = self._safe_name(return_udt_name)
         elif (self._is_nullable_collection_cpp_type(ret_type)
               or ret_type in DRAWING_TYPE_TO_CPP.values()
-              or ret_type in ("int", "int64_t")):
+              or ret_type in ("int", "int64_t")
+              or ret_type.startswith("std::tuple<")):
             rhs_return_cpp_type = ret_type
         else:
             rhs_return_cpp_type = None

@@ -725,7 +725,10 @@ pairs.put("b", 2)
         assert "auto __pf_map_iter_0 = pairs;" not in cpp
     else:
         assert "for (auto __pf_map_key_0 :" not in cpp
-    assert f"return (total + {parameter});" in cpp
+    from tests._numeric_expected import integer_arithmetic, integer_store
+    # The scalar return retains the parameter's identity through its na guard.
+    expected = integer_store(integer_arithmetic("total", "+", parameter))
+    assert f"return {expected};" in cpp
     compile_env.compile_cpp(
         cpp,
         label=(

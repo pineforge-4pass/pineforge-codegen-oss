@@ -6,6 +6,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from tests._compile import compile_cpp, run_emitted_tu
+from tests._numeric_expected import integer_arithmetic, integer_to_double
 
 
 def _source(body: str) -> str:
@@ -23,12 +24,14 @@ _ROWS = [
         "y = math.max(c ? 1 : na, 0)\n",
         ("? (1) : (na<double>())",),
         "1 0 0 1 1 1\n",  # max(na, 0) is na; max(1, 0) is 1.
+        0,
         id="math-source",
     ),
     pytest.param(
         "y = ta.sma(c ? 1 : na, 2)\n",
         ("? (1) : (na<double>())", ".compute("),
         "1 0 0 1 1 1\n",  # Two missing samples give na; mean(1, 1) is 1.
+        0,
         id="ta-source",
     ),
     pytest.param(
@@ -36,6 +39,7 @@ _ROWS = [
         "y = t + 60000 < time ? 1.0 : 0.0\n",
         ("double t = 0.0;", "? (current_bar_.timestamp) : (na<double>())"),
         "0 0 0 0 1 1\n",  # na compares false; time + 60000 is later than time.
+        0,
         id="untyped-time-future",
     ),
     pytest.param(
@@ -43,6 +47,7 @@ _ROWS = [
         "y = t - 60000 < time ? 1.0 : 0.0\n",
         ("double t = 0.0;", "? (current_bar_.timestamp) : (na<double>())"),
         "0 0 0 1 1 1\n",  # na compares false; time - 60000 is earlier than time.
+        0,
         id="untyped-time-past",
     ),
     pytest.param(
@@ -50,6 +55,7 @@ _ROWS = [
         "y = x + 1\n",
         ("double x = 0.0;", "? (pine_bar_index()) : (na<double>())"),
         "1 0 0 2 1 1\n",  # na + 1 is na; the second bull bar has index 1, so 1 + 1 is 2.
+        0,
         id="untyped-bar-index",
     ),
     pytest.param(
@@ -59,6 +65,7 @@ _ROWS = [
         "y = add_half(c)\n",
         ("double x = ", "? (1) : (na<double>())"),
         "1 0 0 1.5 1 1\n",  # The local is na or 1; adding 0.5 gives na or 1.5.
+        0,
         id="local-addition",
     ),
     pytest.param(
@@ -68,6 +75,7 @@ _ROWS = [
         "y = half_distance(c)\n",
         ("double x = ", "? (1) : (na<double>())"),
         "1 0 0 0 1 1\n",  # (index - na) / 2 is na; on bull bar 1, (1 - 1) / 2 is 0.
+        0,
         id="local-division",
     ),
     pytest.param(
@@ -77,6 +85,7 @@ _ROWS = [
         "y = z\n",
         ("? (1) : (na<double>())",),
         "1 0 0 1 1 1\n",  # Both bars select the inner arm: missing on bear, 1 on bull.
+        0,
         id="nested-float",
     ),
     pytest.param(
@@ -87,6 +96,7 @@ _ROWS = [
         '    runtime.error("selection must evaluate only its chosen arm")\n',
         ("double y = 0.0;", ": (na<double>())"),
         "1 0 0 1 1 1\n",  # Bear leaves the array alone; bull shifts its only element once.
+        1,
         id="selected-effect",
     ),
     pytest.param(
@@ -96,6 +106,7 @@ _ROWS = [
         "y = choose_value(not c) + 1\n",
         ("double choose_value(bool choose)", "? (na<double>()) : ("),
         "1 0 0 8 1 1\n",  # Bear gives NaN + 1 = NaN; bull gives 7 + 1 = 8.
+        1,
         id="array-element-return-na-first",
     ),
     pytest.param(
@@ -105,6 +116,7 @@ _ROWS = [
         "plot(selected)\nplot(y)\n",
         ("double choose_value(bool choose)", "? (na<double>()) : (1)"),
         "1 0 0 2 1 1\n",  # Bear returns NaN; bull returns 1, then 1 + 1 = 2.
+        0,
         id="literal-return-na-first",
     ),
     pytest.param(
@@ -114,6 +126,7 @@ _ROWS = [
         "plot(selected)\nplot(y)\n",
         ("double choose_value(bool choose)", "? (na<double>()) : (current_bar_.timestamp)"),
         "1 0 0 1700000060001 1 1\n",  # Bull bar 1 has time 1700000060000; adding 1 is exact.
+        0,
         id="timestamp-return-na-first",
     ),
     pytest.param(
@@ -123,6 +136,7 @@ _ROWS = [
         "plot(selected)\nplot(y)\n",
         ("double choose_value(bool choose)", "? (na<double>()) : (pine_bar_index())"),
         "1 0 0 2 1 1\n",  # Bear returns NaN; bull bar 1 returns index 1, then 1 + 1 = 2.
+        0,
         id="bar-index-return-na-first",
     ),
     pytest.param(
@@ -134,6 +148,7 @@ _ROWS = [
         "plot(selected)\nplot(y)\n",
         ("double choose_value(bool choose)", "? (na<double>()) : ("),
         "1 0 0 6 1 1\n",  # Bear returns NaN; bull returns the local 5, then 5 + 1 = 6.
+        0,
         id="local-integer-return-na-first",
     ),
     pytest.param(
@@ -147,6 +162,7 @@ _ROWS = [
         "plot(selected)\nplot(y)\n",
         ("double choose_value(bool choose)", "? (na<double>()) : ("),
         "1 0 0 8 1 1\n",  # Bear returns NaN; bull shifts 7 from its fresh field array, then adds 1.
+        1,
         id="field-array-return-na-first",
     ),
     pytest.param(
@@ -156,6 +172,7 @@ _ROWS = [
         "plot(selected)\nplot(y)\n",
         ("double choose_value(bool choose)", "? (na<double>()) : ("),
         "1 0 0 8 1 1\n",  # The missing branch is NaN; the temporary's sole element is 7.
+        1,
         id="temporary-array-return-na-first",
     ),
     pytest.param(
@@ -168,6 +185,7 @@ _ROWS = [
         "plot(selected)\nplot(y)\n",
         ("double choose_value(bool choose)", "double selected_value = ", "? (na<double>()) : ("),
         "1 0 0 8 1 1\n",  # The alias preserves NaN on bear and 7 on bull before addition.
+        1,
         id="aliased-array-return-na-first",
     ),
     pytest.param(
@@ -181,6 +199,7 @@ _ROWS = [
         "plot(selected)\nplot(y)\n",
         ("double _udt_Holder_take(", "? (na<double>()) : ("),
         "1 0 0 8 1 1\n",  # Each bar creates one field array; the method selects NaN or 7.
+        1,
         id="method-array-return-na-first",
     ),
     pytest.param(
@@ -193,6 +212,7 @@ _ROWS = [
         "plot(selected)\nplot(y)\n",
         ("double choose_value(bool choose)", "? (na<double>()) : ("),
         "1 0 0 8 1 1\n",  # Bear returns NaN; the populated map returns 7 on bull, then adds 1.
+        1,
         id="map-value-return-na-first",
     ),
     pytest.param(
@@ -204,6 +224,7 @@ _ROWS = [
         "plot(selected)\nplot(y)\n",
         ("double choose_value(bool choose)", "? (na<double>()) : ("),
         "1 0 0 8 1 1\n",  # Bear returns NaN; the single matrix element is 7 on bull, then adds 1.
+        0,
         id="matrix-value-return-na-first",
     ),
     pytest.param(
@@ -211,8 +232,9 @@ _ROWS = [
         "selected = choose_value(5, not c)\n"
         "y = selected + 1\n"
         "plot(selected)\nplot(y)\n",
-        ("double choose_value(", "? (na<double>()) : (value)"),
+        ("double choose_value(", f"? (na<double>()) : ({integer_to_double('value')})"),
         "1 0 0 6 1 1\n",  # The integer argument is 5; the missing function result is NaN.
+        1,
         id="untyped-parameter-na-first",
     ),
     pytest.param(
@@ -220,8 +242,9 @@ _ROWS = [
         "selected = choose_value(5, c)\n"
         "y = selected + 1\n"
         "plot(selected)\nplot(y)\n",
-        ("double choose_value(", "? (value) : (na<double>())"),
+        ("double choose_value(", f"? ({integer_to_double('value')}) : (na<double>())"),
         "1 0 0 6 1 1\n",  # Bear selects NaN; bull returns the integer argument 5, then adds 1.
+        1,
         id="untyped-parameter-na-second",
     ),
 ]
@@ -238,16 +261,19 @@ def _assert_nullable_target(cpp: str) -> None:
     assert "na<int>()" not in assignment
 
 
-@pytest.mark.parametrize("body,fragments,expected", _ROWS)
+@pytest.mark.parametrize("body,fragments,expected,adapters", _ROWS)
 def test_numeric_selection_emits_nan_with_a_declared_integer(
-    body: str, fragments: tuple[str, ...], expected: str,
+    body: str, fragments: tuple[str, ...], expected: str, adapters: int,
 ) -> None:
     cpp = transpile(_source(body))
     for fragment in fragments:
         assert fragment in cpp
     _assert_nullable_target(cpp)
-    # The missing numeric arm is already NaN; no integer-to-float repair is needed.
-    assert "auto _pf_w = (" not in cpp
+    # Only an integer-valued arm needs conversion before the double join.
+    assert cpp.count("auto _pf_w = (") == adapters
+    assert cpp.count(
+        "else return is_na(_pf_w) ? na<double>() : (double)_pf_w; }()"
+    ) == adapters
     compile_cpp(cpp, label="numeric-selection")
 
 
@@ -286,9 +312,9 @@ int main() {
 
 
 @pytest.mark.parametrize("opt", ["-O0", "-O2"])
-@pytest.mark.parametrize("body,fragments,expected", _ROWS)
+@pytest.mark.parametrize("body,fragments,expected,adapters", _ROWS)
 def test_numeric_selection_values_on_bear_and_bull_bars(
-    body: str, fragments: tuple[str, ...], expected: str, opt: str,
+    body: str, fragments: tuple[str, ...], expected: str, adapters: int, opt: str,
 ) -> None:
     assert run_emitted_tu(
         transpile(_source(body)), _DRIVER, opt=opt, label="numeric-selection",
@@ -462,8 +488,8 @@ _FUNCTION_CONSUMER_ROWS = [
         "selected = choose_local(c)\n",
         ("int local = [&](){ auto _pf_v = (", "int choose_local("),
         "int",
-        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
-        "1 2 1 1 1 1 1 0\n",  # INT_MIN + 1 is -2147483647; finite 1 + 1 is 2.
+        "-2147483648 nan 0 NaN nan nan -2147483648 1\n"
+        "1 2 1 1 1 1 1 0\n",  # Integer slots retain na; double consumers receive NaN.
         id="function-local",
     ),
     pytest.param(
@@ -477,8 +503,8 @@ _FUNCTION_CONSUMER_ROWS = [
         ("int leaf = [&](){ auto _pf_v = (", "int choose_leaf(",
          "int local = choose_leaf(choose);", "int choose_caller("),
         "int",
-        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
-        "1 2 1 1 1 1 1 0\n",  # Both integer calls keep INT_MIN or 1; adding 1 gives the shown sum.
+        "-2147483648 nan 0 NaN nan nan -2147483648 1\n"
+        "1 2 1 1 1 1 1 0\n",  # Both calls keep integer na before the double boundary.
         id="local-through-call",
     ),
     pytest.param(
@@ -486,8 +512,8 @@ _FUNCTION_CONSUMER_ROWS = [
         "selected = accept_value(c ? 1 : na)\n",
         ("int accept_value(int value)", "accept_value([&](){ auto _pf_v = ("),
         "int",
-        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
-        "1 2 1 1 1 1 1 0\n",  # The guarded argument is INT_MIN or 1 before integer addition.
+        "-2147483648 nan 0 NaN nan nan -2147483648 1\n"
+        "1 2 1 1 1 1 1 0\n",  # The integer argument remains missing through addition.
         id="parameter",
     ),
     pytest.param(
@@ -495,7 +521,7 @@ _FUNCTION_CONSUMER_ROWS = [
         "selected = c ? default_value(1) : default_value()\n",
         ("int default_value(int value)", "default_value([&](){ auto _pf_v = ("),
         "int",
-        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
+        "-2147483648 nan 0 NaN nan nan -2147483648 1\n"
         "1 2 1 1 1 1 1 0\n",  # Bear narrows the missing default to INT_MIN; bull passes 1.
         id="parameter-default",
     ),
@@ -504,8 +530,8 @@ _FUNCTION_CONSUMER_ROWS = [
         "selected = choose_return(c)\n",
         ("int choose_return(", "return [&](){ auto _pf_v = ("),
         "int",
-        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
-        "1 2 1 1 1 1 1 0\n",  # The guarded return is INT_MIN or 1; adding 1 remains integer.
+        "-2147483648 nan 0 NaN nan nan -2147483648 1\n"
+        "1 2 1 1 1 1 1 0\n",  # The integer return stays na through its double consumers.
         id="return",
     ),
     pytest.param(
@@ -515,7 +541,7 @@ _FUNCTION_CONSUMER_ROWS = [
         "selected = choose_nested(c)\n",
         ("int local = [&](){ auto _pf_v = (", "int choose_nested("),
         "int",
-        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
+        "-2147483648 nan 0 NaN nan nan -2147483648 1\n"
         "1 2 1 1 1 1 1 0\n",  # Both feeds take the inner selection, then narrow to INT_MIN or 1.
         id="nested-local",
     ),
@@ -525,12 +551,11 @@ _FUNCTION_CONSUMER_ROWS = [
         "    na(previous) ? value : previous\n"
         "selected = history_value(c ? 1 : na)\n",
         ("int64_t history_value_cs0(const Series<int64_t>& value)",
-         "double previous = value[1];"),
+         f"double previous = {integer_to_double('value[1]')};"),
         "int64_t",
-        "-9223372036854775808 -9.2233720368547758e+18 0 NaN 0 "
-        "-9.2233720368547758e+18 -9223372036854775808 1\n"
-        "1 2 1 1 1 -4.6116860184273879e+18 1 0\n",
-        # The double history alias gives an initial INT64_MIN result; bull SMA averages it with 1.
+        "-9223372036854775808 nan 0 NaN nan nan -9223372036854775808 1\n"
+        "1 2 1 1 1 1 1 0\n",
+        # Missing parameter history becomes NaN before the fallback reads it.
         id="parameter-history",
     ),
     pytest.param(
@@ -541,16 +566,8 @@ _FUNCTION_CONSUMER_ROWS = [
         "selected = choose_loop(c)\n",
         ("int local = [&](){ auto _pf_v = (", "double choose_loop("),
         "double",
-        # The loop's int sentinel survives as a finite double, recording current behavior.
-        # selected: bear promotes INT_MIN to -2147483648.0; bull promotes 1 to 1.0.
-        # y: -2147483648.0 + 1 = -2147483647.0; 1.0 + 1 = 2.0.
-        # positive: -2147483648.0 > 0 is false (0); 1.0 > 0 is true (1).
-        # text: finite -2147483648.0 formats as "-2147483648"; 1.0 formats as "1".
-        # maximum: max(-2147483648.0, 0) = 0.0; max(1.0, 0) = 1.0.
-        # average: mean(-2147483648.0, -2147483648.0) = -2147483648.0; mean(1.0, 1.0) = 1.0.
-        # plot_value: selected copies -2147483648.0 or 1.0, printed as integers.
-        # missing_value: neither finite double is NaN, so both are false (0).
-        "-2147483648 -2147483647 0 -2147483648 0 -2147483648 -2147483648 0\n"
+        # The int local retains its sentinel; the double loop result receives NaN.
+        "NaN nan 0 NaN nan nan NaN 1\n"
         "1 2 1 1 1 1 1 0\n",
         id="loop-return",
     ),
@@ -562,7 +579,7 @@ _FUNCTION_CONSUMER_ROWS = [
         ("int local = [&](){ auto _pf_v = (", "int choose_assignment(",
          "local = [&](){ auto _pf_v = ("),
         "int",
-        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
+        "-2147483648 nan 0 NaN nan nan -2147483648 1\n"
         "1 2 1 1 1 1 1 0\n",  # The assignment narrows to INT_MIN or 1 and returns that integer.
         id="assignment-return",
     ),
@@ -575,7 +592,7 @@ _FUNCTION_CONSUMER_ROWS = [
         ("int captured = [&](){ auto _pf_v = (", "int choose_shadow(",
          "int k = [&](){ auto _pf_v = ("),
         "int",
-        "-2147483648 -2147483647 0 NaN 0 -2147483648 -2147483648 1\n"
+        "-2147483648 nan 0 NaN nan nan -2147483648 1\n"
         "1 2 1 1 1 1 1 0\n",  # The earlier global read narrows to INT_MIN or 1 before shadowing.
         id="global-before-local-shadow",
     ),
@@ -609,7 +626,7 @@ _METHOD_CONSUMER_ROWS = [
 
 _CONSUMERS = """y = selected + 1
 bool positive = selected > 0
-string text = str.tostring(selected)
+string formatted_value = str.tostring(selected)
 maximum = math.max(selected, 0)
 average = ta.sma(selected, 2)
 plot_value = selected
@@ -654,7 +671,7 @@ _CONSUMER_DRIVER = _DRIVER.replace(
     static_assert(std::is_same_v<decltype(bear_strategy.direct_positive), bool>);
     static_assert(std::is_same_v<decltype(bear_strategy.direct_plot_value), double>);
     if (!std::isnan(bear_strategy.selected) || !bear_strategy.missing_value
-            || bear_strategy.positive || bear_strategy.text != "NaN"
+            || bear_strategy.positive || bear_strategy.formatted_value != "NaN"
             || !std::isnan(bear_strategy.maximum)
             || !std::isnan(bear_strategy.average)
             || !std::isnan(bear_strategy.plot_value)
@@ -665,7 +682,7 @@ _CONSUMER_DRIVER = _DRIVER.replace(
             || !std::isnan(bear_strategy.direct_plot_value))
         return 2;
     if (bull_strategy.selected != 1.0 || bull_strategy.missing_value
-            || !bull_strategy.positive || bull_strategy.text != "1"
+            || !bull_strategy.positive || bull_strategy.formatted_value != "1"
             || bull_strategy.maximum != 1.0 || bull_strategy.average != 1.0
             || bull_strategy.plot_value != 1.0 || bull_strategy.direct_y != 2.0
             || !bull_strategy.direct_positive || bull_strategy.direct_text != "1"
@@ -700,14 +717,18 @@ def test_function_integer_consumers_keep_guarded_storage(
     initializer = "0.0" if storage == "double" else "0"
     assert f"{storage} selected = {initializer};" in cpp
     assert "double y = 0.0;" in cpp
-    assert "y = (selected + 1);" in cpp
+    expected_sum = (
+        "(selected + 1)" if storage == "double"
+        else integer_to_double(integer_arithmetic("selected", "+", "1"))
+    )
+    assert f"y = {expected_sum};" in cpp
     assert "plot_value = selected;" in cpp
     assert "direct_plot_value = k;" in cpp
     assert "pine_str_tostring_tv(selected, std::string(), syminfo_mintick_)" in cpp
     compile_cpp(cpp, label="function-integer-consumers")
 
 
-# Integer consumers expose the sentinel to arithmetic, min/max and TA inputs.
+# Integer storage preserves its sentinel; double consumers preserve missingness.
 _FUNCTION_CONSUMER_DRIVER = _DRIVER.split("    const bool bear_na", 1)[0] + r"""
     static_assert(std::is_same_v<decltype(bear_strategy.selected), _EXPECTED_INT_TYPE>);
     static_assert(std::is_same_v<decltype(bear_strategy.positive), bool>);
@@ -729,16 +750,22 @@ _FUNCTION_CONSUMER_DRIVER = _DRIVER.split("    const bool bear_na", 1)[0] + r"""
             || bull_strategy.direct_maximum != 1.0 || bull_strategy.direct_average != 1.0
             || bull_strategy.direct_plot_value != 1.0)
         return 3;
-    std::printf("%lld %.17g %d %s %.17g %.17g %lld %d\n",
-                static_cast<long long>(bear_strategy.selected), bear_strategy.y,
-                bear_strategy.positive, bear_strategy.text.c_str(),
+    const auto integer_text = [](auto value) {
+        if constexpr (std::is_floating_point_v<decltype(value)>) {
+            if (std::isnan(value)) return std::string("NaN");
+        }
+        return std::to_string(static_cast<long long>(value));
+    };
+    std::printf("%s %.17g %d %s %.17g %.17g %s %d\n",
+                integer_text(bear_strategy.selected).c_str(), bear_strategy.y,
+                bear_strategy.positive, bear_strategy.formatted_value.c_str(),
                 bear_strategy.maximum, bear_strategy.average,
-                static_cast<long long>(bear_strategy.plot_value), bear_strategy.missing_value);
-    std::printf("%lld %.17g %d %s %.17g %.17g %lld %d\n",
-                static_cast<long long>(bull_strategy.selected), bull_strategy.y,
-                bull_strategy.positive, bull_strategy.text.c_str(),
+                integer_text(bear_strategy.plot_value).c_str(), bear_strategy.missing_value);
+    std::printf("%s %.17g %d %s %.17g %.17g %s %d\n",
+                integer_text(bull_strategy.selected).c_str(), bull_strategy.y,
+                bull_strategy.positive, bull_strategy.formatted_value.c_str(),
                 bull_strategy.maximum, bull_strategy.average,
-                static_cast<long long>(bull_strategy.plot_value), bull_strategy.missing_value);
+                integer_text(bull_strategy.plot_value).c_str(), bull_strategy.missing_value);
 }
 """
 
@@ -776,7 +803,8 @@ def test_method_integer_consumers_keep_their_signature_and_argument_expression(
     assert "int selected = 0;" in cpp
     assert "int plot_value = 0;" in cpp
     assert "double y = 0.0;" in cpp
-    assert "y = (selected + 1);" in cpp
+    expected_sum = integer_to_double(integer_arithmetic("selected", "+", "1"))
+    assert f"y = {expected_sum};" in cpp
     assert "plot_value = selected;" in cpp
     assert "direct_plot_value = k;" in cpp
     assert "pine_str_tostring_tv(selected, std::string(), syminfo_mintick_)" in cpp

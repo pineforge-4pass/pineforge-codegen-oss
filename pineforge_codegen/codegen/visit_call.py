@@ -714,10 +714,8 @@ class CallVisitor:
             else self._visit_expr(value_node)
         )
         if (elem_spec is not None and elem_spec.kind == "primitive"
-                and elem_spec.name == "float"
-                and isinstance(value_node, Ternary)
-                and self._selection_contains_na(value_node)):
-            rendered = self._coerce_double_slot(rendered, value_node)
+                and elem_spec.name == "float"):
+            rendered = self._coerce_int_slot(rendered, value_node, "double")
         if (elem_spec is not None and elem_spec.kind == "primitive"
                 and elem_spec.name == "bool"):
             return self._coerce_bool_expr(rendered, value_node)
@@ -858,6 +856,12 @@ class CallVisitor:
         if value_at is not None and value_at < len(arg_nodes):
             self._warn_narrow_int_element(arg_nodes[value_at], spec,
                                           arg_nodes[value_at])
+            if (spec is not None and spec.element is not None
+                    and spec.element.kind == "primitive"
+                    and spec.element.name == "float"
+                    and value_at < len(args)):
+                args[value_at] = self._coerce_int_slot(
+                    args[value_at], arg_nodes[value_at], "double")
             if (spec is not None and spec.kind == "matrix"
                     and spec.element is not None
                     and spec.element.kind == "primitive"
@@ -1106,6 +1110,10 @@ class CallVisitor:
         extending temporary receiver lifetime through the operation.
         """
         args = [self._visit_expr(arg) for arg in arg_nodes]
+        if (method == "put" and arg_nodes and spec is not None
+                and spec.value is not None and spec.value.kind == "primitive"
+                and spec.value.name == "float"):
+            args[-1] = self._coerce_int_slot(args[-1], arg_nodes[-1], "double")
         if (method == "put" and arg_nodes and spec is not None
                 and spec.kind == "map" and spec.value is not None
                 and spec.value.kind == "primitive" and spec.value.name == "int"
@@ -1612,6 +1620,8 @@ class CallVisitor:
             int_cpp = self._func_param_int_cpp_type(
                 func_info, param_index,
                 self._callable_target_callsite_idx(func_info, call_node))
+            if int_cpp == "double":
+                return self._coerce_int_slot(cpp, arg_node, int_cpp)
             if (int_cpp is not None
                     and self._holds_na_aware_wide_double(arg_node)
                     and self._emitted_value_is_double(arg_node)):
@@ -2794,9 +2804,7 @@ class CallVisitor:
             return na_preserving_int_cast(x)
         if func_name == "float" and namespace is None and node.args:
             value = self._visit_expr(node.args[0])
-            if (isinstance(node.args[0], Ternary)
-                    and self._selection_contains_na(node.args[0])):
-                value = self._coerce_double_slot(value, node.args[0])
+            value = self._coerce_int_slot(value, node.args[0], "double")
             return f"(double)({value})"
         if func_name == "bool" and namespace is None and node.args:
             # Pine v6 bools are two-state. Explicit bool(int/float) treats na
@@ -3399,7 +3407,7 @@ class CallVisitor:
 
     def _coerce_int_param_args(self, func_name, arg_nodes, all_args,
                                call_site_idx) -> None:
-        """In-place narrow every argument bound to an integer parameter.
+        """Convert each bound numeric argument without losing missingness.
 
         Pine ``color`` parameters are integers in the emitted signature too, so
         a ``na`` colour argument (``na<double>()``) is a NaN crossing into an
@@ -3515,11 +3523,11 @@ class CallVisitor:
         from .order_shapes import record_order_call
         if func_name in ("convert_to_account", "convert_to_symbol"):
             p = self._resolve_func_args(node, f"strategy.{func_name}")
-            v = self._visit_expr(p.get("value")) if p.get("value") is not None else "0.0"
+            v = self._visit_float_arg(p.get("value"), "0.0")
             return f"({v})"
         if func_name == "default_entry_qty":
             p = self._resolve_func_args(node, "strategy.default_entry_qty")
-            fp = self._visit_expr(p.get("fill_price")) if p.get("fill_price") is not None else "0.0"
+            fp = self._visit_float_arg(p.get("fill_price"), "0.0")
             return f"calc_qty({fp})"
 
         if func_name == "entry":
@@ -3543,10 +3551,10 @@ class CallVisitor:
             oca_name_val = self._visit_expr(oca_name) if oca_name else '""'
             oca_type_val = self._visit_expr(oca_type) if oca_type else "0"
             qty_type_val = self._visit_expr(qty_type) if qty_type else "-1"
-            qty_val = self._visit_expr(qty) if qty else "na<double>()"
+            qty_val = self._visit_float_arg(qty)
             if stop is not None or limit is not None or qty is not None or oca_name is not None or oca_type is not None or qty_type is not None:
-                limit_val = self._visit_expr(limit) if limit else "na<double>()"
-                stop_val = self._visit_expr(stop) if stop else "na<double>()"
+                limit_val = self._visit_float_arg(limit)
+                stop_val = self._visit_float_arg(stop)
                 record_order_call(self, node, "entry", {
                     "id": (entry_id, p.get("id")), "direction": (direction, direction_node),
                     "limit": (limit_val, limit, "na<double>()"),
@@ -3579,8 +3587,8 @@ class CallVisitor:
             p = self._resolve_func_args(node, "strategy.close")
             close_id = self._visit_expr(p.get("id")) if "id" in p else '""'
             comment = self._visit_expr(p.get("comment")) if p.get("comment") is not None else '""'
-            qty = self._visit_expr(p.get("qty")) if p.get("qty") is not None else "na<double>()"
-            qty_pct = self._visit_expr(p.get("qty_percent")) if p.get("qty_percent") is not None else "na<double>()"
+            qty = self._visit_float_arg(p.get("qty"))
+            qty_pct = self._visit_float_arg(p.get("qty_percent"))
             immediately_node = p.get("immediately")
             immediately = (
                 self._coerce_bool_expr(
@@ -3639,22 +3647,22 @@ class CallVisitor:
                                 [limit_n, stop_n, profit_n, loss_n,
                                  trail_pts_n, trail_off_n, trail_pr_n])
             if has_price_exit:
-                limit_val = self._visit_expr(limit_n) if limit_n else "na<double>()"
-                stop_val = self._visit_expr(stop_n) if stop_n else "na<double>()"
-                trail_pts = self._visit_expr(trail_pts_n) if trail_pts_n else "na<double>()"
-                trail_off = self._visit_expr(trail_off_n) if trail_off_n else "na<double>()"
-                trail_pr = self._visit_expr(trail_pr_n) if trail_pr_n else "na<double>()"
-                qty_pct = self._visit_expr(qty_pct_n) if qty_pct_n else "100.0"
-                qty_val = self._visit_expr(qty_n) if qty_n else "na<double>()"
+                limit_val = self._visit_float_arg(limit_n)
+                stop_val = self._visit_float_arg(stop_n)
+                trail_pts = self._visit_float_arg(trail_pts_n)
+                trail_off = self._visit_float_arg(trail_off_n)
+                trail_pr = self._visit_float_arg(trail_pr_n)
+                qty_pct = self._visit_float_arg(qty_pct_n, "100.0")
+                qty_val = self._visit_float_arg(qty_n)
                 comment = self._visit_expr(comment_n) if comment_n is not None else '""'
                 oca_val = self._visit_expr(oca_name_n) if oca_name_n is not None else '""'
                 profit_ticks = "na<double>()"
                 loss_ticks = "na<double>()"
 
                 if profit_n and not limit_n:
-                    profit_ticks = self._visit_expr(profit_n)
+                    profit_ticks = self._visit_float_arg(profit_n)
                 if loss_n and not stop_n:
-                    loss_ticks = self._visit_expr(loss_n)
+                    loss_ticks = self._visit_float_arg(loss_n)
 
                 record_order_call(self, node, "exit", {
                     "id": (exit_id, p.get("id")), "from_entry": (from_id, p.get("from_entry")),
@@ -3701,9 +3709,9 @@ class CallVisitor:
                 )
                 if direction_node is not None else "true"
             )
-            qty = self._visit_expr(p.get("qty")) if "qty" in p else "0"
-            limit_arg = self._visit_expr(p.get("limit")) if "limit" in p else "na<double>()"
-            stop_arg = self._visit_expr(p.get("stop")) if "stop" in p else "na<double>()"
+            qty = self._visit_float_arg(p.get("qty"), "0")
+            limit_arg = self._visit_float_arg(p.get("limit"))
+            stop_arg = self._visit_float_arg(p.get("stop"))
             oca_name = self._visit_expr(p.get("oca_name")) if "oca_name" in p else '""'
             oca_type = self._visit_expr(p.get("oca_type")) if "oca_type" in p else "0"
             record_order_call(self, node, "order", {
@@ -4045,10 +4053,20 @@ class CallVisitor:
         return f'std::string("") /* unsupported: str.{comment_name} */'
 
     def _visit_math_call(self, func_name: str, node: FuncCall) -> str:
-        args = _merge_kwargs(
+        arg_nodes = _merge_kwargs(
             node.args, node.kwargs, sigs.get_param_names("math", func_name),
-            self._visit_expr, intrinsic=sigs.get_intrinsic("math", func_name),
+            lambda arg: arg,
+            intrinsic=sigs.get_intrinsic("math", func_name),
         )
+        intrinsic = sigs.MATH_FUNCTIONS.get(func_name)
+        params = (max(intrinsic.signatures, key=lambda sig: len(sig.params)).params
+                  if intrinsic is not None else [])
+        args = [
+            self._visit_float_arg(arg)
+            if index < len(params) and params[index].pine_type == PineType.FLOAT
+            else self._visit_expr(arg)
+            for index, arg in enumerate(arg_nodes)
+        ]
         # Handle special cases first
         if func_name == "round" and len(args) == 2:
             return _math_round_digits_expr(args)
@@ -4087,6 +4105,12 @@ class CallVisitor:
     # ------------------------------------------------------------------
     # Arg/kwarg resolution (PineScript parameter signatures)
     # ------------------------------------------------------------------
+
+    def _visit_float_arg(self, node, default: str = "na<double>()") -> str:
+        """Render an actual double argument through the numeric destination rule."""
+        if node is None:
+            return default
+        return self._coerce_int_slot(self._visit_expr(node), node, "double")
 
     def _resolve_func_args(self, node: FuncCall, sig_key: str) -> dict:
         """Merge positional args and kwargs into a dict keyed by parameter name.

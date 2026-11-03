@@ -240,6 +240,15 @@ CPP_KEYWORDS = frozenset("""
 # become special after future emitter changes or on newer compilers.
 CPP_CONTEXTUAL = frozenset({"final", "override", "import", "module"})
 
+# Non-keyword native type names emitted without a namespace qualifier.
+# A Pine value, parameter, callable or UDT with one of these spellings can
+# hide a declaration type, cast, template argument or lambda return type
+# throughout the generated class, including its nested request scopes.
+# Engine type names and the namespace roots are in CPP_EMITTER_NAMES below.
+CPP_NATIVE_TYPE_NAMES = frozenset({
+    "int32_t", "int64_t", "uint32_t", "uint64_t", "size_t", "time_t", "tm",
+})
+
 # Macros visible through the standard and engine headers included by every
 # generated TU.  Their expansion in a member declaration is invalid C++.
 CPP_STANDARD_MACROS = frozenset("""
@@ -397,8 +406,8 @@ LIBC_RESERVED_NAMES = frozenset("""
 # close > open`` became the value of ``session.isfirstbar``).
 CPP_RESERVED = set(
     LEGACY_CPP_RESERVED | CPP_KEYWORDS | CPP_CONTEXTUAL |
-    CPP_STANDARD_MACROS | CPP_EMITTER_NAMES | HOST_MEMBER_NAMES |
-    LIBC_RESERVED_NAMES
+    CPP_NATIVE_TYPE_NAMES | CPP_STANDARD_MACROS | CPP_EMITTER_NAMES |
+    HOST_MEMBER_NAMES | LIBC_RESERVED_NAMES
 )
 
 # Temporaries the emitter declares in the C++ it generates around a user's

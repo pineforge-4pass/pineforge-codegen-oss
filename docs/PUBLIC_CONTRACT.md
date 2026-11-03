@@ -7,6 +7,12 @@ Text marked **since 1.5.0** describes diagnostic additions that 1.4.0 and
 earlier releases do not have: the `note` severity, the `user_message` template
 and the eleven codes that became notes.
 
+## Numeric conversions
+
+Supported numeric conversions preserve missingness in the original type:
+an integer `na` becomes floating `na` when a float destination consumes it.
+Integer arithmetic propagates missing operands before a numeric conversion.
+
 ## Identifiers in generated C++
 
 Legal Pine identifiers that collide with C++ keywords, engine names or emitter

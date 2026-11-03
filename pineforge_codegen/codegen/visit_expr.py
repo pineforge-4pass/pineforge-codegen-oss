@@ -296,13 +296,18 @@ class ExprVisitor:
             return self._selection_value_expr(node)
         raise CodegenInvariantError(node)
 
-    def _selection_value_expr(self, node: IfStmt | SwitchStmt) -> str:
+    def _selection_value_expr(
+        self, node: IfStmt | SwitchStmt, target_cpp_type: str | None = None,
+    ) -> str:
         """Materialize an admitted block value with the typed statement emitter.
 
         The lambda preserves branch laziness and evaluates a switch selector
         once. Its target supplies the same typed missing value as a declaration.
         """
         cpp_type, initial = self._selection_expression_slot(node)
+        if target_cpp_type is not None:
+            cpp_type = target_cpp_type
+            initial = self._na_value_for_type(cpp_type)
         target = f"__selection_value_{self._switch_counter}"
         self._switch_counter += 1
         lines = [
@@ -389,7 +394,10 @@ class ExprVisitor:
         string_na = self._ternary_string_na(links)
         ternary_cpp_type = (
             self._infer_type(node)
-            if self._selection_contains_na(node)
+            if (self._selection_contains_na(node)
+                or any(self._emitted_value_is_double(arm)
+                       for link in links
+                       for arm in (link.true_val, link.false_val)))
             else None
         )
         array_history_type = self._array_history_value_expr_cpp_type(node)
@@ -457,7 +465,10 @@ class ExprVisitor:
             return self._visit_rhs_value(arm, target_cpp_type=target_cpp_type)
         if string_na and self._is_na_expr(arm):
             return "na<std::string>()"
-        return self._visit_expr(arm)
+        rendered = self._visit_expr(arm)
+        if target_cpp_type == "double":
+            return self._coerce_int_slot(rendered, arm, target_cpp_type)
+        return rendered
 
     # ------------------------------------------------------------------
     # Target-typed RHS lowering (drawing handles are C++ structs, not doubles)
@@ -553,6 +564,36 @@ class ExprVisitor:
         ``na<double>()`` and fail to compile (no viable assignment/conversion).
         A nullable numeric ternary keeps its floating NaN.
         """
+        tuple_types = self._tuple_slot_types(target_cpp_type)
+        if (tuple_types and isinstance(value_node, TupleLiteral)
+                and any(cpp_type == "double" and self._integer_na_operand(element)
+                        for element, cpp_type in zip(value_node.elements, tuple_types))):
+            elements = [
+                self._coerce_int_slot(
+                    self._visit_expr(element),
+                    element, cpp_type,
+                ) if cpp_type == "double" else self._visit_expr(element)
+                for element, cpp_type in zip(value_node.elements, tuple_types)
+            ]
+            return f"std::make_tuple({', '.join(elements)})"
+        if tuple_types and isinstance(value_node, FuncCall):
+            func_name, namespace = self._resolve_callee(value_node.callee)
+            info = self._func_info_map.get(func_name) if namespace is None else None
+            if info is not None and info.returns_tuple:
+                source_types = self._infer_tuple_types(info.node, len(tuple_types))
+                if any(target == "double" and source in ("int", "int64_t")
+                       for target, source in zip(tuple_types, source_types)):
+                    elements = [
+                        self._coerce_int_slot(
+                            f"std::get<{index}>(_pf_raw)", None, target,
+                        ) if target == "double" and source in ("int", "int64_t")
+                        else f"std::get<{index}>(_pf_raw)"
+                        for index, (target, source) in enumerate(
+                            zip(tuple_types, source_types))
+                    ]
+                    value = self._visit_expr(value_node)
+                    return (f"([&]() {{ auto _pf_raw = ({value}); "
+                            f"return std::make_tuple({', '.join(elements)}); }}())")
         if (isinstance(value_node, Ternary)
                 and self._selection_contains_na(value_node)):
             scalar_target = target_cpp_type
@@ -1823,7 +1864,8 @@ class ExprVisitor:
             )
         return memo[key]
 
-    def _lower_binop(self, node: BinOp, left: str, right: str, widened: bool = False) -> str:
+    def _lower_binop(self, node: BinOp, left: str, right: str,
+                     widened: bool = False, na_checked: bool = False) -> str:
         """The C++ of ``node`` over its rendered operands; ``widened`` when
         ``_visit_binop`` computes it in 64 bits already (``left`` cast)."""
         cpp_ops = {"and": "&&", "or": "||"}
@@ -1853,6 +1895,15 @@ class ExprVisitor:
                     return f"std::to_string({rendered})"
 
                 return f"({_as_string(left, lt)} + {_as_string(right, rt)})"
+        if (node.op in ("+", "-", "*", "/", "%")
+                and not widened and not na_checked
+                and any(self._integer_na_operand(side)
+                        for side in (node.left, node.right))):
+            return self._na_arithmetic_cpp(
+                node, left, right,
+                lambda a, b: self._lower_binop(
+                    node, a, b, widened=widened, na_checked=True),
+            )
         # PineScript % works on floats — use std::fmod in C++
         if node.op == "%":
             return f"std::fmod((double)({left}), (double)({right}))"
@@ -1940,7 +1991,7 @@ class ExprVisitor:
         operand = self._visit_expr(node.operand)
         if node.op == "not":
             return f"!({self._coerce_bool_expr(operand, node.operand)})"
-        return unary_sign_cpp(node.op, operand)
+        return self._numeric_unary_cpp(node, operand)
 
     def _visit_session_history(self, node: Subscript, series_idx: str) -> str:
         """``session.<flag>[k]``: the value the flag had k bars ago at the top

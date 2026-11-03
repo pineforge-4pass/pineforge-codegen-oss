@@ -1880,8 +1880,11 @@ if close < open
     # Both members get their own ctor init.
     assert "counter(0)" in cpp and "counter__blk1(0)" in cpp
     # The first (upper) block keeps the raw name; the second (lower) is remapped.
-    assert "counter = (counter + 1)" in cpp
-    assert "counter__blk1 = (counter__blk1 + 1)" in cpp
+    from tests._numeric_expected import integer_arithmetic, integer_store
+    # Each integer member preserves missingness before addition and storage.
+    for member in ("counter", "counter__blk1"):
+        expected = integer_store(integer_arithmetic(member, "+", "1"))
+        assert f"{member} = {expected};" in cpp
 
 
 def test_block_scoped_var_no_collision_keeps_raw_name():
