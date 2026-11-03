@@ -8367,8 +8367,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # timeframe.*
             if ns == "timeframe":
                 key = f"timeframe.{node.member}"
-                return sigs.VARIABLE_STORAGE_COMPATIBILITY.get(
-                    key, sigs.TIMEFRAME_VARIABLES.get(key, PineType.STRING))
+                return sigs.TIMEFRAME_VARIABLES.get(key, PineType.STRING)
 
             # barstate.* (ishistory, isrealtime, islast, isfirst, etc.)
             if ns == "barstate":
