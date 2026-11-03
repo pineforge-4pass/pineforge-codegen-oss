@@ -1436,7 +1436,8 @@ class TopLevelEmitter:
                         "request.security timeframe was not resolved for registration",
                     )
                 if tf_expr:
-                    la = "true" if info["lookahead_on"] else "false"
+                    la = info.get("lookahead_expr") or (
+                        "true" if info["lookahead_on"] else "false")
                     go = "true" if info.get("gaps_on") else "false"
                     # Heikin-Ashi same-symbol read: emit the 6th arg only when set
                     # so every non-HA strategy's generated code stays byte-identical

@@ -13,6 +13,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen.support_checker import SupportChecker
+from tests._compile import compile_cpp
 
 
 PRELUDE = '//@version=6\nstrategy("t")\n'
@@ -75,10 +76,14 @@ def test_security_variable_tf_skipped():
     transpile(src)  # no exception
 
 
-def test_security_empty_tf_rejected():
-    src = PRELUDE + 'x = request.security(syminfo.tickerid, "", close)\n'
-    with pytest.raises(Exception, match="invalid timeframe literal|empty"):
-        transpile(src)
+@pytest.mark.parametrize("arguments", [
+    'syminfo.tickerid, "", close',
+    'symbol=syminfo.tickerid, timeframe="", expression=close',
+])
+def test_security_empty_tf_uses_chart_timeframe(arguments):
+    src = PRELUDE + f'x = request.security({arguments})\nplot(x)\n'
+    cpp = transpile(src)
+    compile_cpp(cpp, label="empty request timeframe")
 
 
 def test_security_lower_tf_valid_literal_accepted():

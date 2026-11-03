@@ -151,6 +151,19 @@ def build_strategy_library(cpp: str, workdir: Path, *,
                            + "\n".join(proc.stderr.splitlines()[:40]))
 
 
+def _runner_input_params(params: dict) -> dict:
+    """Use ABI boolean text for scalar inputs, preserving JSON metadata.
+
+    The engine runner forwards inputs with str(value).encode(), which gives
+    Python booleans the spellings "True"/"False". Nested runtime settings
+    are consumed as JSON and must keep their boolean types.
+    """
+    return {
+        key: ("true" if value else "false") if isinstance(value, bool) else value
+        for key, value in params.items()
+    }
+
+
 def run_strategy(engine_root: Path, workdir: Path, feed: Path,
                  overrides: dict | None, tag: str, trace: bool = False
                  ) -> tuple[bytes, list[dict] | None, str]:
@@ -161,7 +174,7 @@ def run_strategy(engine_root: Path, workdir: Path, feed: Path,
            str(workdir), "--ohlcv", str(feed), "--no-trim-output", "-o", str(out)]
     if overrides is not None:
         inputs = workdir / f"inputs_{tag}.json"
-        inputs.write_text(json.dumps(overrides))
+        inputs.write_text(json.dumps(_runner_input_params(overrides)))
         cmd += ["--inputs-json", str(inputs)]
     trace_path = workdir / f"trace_{tag}.json"
     if trace:
@@ -196,7 +209,8 @@ def closed_trades(engine_root: Path, workdir: Path, feed: Path,
         spec.loader.exec_module(module)
         _RUN_STRATEGY_MODULES[engine_root] = module
     return module.Strategy(workdir / "strategy.so").run(
-        feed, params, **run_kwargs)["trades"]
+        feed, _runner_input_params(params) if params is not None else None,
+        **run_kwargs)["trades"]
 
 
 def trade_count(trades_csv: bytes) -> int:

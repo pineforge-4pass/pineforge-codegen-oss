@@ -20,7 +20,7 @@ import re
 
 import pytest
 
-from pineforge_codegen import transpile
+from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
 
@@ -178,3 +178,253 @@ def test_empty_timeframe_constant_keeps_the_chart_timeframe():
                  'tfX = ""\nf(tf) => request.security(syminfo.tickerid, tf, close)\na = f(tfX)\n'):
         cpp = transpile(HEAD + body + 'b = close\n' + TAIL)
         assert _registrations(cpp) == ['0, input_tf_, input_tf_, false, false']
+
+
+@pytest.mark.parametrize("default", ["true", "false"])
+@pytest.mark.parametrize("argument", [
+    "lookahead=mode",
+    "gaps=barmerge.gaps_off, lookahead=mode",
+])
+def test_input_derived_lookahead_transpiles_and_compiles(default, argument):
+    cpp = transpile(
+        '//@version=6\nstrategy("lookahead input")\n'
+        f'useLookahead = input.bool({default}, "Lookahead")\n'
+        'mode = useLookahead ? barmerge.lookahead_on : barmerge.lookahead_off\n'
+        f'daily = request.security(syminfo.tickerid, "D", close[1], {argument})\n'
+        'plot(daily)\n')
+    compile_cpp(cpp, label="input-derived lookahead")
+
+
+@pytest.mark.parametrize("payload", ["ta.ema(base[1], 5)", "ta.sma(base[2], 3)"])
+def test_requested_value_history_inside_requested_ta_compiles(payload):
+    cpp = transpile(
+        '//@version=6\nstrategy("requested history")\n'
+        'base = request.security(syminfo.tickerid, "D", close)\n'
+        f'smooth = request.security(syminfo.tickerid, "240", {payload})\n'
+        'plot(smooth)\n')
+    compile_cpp(cpp, label="requested history inside requested TA")
+
+
+@pytest.mark.parametrize("wrapper", [
+    'fetch(sym, tf, expr) => request.security(sym, tf, expr)\n',
+    'fetch(sym, tf, expr) => request.security(sym, tf, expr)\n'
+    'forward(sym, tf, expr) => fetch(sym, tf, expr)\n',
+])
+def test_uncalled_request_payload_wrapper_compiles(wrapper):
+    cpp = transpile(
+        '//@version=6\nstrategy("unused request wrapper")\n'
+        + wrapper
+        + 'daily = request.security(syminfo.tickerid, "D", close[1])\n'
+        'plot(daily)\n')
+    compile_cpp(cpp, label="uncalled request payload wrapper")
+
+
+@pytest.mark.parametrize("selection", [
+    "barmerge.lookahead_on",
+    "useLookahead ? barmerge.lookahead_on : barmerge.lookahead_off",
+    "useLookahead ? barmerge.lookahead_off : barmerge.lookahead_on",
+])
+def test_lookahead_aliases_register_their_value(selection):
+    cpp = transpile(
+        '//@version=6\nstrategy("lookahead aliases")\n'
+        'useLookahead = input.bool(true, "Lookahead")\n'
+        f'first = {selection}\nsecond = first\n'
+        'daily = request.security(syminfo.tickerid, "D", close[1], '
+        'barmerge.gaps_off, second)\nplot(daily)\n')
+    (registration,) = _registrations(cpp)
+    assert "second" not in registration
+    if "useLookahead" in selection:
+        assert 'get_input_bool("Lookahead", true)' in registration
+    else:
+        assert registration == '0, "D", input_tf_, true, false'
+    compile_cpp(cpp, label="lookahead alias registration")
+
+
+@pytest.mark.parametrize("selection", [
+    "close > open ? barmerge.lookahead_on : barmerge.lookahead_off",
+    "input(close) > 0 ? barmerge.lookahead_on : barmerge.lookahead_off",
+    "input.source(close) > 0 ? barmerge.lookahead_on : barmerge.lookahead_off",
+    "true",
+    "barmerge.gaps_on",
+])
+def test_lookahead_keeps_enum_and_simple_value_validation(selection):
+    with pytest.raises(CompileError, match="lookahead must be barmerge"):
+        transpile(
+            '//@version=6\nstrategy("invalid lookahead")\n'
+            f'mode = {selection}\n'
+            'daily = request.security(syminfo.tickerid, "D", close, lookahead=mode)\n'
+            'plot(daily)\n')
+
+
+def test_repeated_requested_history_reads_share_requested_clock_storage():
+    cpp = transpile(
+        '//@version=6\nstrategy("requested history reads")\n'
+        'base = request.security(syminfo.tickerid, "D", close)\n'
+        'smooth = request.security(syminfo.tickerid, "240", '
+        'ta.ema(base[1], 5) + base[1])\nplot(smooth)\n')
+    compile_cpp(cpp, label="repeated requested history")
+
+
+@pytest.mark.parametrize("offset", [0, 1, 2])
+def test_requested_history_through_global_aliases_compiles(offset):
+    cpp = transpile(
+        '//@version=6\nstrategy("requested history aliases")\n'
+        'base = request.security(syminfo.tickerid, "D", close)\n'
+        'first = base\nsecond = first\n'
+        f'smooth = request.security(syminfo.tickerid, "240", ta.ema(second[{offset}], 5))\n'
+        'plot(smooth)\n')
+    compile_cpp(cpp, label="requested history aliases")
+
+
+def test_multiple_uncalled_forwarders_do_not_bind_request_payloads():
+    cpp = transpile(
+        '//@version=6\nstrategy("uncalled forwarders")\n'
+        'fetch(sym, tf, expr) => request.security(sym, tf, expr)\n'
+        'forwardA(expr) => fetch(syminfo.tickerid, "60", expr)\n'
+        'forwardB(expr) => fetch(syminfo.tickerid, "240", expr)\n'
+        'daily = request.security(syminfo.tickerid, "D", close[1])\n'
+        'plot(daily)\n')
+    compile_cpp(cpp, label="multiple uncalled request forwarders")
+
+
+@pytest.mark.parametrize("default", [True, False])
+def test_input_derived_lookahead_manifest_uses_the_input_default(default):
+    result = transpile_full(
+        '//@version=6\nstrategy("lookahead manifest")\n'
+        'other = input.symbol("BINANCE:ETHUSDT", "Other")\n'
+        f'useLookahead = input.bool({str(default).lower()}, "Lookahead")\n'
+        'mode = useLookahead ? barmerge.lookahead_on : barmerge.lookahead_off\n'
+        'daily = request.security(other, "D", close[1], lookahead=mode)\n'
+        'if daily > close\n    strategy.entry("L", strategy.long)\n')
+    (request,) = result["requests"]
+    assert request["lookahead"] is default
+    assert request["symbol"]["kind"] == "input"
+    compile_cpp(result["cpp"], label="lookahead manifest")
+
+
+@pytest.mark.parametrize("selection", [
+    'mode = if useLookahead\n'
+    '    barmerge.lookahead_on\n'
+    'else\n'
+    '    barmerge.lookahead_off\n',
+    'mode = switch useLookahead\n'
+    '    true => barmerge.lookahead_on\n'
+    '    => barmerge.lookahead_off\n',
+])
+def test_lookahead_selection_statements_register_input_reads(selection):
+    cpp = transpile(
+        '//@version=6\nstrategy("lookahead selections")\n'
+        'useLookahead = input.bool(true, "Lookahead")\n'
+        + selection
+        + 'daily = request.security(syminfo.tickerid, "D", close[1], lookahead=mode)\n'
+        'plot(daily)\n')
+    (registration,) = _registrations(cpp)
+    assert 'get_input_bool("Lookahead", true)' in registration
+    compile_cpp(cpp, label="lookahead selection statements")
+
+
+def test_uncalled_request_wrapper_needs_no_requested_ta_constructor():
+    cpp = transpile(
+        '//@version=6\nstrategy("uncalled requested TA")\n'
+        'fetch(sym, tf, expr, length) => '
+        'request.security(sym, tf, ta.sma(expr, length))\n'
+        'daily = request.security(syminfo.tickerid, "D", close[1])\n'
+        'plot(daily)\n')
+    compile_cpp(cpp, label="uncalled requested TA constructor")
+
+
+def test_uncalled_request_wrapper_needs_no_persistent_payload_lowering():
+    cpp = transpile(
+        '//@version=6\nstrategy("uncalled persistent request")\n'
+        'accumulate(src) =>\n'
+        '    var total = 0.0\n'
+        '    total += src\n'
+        '    total\n'
+        'fetch(sym, tf, expr) => '
+        'request.security(sym, tf, expr > 0 ? accumulate(expr) : 0.0)\n'
+        'daily = request.security(syminfo.tickerid, "D", close[1])\n'
+        'plot(daily)\n')
+    compile_cpp(cpp, label="uncalled persistent request payload")
+
+
+@pytest.mark.parametrize("default", ["true", "false"])
+@pytest.mark.parametrize("argument", ["lookahead={}", "barmerge.gaps_off, {}"],
+                         ids=["keyword", "positional"])
+@pytest.mark.parametrize("declarations, selection, warns", [
+    pytest.param("", "barmerge.lookahead_on", True, id="literal-on"),
+    pytest.param("", "barmerge.lookahead_off", False, id="literal-off"),
+    pytest.param("", "useLookahead ? barmerge.lookahead_on : barmerge.lookahead_off",
+                 True, id="input-on-off"),
+    pytest.param("", "useLookahead ? barmerge.lookahead_off : barmerge.lookahead_on",
+                 True, id="input-off-on"),
+    pytest.param("", "useLookahead ? barmerge.lookahead_off : barmerge.lookahead_off",
+                 False, id="input-off-only"),
+    pytest.param("", "useLookahead ? barmerge.lookahead_on : barmerge.lookahead_on",
+                 True, id="input-on-only"),
+    pytest.param("first = barmerge.lookahead_on\nsecond = first\n", "second",
+                 True, id="alias-on"),
+    pytest.param("first = barmerge.lookahead_off\nsecond = first\n", "second",
+                 False, id="alias-off"),
+    pytest.param("first = useLookahead ? barmerge.lookahead_off : barmerge.lookahead_on\n"
+                 "second = first\n", "second", True, id="alias-input-on"),
+    pytest.param("first = useLookahead ? barmerge.lookahead_off : barmerge.lookahead_off\n"
+                 "second = first\n", "second", False, id="alias-input-off-only"),
+    pytest.param("mode = if useLookahead\n"
+                 "    barmerge.lookahead_on\n"
+                 "else\n"
+                 "    barmerge.lookahead_off\n", "mode", True, id="if-input-on"),
+    pytest.param("mode = if useLookahead\n"
+                 "    barmerge.lookahead_off\n"
+                 "else\n"
+                 "    barmerge.lookahead_off\n", "mode", False, id="if-off-only"),
+    pytest.param("mode = switch useLookahead\n"
+                 "    true => barmerge.lookahead_off\n"
+                 "    => barmerge.lookahead_on\n", "mode", True, id="switch-input-on"),
+    pytest.param("mode = switch useLookahead\n"
+                 "    true => barmerge.lookahead_off\n"
+                 "    => barmerge.lookahead_off\n", "mode", False, id="switch-off-only"),
+    pytest.param("", "true ? barmerge.lookahead_off : barmerge.lookahead_on",
+                 False, id="constant-true-off"),
+    pytest.param("", "false ? barmerge.lookahead_on : barmerge.lookahead_off",
+                 False, id="constant-false-off"),
+])
+def test_lookahead_warning_follows_immutable_value(
+        declarations, selection, warns, argument, default):
+    result = transpile_full(
+        '//@version=6\nstrategy("lookahead warnings")\n'
+        f'useLookahead = input.bool({default}, "Lookahead")\n'
+        + declarations
+        + 'daily = request.security(syminfo.tickerid, "D", close[1], '
+        + argument.format(selection) + ')\nplot(daily)\n')
+    warnings = [d for d in result["diagnostics"] if d.code == "PF-W1524"]
+    assert len(warnings) == int(warns), [d.message for d in result["diagnostics"]]
+
+
+@pytest.mark.parametrize("declarations", [
+    pytest.param('mode = barmerge.lookahead_off\nmode := barmerge.lookahead_on\n',
+                 id="reassigned-enum"),
+    pytest.param('var mode = barmerge.lookahead_on\n', id="persistent-enum"),
+    pytest.param('choice = useLookahead\nchoice := false\n'
+                 'mode = choice ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="reassigned-condition"),
+    pytest.param('mode = close > open ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="bar-series"),
+    pytest.param('mode = input(close) > 0 ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="source-input"),
+    pytest.param('barmerge = 1\n'
+                 'mode = useLookahead ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="shadowed-namespace"),
+    pytest.param('mode = if useLookahead\n    barmerge.lookahead_on\n',
+                 id="incomplete-if"),
+    pytest.param('mode = switch useLookahead\n    true => barmerge.lookahead_on\n',
+                 id="incomplete-switch"),
+])
+def test_lookahead_warning_preserves_selection_refusals(declarations):
+    with pytest.raises(CompileError, match="lookahead must be barmerge") as err:
+        transpile_full(
+            '//@version=6\nstrategy("lookahead refusal")\n'
+            'useLookahead = input.bool(true, "Lookahead")\n'
+            + declarations
+            + 'daily = request.security(syminfo.tickerid, "D", close[1], lookahead=mode)\n'
+            'plot(daily)\n')
+    assert not [d for d in err.value.diagnostics if d.code == "PF-W1524"]

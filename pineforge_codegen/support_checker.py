@@ -2279,8 +2279,8 @@ class SupportChecker:
 
         Rejects ignore_invalid_symbol/currency (codegen drops silently).
         Symbol must reference current chart symbol.
-        gaps/lookahead must be barmerge.{gaps,lookahead}_{on,off} member access
-        (codegen only recognizes that shape; anything else silently dropped).
+        gaps must be a barmerge.gaps_* constant; lookahead also accepts fixed
+        selections of barmerge.lookahead_* constants, evaluated at registration.
         """
         allowed_hint = (
             "Only symbol, timeframe, expression, gaps, and lookahead are accepted."
@@ -2347,15 +2347,15 @@ class SupportChecker:
                 hint="Codegen only recognizes the barmerge.gaps_* literal; other values are silently treated as gaps_off.",
             )
 
-        if reads_data and lookahead_node is not None and not self._is_barmerge_member(
-            lookahead_node, "lookahead_on", "lookahead_off"
+        if reads_data and lookahead_node is not None and not self._is_lookahead_value(
+            lookahead_node
         ):
             self._err(
                 lookahead_node,
                 "request.security lookahead must be barmerge.lookahead_on or barmerge.lookahead_off.",
-                hint="Codegen only recognizes the barmerge.lookahead_* literal; other values are silently treated as lookahead_off.",
+                hint="Use barmerge.lookahead_* constants selected by values fixed before the first bar.",
             )
-        if self._is_barmerge_member(lookahead_node, "lookahead_on"):
+        if self._lookahead_can_be_on(lookahead_node):
             # lookahead_on is supported by codegen + engine: base.py forwards
             # the flag into _security_eval_info, emit_top.py registers it via
             # register_security_eval(..., lookahead_on=true), and the engine
@@ -2577,8 +2577,8 @@ class SupportChecker:
         gaps, lookahead = _security_gaps_lookahead(node)
         if not (gaps is None or self._is_barmerge_member(gaps, "gaps_on", "gaps_off")) or not (
                 lookahead is None
-                or self._is_barmerge_member(lookahead, "lookahead_on", "lookahead_off")):
-            # Registration reads them as the constants they are written as.
+                or self._is_lookahead_value(lookahead)):
+            # Registration must compute both flags before the first bar.
             return "its gaps and lookahead are barmerge constants"
         payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
         if isinstance(payload, FuncCall) and _qualified_name(payload.callee) == (
@@ -2857,6 +2857,37 @@ class SupportChecker:
             return False
         return node.member in allowed
 
+    def _is_lookahead_value(self, node: ASTNode) -> bool:
+        if self._is_barmerge_member(node, "lookahead_on", "lookahead_off"):
+            return True
+        return self._resolve_lookahead_value(node) is not None
+
+    def _resolve_lookahead_value(self, node: ASTNode | None):
+        if node is None:
+            return None
+        from .security_contexts import ScriptIndex, resolve_barmerge_value
+
+        index = getattr(self, "_barmerge_index", None)
+        if index is None:
+            index = self._barmerge_index = ScriptIndex(self._ast)
+        return resolve_barmerge_value(index, node, "lookahead_on", "lookahead_off")
+
+    def _lookahead_can_be_on(self, node: ASTNode | None) -> bool:
+        """Inspect result arms of the same immutable value used at registration."""
+        pending = [self._resolve_lookahead_value(node)]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, Ternary):
+                if self._is_constant_bool(value.condition, True):
+                    pending.append(value.true_val)
+                elif self._is_constant_bool(value.condition, False):
+                    pending.append(value.false_val)
+                else:
+                    pending.extend((value.true_val, value.false_val))
+            elif self._is_barmerge_member(value, "lookahead_on"):
+                return True
+        return False
+
     def _is_current_symbol_expr(
         self, node: ASTNode, _seen: frozenset[object] = frozenset(),
         *, require_all_paths: bool = False, legacy_names: bool = False,
@@ -3005,6 +3036,10 @@ class SupportChecker:
         if tf_node is None:
             return
         if not isinstance(tf_node, StringLiteral):
+            return
+        # In a request, an empty timeframe names the chart's timeframe.
+        # It is not a timeframe token, so keep the token validator separate.
+        if tf_node.value == "":
             return
         refusal = invalid_tf_literal(tf_node.value, fn_label)
         if refusal is None:

@@ -1216,13 +1216,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if lookahead_node is not None:
                 if isinstance(lookahead_node, MemberAccess) and lookahead_node.member == "lookahead_on":
                     is_lookahead_on = True
+            lookahead_value = (
+                None if item.get("dead") else self._security_lookahead_value(lookahead_node))
 
             is_gaps_on = False
             if gaps_node is not None:
                 if isinstance(gaps_node, MemberAccess) and gaps_node.member == "gaps_on":
                     is_gaps_on = True
 
-            expr_node = item["expr_node"]
+            # A request in an unreachable helper has no payload arguments to
+            # bind and needs no requested-context TA buffers or constructors.
+            expr_node = None if item.get("dead") else item["expr_node"]
             inline_helper_ta_indices: set[tuple] = set()
             ta_binding_stacks = self._collect_security_ta_binding_stacks(
                 expr_node,
@@ -1268,6 +1272,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "tf_node": tf_node,
                 "gaps_on": is_gaps_on,
                 "lookahead_on": is_lookahead_on,
+                "lookahead_expr": self._security_lookahead_expr(lookahead_value),
+                "lookahead_value": lookahead_value,
                 "heikinashi": bool(item.get("heikinashi", False)),
                 "ta_range": ta_range,
                 "ta_indices": sorted(ta_indices),
@@ -1277,8 +1283,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 # (index, _SECURITY_THROUGH_GLOBAL) of a global's site a
                 # multi-statement helper reads, which the prologue computes.
                 "inline_helper_ta_indices": inline_helper_ta_indices,
-                "depends_on_mutable_globals": item.get("depends_on_mutable_globals", False),
-                "mutable_globals": list(item.get("mutable_globals", [])),
+                "depends_on_mutable_globals": (
+                    not item.get("dead") and item.get("depends_on_mutable_globals", False)),
+                "mutable_globals": (
+                    [] if item.get("dead") else list(item.get("mutable_globals", []))),
                 "is_lower_tf_array": bool(item.get("is_lower_tf_array", False)),
                 # Another symbol's feed (``_emit_foreign_security_registration``);
                 # a helper nothing reaches keeps the chart registration.
@@ -5408,10 +5416,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for item in self._security_calls:
             sec_id = item["sec_id"]
             expr_node = item["expr_node"]
-            self._security_arg_inventory[sec_id] = self._security_argument_inventory(item)
+            # Keep the result's declared shape for the emitted helper method,
+            # but an unreachable evaluator has no payload state to allocate.
+            state_item = (item if not item.get("dead") else
+                          {**item, "expr_node": None, "mutable_globals": []})
+            state_expr = state_item["expr_node"]
+            self._security_arg_inventory[sec_id] = self._security_argument_inventory(state_item)
             self._security_arg_history_sec = sec_id
             self._security_arg_history_discovering = True
-            self._validate_security_persistent_var_control_flow(expr_node)
+            self._validate_security_persistent_var_control_flow(state_expr)
             returns_tuple = item.get("returns_tuple", False)
             tuple_size = item.get("tuple_size", 0)
             if item.get("is_lower_tf_array"):
@@ -5427,7 +5440,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     # well-defined if a future path slips through.
                     ctype = "double"
                 self._security_ohlc_hist_fields_by_sec[sec_id] = (
-                    self._collect_security_ohlc_hist_fields(expr_node)
+                    self._collect_security_ohlc_hist_fields(state_expr)
                 )
                 lines.append(
                     f"    std::vector<{ctype}> _req_sec_lower_tf_{sec_id}{{}};"
@@ -5440,17 +5453,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         f"    Series<{ctype}> {self._security_ohlc_hist_series_cpp(sec_id, field)}{_mbb};"
                     )
                 self._security_ta_hist_idx_by_sec[sec_id] = (
-                    self._collect_security_ta_hist_indices(expr_node)
+                    self._collect_security_ta_hist_indices(state_expr)
                 )
                 for name in self._security_ta_hist_series_names(sec_id):
                     lines.append(f"    Series<double> {name}{_mbb};")
-                self._emit_security_expr_hist_members(sec_id, expr_node, lines, _mbb)
+                self._emit_security_expr_hist_members(sec_id, state_expr, lines, _mbb)
                 continue
             if returns_tuple and tuple_size and tuple_size > 0 and isinstance(expr_node, TupleLiteral):
                 hist_fields: set[str] = set()
-                for el in expr_node.elements:
-                    hist_fields |= self._collect_security_ohlc_hist_fields(el)
-                for name in item.get("mutable_globals", []) or []:
+                if state_expr is not None:
+                    for el in expr_node.elements:
+                        hist_fields |= self._collect_security_ohlc_hist_fields(el)
+                for name in state_item.get("mutable_globals", []) or []:
                     info = self._global_mutable_infos.get(name)
                     if info is not None:
                         for stmt in getattr(info, "source_stmts", []) or []:
@@ -5478,7 +5492,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         )
             elif returns_tuple and tuple_size and tuple_size > 0:
                 self._security_ohlc_hist_fields_by_sec[sec_id] = (
-                    self._collect_security_ohlc_hist_fields_for_call(item)
+                    self._collect_security_ohlc_hist_fields_for_call(state_item)
                 )
                 site = self._get_ta_site(expr_node)
                 ta_name = self._ta_name_from_site(site) if site is not None else ""
@@ -5497,7 +5511,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 lines.append(f"    {ctype} _req_sec_{sec_id} = {default};")
             else:
                 self._security_ohlc_hist_fields_by_sec[sec_id] = (
-                    self._collect_security_ohlc_hist_fields_for_call(item)
+                    self._collect_security_ohlc_hist_fields_for_call(state_item)
                 )
                 if item.get("string_result"):
                     lines.append(f"    std::string _req_sec_{sec_id} = na<std::string>();")
@@ -5509,11 +5523,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     f"    Series<{ctype}> {self._security_ohlc_hist_series_cpp(sec_id, field)}{_mbb};"
                 )
             self._security_ta_hist_idx_by_sec[sec_id] = (
-                self._collect_security_ta_hist_indices(expr_node)
+                self._collect_security_ta_hist_indices(state_expr)
             )
             for name in self._security_ta_hist_series_names(sec_id):
                 lines.append(f"    Series<double> {name}{_mbb};")
-            self._emit_security_expr_hist_members(sec_id, expr_node, lines, _mbb)
+            self._emit_security_expr_hist_members(sec_id, state_expr, lines, _mbb)
             # Inside the declaration-derived snapshot/reset inventory. A new
             # run reuses the explicit constructor capacity, never Series' 500.
             for cell in self._security_arg_histories.get(sec_id, {}).values():

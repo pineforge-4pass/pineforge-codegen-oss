@@ -206,6 +206,97 @@ def _request_payload(node: FuncCall):
     return node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
 
 
+def resolve_barmerge_value(prog: ScriptIndex, expr, *allowed: str):
+    """Expand an immutable selection of barmerge constants for registration.
+
+    The leaves must retain their enum family. Conditions may read literals,
+    inputs and fixed chart facts, through lexical aliases, but never a bar
+    series or mutable storage. Return None when that cannot be established.
+    The checker and emitter use the same rule.
+    """
+    # Successes are independent of seen; failed or seen-blocked walks are not cached.
+    memo: dict[tuple[int, bool], ASTNode] = {}
+
+    def arm(body, enum, seen):
+        if len(body) != 1:
+            raise _Unresolvable()
+        node = body[0]
+        return walk(node.expr if isinstance(node, ExprStmt) else node, enum, seen)
+
+    def walk(node, enum, seen):
+        key = (id(node), enum)
+        if key in memo:
+            return memo[key]
+        if isinstance(node, Identifier):
+            binding = prog.refs.get(id(node))
+            decl = prog.decls.get(binding)
+            if (binding in seen or binding in prog.unstable
+                    or decl is None or decl.value is None):
+                raise _Unresolvable()
+            result = walk(decl.value, enum, seen | {binding})
+        elif isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
+            if id(node.object) in prog.refs:
+                raise _Unresolvable()
+            member = (node.object.name, node.member)
+            if member[0] == "barmerge" and member[1] in allowed:
+                result = node
+            elif not enum and member in _REGISTRATION_MEMBERS:
+                result = node
+            else:
+                raise _Unresolvable()
+        elif isinstance(node, Ternary):
+            result = replace(node, condition=walk(node.condition, False, seen),
+                             true_val=walk(node.true_val, enum, seen),
+                             false_val=walk(node.false_val, enum, seen))
+        elif isinstance(node, IfStmt):
+            result = Ternary(
+                condition=walk(node.condition, False, seen),
+                true_val=arm(node.body, enum, seen),
+                false_val=arm(node.else_body, enum, seen),
+                loc=node.loc, annotations=node.annotations)
+        elif isinstance(node, SwitchStmt):
+            result = arm(node.default_body, enum, seen)
+            selector = walk(node.expr, False, seen) if node.expr is not None else None
+            for case, body in reversed(node.cases):
+                condition = walk(case, False, seen)
+                if selector is not None:
+                    condition = BinOp(left=selector, op="==", right=condition, loc=case.loc)
+                result = Ternary(condition=condition, true_val=arm(body, enum, seen),
+                                 false_val=result, loc=node.loc, annotations=node.annotations)
+        elif not enum and isinstance(node, (StringLiteral, NumberLiteral, BoolLiteral)):
+            result = node
+        elif not enum and isinstance(node, BinOp):
+            result = replace(node, left=walk(node.left, False, seen),
+                             right=walk(node.right, False, seen))
+        elif not enum and isinstance(node, UnaryOp):
+            result = replace(node, operand=walk(node.operand, False, seen))
+        elif not enum and isinstance(node, FuncCall):
+            callee = node.callee
+            if not (
+                (isinstance(callee, Identifier) and callee.name == "input"
+                 and id(callee) not in prog.refs)
+                or (isinstance(callee, MemberAccess)
+                    and isinstance(callee.object, Identifier)
+                    and callee.object.name == "input" and id(callee.object) not in prog.refs
+                    and callee.member in _REGISTRATION_INPUTS | {"int", "float", "timeframe"})
+            ):
+                raise _Unresolvable()
+            # The bare input(close) overload is a live source, not an input
+            # qualifier. Its default cannot be evaluated before the first bar.
+            default = node.args[0] if node.args else node.kwargs.get("defval")
+            walk(default, False, seen)
+            result = node
+        else:
+            raise _Unresolvable()
+        memo[key] = result
+        return result
+
+    try:
+        return walk(expr, True, frozenset())
+    except (_Unresolvable, RecursionError):
+        return None
+
+
 def _children(node):
     for key, value in vars(node).items():
         if key in ("loc", "annotations"):
@@ -1593,11 +1684,16 @@ def _reached(prog: ScriptIndex) -> set[str]:
 
 
 def _mark_unreached(prog: ScriptIndex, reached: set[str]) -> None:
-    """Annotate each payload read of a parameter of a helper nothing reaches:
-    it never runs, so it does not warn."""
+    """Mark requests in helpers nothing reaches, and their parameter reads.
+
+    Their evaluators never run and must not lower a payload whose arguments
+    have no call-site bindings.
+    """
     for owner, requests in prog.requests.items():
         if owner in prog.funcs and owner not in reached:
             for request in requests:
+                request.annotations = {**(request.annotations or {}),
+                                       DEAD_ANNOTATION: True}
                 for read in _payload_params(prog, owner, request):
                     read.annotations = {**(read.annotations or {}),
                                         UNREACHED_ANNOTATION: True}
