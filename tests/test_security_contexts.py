@@ -345,3 +345,86 @@ def test_uncalled_request_wrapper_needs_no_persistent_payload_lowering():
         'daily = request.security(syminfo.tickerid, "D", close[1])\n'
         'plot(daily)\n')
     compile_cpp(cpp, label="uncalled persistent request payload")
+
+
+@pytest.mark.parametrize("default", ["true", "false"])
+@pytest.mark.parametrize("argument", ["lookahead={}", "barmerge.gaps_off, {}"],
+                         ids=["keyword", "positional"])
+@pytest.mark.parametrize("declarations, selection, warns", [
+    pytest.param("", "barmerge.lookahead_on", True, id="literal-on"),
+    pytest.param("", "barmerge.lookahead_off", False, id="literal-off"),
+    pytest.param("", "useLookahead ? barmerge.lookahead_on : barmerge.lookahead_off",
+                 True, id="input-on-off"),
+    pytest.param("", "useLookahead ? barmerge.lookahead_off : barmerge.lookahead_on",
+                 True, id="input-off-on"),
+    pytest.param("", "useLookahead ? barmerge.lookahead_off : barmerge.lookahead_off",
+                 False, id="input-off-only"),
+    pytest.param("", "useLookahead ? barmerge.lookahead_on : barmerge.lookahead_on",
+                 True, id="input-on-only"),
+    pytest.param("first = barmerge.lookahead_on\nsecond = first\n", "second",
+                 True, id="alias-on"),
+    pytest.param("first = barmerge.lookahead_off\nsecond = first\n", "second",
+                 False, id="alias-off"),
+    pytest.param("first = useLookahead ? barmerge.lookahead_off : barmerge.lookahead_on\n"
+                 "second = first\n", "second", True, id="alias-input-on"),
+    pytest.param("first = useLookahead ? barmerge.lookahead_off : barmerge.lookahead_off\n"
+                 "second = first\n", "second", False, id="alias-input-off-only"),
+    pytest.param("mode = if useLookahead\n"
+                 "    barmerge.lookahead_on\n"
+                 "else\n"
+                 "    barmerge.lookahead_off\n", "mode", True, id="if-input-on"),
+    pytest.param("mode = if useLookahead\n"
+                 "    barmerge.lookahead_off\n"
+                 "else\n"
+                 "    barmerge.lookahead_off\n", "mode", False, id="if-off-only"),
+    pytest.param("mode = switch useLookahead\n"
+                 "    true => barmerge.lookahead_off\n"
+                 "    => barmerge.lookahead_on\n", "mode", True, id="switch-input-on"),
+    pytest.param("mode = switch useLookahead\n"
+                 "    true => barmerge.lookahead_off\n"
+                 "    => barmerge.lookahead_off\n", "mode", False, id="switch-off-only"),
+    pytest.param("", "true ? barmerge.lookahead_off : barmerge.lookahead_on",
+                 False, id="constant-true-off"),
+    pytest.param("", "false ? barmerge.lookahead_on : barmerge.lookahead_off",
+                 False, id="constant-false-off"),
+])
+def test_lookahead_warning_follows_immutable_value(
+        declarations, selection, warns, argument, default):
+    result = transpile_full(
+        '//@version=6\nstrategy("lookahead warnings")\n'
+        f'useLookahead = input.bool({default}, "Lookahead")\n'
+        + declarations
+        + 'daily = request.security(syminfo.tickerid, "D", close[1], '
+        + argument.format(selection) + ')\nplot(daily)\n')
+    warnings = [d for d in result["diagnostics"] if d.code == "PF-W1524"]
+    assert len(warnings) == int(warns), [d.message for d in result["diagnostics"]]
+
+
+@pytest.mark.parametrize("declarations", [
+    pytest.param('mode = barmerge.lookahead_off\nmode := barmerge.lookahead_on\n',
+                 id="reassigned-enum"),
+    pytest.param('var mode = barmerge.lookahead_on\n', id="persistent-enum"),
+    pytest.param('choice = useLookahead\nchoice := false\n'
+                 'mode = choice ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="reassigned-condition"),
+    pytest.param('mode = close > open ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="bar-series"),
+    pytest.param('mode = input(close) > 0 ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="source-input"),
+    pytest.param('barmerge = 1\n'
+                 'mode = useLookahead ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="shadowed-namespace"),
+    pytest.param('mode = if useLookahead\n    barmerge.lookahead_on\n',
+                 id="incomplete-if"),
+    pytest.param('mode = switch useLookahead\n    true => barmerge.lookahead_on\n',
+                 id="incomplete-switch"),
+])
+def test_lookahead_warning_preserves_selection_refusals(declarations):
+    with pytest.raises(CompileError, match="lookahead must be barmerge") as err:
+        transpile_full(
+            '//@version=6\nstrategy("lookahead refusal")\n'
+            'useLookahead = input.bool(true, "Lookahead")\n'
+            + declarations
+            + 'daily = request.security(syminfo.tickerid, "D", close[1], lookahead=mode)\n'
+            'plot(daily)\n')
+    assert not [d for d in err.value.diagnostics if d.code == "PF-W1524"]

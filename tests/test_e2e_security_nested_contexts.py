@@ -450,3 +450,89 @@ def test_uncalled_requested_state_wrapper_native_values(
     candidate = ok(runs, "subject")
     _assert_live_request_values(candidate)
     assert_same_runs(candidate, control)
+
+
+def _reached_request_source(body: str) -> str:
+    return (
+        '//@version=6\nstrategy("reached request values", overlay=true)\n'
+        + body
+        + '// @pf-trace value=value\n'
+        'if not na(value) and bar_index % 8 == 0\n'
+        '    strategy.entry("L", strategy.long, qty=value / close)\n'
+        'if bar_index % 8 == 4\n'
+        '    strategy.close("L")\n'
+        'plot(value)\n'
+    )
+
+
+@pytest.mark.parametrize("default, override", [("60", "240"), ("240", "60")],
+                         ids=["hour-to-four-hour", "four-hour-to-hour"])
+@pytest.mark.parametrize("forwarder, call", [
+    pytest.param('forward() => fetch()\n', "forward()", id="transitive"),
+    pytest.param('method forward(float anchor) => fetch()\n', "close.forward()",
+                 id="method"),
+])
+def test_reached_request_helper_native_values(
+        request_value_feed, tmp_path, forwarder, call, default, override):
+    """A request reached solely through a helper or method stays live."""
+    engine, feed = request_value_feed
+    declare = (
+        f'resolution = input.timeframe("{default}", "Resolution")\n'
+        '// @pf-trace resolution_input=resolution == "60" ? 1 : 0\n'
+    )
+    # Only the forwarder calls fetch. References are separate strategy builds,
+    # so their top-level requests cannot make this helper reachable.
+    subject = _reached_request_source(
+        declare
+        + 'fetch() => request.security(syminfo.tickerid, resolution, close[1])\n'
+        + forwarder + f'value = {call}\n')
+    reference = _reached_request_source(
+        declare
+        + 'hourly = request.security(syminfo.tickerid, "60", close[1])\n'
+        'fourHourly = request.security(syminfo.tickerid, "240", close[1])\n'
+        'value = resolution == "60" ? hourly : fourHourly\n')
+    builds = {
+        "subject": Build(subject, overrides={"Resolution": override}, trace=True),
+        "reference": Build(reference, overrides={"Resolution": override}, trace=True),
+    }
+    for timeframe in ("60", "240"):
+        builds[f"fixed_{timeframe}"] = Build(_reached_request_source(
+            f'value = request.security(syminfo.tickerid, "{timeframe}", close[1])\n'),
+            trace=True)
+    runs = _execute_lookahead_builds(engine, feed, tmp_path, builds)
+    control = ok(runs, "reference")
+    assert set(control.traces) == set(control.trades) == {"default", "override"}
+    _assert_live_request_values(control)
+    for tag, timeframe in (("default", default), ("override", override)):
+        selected = [r["value"] for r in control.traces[tag]
+                    if r["name"] == "resolution_input"]
+        assert len(selected) == len(_value_trace(control, tag)) > 100
+        assert all(value == int(timeframe == "60") for value in selected), (
+            f"INVALID CONTROL: {tag} did not read Resolution={timeframe}"
+        )
+        fixed = ok(runs, f"fixed_{timeframe}")
+        _assert_live_request_values(fixed)
+        compared, mismatched, first = per_bar_mismatches(
+            _value_trace(control, tag), _value_trace(fixed))
+        assert compared > 100 and mismatched == 0, (
+            f"INVALID CONTROL: reference {tag} differs from fixed {timeframe}; "
+            f"{compared=}, {mismatched=}, {first=}"
+        )
+        assert control.trades[tag] == fixed.trades["default"], tag
+    compared, changed, first = per_bar_mismatches(
+        _value_trace(control), _value_trace(control, "override"))
+    assert compared > 100 and changed > 0, (
+        f"INVALID CONTROL: Resolution did not change requested values; "
+        f"{compared=}, {changed=}, {first=}"
+    )
+    assert control.trades["default"] != control.trades["override"], (
+        "INVALID CONTROL: requested values did not change order quantities/trades"
+    )
+    candidate = ok(runs, "subject")
+    assert set(candidate.traces) == set(candidate.trades) == {"default", "override"}
+    # A mutant that empties every helper request must get this far, after the
+    # independent references and the subject's compile/run have succeeded.
+    _assert_live_request_values(candidate)
+    summary = assert_same_runs(candidate, control)
+    print(f"reached helper {call=} {default=} {override=}: "
+          f"{compared=}, {changed=}, {first=}; {summary}")
