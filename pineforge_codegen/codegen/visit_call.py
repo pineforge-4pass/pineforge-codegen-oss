@@ -2808,13 +2808,13 @@ class CallVisitor:
                 # ``str.tostring(na)`` ("NaN"), whose formatter a script
                 # without str.tostring does not declare.
                 return "na<std::string>()"
-            inferred = self._infer_type(arg)
+            inferred = self._text_type(arg)
             if inferred == "std::string":
                 return self._visit_expr(arg)
             if inferred == "bool":
                 if self._pine_v5_body:
                     self._refuse_v5_bool_na_observer(node, "string()", [arg])
-                visited = self._visit_expr(arg)
+                visited = self._bool_text_condition(arg, self._visit_expr(arg))
                 return f'(({visited}) ? std::string("true") : std::string("false"))'
             return self._visit_str_call("tostring", node)
 
@@ -3308,6 +3308,38 @@ class CallVisitor:
                 func_name, ordered_arg_nodes, all_args,
                 self.ctx.func_call_cs_map.get(id(node), (None, None))[1],
             )
+            fi = self._func_info_map[func_name]
+            declared = self.ctx.func_declared_param_type_specs.get(func_name, ())
+            call_site_idx = self._callable_target_callsite_idx(fi, node)
+            if (self._current_instance_name, id(node)) in self._instance_dispatch:
+                # Instance dispatch uses the written callee's type profile,
+                # including inherited calls composed from its natural cs0.
+                call_site_idx = self.ctx.func_call_cs_map.get(id(node), (None, 0))[1]
+            variant_param_types = self.ctx.func_callsite_param_types.get(
+                (fi.name, call_site_idx), (),
+            ) if call_site_idx is not None else ()
+            param_specs = getattr(fi, "param_type_specs", ()) or ()
+            param_names = fi.node.params if fi.node is not None else ()
+            series_params = self.ctx.func_series_vars.get(fi.name, set())
+            for index, arg in enumerate(ordered_arg_nodes):
+                if (index >= len(all_args) or index >= len(param_names)
+                        or (index < len(declared) and declared[index] is not None)
+                        or param_names[index] in series_params):
+                    continue
+                # Match the emitted scalar parameter: a clone's primitive
+                # profile takes precedence over the base FuncInfo inference.
+                if index < len(variant_param_types) and variant_param_types[index] in {
+                    PineType.INT, PineType.FLOAT, PineType.BOOL,
+                    PineType.STRING, PineType.COLOR,
+                }:
+                    is_string_param = variant_param_types[index] == PineType.STRING
+                elif index < len(param_specs) and param_specs[index] is not None:
+                    is_string_param = self._type_spec_to_cpp(param_specs[index]) == "std::string"
+                else:
+                    is_string_param = (index < len(fi.param_types)
+                                       and fi.param_types[index] == PineType.STRING)
+                if is_string_param:
+                    all_args[index] = self._legacy_bool_string_value(arg, all_args[index])
         # Default args (parser does not store defaults): isInSession(sess, res = timeframe.period)
         if namespace is None and func_name in self._func_names:
             fi = self._func_info_map.get(func_name)
@@ -3922,13 +3954,14 @@ class CallVisitor:
                             f"::pineforge::source::pine_enum_str_at("
                             f"{self._safe_name(et)}_str_values, {n}, {var})"
                         )
-            inferred = self._infer_type(val_arg) if val_arg is not None else ""
+            inferred = self._text_type(val_arg) if val_arg is not None else ""
             if inferred == "std::string":
                 return args[0] if args else 'std::string("")'
             if inferred == "bool":
                 if self._pine_v5_body:
                     self._refuse_v5_bool_na_observer(node, "str.tostring()", [val_arg])
-                return (f'({args[0]} ? std::string("true") : '
+                condition = self._bool_text_condition(val_arg, args[0])
+                return (f'({condition} ? std::string("true") : '
                         'std::string("false"))')
             if len(args) >= 2:
                 return f"pine_str_tostring_tv({args[0]}, {args[1]}, syminfo_mintick_)"

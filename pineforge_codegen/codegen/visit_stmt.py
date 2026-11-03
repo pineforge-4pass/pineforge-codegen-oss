@@ -670,7 +670,8 @@ class StmtVisitor:
         if is_global_member and isinstance(node.value, FuncCall) and self._is_input_call(node.value):
             func_name_i, namespace_i = self._resolve_callee(node.value.callee)
             is_static_global_input = (
-                not self._is_source_input(node.value)
+                not declaration_is_series
+                and not self._is_source_input(node.value)
                 and node.name not in self._array_vars
                 and node.name not in getattr(self, "_matrix_specs", {})
                 and node.name not in getattr(self, "_map_vars", {})
@@ -860,7 +861,10 @@ class StmtVisitor:
                 node.name,
                 target_cpp_type=(
                     target_cpp_type
-                    if target_cpp_type in DRAWING_TYPE_TO_CPP.values()
+                    if (target_cpp_type in DRAWING_TYPE_TO_CPP.values()
+                        or (target_cpp_type == "std::string"
+                            and self._has_bool_text()
+                            and self._text_type(node.value) == "bool"))
                     else self._series_handle_target(node.name)
                 ),
             )

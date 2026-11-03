@@ -1718,6 +1718,7 @@ class TopLevelEmitter:
                     func_name_i, namespace_i = self._resolve_callee(stmt.value.callee)
                     is_static_global_input = (
                         stmt.name in self._global_member_vars
+                        and not self._decl_binding_is_series(id(stmt), stmt.name)
                         and not self._is_source_input(stmt.value)
                         and stmt.name not in self._array_vars
                         and stmt.name not in getattr(self, "_matrix_specs", {})
@@ -2519,6 +2520,9 @@ class TopLevelEmitter:
             rhs_return_cpp_type = ret_type
         else:
             rhs_return_cpp_type = None
+        if (ret_type == "std::string" and self._has_bool_text()
+                and self._text_type(self._selection_terminal_expr(node.body)) == "bool"):
+            rhs_return_cpp_type = "std::string"
 
         # For per-call-site variants, suffix the function name and activate TA + var remapping
         func_name = (
