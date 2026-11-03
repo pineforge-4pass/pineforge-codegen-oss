@@ -794,8 +794,10 @@ class CallVisitor:
             optional = MATRIX_OPTIONAL_PARAMS.get(method, {})
             aliases = MATRIX_METHOD_KWARG_ALIASES.get(method, {})
             receiver = MATRIX_RECEIVER_KEYWORD.get(method, "id")
-        elif method in CHECKED_ARRAY_METHOD_KWARGS:
-            slots = list(CHECKED_ARRAY_METHOD_KWARGS[method])
+        elif (method in CHECKED_ARRAY_METHOD_KWARGS
+              or (functional and method == "push")):
+            slots = (["value"] if method == "push"
+                     else list(CHECKED_ARRAY_METHOD_KWARGS[method]))
             optional = ARRAY_OPTIONAL_PARAMS.get(method, {})
             aliases = {}
             receiver = "id"
@@ -1598,14 +1600,19 @@ class CallVisitor:
                 or self._type_spec_to_cpp(param_spec)
             )
             cpp = self._visit_rhs_value(arg_node, target_cpp_type=target_cpp_type)
-            return self._coerce_int_slot(cpp, arg_node, target_cpp_type)
+            return (self._coerce_int_slot(cpp, arg_node, target_cpp_type)
+                    if target_cpp_type == "int64_t" else cpp)
         if param_name not in method_series:
             cpp = self._visit_expr(arg_node)
             int_cpp = self._func_param_int_cpp_type(
                 func_info, param_index,
                 self._callable_target_callsite_idx(func_info, call_node))
-            if int_cpp is not None:
+            if int_cpp == "int64_t":
                 cpp = self._coerce_int_slot(cpp, arg_node, int_cpp)
+            elif (int_cpp is not None
+                    and self._holds_na_aware_wide_double(arg_node)
+                    and self._emitted_value_is_double(arg_node)):
+                cpp = na_preserving_int_cast(cpp, int_cpp)
             return cpp
         expected_cpp_type = self._series_param_element_cpp_type(
             func_info,

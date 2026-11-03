@@ -378,20 +378,6 @@ tests/
 
 ## Support contracts
 
-Issue #285 timestamp width supersedes the older callable/array limitations in
-the "Epoch ints" table below. `input.time` and wide literal scalar actuals
-propagate through function and typed method parameters, including an integer
-receiver and qualified persistent members. Timestamp-connected `array<int>`
-storage shares one width plan (`codegen/array_field_width.py`): record fields,
-constructors, aliases, copies/slices, typed parameters, results, tuple elements
-and history use `int64_t` elements together. Bar-local fields retain their
-`_PFArrayField` representation and retained fields their vectors; width does
-not change lifetime. Unconnected small-int arrays keep their existing types.
-Integer-width stores translate missing sentinels. Arithmetic after a wide
-boundary uses binary64 operands, preserving the measured C1_24 delta of 16 at
-2**53 rather than promising exact integers above it. Native behavior rows live
-in `tests/test_timestamp_int_width_native.py`.
-
 Map namespace calls and receiver methods share named-slot argument binding:
 positional arguments fill the leading slots, and keywords fill the parameters
 with those names, including a functional receiver named `id`. Valid keyword

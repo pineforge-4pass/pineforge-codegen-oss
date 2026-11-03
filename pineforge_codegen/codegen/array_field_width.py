@@ -3,10 +3,11 @@
 from dataclasses import dataclass, field
 
 from ..ast_nodes import (
-    Assignment, ExprStmt, FuncCall, FuncDef, Identifier, IfStmt, MemberAccess,
-    MethodDef, Subscript, SwitchStmt, Ternary, TupleAssign, VarDecl,
+    Assignment, BinOp, ExprStmt, ForInStmt, ForStmt, FuncCall, FuncDef,
+    Identifier, IfStmt, MemberAccess, MethodDef, Subscript, SwitchStmt,
+    Ternary, TupleAssign, UnaryOp, VarDecl, WhileStmt,
 )
-from ..symbols import TypeSpec
+from ..symbols import PineType, TypeSpec
 
 
 @dataclass
@@ -15,6 +16,8 @@ class ArrayWidths:
     nodes: dict = field(default_factory=dict)
     names: dict = field(default_factory=dict)
     specs: dict = field(default_factory=dict)
+    name_specs: dict = field(default_factory=dict)
+    bindings: dict = field(default_factory=dict)
     elements: dict = field(default_factory=dict)
 
     def widen(self, spec, slots):
@@ -29,7 +32,10 @@ def prepare_array_widths(gen):
     A field is keyed by its resolved record type, not its spelling. All
     instances share that layout. Copies need the same element type too, but
     this pass does not change their ownership or lifetime. Unconnected arrays
-    containing only small integers retain their original C++.
+    containing only small integers retain their original C++. Declarations
+    and their authored reads share a storage identity; spelling alone never
+    connects two lexical arrays. Declaration, constructor, parameter, result,
+    tuple and history types all consume this plan.
     """
     result = ArrayWidths()
     # Type queries made by scalar provenance can see the growing answer.
@@ -43,6 +49,13 @@ def prepare_array_widths(gen):
     nodes = []
     declarations = {}
     declarations_by_id = {}
+    declaration_keys = {}
+    block_declarations = {}
+    parameter_keys = {
+        (info.name, name)
+        for info in gen.ctx.func_infos if info.node is not None
+        for name in info.node.params
+    }
     for stmt in gen.ctx.ast.body:
         if not isinstance(stmt, (FuncDef, MethodDef)):
             nodes.extend((child, None) for child in gen._walk_ast(stmt))
@@ -59,28 +72,56 @@ def prepare_array_widths(gen):
         return result
     for node, owner in nodes:
         if isinstance(node, VarDecl):
-            declarations[(owner.name if owner else "", node.name)] = node
+            key = (owner.name if owner else "", node.name)
+            declarations[key] = node
+            declaration_keys.setdefault(key, set()).add(
+                ("declaration", id(node), node.name))
             declarations_by_id[id(node)] = (node, owner)
         elif isinstance(node, TupleAssign):
+            declarations_by_id[id(node)] = (node, owner)
             for index, name in enumerate(node.names):
                 element = gen._tuple_element_value(node.value, index, owner)
                 if name and name != "_" and element is not None:
-                    declarations[(owner.name if owner else "", name)] = element
+                    key = (owner.name if owner else "", name)
+                    declarations[key] = element
+                    declaration_keys.setdefault(key, set()).add(
+                        ("declaration", id(node), name))
+        elif isinstance(node, (ForStmt, ForInStmt)):
+            declarations_by_id[id(node)] = (node, owner)
+        bodies = []
+        if isinstance(node, (ForStmt, ForInStmt, WhileStmt)):
+            bodies.append((id(node), node.body))
+        elif isinstance(node, IfStmt):
+            bodies.extend((id(body), body) for body in (node.body, node.else_body))
+        elif isinstance(node, SwitchStmt):
+            bodies.extend((id(body), body) for _condition, body in node.cases)
+            bodies.append((id(node.default_body), node.default_body))
+        for block_id, body in bodies:
+            for child in body:
+                if isinstance(child, VarDecl):
+                    block_declarations[(block_id, child.name)] = child
 
     def binding(name, owner, expr=None):
         scope = owner.name if owner else ""
         resolved = gen.ctx.identifier_decl_bindings.get(id(expr))
         if resolved is not None and resolved[0] in declarations_by_id:
             return ("declaration", *resolved)
-        if owner and (name in owner.node.params
-                      or (scope, name) in declarations):
+        if owner and name in owner.node.params:
             return "name", scope, name
+        candidates = declaration_keys.get((scope, name), ())
+        if len(candidates) == 1:
+            return next(iter(candidates))
         return "name", "", name
 
     def declaration(expr, owner):
         resolved = gen.ctx.identifier_decl_bindings.get(id(expr))
         if resolved is not None and resolved[0] in declarations_by_id:
-            return declarations_by_id[resolved[0]]
+            decl, lexical_owner = declarations_by_id[resolved[0]]
+            if isinstance(decl, TupleAssign):
+                index = decl.names.index(expr.name)
+                element = gen._tuple_element_value(decl.value, index, lexical_owner)
+                return element, lexical_owner
+            return decl, lexical_owner
         scope = owner.name if owner else ""
         if owner and expr.name in owner.node.params:
             return None, owner
@@ -101,11 +142,39 @@ def prepare_array_widths(gen):
             if isinstance(decl, tuple):
                 value, lexical_owner = decl
                 return spec_of(value, lexical_owner, seen | {key})
+            if isinstance(decl, ForStmt):
+                family = gen.ctx.for_counter_types.get(id(decl.start))
+                return TypeSpec.primitive("float" if family == PineType.FLOAT else "int")
+            if isinstance(decl, ForInStmt):
+                iterable = spec_of(decl.iterable, lexical_owner, seen | {key})
+                if iterable is not None and iterable.kind == "array":
+                    return (TypeSpec.primitive("int")
+                            if decl.vars and expr.name == decl.vars[0]
+                            else iterable.element)
+                if iterable is not None and iterable.kind == "map" and decl.vars:
+                    return iterable.key if expr.name == decl.vars[0] else iterable.value
+                return None
             if decl is not None:
                 hint = gen._type_spec_from_hint_name(decl.type_hint)
                 if hint is not None:
                     return hint
                 return spec_of(decl.value, lexical_owner, seen | {key})
+        if isinstance(expr, UnaryOp):
+            return (TypeSpec.primitive("bool") if expr.op == "not"
+                    else spec_of(expr.operand, owner, seen))
+        if isinstance(expr, BinOp):
+            if expr.op in {"==", "!=", "<", ">", "<=", ">=", "and", "or"}:
+                return TypeSpec.primitive("bool")
+            operands = [spec_of(arg, owner, seen) for arg in (expr.left, expr.right)]
+            if all(spec is not None and spec.kind == "primitive" for spec in operands):
+                names = {spec.name for spec in operands}
+                if names <= {"int", "int64", "float"}:
+                    return TypeSpec.primitive(
+                        "float" if expr.op == "/" or "float" in names
+                        else "int64" if "int64" in names else "int")
+                if expr.op == "+" and names == {"string"}:
+                    return TypeSpec.primitive("string")
+            return None
         if isinstance(expr, MemberAccess):
             record = spec_of(expr.object, owner, seen)
             if record is not None and record.kind == "udt":
@@ -119,6 +188,8 @@ def prepare_array_widths(gen):
                 return TypeSpec.udt(ns)
             if ns is None and fn in {"int", "float", "bool", "string"}:
                 return TypeSpec.primitive(fn)
+            if gen._expr_is_int64_builtin(expr):
+                return TypeSpec.primitive("int")
             if ns == "array" and fn == "from" and expr.args:
                 elements = [spec_of(arg, owner, seen)
                             or gen._array_from_element_spec(arg) for arg in expr.args]
@@ -158,8 +229,7 @@ def prepare_array_widths(gen):
         if isinstance(expr, VarDecl):
             spec = (gen._type_spec_from_hint_name(expr.type_hint)
                     or spec_of(expr.value, owner))
-            return ({("declaration", id(expr), expr.name),
-                     ("name", owner.name if owner else "", expr.name)}
+            return ({("declaration", id(expr), expr.name)}
                     if _int_array(spec, include_wide=True) else set())
         if isinstance(expr, Ternary):
             return slots(expr.true_val, owner) | slots(expr.false_val, owner)
@@ -212,13 +282,19 @@ def prepare_array_widths(gen):
                     result.specs[id(node)] = spec
             if isinstance(node, VarDecl):
                 scope = owner.name if owner else ""
-                result.names.setdefault((scope, node.name), set()).update(node_slots)
+                key = (scope, node.name)
+                if (key not in parameter_keys
+                        and len(declaration_keys.get(key, ())) == 1):
+                    result.names[key] = node_slots
+                    if id(node) in result.specs:
+                        result.name_specs[key] = result.specs[id(node)]
                 # Persistent callable/block variables have a separate member
                 # spelling; their class layout must use the same width.
                 meta = gen.ctx.var_member_metadata_by_node.get(id(node))
                 if meta is not None:
                     result.names.setdefault(("", meta[1]), set()).update(node_slots)
-                connect(node_slots, node_slots)
+                    if id(node) in result.specs:
+                        result.name_specs[("", meta[1])] = result.specs[id(node)]
             if isinstance(node, (VarDecl, Assignment)):
                 connect(slots(node, owner), slots(node.value, owner))
             elif isinstance(node, TupleAssign):
@@ -226,10 +302,16 @@ def prepare_array_widths(gen):
                     element = gen._tuple_element_value(node.value, index, owner)
                     if name and name != "_" and element is not None:
                         value, lexical_owner = element
-                        target = {("name", owner.name if owner else "", name)}
+                        target = {("declaration", id(node), name)}
                         connect(target, slots(value, lexical_owner))
-                        result.names.setdefault(
-                            (owner.name if owner else "", name), set()).update(target)
+                        spec = spec_of(value, lexical_owner)
+                        if _int_array(spec, include_wide=True):
+                            result.bindings[(id(node), name)] = (spec, target)
+                            key = (owner.name if owner else "", name)
+                            if (key not in parameter_keys
+                                    and len(declaration_keys.get(key, ())) == 1):
+                                result.names[key] = target
+                                result.name_specs[key] = spec
             if not isinstance(node, FuncCall):
                 continue
             fn, ns = gen._resolve_callee(node.callee)
@@ -240,9 +322,10 @@ def prepare_array_widths(gen):
                             info.param_type_specs[index], include_wide=True):
                         connect({("name", info.name, info.node.params[index])},
                                 slots(actual, owner))
-                        result.names.setdefault(
-                            (info.name, info.node.params[index]), set()).add(
-                                ("name", info.name, info.node.params[index]))
+                        key = (info.name, info.node.params[index])
+                        if key not in declaration_keys:
+                            result.names.setdefault(key, set()).add(
+                                ("name", *key))
             if callees:
                 continue
             if ns in gen._udt_defs and fn == "new":
@@ -285,10 +368,6 @@ def prepare_array_widths(gen):
                 if (type_name, field.name) in fields:
                     connect({("field", type_name, field.name)}, slots(field.default, None))
 
-    # The legacy name scan remains a seed for the shapes already supported.
-    for (scope, name), storage in result.names.items():
-        if name in gen._wide_int_array_names():
-            wide.update(storage)
     with gen._int_width_scan(epoch_only=True):
         while True:
             before = len(wide)
@@ -311,16 +390,37 @@ def prepare_array_widths(gen):
                 gen.__dict__.pop(attr, None)
     # Captured declarations are used directly for persistent member layout,
     # tuple inference and lexical overlays; specialize these private copies.
+    result.bindings = {
+        key: result.widen(spec, storage)
+        for key, (spec, storage) in result.bindings.items()
+        if not wide.isdisjoint(storage)
+    }
     for node_id, spec in gen._callable_collection_bindings.items():
-        gen._callable_collection_bindings[node_id] = result.widen(
-            spec, result.nodes.get(node_id, ()))
+        storage = result.nodes.get(node_id, ())
+        if not wide.isdisjoint(storage):
+            spec = result.specs.get(node_id, spec)
+        gen._callable_collection_bindings[node_id] = result.widen(spec, storage)
     for owner, specs in gen._func_collection_types.items():
         for name, spec in specs.items():
-            specs[name] = result.widen(spec, result.names.get((owner, name), ()))
+            storage = result.names.get((owner, name), ())
+            if not wide.isdisjoint(storage):
+                spec = result.name_specs.get((owner, name), spec)
+            specs[name] = result.widen(spec, storage)
     for block_id, specs in gen._block_collection_types.items():
-        owner = gen._block_collection_owners.get(block_id, "")
         for name, spec in specs.items():
-            specs[name] = result.widen(spec, result.names.get((owner, name), ()))
+            decl = block_declarations.get((block_id, name))
+            storage = result.nodes.get(id(decl), ())
+            if not wide.isdisjoint(storage):
+                spec = result.specs.get(id(decl), spec)
+            specs[name] = result.widen(spec, storage)
+    # Chart blocks lack callable collection metadata. Open the same lexical
+    # overlay for a widened local so its registry cannot escape into a later
+    # sibling block that happens to reuse the spelling.
+    for (block_id, name), decl in block_declarations.items():
+        storage = result.nodes.get(id(decl), ())
+        if not wide.isdisjoint(storage):
+            gen._block_collection_types.setdefault(block_id, {})[name] = result.widen(
+                result.specs[id(decl)], storage)
     for attr in ("_wide_int_provenance_cache",
                  "_wide_int_epoch_provenance_cache",
                  "_wide_udt_int_field_cache"):

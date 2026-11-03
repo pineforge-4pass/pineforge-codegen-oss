@@ -35,9 +35,8 @@ def test_epoch_field_storage_preserves_value(write, read):
 
 
 def test_array_method_named_argument_is_a_known_gap():
-    # Named arguments on array METHOD calls are a separate finding
-    # (class: named arguments on array.* calls, see the A4 spec).
-    # Update this pin deliberately when that binding gap is fixed.
+    # Named arguments on array method calls retain their existing arity error.
+    # Namespace calls bind their receiver and value by keyword separately.
     # Unchanged pin: push has no keyword slots, so args=[] raises the arity error.
     with pytest.raises(CompileError, match=r"array\.push: wrong number of arguments$"):
         transpile(HEADER + '''var arr = array.new<float>()
