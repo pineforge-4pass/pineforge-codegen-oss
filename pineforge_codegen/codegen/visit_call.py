@@ -1610,8 +1610,13 @@ class CallVisitor:
             if int_cpp == "int64_t":
                 cpp = self._coerce_int_slot(cpp, arg_node, int_cpp)
             elif (int_cpp is not None
-                    and self._holds_na_aware_wide_double(arg_node)
+                    and (self._holds_na_aware_wide_double(arg_node)
+                         or isinstance(arg_node, (Identifier, Subscript)))
                     and self._emitted_value_is_double(arg_node)):
+                # An integer stored as double (including a bare-na global)
+                # must translate NaN to the parameter's integer sentinel.
+                # Same-width integer reads and direct numeric selections
+                # retain their existing argument expression.
                 cpp = na_preserving_int_cast(cpp, int_cpp)
             return cpp
         expected_cpp_type = self._series_param_element_cpp_type(

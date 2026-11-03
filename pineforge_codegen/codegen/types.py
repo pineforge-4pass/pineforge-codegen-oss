@@ -778,23 +778,27 @@ class TypeInferer:
         bound = self._int_arith_bound(node, owner_info)
         return bound is not None and bound > (1 << 31) - 1
 
-    def _int_arith_bound(self, node: BinOp, owner_info=None) -> int | None:
+    def _int_arith_bound(self, node: BinOp, owner_info=None,
+                         binding_bounds=None) -> int | None:
         """The bound on ``|value|`` of a ``+ - *`` over two 32-bit integer
         operands, uncapped; None when an operand is not one."""
-        left = self._narrow_int_bound(node.left, owner_info)
+        binding_bounds = {} if binding_bounds is None else binding_bounds
+        left = self._narrow_int_bound(node.left, owner_info, binding_bounds)
         if left is None:
             return None
-        right = self._narrow_int_bound(node.right, owner_info)
+        right = self._narrow_int_bound(node.right, owner_info, binding_bounds)
         if right is None:
             return None
         return left * right if node.op == "*" else left + right
 
-    def _narrow_int_bound(self, node, owner_info=None) -> int | None:
+    def _narrow_int_bound(self, node, owner_info=None,
+                          binding_bounds=None) -> int | None:
         """A bound on ``|value|`` of an integer expression the C++ holds in a
         32-bit ``int``, else None (a double, a 64-bit integer, or a shape this
         does not know). Literals and inlined constants are exact, an
         ``input.int`` is its declared range (its default and 2**24 without
         one), and any other runtime integer is ``_RUNTIME_INT_BOUND``."""
+        binding_bounds = {} if binding_bounds is None else binding_bounds
         if isinstance(node, NumberLiteral):
             value = node.value
             if type(value) is int and self._int_fits_int32(value):
@@ -803,19 +807,43 @@ class TypeInferer:
         if isinstance(node, UnaryOp):
             if node.op != "-":
                 return None
-            return self._narrow_int_bound(node.operand, owner_info)
+            return self._narrow_int_bound(node.operand, owner_info, binding_bounds)
         if isinstance(node, BinOp):
             if node.op not in ("+", "-", "*"):
                 return None
-            bound = self._int_arith_bound(node, owner_info)
+            bound = self._int_arith_bound(node, owner_info, binding_bounds)
             # A node past int32 is computed in 64 bits: no longer 32-bit.
             return bound if bound is not None and bound <= (1 << 31) - 1 else None
         if isinstance(node, Ternary):
-            arms = [self._narrow_int_bound(arm, owner_info)
+            arms = [self._narrow_int_bound(arm, owner_info, binding_bounds)
                     for arm in (node.true_val, node.false_val)]
             return None if None in arms else max(arms)
         if isinstance(node, Identifier):
-            return self._narrow_int_name_bound(node.name, owner_info)
+            bound = self._narrow_int_name_bound(node.name, owner_info)
+            if bound is not None:
+                return bound
+            declaration = self.ctx.identifier_binding_nodes.get(id(node))
+            if (not isinstance(declaration, VarDecl)
+                    or self.ctx.identifier_binding_scopes.get(id(node)) == "global"
+                    or declaration.type_hint not in (None, "int")
+                    or (declaration.annotations or {}).get(FLOAT_REASSIGNMENT)):
+                return None
+            binding = self._int_value_binding(node, owner_info)
+            if binding is None:
+                return None
+            key, values = binding
+            if key not in binding_bounds:
+                # A shadow's own writes decide its family, not a same-named
+                # global. Memoize shared declarations; a cycle alone proves
+                # no bound and never starts another walk of its writes.
+                binding_bounds[key] = None
+                bounds = [self._narrow_int_bound(value, owner, binding_bounds)
+                          for value, owner in values]
+                if bounds and all(value is not None for value in bounds):
+                    candidate = max(self._RUNTIME_INT_BOUND, *bounds)
+                    if self._int_fits_int32(candidate):
+                        binding_bounds[key] = candidate
+            return binding_bounds[key]
         return None
 
     @contextlib.contextmanager
@@ -1006,6 +1034,16 @@ class TypeInferer:
         if isinstance(expr, (Assignment, VarDecl)):
             return self._crosses_wide_int_boundary(expr.value, owner, seen)
         if isinstance(expr, Identifier):
+            declaration = self.ctx.identifier_decl_bindings.get(id(expr))
+            if (owner is not None and expr.name in owner.node.params
+                    and declaration in (None, (id(owner.node), expr.name))):
+                index = owner.node.params.index(expr.name)
+                # A scalar parameter's emitted width is the boundary,
+                # including one widened by a literal actual. History
+                # parameters keep their existing arithmetic lowering.
+                return (self._param_is_integer_scalar(owner, index)
+                        and self._func_param_int_cpp_type(
+                            owner, index, None) == "int64_t")
             binding = self._int_value_binding(expr, owner)
             if binding is not None:
                 # Different reads share one declaration's whole write list.
@@ -1016,9 +1054,6 @@ class TypeInferer:
                 return any(self._crosses_wide_int_boundary(
                     value, lexical_owner, seen)
                     for value, lexical_owner in binding[1])
-            if owner is not None and expr.name in owner.node.params:
-                return (owner.name, owner.node.params.index(expr.name)) in (
-                    self._wide_int_provenance()[1])
             return False
         if isinstance(expr, MemberAccess):
             type_name = self._udt_receiver_type_name(expr.object, owner)
@@ -2791,19 +2826,20 @@ class TypeInferer:
         if handle is not None:
             return handle
         sym = self._variable_symbol(name)
-        # A float or bool an epoch reaches keeps its type: the analyzer types
-        # every request.security value float (a double holds an epoch
-        # exactly), and a name is keyed by spelling across scopes.
-        if self._is_int64_builtin_init(name) and (
+        local = self._callable_series_local_symbol(name)
+        local_decl = getattr(local, "_pf_decl_node", None)
+        if local is not None and (
+                sym is None or sym is local or not getattr(sym, "is_series", False)):
+            sym = local
+        else:
+            local_decl = None
+        # A callable-local series follows its declaration and writes. Float,
+        # bool and string declarations retain their own family even when an
+        # epoch reaches them; the same rule applies to requested values.
+        if self._is_int64_builtin_init(name, local_decl) and (
             sym is None
             or sym.pine_type not in (PineType.FLOAT, PineType.BOOL, PineType.STRING)
         ):
-            # So does a function's local, which the global scope does not
-            # hold: ``float x = time`` is a float series (``x - x[1]`` is na
-            # on the first bar, not a difference with the integer sentinel).
-            local = self._callable_series_local_symbol(name) if sym is None else None
-            if local is not None and local.pine_type == PineType.FLOAT:
-                return "double"
             return "int64_t"
         if sym is not None:
             return PINE_TYPE_TO_CPP.get(sym.pine_type, "double")
@@ -2893,6 +2929,8 @@ class TypeInferer:
             else f"func_{owner}"
             for owner, names in getattr(self.ctx, "func_series_vars", {}).items()
             if name in names
+            and (not getattr(self, "_active_func_name", None)
+                 or owner == self._active_func_name)
         }
         found = [
             scope.symbols[name]
@@ -3119,7 +3157,14 @@ class TypeInferer:
         key = ((id(decl), expr.name) if decl is not None
                else self.ctx.identifier_decl_bindings.get(id(expr)))
         if key is not None:
+            if (owner is not None and expr.name in owner.node.params
+                    and key == (id(owner.node), expr.name)):
+                # Parameter declarations have no local initializer/write
+                # list. Let callers consult their actual-argument provenance.
+                return None
             return key, values.get(key, ())
+        if decl is None and id(expr) in self.ctx.identifier_decl_bindings:
+            return None
         scope = owner.name if owner is not None else ""
         if owner is not None and expr.name in owner.node.params:
             return None

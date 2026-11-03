@@ -16,6 +16,75 @@ BOOK = "type Book\n    array<int> stamps\n"
 
 
 ROWS = [
+    # A short difference can survive narrowing both endpoints. Check the
+    # held epoch too, beside same-named callables with int and string results.
+    # The first bar has no predecessor, so both spacing expressions choose 0.
+    pytest.param(
+        '''y() => 0
+spacing() =>
+    y = time
+    [bar_index == 0 ? 0 : y - y[1], y]
+[observed, epoch] = spacing()
+reference = bar_index == 0 ? 0 : time - time[1]
+log.info("epoch {0} {1}", bar_index, epoch)
+log.info("epoch reference {0} {1}", bar_index, time)
+''', ("((na(observed) and na(reference)) or observed == reference)"
+      " and epoch == time"),
+        id="untyped-epoch-local-history-spacing"),
+    pytest.param(
+        '''f() => 0
+spacing() =>
+    int f = time
+    [bar_index == 0 ? 0 : f - f[1], f]
+[observed, epoch] = spacing()
+reference = bar_index == 0 ? 0 : time - time[1]
+log.info("epoch {0} {1}", bar_index, epoch)
+log.info("epoch reference {0} {1}", bar_index, time)
+''', ("((na(observed) and na(reference)) or observed == reference)"
+      " and epoch == time"),
+        id="typed-epoch-local-history-spacing"),
+    pytest.param(
+        '''f(x) => str.tostring(x)
+spacing() =>
+    int f = time
+    [bar_index == 0 ? 0 : f - f[1], f]
+unrelated() =>
+    int f = bar_index
+    f
+[observed, epoch] = spacing()
+reference = bar_index == 0 ? 0 : time - time[1]
+count = unrelated()
+log.info("epoch {0} {1}", bar_index, epoch)
+log.info("epoch reference {0} {1}", bar_index, time)
+''', ("((na(observed) and na(reference)) or observed == reference)"
+      " and epoch == time and count == bar_index"),
+        id="epoch-history-local-named-like-function"),
+    # This feed has 60 bars; the offset exercises a product above int32.
+    pytest.param(
+        '''var int g = 3000000001
+g := g + 0
+var int z = 0
+if bar_index > 1
+    int g = bar_index + 72
+    z := g * 30000001
+observed = z
+reference = bar_index > 1 ? (float(bar_index) + 72.0) * 30000001.0 : 0.0
+''', "observed == reference", id="block-shadow-integer-product-storage"),
+    pytest.param(
+        '''h() =>
+    var int n = 0
+    n += 1
+    n
+g() =>
+    n = time
+    n
+observed = request.security(syminfo.tickerid, "15", h())
+reference = bar_index + 1
+epoch = g()
+log.info("epoch {0} {1}", bar_index, epoch)
+log.info("epoch reference {0} {1}", bar_index, time)
+''', "observed == reference and epoch == time",
+        id="requested-counter-beside-same-named-epoch-local"),
     pytest.param(
         '''start = input.time(timestamp("2020-01-01T00:00:00"), "Start")
 stop = input.time(timestamp("2034-07-01T00:00:00"), "Stop")
@@ -61,7 +130,7 @@ reference = time
     pytest.param(
         BOOK + '''var b = Book.new(array.new<int>())
 array.push(value = time, id = b.stamps)
-observed = b.stamps.get(0)
+observed = b.stamps.get(b.stamps.size() - 1)
 reference = time
 ''', "observed == reference", id="array-field-keyword-push"),
     pytest.param(
