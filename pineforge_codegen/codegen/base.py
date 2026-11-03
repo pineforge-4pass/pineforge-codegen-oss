@@ -458,6 +458,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for stmt in ctx.ast.body
             if isinstance(stmt, TupleAssign)
         }
+        self._tuple_decl_nodes: dict[int, TupleAssign] = {
+            id(node): node for node in self._walk_ast(ctx.ast)
+            if isinstance(node, TupleAssign)
+        }
+        self._direct_program_tuple_bindings: dict[str, tuple[TupleAssign, int]] = {
+            name: (stmt, index)
+            for stmt in ctx.ast.body
+            if isinstance(stmt, TupleAssign)
+            for index, name in enumerate(stmt.names)
+            if name != "_"
+        }
         self._direct_program_tuple_binding_names: set[str] = {
             name
             for stmt in ctx.ast.body
@@ -5915,7 +5926,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     lines.append(f"    {udt_cpp} {safe} = {udt_cpp}{{}};")
             else:
                 expr = self.ctx.global_expr_map.get(name) if hasattr(self.ctx, "global_expr_map") else None
-                if self._global_color_hint(name):
+                tuple_cpp_type = self._ordinary_global_tuple_cpp_type(name)
+                if tuple_cpp_type is not None:
+                    cpp_type = tuple_cpp_type
+                elif self._global_color_hint(name):
                     cpp_type = "int64_t"
                 elif self._global_bool_hint(name):
                     cpp_type = "bool"

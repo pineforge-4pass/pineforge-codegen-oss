@@ -111,6 +111,7 @@ from .tables import (
     TA_RETURNS_BOOL,
     TA_TUPLE_FIELDS,
     MATRIX_RETURNING_METHODS,
+    PINE_TYPE_TO_CPP,
 )
 
 # Sentinel for "no block-scoped overlay was activated" so an empty saved map
@@ -1116,6 +1117,7 @@ class StmtVisitor:
         # targets otherwise bypass the ordinary identifier assignment path.
         target_name = self._get_target_name(node.target)
         self._validate_matrix_reassignment(node, target_name)
+        tuple_cpp_type = self._lexical_tuple_cpp_type(node.target)
 
         # If/switch expression in assignment: x := if cond ...
         if isinstance(node.value, (IfStmt, SwitchStmt)) and node.op == ":=":
@@ -1129,10 +1131,12 @@ class StmtVisitor:
                 target_name is not None
                 and self._binding_is_series(target_name, safe)
             )
-            selection_cpp_type = self._nullable_collection_target_cpp_type(
-                name=target_name,
-                target_node=node.target if target_name is None else None,
-            )
+            selection_cpp_type = tuple_cpp_type
+            if selection_cpp_type is None:
+                selection_cpp_type = self._nullable_collection_target_cpp_type(
+                    name=target_name,
+                    target_node=node.target if target_name is None else None,
+                )
             if selection_cpp_type is None:
                 selection_cpp_type = self._udt_target_cpp_type(
                     target_name=target_name,
@@ -1287,13 +1291,15 @@ class StmtVisitor:
             # a double NaN is stored into an int/int64_t/bool member (UB, defeats
             # is_na<T>()). Only computed for bare na — every other RHS is
             # unaffected.
-            tct = self._nullable_collection_target_cpp_type(name=target_name)
+            tct = tuple_cpp_type or self._nullable_collection_target_cpp_type(
+                name=target_name,
+            )
             if tct is None:
                 tct = self._udt_target_cpp_type(target_name=target_name)
             if tct is None and self._is_na_expr(node.value):
                 tct = self._na_reassign_cpp_type(target_name)
             val_cpp = self._visit_rhs_value(node.value, target_name, target_cpp_type=tct)
-            int_slot = self._int_slot_cpp_type(target_name)
+            int_slot = self._int_slot_cpp_type(target_name, tuple_cpp_type)
             if node.op == ":=":
                 val_cpp = self._coerce_int_slot(val_cpp, node.value, int_slot)
                 lines.append(f"{pad}{self._array_journal_initializer(safe, val_cpp)}")
@@ -1319,13 +1325,15 @@ class StmtVisitor:
                     else:
                         lines.append(f"{pad}{safe} {node.op} {val_cpp};")
         else:
-            tct = self._nullable_collection_target_cpp_type(name=target_name)
+            tct = tuple_cpp_type or self._nullable_collection_target_cpp_type(
+                name=target_name,
+            )
             if tct is None:
                 tct = self._udt_target_cpp_type(target_name=target_name)
             if tct is None and self._is_na_expr(node.value):
                 tct = self._na_reassign_cpp_type(target_name)
             val_cpp = self._visit_rhs_value(node.value, target_name, target_cpp_type=tct)
-            int_slot = self._int_slot_cpp_type(target_name)
+            int_slot = self._int_slot_cpp_type(target_name, tuple_cpp_type)
             if node.op == ":=":
                 val_cpp = self._coerce_int_slot(val_cpp, node.value, int_slot)
                 lines.append(f"{pad}{safe} = {val_cpp};")
@@ -1357,24 +1365,19 @@ class StmtVisitor:
         # (codegen/collection_history.py).
         for statement in self._collection_history_decl_statements(node):
             lines.append(f"{pad}{statement}")
-        is_top_level = any(id(node) == id(stmt) for stmt in self.ctx.ast.body)
+        is_top_level = id(node) in self._direct_program_tuple_decl_nodes
         global_targets = (
-            set(getattr(self.ctx, "ordinary_global_binding_names", set()))
-            & (self._qualified_func_var_raw_names
-               | self._callable_global_tuple_names)
+            {name for name in node.names if name != "_"}
             if is_top_level
             else set()
         )
         security_result_fields: list[str] | None = None
 
-        # Exact supported request.security tuples are authoritative Program
-        # globals: a later UDF reads their class-member storage, so a local
-        # structured binding would shadow the members with fresh values while
-        # leaving the UDF-visible state stale. Keep this narrow to security
-        # tuples whose analyzer metadata proves a supported helper family, an
-        # exact direct literal, or a known TA tuple result. Non-security
-        # elements without a callable global read or a storage collision
-        # retain their established local destructuring behavior.
+        # Every direct Program tuple declaration writes authoritative member
+        # storage, independently of history or later UDF reads. Exact node
+        # ownership keeps same-spelled function/block tuples lexical.
+        # Requested TA tuples additionally expose named result fields rather
+        # than std::tuple elements.
         if is_top_level and isinstance(node.value, FuncCall):
             func_name, namespace = self._resolve_callee(node.value.callee)
             if namespace == "request" and func_name == "security":
@@ -1399,44 +1402,6 @@ class StmtVisitor:
                     None,
                 )
                 if info is not None:
-                    tuple_size = info.get("tuple_size", 0)
-                    tuple_types = tuple(
-                        info.get("tuple_element_types", ()) or ()
-                    )
-                    numeric_tuple = (
-                        tuple_size >= 2
-                        and len(tuple_types) == tuple_size
-                        and all(
-                            item in (PineType.INT, PineType.FLOAT)
-                            for item in tuple_types
-                        )
-                    )
-                    bool_tuple = (
-                        tuple_size >= 2
-                        and len(tuple_types) == tuple_size
-                        and all(item == PineType.BOOL for item in tuple_types)
-                    )
-                    # A helper tuple mixing bool, string and numeric
-                    # elements (the analyzer admits nothing else).
-                    mixed_helper_tuple = (
-                        not isinstance(expr_node, TupleLiteral)
-                        and info.get("returns_tuple", False)
-                        and tuple_size >= 2
-                        and len(tuple_types) == tuple_size
-                    )
-                    exact_direct_tuple = (
-                        isinstance(expr_node, TupleLiteral)
-                        and tuple_size >= 2
-                        and len(tuple_types) == tuple_size
-                        and all(
-                            item in (
-                                PineType.INT,
-                                PineType.FLOAT,
-                                PineType.BOOL,
-                            )
-                            for item in tuple_types
-                        )
-                    )
                     ta_site = self._get_ta_site(expr_node)
                     known_ta_tuple = (
                         ta_site is not None
@@ -1446,18 +1411,8 @@ class StmtVisitor:
                         security_result_fields = TA_TUPLE_FIELDS[
                             self._ta_name_from_site(ta_site)
                         ]
-                    if (
-                        numeric_tuple
-                        or bool_tuple
-                        or mixed_helper_tuple
-                        or exact_direct_tuple
-                        or known_ta_tuple
-                    ):
-                        global_targets.update(
-                            name for name in node.names if name != "_"
-                        )
 
-        def emit_call_tuple(call_expr: str) -> None:
+        def emit_call_tuple(call_expr: str, *, decompose: bool = False) -> None:
             """Destructure once, routing exact history elements to Series.
 
             A structured binding always creates scalar C++ locals, which would
@@ -1489,6 +1444,13 @@ class StmtVisitor:
             temp = f"_tuple_result_{self._tuple_assign_counter}"
             self._tuple_assign_counter += 1
             lines.append(f"{pad}auto {temp} = {call_expr};")
+            elements = [f"{temp}_elem_{idx}" for idx in range(len(node.names))]
+            if decompose:
+                # An ordinary helper can forward a requested TA result
+                # struct as well as a std::tuple. Decompose the materialized
+                # result by reference, preserving either result's element
+                # types without calling the helper again.
+                lines.append(f"{pad}auto& [{', '.join(elements)}] = {temp};")
             for idx, name in enumerate(node.names):
                 if name == "_":
                     continue
@@ -1498,6 +1460,7 @@ class StmtVisitor:
                         security_result_fields is not None
                         and idx < len(security_result_fields)
                     )
+                    else elements[idx] if decompose
                     else f"std::get<{idx}>({temp})"
                 )
                 safe = self._safe_name(name)
@@ -1599,32 +1562,21 @@ class StmtVisitor:
                 return
             if func_name and namespace is None and func_name in self._func_names:
                 call_expr = self._visit_func_call(node.value)
-                emit_call_tuple(call_expr)
+                emit_call_tuple(call_expr, decompose=True)
                 return
 
-            # UDT instance method returning a tuple: ``[a, b, c] = receiver.method(...)``.
-            # The plain-function branch above misses this because _resolve_callee
-            # returns ``("method", "receiver")`` for ``recv.method(...)``, not
-            # ``(key, None)``. We resolve the receiver's UDT type and look up
-            # the method-key ``TypeName.methodName`` in the FuncInfo map; when
-            # its FuncInfo carries ``returns_tuple=True`` we know
-            # ``_visit_func_call`` has already lowered the call as
-            # ``_udt_TypeName_method(receiver, ...)`` returning
-            # ``std::tuple<...>``, so structured bindings drop in.
-            # Probe: data/validation/udt-method-probe-17-tuple-return-destructure.
+            # Typed receiver methods return the same tuple as an ordinary
+            # helper. Resolve them as calls do, including scalar receivers
+            # whose lexical UDT metadata is an explicit tombstone.
             callee = node.value.callee
             if isinstance(callee, MemberAccess):
-                recv_spec = self._type_spec_from_expr(callee.object)
-                receiver_name = method_receiver_type_name(recv_spec)
-                if receiver_name is not None:
-                    method_key = f"{receiver_name}.{callee.member}"
-                    fi_u = self._func_info_map.get(method_key)
-                    if (fi_u is not None
-                            and getattr(fi_u, "is_udt_method", False)
-                            and getattr(fi_u, "returns_tuple", False)):
-                        call_expr = self._visit_func_call(node.value)
-                        emit_call_tuple(call_expr)
-                        return
+                fi_u = self._tuple_call_info(node.value)
+                if (fi_u is not None
+                        and getattr(fi_u, "is_udt_method", False)
+                        and getattr(fi_u, "returns_tuple", False)):
+                    call_expr = self._visit_func_call(node.value)
+                    emit_call_tuple(call_expr, decompose=True)
+                    return
 
         lines.append(f"{pad}/* unsupported tuple assignment */")
 
@@ -1635,26 +1587,99 @@ class StmtVisitor:
         self._tuple_placeholder_counter = index + 1
         return f"_tuple_unused_{index}"
 
+    def _tuple_call_info(self, call: FuncCall):
+        """One callable identity for tuple storage and tuple evaluation."""
+        if isinstance(call.callee, Identifier):
+            return self._func_info_map.get(call.callee.name)
+        if isinstance(call.callee, MemberAccess):
+            # Member layout is queried outside the caller's lexical emission
+            # scope. Its primitive receiver may have no TypeSpec there (an
+            # input is one such binding), although analysis already resolved
+            # this exact call. Reuse that identity before attempting inference.
+            methods = self._wide_method_call_bindings().get(id(call), ())
+            if len(methods) == 1:
+                return methods[0][0]
+            _receiver_spec, method_info = self._typed_user_method_info(
+                call.callee.object, call.callee.member,
+            )
+            return method_info
+        return None
+
     def _tuple_binding_cpp_types(self, node: TupleAssign) -> list[str]:
         """Exact supported tuple element types for later lexical operations."""
         count = len(node.names)
+        if isinstance(node.value, (IfStmt, SwitchStmt)):
+            return self._infer_selection_tuple_types(node.value, count)
         if not isinstance(node.value, FuncCall):
             return ["double"] * count
-        func_name, namespace = self._resolve_callee(node.value.callee)
-        fi = None
-        if namespace is None:
-            fi = self._func_info_map.get(func_name)
-        elif isinstance(node.value.callee, MemberAccess):
-            recv_spec = self._type_spec_from_expr(node.value.callee.object)
-            receiver_name = method_receiver_type_name(recv_spec)
-            if receiver_name is not None:
-                fi = self._func_info_map.get(
-                    f"{receiver_name}.{node.value.callee.member}"
-                )
+        fi = self._tuple_call_info(node.value)
         if (fi is not None
                 and fi.node is not None
                 and getattr(fi, "returns_tuple", False)):
-            return self._infer_tuple_types(fi.node, count)
+            # Member layout queries run outside the callee's emission scope.
+            # Use the same declared/call-site parameter families as its
+            # emitted variant, then restore the caller's lexical context.
+            call_site = self._callable_target_callsite_idx(fi, node.value)
+            declared = self.ctx.func_declared_param_type_specs.get(fi.name, ())
+            variant = self.ctx.func_callsite_param_types.get(
+                (fi.name, call_site), ()
+            )
+            attrs = (
+                "_current_func_param_types", "_current_func_param_specs",
+                "_current_func_series_param_types", "_current_func_local_types",
+                "_active_func_name",
+            )
+            saved = {attr: getattr(self, attr, None) for attr in attrs}
+            param_types = {}
+            param_specs = {}
+            series_types = {}
+            series_params = self.ctx.func_series_vars.get(fi.name, set())
+            for index, name in enumerate(fi.node.params):
+                spec = (
+                    fi.param_type_specs[index]
+                    if index < len(fi.param_type_specs) else None
+                )
+                if name in series_params:
+                    cpp_type = self._series_param_element_cpp_type(
+                        fi, index, call_site
+                    )
+                    series_types[name] = cpp_type
+                elif ((index >= len(declared) or declared[index] is None)
+                      and index < len(variant)
+                      and variant[index] in (
+                          PineType.INT, PineType.FLOAT, PineType.BOOL,
+                          PineType.STRING, PineType.COLOR,
+                      )):
+                    cpp_type = {
+                        PineType.INT: "int64_t", PineType.FLOAT: "double",
+                        PineType.BOOL: "bool", PineType.STRING: "std::string",
+                        PineType.COLOR: "int64_t",
+                    }[variant[index]]
+                elif spec is not None:
+                    cpp_type = self._type_spec_to_cpp(
+                        self._array_param_spec(fi, index, spec)
+                    )
+                    cpp_type = self._wide_declared_int_param(fi, index, cpp_type)
+                else:
+                    cpp_type = PINE_TYPE_TO_CPP.get(
+                        fi.param_types[index]
+                        if index < len(fi.param_types) else PineType.UNKNOWN,
+                        "double",
+                    )
+                    cpp_type = self._wide_declared_int_param(fi, index, cpp_type)
+                param_types[name] = cpp_type
+                if spec is not None:
+                    param_specs[name] = spec
+            self._current_func_param_types = param_types
+            self._current_func_param_specs = param_specs
+            self._current_func_series_param_types = series_types
+            self._current_func_local_types = {}
+            self._active_func_name = fi.name
+            try:
+                return self._infer_tuple_types(fi.node, count)
+            finally:
+                for attr, value in saved.items():
+                    setattr(self, attr, value)
         return ["double"] * count
 
     def _push_block_var_remap(self, owner):

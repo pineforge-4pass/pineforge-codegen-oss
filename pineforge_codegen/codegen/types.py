@@ -45,6 +45,7 @@ from ..ast_nodes import (
     MemberAccess, MethodDef, NaLiteral, NumberLiteral, StringLiteral, SwitchStmt,
     Subscript, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, WhileStmt,
 )
+from ..analyzer.value_bindings import ValueBindings
 from ..collection_history import history_annotation
 from ..cpp_names import cpp_identifier_fragment
 from ..errors import Phase
@@ -1280,10 +1281,18 @@ class TypeInferer:
                     continue
                 for info, bound in self._wide_callable_args(call):
                     for index, value in bound:
-                        written = (
-                            isinstance(call.callee, Identifier)
-                            and (index < len(call.args)
-                                 or info.node.params[index] in call.kwargs))
+                        if isinstance(call.callee, MemberAccess):
+                            # A method's receiver occupies parameter zero;
+                            # its written arguments start at parameter one.
+                            # Keep their integer provenance just as for a
+                            # plain call, including keyword-bound actuals.
+                            written = (
+                                index == 0 or index - 1 < len(call.args)
+                                or info.node.params[index] in call.kwargs)
+                        else:
+                            written = (
+                                index < len(call.args)
+                                or info.node.params[index] in call.kwargs)
                         parameters.setdefault((info.name, index), []).append(
                             (value, owner, written))
                 pair = self._array_receiver_and_value(call)
@@ -3593,11 +3602,21 @@ class TypeInferer:
         if isinstance(expr, Identifier):
             binding = self._int_value_binding(expr, owner_info)
             if binding is not None:
-                key, values = binding
-                key = ("binding", key, call_site_idx)
+                declaration, values = binding
+                key = ("binding", declaration, call_site_idx)
                 if key in seen:
                     return False
                 seen.add(key)
+                tuple_binding = self._direct_program_tuple_bindings.get(expr.name)
+                if (not getattr(self, "_wide_int_epoch_only", False)
+                        and tuple_binding is not None
+                        and declaration == (id(tuple_binding[0]), expr.name)
+                        and self._ordinary_global_tuple_cpp_type(expr.name)
+                        == "int64_t"):
+                    # A later Pine consumer reads this exact member's width,
+                    # including a selected tuple or a typed method result.
+                    # Width alone does not prove epoch provenance for arrays.
+                    return True
                 return any(self._expr_returns_wide_int(
                     value, lexical_owner, seen, call_site_idx)
                     for value, lexical_owner in values)
@@ -4246,6 +4265,76 @@ class TypeInferer:
                 return func_name not in TA_RETURNS_BOOL
         return self._infer_type(node) == "double"
 
+    def _lexical_tuple_cpp_type(self, expr) -> str | None:
+        """The storage of this exact lexical tuple element, including writes.
+
+        A same-spelled Program member cannot type a local tuple consumer.
+        Authored binding metadata also covers assignment targets, which the
+        analyzer's expression visitor need not have visited.
+        """
+        if not isinstance(expr, Identifier):
+            return None
+        # A visited read's current-tree binding wins, including an explicit
+        # None. Unvisited assignment targets retain the lexical annotation.
+        binding = (
+            self.ctx.identifier_decl_bindings[id(expr)]
+            if id(expr) in self.ctx.identifier_decl_bindings
+            else ValueBindings.declaration_of(expr)
+        )
+        if binding is None:
+            return None
+        declaration, name = binding
+        node = self._tuple_decl_nodes.get(declaration)
+        if (node is None
+                or declaration in self._direct_program_tuple_decl_nodes
+                or self._decl_binding_is_series(declaration, name)):
+            return None
+        # Direct TA/request tuples keep their established type contracts.
+        if self._get_ta_site(node.value) is not None:
+            return None
+        if (isinstance(node.value, FuncCall)
+                and self._resolve_callee(node.value.callee)
+                == ("security", "request")):
+            return None
+        active = self.__dict__.setdefault("_lexical_tuple_type_queries", set())
+        if declaration in active:
+            return None
+        active.add(declaration)
+        try:
+            types = self._tuple_binding_cpp_types(node)
+            index = node.names.index(name)
+            return types[index] if index < len(types) else None
+        finally:
+            active.remove(declaration)
+
+    def _ordinary_global_tuple_cpp_type(self, name: str) -> str | None:
+        """The declared element type of an ordinary Program-global tuple.
+
+        Infer the element, rather than the whole tuple-returning call. This
+        shares the helper/selection tuple contract, including wide-int
+        provenance, with both member layout and later scalar writes.
+        Requested and TA tuples retain their existing storage contracts.
+        """
+        binding = self._direct_program_tuple_bindings.get(name)
+        if binding is None:
+            return None
+        node, index = binding
+        if self._get_ta_site(node.value) is not None:
+            return None
+        if (isinstance(node.value, FuncCall)
+                and self._resolve_callee(node.value.callee)
+                == ("security", "request")):
+            return None
+        active = self.__dict__.setdefault("_global_tuple_type_queries", set())
+        if id(node) in active:
+            return None
+        active.add(id(node))
+        try:
+            types = self._tuple_binding_cpp_types(node)
+            return types[index] if index < len(types) else None
+        finally:
+            active.remove(id(node))
+
     def _slot_scalar_cpp_type(self, name: str) -> str | None:
         """The C++ type of the storage a write to the scalar ``name`` lands in.
 
@@ -4270,6 +4359,9 @@ class TypeInferer:
         for gname, gptype in self.ctx.global_var_decls:
             if gname != name:
                 continue
+            tuple_cpp_type = self._ordinary_global_tuple_cpp_type(name)
+            if tuple_cpp_type is not None:
+                return tuple_cpp_type
             if self._global_color_hint(name):
                 return "int64_t"
             if self._global_bool_hint(name):
@@ -5139,6 +5231,9 @@ class TypeInferer:
         if isinstance(node, NaLiteral):
             return "double"
         if isinstance(node, Identifier):
+            lexical_tuple_type = self._lexical_tuple_cpp_type(node)
+            if lexical_tuple_type is not None:
+                return lexical_tuple_type
             tuple_binding = (node.annotations or {}).get("tuple_builtin_binding")
             tuple_type = (
                 getattr(self, "_tuple_binding_cpp_types_by_name", {}).get(node.name)
@@ -5441,6 +5536,48 @@ class TypeInferer:
             return "double"
         return "double"
 
+    def _tuple_literal_element_cpp_type(
+        self, literal: TupleLiteral, index: int,
+        local_types: dict[str, str], owner_info,
+    ) -> str:
+        """An analyzed tuple element, preserving local and variant storage."""
+        expr = literal.elements[index]
+        if isinstance(expr, Identifier) and expr.name in local_types:
+            cpp_type = local_types[expr.name]
+        else:
+            cpp_type = self._infer_type(expr)
+            element_types = (literal.annotations or {}).get(
+                "pf_tuple_element_types", ()
+            )
+            owner = getattr(owner_info, "node", None)
+            hints = (getattr(owner, "annotations", None) or {}).get(
+                "param_type_hints", ()
+            )
+            untyped = {
+                name for position, name in enumerate(getattr(owner, "params", ()))
+                if position >= len(hints) or not hints[position]
+            }
+            variant_read = any(
+                isinstance(child, Identifier) and child.name in untyped
+                for child in self._walk_ast(expr)
+            )
+            if (not variant_read and index < len(element_types)
+                    and element_types[index] in (
+                        PineType.INT, PineType.FLOAT, PineType.BOOL,
+                        PineType.STRING, PineType.COLOR,
+                    )):
+                annotated_type = PINE_TYPE_TO_CPP[element_types[index]]
+                # Pine's scalar family carries no integer width, and some
+                # integer-returning builtins still have a coarse FLOAT family
+                # in analysis. Do not replace an established wide integer
+                # representation with either int or double at the tuple
+                # boundary; bool/string/color metadata still refines its
+                # respective family.
+                if (cpp_type != "int64_t"
+                        or annotated_type not in ("int", "double")):
+                    cpp_type = annotated_type
+        return self._widen_int_slot(cpp_type, expr, owner_info)
+
     def _infer_tuple_types(self, func_node: FuncDef, count: int) -> list[str]:
         """Infer the C++ type of each element returned by a tuple-returning function.
 
@@ -5454,9 +5591,15 @@ class TypeInferer:
         if not func_node.body:
             return ["double"] * count
 
+        owner_info = next(
+            (info for info in self._func_info_map.values()
+             if getattr(info, "node", None) is func_node), None)
         local_types: dict[str, str] = {}
         for stmt in self._walk_ast(func_node):
             if isinstance(stmt, VarDecl) and stmt.value is not None and stmt.name:
+                if (stmt.annotations or {}).get(FLOAT_REASSIGNMENT):
+                    local_types[stmt.name] = "double"
+                    continue
                 captured = self._callable_collection_bindings.get(id(stmt))
                 if (captured is not None
                         and captured.kind in {"array", "map", "matrix"}):
@@ -5473,7 +5616,7 @@ class TypeInferer:
                 for name, cpp_t in zip(
                     stmt.names,
                     self._infer_selection_tuple_types(
-                        stmt.value, len(stmt.names), local_types
+                        stmt.value, len(stmt.names), local_types, owner_info
                     ),
                 ):
                     if name != "_":
@@ -5500,20 +5643,15 @@ class TypeInferer:
                 return self._security_tuple_element_cpp_types(
                     count, item.get("tuple_element_types", ()))
         if expr is not None:
-            owner_info = next(
-                (info for info in self._func_info_map.values()
-                 if getattr(info, "node", None) is func_node), None)
-            result: list[str] = []
-            for e in expr.elements:
-                if isinstance(e, Identifier) and e.name in local_types:
-                    cpp_t = local_types[e.name]
-                else:
-                    cpp_t = self._infer_type(e)
-                result.append(self._widen_int_slot(cpp_t, e, owner_info))
-            return result
+            return [
+                self._tuple_literal_element_cpp_type(
+                    expr, index, local_types, owner_info
+                )
+                for index in range(len(expr.elements))
+            ]
         if isinstance(last_stmt, (IfStmt, SwitchStmt)):
             return self._infer_selection_tuple_types(
-                last_stmt, count, local_types
+                last_stmt, count, local_types, owner_info
             )
         if (isinstance(last_stmt, TupleAssign)
                 and isinstance(last_stmt.value, FuncCall)
@@ -5527,16 +5665,22 @@ class TypeInferer:
 
     def _infer_selection_tuple_types(
         self, node, count: int, local_types: dict[str, str] | None = None,
+        owner_info=None,
     ) -> list[str]:
         """C++ element types of a tuple-valued if/switch.
 
         Each arm ends in a ``[a, b]`` literal, a tuple-returning user
         function call or a nested selection (the analyzer's
         ``_selection_tuple_shape``). Arms agreeing on a position keep that
-        type; numeric arms that differ widen to ``double``; any other
-        disagreement keeps the first arm's type.
+        type; integer arms retain their widest integer width, other numeric
+        arms that differ widen to ``double``; any other disagreement keeps
+        the first arm's type.
         """
         local_types = local_types or {}
+        if owner_info is None:
+            owner_info = self._func_info_map.get(
+                getattr(self, "_active_func_name", None)
+            )
         if isinstance(node, IfStmt):
             arms = [node.body] + ([node.else_body] if node.else_body else [])
         elif isinstance(node, SwitchStmt):
@@ -5553,10 +5697,10 @@ class TypeInferer:
             expr = terminal.expr if isinstance(terminal, ExprStmt) else terminal
             if isinstance(expr, TupleLiteral) and len(expr.elements) == count:
                 per_arm.append([
-                    local_types[e.name]
-                    if isinstance(e, Identifier) and e.name in local_types
-                    else self._infer_type(e)
-                    for e in expr.elements
+                    self._tuple_literal_element_cpp_type(
+                        expr, index, local_types, owner_info
+                    )
+                    for index in range(count)
                 ])
             elif isinstance(expr, FuncCall) and isinstance(expr.callee, Identifier):
                 fi = self._func_info_map.get(expr.callee.name)
@@ -5566,7 +5710,9 @@ class TypeInferer:
                     per_arm.append(self._infer_tuple_types(fi.node, count))
             elif isinstance(expr, (IfStmt, SwitchStmt)):
                 per_arm.append(
-                    self._infer_selection_tuple_types(expr, count, local_types)
+                    self._infer_selection_tuple_types(
+                        expr, count, local_types, owner_info
+                    )
                 )
         if not per_arm:
             return ["double"] * count
@@ -5575,6 +5721,8 @@ class TypeInferer:
             found = [types[position] for types in per_arm]
             if len(set(found)) == 1:
                 result.append(found[0])
+            elif set(found) <= {"int", "int64_t"}:
+                result.append("int64_t")
             elif set(found) <= {"double", "int", "int64_t"}:
                 result.append("double")
             else:

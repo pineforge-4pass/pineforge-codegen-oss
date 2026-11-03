@@ -30,7 +30,7 @@ from ..symbols import (
     unify_pine_types,
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
-from ..limits import TimeBudget, iter_ast_nodes
+from ..limits import TimeBudget, iter_ast_nodes, syntax_children
 from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
 from ..security_contexts import (
     PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series,
@@ -1885,9 +1885,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         Same-typed primitive non-history declarations can use an ordinary C++
         lexical local once the analyzer preserves the outer symbol (see the
         scoped control-flow visitors below). Aggregate/UDT registries, local
-        history Series storage, and cross-type codegen typing remain raw-name
-        keyed, so allowing those shapes to shadow a direct script binding could
-        silently retarget the class member or emit invalid C++.
+        history Series storage, and scalar declaration typing remain raw-name
+        keyed. Ordinary scalar tuple elements already have lexical C++ storage
+        and declaration-exact consumer types, so their distinct bindings need
+        not share the direct binding's primitive type.
         """
         def tuple_binding_type(
             stmt: TupleAssign, name: str
@@ -1896,6 +1897,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 index = stmt.names.index(name)
             except ValueError:
                 index = -1
+            declared_types = self._tuple_element_types_by_node.get(id(stmt), ())
+            if 0 <= index < len(declared_types):
+                pine_type = declared_types[index]
+                return pine_type, TypeSpec.primitive(pine_type.value)
             element_types = self._tuple_element_types_by_node.get(
                 id(stmt.value), ()
             )
@@ -1911,16 +1916,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             )
             return pine_type, TypeSpec.primitive(pine_type.value)
 
-        direct: dict[str, tuple[PineType, TypeSpec | None]] = {}
+        direct: dict[str, tuple[ASTNode, PineType, TypeSpec | None]] = {}
         for stmt in self._ast.body:
             if isinstance(stmt, VarDecl):
-                direct[stmt.name] = self._var_decl_types_by_node.get(
-                    id(stmt), (PineType.UNKNOWN, None)
+                direct[stmt.name] = (
+                    stmt, *self._var_decl_types_by_node.get(
+                        id(stmt), (PineType.UNKNOWN, None)
+                    ),
                 )
             elif isinstance(stmt, TupleAssign):
                 for name in stmt.names:
                     if name != "_":
-                        direct[name] = tuple_binding_type(stmt, name)
+                        direct[name] = (stmt, *tuple_binding_type(stmt, name))
 
         def nested_bindings(
             stmts: list[ASTNode], primitive_mismatch_unsafe: bool
@@ -2055,7 +2062,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 nested_type, nested_spec = self._var_decl_types_by_node.get(
                     id(node), (PineType.FLOAT, None)
                 )
-            direct_type, direct_spec = direct[name]
+            direct_node, direct_type, direct_spec = direct[name]
+            is_lexical_tuple = (
+                isinstance(node, TupleAssign) and node is not direct_node
+            )
             is_exact_series = (
                 (id(node), name) in exact_series
                 or (
@@ -2068,7 +2078,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 for spec in (direct_spec, nested_spec)
             )
             has_incompatible_primitive = (
-                mismatch_unsafe and nested_type != direct_type
+                mismatch_unsafe and not is_lexical_tuple
+                and nested_type != direct_type
                 # The standard corpus uses a loop-local inferred int under
                 # a direct float binding (Hexatrades ``base``).  C++ widens
                 # that RHS safely.  The reverse direction and all other
@@ -2373,23 +2384,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 out |= self._collect_security_mutable_globals(defval, resolving)
             return out
 
-        def walk(value: Any) -> None:
-            nonlocal out
-            if value is None:
-                return
-            if hasattr(value, "__dict__"):
-                out |= self._collect_security_mutable_globals(value, resolving)
-                return
-            if isinstance(value, (list, tuple)):
-                for item in value:
-                    walk(item)
-                return
-            if isinstance(value, dict):
-                for item in value.values():
-                    walk(item)
-
-        for child in vars(node).values():
-            walk(child)
+        # Dependencies live in syntax, not the binding/type metadata retained
+        # on it. In particular tuple element types contain enum objects whose
+        # dictionaries lead back to their enum class. Keep those annotations
+        # for value/type consumers without following them as authored reads.
+        for child in syntax_children(node):
+            out |= self._collect_security_mutable_globals(child, resolving)
 
         return out
 
@@ -5090,6 +5090,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _visit_TupleAssign(self, node: TupleAssign) -> PineType:
         val_type = self._visit(node.value)
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
+        is_program_global = (
+            self._global_scope and self._symbols.current_scope.name == "global"
+        )
         element_types = self._tuple_element_types_by_node.get(id(node.value), ())
         if not element_types and isinstance(node.value, (IfStmt, SwitchStmt)):
             shape = self._selection_tuple_shape(node.value)
@@ -5097,39 +5100,71 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 element_types = shape[1]
         if (not element_types
                 and isinstance(node.value, FuncCall)
+                and isinstance(node.value.callee, MemberAccess)):
+            # Typed receiver methods keep their exact call binding. Their
+            # supported tuple tail was visited while the method scope was
+            # active, so reuse those element types rather than the scalar
+            # return type of the call.
+            for call_id, method_key in self._method_call_bindings:
+                if call_id != id(node.value):
+                    continue
+                info = next(
+                    (item for item in self._func_infos
+                     if item.name == method_key and item.returns_tuple),
+                    None,
+                )
+                if info is not None and info.node is not None and info.node.body:
+                    tail = info.node.body[-1]
+                    tail = tail.expr if isinstance(tail, ExprStmt) else tail
+                    element_types = self._tuple_element_types_by_node.get(id(tail), ())
+                break
+        binding_element_types = element_types
+        if (not element_types
+                and isinstance(node.value, FuncCall)
                 and isinstance(node.value.callee, Identifier)
                 and self._func_returns_tuple.get(node.value.callee.name, False)):
-            # A user function's string elements bind as strings. Its other
-            # families keep the historical double storage of a call tuple.
-            element_types = tuple(
-                PineType.STRING if item == PineType.STRING else PineType.FLOAT
-                for item in self._func_tuple_element_types.get(
-                    node.value.callee.name, ()
+            helper_types = self._func_tuple_element_types.get(
+                node.value.callee.name, ()
+            )
+            binding_element_types = helper_types
+            # Program globals retain each returned family. Lexical tuples
+            # keep their existing inference policy.
+            element_types = (
+                helper_types if is_program_global else tuple(
+                    PineType.STRING if item == PineType.STRING else PineType.FLOAT
+                    for item in helper_types
                 )
             )
 
         is_val_static = self._is_static_expression(node.value)
+        declared_types: list[PineType] = []
 
         for idx, name in enumerate(node.names):
-            if name == "_":
-                continue
-            outer_symbol = self._symbols.resolve(name)
-
             inferred_element_type = (
                 element_types[idx]
                 if idx < len(element_types)
                 else PineType.FLOAT
             )
-            # Tuple bindings historically use double storage for every
-            # numeric element, including integer literals. Preserve that
-            # contract while retaining the bool and string families: a string
-            # element read as a double compared by value (``a == b``) through
-            # a static_cast of a std::string.
+            # The member storing a Program-global element must agree with its
+            # Pine consumers. Codegen retains the corresponding integer width.
+            # Lexical numeric tuples keep their established inference.
             element_type = (
                 inferred_element_type
-                if inferred_element_type in (PineType.BOOL, PineType.STRING)
+                if (is_program_global
+                    or inferred_element_type in (PineType.BOOL, PineType.STRING))
                 else PineType.FLOAT
             )
+            # The shadow-boundary check compares the actual tuple families.
+            # In particular a lexical int tuple remains compatible with a
+            # global int tuple despite its legacy float analysis policy.
+            declared_types.append(
+                binding_element_types[idx]
+                if idx < len(binding_element_types)
+                else element_type
+            )
+            if name == "_":
+                continue
+            outer_symbol = self._symbols.resolve(name)
 
             if self._global_scope and is_val_static:
                 self._static_vars.add(name)
@@ -5167,9 +5202,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # functions / later references resolve — mirroring _visit_VarDecl.
             # Without this the names are never declared and the C++ errors with
             # "use of undeclared identifier".
-            if (self._global_scope
-                    and self._symbols.current_scope.name == "global"
-                    ):
+            if is_program_global:
                 self._ordinary_global_binding_info[name] = (
                     id(node), element_type, node.value,
                 )
@@ -5180,6 +5213,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     name, element_type, False, decl_node=node,
                 )
 
+        self._tuple_element_types_by_node[id(node)] = tuple(declared_types)
         return val_type
 
     # ------------------------------------------------------------------
@@ -8514,7 +8548,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.COLOR
 
     def _visit_TupleLiteral(self, node: TupleLiteral) -> PineType:
-        self._tuple_element_types_by_node[id(node)] = tuple(
+        element_types = tuple(
             self._visit(elem) for elem in node.elements
         )
+        self._tuple_element_types_by_node[id(node)] = element_types
+        node.annotations = {
+            **(node.annotations or {}),
+            "pf_tuple_element_types": element_types,
+        }
         return PineType.FLOAT

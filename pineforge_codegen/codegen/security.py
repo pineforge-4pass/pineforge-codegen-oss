@@ -83,7 +83,7 @@ from ..external_requests import (
     FOOTPRINT_COLUMN_ANNOTATION, RECORDED_KEY_ANNOTATION, REQUEST_REF_ANNOTATION,
 )
 from ..external_requests import _nodes as walk_request_nodes
-from ..limits import iter_ast_nodes
+from ..limits import iter_ast_nodes, syntax_children
 from .helpers import (
     _CPP_COMMENT_OR_LITERAL as _SECURITY_CPP_LITERALS,
     na_preserving_int_cast, unary_sign_cpp,
@@ -6994,29 +6994,19 @@ class SecurityEmitter:
                         (idx, current_sig if inline_helper is True else inline_helper)
                     )
 
-        def walk(value) -> None:
-            if value is None:
-                return
-            if hasattr(value, "__dict__"):
-                self._collect_security_ta_binding_stacks(
-                    value,
-                    resolving,
-                    helper_binding_stack,
-                    collected,
-                    inline_ta_indices,
-                    inline_helper,
-                )
-                return
-            if isinstance(value, (list, tuple)):
-                for item in value:
-                    walk(item)
-                return
-            if isinstance(value, dict):
-                for item in value.values():
-                    walk(item)
-
-        for child in vars(expr_node).values():
-            walk(child)
+        # Binding/type annotations are metadata, not authored dependencies.
+        # Keep them for the consumers above without walking enum internals
+        # or annotation back edges. Reverse the stack-based syntax iterator
+        # to retain the previous field/list/dict traversal order.
+        for child in reversed(list(syntax_children(expr_node))):
+            self._collect_security_ta_binding_stacks(
+                child,
+                resolving,
+                helper_binding_stack,
+                collected,
+                inline_ta_indices,
+                inline_helper,
+            )
         return collected
 
     def _emit_security_rebind_var_decl(
@@ -7403,22 +7393,12 @@ class SecurityEmitter:
                     key = (idx, self._security_binding_stack_signature(binding_stack))
                     occurrences.setdefault(key, []).append(lazy)
 
-            for child in vars(node).values():
-                walk_value(child, lazy, binding_stack, resolving)
-
-        def walk_value(value, lazy: bool, binding_stack, resolving: set[str]) -> None:
-            if value is None or unsafe:
-                return
-            if hasattr(value, "__dict__"):
-                walk(value, lazy, binding_stack, resolving)
-                return
-            if isinstance(value, (list, tuple)):
-                for item in value:
-                    walk_value(item, lazy, binding_stack, resolving)
-                return
-            if isinstance(value, dict):
-                for item in value.values():
-                    walk_value(item, lazy, binding_stack, resolving)
+            # Binding/type annotations are metadata, not authored dependencies.
+            # Keep them for the consumers above without walking enum internals
+            # or annotation back edges. Reverse the stack-based syntax iterator
+            # to retain the previous field/list/dict traversal order.
+            for child in reversed(list(syntax_children(node))):
+                walk(child, lazy, binding_stack, resolving)
 
         walk(expr_node, False, (), set())
         if unsafe:
