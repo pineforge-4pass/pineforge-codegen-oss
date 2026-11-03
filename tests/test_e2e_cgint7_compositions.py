@@ -127,9 +127,13 @@ def test_a_product_both_rules_reach_keeps_mains_form():
     # product that fits int32.
     from tests._numeric_expected import integer_arithmetic
     wide = "((int64_t)(_pna_l) * (_pna_r))"
+    product = integer_arithmetic("n", "*", "3", wide)
+    # Both products require the full result family, original-type guards
+    # and casts, independent of their operand spelling.
+    result_contract = product[product.index("using _pf_val_t = "):]
     assert "auto _pna_l = ([&](auto&& __pf_array)" in lines["v"]
-    assert f"using _pf_val_t = decltype({wide});" in lines["v"]
-    assert integer_arithmetic("n", "*", "3", wide) in lines["q"]
+    assert result_contract in lines["v"]
+    assert product in lines["q"]
 
 
 def _history_series(decl: str, read: str = "g[1]") -> str:

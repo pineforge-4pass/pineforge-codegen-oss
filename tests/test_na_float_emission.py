@@ -281,3 +281,386 @@ def test_unproved_integer_sources_keep_the_emitted_arithmetic_guard(body):
     # Division consumes the original int or int64_t before converting to double.
     # A missing operand must select na before the division, evaluated once.
     assert f"quotient = {integer_arithmetic('observed', '/', '2')};" in cpp
+
+
+_NATIVE_FLOAT_WRITES = (
+    "acceptValue(float item) => item\n"
+    "returnValue({source_type} item) => item\n"
+    "shadowValue({source_type} item) =>\n"
+    "    float shared = na\n"
+    "    shared := item\n"
+    "    shared\n"
+    "method storeValue(array<float> items, float item) =>\n"
+    "    items.set(0, item)\n"
+    "    items.get(0)\n"
+    "var int shared = 19\n"
+    "{declaration}\n"
+    "if close > open\n"
+    "    sourceValue := {missing}\n"
+    "float declaredValue = sourceValue\n"
+    "float assignedValue = na\n"
+    "assignedValue := sourceValue\n"
+    "var float retainedValue = na\n"
+    "retainedValue := sourceValue\n"
+    "float branchValue = 37.25\n"
+    "if high > open\n"
+    "    branchValue := sourceValue\n"
+    "float selectedValue = if high > open\n"
+    "    sourceValue\n"
+    "else\n"
+    "    37.25\n"
+    "float argumentValue = acceptValue(sourceValue)\n"
+    "float returnedValue = returnValue(sourceValue)\n"
+    "float shadowedValue = shadowValue(sourceValue)\n"
+    "items = array.new<float>(1, 37.25)\n"
+    "float byrefValue = items.storeValue(sourceValue)\n"
+    "float loopValue = na\n"
+    "for step = 0 to 1\n"
+    "    loopValue := sourceValue\n"
+    "float identityValue = (sourceValue + 0) * 1\n"
+    "float quotientValue = sourceValue / 2\n"
+    "bool missingValue = na(assignedValue)\n"
+    "float fallbackValue = nz(assignedValue, 37.25)\n"
+    "bool comparisonValue = assignedValue < 5\n"
+    "plot(declaredValue + assignedValue + retainedValue + branchValue + selectedValue)\n"
+    "plot(argumentValue + returnedValue + shadowedValue + byrefValue + loopValue)\n"
+    "plot(identityValue + quotientValue + fallbackValue)\n"
+)
+
+
+_NATIVE_FLOAT_WRITES_DRIVER = r"""
+#include <cmath>
+#include <cstdio>
+#include <type_traits>
+
+int main() {
+    // Each strategy consumes a different bar. The close selects missingness
+    // in Pine, and supplies the finite value for the int32/float cases.
+    const double closes[] = {CLOSE_INPUTS};
+    for (unsigned index = 0; index < sizeof(closes) / sizeof(closes[0]); ++index) {
+        GeneratedStrategy strategy;
+        static_assert(std::is_same_v<decltype(strategy.sourceValue), SOURCE_CPP_TYPE>);
+        static_assert(std::is_same_v<decltype(strategy.declaredValue), double>);
+        static_assert(std::is_same_v<decltype(strategy.assignedValue), double>);
+        static_assert(std::is_same_v<decltype(strategy.retainedValue), double>);
+        static_assert(std::is_same_v<decltype(strategy.branchValue), double>);
+        static_assert(std::is_same_v<decltype(strategy.selectedValue), double>);
+        static_assert(std::is_same_v<decltype(strategy.argumentValue), double>);
+        static_assert(std::is_same_v<decltype(strategy.returnedValue), double>);
+        static_assert(std::is_same_v<decltype(strategy.shadowedValue), double>);
+        static_assert(std::is_same_v<decltype(strategy.byrefValue), double>);
+        static_assert(std::is_same_v<decltype(strategy.loopValue), double>);
+        pineforge::Bar bar{
+            100.0, 102.0, closes[index] - 1.0, closes[index], 10.0,
+            1704067200000LL + index * 60000LL,
+        };
+        strategy.run(&bar, 1);
+        if (!strategy.last_error().empty()) return 1;
+        const bool missing = bar.close > bar.open;
+        const double expected = EXPECTED_INPUT;
+        const double values[] = {
+            strategy.declaredValue, strategy.assignedValue,
+            strategy.retainedValue, strategy.branchValue,
+            strategy.selectedValue, strategy.argumentValue,
+            strategy.returnedValue, strategy.shadowedValue,
+            strategy.byrefValue, strategy.loopValue, strategy.identityValue,
+        };
+        const char* names[] = {
+            "declaration", "assignment", "var assignment", "branch", "if expression",
+            "float argument", "return", "shadowed local", "collection method",
+            "loop", "arithmetic",
+        };
+        for (unsigned slot = 0; slot < sizeof(values) / sizeof(values[0]); ++slot) {
+            if (missing ? !std::isnan(values[slot]) : values[slot] != expected) {
+                std::printf("%s input=%u missing=%d expected=%.17g actual=%.17g\n",
+                            names[slot], index, missing, expected, values[slot]);
+                return 2;
+            }
+        }
+        if (missing ? !std::isnan(strategy.quotientValue)
+                    : strategy.quotientValue != expected / 2.0) return 3;
+        if (strategy.missingValue != missing) return 4;
+        if (strategy.fallbackValue != (missing ? 37.25 : expected)) return 5;
+        if (strategy.comparisonValue != (!missing && expected < 5.0)) return 6;
+    }
+    std::puts("ok");
+}
+"""
+
+
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+@pytest.mark.parametrize("declaration,source_type,source_cpp_type,missing,expected", [
+    pytest.param(
+        "int sourceValue = int(close)", "int", "int", "int(na)", "bar.close",
+        id="int32",
+    ),
+    pytest.param(
+        "int sourceValue = time", "int", "int64_t", "int(na)",
+        "static_cast<double>(bar.timestamp)", id="int64",
+    ),
+    pytest.param(
+        "float sourceValue = close", "float", "double", "na", "bar.close",
+        id="float-control",
+    ),
+])
+def test_native_float_write_controls_consume_finite_and_missing_inputs(
+    declaration, source_type, source_cpp_type, missing, expected, opt,
+):
+    """Native witness only; TradingView evidence for these new sources: NONE."""
+    from tests._compile import run_emitted_tu
+
+    source = (
+        '//@version=6\nstrategy("Input-sensitive numeric writes")\n'
+        + _NATIVE_FLOAT_WRITES.format(
+            declaration=declaration, source_type=source_type, missing=missing,
+        )
+    )
+    driver = _NATIVE_FLOAT_WRITES_DRIVER.replace(
+        "SOURCE_CPP_TYPE", source_cpp_type,
+    ).replace("EXPECTED_INPUT", expected).replace(
+        "CLOSE_INPUTS",
+        # Float values equal to either integer sentinel must stay finite.
+        # Fractional input also detects accidental integer storage.
+        "-7.0, 0.0, 13.0, 0.375, -2147483648.0, -9223372036854775808.0, 101.0"
+        if source_cpp_type == "double" else "-7.0, 0.0, 13.0, 101.0",
+    )
+    assert run_emitted_tu(
+        transpile(source), driver, opt=opt, label="input-sensitive-float-writes",
+    ) == "ok\n"
+
+
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+def test_finite_integer_arithmetic_result_can_equal_int32_missing_encoding(
+    tmp_path, opt,
+):
+    """Unrun regression hypothesis; TradingView evidence for this source: NONE."""
+    from tests._compile import run_emitted_tu
+
+    source = (
+        '//@version=6\nstrategy("Finite integer arithmetic boundary")\n'
+        "int sourceValue = int(close)\n"
+        "float promotedControl = float(sourceValue) - 1.0\n"
+        "float observedValue = sourceValue - 1\n"
+        "plot(promotedControl)\nplot(observedValue)\n"
+    )
+    driver = r"""
+#include <cmath>
+#include <cstdio>
+#include <type_traits>
+
+int main() {
+    // Every source value is finite and distinct from the int32 na encoding.
+    // The last subtraction reaches that encoding without integer overflow.
+    const double closes[] = {-7.0, 0.0, 13.0, -2147483647.0};
+    for (unsigned index = 0; index < sizeof(closes) / sizeof(closes[0]); ++index) {
+        GeneratedStrategy strategy;
+        static_assert(std::is_same_v<decltype(strategy.sourceValue), int>);
+        static_assert(std::is_same_v<decltype(strategy.promotedControl), double>);
+        static_assert(std::is_same_v<decltype(strategy.observedValue), double>);
+        const double close = closes[index];
+        pineforge::Bar bar{
+            close, close + 1.0, close - 1.0, close, 10.0,
+            1704067200000LL + index * 60000LL,
+        };
+        strategy.run(&bar, 1);
+        if (!strategy.last_error().empty()) return 1;
+        if (pineforge::is_na(strategy.sourceValue)
+                || static_cast<double>(strategy.sourceValue) != close) return 2;
+        const double expected = close - 1.0;
+        if (strategy.promotedControl != expected) {
+            std::printf("control input=%.17g expected=%.17g actual=%.17g\n",
+                        close, expected, strategy.promotedControl);
+            return 3;
+        }
+        if (std::isnan(strategy.observedValue)
+                || strategy.observedValue != expected) {
+            std::printf("subtraction input=%.17g expected=%.17g actual=%.17g\n",
+                        close, expected, strategy.observedValue);
+            return 4;
+        }
+    }
+    std::puts("ok");
+}
+"""
+    # Compare the same consumed bars and independent oracle with the exact
+    # main base. A base failure does not establish a candidate regression.
+    base_commit = "c12c1877da48629b9c711f745a752ffc20ceef17"
+    base = reference_codegen(base_commit)
+    assert base is not None, f"Reference {base_commit} unavailable."
+    pine = tmp_path / "finite_integer_arithmetic.pine"
+    pine.write_text(source, encoding="utf-8")
+    previous = transpile_json(pine, base)
+    assert previous.get("ok"), previous
+    assert run_emitted_tu(
+        previous["cpp"], driver, opt=opt, label="base-finite-integer-arithmetic",
+    ) == "ok\n"
+    assert run_emitted_tu(
+        transpile(source), driver, opt=opt, label="current-finite-integer-arithmetic",
+    ) == "ok\n"
+
+
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+@pytest.mark.parametrize("declaration,cpp_type,source_input", [
+    ("int sourceValue = int(close)", "int", "static_cast<int64_t>(bar.close)"),
+    ("int sourceValue = time", "int64_t", "bar.timestamp"),
+])
+def test_native_nullable_arithmetic_keeps_semantic_width_and_single_evaluation(
+    declaration, cpp_type, source_input, opt,
+):
+    """Native expectations only; TradingView evidence for these sources: NONE."""
+    from tests._compile import run_emitted_tu
+
+    source = (
+        '//@version=6\nstrategy("Nullable arithmetic result families")\n'
+        "acceptFloat(float item) => item\n"
+        "subtractToFloat(int item) =>\n"
+        "    float result = item - 1\n"
+        "    result\n"
+        "countRead(array<int> calls, int item) =>\n"
+        "    calls.set(0, calls.get(0) + 1)\n"
+        "    item\n"
+        + declaration + "\n"
+        "if close > open\n"
+        "    sourceValue := int(na)\n"
+        "float subtractionValue = sourceValue - 1\n"
+        "float additionValue = sourceValue + (-1)\n"
+        "float productValue = sourceValue * 2\n"
+        "float nestedValue = (sourceValue - 1) + 1\n"
+        "float negatedValue = -(sourceValue - 1)\n"
+        "float quotientValue = (sourceValue - 1) / 2\n"
+        "float precisionValue = (sourceValue + 2) - sourceValue\n"
+        "float argumentValue = acceptFloat(sourceValue - 1)\n"
+        "float helperValue = subtractToFloat(sourceValue)\n"
+        "float branchValue = 37.25\n"
+        "if high > open\n"
+        "    branchValue := sourceValue - 1\n"
+        "float selectedValue = if high > open\n"
+        "    sourceValue - 1\n"
+        "else\n"
+        "    37.25\n"
+        "float loopValue = 37.25\n"
+        "for step = 0 to 1\n"
+        "    loopValue := sourceValue - 1\n"
+        "calls = array.new<int>(1, 0)\n"
+        "float onceValue = countRead(calls, sourceValue) - countRead(calls, 1)\n"
+        "int callCount = calls.get(0)\n"
+        "plot(subtractionValue + additionValue + productValue + nestedValue)\n"
+        "plot(negatedValue + quotientValue + precisionValue + argumentValue)\n"
+        "plot(helperValue + branchValue + selectedValue + loopValue + onceValue)\n"
+        "plot(callCount)\n"
+    )
+    driver = r"""
+#include <cmath>
+#include <cstdio>
+#include <type_traits>
+
+int main() {
+    const double closes[] = {-7.0, 0.0, 13.0, -1073741824.0, -2147483647.0, 101.0};
+    const int64_t stamps[] = {
+        1704067200000LL, 9007199254740993LL, 9007199254740995LL,
+        -1073741824LL, -2147483647LL, 1704067500000LL,
+    };
+    for (unsigned index = 0; index < sizeof(closes) / sizeof(closes[0]); ++index) {
+        GeneratedStrategy strategy;
+        static_assert(std::is_same_v<decltype(strategy.sourceValue), SOURCE_CPP_TYPE>);
+        pineforge::Bar bar{
+            100.0, 102.0, closes[index] - 1.0, closes[index], 10.0, stamps[index],
+        };
+        strategy.run(&bar, 1);
+        if (!strategy.last_error().empty()) return 1;
+        const bool missing = bar.close > bar.open;
+        const int64_t source = SOURCE_INPUT;
+        // Compute the oracle in integers before converting to double. In
+        // particular, (source + 2) - source must retain its low bits.
+        const int64_t difference = source - 1;
+        const double values[] = {
+            strategy.subtractionValue, strategy.additionValue,
+            strategy.productValue, strategy.nestedValue, strategy.negatedValue,
+            strategy.quotientValue, strategy.precisionValue, strategy.argumentValue,
+            strategy.helperValue, strategy.branchValue, strategy.selectedValue,
+            strategy.loopValue, strategy.onceValue,
+        };
+        const double expected[] = {
+            static_cast<double>(difference), static_cast<double>(difference),
+            static_cast<double>(source * 2), static_cast<double>(source),
+            static_cast<double>(-difference), static_cast<double>(difference) / 2.0,
+            2.0, static_cast<double>(difference), static_cast<double>(difference),
+            static_cast<double>(difference), static_cast<double>(difference),
+            static_cast<double>(difference), static_cast<double>(difference),
+        };
+        for (unsigned slot = 0; slot < sizeof(values) / sizeof(values[0]); ++slot) {
+            if (missing ? !std::isnan(values[slot]) : values[slot] != expected[slot]) {
+                std::printf("input=%u slot=%u missing=%d expected=%.17g actual=%.17g\n",
+                            index, slot, missing, expected[slot], values[slot]);
+                return 2;
+            }
+        }
+        // Both operands must run once even when the left operand is missing.
+        if (strategy.callCount != 2) return 3;
+    }
+    std::puts("ok");
+}
+"""
+    driver = driver.replace("SOURCE_CPP_TYPE", cpp_type).replace(
+        "SOURCE_INPUT", source_input,
+    )
+    assert run_emitted_tu(
+        transpile(source), driver, opt=opt, label="nullable-arithmetic-result-family",
+    ) == "ok\n"
+
+
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+def test_native_lower_timeframe_arithmetic_converts_the_result_after_operand_checks(opt):
+    """Exercise the vector consumer; TradingView evidence for this source: NONE."""
+    from tests._compile import run_emitted_tu
+
+    source = (
+        '//@version=6\nstrategy("Requested arithmetic result conversion")\n'
+        'missingValues = request.security_lower_tf(syminfo.tickerid, "1", int(na) + 0)\n'
+        'values = request.security_lower_tf(syminfo.tickerid, "1", '
+        '(close > open ? int(na) : int(close)) - 1)\n'
+        "plot(array.size(missingValues) + array.size(values))\n"
+    )
+    driver = r"""
+#include <cmath>
+#include <cstdio>
+#include <type_traits>
+#include <vector>
+
+int main() {
+    const double closes[] = {-7.0, 0.0, 13.0, -2147483647.0, 101.0};
+    for (unsigned index = 0; index < sizeof(closes) / sizeof(closes[0]); ++index) {
+        GeneratedStrategy strategy;
+        static_assert(std::is_same_v<decltype(strategy._req_sec_lower_tf_0),
+                                     std::vector<double>>);
+        static_assert(std::is_same_v<decltype(strategy._req_sec_lower_tf_1),
+                                     std::vector<double>>);
+        pineforge::Bar requested{
+            100.0, 102.0, closes[index] - 1.0, closes[index], 10.0,
+            1704067200000LL + index * 60000LL,
+        };
+        // Call the compiled evaluators with the actual requested bar, without
+        // involving sub-bar synthesis in this element-conversion contract.
+        strategy.configure_security_evaluators();
+        strategy.evaluate_security(0, requested, true);
+        strategy.evaluate_security(1, requested, true);
+        if (!strategy.last_error().empty()) return 1;
+        if (strategy._req_sec_lower_tf_0.size() != 1
+                || strategy._req_sec_lower_tf_1.size() != 1) return 2;
+        if (!std::isnan(strategy._req_sec_lower_tf_0[0])) return 3;
+        const bool missing = requested.close > requested.open;
+        const double expected = requested.close - 1.0;
+        const double actual = strategy._req_sec_lower_tf_1[0];
+        if (missing ? !std::isnan(actual)
+                    : !std::isfinite(actual) || actual != expected) {
+            std::printf("input=%u missing=%d expected=%.17g actual=%.17g\n",
+                        index, missing, expected, actual);
+            return 4;
+        }
+    }
+    std::puts("ok");
+}
+"""
+    assert run_emitted_tu(
+        transpile(source), driver, opt=opt, label="lower-timeframe-result-conversion",
+    ) == "ok\n"

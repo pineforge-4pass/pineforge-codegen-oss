@@ -1077,12 +1077,32 @@ class TypeInferer:
         return result
 
     def _na_arithmetic_cpp(self, node, left: str, right: str, lower) -> str:
-        """Evaluate operands once, testing their original types before arithmetic."""
+        """Check original operands, then compute in the semantic result family.
+
+        A physical ``int`` slot reserves INT_MIN for missing input, but a
+        finite Pine integer calculation can produce that number. Carry integer
+        sums, differences and products in int64_t until a consumer
+        converts or stores them; testing a narrow result would invent an na.
+        Floating arithmetic and the existing / and % lowerings keep their
+        result families. No operand is converted before its missingness test.
+        """
         operation = lower("_pna_l", "_pna_r")
+        result_type = f"decltype({operation})"
+        if node.op in ("+", "-", "*"):
+            # Select the engine's exact integer family, whose na factory is
+            # specialized, even if a literal made C++ choose long long.
+            result_type = (
+                f"std::conditional_t<std::is_integral_v<{result_type}>, "
+                f"int64_t, {result_type}>"
+            )
+            operation = lower(
+                "static_cast<_pf_val_t>(_pna_l)",
+                "static_cast<_pf_val_t>(_pna_r)",
+            )
         return (
             f"([&]() {{ auto _pna_l = ({left}); "
             f"auto _pna_r = ({right}); "
-            f"using _pf_val_t = decltype({operation}); "
+            f"using _pf_val_t = {result_type}; "
             f"return ({self._integer_missing_cpp('_pna_l')} || {self._integer_missing_cpp('_pna_r')}) "
             f"? na<_pf_val_t>() : {operation}; }}())"
         )

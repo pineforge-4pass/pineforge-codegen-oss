@@ -84,7 +84,10 @@ from ..external_requests import (
 )
 from ..external_requests import _nodes as walk_request_nodes
 from ..limits import iter_ast_nodes
-from .helpers import na_preserving_int_cast, unary_sign_cpp
+from .helpers import (
+    _CPP_COMMENT_OR_LITERAL as _SECURITY_CPP_LITERALS,
+    na_preserving_int_cast, unary_sign_cpp,
+)
 from ..security_contexts import GLOBAL_ANNOTATION, UNREACHED_ANNOTATION
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .tables import (
@@ -96,11 +99,11 @@ from .tables import (
 )
 
 
-_SECURITY_CPP_LITERALS = re.compile(r'"(?:[^"\\\n]|\\.)*"' + r"|'(?:[^'\\\n]|\\.)*'")
 _SECURITY_CPP_SCOPES = re.compile(
-    _SECURITY_CPP_LITERALS.pattern + "|" + "|".join(
-        r"\b" + re.escape(body) for body in TIMEZONE_LAMBDA_BODIES
-    )
+    _SECURITY_CPP_LITERALS.pattern
+    + r"|(?P<return_type>\)\s*->\s*[\w:\s<>,*&()]+(?=\{))"
+    + "|" + "|".join(r"\b" + re.escape(body) for body in TIMEZONE_LAMBDA_BODIES),
+    re.S,
 )
 
 
@@ -2061,14 +2064,16 @@ class SecurityEmitter:
         # The names below are C++ tokens of the rendered text: a string
         # literal's contents (``"bull"`` beside a helper local ``bull``) stay.
         result = cpp.replace("current_bar_.", "bar.")
-        # Recognize the exact emitted suffixes before any substitution can
-        # change them. They contain no script expressions, so every token
-        # inside stays intact; argument initializers remain outside. Literals
-        # participate so template-like text inside a string is never a scope.
+        # Fixed lambda return types and the exact emitted calendar suffixes
+        # contain no Pine value reads. Protect them before rebinding values,
+        # including in nested lambdas; argument initializers and other lambda
+        # bodies remain outside. Comments and literals participate so their
+        # signature-like text cannot hide a value read from substitution.
         parts: list[tuple[str, bool]] = []
         last = 0
         for match in _SECURITY_CPP_SCOPES.finditer(result):
-            if match.group(0) not in TIMEZONE_LAMBDA_BODIES:
+            if (match.group("return_type") is None
+                    and match.group(0) not in TIMEZONE_LAMBDA_BODIES):
                 continue
             parts.append((result[last:match.start()], False))
             parts.append((match.group(0), True))

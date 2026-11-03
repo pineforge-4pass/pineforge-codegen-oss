@@ -267,9 +267,12 @@ def test_an_int_product_is_64_bit():
                     'x = s + v\n' + TAIL)
     from tests._numeric_expected import integer_arithmetic
     wide = "((int64_t)(_pna_l) * (_pna_r))"
-    assert integer_arithmetic("s", "*", "48271", wide) in cpp
+    product = integer_arithmetic("s", "*", "48271", wide)
+    # Count the complete result contract for both operand forms.
+    result_contract = product[product.index("using _pf_val_t = "):]
+    assert product in cpp
     assert cpp.count("auto _pna_l = ([&](auto&& __pf_array)") == 1
-    assert cpp.count(f"using _pf_val_t = decltype({wide});") == 2
+    assert cpp.count(result_contract) == 2
     compile_cpp(cpp, label="int product")
 
 
