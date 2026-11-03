@@ -105,6 +105,8 @@ for _table in CALL_INVENTORIES.values():
 def _argument(namespace, parameter):
     if namespace == "map" and parameter.name in ("id", "id2"):
         return "source_map"
+    if namespace == "matrix" and parameter.name == "id":
+        return "source_matrix"
     if parameter.default is not None:
         return json.dumps(parameter.default)
     if parameter.pine_type == PineType.BOOL:
@@ -145,8 +147,10 @@ def _namespace_row(namespace, functions):
     )
     arguments = ", ".join(_argument(namespace, parameter)
                           for parameter in signature.params)
-    setup = ('source_map = map.new<string, float>()\n'
-             if namespace == "map" else "")
+    setup = {
+        "map": 'source_map = map.new<string, float>()\n',
+        "matrix": "source_matrix = matrix.new<float>(2, 2, 1.0)\n",
+    }.get(namespace, "")
     return (function.name, setup,
             _scalar_condition(f"{function.name}({arguments})",
                               signature.return_type))

@@ -133,7 +133,8 @@ def reference_codegen(commit: str) -> Path | None:
     return _REFERENCE_TREES[commit]
 
 
-def build_strategy_library(cpp: str, workdir: Path) -> None:
+def build_strategy_library(cpp: str, workdir: Path, *,
+                           extra_flags: tuple[str, ...] = ()) -> None:
     (workdir / "generated.cpp").write_text(cpp)
     lib = str(compile_env._ENGINE_LIB)
     if sys.platform == "darwin":
@@ -141,6 +142,7 @@ def build_strategy_library(cpp: str, workdir: Path) -> None:
     else:
         link = ["-Wl,--whole-archive", lib, "-Wl,--no-whole-archive"]
     cmd = [compile_env._COMPILER, "-std=c++17", "-O2", *compile_env.STRATEGY_FP_FLAGS,
+           *extra_flags,
            "-fPIC", "-shared", *compile_env._include_flags(isolate_headers=True),
            str(workdir / "generated.cpp"), *link, "-o", str(workdir / "strategy.so")]
     proc = subprocess.run(cmd, capture_output=True, text=True)

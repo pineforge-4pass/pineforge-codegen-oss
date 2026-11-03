@@ -4148,6 +4148,83 @@ class TypeInferer:
             return "std::vector<double>"
         return "double"
 
+    def _text_type(self, node) -> str:
+        """Pine bool provenance is consumed only by explicit text conversion."""
+        if not self._pine_v5_body:
+            from .bool_text import BoolTextTypes
+            query = getattr(self, "_bool_text_types", None)
+            if query is None:
+                query = self._bool_text_types = BoolTextTypes(
+                    self.ctx, self._type_spec_from_hint_name,
+                    getattr(self, "_budget", None),
+                )
+            if query.is_bool(
+                node, getattr(self, "_active_func_name", None),
+                getattr(self, "_active_call_site_idx", None),
+            ):
+                return "bool"
+        return self._infer_type(node)
+
+    def _contains_bool_text(self, node) -> bool:
+        if node is None or self._pine_v5_body:
+            return False
+        self._text_type(node)
+        return self._bool_text_types.contains_conversion(
+            node, getattr(self, "_active_func_name", None),
+            getattr(self, "_active_call_site_idx", None),
+        )
+
+    def _has_bool_text(self) -> bool:
+        if self._pine_v5_body:
+            return False
+        cached = getattr(self, "_program_has_bool_text", None)
+        if cached is None:
+            cached = self._program_has_bool_text = self._contains_bool_text(self.ctx.ast)
+        return cached
+
+    def _bool_text_storage_type(self, node) -> str:
+        """The emitted value's type at a text boundary, leaving storage alone."""
+        if isinstance(node, Identifier):
+            name = node.name
+            series_param = self._current_func_series_param_types.get(name)
+            if series_param is not None:
+                return series_param
+            param = self._current_func_param_types.get(name)
+            if param is not None:
+                return param
+            if self._identifier_reads_series(node):
+                return self._series_type_for(name)
+            local = self._current_func_local_types.get(name)
+            if local is not None:
+                return local
+            if name not in self._current_func_locals:
+                # Hoisted globals use the initializer's emitted type, which
+                # can differ from the analyzer's compatibility PineType.
+                slot = self._slot_scalar_cpp_type(name)
+                if slot is not None:
+                    return slot
+        return self._infer_type(node)
+
+    def _bool_text_condition(self, node, value: str) -> str:
+        """Read a legacy bool slot as a value, without changing that slot."""
+        storage = self._bool_text_storage_type(node)
+        if storage == "bool":
+            return value
+        if storage != "std::string":
+            return self._coerce_bool_expr(value, node)
+        return evaluate_args_once(
+            [value], {0},
+            lambda args: f"(!({args[0]}).empty() && ({args[0]})[0] != '\\0')",
+            "_pf_text_bool_",
+        )
+
+    def _legacy_bool_string_value(self, node, value: str) -> str:
+        """Carry a bool across a legacy string parameter or return boundary."""
+        if (self._bool_text_storage_type(node) != "std::string"
+                and self._has_bool_text() and self._text_type(node) == "bool"):
+            return f"std::string(1, static_cast<char>({self._coerce_bool_expr(value, node)}))"
+        return value
+
     def _infer_type(
         self,
         node,
@@ -4389,10 +4466,7 @@ class TypeInferer:
                 if node.member == "multiplier":
                     return "int"
                 return "bool"
-            # chart.is_* are Pine bools (the emitter lowers them to C++
-            # ``true``/``false``): str.tostring(chart.is_standard) reads "true"
-            # on TradingView (lab tv pf-krunerr-env-facts, 2026-09-26), not the
-            # numeric "1".
+            # Chart predicates are emitted as C++ bool literals.
             if ename == "chart" and node.member in (
                     "is_standard", "is_heikinashi", "is_kagi", "is_linebreak",
                     "is_pnf", "is_range", "is_renko"):
