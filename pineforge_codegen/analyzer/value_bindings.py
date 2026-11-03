@@ -108,6 +108,9 @@ class ValueBindings(DiagnosticsHelper):
         self.position = 0
         self.scopes: list[_Scope] = []
         self.uses: list[tuple[Identifier, _Scope, int, str]] = []
+        # Current-tree identities for numeric source queries. Authored-use
+        # annotations can retain pre-lowering identities through a copy.
+        self.declaration_bindings: dict[int, tuple[int, str] | None] = {}
 
     def _scope(self, parent: _Scope | None, kind: str,
                callable_name: str | None = None) -> _Scope:
@@ -212,9 +215,13 @@ class ValueBindings(DiagnosticsHelper):
         for node, scope, position, role in self.uses:
             if self.budget is not None:
                 self.budget.check(node.loc, Phase.ANALYZER)
+            binding = scope.resolve(node.name, position)
+            self.declaration_bindings[id(node)] = (
+                (binding.declaration, binding.name)
+                if binding is not None and binding.kind != "builtin" else None
+            )
             origin = (node.annotations or {}).get(_VALUE_USE)
             if not isinstance(origin, _ValueUse):
-                binding = scope.resolve(node.name, position)
                 origin = _ValueUse(
                     binding,
                     None if binding is not None else self._missing(

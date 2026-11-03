@@ -162,7 +162,9 @@ pineforge_codegen/
 ├── loop_types.py                   Counted-loop counter-family evidence,
 │                                   shared by analyzer and emitter, with a
 │                                   memo per declaration in each query;
-│                                   independent of shared storage inference.
+│                                   its value query alone sees fractional
+│                                   reassignment storage before analysis;
+│                                   check types retain hints or initializers.
 ├── pragmas.py                      // @pf-trace extraction
 ├── library_modules.py              A Pine library source parsed as a
 │                                   module: its library() declaration,
@@ -480,6 +482,20 @@ that replay cannot carry retain PF-E3111.
 A stateful expanded evaluator cannot fall back to a chart helper call;
 conditional helper declarations and unsupported state types keep their gates.
 Fixed requests retain their helper-local `varip` refusal.
+A numerically int declaration with a fractional `:=` write uses float storage,
+including an explicit `int` hint. Reassignments and counters share one numeric
+value query and its integral-division proofs. The step check retains the hint
+or initializer's type, so a widened int still refuses a float step with PF-E2079.
+This covers unambiguous global,
+callable, block and loop-body declarations; duplicate storage names, unknown
+initializer families and untyped helper parameters remain gaps. Direct
+initializers and direct non-quotient numeric-literal writes keep their policy.
+Call-site return inference honors the same widening annotation, including
+callable-local `var` and `varip`; an `int` return must not narrow their double
+storage.
+`tests/test_float_reassignment.py` and the measured reassignment fixtures pin
+storage, quantities and complete unchanged integer-control C++.
+
 Registry builtins with verified keyword names
 (`IntrinsicFunc.keyword_names_verified`) declare their complete keyword set
 through their signature parameters. These names are validated before lowering

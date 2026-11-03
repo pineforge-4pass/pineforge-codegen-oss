@@ -1,0 +1,12 @@
+//@version=6
+strategy("carrier probe callable_local_qty", initial_capital = 1000000000000, currency = currency.NONE)
+n = input.int(5, "Numerator")
+measure(int seed) =>
+    int s = seed
+    s := s / 2
+    s
+observed = measure(n)
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = observed)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

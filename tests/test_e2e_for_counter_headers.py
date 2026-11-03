@@ -34,7 +34,17 @@ PATTERN_MEASURED = tuple(TV["entry_quantity_patterns"])
 FRACTIONAL_COUNTER_TAPES = (
     "fractional_descending", "fractional_array_index", "counter_string",
 )
+REASSIGNMENT_TAPES = (
+    "reassign_int_hint", "reassign_plain_qty", "reassign_literal_qty",
+    "reassign_series_qty", "reassign_untyped", "reassign_typed",
+)
+CALLABLE_QUANTITY_TAPES = ("callable_var_qty", "callable_local_qty")
+# Each twin is an engine-vs-engine control, not TradingView evidence.
+REASSIGNMENT_TAPE_TWINS = {
+    name: ("s := s / 2", "s := s * 0.5") for name in REASSIGNMENT_TAPES
+}
 # These twins change authored Pine expressions, never emitted C++ or a tape.
+# Each twin is an engine-vs-engine control, not TradingView evidence.
 DIVISION_TAPE_TWINS = {
     "division_start_no_step": ("for i = 5 / 2 to", "for i = 2.5 to"),
     "division_start_int_step": ("for i = 7 / 2 to", "for i = 3.5 to"),
@@ -50,7 +60,11 @@ DIVISION_TAPE_TWINS = {
 # Shared parameter inference still truncates this float counter. Run it as
 # a documented discrepancy, retaining TradingView's measured 5 in the quantities file.
 HELPER_VALUE_GAP = "float_counter_helper_value"
-MATCHING_MEASURED = tuple(name for name in MEASURED if name != HELPER_VALUE_GAP)
+HELPER_PARAMETER_GAP = "helper_param"
+MATCHING_MEASURED = tuple(
+    name for name in MEASURED
+    if name not in (HELPER_VALUE_GAP, HELPER_PARAMETER_GAP)
+)
 # These measured rows distinguish accumulated rounding near 0.3 from an
 # end shortfall at a larger scale. Both use TradingView's recorded quantities.
 END_DIFFERENCE_PROBES = (
@@ -211,12 +225,15 @@ def runs(run_environment):
         pine = (FIXTURES / f"{name}.pine").read_text(encoding="utf-8")
         builds[name] = Build(pine)
         counters = re.findall(r"(?m)^\s*for (\w+) =", pine)
+        writes = re.findall(r"(?m)^(\w+) :=", pine)
+        rename = counters[-1] if counters else writes[0] if writes else "i"
         renamed = re.sub(
-            rf"\b{counters[-1] if counters else 'i'}\b", "sampleIndex", pine,
+            rf"\b{rename}\b", "sampleIndex", pine,
         )
         builds[f"{name}_renamed"] = Build(renamed)
-        if name in DIVISION_TAPE_TWINS:
-            before, after = DIVISION_TAPE_TWINS[name]
+        twin = DIVISION_TAPE_TWINS.get(name) or REASSIGNMENT_TAPE_TWINS.get(name)
+        if twin is not None:
+            before, after = twin
             assert pine.count(before) == 1, name
             builds[f"{name}_twin"] = Build(pine.replace(before, after))
         if name in FIRST_END_READ_PROBES:
@@ -286,7 +303,10 @@ def test_tradingview_evidence_has_complete_sha256():
     assert re.fullmatch(r"[0-9a-fA-F]{64}", TV["ta_counter_type_receipt"]["sha256"])
 
 
-@pytest.mark.parametrize("name", tuple(DIVISION_TAPE_TWINS))
+@pytest.mark.parametrize("name", (
+    *REASSIGNMENT_TAPES, *CALLABLE_QUANTITY_TAPES,
+    HELPER_PARAMETER_GAP, *DIVISION_TAPE_TWINS,
+))
 def test_division_fixture_is_the_measured_source(name):
     evidence = TV["evidence"][name]
     assert evidence["source"] == f"{name}.pine"
@@ -399,6 +419,7 @@ def test_counter_binding_compositions(runs, name):
 
 @pytest.mark.parametrize("name", tuple(DIVISION_TAPE_TWINS))
 def test_division_tape_fixture_keeps_its_counter_family_and_twin(runs, name):
+    """engine-vs-engine control, not TradingView evidence."""
     pine = (FIXTURES / f"{name}.pine").read_text(encoding="utf-8")
     cpp = transpile(pine)
     family = "int" if name == "division_end_only" else "double"
@@ -410,9 +431,16 @@ def test_division_tape_fixture_keeps_its_counter_family_and_twin(runs, name):
     assert_same_runs(ok(runs, name), ok(runs, name + "_twin"))
 
 
+@pytest.mark.parametrize("name", REASSIGNMENT_TAPES)
+def test_reassignment_tape_matches_its_fraction_preserving_twin(runs, name):
+    """engine-vs-engine control, not TradingView evidence."""
+    assert_same_runs(ok(runs, name), ok(runs, name + "_twin"))
+
+
 @pytest.mark.parametrize("name", PATTERN_MEASURED)
 @pytest.mark.parametrize("suffix", ["", "_renamed", "_twin"])
 def test_tradingview_alternating_entry_quantities(runs, name, suffix):
+    # The _twin suffix is an engine-vs-engine control, not TradingView evidence.
     outcome = ok(runs, name + suffix)
     rows = csv.DictReader(outcome.trades["default"].decode("utf-8-sig").splitlines())
     entries = [row for row in rows if row["Type"].startswith("Entry")]
@@ -433,6 +461,7 @@ def test_known_gap_counter_tostring(runs, run_environment, suffix):
     Quantity and entry counts match the tape; ids are a known formatter gap.
     This row must flip to the recorded TV ids when the formatter is fixed.
     """
+    # The _twin suffix is an engine-vs-engine control, not TradingView evidence.
     gap = TV["known_gaps"]["counter_tostring"]
     name = gap["probe"]
     pattern = TV["entry_id_patterns"][name]
@@ -463,16 +492,14 @@ def test_fractional_start_carrier_matches_the_measured_loop_shape(runs, name):
     )
 
 
-def test_known_gap_reassignment_fraction(runs):
-    """TradingView gives 10.5 and we give 9; flips when reassignment keeps the fraction."""
-    assert TV["entry_quantities"]["fractional_input"] == 10.5
-    _assert_quantities(ok(runs, "carrier_reassignment"), "default", 9)
-
-
-def test_known_gap_helper_parameter_fraction(runs):
+@pytest.mark.parametrize("name", (
+    "carrier_helper_parameter", HELPER_PARAMETER_GAP, HELPER_PARAMETER_GAP + "_renamed",
+))
+def test_known_gap_helper_parameter_fraction(runs, name):
     """TradingView gives 10.5 and we give 9; flips when a helper parameter keeps the fraction."""
-    assert TV["entry_quantities"]["fractional_input"] == 10.5
-    _assert_quantities(ok(runs, "carrier_helper_parameter"), "default", 9)
+    gap = TV["known_gaps"]["helper_parameter_fraction"]
+    assert TV["entry_quantities"][HELPER_PARAMETER_GAP] == gap["tradingview_entry_quantity"]
+    _assert_quantities(ok(runs, name), "default", gap["current_entry_quantity"])
 
 
 STOP_DRIVER = r'''

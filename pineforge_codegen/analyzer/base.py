@@ -31,7 +31,7 @@ from ..symbols import (
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from ..limits import TimeBudget, iter_ast_nodes
-from ..loop_types import LoopTypeSources, for_counter_type
+from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
 from ..security_contexts import (
     PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series,
 )
@@ -616,6 +616,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         from .value_bindings import ValueBindings
         self._value_bindings = ValueBindings(self._ast, self._filename, self._budget)
         self._value_bindings.resolve()
+        self._loop_type_sources = LoopTypeSources(self._ast)
+        self._loop_type_sources.widen_reassignments(
+            self._value_bindings.declaration_bindings, budget=self._budget,
+        )
         self._check_direct_terminal_array_element_callee_shadows()
         self._visit(self._ast)
         if self._operator_condition_errors:
@@ -4686,6 +4690,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 "Namespaces of built-ins cannot be used.",
                 node.loc,
             )
+
+        # Establish storage before any reader, member or history snapshot.
+        # A later quotient write can keep a fraction even with an int hint.
+        if (node.annotations or {}).get(FLOAT_REASSIGNMENT):
+            if val_type == PineType.INT:
+                val_type = PineType.FLOAT
+                type_spec = TypeSpec.primitive("float")
+            elif val_type != PineType.FLOAT:
+                node.annotations.pop(FLOAT_REASSIGNMENT)
 
         self._var_decl_types_by_node[id(node)] = (val_type, type_spec)
 
