@@ -985,14 +985,22 @@ class TypeInferer:
             return False
         owner = self._func_info_map.get(
             getattr(self, "_active_func_name", "") or "")
-        return any(self._crosses_wide_int_boundary(arg, owner, set())
+        seen = set()
+        return any(self._crosses_wide_int_boundary(arg, owner, seen)
                    for arg in (node.left, node.right))
 
     def _crosses_wide_int_boundary(self, expr, owner, seen) -> bool:
-        """Follow values, excluding the old chart/literal width sources."""
-        if expr is None or (id(expr), getattr(owner, "name", "")) in seen:
+        """Follow values, excluding the old chart/literal width sources.
+
+        All paths share this query's visited set: a repeated node has the
+        same successors, so only its first visit needs to expand them.
+        """
+        if expr is None:
             return False
-        seen = {*seen, (id(expr), getattr(owner, "name", ""))}
+        key = (id(expr), getattr(owner, "name", ""))
+        if key in seen:
+            return False
+        seen.add(key)
         if isinstance(expr, ExprStmt):
             return self._crosses_wide_int_boundary(expr.expr, owner, seen)
         if isinstance(expr, (Assignment, VarDecl)):
@@ -1000,6 +1008,11 @@ class TypeInferer:
         if isinstance(expr, Identifier):
             binding = self._int_value_binding(expr, owner)
             if binding is not None:
+                # Different reads share one declaration's whole write list.
+                key = ("binding", binding[0])
+                if key in seen:
+                    return False
+                seen.add(key)
                 return any(self._crosses_wide_int_boundary(
                     value, lexical_owner, seen)
                     for value, lexical_owner in binding[1])
@@ -2997,7 +3010,7 @@ class TypeInferer:
     def _func_int_return_uses_wide_history(
         self,
         func_info,
-        seen: set[str] | None = None,
+        seen: set[tuple] | None = None,
         call_site_idx: int | None = None,
     ) -> bool:
         """Whether an integer callable must preserve the ``int64_t`` family.
@@ -3020,9 +3033,10 @@ class TypeInferer:
         if seen is None:
             seen = set()
         func_name = getattr(func_info, "name", "")
-        if func_name in seen:
+        key = ("callable", func_name, call_site_idx)
+        if key in seen:
             return False
-        seen = {*seen, func_name}
+        seen.add(key)
 
         series_names = self.ctx.func_series_vars.get(func_info.name, set())
         if any(
@@ -3121,12 +3135,23 @@ class TypeInferer:
         self,
         expr,
         owner_info,
-        seen: set[str],
+        seen: set[tuple],
         call_site_idx: int | None = None,
     ) -> bool:
-        """Trace wide integer provenance through a callable return expression."""
+        """Trace wide integer provenance with one visited set per query.
+
+        Owner and return specialization determine successors. Never reuse
+        this set across queries: the outer provenance fixpoint can grow.
+        """
         if expr is None:
             return False
+        # Statement values can synthesize short-lived Identifier objects.
+        # Their declaration keys below are stable even if Python reuses ids.
+        if not isinstance(expr, Identifier):
+            key = ("expr", id(expr), getattr(owner_info, "name", ""), call_site_idx)
+            if key in seen:
+                return False
+            seen.add(key)
         if isinstance(expr, (Assignment, VarDecl)):
             # A value-producing write leaves its stored value. Follow both
             # sides: field provenance may still be growing while a callable
@@ -3146,10 +3171,12 @@ class TypeInferer:
             binding = self._int_value_binding(expr, owner_info)
             if binding is not None:
                 key, values = binding
+                key = ("binding", key, call_site_idx)
                 if key in seen:
                     return False
+                seen.add(key)
                 return any(self._expr_returns_wide_int(
-                    value, lexical_owner, {*seen, key}, call_site_idx)
+                    value, lexical_owner, seen, call_site_idx)
                     for value, lexical_owner in values)
             node = getattr(owner_info, "node", None)
             if node is not None and expr.name in node.params:
@@ -3588,9 +3615,10 @@ class TypeInferer:
         binding = self._int_value_binding(read, owner, decl)
         if binding is not None:
             key, values = binding
+            seen = {("binding", key, None)}
             return (self._literal_wide_global(name, decl)
                     or any(self._expr_returns_wide_int(
-                        value, lexical_owner, {key}, None)
+                        value, lexical_owner, seen, None)
                         for value, lexical_owner in values))
         if owner is not None and name in owner.node.params:
             return (owner.name, owner.node.params.index(name)) in (
