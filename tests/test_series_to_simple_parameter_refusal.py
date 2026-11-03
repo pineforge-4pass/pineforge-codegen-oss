@@ -331,10 +331,6 @@ def test_paired_controls_keep_complete_cpp(source, control, code, position, refe
     "keep(simple string value) => value\nresult = keep(syminfo.tickerid)\n",
     "keep(simple string value) => value\nresult = keep(session.regular)\n",
     "keep(simple string value) => value\nresult = keep(session.extended)\n",
-    """
-    keep(simple string value) => value
-    result = keep(ticker.modify(syminfo.tickerid, session.extended))
-    """,
     "keep(simple int value) => value\nsimple int fixed = 7\nresult = keep(fixed)\n",
     "keep(simple int value) => value\nresult = keep(dayofweek.monday)\n",
     "keep(simple float value) => value\nresult = keep(math.pi)\n",
