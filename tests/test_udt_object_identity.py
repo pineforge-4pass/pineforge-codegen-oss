@@ -604,6 +604,7 @@ type Item
 var Item item = Item.new(1.0)
 var float observed = item.combine(second=4)
 method combine(Item self, int first = 2, int second = 3) =>
+    self
     first * 10 + second
 '''
     with pytest.raises(CompileError) as caught:
@@ -625,6 +626,7 @@ strategy("forward typed method defaults")
 type Item
     float value
 method combine(Item self, int first = 2, int second = 3) =>
+    self
     first * 10 + second
 var Item item = Item.new(1.0)
 var float observed = item.combine(second=4)
@@ -656,6 +658,7 @@ def test_forward_stateful_typed_method_with_default_length_is_rejected() -> None
 strategy("forward stateful typed method default")
 out = 1.smooth()
 method smooth(int self, int len = 2) =>
+    self
     ta.sma(close, len)
 '''
     with pytest.raises(CompileError) as caught:
@@ -675,6 +678,7 @@ def test_defined_stateful_typed_method_default_sizes_ta_runtime() -> None:
     source = r'''//@version=6
 strategy("forward stateful typed method default")
 method smooth(int self, int len = 2) =>
+    self
     ta.sma(close, len)
 out = 1.smooth()
 '''
@@ -694,6 +698,7 @@ type Holder
 method outer(Holder self) =>
     self.inner()
 method inner(Holder self) =>
+    self
     "ok"
 var Holder holder = Holder.new(1.0)
 result = holder.outer()

@@ -26,6 +26,8 @@ Buckets:
   call sites), or the value must reach display and alert sinks only.
 * Declarations - only ``strategy(...)`` accepted; ``indicator(...)`` and
   ``library(...)`` rejected.
+* Method receiver use is checked by the analyzer (PF-E5087), including when
+  this support pass is disabled.
 * Unknown ``ta.X`` / ``math.X`` / ``str.X`` / ``input.X`` calls (codegen would
   silently emit ``na`` / ``0`` / ``""`` stubs).
 """

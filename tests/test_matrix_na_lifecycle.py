@@ -536,6 +536,7 @@ strategy("typed matrix method arguments")
 type Carrier
     float seed
 method isNull(Carrier self, matrix<int> state = na) =>
+    self
     na(state)
 var Carrier carrier = Carrier.new(1.0)
 identifierPositional = carrier.isNull(na)

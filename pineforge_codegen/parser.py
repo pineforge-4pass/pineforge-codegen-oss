@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from .lexer import Token, TokenType
 from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from .limits import MAX_NESTING_DEPTH, TimeBudget, limit_error, syntax_children
+from .method_binding import method_receiver_is_used
 from .ast_nodes import (
     HISTORY_MEMBER_ANNOTATION,
     ASTNode, ArgOrder,
@@ -1112,6 +1113,7 @@ class Parser:
         # through the parser's top-level recovery path.
         if self._current().type not in TYPE_KEYWORDS | {TokenType.IDENT}:
             self._consume(TokenType.IDENT)  # raises a located ParseError
+        receiver_loc = self._loc(self._current())
         type_name = self._parse_type_hint_string()
         params = [self._consume(TokenType.IDENT).value]  # 'self' or user's name
         param_type_hints = [type_name]
@@ -1154,6 +1156,10 @@ class Parser:
         node.annotations = {
             "param_type_hints": param_type_hints,
             "param_defaults": param_defaults,
+            "receiver_loc": receiver_loc,
+            # Preserve authored use even if request lowering replaces the
+            # only expression that reads the receiver with na.
+            "receiver_used": method_receiver_is_used(node),
         }
         return self._set_loc(node, start_tok)
 

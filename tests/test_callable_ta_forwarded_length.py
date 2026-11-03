@@ -67,7 +67,7 @@ def test_direct_method_parameter_length() -> None:
 strategy("direct method length")
 type Holder
     float seed
-method smooth(Holder self, float src, int len) => ta.sma(src, len)
+method smooth(Holder self, float src, int len) => self, ta.sma(src, len)
 var Holder holder = Holder.new(0.0)
 n = input.int(5, "Len")
 out = holder.smooth(close, n)
@@ -83,7 +83,7 @@ def test_sibling_method_forwards_parameter_length() -> None:
 strategy("sibling method length")
 type Holder
     float seed
-method inner(Holder self, int len) => ta.sma(close, len)
+method inner(Holder self, int len) => self, ta.sma(close, len)
 method outer(Holder self, int len) => self.inner(len)
 var Holder holder = Holder.new(0.0)
 n = input.int(6, "Len")
@@ -100,7 +100,7 @@ def test_udf_wrapper_receiver_forwards_parameter_length() -> None:
 strategy("wrapper receiver length")
 type Holder
     float seed
-method inner(Holder self, int len) => ta.sma(close, len)
+method inner(Holder self, int len) => self, ta.sma(close, len)
 wrapped(Holder obj, int len) => obj.inner(len)
 var Holder holder = Holder.new(0.0)
 n = input.int(7, "Len")
@@ -118,7 +118,7 @@ strategy("forward sibling method length")
 type Holder
     float seed
 method outer(Holder self, int len) => self.inner(len)
-method inner(Holder self, int len) => ta.sma(close, len)
+method inner(Holder self, int len) => self, ta.sma(close, len)
 var Holder holder = Holder.new(0.0)
 n = input.int(10, "Len")
 out = holder.outer(n)
@@ -135,7 +135,7 @@ strategy("forward renamed sibling method length")
 type Holder
     float seed
 method outer(Holder self, int outerLen) => self.inner(outerLen)
-method inner(Holder self, int innerLen) => ta.sma(close, innerLen)
+method inner(Holder self, int innerLen) => self, ta.sma(close, innerLen)
 var Holder holder = Holder.new(0.0)
 n = input.int(2, "Len")
 out = holder.outer(n)
@@ -167,8 +167,8 @@ def test_widened_caller_indices_exclude_interleaved_unrelated_ta() -> None:
 strategy("interleaved unrelated TA length")
 type Holder
     float seed
-method inner(Holder self, int len) => ta.sma(close, len)
-method unrelated(Holder self, int len) => ta.ema(close, len)
+method inner(Holder self, int len) => self, ta.sma(close, len)
+method unrelated(Holder self, int len) => self, ta.ema(close, len)
 method outer(Holder self, int len) =>
     own = ta.rma(close, len)
     own + self.inner(len)
@@ -210,7 +210,7 @@ type Holder
     float seed
 method outer(Holder self, int len) => self.middle(len)
 method middle(Holder self, int len) => self.inner(len)
-method inner(Holder self, int len) => ta.sma(close, len)
+method inner(Holder self, int len) => self, ta.sma(close, len)
 var Holder holder = Holder.new(0.0)
 n = input.int(11, "Len")
 out = holder.outer(n)
@@ -229,7 +229,7 @@ type Holder
 method outer(Holder self, int outerLen) => self.middle(outerLen)
 method middle(Holder self, int middleLen) =>
     ta.ema(close, middleLen) + self.inner(middleLen)
-method inner(Holder self, int innerLen) => ta.sma(close, innerLen)
+method inner(Holder self, int innerLen) => self, ta.sma(close, innerLen)
 var Holder holder = Holder.new(0.0)
 n = input.int(11, "Len")
 out = holder.outer(n)
@@ -254,7 +254,7 @@ type Holder
 method middle(Holder self, int middleLen) =>
     ta.ema(close, middleLen) + self.inner(middleLen)
 method outer(Holder self, int outerLen) => self.middle(outerLen)
-method inner(Holder self, int innerLen) => ta.sma(close, innerLen)
+method inner(Holder self, int innerLen) => self, ta.sma(close, innerLen)
 var Holder holder = Holder.new(0.0)
 n = input.int(11, "Len")
 out = holder.outer(n)
@@ -271,10 +271,10 @@ strategy("growing method owner slice")
 type Holder
     float seed
 method outer(Holder self, int outerLen) => self.middle(outerLen)
-method unrelated(Holder self) => ta.rma(close, 19)
+method unrelated(Holder self) => self, ta.rma(close, 19)
 method middle(Holder self, int middleLen) =>
     ta.ema(close, middleLen) + self.inner(middleLen)
-method inner(Holder self, int innerLen) => ta.sma(close, innerLen)
+method inner(Holder self, int innerLen) => self, ta.sma(close, innerLen)
 var Holder holder = Holder.new(0.0)
 noise = holder.unrelated()
 first = holder.outer(4)
@@ -342,7 +342,7 @@ def test_branch_wrapper_and_two_callsites_keep_distinct_lengths(
     forward_defined: bool,
 ) -> None:
     inner = (
-        "method inner(Holder self, float src, int len) => ta.ema(src, len)"
+        "method inner(Holder self, float src, int len) => self, ta.ema(src, len)"
     )
     outer = '''method outer(Holder self, float src, int len, bool choose) =>
     choose ? self.inner(src, len) : self.inner(src, len + 1)'''
@@ -372,7 +372,7 @@ def test_series_dynamic_length_remains_rejected_through_method_wrapper() -> None
 strategy("dynamic method length guard")
 type Holder
     float seed
-method inner(Holder self, int len) => ta.sma(close, len)
+method inner(Holder self, int len) => self, ta.sma(close, len)
 method outer(Holder self, int len) => self.inner(len)
 var Holder holder = Holder.new(0.0)
 out = holder.outer(int(ta.atr(14)))
@@ -388,7 +388,7 @@ def test_two_method_callsites_run_with_distinct_forwarded_lengths() -> None:
 strategy("runtime forwarded lengths")
 type Holder
     float seed
-method inner(Holder self, float src, int len) => ta.sma(src, len)
+method inner(Holder self, float src, int len) => self, ta.sma(src, len)
 method outer(Holder self, float src, int len) => self.inner(src, len)
 var Holder holder = Holder.new(0.0)
 fast = input.int(2, "Fast")

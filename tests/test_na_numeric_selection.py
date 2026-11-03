@@ -603,7 +603,7 @@ _METHOD_CONSUMER_ROWS = [
     pytest.param(
         "type Holder\n"
         "    int seed\n"
-        "method take(Holder self, int value) => value\n"
+        "method take(Holder self, int value) => self, value\n"
         "holder = Holder.new(0)\n"
         "selected = holder.take(c ? 1 : na)\n",
         "selected = _udt_Holder_take(holder, ((c) ? (1) : (na<double>())));",
@@ -613,7 +613,7 @@ _METHOD_CONSUMER_ROWS = [
     pytest.param(
         "type Holder\n"
         "    int seed\n"
-        "method take(Holder self, int value = true ? na : 1) => value\n"
+        "method take(Holder self, int value = true ? na : 1) => self, value\n"
         "holder = Holder.new(0)\n"
         "selected = c ? holder.take(1) : holder.take()\n",
         "selected = ((c) ? (_udt_Holder_take(holder, 1)) : "
@@ -790,8 +790,10 @@ def test_method_integer_consumers_keep_their_signature_and_argument_expression(
     cpp = transpile(_source(body + _CONSUMERS))
     _assert_nullable_target(cpp)
     # An int identity method keeps its parameter and return, including a defaulted call.
+    # Its receiver is read first (the method refuses an unused first parameter).
     assert (
         "    int _udt_Holder_take(Holder self, int value) {\n"
+        "        self;\n"
         "        return value;\n"
         "    }"
     ) in cpp

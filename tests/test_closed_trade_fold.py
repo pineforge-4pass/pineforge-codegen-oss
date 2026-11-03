@@ -410,7 +410,7 @@ def test_plan_record_fields_are_fixed_and_frozen():
     pytest.param(_script(tail="readTotal() => total\nplot(readTotal())\n"),
                  (), id="function_reads_accumulator"),
     # Method bodies have the same remote-read restriction.
-    pytest.param(_script(tail="method readTotal(float self) => total\n"),
+    pytest.param(_script(tail="method readTotal(float self) => self, total\n"),
                  (), id="method_reads_accumulator"),
     # Function defaults are source expressions despite living in annotations.
     pytest.param(_script(tail="readTotal(float value = total) => value\n"),
@@ -659,7 +659,7 @@ def test_plan_record_fields_are_fixed_and_frozen():
         "total\n", "    ",
     ), (), id="loop_in_function"),
     # A method's local loop has the same top-level exclusion.
-    pytest.param(HEAD + "method sumRows(float self) =>\n" + indent(
+    pytest.param(HEAD + "method sumRows(float self) =>\n    self\n" + indent(
         "float total = 0.0\n"
         "if strategy.closedtrades > 0\n"
         "    for i = 0 to strategy.closedtrades - 1\n"

@@ -144,7 +144,7 @@ def test_all_void_matrix_mutator_forms_native_compile() -> None:
 def test_typed_user_matrix_method_still_precedes_same_named_builtin() -> None:
     source = '''//@version=6
 strategy("typed user matrix method precedence")
-method fill(matrix<int> self) => 42
+method fill(matrix<int> self) => self, 42
 method delegate(matrix<int> self) => self.fill()
 '''
 
@@ -159,7 +159,7 @@ method delegate(matrix<int> self) => self.fill()
 def test_typed_user_method_precedes_shadowed_matrix_namespace() -> None:
     source = '''//@version=6
 strategy("typed user method shadows matrix namespace")
-method fill(int self, matrix<int> other) => 42
+method fill(int self, matrix<int> other) => self, 42
 method delegate(int matrix, matrix<int> other) => matrix.fill(other)
 '''
 

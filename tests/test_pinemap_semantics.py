@@ -709,10 +709,11 @@ observed = accumulator.probe(10, pairs)
             f"probe(int {parameter}, map<string, int> pairs) =>"
         )
         setup = "observed = probe(10, pairs)\n"
+    receiver_read = "    self\n" if as_method else ""
     source = f'''//@version=6
 strategy("PineMap pair loop parameter collision")
 {prelude}{declaration}
-    total = {parameter}
+{receiver_read}    total = {parameter}
     for [{key_name}, value] in pairs
         total += value
     total + {parameter}
