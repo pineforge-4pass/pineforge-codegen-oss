@@ -73,14 +73,26 @@ def hourly_native_env(tmp_path_factory, native_env):
     engine, feed, count, aux = native_env
     rows = feed.read_text(encoding="utf-8").splitlines()
     start = int(rows[1].split(",", 1)[0])
-    hourly_feed = tmp_path_factory.mktemp("bool_hourly_feed") / "chart.csv"
+    hourly_dir = tmp_path_factory.mktemp("bool_hourly_feed")
+    hourly_feed = hourly_dir / "chart.csv"
     hourly_feed.write_text(
         rows[0] + "\n"
         + "".join(f"{start + index * 3_600_000},{row.split(',', 1)[1]}\n"
                   for index, row in enumerate(rows[1:])),
         encoding="utf-8",
     )
-    return engine, hourly_feed, count, aux
+    # The auxiliary request.security feed must map onto the hourly chart's own
+    # bars: sixty one-minute bars start at every hourly stamp (the shared feed's
+    # auxiliary minutes belong to the original fifteen-minute stamps).
+    hourly_aux = hourly_dir / "minutes.csv"
+    hourly_aux.write_text(
+        rows[0] + "\n"
+        + "".join(f"{start + index * 3_600_000 + minute * 60_000},"
+                  f"{row.split(',', 1)[1]}\n"
+                  for index, row in enumerate(rows[1:]) for minute in range(60)),
+        encoding="utf-8",
+    )
+    return engine, hourly_feed, count, hourly_aux
 
 
 def _run_native(tmp_path, native_env, source, *, extra_flags=(), timeframe="15"):
