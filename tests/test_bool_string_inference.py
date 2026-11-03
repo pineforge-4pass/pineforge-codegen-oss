@@ -68,34 +68,7 @@ def native_env(tmp_path_factory):
     return engine, feed, len(stamps), aux
 
 
-@pytest.fixture(scope="module")
-def hourly_native_env(tmp_path_factory, native_env):
-    engine, feed, count, aux = native_env
-    rows = feed.read_text(encoding="utf-8").splitlines()
-    start = int(rows[1].split(",", 1)[0])
-    hourly_dir = tmp_path_factory.mktemp("bool_hourly_feed")
-    hourly_feed = hourly_dir / "chart.csv"
-    hourly_feed.write_text(
-        rows[0] + "\n"
-        + "".join(f"{start + index * 3_600_000},{row.split(',', 1)[1]}\n"
-                  for index, row in enumerate(rows[1:])),
-        encoding="utf-8",
-    )
-    # The auxiliary request.security feed must map onto the hourly chart's own
-    # bars: sixty one-minute bars start at every hourly stamp (the shared feed's
-    # auxiliary minutes belong to the original fifteen-minute stamps).
-    hourly_aux = hourly_dir / "minutes.csv"
-    hourly_aux.write_text(
-        rows[0] + "\n"
-        + "".join(f"{start + index * 3_600_000 + minute * 60_000},"
-                  f"{row.split(',', 1)[1]}\n"
-                  for index, row in enumerate(rows[1:]) for minute in range(60)),
-        encoding="utf-8",
-    )
-    return engine, hourly_feed, count, hourly_aux
-
-
-def _run_native(tmp_path, native_env, source, *, extra_flags=(), timeframe="15"):
+def _run_native(tmp_path, native_env, source, *, extra_flags=()):
     engine, feed, _count, aux = native_env
     pine = tmp_path / "strategy.pine"
     pine.write_text(source, encoding="utf-8")
@@ -105,7 +78,7 @@ def _run_native(tmp_path, native_env, source, *, extra_flags=(), timeframe="15")
     build_strategy_library(translated["cpp"], tmp_path, extra_flags=extra_flags)
     _, _records, stderr = run_strategy(
         engine, tmp_path, feed,
-        {"input_tf": timeframe, "script_tf": timeframe,
+        {"input_tf": "15", "script_tf": "15",
          "aux_security_ohlcv_csv": str(aux), "aux_security_input_tf": "1",
          "runtime_overrides": {"session": "0930-1600",
                                "timezone": "America/New_York"}},
@@ -424,7 +397,7 @@ def test_legacy_bool_helper_result_is_evaluated_once(tmp_path, native_env, value
     for value in TIMEFRAME_BOOLS for shape in ("parameter", "history")
 ])
 def test_native_timeframe_bool_values_match_pine_reference(
-        tmp_path, hourly_native_env, value, shape):
+        tmp_path, native_env, value, shape):
     """Pine reference: transported predicates select and fill the same quantity."""
     if shape == "parameter":
         body = "q(p) => p ? 2 : 1\n" + f"qty = q({value})\n"
@@ -446,8 +419,8 @@ def test_native_timeframe_bool_values_match_pine_reference(
         + "if bar_index > 6 and bar_index % 7 == 4\n"
         + '    log.info("filled {0} {1}", bar_index - 1, strategy.position_size)\n'
     )
-    stderr = _run_native(tmp_path, hourly_native_env, source, timeframe="60")
-    count = hourly_native_env[2]
+    stderr = _run_native(tmp_path, native_env, source)
+    count = native_env[2]
     reference = _messages(stderr, "Pine reference", count)
     assert set(reference.values()) <= {"1", "2"}, reference
     history = 1 if shape == "history" else 0
