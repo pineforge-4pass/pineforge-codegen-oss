@@ -723,6 +723,7 @@ class SecurityEmitter:
             self._codegen_error(
                 node,
                 "request.security lookahead must be barmerge.lookahead_on or barmerge.lookahead_off.",
+                hint="Use barmerge.lookahead_* constants selected by values fixed before the first bar.",
             )
         return value
 
