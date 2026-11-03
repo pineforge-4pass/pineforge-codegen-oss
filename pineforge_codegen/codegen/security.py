@@ -4405,8 +4405,20 @@ class SecurityEmitter:
         """Resolve integer missingness on the same bindings as the evaluator."""
         if node is None or depth > 64:
             return node is not None
+        if self._text_type(node) == "bool":
+            return False
         if self._security_emits_double(node, bindings):
             return False
+        if isinstance(node, Subscript) and isinstance(node.object, Identifier):
+            if not self._security_identifier_is_global_binding(node.object):
+                context = self._security_lookup_helper_binding_context(
+                    node.object.name, bindings)
+                if context is not None and isinstance(context[0], str):
+                    series = self._security_series_binding_target(context[0])
+                    if (series is not None
+                            and series not in self._security_string_series
+                            and series not in self._security_color_series):
+                        return False
         if isinstance(node, Identifier):
             if not self._security_identifier_is_global_binding(node):
                 context = self._security_lookup_helper_binding_context(node.name, bindings)
@@ -4430,6 +4442,29 @@ class SecurityEmitter:
             if plan["mode"] != "linear":
                 return self._security_integer_na_operand(
                     plan["expr"], plan["binding_stack"], depth + 1)
+            final = plan["expr"]
+            if isinstance(final, Identifier):
+                declaration = self.ctx.identifier_binding_nodes.get(id(final))
+                if (declaration is None
+                        and id(final) not in self.ctx.identifier_decl_bindings):
+                    # Value-producing declaration/assignment tails have a
+                    # synthetic read. Only an unambiguous declaration of this
+                    # helper's own top-level block can supply its storage.
+                    declarations = [
+                        stmt for stmt in plan["body"]
+                        if isinstance(stmt, VarDecl) and stmt.name == final.name
+                    ]
+                    if len(declarations) == 1:
+                        declaration = declarations[0]
+                if (isinstance(declaration, VarDecl)
+                        and any(declaration is stmt for stmt in plan["body"])
+                        and (declaration.is_var or declaration.is_varip
+                             or final.name in plan.get("local_series_names", ()))
+                        and not self._security_helper_var_is_color(declaration)
+                        and self._type_for_decl(declaration) != "std::string"):
+                    # Numeric helper history and persistent state are the
+                    # evaluator's Series<double>, including their missing slots.
+                    return False
             # A materialized integer result can be missing even when its
             # chart-side return inference uses a floating fallback.
             return self._infer_type(node) in ("int", "int64_t", "double")
@@ -4902,7 +4937,14 @@ class SecurityEmitter:
                         op_char = stmt.op[0]
                         current = _series_expr(series_name, "0")
                         rhs = self._compound_assign_rhs(
-                            current, stmt.op, expr_cpp, stmt.target, stmt.value)
+                            current, stmt.op, expr_cpp, stmt.target, stmt.value,
+                            target_is_double=(
+                                series_name not in self._security_color_series
+                                and series_name not in self._security_string_series),
+                            value_is_double=(
+                                series_name not in self._security_color_series
+                                and series_name not in self._security_string_series),
+                        )
                         if rhs is None:
                             rhs = f"{current} {op_char} {expr_cpp}"
                         lines.append(f'{pad}{ref}.update({rhs});')

@@ -980,7 +980,8 @@ class StmtVisitor:
             name=node.name,
             type_hint=node.type_hint,
         )
-        if target_cpp_type is None and self._type_for_decl(node) == "std::string":
+        if (target_cpp_type is None
+                and self._slot_scalar_cpp_type(node.name) == "std::string"):
             target_cpp_type = "std::string"
         if target_cpp_type is None:
             target_cpp_type = self._udt_target_cpp_type(
@@ -1005,7 +1006,9 @@ class StmtVisitor:
             lines.append(f"{pad}{cpp_type} {safe} = {cpp_val};")
 
     def _compound_assign_rhs(self, target_read: str, op: str, val_cpp: str,
-                             target_node=None, value_node=None) -> str | None:
+                             target_node=None, value_node=None, *,
+                             target_is_double: bool = False,
+                             value_is_double: bool = False) -> str | None:
         """RHS for a compound assignment that must NOT lower to the C++
         compound operator.
 
@@ -1017,9 +1020,12 @@ class StmtVisitor:
         for operators where the native C++ compound form is correct
         (+=, -=, *=).
         """
+        # Requested helper state already stores numeric values as doubles.
+        # Its caller supplies the emitted operand families after converting
+        # the RHS; the chart AST's int hint cannot type those series reads.
         if (self._infer_type(target_node) != "std::string"
-                and any(self._integer_na_operand(side)
-                        for side in (target_node, value_node))):
+                and ((not target_is_double and self._integer_na_operand(target_node))
+                     or (not value_is_double and self._integer_na_operand(value_node)))):
             expression = BinOp(left=target_node, op=op[0], right=value_node)
             return self._na_arithmetic_cpp(
                 expression, target_read, val_cpp,

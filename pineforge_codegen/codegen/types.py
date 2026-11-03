@@ -1086,9 +1086,138 @@ class TypeInferer:
     def _integer_na_operand(self, node) -> bool:
         """An emitted integer expression whose value can be missing."""
         return (node is not None
+                # Pine bools can occupy legacy numeric storage. That storage
+                # does not give them an integer missing-value sentinel.
+                and self._text_type(node) != "bool"
                 and not self._emitted_value_is_double(node)
                 and self._infer_type(node) in ("int", "int64_t", "double")
+                and not self._integer_slot_value_is_present(node)
                 and self._int_operand_may_be_na(node))
+
+    def _integer_slot_value_is_present(self, node) -> bool:
+        """Prove initialized integer storage has no missing-value source.
+
+        Follow declaration identities and every write, rather than treating a
+        mutable name as nullable merely because it is mutable. A self-update
+        such as ``n := n + 1`` contributes a dependency, not a new missing
+        source. History, unknown calls and unproved parameters remain nullable.
+        This query owns no alias cache and does not change the shared NA walk.
+        """
+        owner = self._func_info_map.get(
+            getattr(self, "_active_func_name", "") or "")
+        pending = [(node, owner)]
+        seen = set()
+        compound_writes = {}
+        budget = getattr(self, "_budget", None)
+        while pending:
+            value, lexical_owner = pending.pop()
+            key = (id(value), getattr(lexical_owner, "name", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            if budget is not None and len(seen) % 128 == 0:
+                budget.check(getattr(value, "loc", None), Phase.CODEGEN)
+            if isinstance(value, NumberLiteral):
+                # A floating initializer/write can narrow to the integer
+                # sentinel; leave that conversion to the existing guards.
+                if not isinstance(value.value, int):
+                    return False
+                continue
+            if isinstance(value, (BoolLiteral, ColorLiteral)):
+                continue
+            if isinstance(value, (ExprStmt, VarDecl, Assignment)):
+                pending.append((
+                    value.expr if isinstance(value, ExprStmt) else value.value,
+                    lexical_owner,
+                ))
+                continue
+            if isinstance(value, Identifier):
+                declaration = (
+                    self.ctx.identifier_decl_bindings[id(value)]
+                    if id(value) in self.ctx.identifier_decl_bindings
+                    else ValueBindings.declaration_of(value)
+                )
+                if (lexical_owner is not None
+                        and value.name in lexical_owner.node.params
+                        and declaration in (
+                            None, (id(lexical_owner.node), value.name))):
+                    index = lexical_owner.node.params.index(value.name)
+                    actuals = self._int_boundary_inputs()[0].get(
+                        (lexical_owner.name, index), ())
+                    if not actuals:
+                        return False
+                    pending.extend((arg, caller) for arg, caller, _written in actuals)
+                    continue
+                binding = self._int_value_binding(value, lexical_owner)
+                if binding is not None:
+                    binding_key = ("binding", binding[0])
+                    if binding_key in seen:
+                        continue
+                    seen.add(binding_key)
+                    if not binding[1]:
+                        return False
+                    if binding[0][0] in self._tuple_decl_nodes:
+                        # A tuple's value owner can be its callee, rather than
+                        # the owner of the storage receiving that value.
+                        return False
+                    binding_owner = binding[1][0][1]
+                    scope = getattr(binding_owner, "name", "")
+                    if scope not in compound_writes:
+                        body = (binding_owner.node.body if binding_owner is not None
+                                else [stmt for stmt in self.ctx.ast.body
+                                      if not isinstance(stmt, (FuncDef, MethodDef))])
+                        unsafe = set()
+                        for stmt in self._walk_ast_list(body):
+                            if (not isinstance(stmt, Assignment)
+                                    or not isinstance(stmt.target, Identifier)
+                                    or stmt.op in (":=", "+=", "-=", "*=")):
+                                continue
+                            target = self._int_value_binding(stmt.target, binding_owner)
+                            if target is None:
+                                return False
+                            # The value inventory contains a compound write's
+                            # RHS, not its result. Division/remainder can create
+                            # NaN even when that RHS is present.
+                            unsafe.add(target[0])
+                        compound_writes[scope] = unsafe
+                    if binding[0] in compound_writes[scope]:
+                        return False
+                    pending.extend(binding[1])
+                    continue
+                if self._int_operand_may_be_na(value, lexical_owner):
+                    return False
+                continue
+            if isinstance(value, UnaryOp) and value.op in ("+", "-"):
+                pending.append((value.operand, lexical_owner))
+                continue
+            if isinstance(value, BinOp) and value.op in ("+", "-", "*", "/", "%"):
+                if value.op in ("/", "%"):
+                    divisor = self._pure_int_literal_value(value.right, names=False)
+                    if divisor is None or divisor == 0:
+                        return False
+                pending.extend(((value.left, lexical_owner),
+                                (value.right, lexical_owner)))
+                continue
+            if isinstance(value, Ternary):
+                pending.extend(((value.true_val, lexical_owner),
+                                (value.false_val, lexical_owner)))
+                continue
+            if isinstance(value, (IfStmt, SwitchStmt)):
+                bodies = ([value.body, value.else_body] if isinstance(value, IfStmt)
+                          else [*(body for _case, body in value.cases),
+                                value.default_body])
+                if any(not body for body in bodies):
+                    return False
+                pending.extend((self._selection_terminal_expr(body), lexical_owner)
+                               for body in bodies)
+                continue
+            # In particular, never prove a history read from the initializer
+            # of its current slot: the first history value is still missing.
+            if value is None or isinstance(value, (NaLiteral, Subscript)):
+                return False
+            if self._int_operand_may_be_na(value, lexical_owner):
+                return False
+        return True
 
     @staticmethod
     def _tuple_slot_types(cpp_type: str | None) -> list[str]:
@@ -4794,9 +4923,14 @@ class TypeInferer:
                      or (target_cpp_type == "int"
                          and self._udt_field_may_hold_na(node, owner)))):
             source_cpp_type = self._udt_field_int_cpp_type(node) or source_cpp_type
-        if (isinstance(node, Identifier)
-                and self._is_int64_builtin_init(node.name)):
-            source_cpp_type = "int64_t"
+        if isinstance(node, Identifier):
+            declaration = self.ctx.identifier_binding_nodes.get(id(node))
+            if ((isinstance(declaration, VarDecl)
+                 and self._is_int64_builtin_init(node.name, declaration))
+                    or (declaration is None
+                        and id(node) not in self.ctx.identifier_decl_bindings
+                        and self._is_int64_builtin_init(node.name))):
+                source_cpp_type = "int64_t"
         if (source_cpp_type in NA_PRESERVING_INT_TYPES
                 and source_cpp_type != target_cpp_type):
             return na_preserving_int_cast(cpp_val, target_cpp_type)
@@ -4814,6 +4948,13 @@ class TypeInferer:
         Packed colors in a nullable ternary still need an integer-na conversion.
         A double, an integer literal or an expression of literals (a constant
         a double holds exactly narrows) and a bare na keep their spelling."""
+        if node is not None:
+            if self._text_type(node) == "bool":
+                # Direct callers include braced float-field initializers,
+                # which need an explicit conversion even for a finite bool.
+                return f"(double)({self._bool_text_condition(node, cpp_val)})"
+            if self._infer_type(node) not in ("int", "int64_t", "double"):
+                return cpp_val
         constant = self._pure_int_literal_value(node)
         # Integral selections such as packed colors retain a typed sentinel;
         # ordinary nullable numeric ternaries already emit a floating NaN.
