@@ -1563,6 +1563,12 @@ class TypeInferer:
         for node, spec in branches:
             if self._selection_node_is_na(node):
                 continue
+            if nullable and spec is None and isinstance(node, Identifier):
+                # Scalar UDT tombstones can hide an integer global/parameter
+                # from structured inference. Its emitted type still proves
+                # the arm's family; retain it for _selection_result_cpp_type.
+                if self._infer_type(node) == "int":
+                    spec = TypeSpec.primitive("int")
             if (nullable and spec is None
                     and isinstance(node, (ColorLiteral, MemberAccess, FuncCall))
                     and self._is_color_value(node)):

@@ -134,6 +134,63 @@ def test_integer_or_na_quantity_matches_ternary(selection):
     _assert_quantity_pair(transpile(source), transpile(control))
 
 
+@pytest.mark.parametrize("qualifier", ["int ", "var ", "var int ", "varip ", "varip int "])
+@pytest.mark.parametrize("selection", [
+    _SWITCH,
+    "q = if mode == 'Fixed'\n    fixedQty\nelse\n    na\n",
+])
+def test_nullable_selection_declaration_storage(qualifier, selection):
+    source, _control = _quantity_pair(qualifier + selection)
+    cpp = transpile(source)
+    calls = _calls(cpp, "strategy_entry")
+    assert len(calls) == 2
+    quantity, = {call.split(", ")[4] for call in calls}
+    initial = r"na<double>\(\)" if qualifier.startswith("var") else r"0\.0"
+    assert re.search(
+        rf"^\s*double {quantity} = {initial};$", cpp, re.MULTILINE,
+    )
+    assert re.search(rf"^\s*{quantity} = fixedQty;$", cpp, re.MULTILINE)
+    assert re.search(rf"^\s*{quantity} = na<double>\(\);$", cpp, re.MULTILINE)
+    assert f"{quantity} = na<int>();" not in cpp
+
+
+@pytest.mark.parametrize("qualifier", ["", "int "])
+@pytest.mark.parametrize("integer_arm", ["fixedQty", "units"])
+def test_callable_nullable_selection_declaration_and_reassignment(qualifier, integer_arm):
+    source = _HEADER + _SIZE_INPUTS + (
+        "read_quantity(int units) =>\n"
+        f"    {qualifier}amount = switch mode\n"
+        f"        'Fixed' => {integer_arm}\n"
+        "        => na\n"
+        "    amount := if mode == 'Fixed'\n"
+        f"        {integer_arm}\n"
+        "    else\n"
+        "        na\n"
+        "    na(amount) ? 1.0 : amount\n"
+        "q = read_quantity(fixedQty)\n"
+    ) + _ENTRIES
+    cpp = transpile(source)
+    assert re.search(r"^\s*double amount = 0\.0;$", cpp, re.MULTILINE)
+    assert len(re.findall(
+        r"^\s*amount = na<double>\(\);$", cpp, re.MULTILINE,
+    )) >= 2
+    assert "amount = na<int>();" not in cpp
+
+
+@pytest.mark.parametrize("selection", [
+    "q = switch mode\n    'Fixed' => fixedQty\n    => 2\n",
+    "q = if mode == 'Fixed'\n    fixedQty\nelse\n    2\n",
+    "q = switch mode\n    'Fixed' => fixedQty\n",
+    "q = if mode == 'Fixed'\n    fixedQty\n",
+])
+def test_integer_selection_without_explicit_na_keeps_integer_storage(selection):
+    source, _control = _quantity_pair(selection)
+    cpp = transpile(source)
+    assert re.search(r"^\s*int q = 0;$", cpp, re.MULTILINE)
+    assert re.search(r"^\s*q = fixedQty;$", cpp, re.MULTILINE)
+    assert "double q = " not in cpp
+
+
 @pytest.mark.parametrize("true_direction,false_direction", [
     ("long", "short"), ("short", "long"), ("long", "all"), ("all", "short"),
 ])
