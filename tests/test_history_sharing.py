@@ -229,6 +229,10 @@ alias = a
         "using _pf_idx_t = std::decay_t<decltype(_pf_idx_v)>; "
         "if constexpr (std::is_same_v<_pf_idx_t, bool>) return (int)_pf_idx_v; "
         "else return is_na(_pf_idx_v) ? na<int>() : (int)_pf_idx_v; }()); "
+        "if (!is_na(_pf_history_offset) && _pf_history_offset < 0) "
+        'pine_runtime_error(std::string("History reference at line 5: offset ") '
+        '+ std::to_string(_pf_history_offset) '
+        '+ ". The history offset must be a value between 0 and 10000."); '
         "if (_pf_history_offset < 0 || static_cast<size_t>(_pf_history_offset) >= _pf_history_array.size()) "
         "return na<int>(); return _pf_history_array[_pf_history_offset]; }());"
     ) in cpp

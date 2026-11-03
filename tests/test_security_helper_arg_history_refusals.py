@@ -59,11 +59,15 @@ class _Refusal(NamedTuple):
 _ROWS = [
     pytest.param(_Refusal(
         "f(x) => x[bar_index % 3] - x\n", "f(close - open)", "PF-E3094",
-        method_sha256="1599a040ecfb28fec6e2b692c19222f38f6edd0401a323a4f8c8d2e606124955",
+        # the emitted method now also checks a negative history offset; the only
+        # difference from the earlier text is that check
+        method_sha256="ed6ec3056ccf926c25147f7605d2d692d1264f41a66d91ffa02dd0bfe92a28d1",
     ), id="dynamic-offset"),
     pytest.param(_Refusal(
         "n = input.int(2)\nf(x) => x[n] - x\n", "f(close - open)", "PF-E3094",
-        (4, 10), "295c763ead51e01ed6d518ccca9e8dcd7a8531fd369a5701a73b31ad8e2cdec5",
+        # the emitted method now also checks a negative history offset; the only
+        # difference from the earlier text is that check
+        (4, 10), "09895365528abf4d4ae3839dcb163c23ae068371810c12d7e1e46a386e0f26f1",
     ), id="input-offset"),
     pytest.param(_Refusal(
         "f(x) => x[2147483647] - x\n", "f(close - open)", "PF-E3095",
