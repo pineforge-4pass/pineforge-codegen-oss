@@ -974,24 +974,57 @@ class TypeInferer:
         return ((runtime, True)
                 if self._slot_scalar_cpp_type(name) == "int" else None)
 
-    def _int_operand_may_be_na(self, node, scope_info=None, *, _seen=frozenset()) -> bool:
+    def _int_operand_may_be_na(self, node, scope_info=None, *,
+                               _seen=frozenset(), _memo=None) -> bool:
         """Whether an integer source can produce ``na``, independent of width.
 
         Prove literals, input.int and generic integer input calls, current
         calendar readings, collection dimensions and counted binders before
         following aliases. Other input functions retain conservative guards.
         Unproved parameters, history and mutable storage remain guarded.
+
+        Share alias results for this query only, including the double-type
+        checks that can ask this question again. None means in progress:
+        preserve the old seen-name fallback rather than guessing a result.
         """
+        if _memo is None:
+            _memo = {}
+        if not isinstance(node, Identifier):
+            return self._int_operand_may_be_na_uncached(
+                node, scope_info, _seen=_seen, _memo=_memo)
+        key = (
+            "local" if node.name in getattr(self, "_current_func_local_types", {}) else "global",
+            node.name, id(scope_info), getattr(self, "_active_func_name", None),
+            bool((node.annotations or {}).get("tuple_builtin_binding")),
+        )
+        if node.name in _seen or (key in _memo and _memo[key] is None):
+            # Run the same non-alias rules and _narrow_int_name_info as the
+            # original path guard. Do not cache a cycle's provisional answer.
+            return self._int_operand_may_be_na_uncached(
+                node, scope_info, _seen=_seen | {node.name}, _memo=_memo)
+        if key not in _memo:
+            _memo[key] = None
+            _memo[key] = self._int_operand_may_be_na_uncached(
+                node, scope_info, _seen=_seen, _memo=_memo)
+        return _memo[key]
+
+    def _int_operand_may_be_na_uncached(self, node, scope_info, *, _seen, _memo) -> bool:
+        """The missingness rules, with alias expansion owned by the query memo."""
         if isinstance(node, (NumberLiteral, BoolLiteral, ColorLiteral, StringLiteral)):
             return False
         if isinstance(node, UnaryOp):
-            return self._int_operand_may_be_na(node.operand, scope_info, _seen=_seen)
+            return self._int_operand_may_be_na(
+                node.operand, scope_info, _seen=_seen, _memo=_memo)
         if isinstance(node, BinOp):
-            return (self._int_operand_may_be_na(node.left, scope_info, _seen=_seen)
-                    or self._int_operand_may_be_na(node.right, scope_info, _seen=_seen))
+            return (self._int_operand_may_be_na(
+                        node.left, scope_info, _seen=_seen, _memo=_memo)
+                    or self._int_operand_may_be_na(
+                        node.right, scope_info, _seen=_seen, _memo=_memo))
         if isinstance(node, Ternary):
-            return (self._int_operand_may_be_na(node.true_val, scope_info, _seen=_seen)
-                    or self._int_operand_may_be_na(node.false_val, scope_info, _seen=_seen))
+            return (self._int_operand_may_be_na(
+                        node.true_val, scope_info, _seen=_seen, _memo=_memo)
+                    or self._int_operand_may_be_na(
+                        node.false_val, scope_info, _seen=_seen, _memo=_memo))
         if isinstance(node, Identifier):
             if (scope_info is None
                     and node.name in {"time", "timenow", "last_bar_time",
@@ -1010,9 +1043,9 @@ class TypeInferer:
                     and node.name not in self._current_func_local_types
                     and node.name not in self._current_loop_vars):
                 value = getattr(self.ctx, "global_expr_map", {}).get(node.name)
-                if value is not None and not self._emitted_value_is_double(value):
+                if value is not None and not self._emitted_value_is_double(value, _memo=_memo):
                     return self._int_operand_may_be_na(
-                        value, _seen=_seen | {node.name})
+                        value, _seen=_seen | {node.name}, _memo=_memo)
             if (scope_info is None and node.name not in _seen
                     and node.name in self._current_func_local_types):
                 function = self._func_info_map.get(getattr(self, "_active_func_name", None))
@@ -1033,9 +1066,9 @@ class TypeInferer:
                         if self._pure_int_literal_value(value) is not None:
                             return False
                         if (value is not None
-                                and not self._emitted_value_is_double(value)
+                                and not self._emitted_value_is_double(value, _memo=_memo)
                                 and not self._int_operand_may_be_na(
-                                    value, _seen=_seen | {node.name})):
+                                    value, _seen=_seen | {node.name}, _memo=_memo)):
                             return False
             info = self._narrow_int_name_info(node.name, scope_info)
             return info is None or info[1]
@@ -1048,8 +1081,9 @@ class TypeInferer:
         if (isinstance(node, FuncCall) and isinstance(node.callee, Identifier)
                 and node.callee.name == "nz" and node.args):
             return (len(node.args) > 1
-                    and (self._emitted_value_is_double(node.args[1])
-                         or self._int_operand_may_be_na(node.args[1], scope_info, _seen=_seen)))
+                    and (self._emitted_value_is_double(node.args[1], _memo=_memo)
+                         or self._int_operand_may_be_na(
+                             node.args[1], scope_info, _seen=_seen, _memo=_memo)))
         if isinstance(node, FuncCall):
             function, namespace = self._resolve_callee(node.callee)
             if ((namespace == "input" and function == "int")
@@ -1063,7 +1097,8 @@ class TypeInferer:
                     and function in {"timestamp", "year", "month", "dayofmonth",
                                      "dayofweek", "hour", "minute", "second",
                                      "weekofyear"}):
-                return any(self._int_operand_may_be_na(arg, scope_info, _seen=_seen)
+                return any(self._int_operand_may_be_na(
+                               arg, scope_info, _seen=_seen, _memo=_memo)
                            for arg in (*node.args, *node.kwargs.values()))
         if (isinstance(node, FuncCall) and isinstance(node.callee, MemberAccess)
                 and node.callee.member in ("size", "rows", "columns", "elements_count")):
@@ -1155,14 +1190,14 @@ class TypeInferer:
             f"return {self._integer_missing_cpp('_pf_sign_v')} ? na<_pf_val_t>() : {operation}; }}())"
         )
 
-    def _na_aware_wide_is_double(self, node) -> bool:
+    def _na_aware_wide_is_double(self, node, *, _memo=None) -> bool:
         """Whether ``node`` is a 64-bit ``+ - *`` (``_int_arith_leaves_int32``)
         over an operand that can be na, which ``_wide_int_arith_cpp`` emits
         as a double."""
         return (isinstance(node, BinOp)
                 and (self._arithmetic_has_wide_int_operand(node)
                      or (self._int_arith_leaves_int32(node)
-                         and self._int_operand_may_be_na(node))))
+                         and self._int_operand_may_be_na(node, _memo=_memo))))
 
     def _arithmetic_has_wide_int_operand(self, node) -> bool:
         """Arithmetic over an integer that crossed a widened value boundary.
@@ -4132,7 +4167,7 @@ class TypeInferer:
         )
         return "double" if counter_type == PineType.FLOAT else "int"
 
-    def _emitted_value_is_double(self, node) -> bool:
+    def _emitted_value_is_double(self, node, *, _memo=None) -> bool:
         """True when the C++ expression emitted for ``node`` has type ``double``.
 
         This is deliberately *not* ``_infer_type(node) == "double"``.
@@ -4143,6 +4178,8 @@ class TypeInferer:
         this function's answer decides whether a value reaching an integer
         slot needs the na-preserving cast.
         """
+        if _memo is None:
+            _memo = {}
         if node is None:
             return False
         if isinstance(node, NumberLiteral):
@@ -4173,7 +4210,7 @@ class TypeInferer:
         if isinstance(node, UnaryOp):
             if node.op in ("not", "!"):
                 return False
-            return self._emitted_value_is_double(node.operand)
+            return self._emitted_value_is_double(node.operand, _memo=_memo)
         if isinstance(node, BinOp):
             if node.op in _BOOL_RESULT_BINOPS:
                 return False
@@ -4181,16 +4218,16 @@ class TypeInferer:
                 # Both lower through an explicit double form
                 # (``(double)a / (double)b`` / ``std::fmod``).
                 return True
-            if self._na_aware_wide_is_double(node):
+            if self._na_aware_wide_is_double(node, _memo=_memo):
                 # ``_wide_int_arith_cpp``'s na-aware form.
                 return True
-            return (self._emitted_value_is_double(node.left)
-                    or self._emitted_value_is_double(node.right))
+            return (self._emitted_value_is_double(node.left, _memo=_memo)
+                    or self._emitted_value_is_double(node.right, _memo=_memo))
         if isinstance(node, Ternary):
             # C++ gives a mixed int/double conditional the common type
             # ``double``, so one double arm narrows the whole expression.
-            return (self._emitted_value_is_double(node.true_val)
-                    or self._emitted_value_is_double(node.false_val))
+            return (self._emitted_value_is_double(node.true_val, _memo=_memo)
+                    or self._emitted_value_is_double(node.false_val, _memo=_memo))
         if isinstance(node, Identifier):
             name = node.name
             tuple_type = (
@@ -4247,7 +4284,7 @@ class TypeInferer:
                 return False
             if namespace is None and func_name == "nz" and node.args:
                 # ``nz(x)`` / ``nz(x, y)`` keep the replaced value's type.
-                return self._emitted_value_is_double(node.args[0])
+                return self._emitted_value_is_double(node.args[0], _memo=_memo)
             if namespace == "timeframe" and func_name == "in_seconds":
                 return False
             if namespace == "session":
