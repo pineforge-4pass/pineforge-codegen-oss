@@ -289,24 +289,33 @@ def _assert_unchanged_method(row, monkeypatch):
 @pytest.mark.parametrize("row", _ROWS)
 def test_product_refusal_and_unchanged_builtin_and_method_envelopes(row, monkeypatch):
     _assert_refusal(lambda: transpile(_source(row)), row)
-    _assert_refusal(lambda: transpile(_source(row, "builtin")), row, old=True)
+    # A scalar builtin no longer hides an argument-history diagnostic.
+    # The invalid offset/body/state still reports its own located refusal.
+    _assert_refusal(lambda: transpile(_source(row, "builtin")), row)
     _assert_unchanged_method(row, monkeypatch)
 
 
-def test_reporter_inventory_admission_preserves_each_non_inventory_edge(monkeypatch):
+def test_reporter_inventory_composes_values_and_preserves_method_boundary(monkeypatch):
     row = _Refusal(
         "f(x) => x[2] - x\na = ta.sma(close, 3)\nb = f(a)\n", "b", "",
         method_sha256="67c196a5569ba5b4560a12ee13f4e04c5d09a5a2cfbcc41c4ae51dad7279529d",
     )
-    # This helper call through a global value admits argument history.
-    # Its builtin and method forms keep their existing lowering.
+    # Every value read shares the same requested sample, including across
+    # builtin and selection edges. Methods keep their existing lowering.
     cpp = transpile(_source(row))
     _assert_sampled_sites(cpp, 1)
-    _assert_refusal(lambda: transpile(_source(row, "builtin")), row, old=True)
     _assert_unchanged_method(row, monkeypatch)
-    for payload in ("b + nz(b)", "close > open ? b : na"):
+    samples = [children[-1] for children in _CHART_CLOSES]
+    values = _difference(_sma(samples, 3))
+    for payload, expected in (
+        ("nz(b)", [0.0 if math.isnan(value) else value for value in values]),
+        ("b + nz(b)", [2 * value for value in values]),
+        ("close > open ? b : na", values),
+    ):
         boundary = row._replace(payload=payload)
-        _assert_refusal(lambda: transpile(_source(boundary)), boundary, old=True)
+        composed = transpile(_source(boundary))
+        _assert_sampled_sites(composed, 1)
+        _assert_completed(_run_requested(composed)["chart15"], expected)
 
 
 def _sample_member(cpp: str) -> tuple[str, int]:

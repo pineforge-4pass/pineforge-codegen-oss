@@ -188,6 +188,12 @@ class _SecurityHelperArgumentFrame(dict):
 
 
 @dataclass(frozen=True)
+class _SecurityArgumentCall:
+    result_history: bool
+    globals: tuple[Identifier, ...]
+
+
+@dataclass(frozen=True)
 class _SecurityArgumentHistory:
     parameter: str
     argument: ASTNode
@@ -205,7 +211,7 @@ class _SecurityArgumentHistoryRead:
 @dataclass(frozen=True)
 class _SecurityArgumentSample:
     current: str
-    member: str
+    member: str | None
 
 
 class SecurityEmitter:
@@ -2760,11 +2766,13 @@ class SecurityEmitter:
         )
 
     def _security_argument_inventory(self, item: dict) -> dict:
-        """Helper calls reached from the payload root through arithmetic,
-        comparison and parentheses only, without mutating helper/TA inventories.
+        """Helper calls reached through scalar expression composition.
 
-        A shared definition also reached outside those positions stays on the old
-        path: node identity cannot distinguish those two evaluation edges.
+        Arguments and tuple elements are value edges. A global initializer
+        has its own top-level clock, even when read through a lazy edge.
+        Calls executed only in a lazy arm, helper bodies and method receivers
+        retain their existing unconditional-call and dependency boundaries.
+        A definition also reached outside these positions stays on the old path.
         """
         if (item.get("foreign") or item.get("heikinashi")
                 or item.get("is_lower_tf_array")
@@ -2772,9 +2780,11 @@ class SecurityEmitter:
             return {}
         candidates, outside, seen = {}, set(), set()
         globals_ = getattr(self.ctx, "global_expr_map", {}) or {}
+        global_reads, global_parents = {}, {}
         nested_request = False
 
-        def walk(node, inventory: bool, result_history: bool = False) -> None:
+        def walk(node, inventory: bool, result_history: bool = False,
+                 conditional: bool = False, globals: tuple = ()) -> None:
             nonlocal nested_request
             if not isinstance(node, ASTNode):
                 if isinstance(node, (list, tuple)):
@@ -2784,10 +2794,13 @@ class SecurityEmitter:
                     for child in node.values():
                         walk(child, False)
                 return
-            key = (id(node), inventory, result_history)
+            key = (id(node), inventory, result_history, conditional,
+                   tuple(n.name for n in globals))
             if key in seen:
                 return
             seen.add(key)
+            if self._budget is not None:
+                self._budget.check(node.loc, Phase.CODEGEN)
             if (isinstance(node, FuncCall)
                     and self._resolve_callee(node.callee)[1] == "request"):
                 nested_request = True
@@ -2795,36 +2808,68 @@ class SecurityEmitter:
                 if (self._security_identifier_is_global_binding(node)
                         and node.name not in self._global_mutable_infos
                         and node.name in globals_):
-                    walk(globals_[node.name], inventory, result_history)
+                    global_reads.setdefault(node.name, node)
+                    global_parents.setdefault(node.name, set()).update(
+                        n.name for n in globals)
+                    # The immediate declaration owns the expression. Keep
+                    # parent edges separately so alias diamonds do not expand
+                    # the walk once per path to the same initializer.
+                    walk(globals_[node.name], inventory, result_history, False,
+                         (node,))
                 return
             if isinstance(node, BinOp) and node.op in (
                 "+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=",
+                "and", "or",
             ):
-                walk(node.left, inventory, result_history)
-                walk(node.right, inventory, result_history)
+                walk(node.left, inventory, result_history, conditional, globals)
+                walk(node.right, inventory, result_history,
+                     conditional or node.op in ("and", "or"), globals)
                 return
-            if isinstance(node, UnaryOp) and node.op in ("+", "-"):
-                walk(node.operand, inventory, result_history)
+            if isinstance(node, UnaryOp) and node.op in ("+", "-", "not"):
+                walk(node.operand, inventory, result_history, conditional, globals)
+                return
+            if isinstance(node, Ternary):
+                walk(node.condition, inventory, result_history, conditional, globals)
+                walk(node.true_val, inventory, result_history, True, globals)
+                walk(node.false_val, inventory, result_history, True, globals)
+                return
+            if isinstance(node, TupleLiteral):
+                for element in node.elements:
+                    walk(element, inventory, result_history, conditional, globals)
                 return
             if isinstance(node, Subscript):
                 # A root result-history spelling is inventoried for a
                 # located refusal only; it is never admitted for sampling.
-                walk(node.object, inventory, True)
+                walk(node.object, inventory, True, conditional, globals)
                 walk(node.index, False)
                 return
             if (isinstance(node, FuncCall) and isinstance(node.callee, Identifier)
                     and node.callee.name in self._func_names):
-                if inventory:
+                if inventory and not conditional:
                     previous = candidates.get(id(node))
-                    candidates[id(node)] = (
-                        node, result_history or bool(previous and previous[1]))
+                    roots = {n.name: n for n in previous.globals} if previous else {}
+                    roots.update((n.name, n) for n in globals)
+                    candidates[id(node)] = _SecurityArgumentCall(
+                        result_history or bool(previous and previous.result_history),
+                        tuple(roots.values()))
                 else:
                     outside.add(id(node))
                 info = self._func_info_map.get(node.callee.name)
                 if info is not None and info.node is not None:
                     walk(info.node.body, False)
-            # Every other edge leaves those positions: builtin/method arguments,
-            # receivers, lazy operands, selections, statements and bodies.
+                for argument in (*node.args, *node.kwargs.values()):
+                    walk(argument, inventory, result_history, conditional, globals)
+                return
+            if isinstance(node, FuncCall):
+                name, namespace = self._resolve_callee(node.callee)
+                if (self._get_ta_site(node) is None
+                        and ((namespace is None and name in _SECURITY_PURE_CALLS)
+                             or namespace in _SECURITY_PURE_CALL_NAMESPACES)):
+                    for argument in (*node.args, *node.kwargs.values()):
+                        walk(argument, inventory, result_history, conditional, globals)
+                    return
+            # Stateful builtins, methods, statements and helper bodies keep
+            # their dependency-aware lowering and existing admission rules.
             for name, value in vars(node).items():
                 if name != "annotations":
                     walk(value, False)
@@ -2832,7 +2877,19 @@ class SecurityEmitter:
         walk(item.get("expr_node"), True)
         if nested_request:
             return {}
-        return {key: value for key, value in candidates.items() if key not in outside}
+        admitted = {}
+        for key, value in candidates.items():
+            if key in outside:
+                continue
+            names, pending = set(), [n.name for n in value.globals]
+            while pending:
+                name = pending.pop()
+                if name not in names:
+                    names.add(name)
+                    pending.extend(global_parents.get(name, ()))
+            admitted[key] = replace(value, globals=tuple(
+                node for name, node in global_reads.items() if name in names))
+        return admitted
 
     def _security_argument_call_is_conditional(self, root, target) -> bool:
         """A nested call reached through a branch, loop or once initializer."""
@@ -3073,7 +3130,7 @@ class SecurityEmitter:
                 "derived helper-parameter history requires dependency-aware "
                 "helper evaluation for this body",
             )
-        if inventory[id(root.call)][1]:
+        if inventory[id(root.call)].result_history:
             self._codegen_error(
                 read,
                 "composing derived helper-parameter and helper-result history "
@@ -7694,13 +7751,24 @@ class SecurityEmitter:
         self._security_double_hist_nodes = set()
         outer_arg_sec = self._security_arg_history_sec
         outer_arg_values = self._security_arg_call_values
+        outer_arg_globals = self._security_arg_globals
+        outer_arg_global_values = self._security_arg_global_values
         self._security_arg_history_sec = item["sec_id"]
         self._security_arg_call_values = {}
+        inventory = self._security_arg_inventory.get(item["sec_id"], {})
+        self._security_arg_globals = {
+            node.name: node
+            for call_id, _parameter in self._security_arg_histories.get(item["sec_id"], {})
+            for node in inventory[call_id].globals
+        }
+        self._security_arg_global_values = {}
         try:
             self._emit_security_evaluator_body(item, lines)
         finally:
             self._security_arg_history_sec = outer_arg_sec
             self._security_arg_call_values = outer_arg_values
+            self._security_arg_globals = outer_arg_globals
+            self._security_arg_global_values = outer_arg_global_values
             (self._security_shared_calls, self._security_shared_definitions,
              self._security_shared_globals, self._security_global_hist_pushes,
              self._security_double_hist_nodes, self._security_array_values) = outer
@@ -7839,6 +7907,14 @@ class SecurityEmitter:
 
         self._emit_security_rebinds(sec_id, info, lines, ta_results, indent=2, emitted_lines=lines)
         emit_security_ta(post_rebind_ta_indices)
+        # A global is an unconditional statement of the requested context,
+        # even when the payload reads it only in an untaken selection arm.
+        # Its sampled dependencies keep declaration order and one value.
+        for stmt in self.ctx.ast.body:
+            if isinstance(stmt, VarDecl) and stmt.name in self._security_arg_globals:
+                self._build_security_expr(
+                    sec_id, self._security_arg_globals[stmt.name], None, ta_results,
+                    security_mutable_names=security_mutable_names, emitted_lines=lines)
         returns_tuple = item.get("returns_tuple", False)
         tuple_size = item.get("tuple_size", 0)
         if (
@@ -8446,6 +8522,8 @@ class SecurityEmitter:
                 and expr_node.name in global_expr_map
                 and expr_node.name not in resolving
             ):
+                if expr_node.name in self._security_arg_global_values:
+                    return self._security_arg_global_values[expr_node.name]
                 value = global_expr_map[expr_node.name]
                 # A global bound to a user call is one value per requested
                 # bar, however many reads the payload makes (``g - g[1]``):
@@ -8510,6 +8588,12 @@ class SecurityEmitter:
                             "of a TA tuple it does not compute once per requested bar",
                         )
                     return f"{resolved}.{field}"
+                if expr_node.name in self._security_arg_globals:
+                    if not resolved.isidentifier():
+                        name = f"_sec{sec_id}_arg_global_{len(self._security_arg_global_values)}"
+                        emitted_lines.append(f"        const auto {name} = {resolved};")
+                        resolved = name
+                    self._security_arg_global_values[expr_node.name] = resolved
                 return resolved
 
         if (
@@ -8538,7 +8622,7 @@ class SecurityEmitter:
             if isinstance(expr_node.object, Identifier):
                 sample = self._security_sampled_argument(
                     expr_node.object.name, helper_binding_stack)
-                if sample is not None:
+                if sample is not None and sample.member is not None:
                     offset = self._resolve_security_index_literal(
                         expr_node.index, helper_binding_stack)
                     if offset is None or offset < 0:
@@ -9115,7 +9199,7 @@ class SecurityEmitter:
                 sampled_site = any(key[0] == id(expr_node) for key in cells)
                 sample_key = (id(expr_node), self._security_binding_stack_signature(
                     helper_binding_stack))
-                if sampled_site and sample_key in self._security_arg_call_values:
+                if sample_key in self._security_arg_call_values:
                     return self._security_arg_call_values[sample_key]
                 call_key = f"func:{func_name}"
                 if call_key in resolving:
@@ -9137,6 +9221,30 @@ class SecurityEmitter:
                     helper_binding_stack,
                 )
                 frame = plan["binding_stack"][-1]
+                sampled_call_ids = {key[0] for key in cells}
+                sampled_arguments = {
+                    parameter: argument
+                    for parameter, argument in frame.items()
+                    if (id(expr_node), parameter) not in cells
+                    and sampled_call_ids.intersection(self._security_subtree_ids(argument))
+                } if cells else {}
+                has_samples = sampled_site or bool(sampled_arguments)
+                if has_samples and emitted_lines is None:
+                    self._codegen_error(
+                        expr_node,
+                        "request.security multi-statement helpers require "
+                        "statement-capable security evaluation context",
+                    )
+                # A call's arguments execute in its caller scope, before its
+                # body selects an arm or reads a parameter more than once.
+                # Runtime values do not replace the ASTs that key TA variants.
+                for parameter, argument_node in sampled_arguments.items():
+                    argument = self._build_security_expr(
+                        sec_id, argument_node, ta_range, ta_results, resolving,
+                        security_mutable_names, frame.caller_stack, emitted_lines)
+                    name = self._security_next_inline_name(sec_id, func_name, parameter)
+                    emitted_lines.append(f"        const auto {name} = {argument};")
+                    frame.samples[parameter] = _SecurityArgumentSample(name, None)
                 for parameter in plan["func_info"].node.params:
                     cell = cells.get((id(expr_node), parameter))
                     if cell is None:
@@ -9186,12 +9294,15 @@ class SecurityEmitter:
                         resolving,
                     )
                 resolving.remove(call_key)
-                if sampled_site:
+                if has_samples:
                     # One written call is one runtime result per evaluation.
                     # Distinct AST sites never use the pure-call value key.
-                    first = next(cell for key, cell in cells.items()
-                                 if key[0] == id(expr_node))
-                    result = f"{first.member}_result"
+                    prefix = (
+                        next(cell.member for key, cell in cells.items()
+                             if key[0] == id(expr_node))
+                        if sampled_site else
+                        self._security_next_inline_name(sec_id, func_name, "arguments"))
+                    result = f"{prefix}_result"
                     emitted_lines.append(f"        const auto {result} = {resolved};")
                     resolved = self._security_arg_call_values[sample_key] = result
                 if share_key is not None:
