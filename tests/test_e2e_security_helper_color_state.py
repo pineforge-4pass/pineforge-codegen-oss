@@ -182,7 +182,7 @@ def test_color_helper_var_state_is_accepted():
     transpile(REPORTER)
 
 
-def test_epoch_varip_and_collection_state_remain_refused():
+def test_epoch_local_keeps_counter_state_accepted_and_other_state_refused():
     epoch = (
         HEADER + "h() =>\n"
         "    var int n = 0\n"
@@ -194,14 +194,11 @@ def test_epoch_varip_and_collection_state_remain_refused():
         'out = request.security(syminfo.tickerid, "60", h())\n'
         "plot(out + g())\n"
     )
-    with pytest.raises(CompileError) as caught:
-        transpile(epoch)
-    errors = [d for d in caught.value.diagnostics if d.code == "PF-E3015"]
-    assert len(errors) == 1
-    assert errors[0].message == (
-        "request.security helper-local var state currently supports only "
-        "int, float, bool and string values"
-    )
+    cpp = transpile(epoch)
+    declarations = {line.strip() for line in cpp.splitlines()}
+    assert "int n = na<int>();" in declarations
+    assert "int64_t n = current_bar_.timestamp;" in declarations
+    compile_env.compile_cpp(cpp)
     varip = (
         HEADER + "f(src) =>\n"
         "    varip float state = src\n"

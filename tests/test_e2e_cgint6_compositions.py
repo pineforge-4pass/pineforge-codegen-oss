@@ -44,7 +44,6 @@ from pathlib import Path
 import pytest
 
 from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
 from tests._e2e import Build, skip_unless_e2e_env
 from tests._security_tapes import replay, source, tape_exits
@@ -186,14 +185,16 @@ def test_a_helper_var_keeps_its_state_family_beside_a_wide_product(body):
     compile_cpp(cpp)
 
 
-def test_a_helper_var_an_epoch_reaches_through_its_spelling_stays_refused():
-    # Pinned limitation, as on main: the helper's own ``n`` never holds an
-    # epoch, but the epoch provenance is keyed by spelling, so another
-    # function's ``n = time`` types it int64_t, a family its state lacks.
-    with pytest.raises(CompileError, match="helper-local var state currently supports only"):
-        transpile(HEAD + 'h() =>\n    var int n = 0\n    n += 1\n    n\n'
-                  'g() =>\n    n = time\n    n\n'
-                  'x = request.security(syminfo.tickerid, "60", h())\nplot(x + g())\n')
+def test_a_helper_var_keeps_its_own_width_beside_an_epoch_local():
+    # These declarations share a spelling, but only g's local holds an
+    # epoch. The helper's counter retains the supported int state family.
+    cpp = transpile(HEAD + 'h() =>\n    var int n = 0\n    n += 1\n    n\n'
+                    'g() =>\n    n = time\n    n\n'
+                    'x = request.security(syminfo.tickerid, "60", h())\nplot(x + g())\n')
+    declarations = {line.strip() for line in cpp.splitlines()}
+    assert "int n = na<int>();" in declarations
+    assert "int64_t n = current_bar_.timestamp;" in declarations
+    compile_cpp(cpp)
 
 
 def test_a_nested_helper_call_keeps_a_var_length_per_call():
@@ -269,8 +270,8 @@ def test_a_payload_copy_narrows_the_product_of_a_global_it_expands():
 
 
 def test_a_block_local_shadowing_a_wide_constant_keeps_its_product_64_bit():
-    # The width scan cannot tell the block's int g from the top-level wide g:
-    # z holds the 64-bit product either way (2160000072 at bar 72).
+    # The block's int g holds bar_index. Its product can exceed int32, so
+    # z needs 64-bit storage (2160000072 at bar 72) independently of the global.
     cpp = transpile(HEAD + "var int g = 3000000001\ng := g + 0\nvar int z = 0\n"
                     "if bar_index > 1\n    int g = bar_index\n    z := g * 30000001\nplot(z)\n")
     assert "int64_t z;" in cpp

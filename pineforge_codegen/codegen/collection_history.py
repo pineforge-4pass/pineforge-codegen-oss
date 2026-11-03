@@ -384,7 +384,8 @@ class CollectionHistoryEmitter:
         use = annotation["use"]
         offset = literal_offset(node)
         if use == "reference" and offset == 0:
-            cpp_type = self._type_spec_to_cpp(annotation["spec"])
+            cpp_type = self._type_spec_to_cpp(
+                self._type_spec_from_expr(node) or annotation["spec"])
             return f"_PFArrayHistoryValue<{cpp_type}>({current})"
         if use == "loop" or offset == 0:
             return current

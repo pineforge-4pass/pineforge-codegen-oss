@@ -300,15 +300,16 @@ class StmtVisitor:
                             else self._type_spec_from_hint_name(hint))
                     if spec is not None:
                         tuple_array_specs[name] = TypeSpec.array(spec)
-            if getattr(self, "_active_func_name", None) is not None:
-                for name in node.names:
-                    if name and name != "_":
+            for name in node.names:
+                if name and name != "_":
+                    spec = self._array_widths.bindings.get((id(node), name))
+                    if (spec is not None
+                            or getattr(self, "_active_func_name", None) is not None):
                         self._activate_callable_collection_binding(
-                            name, tuple_array_specs.get(name))
-            else:
-                for name, spec in tuple_array_specs.items():
-                    if name and name != "_":
-                        self._collection_types[name] = spec
+                            name, spec if spec is not None
+                            else tuple_array_specs.get(name))
+                    elif name in tuple_array_specs:
+                        self._collection_types[name] = tuple_array_specs[name]
                         self._array_vars.add(name)
             scalar_names = [
                 name
@@ -724,14 +725,25 @@ class StmtVisitor:
                     else self._type_spec_from_expr(node.value)
                         or self._array_spec_for_name(node.name),
                 )
+                storage = self._array_widths.nodes.get(id(node), ())
+                if not self._array_widths.wide.isdisjoint(storage):
+                    spec = self._array_widths.widen(
+                        self._array_widths.specs.get(id(node), spec), storage)
                 previous_target = getattr(self, "_array_ctor_target_name", None)
+                previous_expected = getattr(self, "_array_ctor_expected", None)
                 self._array_ctor_target_name = node.name
+                if not self._array_widths.wide.isdisjoint(storage):
+                    self._array_ctor_expected = (node.value, spec)
                 try:
                     init = self._visit_expr(node.value)
                 finally:
                     self._array_ctor_target_name = previous_target
+                    self._array_ctor_expected = previous_expected
                 self._array_vars.add(node.name)
-                self._collection_types.setdefault(node.name, spec)
+                if not self._array_widths.wide.isdisjoint(storage):
+                    self._collection_types[node.name] = spec
+                else:
+                    self._collection_types.setdefault(node.name, spec)
                 cpp_type = self._type_spec_to_cpp(spec)
                 if is_global_member:
                     lines.append(f"{pad}{safe} = {init};")
