@@ -37,6 +37,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `if` results with an explicit `na` arm preserve NaN, and
   `strategy.risk.allow_entry_in` retains input-dependent directions (#292).
 - Methods whose first parameter is never referenced in their body now report `PF-E5087` at that parameter, with a hint to use it or declare a function instead.
+- Consumed `if`/`switch` selections mixing value and void arms now report located `PF-E5088`; requested void selections keep `PF-E3102`.
 - An affine chart loop proved endless is stopped with the loop-time error when
   its result reaches an effect. Omission is limited to an unused loop statement
   with no calls, whose writes have no readers except self-updates, a break

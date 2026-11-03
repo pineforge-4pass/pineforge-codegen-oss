@@ -6143,6 +6143,26 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 11b. security evaluators
         self._emit_security_evaluators(lines)
 
+        # Keep requested void results on their existing PF-E3102 path before
+        # checking selections consumed by ordinary expressions.
+        from ..support_checker import check_selection_value_arms
+
+        def function_node(call):
+            if isinstance(call.callee, Identifier):
+                info = self._func_info_map.get(call.callee.name)
+            elif isinstance(call.callee, MemberAccess):
+                _, info = self._typed_user_method_info(
+                    call.callee.object, call.callee.member)
+            else:
+                info = None
+            return info.node if info is not None else None
+
+        check_selection_value_arms(
+            self.ctx.ast, is_void=self._value_is_void,
+            function_node=function_node, error=self._codegen_error,
+            budget=self._budget,
+        )
+
         _script_state_hooks: list[str] = []
         self._emit_script_state_hooks(_script_state_hooks, _script_state_members)
         lines[_script_state_hooks_at:_script_state_hooks_at] = _script_state_hooks

@@ -30,6 +30,9 @@ Buckets:
   this support pass is disabled.
 * Unknown ``ta.X`` / ``math.X`` / ``str.X`` / ``input.X`` calls (codegen would
   silently emit ``na`` / ``0`` / ``""`` stubs).
+* Consumed if/switch values - mixed value and void arms are refused by
+  ``check_selection_value_arms`` after analysis, using codegen's shared
+  requested-value classifier; statement selections keep their existing policy.
 """
 
 from __future__ import annotations
@@ -3120,6 +3123,102 @@ def invalid_tf_literal(tf_str: str, fn_label: str) -> tuple[str, str] | None:
 # ---------------------------------------------------------------------------
 # Convenience entry point
 # ---------------------------------------------------------------------------
+
+def check_selection_value_arms(
+    ast: Program, *, is_void: Callable, function_node: Callable,
+    error: Callable, budget=None,
+) -> None:
+    """Refuse mixed value/void arms only where a selection supplies a value.
+
+    This part of support checking runs after analysis so it can reuse the
+    request emitter's binding-aware void decision and resolved user callables.
+    A callable's terminal value is consumed only through a consumed call.
+    Declarations and reassignments always consume their right-hand side.
+    """
+    from .diagnostic_codes import render_diagnostic
+
+    checked_functions = set()
+
+    def function(definition, consumed):
+        key = (id(definition), consumed)
+        if key in checked_functions:
+            return
+        checked_functions.add(key)
+        block(definition.body, consumed, dict.fromkeys(definition.params))
+
+    def block(body, consumed, bindings):
+        local = dict(bindings)
+        for index, stmt in enumerate(body):
+            walk(stmt, consumed and index == len(body) - 1, local)
+            if isinstance(stmt, VarDecl):
+                local[stmt.name] = stmt.value
+            elif isinstance(stmt, Assignment) and isinstance(stmt.target, Identifier):
+                local[stmt.target.name] = stmt.value
+            elif isinstance(stmt, TupleAssign):
+                local.update(dict.fromkeys(stmt.names))
+
+    def walk(node, consumed, bindings):
+        if isinstance(node, ASTNode) and budget is not None:
+            budget.check(node.loc, Phase.CODEGEN)
+        if isinstance(node, (FuncDef, MethodDef)):
+            function(node, False)
+        elif isinstance(node, ExprStmt):
+            walk(node.expr, consumed, bindings)
+        elif isinstance(node, (VarDecl, Assignment, TupleAssign)):
+            walk(node.value, True, bindings)
+            if isinstance(node, Assignment):
+                walk(node.target, True, bindings)
+        elif isinstance(node, (IfStmt, SwitchStmt)):
+            if isinstance(node, IfStmt):
+                walk(node.condition, True, bindings)
+                arms = [node.body, node.else_body]
+                kind = "if"
+            else:
+                walk(node.expr, True, bindings)
+                for condition, _ in node.cases:
+                    walk(condition, True, bindings)
+                arms = [body for _, body in node.cases] + [node.default_body]
+                kind = "switch"
+            for body in arms:
+                block(body, consumed, bindings)
+            if consumed:
+                kinds = {is_void(body, bindings) for body in arms if body}
+                if kinds == {False, True}:
+                    message, hint = render_diagnostic("PF-E5088", {"kind": kind})
+                    error(node, message, hint=hint)
+        elif isinstance(node, (ForStmt, ForInStmt, WhileStmt)):
+            local = dict(bindings)
+            if isinstance(node, ForStmt):
+                walk(node.start, True, bindings)
+                local[node.var] = None
+                walk(node.end, True, local)
+                walk(node.step, True, local)
+            elif isinstance(node, ForInStmt):
+                walk(node.iterable, True, bindings)
+                local.update(dict.fromkeys(node.vars or [node.var]))
+            else:
+                walk(node.condition, True, bindings)
+            block(node.body, consumed, local)
+        elif isinstance(node, FuncCall):
+            walk(node.callee, True, bindings)
+            walk(node.args, True, bindings)
+            walk(node.kwargs, True, bindings)
+            definition = function_node(node)
+            if definition is not None:
+                function(definition, consumed)
+        elif isinstance(node, ASTNode):
+            for name, child in vars(node).items():
+                if name not in ("loc", "annotations"):
+                    walk(child, True, bindings)
+        elif isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child, consumed, bindings)
+        elif isinstance(node, dict):
+            for child in node.values():
+                walk(child, consumed, bindings)
+
+    block(ast.body, False, {})
+
 
 def check_support(ast: Program, filename: str = "<input>") -> list[Diagnostic]:
     return SupportChecker(ast, filename=filename).check()

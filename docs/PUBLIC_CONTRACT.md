@@ -12,6 +12,7 @@ and the eleven codes that became notes.
 Supported numeric conversions preserve missingness in the original type:
 an integer `na` becomes floating `na` when a float destination consumes it.
 Integer arithmetic propagates missing operands before a numeric conversion.
+Consumed `if`/`switch` selections with both a value arm and a void arm report `PF-E5088` at the selection; statement selections, implicit missing arms and uniformly value or void arms retain their policy, and requested void selections keep `PF-E3102`.
 
 ## Identifiers in generated C++
 

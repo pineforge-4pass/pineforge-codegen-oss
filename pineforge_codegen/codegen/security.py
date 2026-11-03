@@ -10016,6 +10016,16 @@ class SecurityEmitter:
         """Reject void results before a default-valued emitter can hide them."""
         from ..diagnostic_codes import render_diagnostic
 
+        if self._value_is_void(node):
+            message, hint = render_diagnostic("PF-E3102", {})
+            self._codegen_error(node.callee if isinstance(node, FuncCall) else node,
+                                message, hint=hint)
+
+    def _value_is_void(self, node, bindings=None) -> bool:
+        """Share requested-value classification with ordinary selection checks.
+
+        A list denotes an arm body, including the bindings before its terminal.
+        """
         expressions = getattr(self.ctx, "global_expr_map", {}) or {}
         functions = {}
 
@@ -10072,10 +10082,9 @@ class SecurityEmitter:
                         or sigs.get_return_type(namespace, name, len(value.args)) == PineType.VOID)
             return False
 
-        if void(node, {}, set()):
-            message, hint = render_diagnostic("PF-E3102", {})
-            self._codegen_error(node.callee if isinstance(node, FuncCall) else node,
-                                message, hint=hint)
+        local = {} if bindings is None else bindings
+        return (block(node, local, set()) if isinstance(node, list)
+                else void(node, local, set()))
 
     def _emit_security_selection_stmt(self, node, lines, pad) -> bool:
         """Emit a selection's bindings without touching chart member storage."""
