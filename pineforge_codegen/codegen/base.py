@@ -4943,6 +4943,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._all_member_names.add(self._array_journal_member_name)
 
     def _array_journal_initializer(self, member: str, value: str) -> str:
+        if member == getattr(self, "_selection_series_target", None):
+            return f"{member}.update({value});"
         if member in getattr(self, "_array_journal_members", {}):
             return f"this->{self._array_journal_member_name}.replace({member}, {value});"
         writer = self._history_sharing_writer(member)

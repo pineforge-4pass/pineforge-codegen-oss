@@ -22,6 +22,14 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- A chart TA constructor length that shadows a global input or constant now follows its lexical binding; an unsized percentile loop length keeps `PF-E5009` regardless of the counter's name (#295).
+- Constant-expression input defaults can size TA constructors while retaining the input getter in runtime resets (#295).
+- `line(na)` and `box(na)` emit the same missing handles as typed drawing declarations initialized with `na` (#295).
+- Literal `na` in emitted strategy string parameters uses the empty-string sentinel, including `strategy.exit`'s `from_entry` (#295).
+- Array bindings destructured from a helper's tuple retain their collection type for built-in method calls (#295).
+- `strategy.default_entry_qty()` raises `PF-E5084` until the strategy host exposes a default-quantity query (#295).
+- `if` and `switch` expressions reassigned to a history-bearing variable update its current Series slot (#295).
+- Pine identifiers `bar` and `HUGE` use the existing C++ name escape without changing authored input titles (#295).
 - An affine chart loop proved endless is stopped with the loop-time error when
   its result reaches an effect. Omission is limited to an unused loop statement
   with no calls, whose writes have no readers except self-updates, a break

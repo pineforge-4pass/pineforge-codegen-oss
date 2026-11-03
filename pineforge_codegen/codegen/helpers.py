@@ -246,7 +246,7 @@ CPP_STANDARD_MACROS = frozenset("""
     __LINE__ __FILE__ __DATE__ __TIME__ __TIMESTAMP__ __cplusplus
     __STDC__ __STDC_HOSTED__ __STDC_VERSION__ __STDC_MB_MIGHT_NEQ_WC__
     __STDC_UTF_16__ __STDC_UTF_32__
-    NULL EOF NAN INFINITY HUGE_VAL HUGE_VALF HUGE_VALL
+    NULL EOF NAN INFINITY HUGE HUGE_VAL HUGE_VALF HUGE_VALL
     stdin stdout stderr assert offsetof va_start va_end va_arg va_copy
     EXIT_SUCCESS EXIT_FAILURE RAND_MAX MB_CUR_MAX EDOM ERANGE EILSEQ
     CHAR_BIT CHAR_MIN CHAR_MAX SCHAR_MIN SCHAR_MAX UCHAR_MAX
@@ -306,7 +306,7 @@ CPP_EMITTER_NAMES = frozenset("""
     strategy_set_override strategy_set_override_checked
     strategy_set_magnifier_volume_weighted
     strategy_reads_trade_history
-    precalculate
+    precalculate bar
     strategy_entry strategy_close strategy_close_all strategy_exit
     strategy_exit_cancel_bracket strategy_cancel strategy_cancel_all strategy_order
     pine_bar_index pine_last_bar_index prev_chart_close is_first_tick is_last_tick

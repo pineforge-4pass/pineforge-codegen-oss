@@ -1790,6 +1790,10 @@ class TypeInferer:
             return None
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            if (namespace is None and func_name in ("line", "box")
+                    and len(node.args) == 1 and not node.kwargs
+                    and self._is_na_expr(node.args[0])):
+                return TypeSpec.udt(func_name)
             if namespace is None:
                 func_info = self._func_info_map.get(func_name)
                 return_spec = getattr(func_info, "return_type_spec", None)

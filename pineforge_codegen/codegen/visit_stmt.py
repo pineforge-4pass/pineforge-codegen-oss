@@ -289,10 +289,26 @@ class StmtVisitor:
         elif isinstance(node, TupleAssign):
             self._visit_tuple_assign(node, lines, pad)
             tuple_cpp_types = self._tuple_binding_cpp_types(node)
+            tuple_array_specs = {}
+            for name, cpp_type in zip(node.names, tuple_cpp_types):
+                if cpp_type.startswith("std::vector<") and cpp_type.endswith(">"):
+                    element = cpp_type[len("std::vector<"):-1]
+                    hint = {"double": "float", "std::string": "string"}.get(
+                        element, element)
+                    spec = (TypeSpec.primitive("int64") if element == "int64_t"
+                            else self._type_spec_from_hint_name(hint))
+                    if spec is not None:
+                        tuple_array_specs[name] = TypeSpec.array(spec)
             if getattr(self, "_active_func_name", None) is not None:
                 for name in node.names:
                     if name and name != "_":
-                        self._activate_callable_collection_binding(name, None)
+                        self._activate_callable_collection_binding(
+                            name, tuple_array_specs.get(name))
+            else:
+                for name, spec in tuple_array_specs.items():
+                    if name and name != "_":
+                        self._collection_types[name] = spec
+                        self._array_vars.add(name)
             scalar_names = [
                 name
                 for name in node.names
@@ -315,8 +331,8 @@ class StmtVisitor:
             for index, name in enumerate(node.names):
                 if name and name != "_":
                     # A supported tuple destructure creates fresh lexical
-                    # bindings.  Tuple elements are primitive on the current
-                    # supported surface, so install an explicit tombstone: an
+                    # bindings. A primitive or array element installs a
+                    # tombstone for arbitrary UDT lookup: an
                     # unrelated same-named global/callable UDT must not target-
                     # type a later ``name := na`` as ``State{}``.
                     self._lexical_udt_types[name] = None
@@ -1091,6 +1107,13 @@ class StmtVisitor:
                 if target_name
                 else self._visit_mutable_expr(node.target)
             )
+            series_safe = self._active_var_remap.get(safe, safe)
+            series_target = (
+                target_name is not None
+                and self._binding_is_series(target_name, series_safe)
+            )
+            if series_target:
+                safe = series_safe
             selection_cpp_type = self._nullable_collection_target_cpp_type(
                 name=target_name,
                 target_node=node.target if target_name is None else None,
@@ -1108,14 +1131,21 @@ class StmtVisitor:
             if selection_cpp_type is None:
                 selection_cpp_type = self._int_slot_cpp_type(target_name)
             indent = len(pad) // 4
-            self._visit_selection_value(
-                node.value,
-                safe,
-                lines,
-                indent,
-                target_cpp_type=selection_cpp_type,
-                slot_cpp_type=self._infer_type(node.target),
-            )
+            saved_target = getattr(self, "_selection_series_target", None)
+            self._selection_series_target = safe if series_target else None
+            if series_target:
+                selection_cpp_type = self._series_type_for(target_name)
+            try:
+                self._visit_selection_value(
+                    node.value,
+                    safe,
+                    lines,
+                    indent,
+                    target_cpp_type=selection_cpp_type,
+                    slot_cpp_type=self._infer_type(node.target),
+                )
+            finally:
+                self._selection_series_target = saved_target
             return
 
         # Get target name

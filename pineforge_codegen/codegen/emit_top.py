@@ -1110,6 +1110,7 @@ class TopLevelEmitter:
                 # A simple or series length is read on the bar
                 # (``_ta_dynamic_plan``): the member is default-constructed.
                 continue
+            refusal = self._ta_dynamic_refusal(site)
             if site.ctor_args:
                 # If a ctor arg is neither a compile-time literal nor expandable
                 # to an input-backed runtime expression, the old code silently
@@ -1123,9 +1124,10 @@ class TopLevelEmitter:
                     # An argument ``_ta_arg_takes_plan`` sends to the lowering
                     # of ``_ta_dynamic_plan`` that it cannot spell is refused
                     # here, as before string literals were spelled.
-                    if (not self._is_compile_time_value(r)
-                            and (self._runtime_ctor_arg_for_reset(a) is None
-                                 or self._ta_arg_takes_plan(site, arg_pos, a))):
+                    if ((refusal is not None and arg_pos in refusal["refused"])
+                            or (not self._is_compile_time_value(r)
+                                and (self._runtime_ctor_arg_for_reset(a) is None
+                                     or self._ta_arg_takes_plan(site, arg_pos, a)))):
                         # A TA source reached through request.security can have
                         # several helper-bound constructor variants. Validate
                         # only variants of this exact source node before the

@@ -508,6 +508,10 @@ class TypeHelper:
             return self._selection_type_spec(branches)
         if isinstance(value, FuncCall):
             cal = value.callee
+            if (isinstance(cal, Identifier) and cal.name in ("line", "box")
+                    and len(value.args) == 1 and not value.kwargs
+                    and isinstance(value.args[0], NaLiteral)):
+                return TypeSpec.udt(cal.name)
             func = cal.member if isinstance(cal, MemberAccess) else None
             ns = cal.object.name if isinstance(cal, MemberAccess) and isinstance(cal.object, Identifier) else None
             targs = self._template_args_from_call(value)

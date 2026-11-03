@@ -129,8 +129,9 @@ class InputHelper:
     def _input_default_value(self, node: FuncCall) -> tuple[bool, object]:
         """``(True, value)`` when the defval is the constant a ``v = input...``
         binding records as ``v``'s known value -- a number, bool or string
-        literal, or a declared enum member (its index) -- else ``(False, None)``.
-        Only such an input is a stable scalar the TA reset can re-read."""
+        literal, a proven constant expression, or a declared enum member (its
+        index) -- else ``(False, None)``. Only such an input is a stable scalar
+        the TA reset can re-read."""
         default = self._get_input_default(node)
         if isinstance(default, (NumberLiteral, BoolLiteral, StringLiteral)):
             return True, default.value
@@ -138,6 +139,14 @@ class InputHelper:
             members = self._enum_defs.get(default.object.name)
             if members is not None and default.member in members:
                 return True, members.index(default.member)
+        resolver = getattr(self, "_constant_default_resolver", None)
+        if resolver is None:
+            resolver = self._constant_default_resolver = ConstantResolver(
+                self.ctx.ast, getattr(self, "_budget", None))
+        proof = resolver.expression(default)
+        if proof is not None and proof.pine_type in (
+                PineType.INT, PineType.FLOAT, PineType.BOOL, PineType.STRING):
+            return True, proof.value
         return False, None
 
     def _input_title_node(self, node: FuncCall):

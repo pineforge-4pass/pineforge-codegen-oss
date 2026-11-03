@@ -2764,6 +2764,12 @@ class CallVisitor:
                 "have rejected. Use ta.barssince(...)."
             )
 
+        # Drawing casts of na use the same missing handle as a typed binding.
+        if (namespace is None and func_name in ("line", "box")
+                and len(node.args) == 1 and not node.kwargs
+                and self._is_na_expr(node.args[0])):
+            return f"{DRAWING_TYPE_TO_CPP[func_name]}{{}}"
+
         # Type cast functions: int(x), float(x), bool(x), string(x)
         if func_name == "int" and namespace is None and node.args:
             # Pine int(na) → na (int form). Evaluate once, propagate na via
@@ -3497,6 +3503,10 @@ class CallVisitor:
         )
         return f"{token}ULL"
 
+    def _strategy_string_arg(self, node) -> str:
+        """A missing Pine string uses the host's empty-string sentinel."""
+        return '""' if node is None or isinstance(node, NaLiteral) else self._visit_expr(node)
+
     def _visit_strategy_call(self, func_name: str, node: FuncCall) -> str:
         from .order_shapes import record_order_call
         if func_name in ("convert_to_account", "convert_to_symbol"):
@@ -3504,13 +3514,16 @@ class CallVisitor:
             v = self._visit_expr(p.get("value")) if p.get("value") is not None else "0.0"
             return f"({v})"
         if func_name == "default_entry_qty":
-            p = self._resolve_func_args(node, "strategy.default_entry_qty")
-            fp = self._visit_expr(p.get("fill_price")) if p.get("fill_price") is not None else "0.0"
-            return f"calc_qty({fp})"
+            self._codegen_error(
+                node,
+                "strategy.default_entry_qty() requires a default-quantity "
+                "query on the engine strategy host.",
+                hint="Use the default quantity of strategy.entry() by omitting qty.",
+            )
 
         if func_name == "entry":
             p = self._resolve_func_args(node, "strategy.entry")
-            entry_id = self._visit_expr(p.get("id")) if "id" in p else '""'
+            entry_id = self._strategy_string_arg(p.get("id"))
             direction_node = p.get("direction")
             direction = (
                 self._coerce_bool_expr(
@@ -3525,8 +3538,8 @@ class CallVisitor:
             oca_name = p.get("oca_name")
             oca_type = p.get("oca_type")
             qty_type = p.get("qty_type")
-            comment_val = self._visit_expr(comment) if comment else '""'
-            oca_name_val = self._visit_expr(oca_name) if oca_name else '""'
+            comment_val = self._strategy_string_arg(comment)
+            oca_name_val = self._strategy_string_arg(oca_name)
             oca_type_val = self._visit_expr(oca_type) if oca_type else "0"
             qty_type_val = self._visit_expr(qty_type) if qty_type else "-1"
             qty_val = self._visit_expr(qty) if qty else "na<double>()"
@@ -3563,8 +3576,8 @@ class CallVisitor:
 
         if func_name == "close":
             p = self._resolve_func_args(node, "strategy.close")
-            close_id = self._visit_expr(p.get("id")) if "id" in p else '""'
-            comment = self._visit_expr(p.get("comment")) if p.get("comment") is not None else '""'
+            close_id = self._strategy_string_arg(p.get("id"))
+            comment = self._strategy_string_arg(p.get("comment"))
             qty = self._visit_expr(p.get("qty")) if p.get("qty") is not None else "na<double>()"
             qty_pct = self._visit_expr(p.get("qty_percent")) if p.get("qty_percent") is not None else "na<double>()"
             immediately_node = p.get("immediately")
@@ -3585,7 +3598,7 @@ class CallVisitor:
 
         if func_name == "close_all":
             p = self._resolve_func_args(node, "strategy.close_all")
-            comment = self._visit_expr(p.get("comment")) if p.get("comment") is not None else '""'
+            comment = self._strategy_string_arg(p.get("comment"))
             immediately_node = p.get("immediately")
             immediately = (
                 self._coerce_bool_expr(
@@ -3606,8 +3619,8 @@ class CallVisitor:
 
         if func_name == "exit":
             p = self._resolve_func_args(node, "strategy.exit")
-            exit_id = self._visit_expr(p.get("id")) if "id" in p else '""'
-            from_id = self._visit_expr(p.get("from_entry")) if "from_entry" in p else '""'
+            exit_id = self._strategy_string_arg(p.get("id"))
+            from_id = self._strategy_string_arg(p.get("from_entry"))
 
             limit_n = p.get("limit")
             stop_n = p.get("stop")
@@ -3632,8 +3645,8 @@ class CallVisitor:
                 trail_pr = self._visit_expr(trail_pr_n) if trail_pr_n else "na<double>()"
                 qty_pct = self._visit_expr(qty_pct_n) if qty_pct_n else "100.0"
                 qty_val = self._visit_expr(qty_n) if qty_n else "na<double>()"
-                comment = self._visit_expr(comment_n) if comment_n is not None else '""'
-                oca_val = self._visit_expr(oca_name_n) if oca_name_n is not None else '""'
+                comment = self._strategy_string_arg(comment_n)
+                oca_val = self._strategy_string_arg(oca_name_n)
                 profit_ticks = "na<double>()"
                 loss_ticks = "na<double>()"
 
@@ -3659,7 +3672,7 @@ class CallVisitor:
                 return (f"strategy_exit({exit_id}, {from_id}, {limit_val}, {stop_val}, "
                         f"{trail_pts}, {trail_off}, {trail_pr}, {qty_pct}, {comment}, "
                         f"{qty_val}, {oca_val}, {profit_ticks}, {loss_ticks})")
-            comment = self._visit_expr(comment_n) if comment_n is not None else '""'
+            comment = self._strategy_string_arg(comment_n)
             record_order_call(self, node, "exit", {
                 "id": (exit_id, p.get("id")), "from_entry": (from_id, p.get("from_entry")),
                 "comment": (comment, comment_n, '""'),
@@ -3668,7 +3681,7 @@ class CallVisitor:
 
         if func_name == "cancel":
             p = self._resolve_func_args(node, "strategy.close")  # same shape: id first
-            cancel_id = self._visit_expr(p.get("id")) if "id" in p else '""'
+            cancel_id = self._strategy_string_arg(p.get("id"))
             record_order_call(self, node, "cancel", {"id": (cancel_id, p.get("id"))})
             return f"strategy_cancel({cancel_id})"
 
@@ -3678,7 +3691,7 @@ class CallVisitor:
 
         if func_name == "order":
             p = self._resolve_func_args(node, "strategy.order")
-            order_id = self._visit_expr(p.get("id")) if "id" in p else '""'
+            order_id = self._strategy_string_arg(p.get("id"))
             direction_node = p.get("direction")
             direction = (
                 self._coerce_bool_expr(
@@ -3689,7 +3702,7 @@ class CallVisitor:
             qty = self._visit_expr(p.get("qty")) if "qty" in p else "0"
             limit_arg = self._visit_expr(p.get("limit")) if "limit" in p else "na<double>()"
             stop_arg = self._visit_expr(p.get("stop")) if "stop" in p else "na<double>()"
-            oca_name = self._visit_expr(p.get("oca_name")) if "oca_name" in p else '""'
+            oca_name = self._strategy_string_arg(p.get("oca_name"))
             oca_type = self._visit_expr(p.get("oca_type")) if "oca_type" in p else "0"
             record_order_call(self, node, "order", {
                 "id": (order_id, p.get("id")), "direction": (direction, direction_node),
