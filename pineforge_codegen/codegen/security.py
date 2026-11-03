@@ -88,7 +88,7 @@ from .helpers import (
     _CPP_COMMENT_OR_LITERAL as _SECURITY_CPP_LITERALS,
     na_preserving_int_cast, unary_sign_cpp,
 )
-from ..security_contexts import GLOBAL_ANNOTATION, UNREACHED_ANNOTATION
+from ..security_contexts import GLOBAL_ANNOTATION, UNREACHED_ANNOTATION, _FIXED_INPUT_KINDS
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .tables import (
     ARRAY_JOURNAL_DELTA_METHODS, ARRAY_JOURNAL_FULL_METHODS, MATRIX_VOID_METHODS,
@@ -1071,6 +1071,19 @@ class SecurityEmitter:
                 return node
             return replace(node, operand=operand)
         if isinstance(node, FuncCall):
+            name, namespace = self._resolve_callee(node.callee)
+            if namespace == "input" and name in _FIXED_INPUT_KINDS:
+                # Retain the input call for the normal typed runtime getter,
+                # including int64 time and string session/text-area values.
+                # Only its default needs setup substitution; titles/options
+                # are descriptors and keep their authored binding provenance.
+                default = self._get_input_default(node)
+                substituted = self._substitute_tf_input_reads(default, resolving)
+                if substituted is default:
+                    return node
+                if node.args:
+                    return replace(node, args=[substituted, *node.args[1:]])
+                return replace(node, kwargs={**node.kwargs, "defval": substituted})
             new_args = [self._substitute_tf_input_reads(a, resolving) for a in node.args]
             new_kwargs = {
                 k: (self._substitute_tf_input_reads(v, resolving)

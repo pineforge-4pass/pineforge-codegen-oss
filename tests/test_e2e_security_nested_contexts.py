@@ -465,6 +465,106 @@ def _reached_request_source(body: str) -> str:
     )
 
 
+@pytest.fixture(scope="module")
+def fixed_input_lookahead_literal_runs(request_value_feed, tmp_path_factory):
+    """Independent input-free builds with value-sensitive order quantities."""
+    engine, feed = request_value_feed
+    return _execute_lookahead_builds(
+        engine, feed, tmp_path_factory.mktemp("fixed_input_lookahead_controls"), {
+            mode: Build(_reached_request_source(
+                'value = request.security(syminfo.tickerid, "D", close[1], '
+                f'lookahead=barmerge.lookahead_{mode})\n'), trace=True)
+            for mode in ("on", "off")
+        })
+
+
+@pytest.mark.parametrize("kind, on_value, off_value, predicate", [
+    pytest.param("time", 1735689600000, 1767225600000,
+                 "selection < 1751328000000", id="time"),
+    pytest.param("price", 1.25, 2.75, "selection < 2.0", id="price"),
+    pytest.param("session", "0930-1600", "0000-2400",
+                 'selection == "0930-1600"', id="session"),
+    pytest.param("text_area", "Enabled\nMiXeD", "disabled\nMiXeD",
+                 'selection == "Enabled\\nMiXeD"', id="text-area"),
+])
+@pytest.mark.parametrize("default_on", [True, False], ids=["on-to-off", "off-to-on"])
+def test_fixed_primitive_input_lookahead_native_values(
+        request_value_feed, fixed_input_lookahead_literal_runs, tmp_path,
+        kind, on_value, off_value, predicate, default_on):
+    """Typed input transport, requested arrays and orders must all agree."""
+    engine, feed = request_value_feed
+    default, override = ((on_value, off_value) if default_on else (off_value, on_value))
+    # String traces encode exact membership in these two complete values.
+    # An arbitrary string taking the off branch must produce -1, not pass.
+    observed = (
+        f'selection == {json.dumps(on_value)} ? 1 : '
+        f'selection == {json.dumps(off_value)} ? 0 : -1'
+        if isinstance(on_value, str) else "selection")
+    declare = (
+        f'rawChoice = input.{kind}({json.dumps(default)}, "Selection")\n'
+        'selection = rawChoice\n'
+        f'enabled = {predicate}\n'
+        f'// @pf-trace input_observed={observed}\n'
+        '// @pf-trace input_selected=enabled ? 1 : 0\n')
+    subject = _reached_request_source(
+        declare
+        + 'first = enabled ? barmerge.lookahead_on : barmerge.lookahead_off\n'
+        'second = first\n'
+        'value = request.security(syminfo.tickerid, "D", close[1], lookahead=second)\n')
+    reference = _reached_request_source(
+        declare
+        + 'dailyOn = request.security(syminfo.tickerid, "D", close[1], '
+        'lookahead=barmerge.lookahead_on)\n'
+        'dailyOff = request.security(syminfo.tickerid, "D", close[1], '
+        'lookahead=barmerge.lookahead_off)\n'
+        'value = enabled ? dailyOn : dailyOff\n')
+    runs = _execute_lookahead_builds(engine, feed, tmp_path, {
+        "subject": Build(subject, overrides={"Selection": override}, trace=True),
+        "reference": Build(reference, overrides={"Selection": override}, trace=True),
+    })
+    literals = fixed_input_lookahead_literal_runs
+    for mode in ("on", "off"):
+        _assert_live_request_values(ok(literals, mode))
+    compared, changed, first = per_bar_mismatches(
+        _value_trace(ok(literals, "on")), _value_trace(ok(literals, "off")))
+    assert compared > 100 and changed > 0, (
+        "INVALID CONTROL: literal lookahead requests are invariant", compared, changed, first)
+    assert ok(literals, "on").trades["default"] != ok(literals, "off").trades["default"], (
+        "INVALID CONTROL: requested values did not change order quantities")
+
+    # Judge the independent workaround before the candidate. A serialized
+    # override alone says nothing about the setter or registration's getter.
+    control = ok(runs, "reference")
+    for key in ("reference", "subject"):
+        outcome = ok(runs, key)
+        assert set(outcome.traces) == set(outcome.trades) == {"default", "override"}
+        _assert_live_request_values(outcome)
+        for tag, requested, enabled in (
+                ("default", default, default_on), ("override", override, not default_on)):
+            markers = {"input_selected": int(enabled),
+                       "input_observed": int(enabled) if isinstance(requested, str) else requested}
+            for name, expected in markers.items():
+                observed_values = [r["value"] for r in outcome.traces[tag] if r["name"] == name]
+                print(f"fixed input {kind=} {key=} {tag=} {requested=!r} {name=}: "
+                      f"expected={expected!r}, observed={set(observed_values)}")
+                assert len(observed_values) == len(_value_trace(outcome, tag)) > 100
+                assert all(actual == expected for actual in observed_values), (
+                    key, tag, requested, name, expected, set(observed_values))
+            literal = ok(literals, "on" if enabled else "off")
+            compared, mismatched, first = per_bar_mismatches(
+                _value_trace(outcome, tag), _value_trace(literal))
+            assert compared > 100 and mismatched == 0, (key, tag, first)
+            assert outcome.trades[tag] == literal.trades["default"], (key, tag)
+        compared, changed, first = per_bar_mismatches(
+            _value_trace(outcome), _value_trace(outcome, "override"))
+        assert compared > 100 and changed > 0, (key, compared, changed, first)
+        assert outcome.trades["default"] != outcome.trades["override"], key
+        transported = json.loads((tmp_path / key / "inputs_override.json").read_text())
+        assert type(transported["Selection"]) is type(override)
+        assert transported["Selection"] == override
+    assert_same_runs(ok(runs, "subject"), control)
+
+
 @pytest.mark.parametrize("default, override", [("60", "240"), ("240", "60")],
                          ids=["hour-to-four-hour", "four-hour-to-hour"])
 @pytest.mark.parametrize("forwarder, call", [

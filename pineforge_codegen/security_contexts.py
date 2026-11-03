@@ -133,6 +133,13 @@ _REGISTRATION_MEMBERS = frozenset({
     ("syminfo", "currency"), ("syminfo", "basecurrency"),
 })
 _REGISTRATION_INPUTS = frozenset({"symbol", "string", "bool"})
+# Primitive named inputs whose value is fixed for a run. Shared by the
+# barmerge proof and pre-bar input substitution; source/enum/color retain
+# their separate value domains and are not admitted by this policy.
+_FIXED_INPUT_KINDS = frozenset({
+    "symbol", "string", "bool", "int", "float", "timeframe",
+    "time", "price", "session", "text_area",
+})
 # Built-in series a context cannot be computed from before the first bar.
 _BAR_SERIES = frozenset({
     "open", "high", "low", "close", "volume", "hl2", "hlc3", "ohlc4", "hlcc4",
@@ -207,15 +214,30 @@ def _request_payload(node: FuncCall):
 
 
 def resolve_barmerge_value(prog: ScriptIndex, expr, *allowed: str):
-    """Expand an immutable selection of barmerge constants for registration.
+    """Expand a selection of barmerge constants fixed before the first bar.
 
     The leaves must retain their enum family. Conditions may read literals,
-    inputs and fixed chart facts, through lexical aliases, but never a bar
-    series or mutable storage. Return None when that cannot be established.
-    The checker and emitter use the same rule.
+    inputs and fixed chart facts through lexical aliases. A persistent scalar
+    binding may expand to a fixed input call whose default passes this same
+    proof. Writes and persistent enum results retain their refusal; other
+    persistent initializers have no admission here. Return None when the
+    proof fails. The checker and emitter share the rule.
     """
     # Successes are independent of seen; failed or seen-blocked walks are not cached.
     memo: dict[tuple[int, bool], ASTNode] = {}
+
+    def fixed_input_call(node):
+        if not isinstance(node, FuncCall):
+            return False
+        callee = node.callee
+        return (
+            (isinstance(callee, Identifier) and callee.name == "input"
+             and id(callee) not in prog.refs)
+            or (isinstance(callee, MemberAccess)
+                and isinstance(callee.object, Identifier)
+                and callee.object.name == "input" and id(callee.object) not in prog.refs
+                and callee.member in _FIXED_INPUT_KINDS)
+        )
 
     def arm(body, enum, seen):
         if len(body) != 1:
@@ -230,10 +252,15 @@ def resolve_barmerge_value(prog: ScriptIndex, expr, *allowed: str):
         if isinstance(node, Identifier):
             binding = prog.refs.get(id(node))
             decl = prog.decls.get(binding)
-            if (binding in seen or binding in prog.unstable
+            if (binding in seen or binding in prog.reassigned
                     or decl is None or decl.value is None):
                 raise _Unresolvable()
             result = walk(decl.value, enum, seen | {binding})
+            # Only a scalar input initialization path may cross persistent
+            # storage. The recursive proof has checked the scoped aliases,
+            # all writes and the input default before this admission.
+            if binding in prog.unstable and (enum or not fixed_input_call(result)):
+                raise _Unresolvable()
         elif isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
             if id(node.object) in prog.refs:
                 raise _Unresolvable()
@@ -272,20 +299,22 @@ def resolve_barmerge_value(prog: ScriptIndex, expr, *allowed: str):
             result = replace(node, operand=walk(node.operand, False, seen))
         elif not enum and isinstance(node, FuncCall):
             callee = node.callee
-            if not (
-                (isinstance(callee, Identifier) and callee.name == "input"
-                 and id(callee) not in prog.refs)
-                or (isinstance(callee, MemberAccess)
-                    and isinstance(callee.object, Identifier)
-                    and callee.object.name == "input" and id(callee.object) not in prog.refs
-                    and callee.member in _REGISTRATION_INPUTS | {"int", "float", "timeframe"})
-            ):
-                raise _Unresolvable()
-            # The bare input(close) overload is a live source, not an input
-            # qualifier. Its default cannot be evaluated before the first bar.
-            default = node.args[0] if node.args else node.kwargs.get("defval")
-            walk(default, False, seen)
-            result = node
+            if (isinstance(callee, Identifier) and callee.name == "timestamp"
+                    and id(callee) not in prog.refs and callee.name not in prog.funcs):
+                # The usual input.time default is a timestamp call. Its
+                # existing emitter works before bars only when every argument
+                # does too; a series argument or shadowed callee stays out.
+                result = replace(
+                    node, args=[walk(arg, False, seen) for arg in node.args],
+                    kwargs={name: walk(arg, False, seen) for name, arg in node.kwargs.items()})
+            else:
+                if not fixed_input_call(node):
+                    raise _Unresolvable()
+                # Keep the purity check even for named scalar inputs. In
+                # particular bare input(close) is the live-source overload.
+                default = node.args[0] if node.args else node.kwargs.get("defval")
+                walk(default, False, seen)
+                result = node
         else:
             raise _Unresolvable()
         memo[key] = result
