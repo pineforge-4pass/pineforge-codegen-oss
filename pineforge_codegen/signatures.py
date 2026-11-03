@@ -316,16 +316,22 @@ STRATEGY_PARAMETERS = (
 
 STRATEGY_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 
-def _strat(short_name: str, *sigs: FuncSig) -> None:
-    STRATEGY_FUNCTIONS[short_name] = _func(f"strategy.{short_name}", *sigs)
+def _strat(short_name: str, *sigs: FuncSig,
+           keyword_names_verified: bool = False) -> None:
+    STRATEGY_FUNCTIONS[short_name] = _func(
+        f"strategy.{short_name}", *sigs,
+        keyword_names_verified=keyword_names_verified,
+    )
 
+# Order calls validate names against their own signature before lowering.
+# Keep this separate from arity: None also marks optional order parameters.
 _strat("entry", _sig([
     ("id", S), ("direction", B), ("qty", F, None),
     ("limit", F, None), ("stop", F, None),
     ("oca_name", S, None), ("oca_type", I, None),
     ("comment", S, None), ("alert_message", S, None),
     ("disable_alert", B, None), ("qty_type", I, None),
-], ret=VOID))
+], ret=VOID), keyword_names_verified=True)
 
 _strat("order", _sig([
     ("id", S), ("direction", B), ("qty", F, None),
@@ -333,7 +339,7 @@ _strat("order", _sig([
     ("oca_name", S, None), ("oca_type", I, None),
     ("comment", S, None), ("alert_message", S, None),
     ("disable_alert", B, None), ("qty_type", I, None),
-], ret=VOID))
+], ret=VOID), keyword_names_verified=True)
 
 _strat("exit", _sig([
     ("id", S), ("from_entry", S, ""),
@@ -348,22 +354,22 @@ _strat("exit", _sig([
     ("alert_message", S, None),
     ("alert_profit", S, None), ("alert_loss", S, None), ("alert_trailing", S, None),
     ("disable_alert", B, None),
-], ret=VOID))
+], ret=VOID), keyword_names_verified=True)
 
 _strat("close", _sig([
     ("id", S), ("comment", S, None),
     ("qty", F, None), ("qty_percent", F, None),
     ("alert_message", S, None), ("immediately", B, False),
     ("disable_alert", B, None),
-], ret=VOID))
+], ret=VOID), keyword_names_verified=True)
 
 _strat("close_all", _sig([
     ("comment", S, None), ("alert_message", S, None),
     ("immediately", B, False), ("disable_alert", B, None),
-], ret=VOID))
+], ret=VOID), keyword_names_verified=True)
 
-_strat("cancel", _sig([("id", S)], ret=VOID))
-_strat("cancel_all", _sig([], ret=VOID))
+_strat("cancel", _sig([("id", S)], ret=VOID), keyword_names_verified=True)
+_strat("cancel_all", _sig([], ret=VOID), keyword_names_verified=True)
 
 _strat("convert_to_account", _sig([("value", F)], ret=F))
 _strat("convert_to_symbol", _sig([("value", F)], ret=F))

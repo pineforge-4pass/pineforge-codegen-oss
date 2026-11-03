@@ -3667,12 +3667,13 @@ class CallVisitor:
             return f"strategy_exit_cancel_bracket({exit_id}, {from_id}, {comment})"
 
         if func_name == "cancel":
-            p = self._resolve_func_args(node, "strategy.close")  # same shape: id first
+            p = self._resolve_func_args(node, "strategy.cancel")
             cancel_id = self._visit_expr(p.get("id")) if "id" in p else '""'
             record_order_call(self, node, "cancel", {"id": (cancel_id, p.get("id"))})
             return f"strategy_cancel({cancel_id})"
 
         if func_name == "cancel_all":
+            self._resolve_func_args(node, "strategy.cancel_all")
             record_order_call(self, node, "cancel_all", {})
             return "strategy_cancel_all()"
 
