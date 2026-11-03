@@ -18,6 +18,7 @@ from tests._legacy_cpp import without_trade_history_policy
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diagnostic_notes"
 CASES = json.loads((FIXTURES / "interfaces.json").read_text())["cases"]
+MATH_CASES = json.loads((FIXTURES / "interfaces.json").read_text())["math_keyword_cases"]
 DELTA = json.loads((FIXTURES / "delta.json").read_text())
 NOTE_CODES = set(DELTA["severity_changes"])
 BEFORE = json.loads((FIXTURES / "catalog.before.json").read_text())["codes"]
@@ -63,7 +64,7 @@ CATALOG_ENTRY_ADDITIONS = {
 # (PF-E2066 to PF-E2079) and the strategy() declaration errors (PF-E5080 to
 # PF-E5082), the missing value lowering error (PF-E5083) and the requested
 # selection errors (PF-E3102 to PF-E3105 and PF-E3110), including an unmeasured empty
-# requested-timeframe arm.
+# requested-timeframe arm, and the two math keyword refusals (PF-E5089, PF-E5090).
 CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2040", "PF-E2041", "PF-E2042", "PF-E2043", "PF-E2044",
                      "PF-E2045", "PF-E2046", "PF-E2047", "PF-E2048", "PF-E2049",
@@ -119,6 +120,8 @@ def _assert_catalog_delta(catalog):
     assert set(catalog) == set(BEFORE) | CATALOG_ADDITIONS
     for code, expected in CATALOG_ENTRY_ADDITIONS.items():
         assert catalog[code] == expected, code
+    assert set(DELTA["catalog_additions"]) == {"PF-E5088", "PF-E5089", "PF-E5090"}
+    assert {code: catalog[code] for code in DELTA["catalog_additions"]} == DELTA["catalog_additions"]
     changed = set()
     for code, old in BEFORE.items():
         entry = dict(catalog[code])
@@ -217,6 +220,17 @@ def test_lookahead_migration_rejects_undeclared_changes(code, field):
         _assert_catalog_delta(bad)
 
 
+@pytest.mark.parametrize("code", ("PF-E5089", "PF-E5090"))
+@pytest.mark.parametrize("mutation", [
+    "message", "hint", "explanation", "args", "severity", "user_message",
+])
+def test_math_catalog_delta_rejects_malformed_candidate(code, mutation):
+    bad = copy.deepcopy(diagnostics_catalog()["codes"])
+    bad[code][mutation] = ({"invented": {"kind": "text"}} if mutation == "args" else "changed")
+    with pytest.raises(AssertionError):
+        _assert_catalog_delta(bad)
+
+
 @pytest.mark.parametrize("code", sorted(NOTE_CODES))
 def test_stable_note_identity_uses_declared_severity(code):
     entry = diagnostics_catalog()["codes"][code]
@@ -307,6 +321,38 @@ def test_note_enum_and_catalog_short_sentences():
     assert catalog
     for code, entry in catalog.items():
         assert entry.get("user_message"), f"missing user_message: {code}"
+
+
+@pytest.mark.parametrize("case", MATH_CASES, ids=lambda case: case["name"])
+def test_math_keyword_interfaces_keep_exact_diagnostics(case):
+    assert {row["diagnostic"]["code"] for row in MATH_CASES} == {"PF-E5089", "PF-E5090"}
+    source = (FIXTURES / case["fixture"]).read_text()
+    assert source == case["source"]
+    expected = case["diagnostic"]
+    with pytest.raises(CompileError) as caught:
+        transpile_full(source, filename=case["fixture"])
+    diagnostic, = caught.value.diagnostics
+    assert {
+        "severity": diagnostic.level.value, "phase": diagnostic.phase.value,
+        "location": asdict(diagnostic.location),
+        "message": diagnostic.message, "hint": diagnostic.hint,
+        "code": diagnostic.code, "args": diagnostic.args,
+        "user_message": diagnostic.user_message,
+    } == expected
+    assert (diagnostic.message, diagnostic.hint) == render_diagnostic(
+        expected["code"], expected["args"],
+    )
+    location = expected["location"]
+    assert json.loads(_glue()(source)) == {
+        "ok": False,
+        "error": f"<input>:{location['line']}:{location['col']}: {expected['message']}",
+        "diagnostics": [{
+            "line": location["line"], "col": location["col"], "endCol": location["end_col"],
+            "message": expected["message"] + " — " + expected["hint"],
+            "severity": expected["severity"], "code": expected["code"],
+            "args": expected["args"], "user_message": expected["user_message"],
+        }],
+    }
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])

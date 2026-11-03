@@ -54,8 +54,9 @@ from .ast_nodes import (
     TypeDecl, EnumDecl, MethodDef,
 )
 from .errors import SourceLocation, Diagnostic, CompileError, Level, Phase
-from .builtin_keywords import POSITIONAL_BUILTINS
+from .builtin_keywords import positional_builtin
 from .intrinsic_binding import intrinsic_keyword_diagnostics
+from .limits import iter_ast_nodes
 from .pine_spelling import expr_start
 from .external_requests import (
     ABSENT_LOWERING, CHART_FALLBACK_ANNOTATION, FEED_LOWERING, FEED_WARNING_ANNOTATION,
@@ -723,13 +724,27 @@ class SupportChecker:
 
     def check(self) -> list[Diagnostic]:
         from .drawing_all import drawing_all_call, DRAWING_ALL_READS
-        from .limits import iter_ast_nodes
         self._drawing_all_read_members = {
             id(call[2])
             for node, _ in iter_ast_nodes(self._ast)
             if (call := drawing_all_call(node)) is not None
             and call[0] != "polyline" and call[1] in DRAWING_ALL_READS
         }
+        # Refuse invalid math keywords before declaration folding or unrelated
+        # request/visual diagnostics. Keep check() a diagnostic-returning API,
+        # and check unused bodies and unselected arms as well.
+        keyword_diagnostics = []
+        for node, _depth in iter_ast_nodes(self._ast):
+            if not isinstance(node, FuncCall) or not node.kwargs:
+                continue
+            namespace, name = _qualified_name(node.callee)
+            if namespace == "math":
+                keyword_diagnostics.extend(intrinsic_keyword_diagnostics(
+                    sigs.get_intrinsic(namespace, name), node.kwargs,
+                    filename=self._filename,
+                ))
+        if keyword_diagnostics:
+            return keyword_diagnostics
         self._collect_user_definitions(self._ast)
         self._collect_user_calls()
         self._collect_scalar_rebinds(self._ast)
@@ -1655,9 +1670,14 @@ class SupportChecker:
             return
 
         full = f"{ns}.{name}" if ns else name
-        self._diagnostics.extend(intrinsic_keyword_diagnostics(
+        keyword_diagnostics = intrinsic_keyword_diagnostics(
             sigs.get_intrinsic(ns, name), node.kwargs,
-        ))
+            filename=self._filename,
+        )
+        self._diagnostics.extend(keyword_diagnostics)
+        if keyword_diagnostics:
+            self._visit_children(node)
+            return
 
         # The footprint another symbol's feed carries: the column of the
         # request.security whose whole expression this is.
@@ -1746,8 +1766,12 @@ class SupportChecker:
             )
             self._visit_children(node)
             return
-        if (ns is None and name in POSITIONAL_BUILTINS
-                and not self._check_builtin_arguments(node, name)):
+        positional_func = positional_builtin(full)
+        # Bare builtins and unary math overload families share signature
+        # validation. Other math records retain their existing arity policy.
+        if (positional_func is not None
+                and (ns is None or len(positional_func.primary.params) == 1)
+                and not self._check_builtin_arguments(node, full, func=positional_func)):
             self._visit_children(node)
             return
 
@@ -2738,9 +2762,10 @@ class SupportChecker:
     def _check_builtin_arguments(self, node: FuncCall, name: str, *, func=None) -> bool:
         """Bind an ordinary builtin to its TradingView signatures.
 
-        ``nz`` / ``fixnan`` calls that bind are rewritten positionally by
-        ``builtin_keywords``; request.currency_rate uses the same validation
-        before its evaluation-time stop. Returns True when the arguments bind.
+        Registered bare builtins and unary math calls that bind are
+        rewritten positionally by ``builtin_keywords``; request.currency_rate
+        uses the same validation before its evaluation-time stop.
+        Returns True when the arguments bind.
         """
         if func is None:
             func = sigs.BUILTIN_FUNCTIONS[name]
@@ -2757,6 +2782,9 @@ class SupportChecker:
             expr_start(at if at is not None else node),
             f"{name} {message} (TradingView: {spelled}).",
             hint="Use the parameters of TradingView's signature.",
+            # Preserve the legacy bare-builtin switch policy. Registered
+            # namespace signatures must bind even in a non-default arm.
+            allow_switch_warning=func.name in sigs.BUILTIN_FUNCTIONS,
         )
         return False
 

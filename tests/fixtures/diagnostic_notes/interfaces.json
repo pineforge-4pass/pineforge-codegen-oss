@@ -1,5 +1,37 @@
 {
   "status": "FROZEN: user_message carries a template, never pre-rendered English",
+  "math_keyword_cases": [
+    {
+      "name": "math_variadic_keyword",
+      "fixture": "math_variadic_keyword.pine",
+      "source": "//@version=6\nstrategy(\"Math variadic keyword\")\npf_value = math.max(number0 = close, number1 = open)\nplot(pf_value)\n",
+      "diagnostic": {
+        "severity": "error",
+        "phase": "ANALYZER",
+        "location": {"file": "math_variadic_keyword.pine", "line": 3, "col": 21, "end_col": 28},
+        "message": "math.max: TradingView refuses keyword arguments for functions with a variable number of arguments.",
+        "hint": "Pass every argument to math.max positionally.",
+        "code": "PF-E5089",
+        "args": {"function": "math.max"},
+        "user_message": "{function} accepts positional arguments only."
+      }
+    },
+    {
+      "name": "math_fixed_keyword",
+      "fixture": "math_fixed_keyword.pine",
+      "source": "//@version=6\nstrategy(\"Math fixed keyword\")\npf_value = math.round(x = 2.5)\nplot(pf_value)\n",
+      "diagnostic": {
+        "severity": "error",
+        "phase": "ANALYZER",
+        "location": {"file": "math_fixed_keyword.pine", "line": 3, "col": 23, "end_col": 24},
+        "message": "math.round: unknown keyword argument 'x'; accepted keyword names: number, precision.",
+        "hint": "Use these parameter names for math.round: number, precision.",
+        "code": "PF-E5090",
+        "args": {"function": "math.round", "name": "x", "accepted": "number, precision"},
+        "user_message": "Unknown keyword ''{name}'' for {function}; use {accepted}."
+      }
+    }
+  ],
   "cases": [
     {
       "name": "chart_ema",

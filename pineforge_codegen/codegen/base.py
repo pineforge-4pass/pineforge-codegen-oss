@@ -822,6 +822,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._security_arg_history_sec: int | None = None
         self._security_arg_history_discovering = False
         self._security_arg_call_values: dict[tuple, str] = {}
+        self._security_arg_globals: dict[str, Any] = {}
+        self._security_arg_global_values: dict[str, str] = {}
         self._random_call_counter = 0
         self._for_counter = 0
         self._uses_tv_float_step_end = False

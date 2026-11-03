@@ -6,9 +6,39 @@
   "added_codes": [
     "PF-E5087"
   ],
-  "catalog_additions": [
-    "PF-E5088"
-  ],
+  "catalog_additions": {
+    "PF-E5088": {
+      "severity": "error",
+      "area": "request-security",
+      "message": "The branches of this {kind} return incompatible types: one returns a value and another returns nothing.",
+      "hint": "Give every branch a value, or call the void function as a separate statement.",
+      "explanation": "TradingView refuses a consumed if or switch with a value arm and a terminal void arm (CE10235). Statement selections, implicit missing arms and selections whose present arms all return values or all return nothing retain their existing behavior.",
+      "args": {"kind": {"kind": "vocab", "values": ["if", "switch"]}},
+      "user_message": "The branches of this {kind} must all return compatible values."
+    },
+    "PF-E5089": {
+      "severity": "error",
+      "area": "codegen",
+      "message": "{function}: TradingView refuses keyword arguments for functions with a variable number of arguments.",
+      "hint": "Pass every argument to {function} positionally.",
+      "explanation": "TradingView refuses every keyword argument on variadic math functions; supply their arguments by position.",
+      "args": {"function": {"kind": "identifier"}},
+      "user_message": "{function} accepts positional arguments only."
+    },
+    "PF-E5090": {
+      "severity": "error",
+      "area": "codegen",
+      "message": "{function}: unknown keyword argument ''{name}''; accepted keyword names: {accepted}.",
+      "hint": "Use these parameter names for {function}: {accepted}.",
+      "explanation": "The math function does not declare this keyword; use the parameter names recorded for that function.",
+      "args": {
+        "function": {"kind": "identifier"},
+        "name": {"kind": "identifier"},
+        "accepted": {"kind": "text"}
+      },
+      "user_message": "Unknown keyword ''{name}'' for {function}; use {accepted}."
+    }
+  },
   "severity_changes": {
     "PF-W1505": {
       "before": "warning",
