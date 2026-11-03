@@ -1,11 +1,11 @@
-"""Source evidence used exclusively to choose a counted loop's numeric family."""
+"""Numeric source evidence shared by reassignment storage and counted loops."""
 
 from __future__ import annotations
 
 from .ast_nodes import (
-    Assignment, BinOp, ExprStmt, ForStmt, FuncCall, FuncDef, Identifier, IfStmt,
-    MemberAccess, NaLiteral, NumberLiteral, Subscript, SwitchStmt, Ternary,
-    TupleAssign, TupleLiteral, UnaryOp, VarDecl,
+    Assignment, BinOp, ExprStmt, ForInStmt, ForStmt, FuncCall, FuncDef, Identifier,
+    IfStmt, MemberAccess, MethodDef, NaLiteral, NumberLiteral, Subscript,
+    SwitchStmt, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from .limits import iter_ast_nodes
 from .errors import CompileError, Diagnostic, Level, Phase
@@ -16,6 +16,7 @@ from . import signatures as sigs
 _INT = TypeSpec.primitive("int")
 _FLOAT = TypeSpec.primitive("float")
 _NA = TypeSpec.primitive("na")
+FLOAT_REASSIGNMENT = "pf_float_reassignment"
 
 # These calls declare a float result independently of their operands. Do not
 # use get_return_type(... ) == FLOAT here: _sig defaults to FLOAT even for
@@ -75,19 +76,37 @@ def _join(specs):
 
 
 class LoopTypeSources:
-    """Immutable syntax inventory; no inferred C++ or analyzer fallback types."""
+    """Syntax inventory and numeric proofs; no C++ or analyzer fallback types."""
 
     def __init__(self, ast):
         self.declarations = {}
         self.functions = {}
         self.parameter_hints = {}
         self.reassigned_names = set()
+        self.assignments = []
+        self.name_declarations = {}
         for node, _depth in iter_ast_nodes(ast):
             # Conservatively deny constant proofs for a name written anywhere.
             if isinstance(node, Assignment) and isinstance(node.target, Identifier):
                 self.reassigned_names.add(node.target.name)
+                if node.op == ":=":
+                    self.assignments.append(node)
             if isinstance(node, (VarDecl, TupleAssign, ForStmt, FuncDef)):
                 self.declarations[id(node)] = node
+            if isinstance(node, VarDecl):
+                names = (node.name,)
+            elif isinstance(node, TupleAssign):
+                names = node.names
+            elif isinstance(node, ForStmt):
+                names = (node.var,)
+            elif isinstance(node, ForInStmt):
+                names = node.vars or [node.var]
+            elif isinstance(node, (FuncDef, MethodDef)):
+                names = node.params
+            else:
+                names = ()
+            for name in names:
+                self.name_declarations.setdefault(name, set()).add(id(node))
             if isinstance(node, FuncDef):
                 self.functions.setdefault(node.name, []).append(node)
                 hints = (node.annotations or {}).get("param_type_hints", ())
@@ -97,8 +116,71 @@ class LoopTypeSources:
                         (f"func_{node.name}", name), [],
                     ).append(_hint_spec(hint))
 
+    def widen_reassignments(self, bindings, *, budget=None):
+        """Join fractional writes before any read or storage snapshot.
+
+        Declaration identities resolve each write. Names with multiple storage
+        declarations retain their existing path: some emitter slot lookups
+        still select storage by name, even for lexically distinct bindings.
+        """
+        candidates = {}
+        for key, node in self.declarations.items():
+            if not isinstance(node, VarDecl):
+                continue
+            if node.annotations:
+                node.annotations.pop(FLOAT_REASSIGNMENT, None)
+            # A variable whose name is declared more than once in a file (sibling
+            # locals, a local shadowing a global or a parameter, repeated helper
+            # clones) is not widened.
+            # The emitter's by-name storage lookup
+            # (pineforge_codegen/codegen/types.py:3505, _slot_scalar_cpp_type) scans
+            # var_members, function locals, parameters and global members by name;
+            # it cannot tell two same-named bindings apart.
+            if ((node.annotations or {}).get("pine_version") != 5
+                    and self.name_declarations[node.name] == {key}):
+                candidates[key] = []
+        for assignment in self.assignments:
+            if (assignment.annotations or {}).get("pine_version") == 5:
+                continue
+            value = assignment.value
+            while isinstance(value, UnaryOp) and value.op in {"+", "-"}:
+                value = value.operand
+            if isinstance(value, NumberLiteral):
+                # Non-quotient literal writes have no measurement for widening.
+                # Preserve them uniformly, without consulting the target hint.
+                continue
+            binding = bindings.get(id(assignment.target))
+            if binding is not None and binding[0] in candidates:
+                candidates[binding[0]].append(assignment.value)
+        check = _CounterQuery(self, bindings, {})
+        candidates = {
+            key: values for key, values in candidates.items()
+            if values and check.declaration(self.declarations[key]) == _INT
+        }
+        # Widened storage can carry a fraction to another reassigned variable.
+        # Publish a round together, then discard its declaration/constant memo.
+        while candidates:
+            query = _CounterQuery(self, bindings, {})
+            widened = []
+            for key, values in candidates.items():
+                if budget is not None:
+                    budget.check(self.declarations[key].loc, Phase.ANALYZER)
+                if any(query.value_spec(value) == _FLOAT for value in values):
+                    widened.append(key)
+            if not widened:
+                break
+            for key in widened:
+                node = self.declarations[key]
+                node.annotations = {
+                    **(node.annotations or {}), FLOAT_REASSIGNMENT: True,
+                }
+                del candidates[key]
+
 
 class _CounterQuery:
+    # Fractional reassignment changes values, not the declared check type.
+    _use_reassignment_values = False
+
     def __init__(self, sources, bindings, scopes):
         self.sources = sources
         self.bindings = bindings
@@ -113,8 +195,14 @@ class _CounterQuery:
         if key not in self.declaration_specs:
             self.declaration_specs[key] = None
             if isinstance(node, VarDecl):
-                spec = (_hint_spec(node.type_hint) if node.type_hint
-                        else self.infer(node.value))
+                spec = (
+                    _FLOAT if (
+                        self._use_reassignment_values
+                        and (node.annotations or {}).get(FLOAT_REASSIGNMENT)
+                    ) else
+                    _hint_spec(node.type_hint) if node.type_hint else
+                    self.infer(node.value)
+                )
             elif isinstance(node, TupleAssign):
                 spec = (self.infer(node.value)
                         if isinstance(node.value, (FuncCall, TupleLiteral)) else None)
@@ -129,7 +217,7 @@ class _CounterQuery:
 
     def value_spec(self, node):
         if self._value_query is None:
-            self._value_query = _CounterValueQuery(self)
+            self._value_query = _NumericValueQuery(self)
         return self._value_query.infer(node)
 
     def counter_spec(self, start, step, *, counter_name=None, step_location=None):
@@ -167,6 +255,10 @@ class _CounterQuery:
             binding = self.bindings.get(id(node))
             if binding is not None:
                 declaration = self.sources.declarations.get(binding[0])
+                if isinstance(declaration, FuncDef) and binding[1] in declaration.params:
+                    index = declaration.params.index(binding[1])
+                    hints = (declaration.annotations or {}).get("param_type_hints", ())
+                    return _hint_spec(hints[index]) if index < len(hints) else None
                 spec = self.declaration(declaration)
                 if isinstance(declaration, TupleAssign):
                     index = declaration.names.index(binding[1])
@@ -295,8 +387,10 @@ class _CounterQuery:
         return None
 
 
-class _CounterValueQuery(_CounterQuery):
-    """Keep fractional division values unless literal arithmetic proves an int."""
+class _NumericValueQuery(_CounterQuery):
+    """One value query for storage and counters, including integral proofs."""
+
+    _use_reassignment_values = True
 
     def __init__(self, check_query):
         super().__init__(check_query.sources, check_query.bindings, check_query.scopes)

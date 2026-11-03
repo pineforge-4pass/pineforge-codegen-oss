@@ -50,7 +50,7 @@ from ..cpp_names import cpp_identifier_fragment
 from ..errors import Phase
 from ..external_requests import UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
-from ..loop_types import LoopTypeSources, for_counter_type
+from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
 from ..matrix_overloads import matrix_sum_has_rhs
 from ..symbols import (
     PineType,
@@ -2536,6 +2536,8 @@ class TypeInferer:
 
     def _type_for_decl(self, node: VarDecl) -> str:
         """Determine the C++ type for a ``VarDecl``: explicit hint, then symbol, then RHS inference."""
+        if (node.annotations or {}).get(FLOAT_REASSIGNMENT):
+            return "double"
         history_value_cpp = (self._array_history_value_cpp_type(node.name)
                              if not getattr(self, "_active_func_name", None) else None)
         if history_value_cpp is not None:
