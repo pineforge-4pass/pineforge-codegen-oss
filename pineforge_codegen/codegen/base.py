@@ -1320,6 +1320,24 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # allocating the flags here would not yet have the complete collision
         # inventory.
 
+        self._discard_wide_int_constant_folds()
+
+    def _discard_wide_int_constant_folds(self) -> None:
+        """Read widened callable values from their emitted storage.
+
+        Stable UDF folding substitutes actuals before arithmetic, losing the
+        wide parameter's binary64 boundary: an exact integer difference can
+        disagree with the callable's result. Resolve those dependencies only
+        after the callable and collection inventories have been initialized.
+        Aliases follow their declaration bindings through the same query.
+        """
+        for stmt in self.ctx.ast.body:
+            if (isinstance(stmt, VarDecl)
+                    and stmt.name in self._known_vars
+                    and stmt.name not in self._input_backed_vars
+                    and self._crosses_wide_int_boundary(stmt.value, None, set())):
+                self._known_vars.pop(stmt.name)
+
     def _scalar_var_init_depends_on_runtime_input(self, init_ast) -> bool:
         """Whether a nominally constant initializer depends on input state.
 

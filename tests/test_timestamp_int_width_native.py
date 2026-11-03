@@ -12,13 +12,14 @@ from tests.test_bool_string_inference import native_env, _messages, _run_native
 
 HEADER = '//@version=6\nstrategy("Timestamp integer width", overlay=true)\n'
 INPUT = 'start = input.time(timestamp("2024-01-01T00:00:00"), "Start")\n'
+CHART_INPUT = 'input.time(timestamp("2025-01-06T14:15:00"), "d")\n'
 BOOK = "type Book\n    array<int> stamps\n"
 
 
 ROWS = [
     # A short difference can survive narrowing both endpoints. Check the
     # held epoch too, beside same-named callables with int and string results.
-    # The first bar has no predecessor, so both spacing expressions choose 0.
+    # The first bar has no predecessor, so its reported spacing is 0.
     pytest.param(
         '''y() => 0
 spacing() =>
@@ -47,11 +48,12 @@ log.info("epoch reference {0} {1}", bar_index, time)
         '''f(x) => str.tostring(x)
 spacing() =>
     int f = time
-    [bar_index == 0 ? 0 : f - f[1], f]
+    [f - f[1], f]
 unrelated() =>
     int f = bar_index
     f
-[observed, epoch] = spacing()
+[spacingValue, epoch] = spacing()
+observed = bar_index == 0 ? 0 : spacingValue
 reference = bar_index == 0 ? 0 : time - time[1]
 count = unrelated()
 log.info("epoch {0} {1}", bar_index, epoch)
@@ -59,6 +61,66 @@ log.info("epoch reference {0} {1}", bar_index, time)
 ''', ("((na(observed) and na(reference)) or observed == reference)"
       " and epoch == time and count == bar_index"),
         id="epoch-history-local-named-like-function"),
+    # The default is the chart's second bar. Anchor the independent epoch to
+    # its first timestamp; the overnight gap must not affect this reference.
+    pytest.param(
+        "int x = " + CHART_INPUT + '''x += 60000 * (bar_index % 3)
+observed = x
+reference = time[bar_index] + 900000 + 60000 * (bar_index % 3)
+''', "observed == reference", id="typed-time-input-global-add-assign"),
+    pytest.param(
+        "x = " + CHART_INPUT + '''x := x + 60000
+observed = x
+reference = time[bar_index] + 900000 + 60000
+''', "observed == reference", id="untyped-time-input-global-reassign"),
+    pytest.param(
+        "var int x = " + CHART_INPUT + '''if bar_index > 0
+    x += 60000
+observed = x
+reference = time[bar_index] + 900000 + 60000 * bar_index
+''', "observed == reference", id="typed-var-time-input-global-update"),
+    pytest.param(
+        "var x = " + CHART_INPUT + '''x := x + 60000
+observed = x
+reference = time[bar_index] + 900000 + 60000 * (bar_index + 1)
+''', "observed == reference", id="untyped-var-time-input-global-reassign"),
+    pytest.param(
+        "int a = " + CHART_INPUT + '''int b = a
+b += 1
+observed = b
+reference = time[bar_index] + 900000 + 1
+''', "observed == reference", id="typed-time-input-global-copy-add-assign"),
+    pytest.param(
+        "x = " + CHART_INPUT + '''y = x
+y += 1
+observed = y
+reference = time[bar_index] + 900000 + 1
+''', "observed == reference", id="untyped-time-input-global-copy-add-assign"),
+    pytest.param(
+        '''var int x = na
+if bar_index == 1
+    x := ''' + CHART_INPUT + '''if bar_index > 1
+    x += 60000
+observed = x
+reference = bar_index == 0 ? na : float(time[bar_index]) + 900000.0 + 60000.0 * (bar_index - 1)
+''', "(na(observed) and na(reference)) or observed == reference",
+        id="nullable-time-input-global-late-update"),
+    # Unchanged inputs already keep the full epoch, including a declared int.
+    # The threshold falls inside the chart so both comparison results occur.
+    pytest.param(
+        "startTime = " + CHART_INPUT + '''observed = time >= startTime ? 1 : 0
+reference = time >= time[bar_index] + 900000 ? 1 : 0
+''', "observed == reference", id="untyped-time-input-window-control"),
+    pytest.param(
+        "int startTime = " + CHART_INPUT + '''observed = time >= startTime ? 1 : 0
+reference = time >= time[bar_index] + 900000 ? 1 : 0
+''', "observed == reference", id="typed-time-input-window-control"),
+    pytest.param(
+        "int x = " + CHART_INPUT + '''plot(x)
+observed = x
+reference = time[bar_index] + 900000
+''', "observed == reference and ((time >= x) == (time >= reference))",
+        id="typed-time-input-plot-control"),
     # This feed has 60 bars; the offset exercises a product above int32.
     pytest.param(
         '''var int g = 3000000001

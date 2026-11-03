@@ -2922,7 +2922,12 @@ class TypeInferer:
     def _callable_series_local_symbol(self, name: str):
         """The symbol of the function-local series ``name``: the one every
         function or method keeping it as a series (``func_series_vars``)
-        declares in its scope, else None when they disagree or none does."""
+        declares with a VarDecl, else None when they disagree or none does.
+
+        The same inventory holds history parameters, which have no local
+        declaration. Their analyzer type must not replace the established
+        na-aware fallback for a plain local initialized from ``param[k]``.
+        """
         scope_names = {
             # A method ``Type.name`` scopes its body as ``method_Type_name``.
             f"method_{owner.replace('.', '_', 1)}" if "." in owner
@@ -2936,6 +2941,7 @@ class TypeInferer:
             scope.symbols[name]
             for scope in self.ctx.symbols.all_scopes
             if scope.name in scope_names and name in scope.symbols
+            and isinstance(getattr(scope.symbols[name], "_pf_decl_node", None), VarDecl)
         ]
         if not found or any(s.pine_type != found[0].pine_type for s in found):
             return None
