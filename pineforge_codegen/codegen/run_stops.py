@@ -37,6 +37,26 @@ decltype(auto) _pf_invariant_at(Container& container, Index index) {
 """
 
 
+def history_offset_guard(offset: str, line: int) -> str:
+    """Check an already evaluated numeric offset without narrowing it."""
+    return (
+        f"if (!is_na({offset}) && {offset} < 0) "
+        f'pine_runtime_error(std::string("History reference at line {line}: offset ") '
+        f'+ std::to_string({offset}) '
+        '+ ". The history offset must be a value between 0 and 10000."); '
+    )
+
+
+def checked_history_offset(offset: str, line: int) -> str:
+    """Check one evaluated offset before its original type is narrowed."""
+    return (
+        f"([&]() {{ auto _pf_idx_v = ({offset}); "
+        "if constexpr (!std::is_same_v<std::decay_t<decltype(_pf_idx_v)>, bool>) { "
+        f"{history_offset_guard('_pf_idx_v', line)}}} "
+        "return _pf_idx_v; }())"
+    )
+
+
 def request_stop(marker: dict) -> str:
     """Metadata comes only from the original request's compile-time spelling."""
     escape = NamingHelper._cpp_string_escape
