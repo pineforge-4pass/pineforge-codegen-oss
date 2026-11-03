@@ -255,8 +255,9 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
 
     Pine v6 accepts ISO-8601 strings ("2025-01-01", "2011-10-10T14:48:00",
     with optional offset) and the "DD MMM YYYY hh:mm:ss ±HHMM" /
-    "MMM DD YYYY ..." forms. A dateString without a time zone is GMT+0 per
-    the Pine reference. Returns None when the string cannot be parsed.
+    "MMM DD YYYY ..." forms, with abbreviated or full month names. A dateString
+    without a time zone is GMT+0 per the Pine reference. Returns None when the
+    string cannot be parsed.
     """
     import re
     from datetime import datetime, timezone, timedelta
@@ -282,6 +283,10 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
             "%d %b %Y %H:%M:%S", "%d %b %Y %H:%M", "%d %b %Y",
             "%b %d %Y %H:%M:%S %z", "%b %d %Y %H:%M %z",
             "%b %d %Y %H:%M:%S", "%b %d %Y %H:%M", "%b %d %Y",
+            "%d %B %Y %H:%M:%S %z", "%d %B %Y %H:%M %z",
+            "%d %B %Y %H:%M:%S", "%d %B %Y %H:%M", "%d %B %Y",
+            "%B %d %Y %H:%M:%S %z", "%B %d %Y %H:%M %z",
+            "%B %d %Y %H:%M:%S", "%B %d %Y %H:%M", "%B %d %Y",
             "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
         ):
             try:
