@@ -142,6 +142,14 @@ _CASES = [
         "keep(close > open)", "keep(input.bool(true))", "close",
     ),
     _pair(
+        "session_flag_to_simple_function",
+        """
+        keep(simple bool enabled) => enabled
+        result = keep(session.ismarket)
+        """,
+        "keep(session.ismarket)", "keep(input.bool(true))", "session.ismarket",
+    ),
+    _pair(
         "series_string_argument",
         """
         keep(simple string label) => label
@@ -321,6 +329,12 @@ def test_paired_controls_keep_complete_cpp(source, control, code, position, refe
     "keep(simple int value) => value\nresult = keep(input.int(7))\n",
     "keep(simple int value) => value\nconst int fixed = 7\nresult = keep(fixed)\n",
     "keep(simple string value) => value\nresult = keep(syminfo.tickerid)\n",
+    "keep(simple string value) => value\nresult = keep(session.regular)\n",
+    "keep(simple string value) => value\nresult = keep(session.extended)\n",
+    """
+    keep(simple string value) => value
+    result = keep(ticker.modify(syminfo.tickerid, session.extended))
+    """,
     "keep(simple int value) => value\nsimple int fixed = 7\nresult = keep(fixed)\n",
     "keep(simple int value) => value\nresult = keep(dayofweek.monday)\n",
     "keep(simple float value) => value\nresult = keep(math.pi)\n",

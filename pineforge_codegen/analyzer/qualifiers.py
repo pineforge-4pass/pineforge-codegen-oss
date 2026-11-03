@@ -272,7 +272,10 @@ class ParameterQualifiers(DiagnosticsHelper):
                     return _CONST
                 if obj.name in _SIMPLE_MEMBER_NAMESPACES or obj.name == "chart":
                     return _SIMPLE
-                if obj.name in {"barstate", "session", "ta"}:
+                if obj.name == "session":
+                    # Session names are constant strings; the flags vary by bar.
+                    return _CONST if node.member in {"regular", "extended"} else _SERIES
+                if obj.name in {"barstate", "ta"}:
                     return _SERIES
                 return None
             # Only a source-proven object field supplies series evidence.
