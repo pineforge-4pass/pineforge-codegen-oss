@@ -374,6 +374,11 @@ class ExprVisitor:
         if types and set(types) <= {"int", "int64_t", "double"}:
             cpp_type = ("double" if "double" in types else
                         "int64_t" if "int64_t" in types else "int")
+            if cpp_type in ("int", "int64_t") and self._selection_contains_bare_na(node):
+                spec = self._type_spec_from_expr(node)
+                if (spec is not None
+                        and self._selection_result_cpp_type(node, spec) == "double"):
+                    cpp_type = "double"
         else:
             cpp_type = types[0] if types else self._infer_type(node)
         initial = (self._na_value_for_type(cpp_type)

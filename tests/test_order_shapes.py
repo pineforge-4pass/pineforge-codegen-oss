@@ -36,7 +36,7 @@ def receipt(body, declaration=SOURCE, *, check_support=True):
     ('strategy.exit("X", limit=close)', 'strategy.exit("X", from_entry="", limit=close)'),
     ('strategy.exit("X")', 'strategy.exit("X", from_entry="")'),
     ('strategy.exit("X", limit=close)', 'strategy.exit("X", limit=close, alert_message="a", disable_alert=true)'),
-    ('strategy.order("L", strategy.long)', 'strategy.order(id="L", direction=strategy.long, qty=0)'),
+    ('strategy.order("L", strategy.long)', 'strategy.order(id="L", direction=strategy.long, qty=na)'),
     ('strategy.close("L")', 'strategy.close(id="L", alert_message="a", disable_alert=true)'),
     ('strategy.cancel("L")', 'strategy.cancel(id="L")'),
 ])
