@@ -16,6 +16,7 @@ TradingView's tapes of the nested shapes are replayed in
 
 from __future__ import annotations
 
+import hashlib
 import re
 
 import pytest
@@ -178,6 +179,44 @@ def test_empty_timeframe_constant_keeps_the_chart_timeframe():
                  'tfX = ""\nf(tf) => request.security(syminfo.tickerid, tf, close)\na = f(tfX)\n'):
         cpp = transpile(HEAD + body + 'b = close\n' + TAIL)
         assert _registrations(cpp) == ['0, input_tf_, input_tf_, false, false']
+
+
+@pytest.mark.parametrize("declarations, source_sha256, getter_read", [
+    pytest.param(
+        'var choice = input.time(1735689600000, "Selection")\n'
+        'mode = choice < 1751328000000 ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+        "3bfe9ec98fcb5a0b4bdb60cf426437fc004a17d1c97ba3c755c43416dc5f0611",
+        'get_input_int64("Selection", 1735689600000)',
+        id="persistent-time"),
+    pytest.param(
+        'varip choice = input.text_area("Enabled", "Selection")\n'
+        'mode = choice == "Enabled" ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+        "506ba1e1b9cab8787a0340e529b99282200d1a2845fa37572ea6c05c7e35a6d9",
+        'get_input_string("Selection", std::string("Enabled"))',
+        id="persistent-text-area"),
+])
+def test_tv_accepted_persistent_lookahead_sources(
+        declarations, source_sha256, getter_read):
+    """Exact TV compile receipts; the plot-only tapes prove no values."""
+    request = ('daily = request.security(syminfo.tickerid, "D", close[1], '
+               'lookahead=mode)\n')
+    src = (
+        '//@version=6\nstrategy("lookahead refusal")\n'
+        'useLookahead = input.bool(true, "Lookahead")\n'
+        + declarations + request + 'plot(daily)\n')
+    assert hashlib.sha256(src.encode("utf-8")).hexdigest() == source_sha256
+    result = transpile_full(src, filename="persistent-selection.pine")
+    (registration,) = _registrations(result["cpp"])
+    assert getter_read in registration
+    assert "static_cast<bool>" in registration
+    assert all(name not in registration for name in ("choice", "mode", "useLookahead"))
+    (warning,) = [d for d in result["diagnostics"] if d.code == "PF-W1524"]
+    assert warning.location.file == "persistent-selection.pine"
+    assert (warning.location.line, warning.location.col) == (
+        src.splitlines().index(request.rstrip()) + 1, request.index("mode") + 1)
+    assert warning.args == {}
+    assert not [d for d in result["diagnostics"] if d.code in {"PF-E1085", "PF-W1085"}]
+    compile_cpp(result["cpp"], label="persistent-lookahead-source")
 
 
 @pytest.mark.parametrize("default", ["true", "false"])
@@ -489,16 +528,10 @@ def test_lookahead_warning_follows_immutable_value(
     pytest.param('choice = input.price(1.25, "Selection")\nchoice := 2.75\n'
                  'mode = choice < 2.0 ? barmerge.lookahead_on : barmerge.lookahead_off\n',
                  id="reassigned-price"),
-    pytest.param('var choice = input.time(1735689600000, "Selection")\n'
-                 'mode = choice < 1751328000000 ? barmerge.lookahead_on : barmerge.lookahead_off\n',
-                 id="persistent-time"),
     pytest.param('choice = input.session("0930-1600", "Selection")\n'
                  'alias = choice\nalias := "0000-2400"\n'
                  'mode = alias == "0930-1600" ? barmerge.lookahead_on : barmerge.lookahead_off\n',
                  id="reassigned-session-alias"),
-    pytest.param('varip choice = input.text_area("Enabled", "Selection")\n'
-                 'mode = choice == "Enabled" ? barmerge.lookahead_on : barmerge.lookahead_off\n',
-                 id="persistent-text-area"),
     pytest.param('mode = input.price(close, "Selection") > 0 '
                  '? barmerge.lookahead_on : barmerge.lookahead_off\n',
                  id="series-default"),
