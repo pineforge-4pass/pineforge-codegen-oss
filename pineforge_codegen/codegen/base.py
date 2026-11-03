@@ -402,6 +402,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._budget = budget
         self._budget_visit_count = 0
         self._initialise_safe_names(ctx.ast)
+        self._private_callable_history_names = {
+            node.name for node in self._walk_ast(ctx.ast)
+            if isinstance(node, VarDecl)
+            and (node.annotations or {}).get("authored_history_name")
+        }
         # Lexical Pine names remain in ``ctx.func_var_members``.  This overlay
         # carries exact class-member identities only for collision-qualified
         # ordinary FuncDefs (identity mappings for every other ordinary UDF).

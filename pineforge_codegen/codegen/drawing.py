@@ -199,6 +199,34 @@ ALL_DRAWING_METHODS = (
 class DrawingVisitor:
     """Drawing-objects-as-data emit helpers. Mixed into ``CodeGen``."""
 
+    def _emit_drawing_all_read(self, node):
+        from ..drawing_all import (
+            drawing_all_call, drawing_all_refusal, DRAWING_ALL_READS,
+        )
+        from .tables import ARRAY_METHODS, V5_ARRAY_INDEX_METHODS
+        call = drawing_all_call(node)
+        if call is None:
+            return None
+        kind, method, _receiver, arguments = call
+        if kind not in DRAWING_ARENA or method not in DRAWING_ALL_READS:
+            self._codegen_error(node, drawing_all_refusal(kind))
+        args = self._array_method_arg_nodes(method, arguments)
+        required = 1 if method == "get" else 0
+        if len(args) != required or any(arg is None for arg in args) or (
+            method != "get" and arguments.kwargs
+        ):
+            self._codegen_error(node, drawing_all_refusal(kind))
+        # DrawingArena::order() is a const deque of *live* ids, oldest first.
+        # Each read borrows it afresh, so delete/collection is visible to the
+        # next read. Never expose its mutation or copy it into a mutable array.
+        order = f"{DRAWING_ARENA[kind]}.order()"
+        if method == "size":
+            return f"static_cast<int>({order}.size())"
+        table = (V5_ARRAY_INDEX_METHODS
+                 if self._pine_v5_body and method == "get" else ARRAY_METHODS)
+        read = table[method](order, [self._visit_expr(arg) for arg in args])
+        return f"{DRAWING_TYPE_TO_CPP[kind]}{{{read}}}"
+
     # ------------------------------------------------------------------
     # Enum / extend lowering helpers
     # ------------------------------------------------------------------
@@ -760,7 +788,10 @@ class DrawingVisitor:
                 if self._spec_mentions_drawing(self._type_spec_from_hint_name(f.type_name)):
                     return True
         from .tables import DRAWING_NS
+        from ..drawing_all import drawing_all_kind
         for node in self._walk_ast(self.ctx.ast):
+            if drawing_all_kind(node) in DRAWING_NS:
+                return True
             if isinstance(node, FuncCall):
                 _fn, ns = self._resolve_callee(node.callee)
                 if ns in DRAWING_NS:

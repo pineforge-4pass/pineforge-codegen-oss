@@ -345,6 +345,10 @@ class TypeHelper:
     ) -> TypeSpec | None:
         if value is None:
             return None
+        from ..drawing_all import drawing_all_result_spec
+        drawing_spec = drawing_all_result_spec(value)
+        if drawing_spec is not None:
+            return drawing_spec
         budget = getattr(self, "_budget", None)
         if budget is not None:
             # A method chain re-infers each receiver more than once, so this

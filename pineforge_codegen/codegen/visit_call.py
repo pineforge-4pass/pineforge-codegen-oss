@@ -1676,6 +1676,9 @@ class CallVisitor:
         )
 
     def _visit_func_call(self, node: FuncCall) -> str:
+        live_read = self._emit_drawing_all_read(node)
+        if live_read is not None:
+            return live_read
         callee = node.callee
         if isinstance(callee, MemberAccess):
             recv_spec, method_info = self._typed_user_method_info(

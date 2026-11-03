@@ -184,6 +184,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._series_var_members: set[str] = set()
         self._series_decl_nodes: set[int] = set()
         self._series_decl_bindings: set[tuple[int, str]] = set()
+        self._primitive_history_declarations: set[tuple[int, str]] = set()
         self._series_bar_fields: set[str] = set()
         self._var_members: list[tuple[str, PineType, str]] = []
         self._func_infos: list[FuncInfo] = []
@@ -641,7 +642,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._check_top_level_block_shadow_boundaries()
         self._qualify_colliding_func_var_members()
         self._check_cross_callable_series_collection_collisions()
-        self._check_declaration_exact_series_storage_boundaries()
+        if self._check_declaration_exact_series_storage_boundaries():
+            # Rebuild every inventory, including call-site clones, with the
+            # newly separated declarations' private storage spellings.
+            return Analyzer(
+                self._ast, filename=self._filename, budget=self._budget,
+                session_clones=self._session_clones,
+            ).analyze()
         self._check_persistent_drawing_member_collisions()
 
         # Propagate call-site counts to sub-functions called within
@@ -1521,7 +1528,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 node.loc,
             )
 
-    def _check_declaration_exact_series_storage_boundaries(self) -> None:
+    def _check_declaration_exact_series_storage_boundaries(self) -> bool:
         """Reject raw Series identities that still cross lexical owners.
 
         Non-persistent history locals are currently emitted as class-level
@@ -1532,14 +1539,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         ``series_decl_bindings`` and remain legal: their history buffers are
         routed by the existing callable parameter path.
 
-        Keep this boundary declaration-exact and fail closed until ordinary
-        local Series storage has the same owner-qualified overlay as persistent
-        callable state.  Direct script Series declarations remain supported,
-        including a same-named persistent UDF member that was qualified above.
+        Direct primitive FuncDef locals can be named apart by declaration
+        identity, then analyzed afresh so every clone owns its Series. Other
+        declaration shapes retain this fail-closed boundary. Already-isolated
+        requested evaluators and non-colliding sources keep their spellings.
         """
         exact_series = set(self._series_decl_bindings)
         if not exact_series:
-            return
+            return False
 
         # A helper reached exclusively through a request.security expression
         # does not use the ordinary raw class Series member: the security
@@ -1776,6 +1783,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 getattr(bindings[-1], "loc", None),
             )
 
+        collision_names = {
+            name for name, bindings in callable_nonpersistent.items()
+            if (name in self._ordinary_global_binding_names
+                or name in persistent_raw_names or len(bindings) > 1)
+        }
+        from .callable_history_names import separate_callable_histories
+        if separate_callable_histories(
+            self._ast, self._value_bindings,
+            {key for key in self._primitive_history_declarations
+             if key[1] in collision_names},
+        ):
+            return True
+
         # A direct ordinary global reserves its class-member spelling even when
         # it is scalar.  Persistent declarations reserve their raw spelling in
         # legacy var inventories even after exact owner qualification.  Either
@@ -1792,6 +1812,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 "not supported yet.",
                 getattr(bindings[-1][1], "loc", None),
             )
+        return False
 
     def _check_cross_callable_series_collection_collisions(self) -> None:
         """Fail closed when legacy raw member names cannot preserve scoping.
@@ -6845,6 +6866,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return result_type
 
     def _visit_FuncCall(self, node: FuncCall) -> PineType:
+        from ..drawing_all import drawing_all_call, DRAWING_ALL_READS
+        live_read = drawing_all_call(node)
+        if (live_read is not None and live_read[0] != "polyline"
+                and live_read[1] in DRAWING_ALL_READS):
+            for argument in (*live_read[3].args, *live_read[3].kwargs.values()):
+                self._visit(argument)
+            return PineType.INT if live_read[1] == "size" else PineType.FLOAT
         # Determine what is being called
         callee = node.callee
 
@@ -7899,6 +7927,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             self._series_decl_bindings.add(
                                 (decl_node_id, binding_name)
                             )
+                            spec = getattr(sym, "type_spec", None)
+                            if (spec is not None and spec.kind == "primitive"):
+                                self._primitive_history_declarations.add(
+                                    (decl_node_id, binding_name)
+                                )
                         global_sym = self._symbols.global_scope.symbols.get(name)
                         shadows_map_state = (
                             sym.scope != "global"

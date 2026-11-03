@@ -30,6 +30,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - `strategy.default_entry_qty()` raises `PF-E5084` until the strategy host exposes a default-quantity query (#295).
 - `if` and `switch` expressions reassigned to a history-bearing variable update its current Series slot (#295).
 - Pine identifiers `bar` and `HUGE` use the existing C++ name escape without changing authored input titles (#295).
+- Colliding direct scalar history locals in ordinary functions get declaration-owned Series storage and retain separate call-site histories (#295).
+- Direct `size`, `first`, `last` and `get` reads of `line.all`, `box.all`, `label.all` and `linefill.all` use live arena order; aliases and mutations raise `PF-E5086`, and `polyline.all` requires engine support (`PF-E5085`) (#295).
+- C++ name escaping covers the macros defined by the audited math, limits, C++ wrapper and paired engine headers, retaining authored input keys (#295).
 - An affine chart loop proved endless is stopped with the loop-time error when
   its result reaches an effect. Omission is limited to an unused loop statement
   with no calls, whose writes have no readers except self-updates, a break

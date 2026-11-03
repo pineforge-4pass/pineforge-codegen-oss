@@ -1605,6 +1605,10 @@ class TypeInferer:
 
         Returns ``None`` when the node's type cannot be narrowed beyond
         the runtime default (most callers fall back to ``double``)."""
+        from ..drawing_all import drawing_all_result_spec
+        drawing_spec = drawing_all_result_spec(node)
+        if drawing_spec is not None:
+            return drawing_spec
         budget = getattr(self, "_budget", None)
         if budget is not None:
             # A method chain re-infers each receiver more than once, so this
@@ -2630,6 +2634,8 @@ class TypeInferer:
         if handle is not None:
             return handle
         sym = self._variable_symbol(name)
+        if sym is None and name in self._private_callable_history_names:
+            sym = self._callable_series_local_symbol(name)
         # A float or bool an epoch reaches keeps its type: the analyzer types
         # every request.security value float (a double holds an epoch
         # exactly), and a name is keyed by spelling across scopes.

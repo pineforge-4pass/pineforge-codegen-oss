@@ -817,6 +817,10 @@ class ExprVisitor:
         return "syminfo_.currency"
 
     def _visit_member_access(self, node: MemberAccess) -> str:
+        from ..drawing_all import drawing_all_kind, drawing_all_refusal
+        kind = drawing_all_kind(node)
+        if kind is not None:
+            self._codegen_error(node, drawing_all_refusal(kind))
         # UDT field whose type was a drawing primitive (label/line/box/
         # linefill/polyline/table/chart.point) — the field is dropped from
         # the emitted struct, so a raw ``recv.field`` would fail to compile.

@@ -617,7 +617,7 @@ d = hist(close)
     )
 
 
-def test_callable_history_local_shadowing_direct_global_fails_closed() -> None:
+def test_callable_history_local_shadowing_direct_global_has_private_storage() -> None:
     source = """//@version=6
 strategy("global plus callable local history")
 state = 5.0
@@ -627,14 +627,12 @@ hist() =>
 observed = hist()
 """
 
-    with pytest.raises(
-        CompileError,
-        match="declaration-exact callable storage",
-    ):
-        transpile(source)
+    cpp = transpile(source)
+    assert "Series<double> state__pfhist1;" in cpp
+    assert "state__pfhist1[1]" in cpp
 
 
-def test_security_only_history_helper_global_collision_fails_closed() -> None:
+def test_security_only_history_helper_global_collision_has_private_storage() -> None:
     source = """//@version=6
 strategy("security helper global owner collision")
 state = 5.0
@@ -649,14 +647,12 @@ owned = owner()
 observed = request.security(syminfo.tickerid, "60", hist())
 """
 
-    with pytest.raises(
-        CompileError,
-        match="declaration-exact callable storage",
-    ):
-        transpile(source)
+    cpp = transpile(source)
+    assert "state__pfhist1" in cpp
+    assert "double state = 0.0;" in cpp
 
 
-def test_same_named_nonpersistent_history_locals_in_udfs_fail_closed() -> None:
+def test_same_named_nonpersistent_history_locals_in_udfs_have_private_storage() -> None:
     source = """//@version=6
 strategy("same-named callable history locals")
 left() =>
@@ -669,11 +665,11 @@ a = left()
 b = right()
 """
 
-    with pytest.raises(
-        CompileError,
-        match="declaration-exact callable storage",
-    ):
-        transpile(source)
+    cpp = transpile(source)
+    assert "Series<double> state__pfhist1;" in cpp
+    assert "Series<double> state__pfhist2;" in cpp
+    assert "state__pfhist1[1]" in cpp
+    assert "state__pfhist2[1]" in cpp
 
 
 def test_embedded_callable_history_local_collision_fails_closed() -> None:

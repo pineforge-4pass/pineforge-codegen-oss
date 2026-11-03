@@ -32,3 +32,28 @@ def test_header_and_parameter_names_escape_without_changing_input_titles(name, v
         f'{name} = input.float(3.0)\nplot({name})\n')
     assert settings["inputs"][0]["title"] == name
     assert f'get_input_double("{name}", ' in settings["cpp"]
+
+
+@pytest.mark.parametrize("name", [
+    "MB_LEN_MAX", "INT_WIDTH", "BOOL_MAX", "SNAN", "HUGE_VAL_F128",
+    "FP_ILOGB0", "M_PIf64x", "math_errhandling", "_GLIBCXX_CMATH",
+    "PINEFORGE_HAS_TA_SERIES_LENGTH", "PF_NATIVE_OK",
+])
+def test_audited_header_macros_escape_and_keep_public_input_keys(name):
+    result = transpile_full(
+        '//@version=6\nstrategy("Names")\n'
+        f'{name} = input.float(3.0)\nplot({name})\n')
+    cpp = cpp_code_only(result["cpp"])
+    escaped = f"pf_safe_{name}"
+    assert re.search(rf"\bdouble {escaped}\b", cpp)
+    assert f'{escaped} = get_input_double("{name}", ' in result["cpp"]
+    assert result["inputs"][0]["title"] == name
+
+
+@pytest.mark.parametrize("name", ["issignaling", "iszero", "iseqsig"])
+def test_function_like_header_macros_escape_authored_calls(name):
+    cpp = cpp_code_only(transpile(
+        '//@version=6\nstrategy("Names")\n'
+        f'{name}(float value) => value + 1.0\nplot({name}(close))\n'))
+    assert f"pf_safe_{name}(" in cpp
+    assert not re.search(rf"\b{name}\s*\(", cpp)
