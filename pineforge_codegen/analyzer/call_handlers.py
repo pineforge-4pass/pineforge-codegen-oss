@@ -71,7 +71,7 @@ from ..ast_nodes import (
     Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, NaLiteral,
 )
 from ..method_binding import bind_function_defaults
-from ..loop_types import FLOAT_REASSIGNMENT
+from ..loop_types import FLOAT_REASSIGNMENT, has_fractional_int_value
 from ..pine_spelling import sub_outside_literals
 from ..external_requests import FEED_LOWERING, LOWERING_ANNOTATION
 from ..security_contexts import CONTEXT_ANNOTATION, DEAD_ANNOTATION
@@ -1823,6 +1823,22 @@ class CallHandlers:
         declared_specs = list(
             self._func_param_type_specs.get(func_name, ())
         )
+        fractional_args = set()
+        if self._pine_version == 6 and not self._in_v5_library_definition(func_def):
+            for index, (arg, param_type) in enumerate(zip(bound_args, param_types)):
+                if (param_type == PineType.INT
+                        and (index >= len(declared_specs)
+                             or declared_specs[index] is None)
+                        and not self._in_v5_library_definition(arg)
+                        and has_fractional_int_value(
+                            arg, self._loop_type_sources,
+                            self._value_bindings.declaration_bindings,
+                        )):
+                    # An untyped parameter holds the argument's value. An
+                    # int/int quotient has an int check type, but narrowing
+                    # the callable boundary would discard its fraction.
+                    param_types[index] = PineType.FLOAT
+                    fractional_args.add(index)
         effective_param_types = [
             (
                 self._primitive_pine_type_from_spec(declared_specs[index])
@@ -1850,6 +1866,10 @@ class CallHandlers:
             self._type_spec_from_expr(arg) if arg is not None else None
             for arg in bound_args
         ]
+        for index in fractional_args:
+            # A named quotient can still have the legacy int TypeSpec.
+            # Its value proof must also reach the emitted parameter type.
+            arg_specs[index] = self._pine_type_to_spec(PineType.FLOAT)
         for i in range(len(param_specs)):
             if param_specs[i] is None and i < len(arg_specs):
                 param_specs[i] = arg_specs[i]

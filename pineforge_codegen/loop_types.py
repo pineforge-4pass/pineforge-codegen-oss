@@ -450,6 +450,12 @@ class _NumericValueQuery(_CounterQuery):
         return self.check_query.counter_spec(start, step, **kwargs)
 
 
+def has_fractional_int_value(node, sources, bindings):
+    """Whether an int check type carries a positively float value."""
+    query = _CounterQuery(sources, bindings, {})
+    return query.infer(node) == _INT and query.value_spec(node) == _FLOAT
+
+
 def for_counter_type(
     start, sources, bindings, scopes, *, step=None, pine_v5=False, counter_types=None,
     counter_name=None, step_location=None,
