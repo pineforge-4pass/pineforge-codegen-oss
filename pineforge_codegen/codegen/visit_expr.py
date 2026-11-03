@@ -2242,8 +2242,8 @@ class ExprVisitor:
         # a freshly-computed C++ scalar, and ``scalar[k]`` is not subscriptable.
         # Materialize the result into a checkpoint-owned class-member
         # ``Series<T>`` that pushes (new bar) / updates (intrabar) the value
-        # exactly once per evaluation — same semantics as every other series in
-        # the strategy — and read ``[k]`` off it. The inner call is emitted once
+        # at most once per bar, updating on repeated evaluations, and read
+        # ``[k]`` off it. The inner call is emitted once per evaluation
         # so its own stateful indicator is not double-stepped.  The deterministic
         # member identity includes the emitted UDF variant; separate Pine call
         # sites never share history, and on_bar clears every synthetic member at
@@ -2310,22 +2310,20 @@ class ExprVisitor:
                     f"return na<{cpp_t}>(); "
                     f"return {precalc}[(std::size_t)_pf_hist_bar]; }} "
                     f"{cpp_t} _hv = ({inner}); "
-                    f"if (history_advances_new_bar()) {member}.push(_hv); "
-                    f"else {member}.update(_hv); "
+                    f"{self._inline_history_write_cpp(member, '_hv')}"
                     f"return {member}[{idx_int}]; }}())"
                 )
             idx_int = self._history_offset_cpp(idx, node.index)
             return (
                 f"([&]() -> {cpp_t} {{ "
                 f"{cpp_t} _hv = ({inner}); "
-                f"if (history_advances_new_bar()) {member}.push(_hv); "
-                f"else {member}.update(_hv); "
+                f"{self._inline_history_write_cpp(member, '_hv')}"
                 f"return {member}[{idx_int}]; }}())"
             )
         # History on an operator expression (``(a > b)[1]``) reads the value
         # the expression had k bars ago: its prepass-registered synthetic
-        # Series (``_is_compound_history_object``) is pushed once per
-        # evaluation, like the inline call results above.
+        # Series (``_is_compound_history_object``) opens once per chart bar
+        # and updates on later evaluations, like the inline call results above.
         compound_member = (
             self._inline_history_member_by_key.get(
                 ("hist_call", id(node), self._current_instance_name)
@@ -2347,8 +2345,7 @@ class ExprVisitor:
                 return (
                     f"([&]() -> {cpp_t} {{ "
                     f"{cpp_t} _hv = ({inner}); "
-                    f"if (history_advances_new_bar()) {compound_member}.push(_hv); "
-                    f"else {compound_member}.update(_hv); "
+                    f"{self._inline_history_write_cpp(compound_member, '_hv')}"
                     f"return {compound_member}[{idx_int}]; }}())"
                 )
         obj = self._visit_expr(node.object)

@@ -2788,7 +2788,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Codegen synthesizes a Series buffer for three expression shapes that
         # do not appear in ``_func_series_vars`` themselves:
         #
-        #   * a call result read through history, e.g. ``f()[1]``;
+        #   * a call result or operator expression read through history,
+        #     e.g. ``f()[1]`` or ``(close * multiplier)[1]``;
         #   * a scalar expression bridged into a UDF series parameter, e.g.
         #     ``history(close + open)`` where ``history(src) => src[1]``;
         #   * a session.* flag read at an offset, e.g. ``session.ismarket[1]``,
@@ -2865,7 +2866,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if not hasattr(node, "__dict__"):
                 return False
             if (isinstance(node, Subscript)
-                    and isinstance(node.object, FuncCall)):
+                    and isinstance(node.object, (FuncCall, BinOp, UnaryOp, Ternary))):
                 return True
             if isinstance(node, FuncCall) and _needs_scalar_series_bridge(node):
                 return True

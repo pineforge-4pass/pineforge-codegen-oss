@@ -676,6 +676,7 @@ class StmtVisitor:
                 and node.name not in getattr(self, "_map_vars", {})
                 and not node.is_var
                 and not node.is_varip
+                and node.name not in self._global_mutable_infos
             )
 
         if is_static_global_input:
@@ -861,9 +862,7 @@ class StmtVisitor:
                 target_cpp_type=(
                     target_cpp_type
                     if (target_cpp_type in DRAWING_TYPE_TO_CPP.values()
-                        or (target_cpp_type == "std::string"
-                            and self._has_bool_text()
-                            and self._text_type(node.value) == "bool"))
+                        or target_cpp_type == "std::string")
                     else self._series_handle_target(node.name)
                 ),
             )
@@ -957,6 +956,8 @@ class StmtVisitor:
             name=node.name,
             type_hint=node.type_hint,
         )
+        if target_cpp_type is None and self._type_for_decl(node) == "std::string":
+            target_cpp_type = "std::string"
         if target_cpp_type is None:
             target_cpp_type = self._udt_target_cpp_type(
                 target_name=node.name,
@@ -1287,7 +1288,8 @@ class StmtVisitor:
         is_top_level = any(id(node) == id(stmt) for stmt in self.ctx.ast.body)
         global_targets = (
             set(getattr(self.ctx, "ordinary_global_binding_names", set()))
-            & self._qualified_func_var_raw_names
+            & (self._qualified_func_var_raw_names
+               | self._callable_global_tuple_names)
             if is_top_level
             else set()
         )
@@ -1298,9 +1300,9 @@ class StmtVisitor:
         # structured binding would shadow the members with fresh values while
         # leaving the UDF-visible state stale. Keep this narrow to security
         # tuples whose analyzer metadata proves a supported helper family, an
-        # exact direct literal, or a known TA tuple result. Ordinary
-        # non-security heterogeneous tuples retain their established local
-        # destructuring behavior.
+        # exact direct literal, or a known TA tuple result. Non-security
+        # elements without a callable global read or a storage collision
+        # retain their established local destructuring behavior.
         if is_top_level and isinstance(node.value, FuncCall):
             func_name, namespace = self._resolve_callee(node.value.callee)
             if namespace == "request" and func_name == "security":

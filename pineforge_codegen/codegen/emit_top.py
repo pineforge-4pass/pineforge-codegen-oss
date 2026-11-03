@@ -1640,6 +1640,12 @@ class TopLevelEmitter:
                 "        if (history_advances_new_bar() && bar_index_ == 0) "
                 f"{info['member_name']}.clear();"
             )
+            clock = self._inline_history_bar_members.get(info["member_name"])
+            if clock is not None:
+                lines.append(
+                    "        if (history_advances_new_bar() && bar_index_ == 0) "
+                    f"{clock} = -1;"
+                )
 
         # A history-reading plain-UDF parameter advances on the chart clock,
         # even when lazy control flow skips its written call on this bar.  Seed
@@ -1725,6 +1731,7 @@ class TopLevelEmitter:
                         and stmt.name not in getattr(self, "_map_vars", {})
                         and not stmt.is_var
                         and not stmt.is_varip
+                        and stmt.name not in self._global_mutable_infos
                     )
                     if is_static_global_input:
                         safe = self._safe_name(stmt.name)

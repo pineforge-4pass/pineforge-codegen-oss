@@ -460,6 +460,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for name in stmt.names
             if name != "_"
         }
+        # Callable global reads use the class member of a Program tuple
+        # binding. Resolved scopes exclude same-named parameters and locals.
+        self._callable_global_tuple_names: set[str] = {
+            part.name
+            for fi in ctx.func_infos
+            if fi.node is not None
+            for part, _depth in iter_ast_nodes(fi.node)
+            if isinstance(part, Identifier)
+            and part.name in self._direct_program_tuple_binding_names
+            and ctx.identifier_binding_scopes.get(id(part)) == "global"
+        }
         self._direct_program_binding_names: set[str] = {
             stmt.name
             for stmt in ctx.ast.body
@@ -3846,6 +3857,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """
         self._inline_history_members = []
         self._inline_history_member_by_key = {}
+        self._inline_history_bar_members: dict[str, str] = {}
         # session.* flags a function reads at an offset (owner -> flags) and
         # the owner of each such read: one Series per flag and emitted call
         # site, pushed at the function's entry (emit_top.py).
@@ -3962,6 +3974,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 counters[kind] += 1
                 member_name = f"_{kind}_{counters[kind]}"
             self._inline_history_member_by_key[key] = member_name
+            if kind == "hist_call":
+                self._inline_history_bar_members[member_name] = (
+                    self._allocate_generated_cpp_name(
+                        f"_pf_hist_bar{member_name}", authored_names
+                    )
+                )
             self._inline_history_members.append({
                 "kind": kind,
                 "member_name": member_name,
@@ -4531,6 +4549,22 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             )
         return member
 
+    def _inline_history_write_cpp(self, member: str, value: str) -> str:
+        """Open at most one slot per chart bar; later evaluations update it.
+
+        The execution's new-bar flag stays true throughout a loop. Each
+        written expression and emitted callable variant therefore owns its
+        own bar marker, checkpointed alongside its Series. Intrabar execution
+        still updates the current value, including the last loop iteration.
+        Requested-clock histories use the security evaluator's own writes.
+        """
+        clock = self._inline_history_bar_members[member]
+        return (
+            f"if (history_advances_new_bar() && {clock} != bar_index_) "
+            f"{member}.push({value}); else {member}.update({value}); "
+            f"{clock} = bar_index_; "
+        )
+
     @staticmethod
     def _allocate_generated_cpp_name(preferred: str, used: set[str]) -> str:
         """Reserve one deterministic generated C++ identifier.
@@ -4608,6 +4642,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         class_used.update(
             info["member_name"] for info in self._inline_history_members
         )
+        class_used.update(self._inline_history_bar_members.values())
         class_used.update(
             variant["member_name"]
             for info in self._security_eval_info
@@ -5764,6 +5799,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.append(
                 f"    Series<{info['cpp_type']}> {info['member_name']}{_mbb};"
             )
+            clock = self._inline_history_bar_members.get(info["member_name"])
+            if clock is not None:
+                lines.append(f"    int {clock} = -1;")
 
         # 8b. Global-scope non-var declarations as class members
         #     (so user-defined functions can reference them)
@@ -5816,6 +5854,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     cpp_type = "int64_t"
                 elif self._global_bool_hint(name):
                     cpp_type = "bool"
+                elif self._global_string_hint(name):
+                    cpp_type = "std::string"
                 elif self._global_float_na_selection(name, ptype):
                     cpp_type = "double"
                 elif (

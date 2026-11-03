@@ -3530,6 +3530,8 @@ class TypeInferer:
                 return "int64_t"
             if self._global_bool_hint(name):
                 return "bool"
+            if self._global_string_hint(name):
+                return "std::string"
             if self._global_float_na_selection(name, gptype):
                 return "double"
             if (name in getattr(self, "_direct_program_tuple_binding_names", ())
@@ -3680,6 +3682,15 @@ class TypeInferer:
             isinstance(stmt, VarDecl)
             and stmt.name == name
             and stmt.type_hint == "bool"
+            for stmt in self.ctx.ast.body
+        )
+
+    def _global_string_hint(self, name: str) -> bool:
+        """An explicit string declaration keeps string storage for bare na."""
+        return any(
+            isinstance(stmt, VarDecl)
+            and stmt.name == name
+            and stmt.type_hint == "string"
             for stmt in self.ctx.ast.body
         )
 

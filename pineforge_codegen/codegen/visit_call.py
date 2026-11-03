@@ -174,6 +174,7 @@ from .id_sites import BUILTIN_NAMESPACES
 from .run_stops import request_stop
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
+    ARRAY_NEW_CTORS,
     ARRAY_METHODS,
     ARRAY_OPTIONAL_PARAMS,
     BAR_BUILTINS,
@@ -796,6 +797,11 @@ class CallVisitor:
             optional = MATRIX_OPTIONAL_PARAMS.get(method, {})
             aliases = MATRIX_METHOD_KWARG_ALIASES.get(method, {})
             receiver = MATRIX_RECEIVER_KEYWORD.get(method, "id")
+        elif namespace == "array" and method in ARRAY_NEW_CTORS | {"new"}:
+            slots = ["size", "initial_value"]
+            optional = {"size": 0, "initial_value": None}
+            aliases = {}
+            receiver = "id"
         elif method in CHECKED_ARRAY_METHOD_KWARGS:
             slots = list(CHECKED_ARRAY_METHOD_KWARGS[method])
             optional = ARRAY_OPTIONAL_PARAMS.get(method, {})
@@ -2267,13 +2273,21 @@ class CallVisitor:
                 cpp_type = self._type_spec_to_cpp(spec)
                 elem_spec = spec.element if spec.element is not None else TypeSpec.primitive("float")
                 self._reject_unknown_element_type(node, elem_spec)
-                init_default = self._default_for_spec(elem_spec)
-                if node.args:
-                    size_arg = self._visit_expr(node.args[0])
-                    if len(node.args) > 1:
-                        self._warn_narrow_int_element(node.args[1], spec,
-                                                      node.args[1])
-                        init_val = self._array_init_value_expr(elem_spec, node.args[1])
+                # Pine's omitted float fill is typed na, like an explicit na.
+                init_default = (
+                    self._array_init_value_expr(elem_spec, NaLiteral())
+                    if elem_spec.kind == "primitive" and elem_spec.name == "float"
+                    else self._default_for_spec(elem_spec)
+                )
+                arguments = self._collection_arg_nodes(
+                    "array", func_name, node, False
+                )
+                if arguments:
+                    size_arg = self._visit_expr(arguments[0])
+                    if len(arguments) > 1 and arguments[1] is not None:
+                        self._warn_narrow_int_element(arguments[1], spec,
+                                                      arguments[1])
+                        init_val = self._array_init_value_expr(elem_spec, arguments[1])
                     else:
                         init_val = init_default
                     return (
