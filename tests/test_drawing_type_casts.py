@@ -22,5 +22,8 @@ def test_na_drawing_cast_matches_typed_na_declaration(kind, cpp_type, name):
         if f"{name} =" in line or f"{name};" in line
     ]
     assert initializers(cpp) == initializers(control)
-    assert f"{name} = {cpp_type}{{}};" in cpp
+    reset = f"this->{name} = decltype(this->{name}){{}};"
+    assert reset in control
+    assert reset in cpp
+    assert f"{cpp_type} {name};" in cpp
     assert f"pf_{kind}_delete" in cpp

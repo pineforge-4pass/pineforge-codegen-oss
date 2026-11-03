@@ -7927,8 +7927,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             self._series_decl_bindings.add(
                                 (decl_node_id, binding_name)
                             )
-                            spec = getattr(sym, "type_spec", None)
-                            if (spec is not None and spec.kind == "primitive"):
+                            # Arithmetic and scalar builtin initializers can
+                            # leave Symbol.type_spec unset. The receiver query
+                            # also resolves their inferred scalar PineType.
+                            if (object_spec is not None
+                                    and object_spec.kind == "primitive"):
                                 self._primitive_history_declarations.add(
                                     (decl_node_id, binding_name)
                                 )

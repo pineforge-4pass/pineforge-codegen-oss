@@ -64,7 +64,7 @@ Translation also preserves these value contracts:
 - Array bindings from helper tuple destructuring retain their element type for built-in method lowering.
 - `strategy.default_entry_qty()` raises `PF-E5084` pending an engine strategy-host quantity query; an entry with omitted `qty` keeps engine default sizing.
 - An `if` or `switch` value reassigned to a Series updates the current slot in each selected branch.
-- Colliding direct nonpersistent scalar history declarations in ordinary functions have separate Series storage, including call-site clones and a local shadowing a global. Embedded block, tuple and loop declaration collisions retain their existing storage gates.
+- Colliding direct nonpersistent scalar history declarations in ordinary functions have separate Series storage, including call-site clones, locals of different scalar families and a computed local initializer reading a same-named global with its own history. Embedded block, tuple and loop declaration collisions retain their existing storage gates.
 - Direct `size`, `first`, `last` and `get` reads of `line.all`, `box.all`, `label.all` and `linefill.all` borrow live handles in oldest-first order, with the normal array bounds checks. Aliases, mutations and other collection uses raise `PF-E5086`; `polyline.all` raises `PF-E5085` pending an engine handle and arena.
 - Authored identifiers that collide with macros defined by the audited math, limits, C++ wrapper and paired engine headers use the existing C++ name allocator; authored input keys remain unchanged.
 

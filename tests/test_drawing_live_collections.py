@@ -31,7 +31,8 @@ def test_live_drawing_method_reads_match_array_functions(kind, handle, arena, me
         consumer = f"count = {expression}" if method == "size" else f"{kind}.delete({expression})"
         return '//@version=6\nstrategy("Live drawings", overlay=true)\n' + consumer + "\n"
 
-    cpp = cpp_code_only(transpile(source(method_source)))
+    raw_cpp = transpile(source(method_source))
+    cpp = cpp_code_only(raw_cpp)
     control = cpp_code_only(transpile(source(namespace_source)))
     assert cpp == control
     assert f"{arena}.order()" in cpp
@@ -41,10 +42,10 @@ def test_live_drawing_method_reads_match_array_functions(kind, handle, arena, me
     else:
         assert f"pf_{kind}_delete({arena}, {handle}{{" in cpp
         if method == "get":
-            assert '_PF_ARRAY_STOP("index_out_of_bounds", "get"' in cpp
+            assert '_PF_ARRAY_STOP("index_out_of_bounds", "get"' in raw_cpp
             assert "__pf_array[(size_t)__pf_array_index]" in cpp
         else:
-            assert f'_PF_ARRAY_STOP("empty_array_access", "{method}"' in cpp
+            assert f'_PF_ARRAY_STOP("empty_array_access", "{method}"' in raw_cpp
 
 
 @pytest.mark.parametrize("kind,handle,arena", KINDS)
