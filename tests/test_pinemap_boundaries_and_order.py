@@ -63,7 +63,7 @@ observed = 0
 strategy("method map parameter boundary")
 type Payload
     int value
-method unused(Payload self, map<int, float> values) => 0
+method unused(Payload self, map<int, float> values) => self, 0
 observed = 0
 ''',
             "map keys must be string",
@@ -83,7 +83,7 @@ observed = 0
 strategy("method matrix map-bearing boundary")
 type Holder
     map<string, int> values
-method unused(Holder self, matrix<Holder> values) => 0
+method unused(Holder self, matrix<Holder> values) => self, 0
 observed = 0
 ''',
             "matrix<Holder> is not supported when the UDT contains a map field",
@@ -103,7 +103,7 @@ strategy("valid declared primitive maps")
 type Holder
     map<string, int> values
 identity(map<string, int> values) => values
-method read(Holder self, map<string, bool> flags) => flags.size()
+method read(Holder self, map<string, bool> flags) => self, flags.size()
 var map<string, string> names = na
 var Holder holder = Holder.new(map.new<string, int>())
 var map<string, int> alias = identity(holder.values)
@@ -122,7 +122,7 @@ inferred_mutate(target, string key, int value) => target.put(key, value)
 relay(target, string key, int value) => mutate(target, key, value)
 type Holder
     int marker
-method observe_method(Holder self, int first, int second) => 0
+method observe_method(Holder self, int first, int second) => self, 0
 var direct_target = map.new<string, int>()
 var named_target = map.new<string, int>()
 var helper_target = map.new<string, int>()

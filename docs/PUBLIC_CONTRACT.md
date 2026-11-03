@@ -638,6 +638,8 @@ argument.
 
 ## Diagnostic codes
 
+Methods whose first parameter is never referenced in their body report the fatal analyzer diagnostic `PF-E5087` at that parameter, with a hint to use it or declare a function instead; later unused parameters and ordinary functions remain accepted.
+
 Pine v6 call arguments must put all positional arguments before named
 arguments. `PF-E2074` is a fatal analyzer diagnostic at the first positional
 expression that follows a named argument in the same call. It covers calls

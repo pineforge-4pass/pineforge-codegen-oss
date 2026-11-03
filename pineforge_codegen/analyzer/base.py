@@ -45,6 +45,7 @@ from ..method_binding import (
     MethodBindError,
     bind_method_call,
     inventory_method_signatures,
+    method_receiver_is_used,
     validate_call_argument_order,
 )
 from .. import signatures as sigs
@@ -5671,6 +5672,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 sym._pf_certain_declared = True
             setattr(sym, "_pf_parameter_owner", method_key)
             self._symbols.define(sym)
+        receiver_used = (node.annotations or {}).get("receiver_used")
+        if receiver_used is None:
+            receiver_used = method_receiver_is_used(node)
+        if node.params and not receiver_used:
+            name = node.params[0]
+            raise CompileError([Diagnostic(
+                level=Level.ERROR,
+                phase=Phase.ANALYZER,
+                location=(node.annotations or {}).get("receiver_loc") or loc,
+                message=f'The first method parameter "{name}" is never used in the method body.',
+                hint="Use the first parameter or declare a function instead.",
+            )])
         ret_type = PineType.VOID
         ta_start = len(self._ta_call_sites)
         old_global = self._global_scope

@@ -121,7 +121,7 @@ def _source(row: _Refusal, envelope: str = "root") -> str:
         payload = f"nz({payload})"
     elif envelope == "method":
         definitions += (
-            "method wrap(float receiver, float d) => "
+            "method wrap(float receiver, float d) => receiver * 0 + "
             + payload.replace("close - open", "d") + "\n"
         )
         payload = "close.wrap(close - open)"
@@ -277,13 +277,19 @@ def _assert_unchanged_method(row, monkeypatch):
     assert "wrap" in body
     assert "_arg_hist_" not in body
     if row.method_sha256 is not None:
-        # Compare the earlier method emission with the rollback hook removed:
-        # requested state now survives that hook, so its body is excluded from
-        # the compatibility hash. The id-sites receipt exports are additive
-        # metadata the pinned emission predates.
-        assert hashlib.sha256(
-            without_id_sites_receipt(without_restore_script_state(candidate["cpp"])).encode()
-        ).hexdigest() == row.method_sha256
+        # The historical hash describes an unused-receiver method, which is
+        # now refused. Keep the valid method's equality check above and check
+        # the original source's located refusal instead of inventing a new hash.
+        original = method_source.replace("=> receiver * 0 + ", "=> ")
+        with pytest.raises(CompileError) as caught:
+            transpile(original)
+        diagnostic, = caught.value.diagnostics
+        assert diagnostic.code == "PF-E5087"
+        assert diagnostic.args == {"name": "receiver"}
+        assert diagnostic.location.line == next(
+            line for line, text in enumerate(original.splitlines(), 1)
+            if text.startswith("method wrap(")
+        )
 
 
 @pytest.mark.parametrize("row", _ROWS)

@@ -168,7 +168,7 @@ def test_literal_declaration_cannot_retroactively_authorize_earlier_use(
         (
             "type Sample\n"
             "    int value = 0\n"
-            "method read(Sample self, int prior = p[1]) => prior"
+            "method read(Sample self, int prior = p[1]) => self, prior"
         ),
         "for i = p[1] to 2\n    plot(i)",
         "for i = 0 to p[1]\n    plot(i)",

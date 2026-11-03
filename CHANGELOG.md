@@ -22,6 +22,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Methods whose first parameter is never referenced in their body now report `PF-E5087` at that parameter, with a hint to use it or declare a function instead.
 - An affine chart loop proved endless is stopped with the loop-time error when
   its result reaches an effect. Omission is limited to an unused loop statement
   with no calls, whose writes have no readers except self-updates, a break

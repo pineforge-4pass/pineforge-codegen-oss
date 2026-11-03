@@ -3,6 +3,9 @@
   "allowed_added_fields": [
     "user_message"
   ],
+  "added_codes": [
+    "PF-E5087"
+  ],
   "severity_changes": {
     "PF-W1505": {
       "before": "warning",

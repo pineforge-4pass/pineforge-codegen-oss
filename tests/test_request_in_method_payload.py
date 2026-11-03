@@ -177,7 +177,7 @@ def test_payload_parameters_match_inline_on_hourly_bars(
      "pull(close - open)", "close - open"),
     ("method twice(float source) => source * 2\n",
      'request.security(syminfo.tickerid, "60", close.twice())', "close * 2"),
-    ('method sample(float source) => request.security(syminfo.tickerid, "60", close)\n',
+    ('method sample(float source) => source, request.security(syminfo.tickerid, "60", close)\n',
      "(close - open).sample()", "close"),
 ])
 def test_payloads_without_method_parameter_reads_keep_cpp(

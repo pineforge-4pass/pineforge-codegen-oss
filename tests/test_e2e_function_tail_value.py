@@ -214,6 +214,7 @@ TYPED = HEAD + """type Obj
 bump(Obj o) =>
     o.v += 1{bump_tail}
 method quarter(Obj this, float x) =>
+    this
     float y = x
     y /= 4{quarter_tail}
 fArm(float v) =>
