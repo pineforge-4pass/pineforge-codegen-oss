@@ -51,6 +51,9 @@ class IntrinsicFunc:
     # False preserves the record's existing keyword policy.
     keyword_names_verified: bool = False
     default_contract: InputDefaultContract | None = None
+    # Pine variadic callables forbid every keyword. This does not constrain
+    # their positional arity to the overload examples recorded below.
+    variadic: bool = False
 
     @property
     def primary(self) -> FuncSig:
@@ -85,9 +88,11 @@ def _sig(params: list[tuple], ret: PineType = PineType.FLOAT,
 
 
 def _func(name: str, *sigs: FuncSig,
-          keyword_names_verified: bool = False) -> IntrinsicFunc:
+          keyword_names_verified: bool = False,
+          variadic: bool = False) -> IntrinsicFunc:
     return IntrinsicFunc(name=name, signatures=list(sigs),
-                         keyword_names_verified=keyword_names_verified)
+                         keyword_names_verified=keyword_names_verified,
+                         variadic=variadic)
 
 
 # Shortcuts for common param types
@@ -250,52 +255,58 @@ _ta("pivot_point_levels",
 MATH_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 
 def _math(short_name: str, *sigs: FuncSig,
-          keyword_names_verified: bool = False) -> None:
+          keyword_names_verified: bool = False,
+          variadic: bool = False) -> None:
     MATH_FUNCTIONS[short_name] = _func(
         f"math.{short_name}", *sigs, keyword_names_verified=keyword_names_verified,
+        variadic=variadic,
     )
 
 # Arithmetic
-_math("abs",    _sig([("x", F)]))
-_math("ceil",   _sig([("x", F)], ret=I))
-_math("floor",  _sig([("x", F)], ret=I))
+_math("abs",    _sig([("number", F)]), keyword_names_verified=True)
+_math("ceil",   _sig([("number", F)], ret=I), keyword_names_verified=True)
+_math("floor",  _sig([("number", F)], ret=I), keyword_names_verified=True)
 _math("round",
-      _sig([("x", F)], ret=I),                             # round(x) → int
-      _sig([("x", F), ("precision", I)]))                  # round(x, n) → float
-_math("round_to_mintick", _sig([("x", F)]))
-_math("sign",   _sig([("x", F)], ret=F))
+      _sig([("number", F)], ret=I),                       # round(number) → int
+      _sig([("number", F), ("precision", I)]),             # round(number, n) → float
+      keyword_names_verified=True)
+_math("round_to_mintick", _sig([("number", F)]), keyword_names_verified=True)
+_math("sign",   _sig([("number", F)], ret=F), keyword_names_verified=True)
 _math("max",
       _sig([("x", F), ("y", F)]),                          # 2-arg
       _sig([("x", F), ("y", F), ("z", F)]),                # 3-arg
-      _sig([("x", F), ("y", F), ("z", F), ("w", F)]))     # 4-arg
+      _sig([("x", F), ("y", F), ("z", F), ("w", F)]),      # 4-arg
+      variadic=True)
 _math("min",
       _sig([("x", F), ("y", F)]),
       _sig([("x", F), ("y", F), ("z", F)]),
-      _sig([("x", F), ("y", F), ("z", F), ("w", F)]))
+      _sig([("x", F), ("y", F), ("z", F), ("w", F)]),
+      variadic=True)
 _math("avg",
       _sig([("x", F), ("y", F)]),
       _sig([("x", F), ("y", F), ("z", F)]),
       _sig([("x", F), ("y", F), ("z", F), ("w", F)]),
       _sig([("x", F), ("y", F), ("z", F), ("w", F), ("u", F)]),
-      _sig([("x", F), ("y", F), ("z", F), ("w", F), ("u", F), ("v", F)]))
+      _sig([("x", F), ("y", F), ("z", F), ("w", F), ("u", F), ("v", F)]),
+      variadic=True)
 _math("sum",    _sig([("source", F), ("length", I)]))  # rolling sum → math::Sum in runtime
 _math("pow", _sig([("base", F), ("exponent", F)]), keyword_names_verified=True)
-_math("sqrt",   _sig([("x", F)]))
-_math("exp",    _sig([("x", F)]))
-_math("log",    _sig([("x", F)]))
-_math("log10",  _sig([("x", F)]))
+_math("sqrt",   _sig([("number", F)]), keyword_names_verified=True)
+_math("exp",    _sig([("number", F)]), keyword_names_verified=True)
+_math("log",    _sig([("number", F)]), keyword_names_verified=True)
+_math("log10",  _sig([("number", F)]), keyword_names_verified=True)
 _math("random", _sig([("min", F, 0.0), ("max", F, 1.0), ("seed", I, None)]))
 
 # Trigonometry
-_math("sin",    _sig([("x", F)]))
-_math("cos",    _sig([("x", F)]))
-_math("tan",    _sig([("x", F)]))
-_math("asin",   _sig([("x", F)]))
-_math("acos",   _sig([("x", F)]))
-_math("atan",   _sig([("x", F)]))
+_math("sin",    _sig([("angle", F)]), keyword_names_verified=True)
+_math("cos",    _sig([("angle", F)]), keyword_names_verified=True)
+_math("tan",    _sig([("angle", F)]), keyword_names_verified=True)
+_math("asin",   _sig([("angle", F)]), keyword_names_verified=True)
+_math("acos",   _sig([("angle", F)]), keyword_names_verified=True)
+_math("atan",   _sig([("angle", F)]), keyword_names_verified=True)
 _math("atan2",  _sig([("y", F), ("x", F)]))
-_math("todegrees", _sig([("x", F)]))
-_math("toradians", _sig([("x", F)]))
+_math("todegrees", _sig([("radians", F)]), keyword_names_verified=True)
+_math("toradians", _sig([("degrees", F)]), keyword_names_verified=True)
 
 
 # ============================================================================

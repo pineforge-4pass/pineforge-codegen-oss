@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from pineforge_codegen import transpile, transpile_full
+from pineforge_codegen.diagnostic_codes import render_diagnostic
 from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._compile import run_emitted_tu
 from tests.test_order_shapes import receipt
@@ -376,10 +377,9 @@ def test_constant_selection_never_hides_a_series_dependency(expression):
     ("default_qty_value", "8 / 2", 4.0),  # Pine v6 divides constant integers as floating point.
     ("precision", "int(8 / 2)", 4),  # The explicit integer cast restores an integer constant.
     ("pyramiding", "math.max(2, 5)", 5),  # The larger of two and five is five.
-    ("pyramiding", "math.max(y=5, x=2)", 5),  # Keywords bind to x and y before taking the maximum.
     ("default_qty_value", "math.avg(2, 6)", 4.0),  # The mean of two and six is four.
     ("precision", "math.round(2.5)", 3),  # Pine rounds a positive half upward.
-    ("precision", "math.round(x=2.5)", 3),  # The named x argument has the same half-up result.
+    ("precision", "math.round(number=2.5)", 3),  # The declared number parameter keeps the half-up result.
     ("precision", "math.floor(3.75)", 3),  # Floor takes the greatest integer at most 3.75.
     ("overlay", "not (1 < 2)", False),  # One is less than two, so its negation is false.
     ("precision", "false ? int(1 / 0) : 4", 4),  # The constant condition leaves the invalid arm unevaluated.
@@ -388,6 +388,39 @@ def test_constant_operators_use_pine_values(name, value, expected):
     result = transpile_full(_source(f'strategy("Constant operators", {name}={value})', body=""))
     assert result["strategyParams"][name] == expected
     assert type(result["strategyParams"][name]) is type(expected)
+
+
+@pytest.mark.parametrize("check_support", (True, False))
+@pytest.mark.parametrize("setting,expression,keyword,code,arguments", [
+    pytest.param(
+        "pyramiding", "math.max(y=5, x=2)", "y", "PF-E5089",
+        {"function": "math.max"}, id="variadic-max-y-x",
+    ),
+    pytest.param(
+        "precision", "math.round(x=2.5)", "x", "PF-E5090",
+        {"function": "math.round", "name": "x", "accepted": "number, precision"},
+        id="fixed-round-x",
+    ),
+])
+def test_math_keywords_in_declaration_constants_are_located_refusals(
+    setting, expression, keyword, code, arguments, check_support,
+):
+    # Preserve the exact TV-invalid expressions that used to be positive rows.
+    source = _source(f'strategy("Constant operators", {setting}={expression})', body="")
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="settings.pine", check_support=check_support)
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.code == code
+    assert diagnostic.args == arguments
+    assert (diagnostic.message, diagnostic.hint) == render_diagnostic(code, arguments)
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    start = source.index(expression) + expression.index(f"{keyword}=")
+    line = source.count("\n", 0, start) + 1
+    col = start - source.rfind("\n", 0, start)
+    assert diagnostic.location.file == "settings.pine"
+    assert (diagnostic.location.line, diagnostic.location.col,
+            diagnostic.location.end_col) == (line, col, col + len(keyword))
 
 
 def test_earlier_constant_aliases_resolve_in_source_order():

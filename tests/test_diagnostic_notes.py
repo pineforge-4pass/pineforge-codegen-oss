@@ -18,6 +18,7 @@ from tests._legacy_cpp import without_trade_history_policy
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diagnostic_notes"
 CASES = json.loads((FIXTURES / "interfaces.json").read_text())["cases"]
+MATH_CASES = json.loads((FIXTURES / "interfaces.json").read_text())["math_keyword_cases"]
 DELTA = json.loads((FIXTURES / "delta.json").read_text())
 NOTE_CODES = set(DELTA["severity_changes"])
 BEFORE = json.loads((FIXTURES / "catalog.before.json").read_text())["codes"]
@@ -34,7 +35,7 @@ PRODUCT_BEFORE = json.loads((FIXTURES / "product.before.json").read_text())
 # (PF-E2066 to PF-E2079) and the strategy() declaration errors (PF-E5080 to
 # PF-E5082), the missing value lowering error (PF-E5083) and the requested
 # selection errors (PF-E3102 to PF-E3105 and PF-E3110), including an unmeasured empty
-# requested-timeframe arm.
+# requested-timeframe arm, and the two math keyword refusals (PF-E5089, PF-E5090).
 CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2040", "PF-E2041", "PF-E2042", "PF-E2043", "PF-E2044",
                      "PF-E2045", "PF-E2046", "PF-E2047", "PF-E2048", "PF-E2049",
@@ -50,7 +51,8 @@ CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2079",  # A float step against a loop counter with int start evidence.
                      "PF-E3102", "PF-E3103", "PF-E3104", "PF-E3105", "PF-E3110",
                      "PF-E3111",
-                     "PF-E5080", "PF-E5081", "PF-E5082", "PF-E5083", "PF-W1553"}
+                     "PF-E5080", "PF-E5081", "PF-E5082", "PF-E5083",
+                     "PF-E5089", "PF-E5090", "PF-W1553"}
 # The support checker warns, inside a switch arm, what it refuses elsewhere:
 # PF-W1nnn is PF-E1nnn there. Read off the live catalog, so a twin added later
 # is covered by the sentence tests below without an edit here.
@@ -59,6 +61,8 @@ TWINS = sorted("PF-W" + code[4:] for code in diagnostics_catalog()["codes"] if c
 
 def _assert_catalog_delta(catalog):
     assert set(catalog) == set(BEFORE) | CATALOG_ADDITIONS
+    assert set(DELTA["catalog_additions"]) == {"PF-E5089", "PF-E5090"}
+    assert {code: catalog[code] for code in DELTA["catalog_additions"]} == DELTA["catalog_additions"]
     changed = set()
     for code, old in BEFORE.items():
         entry = dict(catalog[code])
@@ -124,6 +128,17 @@ def test_catalog_delta_rejects_malformed_candidate(mutation):
                        else "An invented {argument}." if mutation == "user_message"
                        else "changed")
     with pytest.raises((AssertionError, KeyError)):
+        _assert_catalog_delta(bad)
+
+
+@pytest.mark.parametrize("code", ("PF-E5089", "PF-E5090"))
+@pytest.mark.parametrize("mutation", [
+    "message", "hint", "explanation", "args", "severity", "user_message",
+])
+def test_math_catalog_delta_rejects_malformed_candidate(code, mutation):
+    bad = copy.deepcopy(diagnostics_catalog()["codes"])
+    bad[code][mutation] = ({"invented": {"kind": "text"}} if mutation == "args" else "changed")
+    with pytest.raises(AssertionError):
         _assert_catalog_delta(bad)
 
 
@@ -217,6 +232,38 @@ def test_note_enum_and_catalog_short_sentences():
     assert catalog
     for code, entry in catalog.items():
         assert entry.get("user_message"), f"missing user_message: {code}"
+
+
+@pytest.mark.parametrize("case", MATH_CASES, ids=lambda case: case["name"])
+def test_math_keyword_interfaces_keep_exact_diagnostics(case):
+    assert {row["diagnostic"]["code"] for row in MATH_CASES} == {"PF-E5089", "PF-E5090"}
+    source = (FIXTURES / case["fixture"]).read_text()
+    assert source == case["source"]
+    expected = case["diagnostic"]
+    with pytest.raises(CompileError) as caught:
+        transpile_full(source, filename=case["fixture"])
+    diagnostic, = caught.value.diagnostics
+    assert {
+        "severity": diagnostic.level.value, "phase": diagnostic.phase.value,
+        "location": asdict(diagnostic.location),
+        "message": diagnostic.message, "hint": diagnostic.hint,
+        "code": diagnostic.code, "args": diagnostic.args,
+        "user_message": diagnostic.user_message,
+    } == expected
+    assert (diagnostic.message, diagnostic.hint) == render_diagnostic(
+        expected["code"], expected["args"],
+    )
+    location = expected["location"]
+    assert json.loads(_glue()(source)) == {
+        "ok": False,
+        "error": f"<input>:{location['line']}:{location['col']}: {expected['message']}",
+        "diagnostics": [{
+            "line": location["line"], "col": location["col"], "endCol": location["end_col"],
+            "message": expected["message"] + " — " + expected["hint"],
+            "severity": expected["severity"], "code": expected["code"],
+            "args": expected["args"], "user_message": expected["user_message"],
+        }],
+    }
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])

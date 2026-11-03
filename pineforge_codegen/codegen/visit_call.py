@@ -153,7 +153,7 @@ from ..ast_nodes import (
 )
 from ..collection_history import history_annotation, literal_offset
 from ..external_requests import RECORDED_KEY_ANNOTATION, request_stop_marker
-from ..intrinsic_binding import validate_intrinsic_keywords
+from ..intrinsic_binding import bind_intrinsic_arguments, validate_intrinsic_keywords
 from ..limits import iter_ast_nodes
 from ..security_contexts import ticker_symbol_arg
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
@@ -4030,9 +4030,12 @@ class CallVisitor:
         return f'std::string("") /* unsupported: str.{comment_name} */'
 
     def _visit_math_call(self, func_name: str, node: FuncCall) -> str:
+        intrinsic = sigs.get_intrinsic("math", func_name)
+        if intrinsic is not None and intrinsic.keyword_names_verified:
+            bind_intrinsic_arguments(node, intrinsic)
         args = _merge_kwargs(
             node.args, node.kwargs, sigs.get_param_names("math", func_name),
-            self._visit_expr, intrinsic=sigs.get_intrinsic("math", func_name),
+            self._visit_expr, intrinsic=intrinsic,
         )
         # Handle special cases first
         if func_name == "round" and len(args) == 2:

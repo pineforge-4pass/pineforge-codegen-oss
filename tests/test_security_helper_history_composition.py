@@ -12,6 +12,7 @@ import math
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError
 from tests.test_security_helper_arg_history import (
     _HOUR_MS,
     _HOURLY_OPENS,
@@ -42,7 +43,7 @@ _SCALAR_CASES = [
     pytest.param("g(b)", "twice", "c > 0", id="user-positional"),
     pytest.param("g(v=b)", "twice", "c > 0", id="user-named"),
     pytest.param("math.sign(b)", "sign", "c > 0", id="builtin-positional"),
-    pytest.param("math.sign(x=b)", "sign", "c > 0", id="builtin-named"),
+    pytest.param("math.sign(number=b)", "sign", "c > 0", id="builtin-named-number"),
     pytest.param("b > 0 ? 1.0 : 0.0", "positive", "c > 0", id="ternary"),
 ]
 
@@ -159,6 +160,31 @@ def test_reporter_compositions_use_requested_history(payload, operation, conditi
 def test_compositions_preserve_sign_zero_and_provisional_slots(payload, operation, condition):
     cpp = transpile(_varied_source(payload, condition))
     _assert_varied_rows(_run_requested(cpp, _feeds()), operation)
+
+
+@pytest.mark.parametrize("source_builder", [
+    pytest.param(_reporter, id="excluded-builtin-named-reporter"),
+    pytest.param(_varied_source, id="excluded-builtin-named-varied"),
+])
+def test_previously_excluded_x_keyword_is_refused(source_builder):
+    # Both old builtin-named rows used x=b and recorded wrong values.
+    # TV's excluded-signature-control now establishes that x is invalid;
+    # keep both shapes as refusals, separate from the new number rows.
+    source = source_builder("math.sign(x=b)", "c > 0")
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="excluded_sign.pine")
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.code == "PF-E5090"
+    assert diagnostic.args == {"function": "math.sign", "name": "x", "accepted": "number"}
+    assert diagnostic.message == (
+        "math.sign: unknown keyword argument 'x'; accepted keyword names: number."
+    )
+    assert diagnostic.hint == "Use these parameter names for math.sign: number."
+    line = next(i for i, row in enumerate(source.splitlines(), 1) if "math.sign(x=b)" in row)
+    col = source.splitlines()[line - 1].index("x=b") + 1
+    assert diagnostic.location.file == "excluded_sign.pine"
+    assert (diagnostic.location.line, diagnostic.location.col,
+            diagnostic.location.end_col) == (line, col, col + 1)
 
 
 @pytest.mark.parametrize("payload,value_template", [
