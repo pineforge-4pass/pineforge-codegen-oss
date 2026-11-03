@@ -195,6 +195,79 @@ def test_input_derived_lookahead_transpiles_and_compiles(default, argument):
     compile_cpp(cpp, label="input-derived lookahead")
 
 
+@pytest.mark.parametrize("kind, defaults, predicate, getter, cpp_defaults", [
+    pytest.param("time", ("1735689600000", "1767225600000"),
+                 "selection < 1751328000000", "get_input_int64",
+                 ("1735689600000", "1767225600000"), id="time"),
+    pytest.param("price", ("1.25", "2.75"), "selection < 2.0", "get_input_double",
+                 ("1.25", "2.75"), id="price"),
+    pytest.param("session", ('"0930-1600"', '"0000-2400"'),
+                 'selection == "0930-1600"', "get_input_string",
+                 ('std::string("0930-1600")', 'std::string("0000-2400")'), id="session"),
+    pytest.param("text_area", ('"Enabled\\nMiXeD"', '"disabled\\nMiXeD"'),
+                 'selection == "Enabled\\nMiXeD"', "get_input_string",
+                 ('std::string("Enabled\\nMiXeD")', 'std::string("disabled\\nMiXeD")'),
+                 id="text-area"),
+])
+@pytest.mark.parametrize("default_index", [0, 1], ids=["default-on", "default-off"])
+@pytest.mark.parametrize("named", [False, True], ids=["positional", "named"])
+def test_fixed_primitive_input_lookahead_registers_typed_getter(
+        kind, defaults, predicate, getter, cpp_defaults, default_index, named):
+    """Exercise the real pipeline, including warning provenance and C++ setup."""
+    arguments = (f'defval={defaults[default_index]}, title="Selection"' if named
+                 else f'{defaults[default_index]}, "Selection"')
+    request = ('daily = request.security(syminfo.tickerid, "D", close[1], '
+               'lookahead=second)\n')
+    src = (
+        '//@version=6\nstrategy("fixed primitive lookahead")\n'
+        f'rawChoice = input.{kind}({arguments})\n'
+        'selection = rawChoice\n'
+        f'first = {predicate} ? barmerge.lookahead_on : barmerge.lookahead_off\n'
+        'second = first\n' + request
+        + 'if daily > close\n    strategy.entry("L", strategy.long)\n')
+    result = transpile_full(src, filename="fixed-input.pine")
+    (registration,) = _registrations(result["cpp"])
+    assert f'{getter}("Selection", {cpp_defaults[default_index]})' in registration
+    assert "static_cast<bool>" in registration
+    assert all(name not in registration for name in ("rawChoice", "selection", "first", "second"))
+    warnings = [d for d in result["diagnostics"] if d.code == "PF-W1524"]
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert warning.location.file == "fixed-input.pine"
+    assert (warning.location.line, warning.location.col) == (
+        src.splitlines().index(request.rstrip()) + 1, request.index("second") + 1)
+    assert warning.args == {}
+    assert not [d for d in result["diagnostics"] if d.code in {"PF-E1085", "PF-W1085"}]
+    compile_cpp(result["cpp"], label=f"fixed-{kind}-lookahead")
+
+
+@pytest.mark.parametrize("declarations, call, predicate, getter_read", [
+    pytest.param("", 'input.time(timestamp("2025-01-01T00:00:00+00:00"), "Selection")',
+                 "selection < 1751328000000",
+                 'get_input_int64("Selection", 1735689600000LL)', id="timestamp-default"),
+    pytest.param("", 'input.price(1.0 + 0.25, "Selection")', "selection < 2.0",
+                 'get_input_double("Selection", (1.0 + 0.25))', id="arithmetic-default"),
+    pytest.param('const string seed = "0930-1600"\n',
+                 'input.session(seed, "Selection")', 'selection == "0930-1600"',
+                 'get_input_string("Selection", std::string("0930-1600"))', id="session-default"),
+    pytest.param('const string seed = "Enabled\\nMiXeD"\n',
+                 'input.text_area(seed, "Selection")', 'selection == "Enabled\\nMiXeD"',
+                 'get_input_string("Selection", std::string("Enabled\\nMiXeD"))', id="text-default"),
+])
+def test_fixed_primitive_lookahead_defaults_keep_prebar_expression(
+        declarations, call, predicate, getter_read):
+    cpp = transpile(
+        '//@version=6\nstrategy("fixed input defaults")\n'
+        + declarations + f'selection = {call}\n'
+        f'mode = {predicate} ? barmerge.lookahead_on : barmerge.lookahead_off\n'
+        'daily = request.security(syminfo.tickerid, "D", close[1], lookahead=mode)\n'
+        'plot(daily)\n')
+    (registration,) = _registrations(cpp)
+    assert getter_read in registration
+    assert "selection" not in registration and "mode" not in registration
+    compile_cpp(cpp, label="fixed-input-expression-default")
+
+
 @pytest.mark.parametrize("payload", ["ta.ema(base[1], 5)", "ta.sma(base[2], 3)"])
 def test_requested_value_history_inside_requested_ta_compiles(payload):
     cpp = transpile(
@@ -411,6 +484,38 @@ def test_lookahead_warning_follows_immutable_value(
                  id="bar-series"),
     pytest.param('mode = input(close) > 0 ? barmerge.lookahead_on : barmerge.lookahead_off\n',
                  id="source-input"),
+    pytest.param('mode = input.source(close) > 0 ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="named-source-input"),
+    pytest.param('choice = input.price(1.25, "Selection")\nchoice := 2.75\n'
+                 'mode = choice < 2.0 ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="reassigned-price"),
+    pytest.param('var choice = input.time(1735689600000, "Selection")\n'
+                 'mode = choice < 1751328000000 ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="persistent-time"),
+    pytest.param('choice = input.session("0930-1600", "Selection")\n'
+                 'alias = choice\nalias := "0000-2400"\n'
+                 'mode = alias == "0930-1600" ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="reassigned-session-alias"),
+    pytest.param('varip choice = input.text_area("Enabled", "Selection")\n'
+                 'mode = choice == "Enabled" ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="persistent-text-area"),
+    pytest.param('mode = input.price(close, "Selection") > 0 '
+                 '? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="series-default"),
+    pytest.param('mode = input.time(timestamp(2025, 1, 1, 0, bar_index), "Selection") > 0 '
+                 '? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="series-timestamp-default"),
+    pytest.param('timestamp = 1\n'
+                 'mode = input.time(timestamp("2025-01-01"), "Selection") > 0 '
+                 '? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="shadowed-timestamp"),
+    pytest.param('input = 1\n'
+                 'mode = input.price(1.25, "Selection") < 2.0 '
+                 '? barmerge.lookahead_on : barmerge.lookahead_off\n',
+                 id="shadowed-input-namespace"),
+    pytest.param('mode = input.text_area("Enabled", "Selection") == "Enabled" '
+                 '? barmerge.lookahead_on : barmerge.gaps_off\n',
+                 id="wrong-enum-family"),
     pytest.param('barmerge = 1\n'
                  'mode = useLookahead ? barmerge.lookahead_on : barmerge.lookahead_off\n',
                  id="shadowed-namespace"),
@@ -420,11 +525,17 @@ def test_lookahead_warning_follows_immutable_value(
                  id="incomplete-switch"),
 ])
 def test_lookahead_warning_preserves_selection_refusals(declarations):
+    request = ('daily = request.security(syminfo.tickerid, "D", close[1], '
+               'lookahead=mode)\n')
+    src = (
+        '//@version=6\nstrategy("lookahead refusal")\n'
+        'useLookahead = input.bool(true, "Lookahead")\n'
+        + declarations + request + 'plot(daily)\n')
     with pytest.raises(CompileError, match="lookahead must be barmerge") as err:
-        transpile_full(
-            '//@version=6\nstrategy("lookahead refusal")\n'
-            'useLookahead = input.bool(true, "Lookahead")\n'
-            + declarations
-            + 'daily = request.security(syminfo.tickerid, "D", close[1], lookahead=mode)\n'
-            'plot(daily)\n')
+        transpile_full(src, filename="fixed-refusal.pine")
+    (diagnostic,) = [d for d in err.value.diagnostics if d.code == "PF-E1085"]
+    assert diagnostic.location.file == "fixed-refusal.pine"
+    assert (diagnostic.location.line, diagnostic.location.col) == (
+        src.splitlines().index(request.rstrip()) + 1, request.index("mode") + 1)
+    assert diagnostic.args == {}
     assert not [d for d in err.value.diagnostics if d.code == "PF-W1524"]
