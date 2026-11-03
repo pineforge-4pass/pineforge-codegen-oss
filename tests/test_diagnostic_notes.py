@@ -61,7 +61,8 @@ CATALOG_ENTRY_ADDITIONS = {
 # source of nz and fixnan (PF-E2047), the operator errors (PF-E2048 to
 # PF-E2052), the function definition scope errors (PF-E2053 to PF-E2060), the
 # untyped na declaration error (PF-E2061), the bool and type mismatch errors
-# (PF-E2066 to PF-E2079) and the strategy() declaration errors (PF-E5080 to
+# (PF-E2066 to PF-E2079), the parameter qualifier and variadic keyword errors
+# (PF-E2080, PF-E2082) and the strategy() declaration errors (PF-E5080 to
 # PF-E5082), the missing value lowering error (PF-E5083) and the requested
 # selection errors (PF-E3102 to PF-E3105 and PF-E3110), including an unmeasured empty
 # requested-timeframe arm, and the two math keyword refusals (PF-E5089, PF-E5090).
@@ -78,6 +79,8 @@ CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2075",  # A name read where its declaration is not visible.
                      "PF-E2076", "PF-E2077", "PF-E2078",
                      "PF-E2079",  # A float step against a loop counter with int start evidence.
+                     "PF-E2080",  # An argument qualifier exceeds its parameter's contract.
+                     "PF-E2082",  # Keyword elements in array.from.
                      "PF-E3102", "PF-E3103", "PF-E3104", "PF-E3105", "PF-E3110",
                      "PF-E3111",
                      "PF-E5080", "PF-E5081", "PF-E5082", "PF-E5083", "PF-W1553"} | set(CATALOG_ENTRY_ADDITIONS)

@@ -620,6 +620,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         from .value_bindings import ValueBindings
         self._value_bindings = ValueBindings(self._ast, self._filename, self._budget)
         self._value_bindings.resolve()
+        from .qualifiers import ParameterQualifiers
+        self._parameter_qualifiers = ParameterQualifiers(
+            self._ast, self._value_bindings.declaration_bindings,
+            self._filename, self._budget,
+        )
         self._loop_type_sources = LoopTypeSources(self._ast)
         self._loop_type_sources.widen_reassignments(
             self._value_bindings.declaration_bindings, budget=self._budget,
@@ -4568,7 +4573,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         values: list[ASTNode | None],
         function_name: str,
     ) -> None:
-        """Refuse only a proven float passed to a declared int parameter."""
+        """Check proven qualifier and base-type mismatches after binding."""
         if (self._pine_version != 6
                 or self._in_v5_library_definition(definition)):
             return
@@ -4577,6 +4582,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # An unresolved overload keeps its established lookup; checking
             # only that declaration would discard the other candidates.
             return
+        self._parameter_qualifiers.check(definition, values, function_name)
         specs = self._param_type_specs_from_def(definition)
         # A default needs a float proof in both scopes; a declaration proof
         # only limits the existing refusal.
@@ -6929,6 +6935,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if isinstance(callee, MemberAccess):
             obj = callee.object
             member = callee.member
+            if (self._pine_version == 6
+                    and not self._in_v5_library_definition(node)
+                    and isinstance(obj, Identifier) and obj.name == "array"
+                    and self._value_bindings.declaration_bindings.get(id(obj)) is None
+                    and member == "from" and node.kwargs):
+                from ..pine_spelling import expr_start
+                self._error(
+                    "Functions that accept a variable number of arguments "
+                    "cannot accept keyword arguments.",
+                    expr_start(next(iter(node.kwargs.values()))).loc or node.loc,
+                )
             self._check_udt_constructor_bool_na(node)
 
             # ta.* calls

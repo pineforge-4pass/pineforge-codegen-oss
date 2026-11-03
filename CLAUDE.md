@@ -385,6 +385,19 @@ forms lower as their positional twins; unknown, duplicate, missing and excess
 arguments keep the existing map diagnostics. Named receivers retain the map's
 value and collection result types, including direct function returns.
 
+User functions and typed methods share a qualifier check after argument
+binding. A proven stronger argument qualifier than an explicit `simple` or
+`const` parameter raises PF-E2080 at the argument's first token. Qualifier
+evidence follows lexical declarations, writes, helper calls and return tails;
+unknown expressions keep their existing policy. Qualifier-only overloads and
+imported v5 definitions keep their existing handling. Method parsing retains
+nonreceiver contracts separately from the linker's overload metadata; linked
+method return qualifiers stay unknown. `array.from` keyword elements raise
+PF-E2082 at the value.
+These checks change no accepted script's emission. The controls in
+`tests/test_series_to_simple_parameter_refusal.py` compare complete C++ to
+the pinned reference.
+
 A counted `for` whose end or step reads its own counter binds that name to
 the counter, including over an outer variable, parameter, block binding or
 enclosing counter, and regardless of later global declarations. The start is
