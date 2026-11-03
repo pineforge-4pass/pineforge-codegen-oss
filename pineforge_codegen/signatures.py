@@ -780,14 +780,6 @@ TIMEFRAME_VARIABLES: dict[str, PineType] = {
     "timeframe.isticks": B,
 }
 
-# These previously unregistered values inherited the analyzer's string
-# fallback. Keep that storage contract separate from their correct Pine type:
-# a bool assigned there is a single byte, decoded only at a text conversion.
-VARIABLE_STORAGE_COMPATIBILITY: dict[str, PineType] = {
-    "timeframe.isminutes": S,
-    "timeframe.isseconds": S,
-}
-
 # display.* plot_display constants (PineScript v6 — values for C++ codegen)
 DISPLAY_VARIABLES: dict[str, PineType] = {
     "display.all": I,
