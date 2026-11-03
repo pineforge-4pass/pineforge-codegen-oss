@@ -2106,6 +2106,10 @@ class CallVisitor:
                 )
                 return f"({self._visit_expr(node.args[0])}).empty()"
             if len(node.args) == 1:
+                if self._udt_array_field_target(node.args[0]) is not None:
+                    # Observe the field's ID without dereferencing its array.
+                    field = self._visit_mutable_expr(node.args[0])
+                    return f"({field}).is_na()"
                 drawing = self._drawing_na_expr(node.args[0])
                 if drawing is not None:
                     return drawing

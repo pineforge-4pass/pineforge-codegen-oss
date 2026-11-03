@@ -101,8 +101,7 @@ UDT_ARRAY_FIELD_CPP = r"""
 template <typename T>
 class _PFArrayField {
 public:
-    _PFArrayField()
-        : owned_(std::make_shared<std::vector<T>>()), data_(owned_.get()) {}
+    _PFArrayField() = default;
     _PFArrayField(const std::vector<T>& value)
         : owned_(std::make_shared<std::vector<T>>(value)), data_(owned_.get()) {}
     _PFArrayField(std::vector<T>&& value)
@@ -111,7 +110,12 @@ public:
     static _PFArrayField alias(std::vector<T>& value) {
         return _PFArrayField(&value);
     }
-    std::vector<T>& operator*() const { return *data_; }
+    bool is_na() const { return data_ == nullptr; }
+    std::vector<T>& operator*() const {
+        if (is_na())
+            _PF_NA_STOP("array", "Cannot call array methods when ID of array is 'na'.");
+        return *data_;
+    }
     const std::shared_ptr<std::vector<T>>& owned() const { return owned_; }
     std::vector<T>* data() const { return data_; }
     void rebind(std::shared_ptr<std::vector<T>> owned, std::vector<T>* data) {

@@ -441,6 +441,10 @@ class TypeInferer:
         an alias of a stable script ``var`` array (``_stable_var_array_names``)
         read at the script's level of names, else the value itself, moved or
         copied in (the snapshot every earlier build stored)."""
+        # Target-typed wide-array na can already look like an empty vector in
+        # value_cpp. Preserve the authored missing ID before wrapping a value.
+        if isinstance(value_node, NaLiteral) or value_cpp == "na<double>()":
+            return f"{field_cpp}()"
         name = value_node.name if isinstance(value_node, Identifier) else None
         if (name is not None
                 and name in self._stable_var_array_names()
@@ -455,11 +459,9 @@ class TypeInferer:
     def _udt_direct_array_fields(self, type_name: str) -> tuple[str, ...]:
         """Direct array-valued fields whose UDT copy semantics are unsupported.
 
-        Maps, matrices, and nested UDTs are numeric/shared-ID handles, so an
-        outer record copy is correctly shallow. Arrays still lower directly to
-        ``std::vector<T>``; copying such a record would silently deep-copy the
-        vector and diverge from Pine object identity. Keep this boundary narrow
-        and explicit until arrays themselves have a handle representation.
+        Maps, matrices, nested UDTs and bar-local array fields hold handles,
+        so an outer record copy is shallow. Retained array fields still use
+        ``std::vector<T>`` and must retain the copy refusal.
         """
         return tuple(
             field_name
@@ -467,6 +469,7 @@ class TypeInferer:
                 type_name, {}
             ).items()
             if spec is not None and spec.kind == "array"
+            and self._udt_array_field_cpp(spec, type_name) is None
         )
 
     def _reject_unsupported_udt_copy(self, type_name: str, node) -> None:
