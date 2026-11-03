@@ -163,7 +163,7 @@ DESTINATIONS = {
     "argument": "identity(float item) => item\nfloat value = identity(counter[1])\n",
     "argument_keyword": "identity(float item) => item\nfloat value = identity(item=counter[1])\n",
     "argument_method": (
-        "method identity(float item, float other) => other\n"
+        "method identity(float item, float other) => item, other\n"
         "float value = close.identity(counter[1])\n"
     ),
     "tuple": (
