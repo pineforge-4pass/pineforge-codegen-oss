@@ -3747,7 +3747,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             fdef = func_defs.get(containing) if containing else None
             tf_node = getattr(sec, "timeframe", None)
             symbol_node = getattr(sec, "symbol", None)
-            if fdef is None or sec.context_resolved or sec.is_lower_tf_array:
+            if fdef is None or sec.dead or sec.context_resolved or sec.is_lower_tf_array:
                 new_calls.append(sec)
                 continue
             tf_param = (tf_node.name if isinstance(tf_node, Identifier)

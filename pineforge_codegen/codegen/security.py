@@ -709,6 +709,30 @@ class SecurityEmitter:
         evaluator's ``timeframe.*`` reads spell it."""
         return f'"{self._cpp_string_escape(tf)}"'
 
+    def _security_lookahead_value(self, node):
+        """A computed lookahead's value before on_bar initializes its aliases."""
+        if node is None or isinstance(node, MemberAccess):
+            return None
+        from ..security_contexts import ScriptIndex, resolve_barmerge_value
+
+        index = getattr(self, "_security_barmerge_index", None)
+        if index is None:
+            index = self._security_barmerge_index = ScriptIndex(self.ctx.ast)
+        value = resolve_barmerge_value(index, node, "lookahead_on", "lookahead_off")
+        if value is None:
+            self._codegen_error(
+                node,
+                "request.security lookahead must be barmerge.lookahead_on or barmerge.lookahead_off.",
+            )
+        return value
+
+    def _security_lookahead_expr(self, value) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, MemberAccess):
+            return "true" if value.member == "lookahead_on" else "false"
+        return f"static_cast<bool>({self._security_tf_runtime_expr(value)})"
+
     def _security_tf_unresolved(self, tf_node, what: str) -> None:
         """Refuse a request.security timeframe registration cannot compute."""
         self._codegen_error(
@@ -4006,7 +4030,7 @@ class SecurityEmitter:
 
     def _security_global_history_value(self, node) -> ASTNode | None:
         """The value of ``g`` in a payload's ``g[k]`` when ``g`` is a global
-        bound to a user function call or an operator expression, else None.
+        bound to a helper, a request or an operator expression, else None.
 
         TradingView evaluates ``g`` on every requested bar and ``g[k]`` reads
         it ``k`` requested bars back. Such a value has no series on the
@@ -4028,11 +4052,31 @@ class SecurityEmitter:
             or name in self._global_mutable_infos
         ):
             return None
-        value = global_expr_map[name]
-        if (isinstance(value, FuncCall) and isinstance(value.callee, Identifier)
-                and self._security_user_call_key(value) is not None):
-            return value
-        if isinstance(value, (BinOp, UnaryOp, Ternary)) and self._is_compound_history_object(value):
+        value = original = global_expr_map[name]
+        seen = {name}
+        while isinstance(value, Identifier):
+            name = value.name
+            if (not self._security_identifier_is_global_binding(value)
+                    or name not in global_expr_map or name in seen
+                    or name in self._direct_program_tuple_binding_names
+                    or name in self._global_mutable_infos):
+                return None
+            seen.add(name)
+            value = global_expr_map[name]
+        if isinstance(value, FuncCall):
+            if (not isinstance(original, Identifier)
+                    and isinstance(value.callee, Identifier)
+                    and self._security_user_call_key(value) is not None):
+                return value
+            if self._resolve_callee(value.callee) == ("security", "request"):
+                # The nested request's returned value is sampled on this
+                # evaluator's clock, just like a helper's returned value.
+                # Keep the authored subscript: a synthetic one has no slot
+                # in the expression-history inventory.
+                return value
+        if (not isinstance(original, Identifier)
+                and isinstance(value, (BinOp, UnaryOp, Ternary))
+                and self._is_compound_history_object(value)):
             return value
         return None
 
@@ -7678,6 +7722,10 @@ class SecurityEmitter:
         """Emit one ``_eval_security_N`` method
         (``_emit_security_evaluator_body``), with the values of its long pure
         calls (``_security_share_pure_call``) computed where it opens."""
+        if item.get("dead"):
+            lines.append(
+                f"    void _eval_security_{item['sec_id']}(const Bar&, bool) {{}}")
+            return
         start = len(lines)
         outer = (getattr(self, "_security_shared_calls", None),
                  getattr(self, "_security_shared_definitions", None),
@@ -7969,7 +8017,8 @@ class SecurityEmitter:
             return
 
         for item in self._security_calls:
-            self._refuse_security_reference_history(item)
+            if not item.get("dead"):
+                self._refuse_security_reference_history(item)
         for item in self._security_calls:
             self._emit_security_evaluator_requested(item, lines)
 
