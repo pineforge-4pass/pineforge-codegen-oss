@@ -1119,10 +1119,12 @@ class Parser:
         # them at the UDT-method call site when a caller omits trailing
         # args. See data/validation/udt-method-probe-04-default-param.
         param_defaults: list = [None]
+        param_qualifiers: list = [None]
         while self._match(TokenType.COMMA):
             # Optional ``series``/``simple``/``const`` qualifiers and type
             # annotation: ``line ln`` / ``float[] arr`` / ``array<float> xs``
             # / ``series float x`` / ``lib.Type t``.
+            param_qualifiers.append(self._param_qualifier_ahead())
             param_type = self._parse_param_type_annotation()
             p = self._consume(TokenType.IDENT).value
             pdefault = None
@@ -1155,6 +1157,10 @@ class Parser:
             "param_type_hints": param_type_hints,
             "param_defaults": param_defaults,
         }
+        if any(param_qualifiers):
+            # Keep method contracts separate from the library linker's
+            # established qualifier-only overload-selection metadata.
+            node.annotations["method_param_qualifiers"] = param_qualifiers
         return self._set_loc(node, start_tok)
 
     # -- Control flow --
