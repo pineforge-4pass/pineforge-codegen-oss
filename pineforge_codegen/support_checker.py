@@ -51,6 +51,7 @@ from .ast_nodes import (
 from .errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from .builtin_keywords import positional_builtin
 from .intrinsic_binding import intrinsic_keyword_diagnostics
+from .limits import iter_ast_nodes
 from .pine_spelling import expr_start
 from .external_requests import (
     ABSENT_LOWERING, CHART_FALLBACK_ANNOTATION, FEED_LOWERING, FEED_WARNING_ANNOTATION,
@@ -717,6 +718,21 @@ class SupportChecker:
     # -- Public API --
 
     def check(self) -> list[Diagnostic]:
+        # Refuse invalid math keywords before declaration folding or unrelated
+        # request/visual diagnostics. Keep check() a diagnostic-returning API,
+        # and check unused bodies and unselected arms as well.
+        keyword_diagnostics = []
+        for node, _depth in iter_ast_nodes(self._ast):
+            if not isinstance(node, FuncCall) or not node.kwargs:
+                continue
+            namespace, name = _qualified_name(node.callee)
+            if namespace == "math":
+                keyword_diagnostics.extend(intrinsic_keyword_diagnostics(
+                    sigs.get_intrinsic(namespace, name), node.kwargs,
+                    filename=self._filename,
+                ))
+        if keyword_diagnostics:
+            return keyword_diagnostics
         self._collect_user_definitions(self._ast)
         self._collect_user_calls()
         self._collect_scalar_rebinds(self._ast)
@@ -1644,6 +1660,7 @@ class SupportChecker:
         full = f"{ns}.{name}" if ns else name
         keyword_diagnostics = intrinsic_keyword_diagnostics(
             sigs.get_intrinsic(ns, name), node.kwargs,
+            filename=self._filename,
         )
         self._diagnostics.extend(keyword_diagnostics)
         if keyword_diagnostics:

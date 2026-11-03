@@ -613,6 +613,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         """Run semantic analysis and return the analyzer context."""
         self._ensure_pine_v6()
         validate_call_argument_order(self._ast, filename=self._filename)
+        from ..builtin_keywords import bind_builtin_keywords
+        bind_builtin_keywords(self._ast, filename=self._filename)
         from .value_bindings import ValueBindings
         self._value_bindings = ValueBindings(self._ast, self._filename, self._budget)
         self._value_bindings.resolve()

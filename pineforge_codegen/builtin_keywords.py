@@ -40,7 +40,7 @@ def positional_builtin(name: str) -> sigs.IntrinsicFunc | None:
     return None
 
 
-def bind_builtin_keywords(program: Program) -> Program:
+def bind_builtin_keywords(program: Program, *, filename: str | None = None) -> Program:
     for node, _depth in iter_ast_nodes(program):
         if not isinstance(node, FuncCall) or not node.kwargs:
             continue
@@ -54,5 +54,5 @@ def bind_builtin_keywords(program: Program) -> Program:
         func = positional_builtin(name)
         if func is None:
             continue
-        bind_intrinsic_arguments(node, func)
+        bind_intrinsic_arguments(node, func, filename=filename)
     return program

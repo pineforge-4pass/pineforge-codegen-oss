@@ -12,12 +12,15 @@ from .signatures import IntrinsicFunc
 def intrinsic_keyword_diagnostics(
     intrinsic: IntrinsicFunc | None,
     kwargs: dict[str, ASTNode],
+    *,
+    filename: str | None = None,
 ) -> list[Diagnostic]:
     """Check record-driven keyword prohibitions and verified keyword names.
 
     Other records retain their existing binding, including ignored names.
     This checks names, leaving argument order and other binding policies to
-    their existing validators.
+    their existing validators. A caller's filename fills the parser's default
+    source label without replacing a location from an explicitly named source.
     """
     if intrinsic is None or not kwargs:
         return []
@@ -27,6 +30,10 @@ def intrinsic_keyword_diagnostics(
         location = ((value.annotations or {}).get("keyword_location")
                     or expr_start(value).loc or value.loc
                     or SourceLocation("<input>", 1, 1, 2))
+        if filename is not None and location.file == "<input>":
+            location = SourceLocation(
+                filename, location.line, location.col, location.end_col,
+            )
         if is_math:
             message, hint = render_diagnostic(
                 "PF-E5089", {"function": intrinsic.name},
@@ -58,6 +65,10 @@ def intrinsic_keyword_diagnostics(
         location = ((value.annotations or {}).get("keyword_location")
                     or expr_start(value).loc or value.loc
                     or SourceLocation("<input>", 1, 1, 2))
+        if filename is not None and location.file == "<input>":
+            location = SourceLocation(
+                filename, location.line, location.col, location.end_col,
+            )
         if is_math:
             message, hint = render_diagnostic(
                 "PF-E5090", {"function": intrinsic.name, "name": name,
@@ -77,21 +88,25 @@ def intrinsic_keyword_diagnostics(
 def validate_intrinsic_keywords(
     intrinsic: IntrinsicFunc | None,
     kwargs: dict[str, ASTNode],
+    *,
+    filename: str | None = None,
 ) -> None:
     """Validate the record's keyword policy for direct codegen clients."""
-    diagnostics = intrinsic_keyword_diagnostics(intrinsic, kwargs)
+    diagnostics = intrinsic_keyword_diagnostics(intrinsic, kwargs, filename=filename)
     if diagnostics:
         raise CompileError(diagnostics)
 
 
-def bind_intrinsic_arguments(node: FuncCall, intrinsic: IntrinsicFunc) -> None:
+def bind_intrinsic_arguments(
+    node: FuncCall, intrinsic: IntrinsicFunc, *, filename: str | None = None,
+) -> None:
     """Move supplied keyword expressions to their canonical argument slots.
 
     Keep the original AST nodes, including their locations and annotations.
     Argument-count, duplicate-slot and required-slot diagnostics remain with
     the existing signature validators; a call with a gap is left as written.
     """
-    validate_intrinsic_keywords(intrinsic, node.kwargs)
+    validate_intrinsic_keywords(intrinsic, node.kwargs, filename=filename)
     if not node.kwargs:
         return
     names = intrinsic.param_names

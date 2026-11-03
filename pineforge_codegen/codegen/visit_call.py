@@ -4031,8 +4031,8 @@ class CallVisitor:
 
     def _visit_math_call(self, func_name: str, node: FuncCall) -> str:
         intrinsic = sigs.get_intrinsic("math", func_name)
-        if intrinsic is not None and intrinsic.keyword_names_verified:
-            bind_intrinsic_arguments(node, intrinsic)
+        if intrinsic is not None and (intrinsic.keyword_names_verified or intrinsic.variadic):
+            bind_intrinsic_arguments(node, intrinsic, filename=self.ctx.filename)
         args = _merge_kwargs(
             node.args, node.kwargs, sigs.get_param_names("math", func_name),
             self._visit_expr, intrinsic=intrinsic,
