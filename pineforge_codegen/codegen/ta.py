@@ -1568,15 +1568,27 @@ class TaSiteHelper:
     def _build_ta_dynamic_plan(self, site: "TACallSite") -> dict | None:
         if not site.ctor_args:
             return None
+        nodes = list(getattr(site, "ctor_nodes", None) or [])
+        # Constructor spellings do not carry scope. Before substituting a
+        # global input/constant, check the authored argument's exact binding;
+        # a loop counter or block local can have the same spelling.
+        shadowed = {
+            pos for pos, node in enumerate(nodes)
+            if site.owner_func is None
+            and any(isinstance(read, Identifier)
+                    and read.name in self._known_vars
+                    and not self._ta_identifier_reads_top_level(read, scoped=True)
+                    for read in self._walk_ast(node))
+        }
         refused = [
             pos for pos, arg in enumerate(site.ctor_args)
-            if not self._is_compile_time_value(self._resolve_ta_ctor_arg(arg))
-            and (self._runtime_ctor_arg_for_reset(arg) is None
-                 or self._ta_arg_takes_plan(site, pos, arg))
+            if pos in shadowed
+            or (not self._is_compile_time_value(self._resolve_ta_ctor_arg(arg))
+                and (self._runtime_ctor_arg_for_reset(arg) is None
+                     or self._ta_arg_takes_plan(site, pos, arg)))
         ]
         if not refused:
             return None
-        nodes = list(getattr(site, "ctor_nodes", None) or [])
         if len(nodes) != len(site.ctor_args):
             return {"kind": "refused", "refused": refused}
         # A call outside every callable is spelled from its own nodes, whose

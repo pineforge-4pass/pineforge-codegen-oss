@@ -345,6 +345,10 @@ class TypeHelper:
     ) -> TypeSpec | None:
         if value is None:
             return None
+        from ..drawing_all import drawing_all_result_spec
+        drawing_spec = drawing_all_result_spec(value)
+        if drawing_spec is not None:
+            return drawing_spec
         budget = getattr(self, "_budget", None)
         if budget is not None:
             # A method chain re-infers each receiver more than once, so this
@@ -508,6 +512,10 @@ class TypeHelper:
             return self._selection_type_spec(branches)
         if isinstance(value, FuncCall):
             cal = value.callee
+            if (isinstance(cal, Identifier) and cal.name in ("line", "box")
+                    and len(value.args) == 1 and not value.kwargs
+                    and isinstance(value.args[0], NaLiteral)):
+                return TypeSpec.udt(cal.name)
             func = cal.member if isinstance(cal, MemberAccess) else None
             ns = cal.object.name if isinstance(cal, MemberAccess) and isinstance(cal.object, Identifier) else None
             targs = self._template_args_from_call(value)

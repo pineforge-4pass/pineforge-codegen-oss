@@ -717,6 +717,14 @@ class SupportChecker:
     # -- Public API --
 
     def check(self) -> list[Diagnostic]:
+        from .drawing_all import drawing_all_call, DRAWING_ALL_READS
+        from .limits import iter_ast_nodes
+        self._drawing_all_read_members = {
+            id(call[2])
+            for node, _ in iter_ast_nodes(self._ast)
+            if (call := drawing_all_call(node)) is not None
+            and call[0] != "polyline" and call[1] in DRAWING_ALL_READS
+        }
         self._collect_user_definitions(self._ast)
         self._collect_user_calls()
         self._collect_scalar_rebinds(self._ast)
@@ -2158,6 +2166,11 @@ class SupportChecker:
         self._visit(node.false_val)
 
     def _visit_MemberAccess(self, node: MemberAccess) -> None:
+        from .drawing_all import drawing_all_kind, drawing_all_refusal
+        kind = drawing_all_kind(node)
+        if kind is not None and id(node) not in self._drawing_all_read_members:
+            self._err(node, drawing_all_refusal(kind), allow_switch_warning=False)
+            return
         if (node.annotations or {}).get(HISTORY_MEMBER_ANNOTATION):
             self._refuse_history_member(node)
         chain = _resolve_member_chain(node)

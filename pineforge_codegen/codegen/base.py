@@ -402,6 +402,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._budget = budget
         self._budget_visit_count = 0
         self._initialise_safe_names(ctx.ast)
+        self._private_callable_history_names = {
+            node.name for node in self._walk_ast(ctx.ast)
+            if isinstance(node, VarDecl)
+            and (node.annotations or {}).get("authored_history_name")
+        }
         # Lexical Pine names remain in ``ctx.func_var_members``.  This overlay
         # carries exact class-member identities only for collision-qualified
         # ordinary FuncDefs (identity mappings for every other ordinary UDF).
@@ -1382,6 +1387,20 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return True
         return self._is_compile_time_value(self._resolve_known(init_str))
 
+    def _is_default_drawing_initializer(self, node) -> bool:
+        """Whether a drawing RHS is the constant missing handle."""
+        return (
+            self._is_na_expr(node)
+            or (
+                isinstance(node, FuncCall)
+                and isinstance(node.callee, Identifier)
+                and node.callee.name in ("line", "box")
+                and len(node.args) == 1
+                and not node.kwargs
+                and self._is_na_expr(node.args[0])
+            )
+        )
+
     def _is_runtime_scalar_var_initializer(
             self, name: str, ptype, init_str: str, init_ast,
             drawing_cpp: str | None = None,
@@ -1404,11 +1423,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if drawing_cpp is not None:
             # A nontrivial drawing-handle initializer may depend on preceding
             # source-order state. Default construction already represents a
-            # bare ``na``, so only real expressions need a declaration-site
-            # once guard.
+            # bare ``na`` or its drawing cast, so only real expressions need
+            # a declaration-site once guard.
             return (
                 is_series
-                or not self._is_na_expr(init_ast)
+                or not self._is_default_drawing_initializer(init_ast)
             )
         if is_series and self._series_var_init_keeps_preamble(init_str, init_ast, top_level):
             return False
@@ -1670,15 +1689,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # direct declaration can depend on ordinary statements immediately
             # before it; a function-entry preamble violates both Pine rules.
             # Exact-node once flags also preserve independent call-site clones.
-            # A bare UDT/drawing ``na`` already has the correct default member
-            # state and needs no assignment guard.
+            # A bare UDT/drawing ``na`` or a drawing cast of it already has
+            # the correct default member state and needs no assignment guard.
             callable_decl_site = (
                 is_callable_scoped
                 and stmt.value is not None
                 and not (
                     stmt_spec is not None
                     and stmt_spec.kind == "udt"
-                    and self._is_na_expr(stmt.value)
+                    and (
+                        self._is_na_expr(stmt.value)
+                        or (
+                            drawing_cpp is not None
+                            and self._is_default_drawing_initializer(stmt.value)
+                        )
+                    )
                 )
             )
             nullable_collection_selection_decl_site = (
@@ -4986,6 +5011,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._all_member_names.add(self._array_journal_member_name)
 
     def _array_journal_initializer(self, member: str, value: str) -> str:
+        if member == getattr(self, "_selection_series_target", None):
+            return f"{member}.update({value});"
         if member in getattr(self, "_array_journal_members", {}):
             return f"this->{self._array_journal_member_name}.replace({member}, {value});"
         writer = self._history_sharing_writer(member)

@@ -8,7 +8,7 @@ retains its call-site environment.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..ast_nodes import (
     ASTNode, Assignment, EnumDecl, ForInStmt, ForStmt, FuncCall, FuncDef,
@@ -166,6 +166,25 @@ class ValueBindings(DiagnosticsHelper):
             f"Variable '{node.name}' is not declared in the current lexical scope before this use.",
             node.loc,
         )
+
+    def rename_declarations(self, names: dict[tuple[int, str], str]) -> None:
+        """Rename only uses resolved to these exact current-tree declarations.
+
+        Keep copied authored-use metadata consistent for the next analysis.
+        Initializers, parameters and earlier global reads retain their bindings.
+        """
+        for node, _scope, _position, _role in self.uses:
+            key = self.declaration_bindings.get(id(node))
+            if key not in names:
+                continue
+            node.name = names[key]
+            use = (node.annotations or {}).get(_VALUE_USE)
+            if isinstance(use, _ValueUse) and use.binding is not None:
+                node.annotations[_VALUE_USE] = replace(
+                    use, binding=replace(
+                        use.binding, name=node.name, declaration=key[0],
+                    ),
+                )
 
     def _missing(self, name: str, scope: _Scope, position: int,
                  role: str) -> str | None:

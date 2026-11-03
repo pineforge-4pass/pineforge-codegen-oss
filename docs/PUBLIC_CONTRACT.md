@@ -22,6 +22,8 @@ reserved names. `_safe_name` also escapes emitter temporary patterns and
 allocates a distinct name when the script already uses the preferred escape.
 An identifier that does not collide keeps its spelling.
 
+`bar` and `HUGE` use the existing C++ escape; authored input titles keep their Pine spellings.
+
 The imported engine names `report`, `report_sink`, `report_sequence`, `source`,
 `native_calendar`, `pine_color`, `RunFailureCode`, `RunFailureInfo`, `QtyType`,
 `CommissionType`, `XLoc`, `YLoc` and `normalize_timezone_for_posix` are reserved
@@ -56,6 +58,21 @@ alone does not require those rows. For a non-reader, the constructor calls
 The order-shapes receipt's `host_reads` therefore includes the setter only for
 non-readers. Older generated libraries can lack the export; its absence does
 not establish that the script is a non-reader.
+
+## Value lowering (unreleased)
+
+Translation also preserves these value contracts:
+
+- A chart TA constructor argument that shadows a global constant or input follows its lexical binding; an unsized percentile loop length raises `PF-E5009` with either counter name.
+- A constant-expression input default can size a TA constructor; runtime resets still read the input getter.
+- `line(na)` and `box(na)` produce the same missing handles as typed declarations initialized with `na`.
+- Literal `na` in emitted strategy string slots uses the host's empty-string sentinel, including `from_entry`, `id`, `comment` and `oca_name`.
+- Array bindings from helper tuple destructuring retain their element type for built-in method lowering.
+- `strategy.default_entry_qty()` raises `PF-E5084` pending an engine strategy-host quantity query; an entry with omitted `qty` keeps engine default sizing.
+- An `if` or `switch` value reassigned to a Series updates the current slot in each selected branch.
+- Colliding direct nonpersistent scalar history declarations in ordinary functions have separate Series storage, including call-site clones, locals of different scalar families and a computed local initializer reading a same-named global with its own history. Embedded block, tuple and loop declaration collisions retain their existing storage gates.
+- Direct `size`, `first`, `last` and `get` reads of `line.all`, `box.all`, `label.all` and `linefill.all` borrow live handles in oldest-first order, with the normal array bounds checks. Aliases, mutations and other collection uses raise `PF-E5086`; `polyline.all` raises `PF-E5085` pending an engine handle and arena.
+- Authored identifiers that collide with macros defined by the audited math, limits, C++ wrapper and paired engine headers use the existing C++ name allocator; authored input keys remain unchanged.
 
 ## Optional compiled execution capabilities
 
