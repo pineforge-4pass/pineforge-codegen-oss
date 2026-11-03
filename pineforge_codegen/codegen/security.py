@@ -8360,6 +8360,9 @@ class SecurityEmitter:
         """Build C++ expression for a security evaluator."""
         if expr_node is None:
             return "na<double>()"
+        checked_offset = getattr(self, "_security_history_offset_overrides", {}).get(id(expr_node))
+        if checked_offset is not None:
+            return checked_offset
         selection = getattr(self, "_security_selection_context", None)
         if selection is not None and id(expr_node) in selection["reads"]:
             return selection["reads"][id(expr_node)]
@@ -8530,6 +8533,11 @@ class SecurityEmitter:
                 sec_id, expr_node.index, ta_range, ta_results, resolving,
                 security_mutable_names, helper_binding_stack, emitted_lines,
             )
+            offset = self._checked_history_offset_cpp(
+                offset, expr_node.index,
+                constant=self._resolve_security_index_literal(
+                    expr_node.index, helper_binding_stack) is not None,
+            )
             return (f"([&]() -> double {{ auto _pf_bar_back = ({offset}); "
                     f"if (is_na(_pf_bar_back) || {member} - _pf_bar_back < 0) "
                     f"return na<double>(); return (double)({member} - _pf_bar_back); }}())")
@@ -8571,6 +8579,11 @@ class SecurityEmitter:
                                 helper_binding_stack,
                                 emitted_lines,
                             )
+                            index_cpp = self._checked_history_offset_cpp(
+                                index_cpp, expr_node.index,
+                                constant=self._resolve_security_index_literal(
+                                    expr_node.index, helper_binding_stack) is not None,
+                            )
                             return self._security_helper_series_value(series_name, index_cpp)
                         return bound
                     # Function parameters retain Pine's series identity. Apply
@@ -8590,7 +8603,7 @@ class SecurityEmitter:
                         # here and hand the C++ over by name, outside the
                         # binding stack (whose shape keys the TA variants).
                         index_name = f"__pf_security_index_{id(expr_node)}"
-                        self._security_raw_cpp[index_name] = self._build_security_expr(
+                        index_cpp = self._build_security_expr(
                             sec_id,
                             expr_node.index,
                             ta_range,
@@ -8600,7 +8613,26 @@ class SecurityEmitter:
                             helper_binding_stack,
                             emitted_lines,
                         )
-                        local_index = Identifier(name=index_name)
+                        self._security_raw_cpp[index_name] = self._checked_history_offset_cpp(
+                            index_cpp, expr_node.index, constant=False,
+                        )
+                        local_index = Identifier(name=index_name, loc=expr_node.index.loc)
+                    offset_overrides = {}
+                    if (isinstance(bound, Subscript)
+                            and isinstance(bound.object, Identifier)
+                            and self._security_bar_history_field(bound.object) is not None
+                            and self._resolve_security_index_literal(
+                                bound.index, bound_stack) is None):
+                        # Each authored offset must be valid before adding
+                        # them: a positive outer offset cannot hide a negative
+                        # offset of the series passed into this helper.
+                        bound_index = self._build_security_expr(
+                            sec_id, bound.index, ta_range, ta_results, resolving,
+                            security_mutable_names, bound_stack, emitted_lines,
+                        )
+                        offset_overrides[id(bound.index)] = self._checked_history_offset_cpp(
+                            bound_index, bound.index, constant=False,
+                        )
                     composed = self._compose_security_helper_history_subscript(
                         bound,
                         local_index,
@@ -8609,16 +8641,30 @@ class SecurityEmitter:
                     )
                     if isinstance(composed, _SecurityArgumentHistoryRead):
                         return f"{composed.member}[{composed.offset}]"
-                    return self._build_security_expr(
-                        sec_id,
-                        composed,
-                        ta_range,
-                        ta_results,
-                        resolving,
-                        security_mutable_names,
-                        bound_stack,
-                        emitted_lines,
-                    )
+                    # Both authored offsets were checked above. The combined
+                    # offset is an internal address calculation, whose old
+                    # narrowing and missing-value behavior must remain intact.
+                    composed.index.annotations = {
+                        **(composed.index.annotations or {}),
+                        "pf_checked_history_offset": True,
+                    }
+                    # Keep the original index nodes for type/width queries;
+                    # only their emitted values gain the check.
+                    saved_offsets = getattr(self, "_security_history_offset_overrides", {})
+                    self._security_history_offset_overrides = {**saved_offsets, **offset_overrides}
+                    try:
+                        return self._build_security_expr(
+                            sec_id,
+                            composed,
+                            ta_range,
+                            ta_results,
+                            resolving,
+                            security_mutable_names,
+                            bound_stack,
+                            emitted_lines,
+                        )
+                    finally:
+                        self._security_history_offset_overrides = saved_offsets
                 field = self._security_bar_history_field(expr_node.object)
                 if field is not None:
                     idx_lit = self._resolve_security_index_literal(
@@ -8653,6 +8699,9 @@ class SecurityEmitter:
                         security_mutable_names,
                         helper_binding_stack,
                         emitted_lines,
+                    )
+                    index_cpp = self._checked_history_offset_cpp(
+                        index_cpp, expr_node.index, constant=False,
                     )
                     index_cpp = self._coerce_int_slot_with_cast(
                         index_cpp, expr_node.index, "int"
@@ -8740,6 +8789,11 @@ class SecurityEmitter:
                     security_mutable_names,
                     helper_binding_stack,
                     emitted_lines,
+                )
+                index_cpp = self._checked_history_offset_cpp(
+                    index_cpp, expr_node.index,
+                    constant=self._resolve_security_index_literal(
+                        expr_node.index, helper_binding_stack) is not None,
                 )
                 index_cpp = self._coerce_int_slot_with_cast(
                     index_cpp, expr_node.index, "int"
@@ -8867,6 +8921,9 @@ class SecurityEmitter:
                         )
                     finally:
                         self._security_index_inputs = saved_index_inputs
+                    index_cpp = self._checked_history_offset_cpp(
+                        index_cpp, expr_node.index, constant=False,
+                    )
                     index_cpp = self._coerce_int_slot_with_cast(
                         index_cpp, expr_node.index, "int"
                     )

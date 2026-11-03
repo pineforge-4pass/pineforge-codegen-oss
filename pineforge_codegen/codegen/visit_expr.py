@@ -87,7 +87,8 @@ classes from ``..ast_nodes``.
 
 from __future__ import annotations
 
-from .run_stops import request_stop
+from .constant_fold import NON_CONSTANT, fold_constant_expression
+from .run_stops import checked_history_offset, request_stop
 
 from ..errors import CodegenInvariantError, Phase
 from ..symbols import TypeSpec
@@ -2039,6 +2040,46 @@ class ExprVisitor:
             return safe
         return self._active_var_remap[safe]
 
+    def _checked_history_offset_cpp(
+        self, idx: str, index_node, *, constant: bool | None = None,
+    ) -> str:
+        """Keep constant emission; check runtime values once at the read.
+
+        Inputs have known defaults, but remain runtime offsets. Only bindings
+        that the expression visitor can inline may prove an offset constant.
+        Requested-context callers supply their own binding-aware proof.
+        """
+        if (getattr(index_node, "annotations", None) or {}).get("pf_checked_history_offset"):
+            return idx
+        if constant is None and isinstance(index_node, (NumberLiteral, NaLiteral, BoolLiteral)):
+            return idx
+        if constant is None:
+            known = {
+                name: value for name, value in self._known_vars.items()
+                if name not in self._input_backed_vars
+                and name not in self._current_func_param_types
+                and name not in self._current_func_series_params
+                and name not in BAR_FIELDS and name not in BAR_BUILTINS
+                and not self._known_var_is_lexically_shadowed(name)
+            } if self._security_fallback_frame is None else {}
+            pending = [index_node]
+            while pending:
+                part = pending.pop()
+                if isinstance(part, Identifier) and part.name not in known and (
+                    self.ctx.identifier_binding_nodes.get(id(part)) is not None
+                    or part.name in self._current_func_param_types
+                    or part.name in self._current_func_series_params
+                ):
+                    # A value binding can hide a namespace or a builtin;
+                    # the constant folder must not interpret its spelling.
+                    known[part.name] = NON_CONSTANT
+                pending.extend(_ast_children(part))
+            _, constant = fold_constant_expression(index_node, known, {})
+        if constant:
+            return idx
+        line = getattr(getattr(index_node, "loc", None), "line", 0) or 0
+        return checked_history_offset(idx, line)
+
     def _history_offset_cpp(self, idx: str, index_node) -> str:
         """The ``int`` offset of a history read, safe right after a ``[``.
 
@@ -2049,6 +2090,7 @@ class ExprVisitor:
         fractional index toward zero (``x[5.5]`` reads ``x[5]``), as the
         cast does.
         """
+        idx = self._checked_history_offset_cpp(idx, index_node)
         idx_int = self._coerce_int_slot(idx, index_node, "int")
         if (idx_int == idx
                 and not self._emitted_value_is_double(index_node)):
@@ -2171,6 +2213,7 @@ class ExprVisitor:
         self._refuse_mutable_chart_point_history(node)
         self._refuse_field_value_history(node)
         idx = self._visit_expr(node.index)
+        checked_idx = self._checked_history_offset_cpp(idx, node.index)
         # Series::operator[] accepts C++ int. A Pine int can be backed by an
         # int64_t timestamp slot; implicitly narrowing its na sentinel to int
         # turns it into zero on arm64 and reads the current bar. Preserve the
@@ -2178,7 +2221,7 @@ class ExprVisitor:
         series_idx = (
             idx if (isinstance(node.index, NumberLiteral)
                     and isinstance(node.index.value, int))
-            else pine_index_int_cast(idx)
+            else pine_index_int_cast(checked_idx)
         )
         if isinstance(node.object, Identifier):
             name = node.object.name
@@ -2222,7 +2265,7 @@ class ExprVisitor:
                         receiver, spec, series_idx,
                         mutable=getattr(self, "_udt_assignment_target", None) is node,
                     )
-                return f"{receiver}[{idx}]"
+                return f"{receiver}[{checked_idx}]"
         # Handle strategy.* history access (e.g., strategy.position_size[1])
         if isinstance(node.object, MemberAccess):
             if isinstance(node.object.object, Identifier):
@@ -2294,7 +2337,7 @@ class ExprVisitor:
                 return (
                     f"([&]() -> {cpp_t} {{ "
                     f"if (_use_precalc) {{ "
-                    f"auto _pf_hist_offset_raw = ({idx}); "
+                    f"auto _pf_hist_offset_raw = ({checked_idx}); "
                     f"if (is_na(_pf_hist_offset_raw)) return na<{cpp_t}>(); "
                     f"long double _pf_hist_offset_numeric = "
                     f"static_cast<long double>(_pf_hist_offset_raw); "
