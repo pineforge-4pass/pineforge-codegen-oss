@@ -81,7 +81,7 @@ def test_input_length_history_reads_through_the_getter():
         'x = request.security(syminfo.tickerid, "D", logeq(lemaSrc, lemaLen))\n') + TRADE)
     evaluator = _evaluators(cpp)[0]
     assert ('int _hidx = get_input_int("LEMA Length", 3); '
-            'if (!is_na(_hidx) && _hidx < 0) '
+            'if (!is_na(_hidx) && (_hidx < 0 || _hidx > 10000)) '
             'pine_runtime_error(std::string("History reference at line 5: offset ") '
             '+ std::to_string(_hidx) '
             '+ ". The history offset must be a value between 0 and 10000."); '

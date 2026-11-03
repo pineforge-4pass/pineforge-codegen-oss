@@ -40,7 +40,7 @@ decltype(auto) _pf_invariant_at(Container& container, Index index) {
 def history_offset_guard(offset: str, line: int) -> str:
     """Check an already evaluated numeric offset without narrowing it."""
     return (
-        f"if (!is_na({offset}) && {offset} < 0) "
+        f"if (!is_na({offset}) && ({offset} < 0 || {offset} > 10000)) "
         f'pine_runtime_error(std::string("History reference at line {line}: offset ") '
         f'+ std::to_string({offset}) '
         '+ ". The history offset must be a value between 0 and 10000."); '

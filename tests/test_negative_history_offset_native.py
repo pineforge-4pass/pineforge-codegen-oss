@@ -192,7 +192,7 @@ def _assert_logs_match(tmp_path, native_env, body):
     (30, 30, "close"),
     (31, 30, "close[1]"),
     (300, 0, "float(na)"),
-    (20000, 0, "float(na)"),
+    (10000, 0, "float(na)"),
 ])
 def test_nonnegative_runtime_offsets_match_reference(tmp_path, native_env, a, b, reference):
     _assert_logs_match(tmp_path, native_env, (
