@@ -56,6 +56,33 @@ CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
 # is covered by the sentence tests below without an edit here.
 TWINS = sorted("PF-W" + code[4:] for code in diagnostics_catalog()["codes"] if code.startswith("PF-E1"))
 
+# Only these two existing identities change presentation after the snapshot.
+# Keep both historical files intact and verify each old and new field exactly.
+LOOKAHEAD_MIGRATION = {
+    "PF-E1085": {
+        "hint": (
+            "Codegen only recognizes the barmerge.lookahead_* literal; other values are silently treated as lookahead_off.",
+            "Use barmerge.lookahead_* constants selected by values fixed before the first bar."),
+        "explanation": (
+            "The lookahead argument of request.security must be written literally as barmerge.lookahead_on or barmerge.lookahead_off, the only forms PineForge reads.",
+            "request.security accepts barmerge.lookahead_on or barmerge.lookahead_off directly or through immutable simple or input-selected values fixed before the first bar; series-dependent or mutable selections are unsupported."),
+        "user_message": (
+            "request.security lookahead requires barmerge.lookahead_on or barmerge.lookahead_off "
+            "selected by immutable simple or input values fixed before the first bar."),
+    },
+    "PF-W1085": {
+        "hint": (
+            "Codegen only recognizes the barmerge.lookahead_* literal; other values are silently treated as lookahead_off.",
+            "Use barmerge.lookahead_* constants selected by values fixed before the first bar."),
+        "explanation": (
+            "The lookahead argument of request.security must be written literally as barmerge.lookahead_on or barmerge.lookahead_off, the only forms PineForge reads; inside a switch arm PineForge warns instead and keeps the arm's lowering.",
+            "request.security accepts barmerge.lookahead_on or barmerge.lookahead_off directly or through immutable simple or input-selected values fixed before the first bar; inside a switch arm PineForge warns instead and keeps the arm's lowering."),
+        "user_message": (
+            "request.security lookahead needs an immutable simple or input-selected enum. "
+            "In a switch arm PineForge only warns and keeps the arm''s lowering."),
+    },
+}
+
 
 def _assert_catalog_delta(catalog):
     assert set(catalog) == set(BEFORE) | CATALOG_ADDITIONS
@@ -76,6 +103,14 @@ def _assert_catalog_delta(catalog):
             assert (old["severity"], entry["severity"]) == (expected["before"], expected["after"])
             assert template == expected["user_message"]
             entry["severity"] = old["severity"]
+        if code in LOOKAHEAD_MIGRATION:
+            migration = LOOKAHEAD_MIGRATION[code]
+            assert template == migration["user_message"], code
+            for field in ("hint", "explanation"):
+                before, after = migration[field]
+                assert old[field] == before, (code, field)
+                assert entry[field] == after, (code, field)
+                entry[field] = before
         assert entry == old, code
     assert changed == NOTE_CODES
 
@@ -88,7 +123,9 @@ def test_exact_catalog_delta_and_legacy_pin():
     assert set(legacy) == set(BEFORE)
     assert set(current) == set(catalog)
     assert set(current) - set(legacy) == CATALOG_ADDITIONS
-    assert {code for code in legacy if legacy[code] != current[code]} == NOTE_CODES
+    assert set(LOOKAHEAD_MIGRATION) == {"PF-E1085", "PF-W1085"}
+    assert {code for code in legacy if legacy[code] != current[code]} == (
+        NOTE_CODES | set(LOOKAHEAD_MIGRATION))
     for code, entry in BEFORE.items():
         meaning = json.dumps([entry["severity"], entry["message"], entry.get("hint"),
                               sorted(entry["args"])], ensure_ascii=False)
@@ -110,6 +147,13 @@ def test_catalog_legacy_bytes_only_have_the_declared_delta():
             line = line.replace(field, "")
             if code in NOTE_CODES:
                 line = line.replace('"severity": "note"', '"severity": "warning"', 1)
+            if code in LOOKAHEAD_MIGRATION:
+                for name in ("hint", "explanation"):
+                    before, after = LOOKAHEAD_MIGRATION[code][name]
+                    old_field = json.dumps(name) + ": " + json.dumps(before, ensure_ascii=False)
+                    new_field = json.dumps(name) + ": " + json.dumps(after, ensure_ascii=False)
+                    assert line.count(new_field) == 1, (code, name)
+                    line = line.replace(new_field, old_field, 1)
         restored.append(line)
     assert "".join(restored).encode() == (FIXTURES / "catalog.before.json").read_bytes()
 
@@ -123,6 +167,18 @@ def test_catalog_delta_rejects_malformed_candidate(mutation):
                        else "note" if mutation == "severity"
                        else "An invented {argument}." if mutation == "user_message"
                        else "changed")
+    with pytest.raises((AssertionError, KeyError)):
+        _assert_catalog_delta(bad)
+
+
+@pytest.mark.parametrize("code", ["PF-E1085", "PF-W1085"])
+@pytest.mark.parametrize("field", [
+    "message", "hint", "explanation", "args", "severity", "area", "user_message",
+])
+def test_lookahead_migration_rejects_undeclared_changes(code, field):
+    bad = copy.deepcopy(diagnostics_catalog()["codes"])
+    bad[code][field] = ({"invented": {"kind": "text"}} if field == "args"
+                        else "note" if field == "severity" else "changed")
     with pytest.raises((AssertionError, KeyError)):
         _assert_catalog_delta(bad)
 
