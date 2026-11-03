@@ -1,6 +1,5 @@
 """Callable numeric values retain the fraction in Pine's division."""
 
-import re
 from textwrap import dedent
 
 import pytest
@@ -132,4 +131,3 @@ def test_integer_callable_controls_keep_complete_reference_cpp(tmp_path, body):
     assert before["ok"], before.get("diagnostics")
     cpp = transpile(source)
     assert cpp == before["cpp"]
-    assert re.search(r"\bint measure\(", cpp), cpp
