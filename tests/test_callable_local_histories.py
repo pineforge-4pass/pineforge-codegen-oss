@@ -70,8 +70,9 @@ delta() =>
     {name} = {name} + open
     {name} - {name}[1]
 a = delta()
-plot({name}[1])
-plot(a)
+prior = {name}[1]
+if prior > a
+    strategy.entry("L", strategy.long)
 """))
     members = _history_members(cpp)
     assert name in members
