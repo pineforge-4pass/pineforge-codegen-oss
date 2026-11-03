@@ -1524,16 +1524,31 @@ class TypeInferer:
         return False
 
     @classmethod
-    def _ternary_contains_bare_na(cls, node: Ternary) -> bool:
-        """Look through ternary arms without widening implicit if/switch na."""
+    def _selection_contains_bare_na(cls, node: ASTNode) -> bool:
+        """Find explicit missing arms while retaining implicit block defaults."""
         pending = [node]
         while pending:
             arm = pending.pop()
             if isinstance(arm, Ternary):
                 pending.extend((arm.true_val, arm.false_val))
+            elif isinstance(arm, IfStmt):
+                pending.extend(cls._selection_terminal_expr(body)
+                               for body in (arm.body, arm.else_body) if body)
+            elif isinstance(arm, SwitchStmt):
+                pending.extend(cls._selection_terminal_expr(body)
+                               for _, body in arm.cases if body)
+                if arm.default_body:
+                    pending.append(cls._selection_terminal_expr(arm.default_body))
             elif arm is not None and cls._selection_node_is_na(arm):
                 return True
         return False
+
+    def _selection_result_cpp_type(self, node: ASTNode, spec: TypeSpec) -> str:
+        """Use the ternary's NaN-capable storage for every int-or-na selection."""
+        if (spec.kind == "primitive" and spec.name in {"int", "int64"}
+                and self._selection_contains_bare_na(node)):
+            return "double"
+        return self._type_spec_to_cpp(spec)
 
     def _selection_type_spec(
         self,
@@ -2450,13 +2465,14 @@ class TypeInferer:
                 self._selection_terminal_expr(node.body), owner, seen,
             )
         if isinstance(node, IfStmt):
-            return any(self._numeric_na_value(
+            return self._selection_contains_bare_na(node) or any(self._numeric_na_value(
                 self._selection_terminal_expr(body), owner, seen,
             ) for body in (node.body, node.else_body) if body)
         if isinstance(node, SwitchStmt):
-            return any(self._numeric_na_value(
+            return self._selection_contains_bare_na(node) or any(self._numeric_na_value(
                 self._selection_terminal_expr(body), owner, seen,
-            ) for _case, body in node.cases if body)
+            ) for body in [*(body for _case, body in node.cases),
+                           node.default_body] if body)
         if isinstance(node, BinOp) and node.op in {"+", "-", "*", "/", "%"}:
             return (self._numeric_na_value(node.left, owner, seen)
                     or self._numeric_na_value(node.right, owner, seen))
@@ -2509,6 +2525,11 @@ class TypeInferer:
         """Follow changed global storage without widening untyped ternaries."""
         if isinstance(value, Identifier):
             return self._numeric_na_global(value.name, seen)
+        if isinstance(value, (IfStmt, SwitchStmt)):
+            spec = self._type_spec_from_expr(value)
+            return (spec is not None and spec.kind == "primitive"
+                    and spec.name in {"int", "int64"}
+                    and self._selection_contains_bare_na(value))
         if isinstance(value, Ternary):
             return any(self._numeric_na_global_value(arm, seen)
                        for arm in (value.true_val, value.false_val))
@@ -2529,7 +2550,9 @@ class TypeInferer:
         self._numeric_na_bindings()
         declaration = self._numeric_na_declarations.get(info["node_id"])
         return (declaration is not None
-                and declaration[0].type_hint == "int"
+                and (declaration[0].type_hint == "int"
+                     or (isinstance(declaration[0].value, (IfStmt, SwitchStmt))
+                         and self._selection_contains_bare_na(declaration[0].value)))
                 and self._numeric_na_value(
                     declaration[0].value, declaration[1],
                 ))
@@ -2538,6 +2561,12 @@ class TypeInferer:
         """Determine the C++ type for a ``VarDecl``: explicit hint, then symbol, then RHS inference."""
         if (node.annotations or {}).get(FLOAT_REASSIGNMENT):
             return "double"
+        if isinstance(node.value, (IfStmt, SwitchStmt)):
+            spec = self._type_spec_from_expr(node.value)
+            if (spec is not None and spec.kind == "primitive"
+                    and spec.name in {"int", "int64"}
+                    and self._selection_contains_bare_na(node.value)):
+                return self._selection_result_cpp_type(node.value, spec)
         history_value_cpp = (self._array_history_value_cpp_type(node.name)
                              if not getattr(self, "_active_func_name", None) else None)
         if history_value_cpp is not None:
@@ -4490,12 +4519,7 @@ class TypeInferer:
                     and (nullable
                          or (ternary_spec.kind == "udt"
                              and ternary_spec.name in DRAWING_TYPE_TO_CPP))):
-                cpp_type = self._type_spec_to_cpp(ternary_spec)
-                if (nullable and ternary_spec.kind == "primitive"
-                        and ternary_spec.name in {"int", "int64"}
-                        and self._ternary_contains_bare_na(node)):
-                    # Numeric selections keep NaN even with a declared int target.
-                    return "double"
+                cpp_type = self._selection_result_cpp_type(node, ternary_spec)
                 if cpp_type == "int" and "int64_t" in (
                     self._infer_type(
                         node.true_val, _ternary_types=_ternary_types,
@@ -4531,7 +4555,7 @@ class TypeInferer:
                     and (self._selection_contains_na(node)
                          or (block_spec.kind == "udt"
                              and block_spec.name in DRAWING_TYPE_TO_CPP))):
-                cpp_type = self._type_spec_to_cpp(block_spec)
+                cpp_type = self._selection_result_cpp_type(node, block_spec)
                 if cpp_type == "int" and any(
                     self._infer_type(self._selection_terminal_expr(body)) == "int64_t"
                     for body in (node.body, node.else_body) if body
@@ -4549,7 +4573,7 @@ class TypeInferer:
             if self._selection_contains_na(node):
                 block_spec = self._type_spec_from_expr(node)
                 if block_spec is not None:
-                    cpp_type = self._type_spec_to_cpp(block_spec)
+                    cpp_type = self._selection_result_cpp_type(node, block_spec)
                     if cpp_type == "int" and any(
                         self._infer_type(self._selection_terminal_expr(body)) == "int64_t"
                         for body in [*(body for _, body in node.cases),

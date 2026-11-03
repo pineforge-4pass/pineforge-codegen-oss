@@ -372,13 +372,7 @@ class StmtVisitor:
                     }
                     if risk_func == "allow_entry_in":
                         val = self._visit_expr(node.expr.args[0])
-                        if val == "1":
-                            direction = "1"
-                        elif val == "-1":
-                            direction = "-1"
-                        else:
-                            direction = "0"
-                        lines.append(f"{pad}set_pine_risk_direction({direction});")
+                        lines.append(f"{pad}set_pine_risk_direction({val});")
                         return
                     if risk_func in _RISK_MEMBER_MAP:
                         setter, cast_type = _RISK_MEMBER_MAP[risk_func]

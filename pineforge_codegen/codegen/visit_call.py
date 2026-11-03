@@ -3686,14 +3686,14 @@ class CallVisitor:
                 )
                 if direction_node is not None else "true"
             )
-            qty = self._visit_expr(p.get("qty")) if "qty" in p else "0"
+            qty = self._visit_expr(p.get("qty")) if "qty" in p else "na<double>()"
             limit_arg = self._visit_expr(p.get("limit")) if "limit" in p else "na<double>()"
             stop_arg = self._visit_expr(p.get("stop")) if "stop" in p else "na<double>()"
             oca_name = self._visit_expr(p.get("oca_name")) if "oca_name" in p else '""'
             oca_type = self._visit_expr(p.get("oca_type")) if "oca_type" in p else "0"
             record_order_call(self, node, "order", {
                 "id": (order_id, p.get("id")), "direction": (direction, direction_node),
-                "qty": (qty, p.get("qty"), "0"),
+                "qty": (qty, p.get("qty"), "na<double>()"),
                 "limit": (limit_arg, p.get("limit"), "na<double>()"),
                 "stop": (stop_arg, p.get("stop"), "na<double>()"),
                 "oca_name": (oca_name, p.get("oca_name"), '""'),

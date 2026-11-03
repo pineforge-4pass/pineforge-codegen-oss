@@ -22,6 +22,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Strategy orders with omitted `qty` use the default size; integer `switch` and
+  `if` results with an explicit `na` arm preserve NaN, and
+  `strategy.risk.allow_entry_in` retains input-dependent directions (#292).
 - An affine chart loop proved endless is stopped with the loop-time error when
   its result reaches an effect. Omission is limited to an unused loop statement
   with no calls, whose writes have no readers except self-updates, a break

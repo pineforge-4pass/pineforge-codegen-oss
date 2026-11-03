@@ -544,6 +544,13 @@ REFUSED = {
         "f() => session.ismarket[1]\n"
         "type Foo\n    bool v = f()\n"
         "x = Foo.new().v\n", (3, 24), "field default"),
+    "a read in strategy.risk.allow_entry_in in a method": (
+        "type Foo\n    float v = 1\n"
+        "method m(Foo self) =>\n"
+        "    strategy.risk.allow_entry_in(session.ismarket[1] ? strategy.direction.long : strategy.direction.all)\n"
+        "    self.v > 0\n"
+        "foo = Foo.new()\n"
+        "x = foo.m()\n", (6, 50), "a method"),
 }
 
 
@@ -660,13 +667,6 @@ STILL_COMPILE = {
         "    label.set_xloc(lb, bar_index, session.ispremarket[1] ? xloc.bar_index : xloc.bar_time)\n"
         "    ln.set_xloc(bar_index - 1, bar_index, session.ispostmarket[1] ? xloc.bar_index : xloc.bar_time)\n"
         "    box.set_xloc(bx, bar_index - 1, bar_index, session.isfirstbar[1] ? xloc.bar_index : xloc.bar_time)\n"
-        "    self.v > 0\n"
-        "foo = Foo.new()\n"
-        "x = foo.m()\n"),
-    "a read in strategy.risk.allow_entry_in in a method": (
-        "type Foo\n    float v = 1\n"
-        "method m(Foo self) =>\n"
-        "    strategy.risk.allow_entry_in(session.ismarket[1] ? strategy.direction.long : strategy.direction.all)\n"
         "    self.v > 0\n"
         "foo = Foo.new()\n"
         "x = foo.m()\n"),
