@@ -11154,9 +11154,16 @@ class SecurityEmitter:
         args = frame["args"]
         # A source input reads the requested bar wherever it sits, as a bar
         # field does (the visitor spells ``close`` from ``bar``); it inlines
-        # no call beside a chart read.
+        # no call beside a chart read. So does ``bar_index`` once the
+        # evaluator keeps a counter for it: under a builtin call kept on the
+        # chart's terms (``array.new(3, float(bar_index))``) it is the
+        # requested bar's, as the ``close`` beside it is, and not the chart's
+        # ``pine_bar_index()``.
         source = (isinstance(node, Identifier)
-                  and self._security_source_input_call(node) is not None)
+                  and (self._security_source_input_call(node) is not None
+                       or (id(node) in frame["chart"]
+                           and self._security_is_bar_index(node)
+                           and args[0] in self._security_bar_index_secs)))
         if (id(node) in frame["chart"] and not source) or not self._security_fallback_owns(
             node, args[5], args[0]
         ):
