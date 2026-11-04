@@ -2776,6 +2776,18 @@ class TypeInferer:
         if isinstance(node, StringLiteral):
             return TypeSpec.primitive("string")
         if isinstance(node, Identifier):
+            # A bare emitter without an analysis context has no block shadows.
+            shadow_ctx = getattr(self, "ctx", None)
+            binding = (
+                shadow_ctx.identifier_decl_bindings.get(id(node))
+                if shadow_ctx is not None else None
+            )
+            primitive_type = (
+                shadow_ctx.primitive_block_shadow_types.get(binding[0])
+                if binding is not None else None
+            )
+            if primitive_type is not None:
+                return TypeSpec.primitive(primitive_type.value)
             # An active lexical UDT/drawing binding must beat a same-spelled
             # top-level primitive or collection.  This is intentionally the
             # exact lexical prefix of _identifier_udt_binding(), not its raw-
@@ -3800,6 +3812,9 @@ class TypeInferer:
             return promote_wide_int(
                 PINE_TYPE_TO_CPP.get(node.type_hint, "double")
             )
+        primitive_type = self.ctx.primitive_block_shadow_types.get(id(node))
+        if primitive_type is not None:
+            return promote_wide_int(PINE_TYPE_TO_CPP[primitive_type])
         # The analyzer records exact callable-local collection bindings before
         # its lexical scopes are popped.  In particular, an inferred local
         # such as ``selected = cond ? na : global_map`` has a map TypeSpec even
@@ -5006,6 +5021,9 @@ class TypeInferer:
         param = getattr(self, "_current_func_param_types", {}).get(name)
         if param is not None:
             return param
+        primitive_global = self._primitive_block_shadow_globals.get(name)
+        if primitive_global is not None:
+            return self._type_for_decl(primitive_global)
         for vname, ptype, _init in self.ctx.var_members:
             if vname == name:
                 if self._numeric_na_member(name):
@@ -5901,6 +5919,12 @@ class TypeInferer:
             lexical_tuple_type = self._lexical_tuple_cpp_type(node)
             if lexical_tuple_type is not None:
                 return lexical_tuple_type
+            binding = self.ctx.identifier_decl_bindings.get(id(node))
+            if (binding is not None
+                    and binding[0] in self.ctx.primitive_block_shadow_types):
+                declaration = self.ctx.identifier_binding_nodes.get(id(node))
+                if isinstance(declaration, VarDecl):
+                    return self._type_for_decl(declaration)
             tuple_binding = (node.annotations or {}).get("tuple_builtin_binding")
             tuple_type = (
                 getattr(self, "_tuple_binding_cpp_types_by_name", {}).get(node.name)

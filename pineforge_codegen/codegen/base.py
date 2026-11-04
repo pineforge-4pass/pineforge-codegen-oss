@@ -457,6 +457,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for stmt in ctx.ast.body
             if isinstance(stmt, VarDecl)
         }
+        self._primitive_block_shadow_globals: dict[str, VarDecl] = {
+            stmt.name: stmt
+            for stmt in ctx.ast.body
+            if isinstance(stmt, VarDecl)
+            and id(stmt) in ctx.primitive_block_shadow_types
+        }
         self._direct_program_tuple_decl_nodes: set[int] = {
             id(stmt)
             for stmt in ctx.ast.body
@@ -3224,6 +3230,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         inits: dict[str, object] = {}
         for stmt in body:
             if (isinstance(stmt, VarDecl) and stmt.name in reassigned
+                    and id(stmt) not in self.ctx.primitive_block_shadow_types
                     and not stmt.is_var and not stmt.is_varip):
                 # Only consider vars whose initial value is itself stable;
                 # an unstable init cannot become a stable scalar via later
@@ -4796,6 +4803,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 member.setdefault(decl.name, self._declared_cpp_type(decl))
         needing: set = set()
         for decl, nested in decls:
+            if nested and id(decl) in self.ctx.primitive_block_shadow_types:
+                # This declaration has ordinary lexical C++ storage already.
+                continue
             cpp = self._declared_cpp_type(decl)
             first = member.setdefault(decl.name, cpp)
             if (nested and first is not None and cpp is not None and first != cpp
@@ -5962,8 +5972,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     lines.append(f"    {udt_cpp} {safe} = {udt_cpp}{{}};")
             else:
                 expr = self.ctx.global_expr_map.get(name) if hasattr(self.ctx, "global_expr_map") else None
-                tuple_cpp_type = self._ordinary_global_tuple_cpp_type(name)
-                if tuple_cpp_type is not None:
+                if name in self._primitive_block_shadow_globals:
+                    cpp_type = self._type_for_decl(
+                        self._primitive_block_shadow_globals[name]
+                    )
+                elif (
+                    tuple_cpp_type := self._ordinary_global_tuple_cpp_type(name)
+                ) is not None:
                     cpp_type = tuple_cpp_type
                 elif self._global_color_hint(name):
                     cpp_type = "int64_t"

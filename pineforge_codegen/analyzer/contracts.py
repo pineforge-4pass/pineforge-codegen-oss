@@ -253,6 +253,9 @@ class AnalyzerContext:
     # First lexical resolution to an exact declaration binder. Scope names
     # such as "for" are shared by sibling and nested loops.
     identifier_decl_bindings: dict = field(default_factory=dict)  # id(Identifier) -> (id(declaration), name) | None
+    # id(VarDecl) -> PineType for accepted differing primitive block shadows
+    # and their direct script declarations. Other storage keeps its gates.
+    primitive_block_shadow_types: dict = field(default_factory=dict)
     # Dedicated source-evidence family of each counted loop, keyed by start.
     # Legacy symbol storage remains independent (collection/callable inference).
     for_counter_types: dict = field(default_factory=dict)  # id(start) -> PineType

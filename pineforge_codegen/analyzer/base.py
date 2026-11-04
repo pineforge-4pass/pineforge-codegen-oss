@@ -232,13 +232,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             for name in stmt.names
             if name != "_"
         )
-        # Exact declaration typing retained only for lexical-boundary checks.
+        # Exact declaration typing retained for lexical-boundary checks.
         # The legacy symbol/type registries are raw-name keyed and therefore
         # cannot distinguish a direct script binding from a same-spelled local
         # declared inside a top-level control-flow block.
         self._var_decl_types_by_node: dict[
             int, tuple[PineType, TypeSpec | None]
         ] = {}
+        # Only differing primitive shadows admitted by the boundary check,
+        # including their direct script declarations. Codegen must retain
+        # these types after the analyzer's branch scopes have unwound.
+        self._primitive_block_shadow_types: dict[int, PineType] = {}
         self._ordinary_global_binding_info: dict[
             str, tuple[int, PineType, ASTNode | None]
         ] = {}
@@ -725,6 +729,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             global_expr_map=pure_global_expr_map,
             identifier_binding_scopes=dict(self._identifier_binding_scopes),
             identifier_decl_bindings=dict(self._identifier_decl_bindings),
+            primitive_block_shadow_types=dict(self._primitive_block_shadow_types),
             for_counter_types=dict(self._for_counter_types),
             identifier_binding_nodes=dict(self._identifier_binding_nodes),
             var_member_init_exprs=self._var_member_init_exprs,
@@ -1908,13 +1913,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _check_top_level_block_shadow_boundaries(self) -> None:
         """Fail closed for block shadows whose storage is not node-exact yet.
 
-        Same-typed primitive non-history declarations can use an ordinary C++
-        lexical local once the analyzer preserves the outer symbol (see the
-        scoped control-flow visitors below). Aggregate/UDT registries, local
-        history Series storage, and scalar declaration typing remain raw-name
-        keyed. Ordinary scalar tuple elements already have lexical C++ storage
-        and declaration-exact consumer types, so their distinct bindings need
-        not share the direct binding's primitive type.
+        Same-typed primitive non-history declarations retain their lexical
+        locals, and float-outer/int-inner retains its existing widening route.
+        Ordinary scalar tuple elements already have lexical C++ storage and
+        declaration-exact consumer types, so their distinct bindings need
+        not share the direct binding's primitive type. Among other primitive
+        declaration shadows, the only proven cross-type pair admitted with
+        distinct types is a script-level float shadowed by a plain block-local
+        string, with declared or literal types on both sides. Other cross-type
+        declaration pairs remain refused. Aggregate/UDT registries, persistent
+        members and local history Series storage remain raw-name keyed, so
+        allowing those shapes could silently retarget the member.
         """
         def tuple_binding_type(
             stmt: TupleAssign, name: str
@@ -2070,6 +2079,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         exact_series = set(self._series_decl_bindings)
         exact_series_nodes = {node_id for node_id, _name in exact_series}
         aggregate_kinds = {"array", "map", "matrix", "udt"}
+        # Constructor spellings lose lexical identity before codegen's
+        # _resolve_ta_ctor_arg -> _resolve_known raw-name constant lookup.
+        # Inspect every retained constructor slot, not just length slots.
+        # Keyword binding and overload remapping already selected ctor_nodes.
+        constant_argument_bindings: set[tuple[int, str]] = set()
+        for site in self._ta_call_sites:
+            for arg in site.ctor_nodes:
+                for use, _depth in iter_ast_nodes(arg):
+                    if isinstance(use, Identifier):
+                        binding = self._value_bindings.declaration_bindings.get(
+                            id(use)
+                        )
+                        if binding is not None:
+                            constant_argument_bindings.add(binding)
         candidate_bindings = list(embedded_top_level_bindings)
         for block, primitive_mismatch_unsafe in top_level_blocks:
             candidate_bindings.extend(
@@ -2106,15 +2129,55 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             has_incompatible_primitive = (
                 mismatch_unsafe and not is_lexical_tuple
                 and nested_type != direct_type
-                # The standard corpus uses a loop-local inferred int under
-                # a direct float binding (Hexatrades ``base``).  C++ widens
-                # that RHS safely.  The reverse direction and all other
-                # cross-type shadows can truncate or fail compilation.
+                # Keep the established C++ widening route for an inferred
+                # int under a direct float binding. Only the proven
+                # float-outer/string-inner declaration pair is lifted below;
+                # all other declaration mismatches remain refused.
                 and not (
                     direct_type == PineType.FLOAT
                     and nested_type == PineType.INT
                 )
             )
+            if has_incompatible_primitive:
+                outer = direct_node
+                plain_primitive_shadow = (
+                    isinstance(node, VarDecl)
+                    and isinstance(outer, VarDecl)
+                    and not (node.is_var or node.is_varip
+                             or outer.is_var or outer.is_varip)
+                    and name not in self._series_vars
+                    and direct_type == PineType.FLOAT
+                    and nested_type == PineType.STRING
+                    and (
+                        outer.type_hint == "float"
+                        or (
+                            outer.type_hint is None
+                            and isinstance(outer.value, NumberLiteral)
+                            and isinstance(outer.value.value, float)
+                        )
+                    )
+                    and (
+                        node.type_hint == "string"
+                        or (
+                            node.type_hint is None
+                            and isinstance(node.value, StringLiteral)
+                        )
+                    )
+                    and all(
+                        spec == TypeSpec.primitive(type_name)
+                        for spec, type_name in (
+                            (direct_spec, "float"),
+                            (nested_spec, "string"),
+                            (self._operator_types_by_node.get(id(outer)), "float"),
+                            (self._operator_types_by_node.get(id(node)), "string"),
+                        )
+                    )
+                    and (id(node), name) not in constant_argument_bindings
+                )
+                if plain_primitive_shadow:
+                    self._primitive_block_shadow_types[id(outer)] = direct_type
+                    self._primitive_block_shadow_types[id(node)] = nested_type
+                    has_incompatible_primitive = False
             if (not is_exact_series
                     and not has_aggregate
                     and not has_incompatible_primitive):
