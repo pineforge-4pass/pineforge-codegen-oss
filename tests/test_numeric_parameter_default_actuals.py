@@ -439,7 +439,7 @@ def test_default_result_native_after_real_strategy_run(tmp_path, case_id, opt):
             ),
             "identity_observer_sha256_role": "LEGACY RUNNER; join runner_sha256",
             "process_helper_sha256": _sha(
-                (_ROOT / "tests/test_numeric_missing_value_rows.py").read_bytes(),
+                (_ROOT / "tests/_numeric_support.py").read_bytes(),
             ),
             "runtime_scope": "actual identity.json only; planned old9fa, no current-engine claim",
         })
