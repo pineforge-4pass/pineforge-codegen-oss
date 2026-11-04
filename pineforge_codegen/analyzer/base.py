@@ -8742,6 +8742,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     return PineType.FLOAT  # profit, entry_price, etc.
                 if sub == "commission":
                     return PineType.INT  # strategy.commission.percent, etc.
+                if sub == "direction":
+                    direction_type = sigs.get_variable_type("strategy.direction", node.member)
+                    if direction_type != PineType.UNKNOWN:
+                        return direction_type
                 if sub in ("oca", "direction", "risk"):
                     return PineType.INT
             return PineType.INT

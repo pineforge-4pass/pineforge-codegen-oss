@@ -51,6 +51,13 @@ def _pine_bool_arg(value: str) -> str:
 # Bar field / built-in mappings
 # ---------------------------------------------------------------------------
 
+# Pine string values, independent of the risk host's signed integer encoding.
+STRATEGY_DIRECTION_VALUES = {
+    "long": "long",
+    "short": "short",
+    "all": "all",
+}
+
 BAR_FIELDS = {
     "close": "current_bar_.close", "open": "current_bar_.open", "high": "current_bar_.high",
     "low": "current_bar_.low", "volume": "current_bar_.volume",

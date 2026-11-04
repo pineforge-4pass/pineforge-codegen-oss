@@ -74,6 +74,7 @@ classes from ``..ast_nodes``.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import re
 
 from ..errors import Phase
 from ..ast_nodes import (
@@ -105,6 +106,7 @@ from ..ast_nodes import (
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from ..external_requests import UNPINNED_ANNOTATION
 from .for_loops import for_continuation
+from .helpers import cpp_code_only
 from .tables import (
     ARRAY_NEW_CTORS,
     DRAWING_TYPE_TO_CPP,
@@ -112,6 +114,7 @@ from .tables import (
     TA_TUPLE_FIELDS,
     MATRIX_RETURNING_METHODS,
     PINE_TYPE_TO_CPP,
+    STRATEGY_DIRECTION_VALUES,
 )
 
 # Sentinel for "no block-scoped overlay was activated" so an empty saved map
@@ -388,7 +391,9 @@ class StmtVisitor:
                 c = node.expr.callee
                 if (isinstance(c.object, MemberAccess) and isinstance(c.object.object, Identifier)
                         and c.object.object.name == "strategy" and c.object.member == "risk"
-                        and node.expr.args):
+                        and (node.expr.args
+                             or (c.member == "allow_entry_in"
+                                 and "value" in node.expr.kwargs))):
                     risk_func = c.member
                     _RISK_MEMBER_MAP = {
                         "max_intraday_filled_orders": (
@@ -400,8 +405,48 @@ class StmtVisitor:
                         "max_cons_loss_days": ("set_pine_risk_max_cons_loss_days", "int"),
                     }
                     if risk_func == "allow_entry_in":
-                        val = self._visit_expr(node.expr.args[0])
-                        lines.append(f"{pad}set_pine_risk_direction({val});")
+                        arg = (
+                            node.expr.args[0]
+                            if node.expr.args
+                            else node.expr.kwargs["value"]
+                        )
+                        val = self._visit_expr(arg)
+                        if (
+                            isinstance(arg, MemberAccess)
+                            and isinstance(arg.object, MemberAccess)
+                            and isinstance(arg.object.object, Identifier)
+                            and arg.object.object.name == "strategy"
+                            and arg.object.member == "direction"
+                            and arg.member in STRATEGY_DIRECTION_VALUES
+                            and self._type_spec_from_expr(arg.object) is None
+                        ):
+                            direction = (
+                                "1" if arg.member == "long"
+                                else "-1" if arg.member == "short"
+                                else "0"
+                            )
+                        elif self._infer_type(arg) == "std::string":
+                            used = set(self._safe_name_occupied)
+                            used.update(re.findall(r"\b[A-Za-z_]\w*\b", cpp_code_only(val)))
+                            temporary = self._allocate_generated_cpp_name(
+                                "_pf_risk_direction_value", used
+                            )
+                            long_value = self._cpp_string_escape(
+                                STRATEGY_DIRECTION_VALUES["long"]
+                            )
+                            short_value = self._cpp_string_escape(
+                                STRATEGY_DIRECTION_VALUES["short"]
+                            )
+                            direction = (
+                                f"([&]() -> int {{ const std::string {temporary} = ({val}); "
+                                f'return {temporary} == std::string("{long_value}") ? 1 : '
+                                f'{temporary} == std::string("{short_value}") ? -1 : 0; }}())'
+                            )
+                        else:
+                            direction = val
+                        lines.append(
+                            f"{pad}set_pine_risk_direction({direction});"
+                        )
                         return
                     if risk_func in _RISK_MEMBER_MAP:
                         setter, cast_type = _RISK_MEMBER_MAP[risk_func]

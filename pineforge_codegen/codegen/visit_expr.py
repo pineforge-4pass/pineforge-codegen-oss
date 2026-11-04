@@ -136,6 +136,7 @@ from .tables import (
     ON_OFF_INHERIT_MAP,
     ORDER_DIRECTION_MAP,
     SKIP_NAMESPACES,
+    STRATEGY_DIRECTION_VALUES,
     SYMINFO_MEMBER_MAP,
     TA_COMPUTE_ARGS,
     TA_IMPLICIT_COMPUTE_FULL,
@@ -1329,12 +1330,9 @@ class ExprVisitor:
                             return "0"
                         return "0"
                     if sub == "direction":
-                        if node.member == "long":
-                            return "1"
-                        if node.member == "short":
-                            return "-1"
-                        if node.member == "all":
-                            return "0"
+                        value = STRATEGY_DIRECTION_VALUES.get(node.member)
+                        if value is not None:
+                            return f'std::string("{self._cpp_string_escape(value)}")'
                         return "0"
                     if sub == "commission":
                         if node.member == "percent":

@@ -718,9 +718,9 @@ STRATEGY_VARIABLES: dict[str, PineType] = {
     "strategy.oca.reduce": I,
     "strategy.oca.none": I,
     # Direction constants
-    "strategy.direction.all": I,
-    "strategy.direction.long": I,
-    "strategy.direction.short": I,
+    "strategy.direction.all": S,
+    "strategy.direction.long": S,
+    "strategy.direction.short": S,
 }
 
 # Barstate variables
