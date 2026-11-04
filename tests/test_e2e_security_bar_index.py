@@ -5,7 +5,7 @@ the count of requested bars before the one evaluated, published like any
 payload value (a 15m chart bar that closes with its 60m bar reads that 60m
 bar's index), with ``bar_index[k]`` k requested bars back and ``na``
 before the first. The evaluator read the chart's (``pine_bar_index()``),
-bare, under a builtin and through a helper (lane CG-SECURITY-2's
+bare, under a builtin and through a helper (the earlier security cases'
 pre-existing defects). Each evaluator that reads it now keeps a counter
 (``_sec<N>_bar_index_``) advanced where it opens a requested slot, as its TA
 sites advance.

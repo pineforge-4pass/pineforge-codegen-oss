@@ -5,7 +5,7 @@ It was emitted as ``na<double>()``, so a script sizing to the exchange's lot
 syminfo.mincontract > 0 ? syminfo.mincontract : 1.0`` -- floored every
 quantity to whole units: sub-unit sizes became 0 and booked no trade on
 btcusdt-15/1d, ethusdtp-1d and xauusd-1d, and the other lanes lost the
-fraction (lane W2, F06: 8 population probes). It now reads the run's syminfo
+fraction (8 population probes). It now reads the run's syminfo
 metadata key ``"mincontract"`` (``runtime_overrides.syminfo_metadata``, the
 channel the lanes already declare ``qty_step`` through) and stays na when the
 run declares none.

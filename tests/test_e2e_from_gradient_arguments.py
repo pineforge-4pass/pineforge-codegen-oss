@@ -5,7 +5,7 @@ PineForge keeps emitting the na colour (a warned visual-only stub). The
 lowering also dropped its arguments (``codegen/visit_call.py``
 ``_visit_color_call`` returned ``"0"`` for it), so a call in them never
 ran: a counting probe never counted, and a helper keeping a series in one
-never advanced (lane W2's open findings). TradingView evaluates each
+never advanced (earlier open findings). TradingView evaluates each
 argument once per execution, in parameter order, whether written by
 position or by keyword.
 

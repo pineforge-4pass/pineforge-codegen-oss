@@ -461,7 +461,7 @@ plot(x)
 """
     # A length reassigned on a series condition is a series length: it used
     # to be refused, and now re-windows every bar as TradingView does
-    # (lane K-TA-DYNLEN, tests/test_e2e_ta_dynamic_length.py).
+    # (tests/test_e2e_ta_dynamic_length.py).
     cpp = transpile(src)
     assert "pineforge::source::SeriesLowest " in cpp
     assert "ta_number(activeSwingLookback)" in cpp

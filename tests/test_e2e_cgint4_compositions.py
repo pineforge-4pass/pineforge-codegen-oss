@@ -1,6 +1,6 @@
 """Where a lane integrated by CGINT4 meets a rule already on main, or changes
 a function one of main's lanes changed, the integration keeps both rules
-(integration lane CGINT4: CG-OPEN-ITEMS on main's CGINT3). Each case runs the
+(integration cases on main's earlier composition). Each case runs the
 composition end to end -- ``transpile_json``, the built runtime,
 ``run_strategy.py`` -- or pins the C++ where the rules decide the lowering.
 ``MAIN`` is the integration base, replayed beside a case to show what it

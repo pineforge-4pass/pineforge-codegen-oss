@@ -4,7 +4,7 @@ TradingView's own session flags on every bar of intraday and daily charts.
 The BINANCE:ETHUSDT.P tapes stay in ``fixtures/session_ismarket``; tapes for
 US-listed stocks, US futures, forex and spot metals are kept in a private
 repository and overlaid onto the paired engine's
-``tests/codegen-fixtures/session_ismarket/``. The engine lane H-MEASURE's
+``tests/codegen-fixtures/session_ismarket/``. The engine's
 session.ismarket tapes ``hm-g236-*`` and this lane's every-flag tapes
 ``cgim-flags-*`` cover the same windows. OANDA:XAUUSD's daily bars are
 stamped at the 17:00 ET break and flagged in market: a D/W/M bar holds whole
@@ -24,12 +24,12 @@ bar's open only in a run without a timeframe, which gets no such fact
 (``codegen/session_market.py``); a bar in market is in neither extended
 session, and off it the engine's windows decide: pre-market from 04:00 to the
 session day's first open, post-market from its last close to 20:00, and
-neither for an overnight or 24-hour session (engine lane K-SESSION-WINDOWS;
+neither for an overnight or 24-hour session (the session-window handling;
 before it the windows also held an overnight session's in-market bars from
 04:00 to its open and from its close to 20:00). The pre-lane lowering,
 time-of-day predicates such as
 ``pine_session_ismarket(syminfo_.session, syminfo_.timezone, time)``, tests
-the instant alone. Until engine lane W11-ENG-TIME-COLOR
+the instant alone. Until the time/color handling
 ``pine_session_ismarket`` also tested a day mask on the instant's own weekday
 and skipped a ``2400`` clock, and read every Sunday-evening open of a
 ``:23456`` session and every bar of ``0000-2400`` as out of market; the engine
@@ -166,7 +166,7 @@ CASES = tuple(case for cases in (
     # window on its session day: the Sunday-evening open is Monday's. The
     # time-of-day predicate tested the instant's own weekday and missed every
     # Sunday-evening open until
-    # engine lane W11-ENG-TIME-COLOR (its tapes w11-sessmask{,2,3}-btc15).
+    # engine time/color cases (their tapes w11-sessmask{,2,3}-btc15).
     _cases("es1-60-dst-mar", "1700-1600:23456", "America/Chicago", {}),
     _cases("es1-60-dst-nov", "1700-1600:23456", "America/Chicago", {}),
     _cases("es1-60-thanksgiving", "1700-1600:23456", "America/Chicago", {}),
@@ -191,7 +191,7 @@ CASES = tuple(case for cases in (
 # extended day's 04:00 and 19:00 bars and the _regular twins the regular
 # day's 10:00 and 15:00 bars. The engine's session_isfirstbar_ /
 # session_islastbar_ are the chart's day and its session_isfirstbar_regular_ /
-# session_islastbar_regular_ the regular day (lane K-SESSION-WINDOWS), which
+# session_islastbar_regular_ the regular day (the session-window handling), which
 # codegen reads for the _regular spellings; the pre-lane build read the
 # chart's pair for them, so its isfirstbar_regular and islastbar_regular land
 # on 04:00 and 19:00.
@@ -536,7 +536,7 @@ def test_one_bar_without_timeframe_reads_the_calendar(one_bar) -> None:
     TradingView's tapes flag that bar its day's first (a divergence of such a
     run, pinned). The pre-lane build's predicate reads the bar in market too:
     it tested the Sunday instant's own weekday against the mask, and read it
-    out of market, until engine lane W11-ENG-TIME-COLOR."""
+    out of market, until the time/color handling."""
     assert read_tape("hm-g236-es1-60-dst-mar")[0] == (SUNDAY_OPEN, {"M": True})
     trades, records, cpp = one_bar["current"]
     assert "_pf_session_market_(" in cpp
@@ -647,7 +647,7 @@ def test_security_payload_session_read_warns_once_per_site(tmp_path: Path) -> No
     assert "a bar that opens in a session break" in message
     assert "a D/W/M bar, always in market on TradingView, reads its open's time of day" in message
     # The predicate reads a day mask by each window's session day and "2400"
-    # as the day's end (engine lane W11-ENG-TIME-COLOR): neither is named.
+    # as the day's end (the time/color handling): neither is named.
     assert "own weekday" not in message and "2400" not in message
 
 

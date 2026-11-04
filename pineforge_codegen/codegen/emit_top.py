@@ -1463,7 +1463,7 @@ class TopLevelEmitter:
             lines.append("    }")
 
     def _emit_foreign_security_lookups(self, lines: list[str]) -> None:
-        """The run-time lookups of another symbol's request (lane XSYM-E):
+        """The run-time lookups of another symbol's request:
         whether its symbol string is the chart's, and whether its data is
         installed (``strategy_set_symbol_feed`` / ``_facts``). An engine
         without the symbol-keyed registration has neither."""

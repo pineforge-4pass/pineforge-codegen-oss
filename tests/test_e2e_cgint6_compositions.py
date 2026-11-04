@@ -1,4 +1,4 @@
-"""Where lane CG-SILENT-2 meets codegen main's rules (integration CGINT6).
+"""Where the silent cases meet codegen main's rules (integration cases).
 
 CG-SILENT-2 was cut before CGINT5a and CG-SESSION-REPIN reached main, and
 several of its items meet a rule one of those lanes made:

@@ -1,4 +1,4 @@
-"""TradingView's tapes of lane TAIL-F's constructs, replayed.
+"""TradingView's tapes of the open-library constructs, replayed.
 
 Two open library chains the population imports needed them:
 ``TradingView/Request/3`` (with ``TradingView/LibraryCOT/5``) writes a switch

@@ -8,7 +8,7 @@ the globals it reads, not the helper bodies it inlines, so the builder
 refused the bare ``k() => g()[1]`` ("helper call history is only supported
 in the payload itself"), and under a builtin the expression visitor looked
 for a chart history member the evaluator has none of and raised an
-AssertionError (lane CG-SECURITY-2's pre-existing defects). The prepass now
+AssertionError (a pre-existing defect). The prepass now
 walks the user functions the payload calls too, and keeps a helper body's
 history where the payload reaches it once; one it reaches twice (``h() +
 h()``) would need a series per inline and is refused where it is lowered, a

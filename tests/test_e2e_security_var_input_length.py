@@ -5,7 +5,7 @@ bar. As the TA length of a helper a payload inlines (``g(close,
 int(vf))``), the requested TA object is built by the runtime reset, which
 ``evaluate_security`` runs before ``on_bar`` has initialized ``vf``: the
 reset read the ``na`` member, built ``ta::SMA((int)vf)`` with a length of
-INT_MIN, and the run segfaulted (P1 of lane CG-SECURITY-2's review). A plain
+INT_MIN, and the run segfaulted (a pre-existing review defect). A plain
 input read there already used its getter; ``_security_var_input_call`` now
 gives a never-reassigned ``var`` input the same getter.
 

@@ -1,4 +1,4 @@
-"""A generic ``input()`` is the type of its default (lane TAIL-E, item 3).
+"""A generic ``input()`` is the type of its default (a prior item).
 
 Pine v6 types ``input(defval)`` by ``defval``: ``input("x")`` is a string
 input, ``input(3)`` an int one, ``input(true)`` a bool one. The codegen typed

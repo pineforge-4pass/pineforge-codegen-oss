@@ -6,7 +6,7 @@ they sit: ``nz(s)`` reads the requested bar's ``s`` as the bare payload
 ``s`` does. PineForge's builder inlines a bare global on the requested bar,
 but a builtin call it does not lower itself (``nz``) went to the expression
 visitor, which read the global's chart member: silently the chart's value
-(P6 of lane CG-SECURITY-2's pre-existing defects), and beside a user call
+(a pre-existing defect), and beside a user call
 the builder inlined (``nz(s) + nz(f())``) the evaluator fell back to the
 chart for both. ``_security_fallback_owns_global`` now hands such a global
 back to the builder. Its history under a builtin (``nz(s[1])``) stays the

@@ -1,6 +1,6 @@
 """E2E: ``ta.valuewhen(condition, source, occurrence)`` returns the source at
 the occurrence-th most recent bar where the condition held, for every
-occurrence (lane C4, defect 2).
+occurrence (a prior defect).
 
 ``ta::ValueWhen`` keeps ``max(1, max_occurrence + 1)`` values, the bound its
 constructor takes (default 1), while ``compute(condition, source,

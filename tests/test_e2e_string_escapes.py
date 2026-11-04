@@ -1,5 +1,5 @@
 """E2E: a Pine string literal's escape sequences produce the value the Pine
-manual documents (lane C4, defect 6).
+manual documents (a prior defect).
 
 TradingView, Pine v6 User Manual, Strings, "Escape sequences":
 

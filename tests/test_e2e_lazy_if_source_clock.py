@@ -1,5 +1,5 @@
 """``ta.change`` / ``ta.mom`` / ``ta.roc`` in an if block read their held
-source history (lane TAIL-E, item 4).
+source history (a prior case).
 
 A call below a lazy operand (``cond ? ta.roc(close, 3) : na``) reads the
 call's own ``source[length]`` history, written on the bars it executes and

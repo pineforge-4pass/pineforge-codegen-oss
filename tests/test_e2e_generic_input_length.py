@@ -1,5 +1,5 @@
 """E2E: a generic ``input()`` in arithmetic is a TA length the way
-``input.int()`` is (lane C5, defect 4).
+``input.int()`` is (a prior defect).
 
 ``len = input.int(9) + 1`` feeding ``ta.ema(close, len)`` sizes the EMA from
 the input at run time (the ``_ta_initialized_`` reset re-reads the override),

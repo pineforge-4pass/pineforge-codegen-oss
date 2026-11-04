@@ -5,7 +5,7 @@ Their values come from TradingView's own report-time and fiscal-period logic,
 which PineForge does not model: the requests manifest records, per probe
 chart, every bar TradingView answered non-na (``chart_open_ms,value``) under
 ``<fn>|<symbol>|<field-or-id>|<period-or->|gaps_<on|off>|lookahead_<on|off>``
-(workflow ``formatRecordedKey``; lane XSYM-B), and the engine replays it on
+(workflow ``formatRecordedKey``), and the engine replays it on
 the chart bar that opens at that time (``recorded_series_value``, lane
 XSYM-D). A request whose value can reach a trade was a deferred refusal
 (XSYM-A); it now reads its series. The key's symbol is the string the run

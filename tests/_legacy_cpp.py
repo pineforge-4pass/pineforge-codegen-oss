@@ -108,11 +108,11 @@ def without_id_sites_receipt(cpp: str) -> str:
 
 
 def without_trade_history_policy(cpp: str) -> str:
-    """Remove CR-150's additive policy block/export and normalize ctor lookup.
+    """Remove the additive policy block/export and normalize ctor lookup.
 
     Whole-C++ identity fixtures pinned before L5 compare semantic lowering
     against that accepted scaffold. The L5 raw-output tests cover these two
-    emitted ABI pieces directly. CR150-CX also qualifies the constructor's
+    emitted ABI pieces directly. The compatibility change also qualifies the constructor's
     existing configure call with ``this->``; normalize only that statement
     when comparing historical lowering. Raw constructor compile/spelling
     coverage lives in test_cr150_constructor_names.py. The id-sites receipt
@@ -156,7 +156,7 @@ def without_restore_script_state(cpp: str) -> str:
 def legacy_cpp(cpp: str) -> str:
     # Coded-stop ABIs are additive; retain their actual call-site changes.
     cpp = _without_run_failure_scaffold(cpp)
-    # CR-150's trade-history policy and per-strategy reader export are also
+    # The trade-history policy and per-strategy reader export are also
     # additive. Historical lowering oracles intentionally ignore both so the
     # feature's ABI shape is covered by its own raw-output tests.
     cpp = without_trade_history_policy(cpp)

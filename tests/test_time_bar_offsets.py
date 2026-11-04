@@ -1,4 +1,4 @@
-"""``time()`` / ``time_close()`` reading another bar (lane TAIL-E, item 2).
+"""``time()`` / ``time_close()`` reading another bar (a prior item).
 
 Pine v6's ``time(timeframe, bars_back, timeframe_bars_back)``,
 ``time(timeframe, session, bars_back, timeframe_bars_back)`` and ``time(timeframe,

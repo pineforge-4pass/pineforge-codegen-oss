@@ -6,7 +6,7 @@ previous call saw it, whether ``gv`` is ``var`` or not, and the same holds
 for ``bar_index``. The chart built-ins (``close``, ``open``, ``time``, ``hl2``,
 ...) keep the chart's history. ``fixtures/function_global_history`` holds
 TradingView's own tapes of three synthetic probes on BINANCE:ETHUSDT.P 15 (see
-its README for what each trade encodes): the r4 witness of lane W8E-EXITS, its
+its README for what each trade encodes): the r4 witness, its
 r5 built-ins control, and this lane's model probe (``[2]``, two call sites, a
 nested call, a loop, a global reassigned after the call, a function called on
 every bar) and conditional probe (a call whose body skips the read).

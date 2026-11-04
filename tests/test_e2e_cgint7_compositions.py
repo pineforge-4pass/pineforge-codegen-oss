@@ -26,7 +26,7 @@
   parameter or a global the loop reads too (such a name is expanded where it
   is read: ``h(ta.sma(close, 3), n)`` computed the SMA once per iteration).
 - Lane TAIL-E reads a ``ta.change`` / ``mom`` / ``roc`` in a top-level if
-  block through the hold-last source clock, and lane TAIL-G pushes a pure
+  block through the hold-last source clock, and the lazy history rule pushes a pure
   call read at an offset below a lazy edge once per execution of its scope,
   before its statement: an if whose head reads such a history and whose body
   calls ``ta.roc`` takes both rules, as do a value-form if and a nested if

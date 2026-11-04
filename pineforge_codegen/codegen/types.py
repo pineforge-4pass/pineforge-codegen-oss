@@ -4083,7 +4083,7 @@ class TypeInferer:
         while ``na()`` reads it as na, ``==``/``!=`` are false, ``str.tostring``
         prints NaN and ``strategy.entry(qty = ...)`` trades the default quantity
         (lab tv tailc-a-na-compare, tailc-a-divzero-readout,
-        tailc-a-qty-nonfinite2; R5 lane TAIL-C). A C++ ``int`` narrows it to
+        tailc-a-qty-nonfinite2; the nonfinite-int case). A C++ ``int`` narrows it to
         ``na<int>()``, which orders as na. So a name is stored as the ``double``
         its value already is when every binding of it -- a global declaration
         or ``:=`` -- is a one-argument ``math.floor``/``math.ceil``/
