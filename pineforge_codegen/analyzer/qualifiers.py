@@ -1,4 +1,4 @@
-"""Qualifier evidence for bound user-call arguments, independent of storage.
+"""Qualifier evidence for bound call arguments, independent of storage.
 
 Series<T> records history storage, not Pine's type qualifier. Reuse the
 library linker's fixed-expression inventories, with declaration identities
@@ -31,6 +31,12 @@ _RANKS = {"const": _CONST, "input": _INPUT, "simple": _SIMPLE, "series": _SERIES
 _NAMES = tuple(_RANKS)
 _LITERALS = (NumberLiteral, StringLiteral, BoolLiteral, ColorLiteral, NaLiteral)
 
+# Parameter order is the positional order; names also bind keyword arguments.
+# allow_entry_in's Pine base type is string; this table checks qualifiers only.
+_BUILTIN_PARAMETERS = {
+    "strategy.risk.allow_entry_in": (("value", "simple"),),
+}
+
 
 def _join(values):
     known = [value for value in values if value is not None]
@@ -43,7 +49,7 @@ def _declared_qualifiers(definition):
 
 
 class ParameterQualifiers(DiagnosticsHelper):
-    """Read-only qualifier queries and one check after argument binding."""
+    """Read-only qualifier queries shared by user and builtin contracts."""
 
     def __init__(self, program, bindings, filename, budget=None):
         self._filename = filename
@@ -53,6 +59,10 @@ class ParameterQualifiers(DiagnosticsHelper):
             qualifier in {"simple", "const"}
             for node in program.body if isinstance(node, (FuncDef, MethodDef))
             for qualifier in _declared_qualifiers(node)
+        ) or any(
+            isinstance(node, FuncCall)
+            and self._builtin_name(node) in _BUILTIN_PARAMETERS
+            for node, _ in iter_ast_nodes(program)
         )
         if not self.active:
             return
@@ -110,6 +120,40 @@ class ParameterQualifiers(DiagnosticsHelper):
         if self.active:
             self._call(definition, values, function_name, {})
 
+    def _builtin_name(self, call):
+        parts = []
+        root = call.callee
+        while isinstance(root, MemberAccess):
+            parts.append(root.member)
+            root = root.object
+        if isinstance(root, Identifier) and self.bindings.get(id(root)) is None:
+            return ".".join((root.name, *reversed(parts)))
+        return None
+
+    def check_builtin(self, call, environment=None):
+        if not self.active:
+            return
+        function_name = self._builtin_name(call)
+        for index, (name, qualifier) in enumerate(
+            _BUILTIN_PARAMETERS.get(function_name, ())
+        ):
+            value = call.args[index] if index < len(call.args) else call.kwargs.get(name)
+            self._check_argument(
+                function_name, name, qualifier, value,
+                self.infer(value, environment if environment is not None else {}),
+            )
+
+    def _check_argument(self, function_name, name, qualifier, value, rank):
+        required = _RANKS.get(qualifier)
+        if required is not None and rank is not None and rank > required:
+            argument_qualifier = _NAMES[rank]
+            parameter_qualifier = qualifier
+            self._error(
+                f"Cannot call '{function_name}' with a {argument_qualifier} "
+                f"argument for {parameter_qualifier} parameter '{name}'.",
+                expr_start(value).loc or value.loc,
+            )
+
     @staticmethod
     def _bound(definition, call):
         defaults = (definition.annotations or {}).get("param_defaults", ())
@@ -134,15 +178,7 @@ class ParameterQualifiers(DiagnosticsHelper):
         for name, qualifier, value, rank in zip(
             definition.params, qualifiers, values, ranks,
         ):
-            required = _RANKS.get(qualifier)
-            if required is not None and rank is not None and rank > required:
-                argument_qualifier = _NAMES[rank]
-                parameter_qualifier = qualifier
-                self._error(
-                    f"Cannot call '{function_name}' with a {argument_qualifier} "
-                    f"argument for {parameter_qualifier} parameter '{name}'.",
-                    expr_start(value).loc or value.loc,
-                )
+            self._check_argument(function_name, name, qualifier, value, rank)
         effective = tuple(
             _RANKS.get(qualifier, rank)
             for qualifier, rank in zip(qualifiers, ranks)
@@ -309,6 +345,7 @@ class ParameterQualifiers(DiagnosticsHelper):
             )
             return _join(map(rank, (*controls, node.body[-1] if node.body else None)))
         if isinstance(node, FuncCall):
+            self.check_builtin(node, environment)
             callee = node.callee
             if isinstance(callee, Identifier):
                 definitions = self.functions.get(callee.name, ())

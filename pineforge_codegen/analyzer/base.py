@@ -6922,6 +6922,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return result_type
 
     def _visit_FuncCall(self, node: FuncCall) -> PineType:
+        if self._pine_version == 6 and not self._in_v5_library_definition(node):
+            self._parameter_qualifiers.check_builtin(node)
         from ..drawing_all import drawing_all_call, DRAWING_ALL_READS
         live_read = drawing_all_call(node)
         if (live_read is not None and live_read[0] != "polyline"
