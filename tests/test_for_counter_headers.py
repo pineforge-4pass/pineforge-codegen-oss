@@ -348,3 +348,32 @@ def test_existing_loop_cpp_matches_reference_except_step_stop(
     assert hashlib.sha256(cpp.encode("utf-8")).hexdigest() == baseline["cpp_sha256"], (
         f"{name}: the complete C++ changed from reference {MAIN_COMMIT}"
     )
+
+
+def _counted_loop_header(pine: str) -> str:
+    cpp = transpile('//@version=6\nstrategy("Loop bound na", currency=currency.NONE)\n' + pine)
+    return next(line for line in cpp.splitlines() if re.match(r"\s*for \(int i = ", line))
+
+
+# An integer loop bound can hold the integer na sentinel (INT_MIN) even when the slot
+# coercion leaves its text as written; the header then needs the same na guard as a
+# double-typed bound, or the loop counts from its start down to INT_MIN.
+@pytest.mark.parametrize("pine", [
+    "float limit = 2.0 + bar_index % 2\nint trips = 0\nfor i = 1 to int((limit + 0.0)[1])\n    trips += 1\nplot(trips)",
+    "int trips = 0\nfor i = 1 to int(na)\n    trips += 1\nplot(trips)",
+    "var int bound = na\nint trips = 0\nfor i = 1 to bound\n    trips += 1\nplot(trips)",
+    "var int first = na\nint trips = 0\nfor i = first to 3\n    trips += 1\nplot(trips)",
+    "var int stride = na\nint trips = 0\nfor i = 1 to 5 by stride\n    trips += 1\nplot(trips)",
+], ids=["history-cast-end", "na-literal-cast-end", "int-na-end", "int-na-start", "int-na-step"])
+def test_integer_bound_that_may_be_na_keeps_the_loop_guard(pine):
+    header = _counted_loop_header(pine)
+    for slot in ("start", "end", "step"):
+        assert re.search(rf"!is_na\(_for_{slot}_\d+\)", header), header
+
+
+@pytest.mark.parametrize("pine", [
+    "int trips = 0\nfor i = 1 to 3\n    trips += 1\nplot(trips)",
+    "int trips = 0\nfor i = 1 to 10 by 2\n    trips += 1\nplot(trips)",
+], ids=["literal-bounds", "literal-step"])
+def test_integer_bounds_proven_present_stay_unguarded(pine):
+    assert "is_na(" not in _counted_loop_header(pine)

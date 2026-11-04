@@ -94,7 +94,9 @@ from ..ast_nodes import (
     ImportStmt,
     MemberAccess,
     MethodDef,
+    NaLiteral,
     StrategyDecl,
+    Subscript,
     SwitchStmt,
     Ternary,
     TupleAssign,
@@ -1981,6 +1983,10 @@ class StmtVisitor:
             or start_cpp != f"({start})"
             or end_cpp != f"({end})"
             or step_cpp != f"({step})"
+            # A bound the slot coercion leaves as written can still hold the integer na
+            # sentinel at run time; without the guard the loop counts from its start to INT_MIN.
+            or any(self._for_bound_may_be_missing(operand)
+                   for operand in (node.start, node.end, node.step))
         )
         lines.append(f"{pad}{counter_cpp_type} {s_var} = {start_cpp};")
         lines.append(f"{pad}{counter_cpp_type} {e_var} = {end_cpp};")
@@ -2016,6 +2022,24 @@ class StmtVisitor:
         )
         self._emit_counted_loop_body(node, lines, indent + 1, value_target)
         lines.append(f"{pad}}}")
+
+    def _for_bound_may_be_missing(self, operand) -> bool:
+        """Whether a counted-loop bound can hold the integer na sentinel at run time.
+
+        The header guard is needed only for a bound that reads a history value, spells na,
+        or reads a name the integer-missing analysis cannot prove present. Calls over present
+        arguments (``int(n / 2)``, a helper called with literals) cannot become missing and
+        keep the established C++ of integer loops; a callee's own name is not a value read.
+        """
+        if operand is None:
+            return False
+        parts = list(self._walk_ast(operand))
+        callees = {id(part.callee) for part in parts if isinstance(part, FuncCall)}
+        return any(
+            isinstance(part, (NaLiteral, Subscript))
+            or (isinstance(part, Identifier) and id(part) not in callees
+                and self._integer_na_operand(part))
+            for part in parts)
 
     def _for_continuation(self, counter_cpp_type, var, end, step, down) -> str:
         if counter_cpp_type == "double":
