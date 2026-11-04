@@ -341,7 +341,10 @@ def test_every_drawing_script_has_the_lifetime_machinery(outcomes):
     cpp = _outcome(outcomes, "w9dg-pin-holders3", "lane").cpp
     # The arenas never evict; the box collector pins the var box and the
     # function's var, not the object held by a var, not the plain non-var p.
-    assert "DrawingArena<BoxRec> _pf_boxes_{_PF_DRAWING_UNBOUNDED};" in cpp
+    assert (
+        "DrawingArena<BoxRec> _pf_boxes_"
+        "{::pineforge::drawing_bound_from_declared_count<BoxRec>(5)};"
+    ) in cpp
     assert "const int32_t _pf_held[] = {_pf_new.id, this->o.id, this->fb.id};" in cpp
     assert "_pf_collect_drawings(this->_pf_boxes_, 5, _pf_held," in cpp
 

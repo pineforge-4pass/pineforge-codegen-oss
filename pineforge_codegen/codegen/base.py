@@ -5929,9 +5929,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         #     max_*_count the way TradingView does (default 50; see
         #     DRAWING_LIFETIME_CPP), and linefills are never collected.
         if self._uses_drawing:
-            lines.append("    DrawingArena<LineRec> _pf_lines_{_PF_DRAWING_UNBOUNDED};")
-            lines.append("    DrawingArena<BoxRec> _pf_boxes_{_PF_DRAWING_UNBOUNDED};")
-            lines.append("    DrawingArena<LabelRec> _pf_labels_{_PF_DRAWING_UNBOUNDED};")
+            lines.append(
+                "    DrawingArena<LineRec> _pf_lines_{"
+                "::pineforge::drawing_bound_from_declared_count<LineRec>"
+                f"({self._drawing_caps['line']})}};"
+            )
+            lines.append(
+                "    DrawingArena<BoxRec> _pf_boxes_{"
+                "::pineforge::drawing_bound_from_declared_count<BoxRec>"
+                f"({self._drawing_caps['box']})}};"
+            )
+            lines.append(
+                "    DrawingArena<LabelRec> _pf_labels_{"
+                "::pineforge::drawing_bound_from_declared_count<LabelRec>"
+                f"({self._drawing_caps['label']})}};"
+            )
             lines.append("    DrawingArena<LinefillRec> _pf_linefills_{_PF_DRAWING_UNBOUNDED};")
 
         # 8e. The copies an array or a matrix variable's executions left
