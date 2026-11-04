@@ -214,6 +214,45 @@ class ParameterQualifiers(DiagnosticsHelper):
             self.expressions[key] = self._infer(node, environment)
         return self.expressions[key]
 
+    def _is_chart_member(self, node, namespace, member):
+        """``namespace.member`` with the namespace no script binding shadows."""
+        return (
+            isinstance(node, MemberAccess) and node.member == member
+            and isinstance(node.object, Identifier)
+            and node.object.name == namespace
+            and self.bindings.get(id(node.object)) is None
+        )
+
+    def _is_direction_constant(self, node):
+        """``strategy.direction.long``, ``.short`` or ``.all``."""
+        return (
+            isinstance(node, MemberAccess)
+            and node.member in {"long", "short", "all"}
+            and self._is_chart_member(node.object, "strategy", "direction")
+        )
+
+    def _chart_context_const_request(self, node, environment):
+        """Whether ``node`` is a ``request.security`` through the chart's own
+        symbol and timeframe of a direction constant.
+
+        TradingView accepts the value of such a request where a simple
+        parameter is declared (a probe that passes one to
+        ``strategy.risk.allow_entry_in`` runs on TradingView), so it is not
+        proven series. Every other request stays series: another symbol or
+        timeframe, or an expression that is not a direction constant, was not
+        measured and keeps the refusal the other forms are measured to get."""
+        bound = dict(zip(("symbol", "timeframe", "expression"), node.args))
+        for name, value in node.kwargs.items():
+            if name in ("symbol", "timeframe", "expression"):
+                bound.setdefault(name, value)
+        if len(bound) < 3:
+            return False
+        return (
+            self._is_chart_member(bound["symbol"], "syminfo", "tickerid")
+            and self._is_chart_member(bound["timeframe"], "timeframe", "period")
+            and self._is_direction_constant(bound["expression"])
+        )
+
     def _receiver_hint(self, node, seen=frozenset()):
         """Only source-proven receiver types; unresolved methods stay unknown."""
         if node is None or id(node) in seen:
@@ -381,6 +420,9 @@ class ParameterQualifiers(DiagnosticsHelper):
                 )
                 if namespace == "input":
                     return _SERIES if member == "source" else _INPUT
+                if (namespace == "request" and member == "security"
+                        and self._chart_context_const_request(node, environment)):
+                    return _SIMPLE
                 if namespace in {"array", "matrix", "map", "ta", "request"}:
                     return _SERIES
                 if namespace == "math" and member in {"random", "sum"}:
