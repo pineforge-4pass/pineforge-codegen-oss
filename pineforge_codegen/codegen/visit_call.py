@@ -159,6 +159,7 @@ from ..security_contexts import ticker_symbol_arg
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from ..method_binding import (
     MethodBindError,
+    _written_actuals,
     bind_function_defaults,
     bind_method_call,
     signature_from_callable,
@@ -1564,6 +1565,19 @@ class CallVisitor:
                 return True
         return False
 
+    def _expr_contains_user_call(self, node) -> bool:
+        """Whether an expression calls a user function or method, which may
+        have effects: C++ leaves the order of sibling call arguments
+        unspecified (g++ evaluates the right one first), where Pine evaluates
+        them as written."""
+        if node is None:
+            return False
+        return any(
+            isinstance(part, FuncCall)
+            and self._map_effect_callable_info(part, {})[1] is not None
+            for part in self._walk_ast(node)
+        )
+
     def _ordered_user_call_expr(
         self,
         call_head: str,
@@ -2347,10 +2361,13 @@ class CallVisitor:
                 cpp_type = self._type_spec_to_cpp(spec)
                 elem_spec = spec.element if spec.element is not None else TypeSpec.primitive("float")
                 self._reject_unknown_element_type(node, elem_spec)
-                # Pine's omitted float fill is typed na, like an explicit na.
+                # Pine's omitted numeric fill is typed na, like an explicit na:
+                # float and int arrays alike (the elements of array.new<int>(size)
+                # and array.new_int(size) are na, not 0).
                 init_default = (
                     self._array_init_value_expr(elem_spec, NaLiteral())
-                    if elem_spec.kind == "primitive" and elem_spec.name == "float"
+                    if elem_spec.kind == "primitive"
+                    and elem_spec.name in ("float", "int", "int64")
                     else self._default_for_spec(elem_spec)
                 )
                 arguments = self._collection_arg_nodes(
@@ -2364,8 +2381,7 @@ class CallVisitor:
                         init_val = self._array_init_value_expr(elem_spec, arguments[1])
                     else:
                         init_val = init_default
-                    return (
-                        "[&](auto _pf_array_new_size, auto _pf_array_new_value){ "
+                    construct = (
                         "using _pf_array_new_size_type=decltype(_pf_array_new_size); "
                         "if constexpr(!std::is_same_v<_pf_array_new_size_type,bool>) { "
                         "if(is_na(_pf_array_new_size)) "
@@ -2378,7 +2394,40 @@ class CallVisitor:
                         "} catch (const std::length_error& _pf_array_new_error) { "
                         '_PF_ARRAY_STOP("size_invalid", "new", _pf_array_new_error.what()); '
                         f"return {cpp_type}(); }} "
-                        f"}}(({size_arg}), ({init_val}))"
+                    )
+                    if (len(arguments) > 1 and arguments[1] is not None
+                            and (self._expr_contains_user_call(arguments[0])
+                                 or self._expr_contains_user_call(arguments[1]))):
+                        # Pine evaluates a call's arguments as they are written.
+                        # C++ leaves the order of a call's arguments unspecified
+                        # (g++ runs the right one first), so a call that may
+                        # have effects binds the argument written first before
+                        # the other is evaluated: the size, unless the fill is
+                        # written before it (``initial_value=f(), size=g()``).
+                        written = [id(part) for part in _written_actuals(node)]
+                        fill_first = (
+                            id(arguments[0]) in written
+                            and id(arguments[1]) in written
+                            and written.index(id(arguments[1]))
+                            < written.index(id(arguments[0]))
+                        )
+                        if fill_first:
+                            return (
+                                "[&](auto _pf_array_new_value){ "
+                                "return [&](auto _pf_array_new_size){ "
+                                + construct
+                                + f"}}(({size_arg})); }}(({init_val}))"
+                            )
+                        return (
+                            "[&](auto _pf_array_new_size){ "
+                            "return [&](auto _pf_array_new_value){ "
+                            + construct
+                            + f"}}(({init_val})); }}(({size_arg}))"
+                        )
+                    return (
+                        "[&](auto _pf_array_new_size, auto _pf_array_new_value){ "
+                        + construct
+                        + f"}}(({size_arg}), ({init_val}))"
                     )
                 return f"{cpp_type}()"
             if func_name == "from":
