@@ -5374,6 +5374,19 @@ class TypeInferer:
             cpp_type = "int64_t"
         return cpp_type if cpp_type in (*NA_PRESERVING_INT_TYPES, "bool") else None
 
+    def _udt_field_is_string(self, target_node) -> bool:
+        """Whether a UDT field write target is a ``string`` field (a C++
+        ``std::string``)."""
+        if not isinstance(target_node, MemberAccess):
+            return False
+        owner = self._type_spec_from_expr(target_node.object)
+        if owner is None or owner.kind != "udt" or not owner.name:
+            return False
+        spec = (self._udt_field_type_specs.get(owner.name) or {}).get(
+            target_node.member
+        )
+        return spec is not None and self._type_spec_to_cpp(spec) == "std::string"
+
     def _udt_field_is_double(self, target_node) -> bool:
         """Whether a UDT field write target is a ``float`` field (a C++
         ``double``)."""

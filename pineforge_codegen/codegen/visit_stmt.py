@@ -1259,6 +1259,11 @@ class StmtVisitor:
                 target_cpp_type = self._udt_target_cpp_type(
                     target_node=node.target,
                 )
+            if (target_cpp_type is None and self._is_na_expr(node.value)
+                    and self._udt_field_is_string(node.target)):
+                # A bare na assigned to a string field is the typed string na,
+                # not the numeric ``na<double>()`` (a char conversion).
+                target_cpp_type = "std::string"
             val_cpp = self._visit_rhs_value(
                 node.value, target_cpp_type=target_cpp_type
             )

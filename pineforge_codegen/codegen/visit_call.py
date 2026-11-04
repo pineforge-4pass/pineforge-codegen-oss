@@ -3196,7 +3196,11 @@ class CallVisitor:
                                         and ("field", namespace, f.name)
                                             in self._array_widths.wide)
                                     or f_cpp_type in self._udt_defs
-                                    or f_cpp_type in DRAWING_TYPE_TO_CPP.values())
+                                    or f_cpp_type in DRAWING_TYPE_TO_CPP.values()
+                                    # A bare na for a string field is the typed
+                                    # string na, not the numeric ``na<double>()``.
+                                    or (f_cpp_type == "std::string"
+                                        and self._is_na_expr(value_node)))
                                 else None
                             ),
                         )
