@@ -571,6 +571,25 @@ class TypeInferer:
         "push": (1, 0), "unshift": (1, 0), "set": (2, 1), "insert": (2, 1),
         "fill": (1, 0),
     }
+    # Element reads whose checked lowering returns a stored element or stops
+    # the run (an empty receiver, an na or out-of-range index): none makes an
+    # na of its own, unlike ``min`` / ``max`` on an empty array.
+    _PRESENT_ARRAY_ELEMENT_READS = frozenset({
+        "get", "first", "last", "pop", "shift", "remove",
+    })
+    # Built-in array methods after which a receiver holds only values it
+    # already held: element reads, removals, reorderings and aggregates.
+    # ``slice`` (a view on TradingView) and ``concat`` (appends another
+    # array's elements) are absent; a stored value is ``_ARRAY_ELEMENT_WRITERS``.
+    _ELEMENT_PRESERVING_ARRAY_USES = frozenset({
+        "get", "first", "last", "pop", "shift", "remove", "clear", "size",
+        "includes", "indexof", "lastindexof", "sort", "reverse", "copy",
+        "sum", "avg", "min", "max", "range", "median", "mode", "stdev",
+        "variance", "every", "some", "join", "abs", "standardize",
+        "sort_indices", "covariance", "percentrank",
+        "percentile_linear_interpolation", "percentile_nearest_rank",
+        "binary_search", "binary_search_leftmost", "binary_search_rightmost",
+    })
 
     @staticmethod
     def _int_fits_int32(value: int) -> bool:
@@ -1119,11 +1138,517 @@ class TypeInferer:
         return True
 
     def _integer_na_operand(self, node) -> bool:
-        """An emitted integer expression whose value can be missing."""
+        """An emitted integer expression whose physical value can be missing."""
         return (node is not None
+                # Pine bools can occupy legacy numeric storage. That storage
+                # does not give them an integer missing-value sentinel.
+                and self._text_type(node) != "bool"
                 and not self._emitted_value_is_double(node)
                 and self._infer_type(node) in ("int", "int64_t", "double")
+                and not self._integer_slot_value_is_present(node)
                 and self._int_operand_may_be_na(node))
+
+    def _integer_slot_value_is_present(self, node) -> bool:
+        """Prove integer presence without losing the physical slot's sentinel.
+
+        Follow declaration identities and every write, rather than treating a
+        mutable name as nullable merely because it is mutable. Pine-value
+        presence alone cannot prove a narrowing int32 store safe: every write
+        to such a slot must also have a constant range proof excluding INT_MIN.
+        A visited dependency closes only the presence walk, never that range
+        proof. History, unknown calls and unproved parameters remain nullable.
+        An element read follows the values its array was given only for a
+        fresh array no reference lets escape (``_present_array_element_sources``).
+        This query owns no alias cache and does not change the shared NA walk.
+        """
+        owner = self._func_info_map.get(
+            getattr(self, "_active_func_name", "") or "")
+        pending = [(node, owner)]
+        seen = set()
+        storage_receipts = {}
+        declaration_reads = {}
+        member_families = None
+        budget = getattr(self, "_budget", None)
+        while pending:
+            value, lexical_owner = pending.pop()
+            key = (id(value), getattr(lexical_owner, "name", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            if budget is not None and len(seen) % 128 == 0:
+                budget.check(getattr(value, "loc", None), Phase.CODEGEN)
+            if isinstance(value, NumberLiteral):
+                # A floating initializer/write can narrow to the integer
+                # sentinel; leave that conversion to the existing guards.
+                if not isinstance(value.value, int):
+                    return False
+                continue
+            if isinstance(value, (BoolLiteral, ColorLiteral)):
+                continue
+            if isinstance(value, ExprStmt):
+                pending.append((value.expr, lexical_owner))
+                continue
+            if isinstance(value, VarDecl):
+                # A declaration tail yields the stored value, not its RHS.
+                # Retain the synthetic read and its exact declaration locally;
+                # it must neither bind an outer parameter nor reuse an id.
+                read = self._statement_value_node(value)
+                if not isinstance(read, Identifier):
+                    return False
+                declaration_reads[id(read)] = read, value
+                pending.append((read, lexical_owner))
+                continue
+            if isinstance(value, Assignment):
+                if value.op not in (":=", "+=", "-=", "*="):
+                    return False
+                # Every assignment tail reads its destination after the write.
+                pending.extend(((value.target, lexical_owner),
+                                (value.value, lexical_owner)))
+                continue
+            if isinstance(value, FuncCall):
+                # A user callable yields its body's terminal value. Its
+                # parameters read the actuals of every written call
+                # (``_int_boundary_inputs``), so that value is present when
+                # each source those reach is. Overloaded names are unproved.
+                callees = self._wide_callable_args(value)
+                if callees:
+                    result_cpp_type = self._infer_type(value)
+                    if result_cpp_type not in ("int", "int64_t", "double", "bool"):
+                        return False
+                    for info, _bound in callees:
+                        terminal = self._selection_terminal_expr(
+                            info.node.body if info.node is not None else None)
+                        if (terminal is None
+                                or sum(other.name == info.name
+                                       for other in self.ctx.func_infos) != 1):
+                            return False
+                        if (result_cpp_type == "int"
+                                and self._integer_presence_int32_constant(terminal) is None):
+                            # A finite body value can still narrow to INT_MIN
+                            # at the callable's physical return boundary.
+                            return False
+                        pending.append((terminal, info))
+                    continue
+                elements = self._present_array_element_sources(value)
+                if elements is not None:
+                    # A checked element read of a fresh array returns one of
+                    # the values its array was given, or stops the run.
+                    pending.extend(elements)
+                    continue
+            if isinstance(value, Identifier):
+                stored = declaration_reads.get(id(value))
+                if stored is not None:
+                    declaration = id(stored[1]), value.name
+                else:
+                    declaration = (
+                        self.ctx.identifier_decl_bindings[id(value)]
+                        if id(value) in self.ctx.identifier_decl_bindings
+                        else ValueBindings.declaration_of(value)
+                    )
+                if (lexical_owner is not None
+                        and value.name in lexical_owner.node.params
+                        and declaration in (
+                            None, (id(lexical_owner.node), value.name))):
+                    index = lexical_owner.node.params.index(value.name)
+                    actuals = self._int_boundary_inputs()[0].get(
+                        (lexical_owner.name, index), ())
+                    if not actuals:
+                        return False
+                    cpp_type = self._integer_presence_parameter_cpp_type(
+                        lexical_owner, index)
+                    if cpp_type is None:
+                        return False
+                    if (cpp_type == "int"
+                            and any(self._integer_presence_int32_constant(arg) is None
+                                    for arg, _caller, _written in actuals)):
+                        return False
+                    pending.extend((arg, caller) for arg, caller, _written in actuals)
+                    continue
+                binding = self._int_value_binding(
+                    value, lexical_owner, stored[1] if stored is not None else None)
+                if binding is not None:
+                    binding_key = ("binding", binding[0])
+                    if binding_key in seen:
+                        continue
+                    seen.add(binding_key)
+                    if not binding[1]:
+                        return False
+                    if binding[0][0] in self._tuple_decl_nodes:
+                        # A tuple's value owner can be its callee, rather than
+                        # the owner of the storage receiving that value.
+                        return False
+                    binding_owner = binding[1][0][1]
+                    scope = getattr(binding_owner, "name", "")
+                    if scope not in storage_receipts:
+                        body = (binding_owner.node.body if binding_owner is not None
+                                else [stmt for stmt in self.ctx.ast.body
+                                      if not isinstance(stmt, (FuncDef, MethodDef))])
+                        declarations, declaration_counts, updates = {}, {}, {}
+                        for stmt in self._walk_ast_list(body):
+                            if isinstance(stmt, VarDecl):
+                                declarations[id(stmt)] = stmt
+                                declaration_counts[stmt.name] = (
+                                    declaration_counts.get(stmt.name, 0) + 1)
+                            if (not isinstance(stmt, Assignment)
+                                    or not isinstance(stmt.target, Identifier)
+                                    or stmt.op == ":="):
+                                continue
+                            target = self._int_value_binding(stmt.target, binding_owner)
+                            if target is None:
+                                return False
+                            # The value inventory contains a compound write's
+                            # RHS, not its result or its physical store range.
+                            updates.setdefault(target[0], set()).add(stmt.op)
+                        storage_receipts[scope] = declarations, declaration_counts, updates
+                    declarations, declaration_counts, updates = storage_receipts[scope]
+                    if member_families is None:
+                        member_families = {}
+                        for name, ptype, _init in self.ctx.var_members:
+                            member_families[name] = (
+                                ptype if name not in member_families else None)
+                    declaration = declarations.get(binding[0][0])
+                    cpp_type = self._integer_presence_storage_cpp_type(
+                        declaration, binding_owner, declaration_counts, member_families)
+                    if cpp_type is None:
+                        return False
+                    operations = updates.get(binding[0], set())
+                    if operations - {"+=", "-=", "*="}:
+                        # Division/remainder can create NaN even with a
+                        # present RHS, regardless of the destination width.
+                        return False
+                    if (cpp_type == "int"
+                            and (operations
+                                 or any(self._integer_presence_int32_constant(source) is None
+                                        for source, _owner in binding[1]))):
+                        # Neither an initializer nor a cycle of present
+                        # dependencies bounds a mutable int32 slot.
+                        return False
+                    pending.extend(binding[1])
+                    continue
+                if self._int_operand_may_be_na(value, lexical_owner):
+                    return False
+                continue
+            if isinstance(value, UnaryOp) and value.op in ("+", "-"):
+                pending.append((value.operand, lexical_owner))
+                continue
+            if isinstance(value, BinOp) and value.op in ("+", "-", "*", "/", "%"):
+                if value.op in ("/", "%"):
+                    divisor = self._pure_int_literal_value(value.right, names=False)
+                    if divisor is None or divisor == 0:
+                        return False
+                pending.extend(((value.left, lexical_owner),
+                                (value.right, lexical_owner)))
+                continue
+            if isinstance(value, Ternary):
+                pending.extend(((value.true_val, lexical_owner),
+                                (value.false_val, lexical_owner)))
+                continue
+            if isinstance(value, (IfStmt, SwitchStmt)):
+                bodies = ([value.body, value.else_body] if isinstance(value, IfStmt)
+                          else [*(body for _case, body in value.cases),
+                                value.default_body])
+                if any(not body for body in bodies):
+                    return False
+                pending.extend((self._selection_terminal_expr(body), lexical_owner)
+                               for body in bodies)
+                continue
+            # In particular, never prove a history read from the initializer
+            # of its current slot: the first history value is still missing.
+            if value is None or isinstance(value, (NaLiteral, Subscript)):
+                return False
+            if self._int_operand_may_be_na(value, lexical_owner):
+                return False
+        return True
+
+    def _integer_presence_int32_constant(self, node) -> int | None:
+        """A literal expression whose every intermediate avoids int32 na.
+
+        This is a physical range proof, independent of the presence walk.
+        Names, actuals forwarded through names, calls and recurrences are
+        deliberately unproved; revisiting a binding cannot establish a bound.
+        Requiring each intermediate to fit also avoids proving a cancellation
+        whose emitted integer arithmetic could overflow before the store.
+        """
+        if isinstance(node, NumberLiteral) and type(node.value) is int:
+            value = node.value
+        elif isinstance(node, UnaryOp) and node.op in ("+", "-"):
+            operand = self._integer_presence_int32_constant(node.operand)
+            if operand is None:
+                return None
+            value = -operand if node.op == "-" else operand
+        elif isinstance(node, BinOp) and node.op in ("+", "-", "*"):
+            left = self._integer_presence_int32_constant(node.left)
+            right = self._integer_presence_int32_constant(node.right)
+            if left is None or right is None:
+                return None
+            value = (left + right if node.op == "+"
+                     else left - right if node.op == "-" else left * right)
+        else:
+            return None
+        return value if -(1 << 31) < value < (1 << 31) else None
+
+    def _integer_presence_parameter_cpp_type(self, owner, index: int) -> str | None:
+        """The parameter's emitted family, rather than its Pine int type."""
+        name = owner.node.params[index]
+        active = self._func_info_map.get(
+            getattr(self, "_active_func_name", "") or "")
+        if owner is active:
+            if name in self._current_func_series_params:
+                return self._current_func_series_param_types.get(name)
+            cpp_type = self._current_func_param_types.get(name)
+        else:
+            # With no active variant receipt, accept only the shared family.
+            cpp_type = self._func_param_int_cpp_type(owner, index, None)
+        return cpp_type if cpp_type in ("int", "int64_t", "double", "bool") else None
+
+    def _integer_presence_storage_cpp_type(
+        self, declaration, owner, declaration_counts, member_families,
+    ) -> str | None:
+        """Read an exact declaration's physical scalar storage receipt.
+
+        Persistent members have declaration-specific metadata even outside
+        their callable. Plain locals need their active emission context; an
+        inactive callable's Pine type or another same-spelled declaration is
+        insufficient evidence of its C++ width.
+        """
+        if not isinstance(declaration, VarDecl):
+            return None
+        metadata = self.ctx.var_member_metadata_by_node.get(id(declaration))
+        if metadata is not None and metadata[0] is declaration:
+            member = metadata[1]
+            family = member_families.get(member)
+            if family is None:
+                return None
+            cpp_type = PINE_TYPE_TO_CPP.get(family, "double")
+            if cpp_type == "int":
+                if self._numeric_na_member(member):
+                    return "double"
+                if self._is_int64_builtin_init(declaration.name, declaration):
+                    return "int64_t"
+            return cpp_type if cpp_type in ("int", "int64_t", "double", "bool") else None
+        active = self._func_info_map.get(
+            getattr(self, "_active_func_name", "") or "")
+        if (owner is not active
+                or declaration_counts.get(declaration.name) != 1):
+            return None
+        if owner is not None:
+            # The local map records the declaration actually emitted. Do not
+            # infer an inactive/local history slot from a global symbol.
+            cpp_type = self._current_func_local_types.get(declaration.name)
+        elif id(declaration) in self._ordinary_global_var_decl_nodes:
+            cpp_type = self._int_slot_cpp_type(declaration.name)
+        else:
+            return None
+        return cpp_type if cpp_type in ("int", "int64_t", "double", "bool") else None
+
+    def _present_array_element_sources(self, call):
+        """Every value a checked element read of a fresh array can return.
+
+        ``get``, ``first``, ``last``, ``pop``, ``shift`` and ``remove`` return
+        a stored element or stop the run on an empty array or an invalid
+        index. The receiver must be a declaration of
+        ``_fresh_array_element_inventory`` whose element slot the shared width
+        plan makes 64-bit, for its declaration and its name alike, so a store
+        keeps a present integer exactly. The plan registers a name only when
+        its scope declares it once, so sibling block declarations sharing one
+        member are never proved. A 32-bit element slot does not keep
+        a present value past int32 (its store narrows the value), and this
+        proof has no range proof for such stores, so their reads keep their
+        guards. A literal source must differ from the 64-bit slot's own na
+        (its minimum). None when any of this is not shown.
+        """
+        use = self._array_method_receiver(call)
+        if use is None or use[1] not in self._PRESENT_ARRAY_ELEMENT_READS:
+            return None
+        receiver = use[0]
+        bindings = self.ctx.identifier_decl_bindings
+        declaration = (bindings[id(receiver)] if id(receiver) in bindings
+                       else ValueBindings.declaration_of(receiver))
+        entry = self._fresh_array_element_inventory().get(declaration)
+        plan = getattr(self, "_array_widths", None)
+        if entry is None or plan is None:
+            return None
+        decl, owner, sources = entry
+        slots = plan.nodes.get(id(decl), set())
+        scope = owner.name if owner is not None else ""
+        if (not slots or plan.wide.isdisjoint(slots)
+                or not slots <= plan.names.get((scope, decl.name), set())):
+            return None
+        for source, _owner in sources:
+            literal = self._pure_int_literal_value(source, names=False)
+            if literal is not None and not -(1 << 63) < literal < (1 << 63):
+                return None
+        return list(sources)
+
+    def _fresh_array_element_inventory(self):
+        """Fresh arrays whose every reference reads or fills them in place.
+
+        Keyed by declaration identity: ``(declaration, owner, sources)``. A
+        declaration qualifies when each value it takes (its initializer and
+        every ``:=``) is an integer-array constructor and each authored
+        reference to it is the receiver of a built-in array method, called
+        without keywords, that reads, removes or reorders its elements
+        (``_ELEMENT_PRESERVING_ARRAY_USES``) or stores one value
+        (``_ARRAY_ELEMENT_WRITERS``). The sources are the constructors'
+        elements and the stored values, with their lexical owners. Any other
+        reference (an alias, an argument, a returned or selected value, a
+        field, history, a loop, a ``slice`` view, ``concat``, a keyword form
+        or a method the script declares) leaves the declaration out, as does
+        a constructor whose elements default to na and a name in a callable
+        without one analyzed identity. It reads syntax and analyzer bindings
+        only, so it is computed once.
+        """
+        cached = getattr(self, "_fresh_array_element_inventory_cache", None)
+        if cached is not None:
+            return cached
+        infos, shared = {}, set()
+        for info in self.ctx.func_infos:
+            if info.node is not None:
+                if id(info.node) in infos:
+                    shared.add(id(info.node))
+                infos[id(info.node)] = info
+        callables = [*(info.node for info in infos.values()),
+                     *(statement for statement in self.ctx.ast.body
+                       if isinstance(statement, (FuncDef, MethodDef)))]
+        user_methods = {node.name for node in callables
+                        if isinstance(node, MethodDef)}
+        unowned = set()
+
+        def defaults(node):
+            # Parameter defaults are syntax kept in annotations, which
+            # ``iter_ast_nodes`` skips (``method_binding`` walks them too).
+            return [default for default in
+                    (node.annotations or {}).get("param_defaults", ())
+                    if isinstance(default, ASTNode)]
+
+        def disown(root):
+            for child, _depth in iter_ast_nodes(root):
+                if isinstance(child, Identifier):
+                    unowned.add(child.name)
+                elif isinstance(child, (FuncDef, MethodDef)):
+                    for default in defaults(child):
+                        disown(default)
+
+        for node in callables:
+            if id(node) not in infos or id(node) in shared:
+                disown(node)
+        roots = [(statement, None) for statement in self.ctx.ast.body
+                 if not isinstance(statement, (FuncDef, MethodDef))]
+        for node_id, info in infos.items():
+            if node_id not in shared:
+                roots.append((info.node, info))
+                # A default reads only the script's top level.
+                roots.extend((default, None) for default in defaults(info.node))
+        declarations, assignments, receivers, references = {}, {}, {}, {}
+        for root, owner in roots:
+            for node, _depth in iter_ast_nodes(root):
+                if isinstance(node, (FuncDef, MethodDef)):
+                    if node is not root:
+                        # A nested callable has no lexical owner of its own.
+                        if isinstance(node, MethodDef):
+                            user_methods.add(node.name)
+                        disown(node)
+                elif isinstance(node, VarDecl):
+                    declarations[(id(node), node.name)] = (node, owner)
+                elif isinstance(node, Identifier):
+                    references.setdefault(node.name, []).append(node)
+                elif isinstance(node, Assignment):
+                    if isinstance(node.target, Identifier):
+                        assignments[id(node.target)] = (node, owner)
+                elif isinstance(node, FuncCall):
+                    use = self._array_method_receiver(node)
+                    if use is not None:
+                        receivers[id(use[0])] = (node, use[1], use[2], owner)
+        bindings = self.ctx.identifier_decl_bindings
+        inventory = {}
+        for key, (decl, owner) in declarations.items():
+            elements = self._fresh_int_array_elements(decl.value)
+            if elements is None or decl.name in unowned:
+                continue
+            sources = [(element, owner) for element in elements]
+            for node in references.get(decl.name, ()):
+                found = (bindings[id(node)] if id(node) in bindings
+                         else ValueBindings.declaration_of(node))
+                if found is not None and found != key:
+                    continue
+                write = assignments.get(id(node))
+                use = receivers.get(id(node))
+                if write is not None:
+                    values = (self._fresh_int_array_elements(write[0].value)
+                              if write[0].op == ":=" else None)
+                    if values is None:
+                        break
+                    sources.extend((value, write[1]) for value in values)
+                elif use is not None:
+                    call, method, arguments, use_owner = use
+                    if (call.kwargs or method in user_methods
+                            or self._wide_callable_args(call)):
+                        break
+                    if method in self._ARRAY_ELEMENT_WRITERS:
+                        index = self._ARRAY_ELEMENT_WRITERS[method][1]
+                        if index >= len(arguments):
+                            break
+                        sources.append((arguments[index], use_owner))
+                    elif method not in self._ELEMENT_PRESERVING_ARRAY_USES:
+                        break
+                else:
+                    break
+            else:
+                inventory[key] = (decl, owner, sources)
+        self._fresh_array_element_inventory_cache = inventory
+        return inventory
+
+    def _fresh_int_array_elements(self, value):
+        """The elements an integer-array constructor stores, else None.
+
+        ``array.from`` stores its arguments; ``array.new_int`` and
+        ``array.new<int>`` store ``initial_value`` (na when omitted) in each
+        slot, and nothing when ``size`` is omitted or 0.
+        """
+        if not (isinstance(value, FuncCall)
+                and isinstance(value.callee, MemberAccess)
+                and isinstance(value.callee.object, Identifier)
+                and self._is_array_namespace(value.callee.object)):
+            return None
+        method = value.callee.member
+        if method == "from":
+            return None if value.kwargs else list(value.args)
+        if not (method == "new_int" or (
+                method == "new"
+                and self._template_args_from_call(value) == ["int"])):
+            return None
+        arguments = list(value.args)
+        names = ("size", "initial_value")
+        if (len(arguments) > len(names)
+                or set(value.kwargs) - set(names)
+                or any(name in value.kwargs for name in names[:len(arguments)])):
+            return None
+        size = arguments[0] if arguments else value.kwargs.get("size")
+        initial = (arguments[1] if len(arguments) > 1
+                   else value.kwargs.get("initial_value"))
+        if size is None or self._pure_int_literal_value(size, names=False) == 0:
+            return []
+        return None if initial is None else [initial]
+
+    def _array_method_receiver(self, call):
+        """``(receiver, method, arguments)`` of a method call on a bare name
+        in either form, ``array.<method>(name, ...)`` or ``name.<method>(...)``,
+        ``arguments`` being those written after the receiver; else None."""
+        callee = call.callee
+        if (not isinstance(callee, MemberAccess)
+                or not isinstance(callee.object, Identifier)):
+            return None
+        if self._is_array_namespace(callee.object):
+            if not call.args or not isinstance(call.args[0], Identifier):
+                return None
+            return call.args[0], callee.member, list(call.args[1:])
+        return callee.object, callee.member, list(call.args)
+
+    def _is_array_namespace(self, node) -> bool:
+        """Whether this ``array`` names the built-in namespace, not a value."""
+        bindings = self.ctx.identifier_decl_bindings
+        return (node.name == "array" and bindings.get(id(node)) is None
+                and ValueBindings.declaration_of(node) is None)
 
     @staticmethod
     def _tuple_slot_types(cpp_type: str | None) -> list[str]:
@@ -1303,6 +1828,25 @@ class TypeInferer:
                            for arg in expr.args)
         return False
 
+    @staticmethod
+    def _int_boundary_body_calls(body):
+        """Full syntax calls and whether the partition still proves their owner.
+
+        Bodies are partitioned by callable before this walk. A nested callable
+        is not owned by that partition: retain its calls as unproved actuals,
+        rather than borrowing an enclosing parameter or guessing global scope.
+        """
+        for stmt in body:
+            unproved_depth = None
+            for node, depth in iter_ast_nodes(stmt):
+                if unproved_depth is not None and depth <= unproved_depth:
+                    unproved_depth = None
+                if isinstance(node, (FuncDef, MethodDef)):
+                    if unproved_depth is None:
+                        unproved_depth = depth
+                elif isinstance(node, FuncCall):
+                    yield node, unproved_depth is None
+
     def _int_boundary_inputs(self):
         """Actuals and array writes, keyed by parameter or declaration identity."""
         cached = getattr(self, "_int_boundary_inputs_cache", None)
@@ -1310,13 +1854,30 @@ class TypeInferer:
             return cached
         parameters, arrays = {}, {}
         bodies = [(None, [stmt for stmt in self.ctx.ast.body
-                          if not isinstance(stmt, (FuncDef, MethodDef))])]
-        bodies.extend((info, info.node.body) for info in self.ctx.func_infos
+                          if not isinstance(stmt, (FuncDef, MethodDef))], True)]
+        bodies.extend((info, info.node.body, True) for info in self.ctx.func_infos
                       if info.node is not None)
-        for owner, body in bodies:
-            for call in self._walk_ast_list(body):
-                if not isinstance(call, FuncCall):
+        # Defaults are syntax stored in annotations, outside iter_ast_nodes.
+        # Include nested and unanalyzed callables, and synthetic analyzed copies.
+        roots = [self.ctx.ast, *(info.node for info in self.ctx.func_infos
+                                if info.node is not None)]
+        defaults, seen_defaults = [], set()
+        while roots:
+            for node, _depth in iter_ast_nodes(roots.pop()):
+                if not isinstance(node, (FuncDef, MethodDef)):
                     continue
+                for default in (node.annotations or {}).get("param_defaults", ()):
+                    if (isinstance(default, ASTNode)
+                            and id(default) not in seen_defaults):
+                        seen_defaults.add(id(default))
+                        defaults.append(default)
+                        roots.append(default)
+        # A body partition does not prove a default's binding owner. Record
+        # unknown actuals rather than borrow an enclosing callable or global.
+        bodies.append((None, defaults, False))
+        for owner, body, partition_proved in bodies:
+            for call, owner_proved in self._int_boundary_body_calls(body):
+                owner_proved = owner_proved and partition_proved
                 for info, bound in self._wide_callable_args(call):
                     for index, value in bound:
                         if isinstance(call.callee, MemberAccess):
@@ -1332,7 +1893,8 @@ class TypeInferer:
                                 index < len(call.args)
                                 or info.node.params[index] in call.kwargs)
                         parameters.setdefault((info.name, index), []).append(
-                            (value, owner, written))
+                            (value, owner, written) if owner_proved
+                            else (None, None, written))
                 pair = self._array_receiver_and_value(call)
                 if pair is None:
                     continue
@@ -1340,9 +1902,17 @@ class TypeInferer:
                 receiver = (
                     (call.args[0] if call.args else call.kwargs.get("id"))
                     if namespace == "array" else call.callee.object)
-                binding = self._int_value_binding(receiver, owner)
+                if owner_proved:
+                    binding = self._int_value_binding(receiver, owner)
+                else:
+                    # Only an exact declaration receipt can identify a write
+                    # across an unproved owner. Its value proves no width or
+                    # presence; do not resolve it in the enclosing scope.
+                    declaration = self.ctx.identifier_decl_bindings.get(id(receiver))
+                    binding = (declaration, ()) if declaration is not None else None
                 if binding is not None:
-                    arrays.setdefault(binding[0], []).append((pair[1], owner))
+                    arrays.setdefault(binding[0], []).append(
+                        (pair[1], owner) if owner_proved else (None, None))
         self._int_boundary_inputs_cache = parameters, arrays
         return parameters, arrays
 
@@ -4831,9 +5401,14 @@ class TypeInferer:
                      or (target_cpp_type == "int"
                          and self._udt_field_may_hold_na(node, owner)))):
             source_cpp_type = self._udt_field_int_cpp_type(node) or source_cpp_type
-        if (isinstance(node, Identifier)
-                and self._is_int64_builtin_init(node.name)):
-            source_cpp_type = "int64_t"
+        if isinstance(node, Identifier):
+            declaration = self.ctx.identifier_binding_nodes.get(id(node))
+            if ((isinstance(declaration, VarDecl)
+                 and self._is_int64_builtin_init(node.name, declaration))
+                    or (declaration is None
+                        and id(node) not in self.ctx.identifier_decl_bindings
+                        and self._is_int64_builtin_init(node.name))):
+                source_cpp_type = "int64_t"
         if (source_cpp_type in NA_PRESERVING_INT_TYPES
                 and source_cpp_type != target_cpp_type):
             return na_preserving_int_cast(cpp_val, target_cpp_type)
@@ -4851,6 +5426,13 @@ class TypeInferer:
         Packed colors in a nullable ternary still need an integer-na conversion.
         A double, an integer literal or an expression of literals (a constant
         a double holds exactly narrows) and a bare na keep their spelling."""
+        if node is not None:
+            if self._text_type(node) == "bool":
+                # Direct callers include braced float-field initializers,
+                # which need an explicit conversion even for a finite bool.
+                return f"(double)({self._bool_text_condition(node, cpp_val)})"
+            if self._infer_type(node) not in ("int", "int64_t", "double"):
+                return cpp_val
         constant = self._pure_int_literal_value(node)
         # Integral selections such as packed colors retain a typed sentinel;
         # ordinary nullable numeric ternaries already emit a floating NaN.

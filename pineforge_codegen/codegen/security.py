@@ -4477,8 +4477,20 @@ class SecurityEmitter:
         """Resolve integer missingness on the same bindings as the evaluator."""
         if node is None or depth > 64:
             return node is not None
+        if self._text_type(node) == "bool":
+            return False
         if self._security_emits_double(node, bindings):
             return False
+        if isinstance(node, Subscript) and isinstance(node.object, Identifier):
+            if not self._security_identifier_is_global_binding(node.object):
+                context = self._security_lookup_helper_binding_context(
+                    node.object.name, bindings)
+                if context is not None and isinstance(context[0], str):
+                    series = self._security_series_binding_target(context[0])
+                    if (series is not None
+                            and series not in self._security_string_series
+                            and series not in self._security_color_series):
+                        return False
         if isinstance(node, Identifier):
             if not self._security_identifier_is_global_binding(node):
                 context = self._security_lookup_helper_binding_context(node.name, bindings)
@@ -4502,9 +4514,36 @@ class SecurityEmitter:
             if plan["mode"] != "linear":
                 return self._security_integer_na_operand(
                     plan["expr"], plan["binding_stack"], depth + 1)
-            # A materialized integer result can be missing even when its
-            # chart-side return inference uses a floating fallback.
-            return self._infer_type(node) in ("int", "int64_t", "double")
+            final = plan["expr"]
+            if isinstance(final, Identifier):
+                declaration = self.ctx.identifier_binding_nodes.get(id(final))
+                if (declaration is None
+                        and id(final) not in self.ctx.identifier_decl_bindings):
+                    # Value-producing declaration/assignment tails have a
+                    # synthetic read. Only an unambiguous declaration of this
+                    # helper's own top-level block can supply its storage.
+                    declarations = [
+                        stmt for stmt in plan["body"]
+                        if isinstance(stmt, VarDecl) and stmt.name == final.name
+                    ]
+                    if len(declarations) == 1:
+                        declaration = declarations[0]
+                if (isinstance(declaration, VarDecl)
+                        and any(declaration is stmt for stmt in plan["body"])
+                        and (declaration.is_var or declaration.is_varip
+                             or final.name in plan.get("local_series_names", ()))
+                        and not self._security_helper_var_is_color(declaration)
+                        and self._type_for_decl(declaration) != "std::string"):
+                    # Numeric helper history and persistent state are the
+                    # evaluator's Series<double>, including their missing slots.
+                    return False
+            # The materialized result is the final expression as the
+            # evaluator renders it, over the helper's own locals as it stores
+            # them; a local this cannot prove keeps the integer guard.
+            return self._security_integer_na_operand(
+                final,
+                plan["binding_stack"] + (self._security_linear_helper_storage_frame(plan),),
+                depth + 1)
         if isinstance(node, UnaryOp):
             return node.op in ("+", "-") and self._security_integer_na_operand(
                 node.operand, bindings, depth + 1)
@@ -4516,6 +4555,59 @@ class SecurityEmitter:
             return any(self._security_integer_na_operand(side, bindings, depth + 1)
                        for side in sides)
         return self._integer_na_operand(node)
+
+    def _security_linear_helper_storage_frame(self, plan: dict) -> dict:
+        """A linear helper's own locals as its final expression reads them
+        (``_emit_security_linear_helper_call_scoped``), for missingness
+        queries only. Numeric persistent state and history-read locals are
+        the evaluator's Series<double> and a ``double`` local holds NaN, so
+        none carries an integer sentinel. An integer local that no statement
+        of the body reassigns holds its integer initializer's value. Every
+        other local (a reassigned or double-fed integer, a color, a string, a
+        tuple element) binds an opaque local that keeps the integer guard,
+        and every local shadows a same-named outer binding."""
+        func_name = plan["func_info"].name
+        local_series = set(plan.get("local_series_names", ()))
+        reassigned = {
+            self._get_target_name(stmt.target)
+            for stmt in self._walk_ast_list(plan["body"])
+            if isinstance(stmt, Assignment)
+        }
+        stack = plan["binding_stack"]
+        frame: dict = {}
+
+        def double_storage(name: str) -> str:
+            return self._security_series_binding(f"@storage:{func_name}:{name}")
+
+        def unproved(name: str) -> str:
+            return f"@unproved:{func_name}:{name}"
+
+        for stmt in plan["body"]:
+            if isinstance(stmt, TupleAssign):
+                for name in stmt.names:
+                    if name and name != "_":
+                        frame[name] = (double_storage(name) if name in local_series
+                                       else unproved(name))
+                continue
+            if not isinstance(stmt, VarDecl):
+                continue
+            cpp_type = self._type_for_decl(stmt)
+            persistent = stmt.is_var or stmt.is_varip
+            if persistent or stmt.name in local_series:
+                numeric = (cpp_type != "std::string"
+                           and not (persistent and self._security_helper_var_is_color(stmt)))
+                frame[stmt.name] = (double_storage(stmt.name) if numeric
+                                    else unproved(stmt.name))
+            elif cpp_type == "double":
+                frame[stmt.name] = double_storage(stmt.name)
+            elif (cpp_type in ("int", "int64_t")
+                    and stmt.value is not None
+                    and stmt.name not in reassigned
+                    and not self._security_emits_double(stmt.value, stack + (frame,))):
+                frame[stmt.name] = stmt.value
+            else:
+                frame[stmt.name] = unproved(stmt.name)
+        return frame
 
     def _security_helper_series_ref(self, series_name: str) -> str:
         """The map entry holding one helper series (string values in their
@@ -4974,7 +5066,14 @@ class SecurityEmitter:
                         op_char = stmt.op[0]
                         current = _series_expr(series_name, "0")
                         rhs = self._compound_assign_rhs(
-                            current, stmt.op, expr_cpp, stmt.target, stmt.value)
+                            current, stmt.op, expr_cpp, stmt.target, stmt.value,
+                            target_is_double=(
+                                series_name not in self._security_color_series
+                                and series_name not in self._security_string_series),
+                            value_is_double=(
+                                series_name not in self._security_color_series
+                                and series_name not in self._security_string_series),
+                        )
                         if rhs is None:
                             rhs = f"{current} {op_char} {expr_cpp}"
                         lines.append(f'{pad}{ref}.update({rhs});')
