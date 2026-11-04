@@ -150,6 +150,34 @@ def test_chart_body_rejects_missing_unterminated_empty_or_duplicate_members(cpp)
         chart_body(cpp)
 
 
+@pytest.mark.parametrize("persistent", ("", "var ", "varip "))
+def test_timeframe_writes_contribute_values_without_replaying_the_chart(persistent):
+    pine = (HEADER + f'{persistent}string chosen_tf = "240"\n'
+            'chosen_tf := close > open ? "240" : "1440"\n'
+            'got_v = request.security(syminfo.tickerid, chosen_tf, bar_index)\n'
+            'plot(got_v)\n')
+    cpp = transpile(pine)
+    assert registrations(cpp) == [
+        '0, "240", input_tf_, false, false',
+        '1, "1440", input_tf_, false, false',
+    ]
+    configure = member_body(cpp, "void configure_security_evaluators() override")
+    assert "current_bar_" not in configure
+    assert "const std::string _pf_selected_tf = chosen_tf" in chart_body(cpp)
+
+
+@pytest.mark.parametrize("modulus", (2, 3, 5))
+def test_integer_remainder_closes_a_computed_timeframe_inventory(modulus):
+    pine = (HEADER
+            + f'chosen_tf = str.tostring((bar_index % {modulus} + 1) * 120)\n'
+            'got_v = request.security(syminfo.tickerid, chosen_tf, bar_index)\n'
+            'plot(got_v)\n')
+    assert registrations(transpile(pine)) == [
+        f'{index}, "{(index + 1) * 120}", input_tf_, false, false'
+        for index in range(modulus)
+    ]
+
+
 @pytest.mark.parametrize("name,timeframes", (
     ("if-price", ("240", "1D")),
     ("ternary-price", ("240", "1D")),
@@ -364,18 +392,19 @@ def test_loop_local_lower_timeframe_alias_selects_each_iterations_array():
 
 
 @pytest.mark.parametrize("lower_tf", (False, True))
-def test_local_open_timeframe_arm_keeps_the_closed_set_refusal(lower_tf):
+def test_local_open_timeframe_arm_registers_only_when_reached(lower_tf):
     request_name = "security_lower_tf" if lower_tf else "security"
     pine = (HEADER + 'if bar_index > 0\n'
             '    chosen_local = close > open ? str.tostring(bar_index) : "15"\n'
             f'    got_local = request.{request_name}(syminfo.tickerid, chosen_local, close)\n'
             '    strategy.entry("Long", strategy.long)\n')
-    with pytest.raises(CompileError) as caught:
-        transpile(pine)
-    (diagnostic,) = caught.value.diagnostics
-    assert diagnostic.code == "PF-E3111"
-    assert diagnostic.args == {"reason": "the timeframe set is not closed at compile time"}
-    assert (diagnostic.location.line, diagnostic.location.col) == (4, 35)
+    cpp = transpile(pine)
+    assert "runtime_contexts().enable_history();" in cpp
+    assert "_runtime_request_0(chosen_local" in chart_body(cpp)
+    assert not registrations(cpp)
+    setup = member_body(cpp, "void configure_security_evaluators() override")
+    assert "get_or_create" not in setup
+    assert "service.get_or_create" in cpp
 
 
 @pytest.mark.parametrize("name", ("explicit-price", "explicit-parity",
@@ -733,13 +762,16 @@ def test_imported_pure_string_helper_has_the_same_value_inventory():
     ("if", 'if close > open\n    {arm}\nelse\n    "180"\n', 5, 5),
     ("switch", 'switch close > open\n    true => {arm}\n    => "180"\n', 5, 13),
 ))
-def test_computed_string_arm_has_a_located_closed_set_refusal(
+def test_computed_string_arm_uses_runtime_values_and_unknown_reads_still_refuse(
         expression, kind, template, line, column):
-    # A bar counter is unbounded and the unknown name has no value proof.
-    # Expansion locates the arm before the scalar-if refusal.
     pine = (HEADER + 'frame_name() => "75"\n'
             + 'tf_v = ' + template.format(arm=expression)
             + 'got_v = request.security(syminfo.tickerid, tf_v, close)\nplot(got_v)\n')
+    if expression != "unknown_frame":
+        cpp = transpile(pine)
+        assert "_runtime_request_0(tf_v" in chart_body(cpp)
+        assert not registrations(cpp)
+        return
     with pytest.raises(CompileError) as caught:
         transpile(pine)
     (diagnostic,) = caught.value.diagnostics
@@ -762,22 +794,25 @@ def test_computed_string_arm_has_a_located_closed_set_refusal(
     ('frame_text() =>\n    array.push(array.new_int(), 75)\n    "75"\n',
      'close > open ? frame_text() : "180"'),
 ))
-def test_unbounded_stateful_and_unproved_formatting_values_stay_open(setup, expression):
+def test_open_string_values_execute_at_the_authored_request(setup, expression):
     pine = (HEADER + setup + f'chosen_tf = {expression}\n'
             'got_v = request.security(syminfo.tickerid, chosen_tf, close)\n'
             'plot(got_v)\n')
-    with pytest.raises(CompileError) as caught:
-        transpile(pine)
-    assert caught.value.diagnostics[0].code == "PF-E3111"
-    assert caught.value.diagnostics[0].args == {
-        "reason": "the timeframe set is not closed at compile time"}
+    cpp = transpile(pine)
+    if "var string saved_tf" in setup:
+        assert registrations(cpp) == [
+            '0, "75", input_tf_, false, false',
+            '1, "180", input_tf_, false, false',
+        ]
+    else:
+        assert "_runtime_request_0(chosen_tf" in chart_body(cpp)
+        assert not registrations(cpp)
 
 
-def test_value_set_limit_refuses_instead_of_truncating_the_inventory():
+def test_value_set_optimization_limit_falls_back_to_one_runtime_template():
     from pineforge_codegen.limits import MAX_SECURITY_TIMEFRAME_VALUES
 
-    # One more distinct result than the configured capacity, all valid minute
-    # strings. Expected failure is fixed; it is never derived by the interpreter.
+    # This bounds compiler work only. It is not a Pine reached-context rule.
     arms = "\n".join(
         f'    {index} => str.tostring({index + 1})'
         for index in range(MAX_SECURITY_TIMEFRAME_VALUES))
@@ -785,11 +820,10 @@ def test_value_set_limit_refuses_instead_of_truncating_the_inventory():
             + f'\n    => str.tostring({MAX_SECURITY_TIMEFRAME_VALUES + 1})\n'
             'got_v = request.security(syminfo.tickerid, chosen_tf, close)\n'
             'plot(got_v)\n')
-    with pytest.raises(CompileError) as caught:
-        transpile(pine)
-    assert caught.value.diagnostics[0].code == "PF-E3111"
-    assert caught.value.diagnostics[0].args == {
-        "reason": "the timeframe set is not closed at compile time"}
+    cpp = transpile(pine)
+    assert cpp.count(" : pineforge::RuntimeContextEvaluator {") == 1
+    assert not registrations(cpp)
+    assert "_runtime_request_0(chosen_tf" in chart_body(cpp)
 
 
 @pytest.mark.parametrize("persistent", ("var", "varip"))
@@ -1449,15 +1483,23 @@ def test_conditional_helper_persistence_keeps_its_rollback_refusal(persistent):
         transpile(pine)
 
 
-def test_fixed_request_of_same_varip_helper_keeps_its_refusal():
+def test_fixed_and_selected_requests_own_separate_historical_varip_cells():
     pine = (HEADER + "payload() =>\n    varip int saved_v = 0\n"
             "    saved_v += 1\n    saved_v\n"
             'tf_v = close > open ? "45" : "2D"\n'
             'got_v = request.security(syminfo.tickerid, tf_v, payload())\n'
             'fixed_v = request.security(syminfo.tickerid, "30", payload())\n'
             'plot(got_v + fixed_v)\n')
-    with pytest.raises(CompileError, match="helper-local varip state"):
-        transpile(pine)
+    cpp = transpile(pine)
+    cells = []
+    for sec_id in range(3):
+        body = requested_body(cpp, sec_id)
+        keys = set(re.findall(
+            r'_security_helper_series_\["([^"]+saved_v)"\]', body))
+        assert keys
+        assert all(f"_sec{sec_id}_" in key for key in keys)
+        cells.append(keys)
+    assert not (cells[0] & cells[1] or cells[0] & cells[2] or cells[1] & cells[2])
 
 
 @pytest.mark.parametrize("selection", (
@@ -1493,6 +1535,77 @@ def test_other_symbol_with_series_timeframe_preserves_missing_data_lowering(
     assert "register_security_eval" not in actual["cpp"]
     assert "_pf_symbol" not in actual["cpp"]
     assert "_PF_OTHER_SYMBOL_STOP(" in actual["cpp"]
+
+
+@pytest.mark.parametrize("persistent", ("var", "varip"))
+@pytest.mark.parametrize("elements,slots", (
+    ("[runs_v, bar_index]", 2),
+    ("[runs_v, close > open, str.tostring(runs_v)]", 3),
+))
+def test_selected_stateful_helper_tuple_compiles_with_aggregate_slots(
+        persistent, elements, slots):
+    """The selected helper tuple uses its aggregate result member."""
+    from tests._compile import compile_cpp
+
+    names = ", ".join(f"part_{i}" for i in range(slots))
+    pine = (HEADER + "pack_v() =>\n"
+            f"    {persistent} int runs_v = 0\n"
+            "    runs_v += 1\n"
+            f"    {elements}\n"
+            'tf_v = close > open ? "75" : "180"\n'
+            f"[{names}] = request.security(syminfo.tickerid, tf_v, pack_v())\n"
+            'strategy.entry("L", strategy.long, qty = 1 + nz(part_0))\n')
+    cpp = transpile(pine)
+    assert len(registrations(cpp)) == 2
+    assert_selection_tail(
+        cpp,
+        'if (_pf_selected_tf == "75") return _req_sec_0;',
+        'if (_pf_selected_tf == "180") return _req_sec_1;',
+    )
+    for sec_id in (0, 1):
+        assert f"_req_sec_{sec_id}_0" not in cpp
+        assert f"_req_sec_{sec_id} = " in requested_body(cpp, sec_id)
+    compile_cpp(cpp, label=f"selected-helper-tuple-{persistent}-{slots}")
+
+
+@pytest.mark.parametrize("payload", ("[close, open]", "ta.macd(close, 3, 6, 2)"))
+def test_selected_literal_and_ta_tuple_controls_compile(payload):
+    from tests._compile import compile_cpp
+
+    slots = 2 if payload.startswith("[") else 3
+    names = ", ".join(f"part_{i}" for i in range(slots))
+    pine = (HEADER + 'tf_v = close > open ? "75" : "180"\n'
+            f"[{names}] = request.security(syminfo.tickerid, tf_v, {payload})\n"
+            'strategy.entry("L", strategy.long, qty = 1 + nz(part_0))\n')
+    compile_cpp(transpile(pine), label=f"selected-tuple-control-{slots}")
+
+
+@pytest.mark.parametrize("payload,element_type", (
+    ("close", "double"), ("bar_index", "int"), ("close > open", "bool"),
+))
+@pytest.mark.parametrize("alias", (
+    "parts_v = expected_a\n",
+    "copy_a = expected_a\nparts_v = copy_a\n",
+))
+def test_fixed_lower_timeframe_array_alias_control_compiles(
+        payload, element_type, alias):
+    """An unannotated alias retains the selected array's element type."""
+    from tests._compile import compile_cpp
+
+    pine = (HEADER
+            + f'fast_a = request.security_lower_tf(syminfo.tickerid, "5", {payload})\n'
+            + f'slow_a = request.security_lower_tf(syminfo.tickerid, "1", {payload})\n'
+            + "expected_a = close > open ? fast_a : slow_a\n" + alias
+            + "if array.size(parts_v) != array.size(expected_a)\n"
+            '    runtime.error("Selected intrabar count differs")\n'
+            "if array.size(parts_v) > 0\n"
+            "    for index_v = 0 to array.size(parts_v) - 1\n"
+            "        if array.get(parts_v, index_v) != array.get(expected_a, index_v)\n"
+            '            runtime.error("Selected intrabar value differs")\n'
+            'strategy.entry("L", strategy.long, qty = 1 + array.size(parts_v))\n')
+    cpp = transpile(pine)
+    assert f"std::vector<{element_type}> parts_v;" in cpp
+    compile_cpp(cpp, label=f"fixed-lower-tf-alias-{element_type}")
 
 
 @pytest.mark.parametrize("name", ("sma-parity", "history-parity"))
@@ -1716,23 +1829,15 @@ def test_literal_only_boolean_block_selections_inside_helpers_prune_dead_arms(se
     ("str.tostring(0)", "PF-E1092",
      {"timeframe": "0"}, "timeframe magnitude must be positive", 50),
 ))
-def test_unreached_invalid_computed_arm_is_refused_during_translation(
+def test_invalid_computed_arm_emits_a_stop_at_selection(
         arm, code, args, hint, column):
-    # bar_index is never negative in a run; this is still not a literal-only
-    # condition. The early inventory validates the unselected arm.
+    # Preserve both invalid expressions; inspect the generated stop branch.
     pine = (HEADER + f'chosen_tf = bar_index >= 0 ? "240" : {arm}\n'
             'got_v = request.security(syminfo.tickerid, chosen_tf, close)\nplot(got_v)\n')
-    with pytest.raises(CompileError) as caught:
-        transpile(pine)
-    (diagnostic,) = caught.value.diagnostics
-    assert diagnostic.code == code
-    assert diagnostic.args == args
-    assert diagnostic.hint == hint
-    assert diagnostic.level == Level.ERROR
-    assert diagnostic.phase == Phase.CODEGEN
-    # Computed literal candidates retain the original call's '(' location.
-    assert (diagnostic.location.line, diagnostic.location.col) == (3, column)
-    assert f"invalid timeframe literal '{args['timeframe']}'" in diagnostic.message
+    cpp = transpile(pine)
+    assert registrations(cpp) == ['0, "240", input_tf_, false, false']
+    assert f'if (_pf_selected_tf == "{args["timeframe"]}")' in chart_body(cpp)
+    assert "pine_runtime_error(" in chart_body(cpp)
 
 
 @pytest.mark.parametrize("count", (65, 128))
@@ -1747,20 +1852,27 @@ def test_large_closed_inventory_registers_all_values_before_the_first_bar(count)
     ]
 
 
-def test_pure_but_unevaluated_string_call_has_a_located_open_set_refusal():
+def test_pure_but_unevaluated_string_call_uses_authored_runtime_value():
     from pineforge_codegen.external_requests import _Taint
 
     assert _Taint._is_pure("str", "upper")
     pine = (HEADER + 'chosen_tf = close > open ? str.upper("240") : "1440"\n'
             'got_v = request.security(syminfo.tickerid, chosen_tf, close)\nplot(got_v)\n')
-    with pytest.raises(CompileError) as caught:
-        transpile(pine)
-    (diagnostic,) = caught.value.diagnostics
-    assert diagnostic.code == "PF-E3111"
-    assert diagnostic.args == {"reason": "the timeframe set is not closed at compile time"}
-    assert diagnostic.level == Level.ERROR
-    assert diagnostic.phase == Phase.CODEGEN
-    assert (diagnostic.location.line, diagnostic.location.col) == (3, 28)
+    cpp = transpile(pine)
+    assert "_runtime_request_0(chosen_tf" in chart_body(cpp)
+    assert not registrations(cpp)
+
+
+def test_nested_runtime_templates_retain_the_enclosing_context():
+    pine = (HEADER
+            + "inner_value() => request.security(syminfo.tickerid, \"15\", ta.cum(close))\n"
+            + "chosen_tf = str.tostring(60 + bar_index)\n"
+            + "requested = request.security(syminfo.tickerid, chosen_tf, inner_value())\n"
+            + "plot(requested)\n")
+    cpp = transpile(pine)
+    assert cpp.count(" : pineforge::RuntimeContextEvaluator {") == 2
+    assert cpp.count("arguments, service.active_context()") == 2
+    assert not registrations(cpp)
 
 
 @pytest.mark.parametrize("name", (

@@ -1226,7 +1226,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # evaluator is a class method, so the param is not in scope there).
             # A lower-timeframe request has no chart-timeframe fallback.
             self._security_tf_lower = bool(item.get("is_lower_tf_array"))
-            if item.get("dead"):
+            if item.get("runtime_context"):
+                tf_str, tf_expr = None, "_pf_state.cursor.timeframe"
+            elif item.get("series_tf_invalid") is not None:
+                # A closed computed arm may be invalid. It has a typed result
+                # slot for emission, but no registration; selecting it stops
+                # the run at the authored request.
+                tf_str, tf_expr = tf_node.value, None
+            elif item.get("dead"):
                 # A helper no top-level statement reaches: its evaluator is
                 # never read, registered on the chart timeframe.
                 tf_str, tf_expr = None, "input_tf_"
@@ -1315,6 +1322,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "foreign": bool(item.get("foreign")) and not item.get("dead"),
                 "symbol_node": item.get("symbol_node"),
                 "ignore_invalid_node": item.get("ignore_invalid_node"),
+                "series_tf_invalid": item.get("series_tf_invalid"),
+                "runtime_context": bool(item.get("runtime_context")),
             })
         self._security_selection_local_members = self._security_selection_local_member_names()
         self._global_member_vars.difference_update(self._security_selection_local_members)
@@ -5612,11 +5621,20 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for n in range(len(self._recorded_sites())):
             lines.append(f"    bool _pf_rec_missing_{n} = true;")
         if self._security_calls:
-            lines.append('    std::unordered_map<std::string, Series<double>> _security_helper_series_;')
+            # Runtime instances must observe real bucket/node allocations.
+            # Static-only scripts retain their existing container declaration.
+            helper_map = (
+                "pineforge::OwnedUnorderedMap"
+                if any(item.get("runtime_context") for item in self._security_calls)
+                else "std::unordered_map"
+            )
+            lines.append(
+                f'    {helper_map}<std::string, Series<double>> _security_helper_series_;'
+            )
             self._security_string_series_declared = self._security_needs_string_series()
             if self._security_string_series_declared:
                 lines.append(
-                    '    std::unordered_map<std::string, Series<std::string>> '
+                    f'    {helper_map}<std::string, Series<std::string>> '
                     '_security_helper_series_str_;'
                 )
 
@@ -6115,6 +6133,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # state category is captured automatically (or generation fails loudly
         # if it introduces an unfamiliar declaration form).
         _script_state_declarations = lines[_script_state_decl_start:-1]
+        self._runtime_security_declarations = _script_state_declarations
         _script_state_members = self._collect_script_state_members(
             _script_state_declarations
         )
@@ -6207,8 +6226,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             budget=self._budget,
         )
 
+        _runtime_templates: list[str] = []
+        self._emit_runtime_security_templates(_runtime_templates)
         _script_state_hooks: list[str] = []
         self._emit_script_state_hooks(_script_state_hooks, _script_state_members)
+        _script_state_hooks = _runtime_templates + _script_state_hooks
         lines[_script_state_hooks_at:_script_state_hooks_at] = _script_state_hooks
         _session_market_member_at += len(_script_state_hooks)
 
