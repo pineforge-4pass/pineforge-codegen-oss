@@ -166,16 +166,22 @@ class StmtVisitor:
                         and inferred_spec.kind in {"array", "map", "matrix"}):
                     activation_spec = inferred_spec
             previous_pending_alias = self._pending_decl_outer_alias
-            if (is_callable_binding
+            primitive_shadow = (
+                id(node) in self.ctx.primitive_block_shadow_types
+                and id(node) not in self._direct_program_var_decl_nodes
+            )
+            if ((is_callable_binding or primitive_shadow)
                     and not node.is_var
                     and not node.is_varip
-                    and self._collection_spec_for_name(node.name) is not None
+                    and (primitive_shadow
+                         or self._collection_spec_for_name(node.name) is not None)
                     and any(
                         isinstance(part, Identifier) and part.name == node.name
                         for part in self._walk_ast(node.value)
                     )):
                 safe_name = self._safe_name(node.name)
-                if (node.name in self._global_collection_types
+                if (not primitive_shadow
+                        and node.name in self._global_collection_types
                         and node.name not in self._current_func_param_specs
                         and node.name not in self._current_func_collection_specs
                         and node.name not in self._current_loop_var_specs):
@@ -209,6 +215,10 @@ class StmtVisitor:
                 self._visit_var_decl(node, lines, pad)
             finally:
                 self._pending_decl_outer_alias = previous_pending_alias
+            if primitive_shadow:
+                # Inputs and expression-valued declarations can return before
+                # the general declaration path remembers their scalar type.
+                self._current_func_local_types[node.name] = self._type_for_decl(node)
             if is_callable_binding:
                 self._activate_callable_collection_binding(
                     node.name,
@@ -1713,6 +1723,11 @@ class StmtVisitor:
         self._lexical_known_var_tombstones = set(
             saved_known_tombstones
         )
+        saved_local_types = self._current_func_local_types
+        if self.ctx.primitive_block_shadow_types:
+            # Only newly admitted programs need this scalar overlay; block
+            # exit must restore the outer type for writes and raw-name helpers.
+            self._current_func_local_types = dict(saved_local_types)
 
         renames = self._block_var_renames.get(id(owner))
         collection_specs = self._block_collection_types.get(id(owner))
@@ -1726,6 +1741,7 @@ class StmtVisitor:
                 saved_udt_types,
                 saved_series_bindings,
                 saved_known_tombstones,
+                saved_local_types,
             )
         saved_remap = self._active_var_remap
         if renames:
@@ -1762,6 +1778,7 @@ class StmtVisitor:
             saved_udt_types,
             saved_series_bindings,
             saved_known_tombstones,
+            saved_local_types,
         )
 
     def _pop_block_var_remap(self, saved) -> None:
@@ -1774,6 +1791,7 @@ class StmtVisitor:
             saved_udt_types,
             saved_series_bindings,
             saved_known_tombstones,
+            saved_local_types,
         ) = saved
         try:
             if saved_remap is not _NO_BLOCK_REMAP:
@@ -1792,6 +1810,7 @@ class StmtVisitor:
             self._lexical_udt_types = saved_udt_types
             self._lexical_series_bindings = saved_series_bindings
             self._lexical_known_var_tombstones = saved_known_tombstones
+            self._current_func_local_types = saved_local_types
             self._block_map_binding_visible = previous_map_visible
             self._block_map_visibility_depth = previous_map_depth
 

@@ -1112,11 +1112,16 @@ strategy("cross-type primitive block shadow")
         source = prefix + block + global_decl + "\n"
     source += "read() => state\nvalue = read()\n"
 
-    with pytest.raises(
-        CompileError,
-        match="declaration-exact block storage",
-    ):
+    with pytest.raises(CompileError) as caught:
         transpile(source)
+
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.code == "PF-E2010"
+    assert diagnostic.message == (
+        "A top-level block binding named 'state' shadows a direct script binding "
+        "with history, aggregate, or incompatible typed state; declaration-exact "
+        "block storage is not supported yet."
+    )
 
 
 @pytest.mark.parametrize(
@@ -1218,12 +1223,13 @@ b = right()
 
 
 @pytest.mark.parametrize(
-    "true_branch",
+    ("true_branch", "accepted"),
     (
         pytest.param(
             """    state = "local"
     1.0
 """,
+            True,
             id="cross-type",
         ),
         pytest.param(
@@ -1231,12 +1237,14 @@ b = right()
     prior = state[1]
     nz(prior)
 """,
+            False,
             id="exact-history",
         ),
     ),
 )
-def test_stateful_embedded_if_shadow_of_direct_global_fails_closed(
+def test_embedded_if_shadow_of_direct_global_preserves_storage_boundary(
     true_branch: str,
+    accepted: bool,
 ) -> None:
     source = (
         '//@version=6\nstrategy("embedded if block shadow")\n'
@@ -1247,14 +1255,20 @@ def test_stateful_embedded_if_shadow_of_direct_global_fails_closed(
         "    0.0\n"
     )
 
-    with pytest.raises(
-        CompileError,
-        match="declaration-exact block storage",
-    ):
-        transpile(source)
+    if accepted:
+        cpp = transpile(source)
+        assert "    double state = 0.0;" in cpp
+        assert re.search(r'^\s+std::string state = std::string\("local"\);$', cpp, re.M)
+        assert _compile_and_run(cpp + _driver(["state", "result"], bars=1)) == "100.0 1.0\n"
+    else:
+        with pytest.raises(
+            CompileError,
+            match="declaration-exact block storage",
+        ):
+            transpile(source)
 
 
-def test_cross_type_for_shadow_of_direct_global_fails_closed() -> None:
+def test_cross_type_for_shadow_keeps_lexical_local_and_direct_global() -> None:
     source = """//@version=6
 strategy("cross-type for block shadow")
 state = 100.0
@@ -1264,11 +1278,10 @@ read() => state
 observed = read()
 """
 
-    with pytest.raises(
-        CompileError,
-        match="declaration-exact block storage",
-    ):
-        transpile(source)
+    cpp = transpile(source)
+    assert "    double state = 0.0;" in cpp
+    assert re.search(r'^\s+std::string state = std::string\("local"\);$', cpp, re.M)
+    assert _compile_and_run(cpp + _driver(["observed"], bars=1)) == "100.0\n"
 
 
 def test_numeric_for_shadow_keeps_lexical_local_and_direct_global() -> None:
