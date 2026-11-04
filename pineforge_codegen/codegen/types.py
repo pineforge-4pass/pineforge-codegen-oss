@@ -1103,7 +1103,7 @@ class TypeInferer:
         return True
 
     def _integer_na_operand(self, node) -> bool:
-        """An emitted integer expression whose value can be missing."""
+        """An emitted integer expression whose physical value can be missing."""
         return (node is not None
                 # Pine bools can occupy legacy numeric storage. That storage
                 # does not give them an integer missing-value sentinel.
@@ -1114,12 +1114,14 @@ class TypeInferer:
                 and self._int_operand_may_be_na(node))
 
     def _integer_slot_value_is_present(self, node) -> bool:
-        """Prove initialized integer storage has no missing-value source.
+        """Prove integer presence without losing the physical slot's sentinel.
 
         Follow declaration identities and every write, rather than treating a
-        mutable name as nullable merely because it is mutable. A self-update
-        such as ``n := n + 1`` contributes a dependency, not a new missing
-        source. History, unknown calls and unproved parameters remain nullable.
+        mutable name as nullable merely because it is mutable. Pine-value
+        presence alone cannot prove a narrowing int32 store safe: every write
+        to such a slot must also have a constant range proof excluding INT_MIN.
+        A visited dependency closes only the presence walk, never that range
+        proof. History, unknown calls and unproved parameters remain nullable.
         An element read follows the values its array was given only for a
         fresh array no reference lets escape (``_present_array_element_sources``).
         This query owns no alias cache and does not change the shared NA walk.
@@ -1128,7 +1130,9 @@ class TypeInferer:
             getattr(self, "_active_func_name", "") or "")
         pending = [(node, owner)]
         seen = set()
-        compound_writes = {}
+        storage_receipts = {}
+        declaration_reads = {}
+        member_families = None
         budget = getattr(self, "_budget", None)
         while pending:
             value, lexical_owner = pending.pop()
@@ -1146,17 +1150,25 @@ class TypeInferer:
                 continue
             if isinstance(value, (BoolLiteral, ColorLiteral)):
                 continue
-            if isinstance(value, (ExprStmt, VarDecl, Assignment)):
-                pending.append((
-                    value.expr if isinstance(value, ExprStmt) else value.value,
-                    lexical_owner,
-                ))
-                if isinstance(value, Assignment) and value.op != ":=":
-                    # A compound write yields its target's new value, which
-                    # reads the target as well as the right-hand side.
-                    if value.op not in ("+=", "-=", "*="):
-                        return False
-                    pending.append((value.target, lexical_owner))
+            if isinstance(value, ExprStmt):
+                pending.append((value.expr, lexical_owner))
+                continue
+            if isinstance(value, VarDecl):
+                # A declaration tail yields the stored value, not its RHS.
+                # Retain the synthetic read and its exact declaration locally;
+                # it must neither bind an outer parameter nor reuse an id.
+                read = self._statement_value_node(value)
+                if not isinstance(read, Identifier):
+                    return False
+                declaration_reads[id(read)] = read, value
+                pending.append((read, lexical_owner))
+                continue
+            if isinstance(value, Assignment):
+                if value.op not in (":=", "+=", "-=", "*="):
+                    return False
+                # Every assignment tail reads its destination after the write.
+                pending.extend(((value.target, lexical_owner),
+                                (value.value, lexical_owner)))
                 continue
             if isinstance(value, FuncCall):
                 # A user callable yields its body's terminal value. Its
@@ -1165,12 +1177,20 @@ class TypeInferer:
                 # each source those reach is. Overloaded names are unproved.
                 callees = self._wide_callable_args(value)
                 if callees:
+                    result_cpp_type = self._infer_type(value)
+                    if result_cpp_type not in ("int", "int64_t", "double", "bool"):
+                        return False
                     for info, _bound in callees:
                         terminal = self._selection_terminal_expr(
                             info.node.body if info.node is not None else None)
                         if (terminal is None
                                 or sum(other.name == info.name
                                        for other in self.ctx.func_infos) != 1):
+                            return False
+                        if (result_cpp_type == "int"
+                                and self._integer_presence_int32_constant(terminal) is None):
+                            # A finite body value can still narrow to INT_MIN
+                            # at the callable's physical return boundary.
                             return False
                         pending.append((terminal, info))
                     continue
@@ -1181,11 +1201,15 @@ class TypeInferer:
                     pending.extend(elements)
                     continue
             if isinstance(value, Identifier):
-                declaration = (
-                    self.ctx.identifier_decl_bindings[id(value)]
-                    if id(value) in self.ctx.identifier_decl_bindings
-                    else ValueBindings.declaration_of(value)
-                )
+                stored = declaration_reads.get(id(value))
+                if stored is not None:
+                    declaration = id(stored[1]), value.name
+                else:
+                    declaration = (
+                        self.ctx.identifier_decl_bindings[id(value)]
+                        if id(value) in self.ctx.identifier_decl_bindings
+                        else ValueBindings.declaration_of(value)
+                    )
                 if (lexical_owner is not None
                         and value.name in lexical_owner.node.params
                         and declaration in (
@@ -1195,9 +1219,18 @@ class TypeInferer:
                         (lexical_owner.name, index), ())
                     if not actuals:
                         return False
+                    cpp_type = self._integer_presence_parameter_cpp_type(
+                        lexical_owner, index)
+                    if cpp_type is None:
+                        return False
+                    if (cpp_type == "int"
+                            and any(self._integer_presence_int32_constant(arg) is None
+                                    for arg, _caller, _written in actuals)):
+                        return False
                     pending.extend((arg, caller) for arg, caller, _written in actuals)
                     continue
-                binding = self._int_value_binding(value, lexical_owner)
+                binding = self._int_value_binding(
+                    value, lexical_owner, stored[1] if stored is not None else None)
                 if binding is not None:
                     binding_key = ("binding", binding[0])
                     if binding_key in seen:
@@ -1211,25 +1244,49 @@ class TypeInferer:
                         return False
                     binding_owner = binding[1][0][1]
                     scope = getattr(binding_owner, "name", "")
-                    if scope not in compound_writes:
+                    if scope not in storage_receipts:
                         body = (binding_owner.node.body if binding_owner is not None
                                 else [stmt for stmt in self.ctx.ast.body
                                       if not isinstance(stmt, (FuncDef, MethodDef))])
-                        unsafe = set()
+                        declarations, declaration_counts, updates = {}, {}, {}
                         for stmt in self._walk_ast_list(body):
+                            if isinstance(stmt, VarDecl):
+                                declarations[id(stmt)] = stmt
+                                declaration_counts[stmt.name] = (
+                                    declaration_counts.get(stmt.name, 0) + 1)
                             if (not isinstance(stmt, Assignment)
                                     or not isinstance(stmt.target, Identifier)
-                                    or stmt.op in (":=", "+=", "-=", "*=")):
+                                    or stmt.op == ":="):
                                 continue
                             target = self._int_value_binding(stmt.target, binding_owner)
                             if target is None:
                                 return False
                             # The value inventory contains a compound write's
-                            # RHS, not its result. Division/remainder can create
-                            # NaN even when that RHS is present.
-                            unsafe.add(target[0])
-                        compound_writes[scope] = unsafe
-                    if binding[0] in compound_writes[scope]:
+                            # RHS, not its result or its physical store range.
+                            updates.setdefault(target[0], set()).add(stmt.op)
+                        storage_receipts[scope] = declarations, declaration_counts, updates
+                    declarations, declaration_counts, updates = storage_receipts[scope]
+                    if member_families is None:
+                        member_families = {}
+                        for name, ptype, _init in self.ctx.var_members:
+                            member_families[name] = (
+                                ptype if name not in member_families else None)
+                    declaration = declarations.get(binding[0][0])
+                    cpp_type = self._integer_presence_storage_cpp_type(
+                        declaration, binding_owner, declaration_counts, member_families)
+                    if cpp_type is None:
+                        return False
+                    operations = updates.get(binding[0], set())
+                    if operations - {"+=", "-=", "*="}:
+                        # Division/remainder can create NaN even with a
+                        # present RHS, regardless of the destination width.
+                        return False
+                    if (cpp_type == "int"
+                            and (operations
+                                 or any(self._integer_presence_int32_constant(source) is None
+                                        for source, _owner in binding[1]))):
+                        # Neither an initializer nor a cycle of present
+                        # dependencies bounds a mutable int32 slot.
                         return False
                     pending.extend(binding[1])
                     continue
@@ -1267,6 +1324,87 @@ class TypeInferer:
             if self._int_operand_may_be_na(value, lexical_owner):
                 return False
         return True
+
+    def _integer_presence_int32_constant(self, node) -> int | None:
+        """A literal expression whose every intermediate avoids int32 na.
+
+        This is a physical range proof, independent of the presence walk.
+        Names, actuals forwarded through names, calls and recurrences are
+        deliberately unproved; revisiting a binding cannot establish a bound.
+        Requiring each intermediate to fit also avoids proving a cancellation
+        whose emitted integer arithmetic could overflow before the store.
+        """
+        if isinstance(node, NumberLiteral) and type(node.value) is int:
+            value = node.value
+        elif isinstance(node, UnaryOp) and node.op in ("+", "-"):
+            operand = self._integer_presence_int32_constant(node.operand)
+            if operand is None:
+                return None
+            value = -operand if node.op == "-" else operand
+        elif isinstance(node, BinOp) and node.op in ("+", "-", "*"):
+            left = self._integer_presence_int32_constant(node.left)
+            right = self._integer_presence_int32_constant(node.right)
+            if left is None or right is None:
+                return None
+            value = (left + right if node.op == "+"
+                     else left - right if node.op == "-" else left * right)
+        else:
+            return None
+        return value if -(1 << 31) < value < (1 << 31) else None
+
+    def _integer_presence_parameter_cpp_type(self, owner, index: int) -> str | None:
+        """The parameter's emitted family, rather than its Pine int type."""
+        name = owner.node.params[index]
+        active = self._func_info_map.get(
+            getattr(self, "_active_func_name", "") or "")
+        if owner is active:
+            if name in self._current_func_series_params:
+                return self._current_func_series_param_types.get(name)
+            cpp_type = self._current_func_param_types.get(name)
+        else:
+            # With no active variant receipt, accept only the shared family.
+            cpp_type = self._func_param_int_cpp_type(owner, index, None)
+        return cpp_type if cpp_type in ("int", "int64_t", "double", "bool") else None
+
+    def _integer_presence_storage_cpp_type(
+        self, declaration, owner, declaration_counts, member_families,
+    ) -> str | None:
+        """Read an exact declaration's physical scalar storage receipt.
+
+        Persistent members have declaration-specific metadata even outside
+        their callable. Plain locals need their active emission context; an
+        inactive callable's Pine type or another same-spelled declaration is
+        insufficient evidence of its C++ width.
+        """
+        if not isinstance(declaration, VarDecl):
+            return None
+        metadata = self.ctx.var_member_metadata_by_node.get(id(declaration))
+        if metadata is not None and metadata[0] is declaration:
+            member = metadata[1]
+            family = member_families.get(member)
+            if family is None:
+                return None
+            cpp_type = PINE_TYPE_TO_CPP.get(family, "double")
+            if cpp_type == "int":
+                if self._numeric_na_member(member):
+                    return "double"
+                if self._is_int64_builtin_init(declaration.name, declaration):
+                    return "int64_t"
+            return cpp_type if cpp_type in ("int", "int64_t", "double", "bool") else None
+        active = self._func_info_map.get(
+            getattr(self, "_active_func_name", "") or "")
+        if (owner is not active
+                or declaration_counts.get(declaration.name) != 1):
+            return None
+        if owner is not None:
+            # The local map records the declaration actually emitted. Do not
+            # infer an inactive/local history slot from a global symbol.
+            cpp_type = self._current_func_local_types.get(declaration.name)
+        elif id(declaration) in self._ordinary_global_var_decl_nodes:
+            cpp_type = self._int_slot_cpp_type(declaration.name)
+        else:
+            return None
+        return cpp_type if cpp_type in ("int", "int64_t", "double", "bool") else None
 
     def _present_array_element_sources(self, call):
         """Every value a checked element read of a fresh array can return.
