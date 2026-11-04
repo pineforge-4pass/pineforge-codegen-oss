@@ -3707,6 +3707,9 @@ class TypeInferer:
 
     def _type_for_decl(self, node: VarDecl) -> str:
         """Determine the C++ type for a ``VarDecl``: explicit hint, then symbol, then RHS inference."""
+        from ..drawing_all import DRAWING_ALL_SNAPSHOT, drawing_all_result_spec
+        if (node.annotations or {}).get(DRAWING_ALL_SNAPSHOT):
+            return self._type_spec_to_cpp(drawing_all_result_spec(node))
         if (node.annotations or {}).get(FLOAT_REASSIGNMENT):
             return "double"
         if isinstance(node.value, (IfStmt, SwitchStmt)):

@@ -621,6 +621,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         validate_call_argument_order(self._ast, filename=self._filename)
         from ..builtin_keywords import bind_builtin_keywords
         bind_builtin_keywords(self._ast, filename=self._filename)
+        from ..drawing_all import (
+            drawing_all_kind, drawing_all_refusal, drawing_all_uses,
+        )
+        allowed_drawing_reads, refused_aliases = drawing_all_uses(self._ast)
+        for node, kind in refused_aliases:
+            self._error(drawing_all_refusal(kind), node.loc)
+        # Direct Analyzer clients and check_support=False share the snapshot
+        # types and read-only boundary, including after request/helper copies.
+        for node, _ in iter_ast_nodes(self._ast):
+            kind = drawing_all_kind(node)
+            if kind is not None and id(node) not in allowed_drawing_reads:
+                self._error(drawing_all_refusal(kind), node.loc)
         from .value_bindings import ValueBindings
         self._value_bindings = ValueBindings(self._ast, self._filename, self._budget)
         self._value_bindings.resolve()
@@ -8397,6 +8409,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.FLOAT
 
     def _visit_MemberAccess(self, node: MemberAccess) -> PineType:
+        from ..drawing_all import drawing_all_kind
+        if drawing_all_kind(node) not in {None, "polyline"}:
+            # Collections use TypeSpec for their shape; PineType stays scalar.
+            return PineType.FLOAT
         # Handle specific namespaces
         if isinstance(node.object, Identifier):
             ns = node.object.name

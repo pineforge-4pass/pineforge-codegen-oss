@@ -723,13 +723,6 @@ class SupportChecker:
     # -- Public API --
 
     def check(self) -> list[Diagnostic]:
-        from .drawing_all import drawing_all_call, DRAWING_ALL_READS
-        self._drawing_all_read_members = {
-            id(call[2])
-            for node, _ in iter_ast_nodes(self._ast)
-            if (call := drawing_all_call(node)) is not None
-            and call[0] != "polyline" and call[1] in DRAWING_ALL_READS
-        }
         # Refuse invalid math keywords before declaration folding or unrelated
         # request/visual diagnostics. Keep check() a diagnostic-returning API,
         # and check unused bodies and unselected arms as well.
@@ -745,6 +738,12 @@ class SupportChecker:
                 ))
         if keyword_diagnostics:
             return keyword_diagnostics
+        from .drawing_all import drawing_all_uses, drawing_all_refusal
+        self._drawing_all_read_members, refused = drawing_all_uses(
+            self._ast,
+        )
+        for node, kind in refused:
+            self._err(node, drawing_all_refusal(kind), allow_switch_warning=False)
         self._collect_user_definitions(self._ast)
         self._collect_user_calls()
         self._collect_scalar_rebinds(self._ast)
