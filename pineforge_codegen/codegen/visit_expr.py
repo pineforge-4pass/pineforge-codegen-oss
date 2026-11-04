@@ -2023,9 +2023,9 @@ class ExprVisitor:
         on the requested clock (security.py); one that reaches it through a
         call's argument or a variable has no such history here and is refused
         at the read. So is a read emitted in a function the analyzer lists in
-        ``session_history_unsafe`` (a method, or a function a method, a
-        request.security expression or a UDT field default reaches), and one
-        with no registered Series: never shared state. The refusal waits for
+        ``session_history_unsafe`` (an unresolved method, or a function such a
+        method, a request.security expression or a UDT field default reaches),
+        and one with no registered Series: never shared state. The refusal waits for
         the C++ (``_settle_session_reads``): a read in an argument the codegen
         renders and leaves out refuses nothing. A read in a function this
         analysis did not clone (``session_uncloned``) asks for its clones

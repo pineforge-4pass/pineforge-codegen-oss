@@ -519,27 +519,29 @@ REFUSED = {
     "a method called on a receiver PineForge cannot type": (
         "type Foo\n    float v = 1\n"
         "method m(Foo self) => session.ismarket[1] and self.v > 0\n"
-        "mk() => Foo.new()\n"
-        "a = mk().m()\n"
-        "x = bar_index % 2 == 0 ? mk().m() : a\n", (5, 39), "a method"),
-    "a method called on a loop variable": (
+        "read(receiver) => receiver.m()\n"
+        "foo = Foo.new()\n"
+        "x = read(foo)\n", (5, 39), "a method"),
+    "a method called through an untyped loop wrapper": (
         "type Foo\n    float v = 1\n"
         "method m(Foo self) => session.ismarket[1] and self.v > 0\n"
+        "read(receiver) => receiver.m()\n"
         "foos = array.from(Foo.new())\n"
         "x = false\n"
-        "for f in foos\n    x := f.m()\n", (5, 39), "a method"),
+        "for f in foos\n    x := read(f)\n", (5, 39), "a method"),
     "a function a mutable global's statements call, the global's name shadowed": (
         "f() => session.ismarket[3] ? 1.0 : 0.0\n"
         "var float g = 0.0\n"
         "g := nz(f())\n"
         "h(float g) => g > open\n"
         'x = request.security(syminfo.tickerid, "60", h(close)) or g > 0\n', (3, 24), "request.security"),
-    "a function a method calls": (
+    "a function an unresolved method calls": (
         "type Foo\n    float v = 1\n"
         "f() => session.ismarket[1]\n"
         "method m(Foo self) => f() and self.v > 0\n"
-        "mk() => Foo.new()\n"
-        "x = mk().m()\n", (5, 24), "which a method calls"),
+        "read(receiver) => receiver.m()\n"
+        "foo = Foo.new()\n"
+        "x = read(foo)\n", (5, 24), "which a method calls"),
     "a function a UDT field default calls": (
         "f() => session.ismarket[1]\n"
         "type Foo\n    bool v = f()\n"

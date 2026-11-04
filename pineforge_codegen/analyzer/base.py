@@ -179,6 +179,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._method_call_bindings: dict[
             tuple[int, str], BoundMethodArgs
         ] = {}
+        # Candidate owners of receiver calls that lexical analysis could not
+        # resolve. Never use a bare member name as a session-history owner.
+        self._session_unresolved_method_calls: dict[int, set[str]] = {}
         self._symbols = SymbolTable()
         self._ta_call_sites: list[TACallSite] = []
         self._series_vars: set[str] = set()
@@ -352,6 +355,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_var_storage_names: dict[str, dict[str, str]] = {}
         self._func_series_vars: dict[str, set] = {}   # func_name -> set[str]
         self._session_history_unsafe: dict[str, str] = {}
+        self._session_method_reads: dict[str, tuple[str, Subscript]] = {}
         # Plain UDF -> script variables (and ``bar_index``) its body reads
         # through history, in source order; id(Subscript) -> (UDF, name, node)
         # for each such read. See ``_note_function_global_history_read``.
@@ -735,6 +739,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             func_security_clone_only=self._func_security_clone_only,
             session_history_unsafe=self._session_history_unsafe,
             session_uncloned=self._session_uncloned,
+            session_method_reads=self._session_method_reads,
             func_cs_ta_clone_names=self._func_cs_ta_clone_names,
             udt_defs=self._udt_fields,
             enum_defs=self._enum_defs,
@@ -2402,18 +2407,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
     def _session_history_unsafe_functions(
             self, func_defs: dict, find_calls, known_func_names: set[str],
-            calls_by_parent: dict) -> dict[str, str]:
+            calls_by_parent: dict, call_edges: list) -> dict[str, str]:
         """The functions and methods that cannot keep a ``session.*`` flag's
         history per call site, each with the reason (name -> why).
 
         A read in a function keeps its call site's history: the function is
-        emitted once per call site (``_session_call_*``, codegen). Four kinds
-        of callable do not get that:
+        emitted once per call site (``_session_call_*``, codegen). A typed
+        method uses the same graph, keyed by its exact ``Type.method``. These
+        callables cannot use it:
 
-        * a method: a call on a receiver the analyzer cannot type
-          (``mk().m()``, a loop variable) is not told apart from the method's
-          other calls;
-        * a function a method calls, once in the method's one body;
+        * a method with an unresolved or ambiguous call, and its callees;
         * a function a request.security expression evaluates: the evaluator
           inlines it or calls its chart variant, on the requested clock. The
           functions reached are those the expression calls, those they call,
@@ -2444,9 +2447,27 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return found
 
         methods = {name for name in func_defs if "." in name}
-        mark(methods, "a method, whose calls PineForge cannot always tell apart")
-        mark(closure(callee for m in methods for callee, _call in calls_by_parent.get(m, [])),
-             "which a method calls")
+        bound_methods: dict[int, set[str]] = {}
+        for call_id, key in self._method_call_bindings:
+            bound_methods.setdefault(call_id, set()).add(key)
+        unsafe_methods: set[str] = set()
+        for candidates in self._session_unresolved_method_calls.values():
+            unsafe_methods.update(candidates & methods)
+        for candidates in bound_methods.values():
+            if len(candidates) != 1:
+                unsafe_methods.update(candidates & methods)
+        for _owner, callee, call in call_edges:
+            if callee in methods and not bound_methods.get(id(call)):
+                unsafe_methods.add(callee)
+        # The signature inventory intentionally preserves first-declaration
+        # lookup. It does not prove a duplicate Type.method is one definition.
+        declarations: set[str] = set()
+        for stmt in self._ast.body:
+            if isinstance(stmt, MethodDef):
+                key = f"{stmt.type_name}.{stmt.name}"
+                if key in declarations:
+                    unsafe_methods.add(key)
+                declarations.add(key)
 
         # A request.security expression's reach.
         pending: list[tuple[Any, str | None]] = [
@@ -2479,18 +2500,28 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 elif name in self._global_expr_map:
                     followed.add(name)
                     pending.append((self._global_expr_map[name], None))
-        mark(reached, "which a request.security expression evaluates on the requested clock")
-
         # A UDT field default's call, for the types a script builds.
         built = {node.callee.object.name for node, _depth in iter_ast_nodes(self._ast)
                  if isinstance(node, FuncCall) and isinstance(node.callee, MemberAccess)
                  and node.callee.member == "new" and isinstance(node.callee.object, Identifier)}
-        mark(closure(callee
-                     for stmt in self._ast.body
-                     if isinstance(stmt, TypeDecl) and stmt.name in built
-                     for field in stmt.fields if field.default is not None
-                     for callee, _call in find_calls(field.default, known_func_names, None)),
-             "which a UDT field default calls once for every new()")
+        defaults = closure(callee
+                           for stmt in self._ast.body
+                           if isinstance(stmt, TypeDecl) and stmt.name in built
+                           for field in stmt.fields if field.default is not None
+                           for callee, _call in find_calls(field.default, known_func_names, None))
+        # Preserve the existing reason precedence for methods reached on the
+        # requested clock or from a field default, and for their callees.
+        unsafe_methods |= (reached | defaults) & methods
+        unsafe_methods |= closure(unsafe_methods) & methods
+        mark(unsafe_methods, "a method, whose calls PineForge cannot always tell apart")
+        method_callees = closure(callee for m in methods
+                                 for callee, _call in calls_by_parent.get(m, []))
+        mark(closure(callee for m in unsafe_methods
+                     for callee, _call in calls_by_parent.get(m, []))
+             | (method_callees & (reached | defaults)),
+             "which a method calls")
+        mark(reached, "which a request.security expression evaluates on the requested clock")
+        mark(defaults, "which a UDT field default calls once for every new()")
         return unsafe
 
     def _propagate_call_site_counts(self) -> None:
@@ -2519,6 +2550,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if getattr(fi, "is_udt_method", False) and fi.node is not None:
                 func_defs.setdefault(fi.name, fi.node)
 
+        session_method_bindings: dict[int, str] = {}
         # Preserve call-node identity as well as the callee name: late clone
         # materialization needs the textual call's argument mapping to resolve
         # parameterized TA constructor lengths.
@@ -2527,6 +2559,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return call.callee.name if call.callee.name in func_defs else None
             if not isinstance(call.callee, MemberAccess):
                 return None
+            if id(call) in session_method_bindings:
+                return session_method_bindings[id(call)]
 
             recv = call.callee.object
             method = call.callee.member
@@ -2600,7 +2634,53 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 calls.extend(_find_calls(attr_val, known_funcs, owner, seen))
             return calls
 
-        known_func_names = set(func_defs.keys())
+        # A lexical typed binding survives scopes that the late raw-name
+        # resolver cannot reconstruct. Prefer that exact declaration only on
+        # the new session-method path, after the C++ actually requested clones.
+        # A syntactic read in a dropped argument must keep the old graph too.
+        known_func_names = set(func_defs)
+        requested_reads = {
+            id(child)
+            for sec in (getattr(self, "_security_calls", []) or [])
+            if sec.expression is not None
+            for child, _depth in iter_ast_nodes(sec.expression)
+        }
+        session_reach = {
+            name for name, definition in func_defs.items()
+            if (self._session_clones is None or name in self._session_clones)
+            and emitted_session_reads(definition, requested_reads)
+        }
+        exact_bindings: dict[int, set[str]] = {}
+        for call_id, key in self._method_call_bindings:
+            exact_bindings.setdefault(call_id, set()).add(key)
+        session_method_bindings = {
+            call_id: next(iter(keys))
+            for call_id, keys in exact_bindings.items()
+            if len(keys) == 1
+            and call_id not in self._session_unresolved_method_calls
+        }
+        if session_reach and session_method_bindings:
+            # First determine reach with exact bindings, including wrappers
+            # whose old receiver-name fallback selected the wrong overload.
+            typed_calls = {
+                name: _find_calls(definition, known_func_names, name)
+                for name, definition in func_defs.items()
+            }
+            changed = True
+            while changed:
+                if self._budget is not None:
+                    self._budget.check(phase=Phase.ANALYZER)
+                changed = False
+                for name, calls in typed_calls.items():
+                    if (name not in session_reach
+                            and any(sub in session_reach for sub, _ in calls)):
+                        session_reach.add(name)
+                        changed = True
+        session_method_bindings = {
+            call_id: key for call_id, key in session_method_bindings.items()
+            if key in session_reach
+        }
+
         calls_by_parent = {
             name: _find_calls(func_def, known_func_names, name)
             for name, func_def in func_defs.items()
@@ -2908,12 +2988,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             name for name, func_def in func_defs.items()
             if _has_synthetic_history_state(func_def)
         }
-        # A plain function that reads a flag at an offset is emitted once per
+        # A resolved callable that reads a flag at an offset is emitted once per
         # call site, if this analysis may clone it. A callable that cannot
         # keep its call sites apart gets no clone for it (codegen refuses such
         # a read where it emits one).
         self._session_history_unsafe = self._session_history_unsafe_functions(
-            func_defs, _find_calls, known_func_names, calls_by_parent)
+            func_defs, _find_calls, known_func_names, calls_by_parent, call_edges)
         session_readers = frozenset(
             name for name, func_def in func_defs.items()
             if name not in self._session_history_unsafe
@@ -2923,6 +3003,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                   else session_readers & self._session_clones)
         self._session_uncloned = session_readers - cloned
         synthetic_history_stateful |= cloned
+        self._session_method_reads = {}
 
         # request.security owns a separate evaluator context and already
         # materializes/remaps its embedded TA state per SecurityCallInfo.  Do
@@ -2971,6 +3052,29 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         closed.add(fname)
                         changed = True
             return closed
+
+        # A call rendered later (e.g. a trace expression, outside the analyzed
+        # AST) has no typed call-site identity. Codegen must refuse it rather
+        # than fall back to a shared method body or a nonexistent base name.
+        # Only actual clone requests participate: a dropped read still costs
+        # nothing, even if a trace calls the method that contains it.
+        for name in sorted(close_over_callers(set(cloned))):
+            info = func_info_by_name.get(name)
+            if info is None or not info.is_udt_method:
+                continue
+            pending, seen = [name], set()
+            while pending:
+                if self._budget is not None:
+                    self._budget.check(phase=Phase.ANALYZER)
+                reader = pending.pop()
+                if reader in seen:
+                    continue
+                seen.add(reader)
+                if reader in cloned:
+                    read = emitted_session_reads(func_defs[reader], requested_node_ids)[0]
+                    self._session_method_reads[name] = (reader, read)
+                    break
+                pending.extend(sub for sub, _call in calls_by_parent.get(reader, []))
 
         # A function whose untyped parameter receives two primitive families
         # at its written calls is TradingView's once per family: one variant
@@ -7057,6 +7161,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # codegen can emit the parameter as a scalar double.
             receiver_spec = self._type_spec_from_expr(obj)
             receiver_type_name = method_receiver_type_name(receiver_spec)
+            primitive_type = PineType.UNKNOWN
             if receiver_spec is None and self._method_signatures:
                 # Record exact scalar expression bindings for request payload
                 # substitution without changing ordinary method return/state
@@ -7080,6 +7185,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     method_key = f"{primitive_type.value}.{member}"
                     if method_key in self._method_signatures:
                         self._bind_typed_method_call(method_key, node)
+            if (receiver_type_name is None and primitive_type == PineType.UNKNOWN
+                    and not (isinstance(obj, Identifier)
+                             and obj.name in _BUILTIN_NAMESPACE_NAMES
+                             and self._symbols.resolve(obj.name) is None)):
+                candidates = {key for key in self._method_signatures
+                              if key.rsplit(".", 1)[-1] == member}
+                if candidates:
+                    self._session_unresolved_method_calls.setdefault(
+                        id(node), set()).update(candidates)
             if receiver_type_name is not None:
                 method_key = f"{receiver_type_name}.{member}"
                 signature = self._method_signatures.get(method_key)

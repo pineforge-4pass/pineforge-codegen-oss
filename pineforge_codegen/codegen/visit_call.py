@@ -362,6 +362,17 @@ class CallVisitor:
 
     def _udt_method_call_emit_name(self, fi, node: FuncCall) -> str:
         """Resolve a UDT method call through the ordinary UDF clone graph."""
+        reader = self.ctx.session_method_reads.get(fi.name)
+        if reader is not None and (id(node), fi.name) not in self.ctx.method_call_bindings:
+            owner, read = reader
+            why = ("a method, whose calls PineForge cannot always tell apart"
+                   if "." in owner else "which a method calls")
+            return self._refused_session_read(
+                read, read,
+                f"session.{read.object.member}[...] cannot be read in {owner.split('.')[-1]}(), "
+                f"{why}: PineForge keeps a session flag's history in a function by "
+                "each of its call sites, and cannot tell this one apart.",
+            )
         base = self._emit_udt_method_cpp_name(fi)
         dispatch = self._instance_dispatch.get(
             (self._current_instance_name, id(node))
