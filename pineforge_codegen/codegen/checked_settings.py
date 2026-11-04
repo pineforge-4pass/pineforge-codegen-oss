@@ -4,7 +4,10 @@ import re
 
 from ..ast_nodes import Identifier, MemberAccess
 from ..errors import CompileError
-from .tables import ALERT_FREQ_VALUES, NAME_ECHO_STRING_MEMBERS, ORDER_DIRECTION_MAP
+from .tables import (
+    ALERT_FREQ_VALUES, NAME_ECHO_STRING_MEMBERS, ORDER_DIRECTION_MAP,
+    STRATEGY_DIRECTION_VALUES,
+)
 
 
 _QUOTED_STRING = r'"(?:[^"\\\x00\r\n]|\\(?:["\\nrt]|000))*"'
@@ -23,15 +26,22 @@ def _string_setting_arg(expr, lowered: str) -> str | None:
     and setters retain their existing execution semantics.
     """
     if isinstance(expr, MemberAccess):
-        if not isinstance(expr.object, Identifier):
-            return None
-        namespace = expr.object.name
-        known = (
-            namespace == "alert" and expr.member in ALERT_FREQ_VALUES
-            or namespace == "order" and expr.member in ORDER_DIRECTION_MAP
-            or namespace == "session" and expr.member in ("regular", "extended")
-            or expr.member in NAME_ECHO_STRING_MEMBERS.get(namespace, ())
-        )
+        if isinstance(expr.object, Identifier):
+            namespace = expr.object.name
+            known = (
+                namespace == "alert" and expr.member in ALERT_FREQ_VALUES
+                or namespace == "order" and expr.member in ORDER_DIRECTION_MAP
+                or namespace == "session" and expr.member in ("regular", "extended")
+                or expr.member in NAME_ECHO_STRING_MEMBERS.get(namespace, ())
+            )
+        else:
+            known = (
+                isinstance(expr.object, MemberAccess)
+                and isinstance(expr.object.object, Identifier)
+                and expr.object.object.name == "strategy"
+                and expr.object.member == "direction"
+                and expr.member in STRATEGY_DIRECTION_VALUES
+            )
         if not known:
             return None
     return lowered if _STRING_LITERAL.fullmatch(lowered) else None

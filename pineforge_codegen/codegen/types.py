@@ -80,6 +80,7 @@ from .tables import (
     DRAWING_TYPE_TO_CPP,
     MATRIX_RETURNING_METHODS,
     PINE_TYPE_TO_CPP,
+    STRATEGY_DIRECTION_VALUES,
     TA_RETURNS_BOOL,
     _matrix_functional_receiver,
     checked_array_slice,
@@ -6042,6 +6043,17 @@ class TypeInferer:
             return "double"
         if isinstance(node, UnaryOp) and node.op == "not":
             return "bool"
+        if (isinstance(node, MemberAccess)
+                and isinstance(node.object, MemberAccess)
+                and isinstance(node.object.object, Identifier)
+                and node.object.object.name == "strategy"
+                and node.object.member == "direction"
+                and node.member in STRATEGY_DIRECTION_VALUES):
+            # Keep authored receivers ahead of the builtin namespace, as the
+            # member emitter does. Authored fields retain existing inference.
+            owner = self._type_spec_from_expr(node.object)
+            if owner is None or owner.kind != "udt":
+                return "std::string"
         if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
             ename = node.object.name
             if ename == "color":
