@@ -2510,10 +2510,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         ):
             if not isinstance(stmt, VarDecl):
                 continue
+            from_selection = False
             if stmt.type_hint:
                 declared_spec = self._type_spec_from_hint_name(stmt.type_hint)
             elif isinstance(stmt.value, (Ternary, IfStmt, SwitchStmt)):
                 declared_spec = self._type_spec_from_expr(stmt.value)
+                if declared_spec is None:
+                    declared_spec = self._array_selection_spec(stmt.value)
+                from_selection = True
             elif self._roots_at_collection_history(stmt.value):
                 # A copy of an array's or a matrix's history, or a built-in's
                 # result on one (``pm = m[1]``, ``c = (m[1]).copy()``).
@@ -2523,6 +2527,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     self._collection_types.setdefault(stmt.name, declared_spec)
                     continue
             else:
+                continue
+            if (from_selection and declared_spec is not None
+                    and declared_spec.kind == "array"):
+                # ``a = switch mode ...`` whose every arm is an array of one
+                # type is an array variable, as the same declaration with one
+                # constructor is: ``a.get(0)`` takes the array lowering and
+                # not a raw member call on the vector.
+                self._array_vars.add(stmt.name)
+                self._collection_types.setdefault(stmt.name, declared_spec)
                 continue
             if declared_spec is None or declared_spec.kind != "matrix":
                 continue

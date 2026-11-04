@@ -2736,6 +2736,39 @@ class TypeInferer:
                 return None
         return result
 
+    def _array_selection_spec(self, node) -> TypeSpec | None:
+        """The one array type every value arm of a selection returns, else None.
+
+        ``_selection_type_spec`` keeps only map and matrix joins outside ``na``
+        (an array is typed by its declaration), so a global declared by a
+        ``switch`` or an ``if`` of arrays had no spec to register it as an
+        array variable. An arm that is ``na`` adds nothing; any other arm that
+        is not an array of the same type makes the selection no array."""
+        arms: list[ASTNode] = []
+        pending = [node]
+        while pending:
+            current = pending.pop()
+            if isinstance(current, Ternary):
+                pending.extend((current.true_val, current.false_val))
+            elif isinstance(current, IfStmt):
+                pending.extend(self._selection_terminal_expr(body)
+                               for body in (current.body, current.else_body))
+            elif isinstance(current, SwitchStmt):
+                pending.extend(self._selection_terminal_expr(body)
+                               for _case, body in current.cases)
+                pending.append(self._selection_terminal_expr(current.default_body))
+            elif not self._selection_node_is_na(current):
+                arms.append(current)
+        result: TypeSpec | None = None
+        for arm in arms:
+            spec = self._type_spec_from_expr(arm)
+            if spec is None or spec.kind != "array":
+                return None
+            result = spec if result is None else unify_type_specs(result, spec)
+            if result is None:
+                return None
+        return result
+
     def _ternary_type_specs(
         self, value: Ternary,
     ) -> dict[int, tuple[TypeSpec | None, bool]]:
