@@ -706,11 +706,29 @@ def test_udf_tuple_history_binding_uses_exact_call_site_series_storage():
         "b = wrap(open)\n"
         "plot(a + b)"
     )
-    assert "auto _tuple_result_0 = pair(src);" in cpp
-    assert "x.push(std::get<0>(_tuple_result_0))" in cpp
-    assert "auto _tuple_result_1 = pair(src);" in cpp
-    assert "x_cs1.push(std::get<0>(_tuple_result_1))" in cpp
+    # Each emitted call site materializes its tuple once, then the
+    # by-reference decomposition feeds the exact call-site Series member.
+    assert cpp.count("auto _tuple_result_0 = pair(src);") == 1
+    assert cpp.count("auto _tuple_result_1 = pair(src);") == 1
+    assert (
+        "auto& [_tuple_result_0_elem_0, _tuple_result_0_elem_1] = "
+        "_tuple_result_0;"
+    ) in cpp
+    assert (
+        "auto& [_tuple_result_1_elem_0, _tuple_result_1_elem_1] = "
+        "_tuple_result_1;"
+    ) in cpp
+    assert (
+        "if (history_advances_new_bar()) x.push(_tuple_result_0_elem_0);"
+        in cpp
+    )
+    assert (
+        "if (history_advances_new_bar()) x_cs1.push(_tuple_result_1_elem_0);"
+        in cpp
+    )
     assert "return (x_cs1[1] + y);" in cpp
+    assert "x.push(_tuple_result_1_elem_0)" not in cpp
+    assert "x_cs1.push(_tuple_result_0_elem_0)" not in cpp
     compile_cpp(cpp, label="udf-tuple-history-exact-call-site-storage")
 
 
@@ -928,9 +946,14 @@ def test_precalculated_extrema_direct_history_uses_chart_bar_clock():
     assert "std::vector<double> _precalc__ta_highest_2" in cpp
     assert "std::vector<double> _precalc__ta_highest_3" in cpp
     lines = cpp.splitlines()
-    for idx, member in ((1, "_hist_call_1"), (2, "_hist_call_2")):
+    for idx, member, stmt_prefix in (
+        (1, "_hist_call_1", "lo = ("),
+        (2, "_hist_call_2", "hi = ("),
+    ):
         hoist = _hoist_line(cpp, f"_pf_every_bar_ta_{idx}")
         assert hoist.startswith("        const auto")
+        statement = _stmt_line(cpp, stmt_prefix)
+        assert lines.index(hoist) < lines.index(statement)
         push = (
             f"        if (history_advances_new_bar()) {member}.push("
             f"_pf_every_bar_ta_{idx});"
@@ -941,12 +964,39 @@ def test_precalculated_extrema_direct_history_uses_chart_bar_clock():
     hi_line = _stmt_line(cpp, "hi = (")
     assert "pred &&" in lo_line and "_hist_call_1[(int)(1)]" in lo_line
     assert "pred &&" in hi_line and "_hist_call_2[(int)(2)]" in hi_line
-    assert "_pf_hist_bar" not in lo_line and "_pf_hist_bar" not in hi_line
+    assert "_use_precalc" not in lo_line and "_precalc__" not in lo_line
+    assert "_use_precalc" not in hi_line and "_precalc__" not in hi_line
     # Eager direct history: precalc-indexed read, synthetic-history fallback.
     flat_line = _stmt_line(cpp, "flat = (")
     assert "static_cast<std::size_t>(bar_index_) - _pf_hist_offset" in flat_line
+    assert "if (is_na(_pf_hist_offset_raw)) return na<double>();" in flat_line
+    assert "_pf_hist_offset_numeric < 0.0L" in flat_line
+    assert (
+        "_pf_hist_offset_numeric > static_cast<long double>(bar_index_)"
+        in flat_line
+    )
+    assert (
+        "if (_pf_hist_bar >= _precalc__ta_highest_3.size()) "
+        "return na<double>();"
+        in flat_line
+    )
     assert "return _precalc__ta_highest_3[(std::size_t)_pf_hist_bar]" in flat_line
-    assert "if (history_advances_new_bar()) _hist_call_3.push(_hv)" in flat_line
+    hist_clock = "_pf_hist_bar_hist_call_3"
+    assert (
+        f"if (history_advances_new_bar() && {hist_clock} != bar_index_) "
+        "_hist_call_3.push(_hv);"
+        in flat_line
+    )
+    assert "else _hist_call_3.update(_hv);" in flat_line
+    assert f"{hist_clock} = bar_index_;" in flat_line
+    assert f"int {hist_clock} = -1;" in cpp
+    assert (
+        f"if (history_advances_new_bar() && bar_index_ == 0) "
+        f"{hist_clock} = -1;"
+        in cpp
+    )
+    assert f"\n            {hist_clock},\n" in cpp
+    assert f"this->{hist_clock} = _pf_script_state_checkpoint_->_pf_value_" in cpp
 
 
 
@@ -965,15 +1015,17 @@ def test_nonprecalculated_extrema_direct_history_uses_every_bar_clock():
     )
 
     assert "std::vector<double> _precalc__ta_highest" not in cpp
-    assert "_pf_hist_bar" not in cpp
+    assert "_precalc__ta_highest" not in cpp
+    assert "_use_precalc" not in cpp
     hoist = _hoist_line(cpp, "_pf_every_bar_ta_1")
     assert "_ta_highest_1.compute(src)" in hoist
     assert "_use_precalc" not in hoist
+    signal_line = _stmt_line(cpp, "signal = (")
+    assert cpp.splitlines().index(hoist) < cpp.splitlines().index(signal_line)
     assert (
         "        if (history_advances_new_bar()) _hist_call_1.push(_pf_every_bar_ta_1);"
         in cpp.splitlines()
     )
-    signal_line = _stmt_line(cpp, "signal = (")
     assert "pred &&" in signal_line and "_hist_call_1[(int)(1)]" in signal_line
     assert ".compute(" not in signal_line
 
