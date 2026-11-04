@@ -1,28 +1,44 @@
-"""F1-1 parameter-default actuals, authored on d910 before seeing a fix.
+"""F1-1 parameter-default actuals; original source authored on d910.
 
 Source tracing: parser._parse_func_def stores expression roots in
 annotations["param_defaults"]; method_binding and CallVisitor materialize
-them at omitted calls. ValueBindings._default sees preceding globals, not
-the callable's formal parameters. Ordinary annotations remain non-syntax.
-No located refusal was found for these shapes by source tracing; admission
-and native values have NOT been executed by this author.
+them at omitted calls. These fixtures call from the top level only; they do
+not cover defaults expanded inside callers with same-named formals.
+formal-shadow is CURRENT-CODEGEN-BINDING-PIN: its unchanged missing result
+assumes the current binding to global k. TradingView default admission and
+formal-shadow binding remain UNRUN; no Pine parity or native agreement is
+claimed. Codegen default admission and all native values also remain UNRUN.
+Ordinary annotations remain non-syntax.
 
-The oracle is independently missing + 1 = missing, finite + 1 arithmetic,
-and the authored explicit override. Never generate a golden with codegen.
-The exact review script is retained separately from input-driven variants.
+The arithmetic reference is independently missing + 1 = missing, finite + 1,
+and the authored explicit override, subject to the formal-shadow binding pin.
+Never generate a golden with codegen. The exact review script is retained
+separately from input-driven variants. All default roots here are direct
+calls; nested/ternary defaults and same-root identity dedup remain UNPROVED.
 
 Later ONE fresh genuine C2 kit must retain this whole module's collection,
 raw results and exact identities: defaults d910 RED / candidate GREEN, plus
-the original 21 source and 14 native rows 01919c40 RED / candidate GREEN.
+the original rows 01919c40 RED / candidate GREEN, with the receiver-use fix.
 The candidate requires 0 errors and 0 skips, including every O0/O2 node.
-Intended collection, NOT observed: 8 inventory + 7 guard + 8 binding +
-2 overridden-root + 1 annotation = 26 source rows; 8 * 2 = 16 native rows.
+Source arithmetic only, UNCOLLECTED: original 7 guard + 7 inventory +
+2 visible controls + 1 unknown-owner + 1 method + 1 array = 19 source;
+7 * 2 = 14 native; 19 + 14 = 33. This module has 8 inventory + 7 guard +
+8 binding + 2 overridden-root + 1 annotation = 26 source; 8 * 2 = 16 native;
+26 + 16 = 42. Combined intended arithmetic is 33 + 42 = 75, UNCOLLECTED.
+The kit must derive its IDs/counts from actual remote by-name collection,
+never hard-code 75 or any source estimate. Every changed hunk still needs
+genuine Claude review before C2; this source edit is not an acceptance.
 Finite/default and explicit-binding controls need not fail on the parent.
-Collection alongside the untouched original 35 rows should be 77, subject
-to actual remote collection and the genuine verdict, never source labels.
 Do not label a build/setup/abort as a numeric counterexample. Native evidence
 is scoped to the recorded engine/runtime (the planned old9fa kit), not an
 unobserved current engine. No executor is launched by this source change.
+
+Hash roles: identity.json's observer_sha256 is the LEGACY RUNNER field
+written by _native_values, hashing tests/test_numeric_actual_inventory.py.
+The new observer is source_binding.json's observer_sha256, separately from
+its runner_sha256. C2 must join both files: identity.observer_sha256 must
+match source_binding.runner_sha256; the new observer must be bound to this
+module's bytes. Reading identity.json alone cannot identify the new observer.
 
 Commands for a later, admitted executor, with explicit real native inputs:
     python -m pytest --collect-only -q tests/test_numeric_parameter_default_actuals.py
@@ -104,6 +120,8 @@ x = g()
 r = inc(7)
 plot(x)
 """ + _CONTROLS
+# CURRENT-CODEGEN-BINDING-PIN until TradingView measures admission and binding.
+# The top-level default currently reads global k; its expected value stays None.
 _SHADOW = """//@version=6
 strategy("default global over formal")
 inc(int a) => a + 1
@@ -161,20 +179,10 @@ def test_default_call_is_a_nonempty_integer_actual_root(case_id):
     ]
     assert len(visible) == 1 and visible[0][1:] == (None, True)
     hidden = [entry for entry in actuals if entry not in visible]
-    assert hidden, "A visible finite call alone cannot prove the default present"
-    for value, owner, written in hidden:
-        assert owner is None, "A default must not borrow g's or a caller's formals"
-        assert written is True  # inc's argument is written inside the default.
-        if value is None:
-            # A conservative unknown-owner/unknown-actual receipt is sound.
-            # Separate guard and native rows prevent dropping its NA guard.
-            continue
-        if case.actual_kind == "k":
-            assert isinstance(value, Identifier) and value.name == "k"
-        elif case.actual_kind == "na":
-            assert isinstance(value, NaLiteral)
-        else:
-            assert isinstance(value, NumberLiteral) and value.value == 5
+    # The default partition proves neither value nor owner. In particular,
+    # treating that partition as proved must fail even for inc(5).
+    # This pins one receipt per fixture, not same-root identity dedup.
+    assert hidden == [(None, None, True)]
     cached_parameters, cached_arrays = generator._int_boundary_inputs()
     assert cached_parameters is parameters and cached_arrays is arrays
 
@@ -251,12 +259,19 @@ def test_unrelated_annotations_do_not_become_default_syntax():
         "inc(int a) => a + 1\nr = inc(7)\nplot(r)\n"
     )
     generator = _generator(source)
-    generator.ctx.ast.annotations = {
-        **(generator.ctx.ast.annotations or {}),
-        "unrelated_analysis_receipt": FuncCall(
-            callee=Identifier(name="inc"), args=[NaLiteral()],
-        ),
-    }
+    definition = next(
+        node for node in generator.ctx.ast.body
+        if isinstance(node, FuncDef) and node.name == "inc"
+    )
+    # A callable is a default-discovery target too. Metadata under another
+    # key must not become syntax on either Program or FuncDef.
+    for node in (generator.ctx.ast, definition):
+        node.annotations = {
+            **(node.annotations or {}),
+            "unrelated_analysis_receipt": FuncCall(
+                callee=Identifier(name="inc"), args=[NaLiteral()],
+            ),
+        }
     # Make this assertion inspect the newly attached metadata even if a
     # constructor query happened to populate the inventory before attachment.
     generator.__dict__.pop("_int_boundary_inputs_cache", None)
@@ -352,7 +367,7 @@ def _inputs(schedule, opt):
 
 
 def _reference(case, payload):
-    """No producer, emitted spelling, runtime sentinel or captured output."""
+    """Source arithmetic; formal-shadow uses CURRENT-CODEGEN-BINDING-PIN."""
     rows = []
     for prefix, bar in enumerate(payload["bars"], 1):
         if case.mode == "finite":
@@ -412,10 +427,17 @@ def test_default_result_native_after_real_strategy_run(tmp_path, case_id, opt):
             "source_sha256": _sha(case.source.encode()),
             "reference_sha256": _sha((directory / "expected.json").read_bytes()),
             "reference_rule": "missing+1=missing; finite+1; explicit override actual",
+            "binding_basis": (
+                "CURRENT-CODEGEN-BINDING-PIN; TradingView admission/binding UNRUN"
+                if case_id == "formal-shadow" else "default admission UNRUN"
+            ),
+            "observer_source": "tests/test_numeric_parameter_default_actuals.py",
             "observer_sha256": _sha(Path(__file__).read_bytes()),
+            "runner_source": "tests/test_numeric_actual_inventory.py",
             "runner_sha256": _sha(
                 (_ROOT / "tests/test_numeric_actual_inventory.py").read_bytes(),
             ),
+            "identity_observer_sha256_role": "LEGACY RUNNER; join runner_sha256",
             "process_helper_sha256": _sha(
                 (_ROOT / "tests/test_numeric_missing_value_rows.py").read_bytes(),
             ),

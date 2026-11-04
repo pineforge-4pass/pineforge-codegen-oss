@@ -167,7 +167,7 @@ def test_method_receiver_keyword_and_omitted_na_actual_keep_their_slots():
 strategy("method actual slots")
 type Reading
     int value = 0
-method add(Reading self, int delta = na) => delta + 1
+method add(Reading self, int delta = na) => delta + self.value + 1
 reading = Reading.new()
 x = reading.add()
 y = reading.add(delta = 7)
