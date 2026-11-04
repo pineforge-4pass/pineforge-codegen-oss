@@ -2462,6 +2462,11 @@ class SecurityEmitter:
                 and (self._holds_na_aware_wide_double(value_node)
                      or "_pf_wide_l" in value_cpp)):
             return na_preserving_int_cast(value_cpp, cpp_type)
+        if cpp_type == "std::string" and self._selection_node_is_na(value_node):
+            # A bare na stored into a string copy is the string na, as it is
+            # in a helper's string series and in the chart's own declaration:
+            # the numeric na pushed into a series of strings failed g++.
+            return "na<std::string>()"
         return value_cpp
 
     def _security_relevant_top_level_stmts(self, mutable_globals: list[str]) -> list[ASTNode]:
