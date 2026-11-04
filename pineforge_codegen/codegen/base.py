@@ -4828,6 +4828,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if sharing is None:
             self._array_journal_members: dict[str, VarDecl] = {}
             self._array_journal_calls: dict[int, str] = {}
+        if getattr(self, "_uses_array_slice_views", False):
+            # A view's writes can reach a different variable's storage. The
+            # old per-variable mutation proof cannot establish uniqueness.
+            return
         if self._uses_map or self._uses_matrix or self._udt_defs:
             return
         enabled = self.ctx.strategy_params.get("calc_on_order_fills") is True
@@ -5162,6 +5166,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Pre-scan for strategy series vars
         self._prescan_strategy_series()
         self._prescan_session_history()
+        from .array_slice import prepare_names as prepare_slice_names, uses_slice
+        self._uses_array_slice_views = uses_slice(self)
+        if self._uses_array_slice_views:
+            prepare_slice_names(self)
         self._prepare_array_journal()
         self._prepare_history_sharing()
         graph_journal.prepare(self)
@@ -5195,6 +5203,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 1. Includes
         self._emit_includes(lines)
+        if self._uses_array_slice_views:
+            from .array_slice import SUPPORT_MARKER
+            lines.append(SUPPORT_MARKER)
         tv_float_step_end_at = len(lines)
         if self._array_journal_members:
             lines.append(graph_journal.runtime(self, ARRAY_JOURNAL_CPP).replace(
@@ -5430,7 +5441,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.append("};")
             lines.append("")
 
-        if self._uses_map or self._uses_matrix or self._udt_defs:
+        if (self._uses_map or self._uses_matrix or self._udt_defs
+                or self._uses_array_slice_views):
             self._emit_handle_checkpoint_traits(lines)
 
         # 1c. Enum constants + string tables for str.tostring(enumVar)
@@ -6264,6 +6276,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if self._uses_enum_string_lookup:
             lines.insert(0, ENUM_STRING_INCLUDE)
         cpp = "\n".join(lines)
+        if self._uses_array_slice_views:
+            from .array_slice import lower_storage
+            cpp = lower_storage(cpp, self)
         self._settle_session_reads(cpp)
         return cpp
 

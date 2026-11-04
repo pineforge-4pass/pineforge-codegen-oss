@@ -1535,10 +1535,10 @@ def test_nested_array_slice_aggregates_materialize_one_receiver():
 
     # Before the fix, each constructor appeared twice: max/min_element took
     # begin() from one temporary vector and end() from another (undefined
-    # behaviour).  Each source slice must now produce one vector constructor,
+    # behaviour). Each source slice must now produce one window,
     # and each iterator pair must use the same named receiver binding.
-    assert mx_line.count("std::vector<double>(") == 1
-    assert mn_line.count("std::vector<double>(") == 1
+    assert mx_line.count("_pf_slice_view<_PFSliceArray<double>>") == 1
+    assert mn_line.count("_pf_slice_view<_PFSliceArray<double>>") == 1
     assert re.search(
         r"std::max_element\((__pf_array_receiver_\d+)\.begin\(\),\1\.end\(\)\)",
         mx_line,

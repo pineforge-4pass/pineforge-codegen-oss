@@ -288,7 +288,17 @@ class CollectionHistoryEmitter:
             return
         float_spec = TypeSpec.primitive("float")
         matrices = [v.spec for v in variables if v.kind == "matrix"]
-        lines.append(COLLECTION_HISTORY_CPP.strip("\n"))
+        array_traits = COLLECTION_HISTORY_CPP
+        if getattr(self, "_uses_array_slice_views", False):
+            # History freezes contents, not live slice bindings.
+            array_traits = array_traits.replace(
+                "std::make_shared<const std::vector<E, A>>(value)",
+                "std::make_shared<const std::vector<E, A>>(value.detached_copy())",
+            ).replace(
+                "copy(const std::vector<E, A>& value) { return value; }",
+                "copy(const std::vector<E, A>& value) { return value.detached_copy(); }",
+            )
+        lines.append(array_traits.strip("\n"))
         lines.append(COLLECTION_HISTORY_ARRAY_VALUE_CPP.strip("\n"))
         if any(spec.element == float_spec for spec in matrices):
             lines.append(COLLECTION_HISTORY_MATRIX_CPP.strip("\n"))

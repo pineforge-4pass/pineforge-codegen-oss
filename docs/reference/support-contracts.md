@@ -1,5 +1,17 @@
 ## Support contracts
 
+Builtin `array.slice` on a resolved typed array in the script, a function or
+method parameter, or a callable-local array opens the view gate and lowers the
+script's array storage to typed handles:
+shared backing plus half-open windows, with composed offsets for nested slices.
+Element writes share bidirectionally; `array.copy` and history freezes detach.
+Structural changes detach the affected array, retaining PineForge's existing
+resize behavior pending TradingView measurements. Slice-free scripts retain
+their previous emitted C++. Slice scripts use eager identity-aware checkpoints
+instead of per-variable array journal/history-cache proofs.
+Other builtin slice receivers keep the copy with warning PF-W5003 while the
+gate stays closed.
+
 `line.all`, `box.all`, `label.all` and `linefill.all` non-var declaration aliases and
 single-binder `for … in` loops take ordered snapshots of live handles at each
 collection read. Elements keep their drawing type; setters/deletion reach the

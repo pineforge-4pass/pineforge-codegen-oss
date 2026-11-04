@@ -1389,7 +1389,8 @@ class CallVisitor:
 
     def _array_arg_kind(self, node, depth: int = 0) -> str:
         """``"fresh"`` for an argument that is an array no variable holds (a
-        new or copied array, a matrix row, a user function's new array),
+        new or copied array, a matrix row, a user function's new array), or
+        a lifetime-owning slice window that can safely be staged by value,
         ``"alias"`` for a user function's array that a variable may hold (it
         returns its argument or a global) or a selection of a held and a
         fresh array, and ``"keep"`` for every other argument, which keeps the
@@ -1413,6 +1414,12 @@ class CallVisitor:
         callee = node.callee
         if isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier):
             key = (callee.object.name, callee.member)
+            if (key == ("array", "slice")
+                    and getattr(self, "_uses_array_slice_views", False)
+                    and self._typed_user_method_info(callee.object, "slice")[1] is None):
+                # A returned view owns its backing lifetime. It can safely
+                # bind to a staged array parameter while retaining sharing.
+                return "fresh"
             if key in self._FRESH_ARRAY_CALLS or (
                     key[0] == "array" and key[1].startswith("new")):
                 return "fresh"
@@ -1421,6 +1428,11 @@ class CallVisitor:
             info = self._func_info_map.get(callee.name)
         elif isinstance(callee, MemberAccess):
             spec = self._type_spec_from_expr(callee.object)
+            if (callee.member == "slice" and spec is not None
+                    and spec.kind == "array"
+                    and getattr(self, "_uses_array_slice_views", False)
+                    and self._typed_user_method_info(callee.object, "slice")[1] is None):
+                return "fresh"
             fresh = self._FRESH_ARRAY_METHODS.get(spec.kind if spec is not None else "")
             if fresh is not None:
                 return "fresh" if callee.member in fresh else "keep"
