@@ -65,6 +65,14 @@ def test_method_session_history_reports_qualifier_before_pf_e5048():
     _refused(METHOD_SOURCE, METHOD_ARGUMENT, 6)
 
 
+def test_unresolved_method_receiver_reports_qualifier_at_definition():
+    source = METHOD_SOURCE.replace(
+        "x = foo.m()\n",
+        "read(receiver) => receiver.m()\nx = read(foo)\n",
+    )
+    _refused(source, METHOD_ARGUMENT, 6)
+
+
 @pytest.mark.parametrize("body,line", [
     (f"chosen = close > open ? {LONG} : {ALL}\n{CALL}(chosen)\n", 4),
     (f"signal = close > open\nchosen = signal ? {LONG} : {ALL}\n{CALL}(chosen)\n", 5),
@@ -135,9 +143,9 @@ def test_forwarded_series_parameter_reaches_builtin_contract(declaration, invoca
 def test_method_on_expression_receiver_forwarding_series_is_accepted_by_unknown_evidence():
     # ACCEPTED BECAUSE THE EVIDENCE IS UNKNOWN, not because TradingView accepts
     # it: whether TradingView refuses a series receiver that a method forwards
-    # into allow_entry_in's simple parameter is an open question (REPORT-Q2.md,
-    # round 3, QUESTIONS FOR TV). This source was the "method" row of the test
-    # above. The classifier refuses only what it proves, and it has no proof
+    # into allow_entry_in's simple parameter is an open question.
+    # This source was the "method" row of the test above.
+    # The classifier refuses only what it proves, and it has no proof
     # here: the analyzer gives the expression receiver `close > open` no type,
     # so the typed-parameter check never runs for the call, and the classifier's
     # own receiver hint is unresolved for it too (its method key is not found).
@@ -222,7 +230,7 @@ ACCEPTED = [
     pytest.param("keep(simple int amount) => amount\nx = keep(input.int(7))\n",
                  LONG, id="user-contract-alongside-builtin"),
     pytest.param(f"direction() => {LONG}\n", "direction()", id="unknown-helper-return"),
-    # CLD's classifier has no strategy.position_size member evidence.
+    # The classifier has no strategy.position_size member evidence.
     # Keep that existing unknown-shape policy rather than extending inference.
     pytest.param("", f"strategy.position_size > 0 ? {LONG} : {ALL}",
                  id="unproved-strategy-member"),

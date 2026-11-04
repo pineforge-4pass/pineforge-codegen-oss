@@ -12,7 +12,7 @@ from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._e2e import reference_codegen, transpile_json
 
 
-CPP_REFERENCE = "c12c1877da48629b9c711f745a752ffc20ceef17"
+CPP_REFERENCE = "290fdf7ae39eb786082fd11b8187ae6b640ab66e"
 HEADER = '//@version=6\nstrategy("Parameter qualifiers")\n'
 
 
@@ -278,8 +278,37 @@ _CASES = [
 ]
 
 
+# Callable, parameter, argument rank, and required rank from each authored case.
+_QUALIFIER_ARGUMENTS = {
+    "series_builtin_to_simple_function": ("keep", "value", "series", "simple"),
+    "series_to_simple_int_method": ("Counter.record", "amount", "series", "simple"),
+    "array_field_element_to_simple_function": ("keep", "amount", "series", "simple"),
+    "array_field_element_to_simple_method": ("Ledger.measure", "amount", "series", "simple"),
+    "derived_series_to_simple_array_helper": ("first", "amount", "series", "simple"),
+    "named_series_argument": ("keep", "amount", "series", "simple"),
+    "named_method_series_argument": ("Counter.record", "amount", "series", "simple"),
+    "explicit_series_literal": ("keep", "amount", "series", "simple"),
+    "series_alias_reassignment": ("keep", "amount", "series", "simple"),
+    "series_float_argument": ("keep", "amount", "series", "simple"),
+    "series_bool_argument": ("keep", "enabled", "series", "simple"),
+    "session_flag_to_simple_function": ("keep", "enabled", "series", "simple"),
+    "series_string_argument": ("keep", "label", "series", "simple"),
+    "series_to_const_parameter": ("keep", "amount", "series", "const"),
+    "series_helper_result": ("keep", "amount", "series", "simple"),
+    "forwarded_series_to_simple": ("keep", "amount", "series", "simple"),
+    "primitive_receiver_simple_parameter": ("int.offset", "amount", "series", "simple"),
+    "tuple_return_qualifier": ("keep", "amount", "series", "simple"),
+    "switch_result_qualifier": ("keep", "amount", "series", "simple"),
+    "loop_tail_qualifier": ("keep", "amount", "series", "simple"),
+    "declaration_tail_qualifier": ("keep", "amount", "series", "simple"),
+    "assignment_tail_qualifier": ("keep", "amount", "series", "simple"),
+    "request_payload_to_simple": ("keep", "amount", "series", "simple"),
+    "simple_call_inside_request": ("keep", "amount", "series", "simple"),
+}
+
+
 @pytest.mark.parametrize("source,control,code,position", _CASES)
-def test_refusals_are_coded_and_located(source, control, code, position):
+def test_refusals_are_coded_and_located(source, control, code, position, request):
     with pytest.raises(CompileError) as caught:
         transpile(source, filename="strategy.pine")
     assert len(caught.value.diagnostics) == 1
@@ -289,6 +318,22 @@ def test_refusals_are_coded_and_located(source, control, code, position):
     assert diagnostic.phase is Phase.ANALYZER
     assert diagnostic.location.file == "strategy.pine"
     assert (diagnostic.location.line, diagnostic.location.col) == position
+    if code == "PF-E2080":
+        function_name, name, argument_qualifier, parameter_qualifier = (
+            _QUALIFIER_ARGUMENTS[request.node.callspec.id]
+        )
+        assert diagnostic.args == {
+            "function_name": function_name,
+            "name": name,
+            "argument_qualifier": argument_qualifier,
+            "parameter_qualifier": parameter_qualifier,
+        }
+    elif code == "PF-E2082":
+        assert diagnostic.args == {}
+        assert diagnostic.message == (
+            "Functions that accept a variable number of arguments "
+            "cannot accept keyword arguments."
+        )
     assert render_diagnostic(code, diagnostic.args) == (
         diagnostic.message, diagnostic.hint,
     )
