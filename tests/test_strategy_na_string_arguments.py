@@ -1,8 +1,12 @@
 """Strategy string slots use the same missing value as an omitted string."""
 
+import json
+import re
+
 import pytest
 
 from pineforge_codegen import transpile
+from tests.test_order_shapes import RECEIPT_PATTERN, SOURCE
 
 
 @pytest.mark.parametrize("call,control,callee", [
@@ -31,3 +35,15 @@ def test_na_strategy_string_slots_match_empty_or_omitted(call, control, callee):
     # uses "". Both denote the same string in the host API.
     normalize = lambda text: text.replace('std::string("")', '""')
     assert normalize(emitted(call)) == normalize(emitted(control))
+
+
+# An order id that lowers to the constant empty string is not a computed id, so the id-sites
+# receipt must not count it as a fresh id per bar; a computed id still is one.
+@pytest.mark.parametrize(("expression", "fresh"), [
+    ("na", 0), ('""', 0), ('"L"', 0), ('close > open ? "A" : "B"', 1),
+])
+def test_missing_order_id_is_not_counted_as_a_fresh_computed_id(expression, fresh):
+    cpp = transpile(SOURCE + f"strategy.entry({expression}, strategy.long)\n")
+    documents = re.findall(RECEIPT_PATTERN, cpp)
+    # Capabilities, confirmed bar, order shapes, then the id-sites receipt.
+    assert json.loads(json.loads(documents[3]))["strategy"]["ids"] == {"freshPerBar": fresh}
