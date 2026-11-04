@@ -1639,7 +1639,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 continue
             if (not nested and isinstance(decl.value, FuncCall)
                     and self._is_input_call(decl.value)
-                    and not self._is_source_input(decl.value)):
+                    and not self._is_source_input(decl.value)
+                    # An input the script reassigns is read at its declaration:
+                    # the preamble cannot build a ``var`` aggregate from it.
+                    and decl.name not in self._global_mutable_infos):
                 continue
             statement_values.add(decl.name)
 
@@ -1778,7 +1781,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     stmt_spec.kind in {"array", "map", "matrix"}
                     or (stmt_spec.kind == "udt" and stmt_spec.name in self._udt_defs)
                 )
-                and reads_statement_value(stmt)
+                # A ``var`` aggregate declared inside a block of the script is
+                # built where the block first reaches it, never in the
+                # first-bar preamble (which does not emit it at all).
+                and (reads_statement_value(stmt)
+                     or node_id not in top_level_node_ids)
             )
             established_decl_site = (
                 (not is_callable_scoped or drawing_cpp is not None)
