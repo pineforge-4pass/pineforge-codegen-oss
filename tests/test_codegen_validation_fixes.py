@@ -184,21 +184,26 @@ def test_bar_index_history_series_is_pushed_from_offset_helper():
     assert integer_arithmetic("pine_bar_index()", "-", "past") in cpp
 
 
-def test_security_param_tf_mixed_with_non_literal_callsite_rejected():
+def test_security_param_tf_mixed_with_series_callsite_selects_registered_arms():
     # Two distinct literal tfs PLUS a third call site whose tf reads the
-    # chart bar (a series ternary) -> its clone has no timeframe before the
-    # first bar, so the deterministic rejection still applies rather than
-    # registering a value computed from no bar.
-    import pytest
-    with pytest.raises(Exception, match="reads the chart bar"):
-        _cpp(
-            "f(tf) =>\n"
-            "    request.security(syminfo.tickerid, tf, close)\n"
-            "a = f(\"5\")\n"
-            "b = f(\"15\")\n"
-            "c = f(close > 0 ? \"5\" : \"60\")\n"
-            "plot(a + b + c)"
-        )
+    # chart bar. Each call path retains its own registered result slots.
+    cpp = _cpp(
+        "f(tf) =>\n"
+        "    request.security(syminfo.tickerid, tf, close)\n"
+        "a = f(\"5\")\n"
+        "b = f(\"15\")\n"
+        "c = f(close > 0 ? \"5\" : \"60\")\n"
+        "plot(a + b + c)"
+    )
+    assert re.findall(r"register_security_eval\((.*)\);", cpp) == [
+        '0, "5", input_tf_, false, false',
+        '1, "15", input_tf_, false, false',
+        '2, "5", input_tf_, false, false',
+        '3, "60", input_tf_, false, false',
+    ]
+    assert 'if (_pf_selected_tf == "5") return _req_sec_2;' in cpp
+    assert 'if (_pf_selected_tf == "60") return _req_sec_3;' in cpp
+    compile_cpp(cpp, label="mixed-fixed-and-series-timeframe-calls")
 
 
 def test_security_param_tf_mixed_literals_cloned_per_callsite():

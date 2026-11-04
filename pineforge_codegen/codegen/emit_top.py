@@ -140,6 +140,13 @@ class TopLevelEmitter:
             for func_name, namespace in [self._resolve_callee(node.callee)]
         )
         lines.append('#include <pineforge/source/pine_strategy_host.hpp>')
+        if any(item.get("runtime_context") for item in self._security_calls):
+            lines.extend((
+                "#ifndef PINEFORGE_HAS_RUNTIME_CONTEXT_SERVICE_V1",
+                '#error "Runtime request templates require the paired runtime-context engine"',
+                "#endif",
+                "#include <utility>",
+            ))
         lines.append('#include <pineforge/ta.hpp>')
         lines.extend(['#if __has_include(<pineforge/checked_settings.hpp>)',
                       '#include <pineforge/checked_settings.hpp>', '#endif'])
@@ -631,6 +638,8 @@ class TopLevelEmitter:
             "        _pf_require_settings_ok();",
             "        _pf_script_state_checkpoint_.reset();",
         ])
+        if any(item.get("runtime_context") for item in self._security_calls):
+            lines.append("        runtime_contexts().enable_history();")
         seen: set[str] = set()
         for declaration in declarations:
             name = self._script_state_member_name(declaration)
@@ -1421,8 +1430,14 @@ class TopLevelEmitter:
                 self._emit_foreign_security_lookups(lines)
             lines.append("    void configure_security_evaluators() override {")
             lines.append("        security_eval_states_.clear();")
+            if any(info.get("runtime_context") for info in self._security_eval_info):
+                lines.append("        runtime_contexts().enable_history();")
             lines.extend(self._security_tf_replay_prologue())
             for info in self._security_eval_info:
+                if info.get("runtime_context"):
+                    continue
+                if info.get("series_tf_invalid") is not None:
+                    continue
                 tf = info.get("tf")
                 tf_expr = info.get("tf_expr")
                 if tf:

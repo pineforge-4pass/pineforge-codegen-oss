@@ -88,7 +88,10 @@ from .helpers import (
     _CPP_COMMENT_OR_LITERAL as _SECURITY_CPP_LITERALS,
     na_preserving_int_cast, unary_sign_cpp,
 )
-from ..security_contexts import GLOBAL_ANNOTATION, UNREACHED_ANNOTATION, _FIXED_INPUT_KINDS
+from ..security_contexts import (
+    GLOBAL_ANNOTATION, TIMEFRAME_SOURCES_ANNOTATION, UNREACHED_ANNOTATION,
+    _FIXED_INPUT_KINDS,
+)
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .tables import (
     ARRAY_JOURNAL_DELTA_METHODS, ARRAY_JOURNAL_FULL_METHODS, MATRIX_VOID_METHODS,
@@ -255,7 +258,26 @@ class SecurityEmitter:
         This walk does not render C++ or allocate emission counters. A request
         which passes the setup proof therefore retains its original emitter.
         """
+        sources = (getattr(node, "annotations", None) or {}).get(
+            TIMEFRAME_SOURCES_ANNOTATION)
+        if sources is not None:
+            return list(sources)
         if isinstance(node, Identifier):
+            # A storage cell's initializer is not its value at the request.
+            # Inventory its writes as well, without moving chart execution
+            # into evaluator registration.
+            if self._security_tf_values.mutable(node):
+                binding = self._security_tf_values._binding(node)
+                declaration = self._security_tf_values.declarations.get(binding)
+                writes = self._security_tf_values.writes.get(binding, ())
+                dynamic = (self._security_series_tf_local_binding(node) is not None
+                           or self._security_tf_expr_is_per_bar(node))
+                if (declaration is not None and dynamic
+                        and all(write.op == ":=" for write in writes)):
+                    # Plain stores can carry setup values, including inputs,
+                    # without interpreting their defaults as constants.
+                    return [declaration.value, *(write.value for write in writes)]
+                return [node]
             name = node.name
             binding = self._security_series_tf_local_binding(node)
             if binding is not None or not self._security_identifier_is_global_binding(node):
@@ -287,7 +309,13 @@ class SecurityEmitter:
         has_series_condition = False
         block_selection = False
         normalization_failed = False
-        local_selection = self._security_series_tf_local_binding(node) is not None
+        active_sources = set()
+        notes = getattr(node, "annotations", None) or {}
+        local_selection = (
+            self._security_series_tf_local_binding(node) is not None
+            or TIMEFRAME_SOURCES_ANNOTATION in notes)
+        if TIMEFRAME_SOURCES_ANNOTATION in notes:
+            series.append(node)
 
         def condition(value):
             nonlocal has_series_condition
@@ -310,10 +338,26 @@ class SecurityEmitter:
 
         def walk(value):
             nonlocal normalization_failed, block_selection, has_computed_value
+            if (self._security_tf_values.mutable(value)
+                    and (local_selection or self._security_tf_expr_is_per_bar(value))):
+                series.append(value)
+                has_computed_value = True
             sources = self._security_series_tf_sources(value)
             if len(sources) != 1 or sources[0] is not value:
-                for source in sources:
-                    walk(source)
+                binding = (self._security_tf_values._binding(value)
+                           if isinstance(value, Identifier) else None)
+                key = ("binding", binding) if binding is not None else ("node", id(value))
+                if key in active_sources:
+                    # A copy cycle adds no values beyond the participating
+                    # cells' seeds and other stores. Operators remain leaves
+                    # and must pass the ordinary bounded value proof.
+                    return
+                active_sources.add(key)
+                try:
+                    for source in sources:
+                        walk(source)
+                finally:
+                    active_sources.remove(key)
                 return
             if isinstance(value, Ternary):
                 condition(value.condition)
@@ -331,7 +375,9 @@ class SecurityEmitter:
                         # selections cannot yet be expanded into closed arms.
                         normalization_failed = True
                         return
-                self._check_security_tf_arms(value, set())
+                self._check_security_tf_arms(
+                    value, set(), validate_literals=not (
+                        local_selection or self._security_tf_expr_is_per_bar(value)))
                 if isinstance(value, IfStmt):
                     condition(value.condition)
                     arm(value.body, value)
@@ -349,7 +395,8 @@ class SecurityEmitter:
                 # An opaque call with no explicit bar read keeps its existing
                 # registration path; conservative implicit-state classification
                 # alone must not introduce a new closed-set requirement.
-                if (isinstance(value, (FuncCall, BinOp, UnaryOp))
+                if ((isinstance(value, (FuncCall, BinOp, UnaryOp))
+                     or self._security_tf_values.mutable(value))
                         and (local_selection or self._security_tf_expr_is_per_bar(
                             value, implicit_calls=False))):
                     series.append(value)
@@ -380,13 +427,18 @@ class SecurityEmitter:
         from ..limits import syntax_children
         from ..security_contexts import ScriptIndex
 
-        index = ScriptIndex(self.ctx.ast, self.ctx.method_call_bindings)
-        writes: dict[tuple, list[ASTNode]] = {}
-        for node, _depth in iter_ast_nodes(self.ctx.ast):
-            if isinstance(node, Assignment) and isinstance(node.target, Identifier):
-                binding = index.refs.get(id(node.target))
-                if binding is not None:
-                    writes.setdefault(binding, []).append(node.value)
+        inventory = getattr(self, "_security_tf_state_inventory", None)
+        if inventory is None:
+            index = ScriptIndex(self.ctx.ast, self.ctx.method_call_bindings)
+            writes: dict[tuple, list[ASTNode]] = {}
+            for node, _depth in iter_ast_nodes(self.ctx.ast):
+                if isinstance(node, Assignment) and isinstance(node.target, Identifier):
+                    binding = index.refs.get(id(node.target))
+                    if binding is not None:
+                        writes.setdefault(binding, []).append(node.value)
+            self._security_tf_state_inventory = (index, writes)
+        else:
+            index, writes = inventory
         pending = [root]
         seen: set[int] = set()
         owned: set[int] = set()
@@ -417,12 +469,13 @@ class SecurityEmitter:
         """Give every closed arm its own continuously evaluated request state."""
         from ..security_contexts import context_key
         from ..limits import MAX_SECURITY_TIMEFRAME_VALUES
+        from ..support_checker import invalid_tf_literal
         from .timeframe_values import OpenTimeframeSet, TimeframeValues
 
         extras = []
-        values = None
         self._security_series_tf_global_declarations = {
             id(stmt) for stmt in self.ctx.ast.body if isinstance(stmt, VarDecl)}
+        values = self._security_tf_values = TimeframeValues(self)
         next_id = len(self._security_calls)
         for item in self._security_calls:
             if item.get("dead"):
@@ -430,15 +483,21 @@ class SecurityEmitter:
             # Choice discovery validates selection arms too, before the later
             # evaluator loop sets this flag for timeframe resolution.
             self._security_tf_lower = bool(item.get("is_lower_tf_array"))
+            registration_reads = set(self._security_tf_mutable_reads)
             leaves, series, setup_error = self._security_series_tf_choices(
                 item["tf_node"])
+            local_state, outside_state = self._security_series_tf_state_declarations(
+                item["expr_node"])
+            # Fixed and expanded requests use the same historical requested
+            # bar protocol: repeated partial evaluations roll back, completed
+            # requested bars advance each helper's own storage.
+            self._security_series_tf_local_decls.update(local_state)
+            item["historical_local_decls"] = frozenset(local_state)
             if not series:
                 continue
             if item.get("foreign"):
                 self._security_series_tf_refusal(
                     series[0], "another symbol is not yet supported")
-            local_state, outside_state = self._security_series_tf_state_declarations(
-                item["expr_node"])
             # Reuse exactly the fixed request's replay plan. A same-spelled
             # helper/block binding is not the global that plan carries.
             rebound_state = {
@@ -451,12 +510,14 @@ class SecurityEmitter:
                     series[0],
                     "state declared outside the requested expression cannot be replayed by this request; "
                     "move the state into a helper used by the requested expression")
-            self._security_series_tf_local_decls.update(local_state)
             arms = []
             keys = set()
             computed = False
+            runtime = False
             for leaf in leaves:
-                resolved = self._substitute_tf_input_reads(leaf, set())
+                resolved = (self._substitute_tf_input_reads(leaf, set())
+                            if isinstance(leaf, Identifier) and not values.mutable(leaf)
+                            else leaf)
                 allowed = isinstance(resolved, StringLiteral) or (
                     isinstance(resolved, MemberAccess)
                     and isinstance(resolved.object, Identifier)
@@ -470,30 +531,40 @@ class SecurityEmitter:
                     candidates = [resolved]
                 else:
                     computed = True
-                    if values is None:
-                        values = TimeframeValues(self)
                     try:
                         # Interpret the authored leaf, not setup substitution:
                         # input defaults and first-bar values are not constants.
                         candidates = values.strings(leaf)
                     except (OpenTimeframeSet, ValueError, TypeError, KeyError,
                             ArithmeticError, RecursionError):
-                        if setup_error is not None:
-                            raise setup_error
-                        # Closing open inventories needs the run-time
-                        # registration spec, including reached-request limits.
-                        self._security_series_tf_refusal(
-                            leaf, "the timeframe set is not closed at compile time")
+                        if self._infer_type(leaf) != "std::string":
+                            if setup_error is not None:
+                                raise setup_error
+                            self._security_series_tf_refusal(
+                                leaf, "the timeframe set is not closed at compile time")
+                        runtime = True
+                        break
                 for candidate in candidates:
                     key = context_key(candidate)
                     if key not in keys:
                         keys.add(key)
                         arms.append(candidate)
                     if computed and len(arms) > MAX_SECURITY_TIMEFRAME_VALUES:
-                        # The run-time registration spec must also replace
-                        # this finite-inventory bound for larger/open sets.
-                        self._security_series_tf_refusal(
-                            leaf, "the timeframe set is not closed at compile time")
+                        runtime = True
+                        break
+                if runtime:
+                    break
+            if runtime:
+                # Inventory bounds limit this optimization, not the language.
+                # The authored argument is evaluated at its reached call; one
+                # typed template supplies arbitrarily many runtime instances.
+                item["runtime_context"] = True
+                item["series_tf_sites"] = [item["sec_id"]]
+                item["series_tf_local_decls"] = frozenset(local_state)
+                item["series_tf_outside_decls"] = frozenset(outside_state)
+                item["series_tf_state_node"] = series[0]
+                self._security_tf_mutable_reads = registration_reads
+                continue
             original = dict(item)
             sites = []
             for arm_index, leaf in enumerate(arms):
@@ -501,6 +572,14 @@ class SecurityEmitter:
                 site = item if arm_index == 0 else dict(original)
                 site["sec_id"] = sec_id
                 site["tf_node"] = leaf
+                if isinstance(leaf, StringLiteral) and leaf.value:
+                    label = ("request.security_lower_tf" if item.get("is_lower_tf_array")
+                             else "request.security")
+                    invalid = invalid_tf_literal(leaf.value, label)
+                    if invalid is not None:
+                        # An invalid computed value owns no engine stream.
+                        # Its request read stops only if that value is reached.
+                        site["series_tf_invalid"] = invalid[0]
                 if local_state:
                     site["series_tf_local_decls"] = frozenset(local_state)
                 if outside_state:
@@ -513,7 +592,231 @@ class SecurityEmitter:
                     extras.append(site)
                     next_id += 1
             item["series_tf_sites"] = sites
+            # Inspection may follow a chart condition through substitution.
+            # Expanded streams register only their leaves, so none of those
+            # transient reads belongs to the first-bar registration replay.
+            self._security_tf_mutable_reads = registration_reads
         self._security_calls.extend(extras)
+        self._promote_nested_runtime_requests()
+
+    def _promote_nested_runtime_requests(self) -> None:
+        """A request evaluated inside a runtime instance uses its parent's key.
+
+        This is a dependency walk over payloads and helper definitions, not an
+        inventory of possible argument strings.
+        """
+        pending = [item for item in self._security_calls if item.get("runtime_context")]
+        seen = set()
+        while pending:
+            item = pending.pop()
+            if item["sec_id"] in seen:
+                continue
+            seen.add(item["sec_id"])
+            roots = [item["expr_node"]]
+            visited_helpers = set()
+            while roots:
+                for node, _depth in iter_ast_nodes(roots.pop()):
+                    if not isinstance(node, FuncCall):
+                        continue
+                    nested = self._runtime_security_call_for_request(node)
+                    if nested is not None and nested is not item:
+                        nested["runtime_context"] = True
+                        nested["series_tf_sites"] = [nested["sec_id"]]
+                        nested.setdefault("series_tf_state_node", nested["tf_node"])
+                        pending.append(nested)
+                    name = self._security_user_call_key(node)
+                    info = self._func_info_map.get(name)
+                    if info is not None and info.node is not None and name not in visited_helpers:
+                        visited_helpers.add(name)
+                        roots.append(info.node)
+        if seen:
+            # Ownership changed from chart/static calls to nested templates.
+            self._security_body_expression_cache = {}
+            self._security_global_value_cache = {}
+
+    def _runtime_security_call_for_request(self, node):
+        function, namespace = self._resolve_callee(node.callee)
+        if namespace != "request" or function not in ("security", "security_lower_tf"):
+            return None
+        payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
+        candidates = [
+            item for item in self._security_calls
+            if not item.get("series_tf_extra") and item["expr_node"] is payload
+            and bool(item.get("is_lower_tf_array")) == (function == "security_lower_tf")]
+        return next((item for item in candidates
+                     if item.get("callsite_idx") == self._active_call_site_idx),
+                    candidates[0] if candidates else None)
+
+    @staticmethod
+    def _runtime_security_cpp(text: str, replacements: dict[str, str]) -> str:
+        """Rewrite identifier tokens, preserving C++ literals and comments."""
+        tokens = re.compile(
+            r'//[^\n]*|/\*.*?\*/|' + _SECURITY_CPP_LITERALS.pattern
+            + r'|\bthis\s*->\s*[A-Za-z_][A-Za-z_0-9]*|[A-Za-z_][A-Za-z_0-9]*',
+            re.DOTALL)
+        def rewrite(match):
+            token = match.group()
+            member = re.sub(r"^this\s*->\s*", "", token)
+            if member == token:
+                previous = match.start()
+                while previous and text[previous - 1].isspace():
+                    previous -= 1
+                if (text[max(0, previous - 1):previous] == "."
+                        or text[max(0, previous - 2):previous] in ("->", "::")):
+                    return token
+            return replacements.get(member, token)
+        return tokens.sub(rewrite, text)
+
+    def _runtime_security_member_names(self, sec_id: int) -> list[str]:
+        item = self._security_calls[sec_id]
+        info = self._security_eval_info[sec_id]
+        owned = {"_security_helper_series_", "_security_helper_series_str_"}
+        if item.get("is_lower_tf_array"):
+            owned.add(f"_req_sec_lower_tf_{sec_id}")
+        elif item.get("returns_tuple") and isinstance(item["expr_node"], TupleLiteral):
+            owned.update(f"_req_sec_{sec_id}_{i}" for i in range(item["tuple_size"]))
+        else:
+            owned.add(f"_req_sec_{sec_id}")
+        owned.update(
+            self._security_ohlc_hist_series_cpp(sec_id, field)
+            for field in self._security_ohlc_hist_fields_by_sec.get(sec_id, ()))
+        owned.update(self._security_ta_hist_series_names(sec_id))
+        owned.update(self._security_expr_hist_series_names(sec_id))
+        owned.update(cell.member for cell in self._security_arg_histories.get(sec_id, {}).values())
+        if sec_id in self._security_bar_index_secs:
+            owned.add(self._security_bar_index_member(sec_id))
+        for name in info.get("mutable_globals", ()):
+            owned.add(self._security_state_name(sec_id, name))
+            variable = self._global_mutable_infos.get(name)
+            if variable is not None and getattr(variable, "is_var", False):
+                owned.add(self._security_init_flag_name(sec_id, name))
+        for variants in (info.get("ta_variants") or {}).values():
+            owned.update(variant["member_name"] for variant in variants)
+        names = []
+        for declaration in self._runtime_security_declarations:
+            name = self._script_state_member_name(declaration)
+            if name in owned:
+                names.append(name)
+        return names
+
+    def _emit_runtime_security_templates(self, lines: list[str]) -> None:
+        """Emit concrete state types after their prototype member declarations.
+
+        Prototypes are immutable seeds reset by the ordinary lifecycle. Every
+        instance owns its Series, TA objects, tuple fields and helper maps.
+        """
+        for item in self._security_calls:
+            if not item.get("runtime_context"):
+                continue
+            sec_id = item["sec_id"]
+            names = self._runtime_security_member_names(sec_id)
+            lines.extend((
+                f"    struct _RuntimeSec{sec_id} : pineforge::RuntimeContextEvaluator {{",
+                "        GeneratedStrategy* owner;",
+                "        pineforge::source::PineRuntimeSecurityCursor cursor;",
+                "        bool slot_is_new(int) const noexcept { return cursor.slot_new; }",
+                "        int lower_sub_bar(int) const noexcept { return cursor.sub_bar_index; }",
+            ))
+            for name in names:
+                lines.append(f"        decltype(GeneratedStrategy::{name}) {name};")
+            initializers = ["owner(owner_value)",
+                            "cursor(owner_value->make_runtime_security_cursor(tf, lookahead, gaps, lower, heikinashi))"]
+            initializers.extend(
+                f"{name}(owner_value->{name})"
+                for name in names if not name.startswith("_security_helper_series"))
+            lines.append(
+                f"        _RuntimeSec{sec_id}(GeneratedStrategy* owner_value, const std::string& tf, "
+                "bool lookahead, bool gaps, bool lower, bool heikinashi)")
+            lines.append("            : " + ", ".join(initializers) + " {}")
+            lines.extend((
+                "        void consume(pineforge::RuntimeContextService&, pineforge::RuntimeContextHandle,",
+                "                     const pineforge::RuntimeContextEvent& event) override {",
+                f"            owner->_runtime_feed_{sec_id}(*this, event);",
+                "        }",
+                "        void observe_owned_storage(pineforge::OwnedStorage& out) const noexcept override {",
+                "            out.metadata(sizeof(*this));",
+                "            pineforge::observe_owned_members(out, cursor.timeframe, cursor.chart_timeframe,",
+                "                cursor.timezone, cursor.session, cursor.aggregator);",
+            ))
+            # Walk every declared instance member, including aggregate result
+            # fields and helper maps. Hooks add external ownership only; the
+            # containing object above already covers their inline storage.
+            # An engine type without a public hook marks the observation
+            # incomplete rather than pretending its storage is zero.
+            for name in names:
+                lines.append(f"            pineforge::observe_owned_storage(out, {name});")
+            lines.extend((
+                "        }",
+                "        std::uint64_t storage_bytes() const noexcept override {",
+                "            pineforge::OwnedStorage out;",
+                "            observe_owned_storage(out);",
+                "            return out.usage().storage_bytes();",
+                "        }",
+                "    };",
+            ))
+
+    def _runtime_security_result(self, item: dict, prefix: str) -> str:
+        sec_id = item["sec_id"]
+        if item.get("is_lower_tf_array"):
+            return f"{prefix}_req_sec_lower_tf_{sec_id}"
+        if item.get("returns_tuple") and isinstance(item["expr_node"], TupleLiteral):
+            return "std::make_tuple(" + ", ".join(
+                f"{prefix}_req_sec_{sec_id}_{i}" for i in range(item["tuple_size"])) + ")"
+        return f"{prefix}_req_sec_{sec_id}"
+
+    def _emit_runtime_security_evaluator(self, item: dict, lines: list[str]) -> None:
+        sec_id = item["sec_id"]
+        body = []
+        self._emit_security_evaluator_requested(item, body)
+        names = self._runtime_security_member_names(sec_id)
+        replacements = {name: f"_pf_state.{name}" for name in names}
+        replacements["security_series_slot_is_new"] = "_pf_state.slot_is_new"
+        replacements["security_lower_tf_sub_bar_index"] = "_pf_state.lower_sub_bar"
+        expected = f"    void _eval_security_{sec_id}(const Bar& bar, bool is_complete) {{"
+        if not body or body[0] != expected:
+            raise AssertionError("unexpected runtime evaluator declaration")
+        body[0] = (
+            f"    void _eval_security_{sec_id}(_RuntimeSec{sec_id}& _pf_state, "
+            "const Bar& bar, bool is_complete) {")
+        text = self._runtime_security_cpp("\n".join(body), replacements)
+        lines.extend(text.splitlines())
+        lines.extend((
+            f"    void _runtime_feed_{sec_id}(_RuntimeSec{sec_id}& state,",
+            "                             const pineforge::RuntimeContextEvent& event) {",
+            "        state.cursor.feed(event, [&](const Bar& bar, bool complete) {",
+            "            pineforge::source::PineRuntimeSecurityScope scope(*this, state.cursor);",
+            f"            _eval_security_{sec_id}(state, bar, complete);",
+            "        }, [&]() {",
+        ))
+        for name in names:
+            if name.startswith("_req_sec"):
+                condition = "true" if item.get("is_lower_tf_array") else "state.cursor.gaps_on"
+                lines.append(f"            if ({condition}) state.{name} = this->{name};")
+        lines.extend((
+            "        });",
+            "    }",
+            "    " + "decltype(" + self._runtime_security_result(
+                item, f"std::declval<_RuntimeSec{sec_id}&>().") + ")"
+            + f" _runtime_request_{sec_id}(const std::string& authored_tf, bool lookahead, bool gaps) {{",
+        ))
+        self._emit_ta_runtime_reset(lines, indent=2)
+        info = self._security_eval_info[sec_id]
+        lower = "true" if item.get("is_lower_tf_array") else "false"
+        ha = "true" if item.get("heikinashi") else "false"
+        lines.extend((
+            "        auto& service = runtime_contexts();",
+            "        const std::string tf = runtime_security_timeframe(authored_tf);",
+            "        const std::string arguments = std::to_string(tf.size()) + \":\" + tf",
+            "            + (lookahead ? \":1\" : \":0\") + (gaps ? \":1\" : \":0\");",
+            f"        const pineforge::RuntimeContextKey key{{{sec_id}, arguments, service.active_context()}};",
+            "        const auto handle = service.get_or_create(key, [&]() {",
+            f"            return std::make_unique<_RuntimeSec{sec_id}>(this, tf, lookahead, gaps, {lower}, {ha});",
+            "        });",
+            "        service.advance(handle, runtime_security_frontier());",
+            f"        auto& state = dynamic_cast<_RuntimeSec{sec_id}&>(service.published(handle));",
+            f"        return {self._runtime_security_result(item, 'state.')};",
+            "    }",
+        ))
 
     def _security_series_tf_value(self, item, tf_node) -> str:
         """Select by the authored chart value, preserving its lazy evaluation.
@@ -522,10 +825,22 @@ class SecurityEmitter:
         bindings. Expanding its condition here would evaluate it twice
         when the script already bound the timeframe to a name.
         """
+        from ..support_checker import PINE_TF_SUFFIXES
+        if item.get("runtime_context"):
+            args = [self._visit_expr(tf_node)]
+            args.extend(self._visit_expr(item[key]) if item.get(key) is not None else "false"
+                        for key in ("lookahead_node", "gaps_node"))
+            return f"_runtime_request_{item['sec_id']}(" + ", ".join(args) + ")"
+
         def result(sec_id):
             if item.get("is_lower_tf_array"):
                 return f"_req_sec_lower_tf_{sec_id}"
-            if isinstance(item["expr_node"], TupleLiteral):
+            # Literal tuples have one member per element. A helper tuple or
+            # TA result owns the aggregate member that its evaluator assigns
+            # and clear_security resets; select that value without rebuilding
+            # it from element members that were never declared.
+            if (item.get("returns_tuple")
+                    and isinstance(item["expr_node"], TupleLiteral)):
                 return "std::make_tuple(" + ", ".join(
                     f"_req_sec_{sec_id}_{i}" for i in range(item["tuple_size"])) + ")"
             return f"_req_sec_{sec_id}"
@@ -537,6 +852,36 @@ class SecurityEmitter:
             target += "_"
         value = self._visit_expr(tf_node)
         lines = ["([&]() {", f"    const std::string {target} = {value};"]
+        suffixes = self._cpp_string_escape("".join(PINE_TF_SUFFIXES))
+        label = ("request.security_lower_tf" if item.get("is_lower_tf_array")
+                 else "request.security")
+        # A numeric family's finite remainder can also be na on a runtime
+        # bar. Validate the actual string before result lookup, rather than
+        # misclassifying "NaN" as an internal inventory failure.
+        lines.extend((
+            "    const auto _pf_valid_tf = [](const std::string& _pf_tf) {",
+            "        if (_pf_tf.empty()) return true;",
+            "        auto _pf_tf_digits = _pf_tf.size();",
+            "        const char _pf_tf_suffix = _pf_tf.back();",
+            "        if ((_pf_tf_suffix >= 'A' && _pf_tf_suffix <= 'Z') ||",
+            "            (_pf_tf_suffix >= 'a' && _pf_tf_suffix <= 'z')) {",
+            f'            if (std::string("{suffixes}").find(_pf_tf_suffix) == std::string::npos)',
+            "                return false;",
+            "            --_pf_tf_digits;",
+            "        }",
+            "        if (_pf_tf_digits == 0) return true;",
+            "        bool _pf_tf_positive = false;",
+            "        for (decltype(_pf_tf_digits) _pf_tf_i = 0; _pf_tf_i < _pf_tf_digits; ++_pf_tf_i) {",
+            "            const char _pf_tf_digit = _pf_tf[_pf_tf_i];",
+            "            if (_pf_tf_digit < '0' || _pf_tf_digit > '9') return false;",
+            "            _pf_tf_positive = _pf_tf_positive || _pf_tf_digit != '0';",
+            "        }",
+            "        return _pf_tf_positive;",
+            "    };",
+            f"    if (!_pf_valid_tf({target})) {{",
+            f'        pine_runtime_error(std::string("{label}: invalid timeframe: ") + {target});',
+            "    }",
+        ))
         sites = item["series_tf_sites"]
         for sec_id in sites:
             info = self._security_eval_info[sec_id]
@@ -547,7 +892,19 @@ class SecurityEmitter:
             condition = f"{target} == {arm}"
             if arm == "script_tf_":
                 condition = f"({target}.empty() || {condition})"
-            lines.append(f"    if ({condition}) return {result(sec_id)};")
+            invalid = info.get("series_tf_invalid")
+            if invalid is not None:
+                message = self._cpp_string_escape(invalid)
+                lines.extend((
+                    f"    if ({condition}) {{",
+                    f'        pine_runtime_error(std::string("{message}"));',
+                    # Retain the expression's scalar/tuple/array return type
+                    # even when every inventoried value is invalid.
+                    f"        return {result(sec_id)};",
+                    "    }",
+                ))
+            else:
+                lines.append(f"    if ({condition}) return {result(sec_id)};")
         lines.extend((
             '    _PF_ENGINE_INVARIANT("Requested timeframe matched no registered timeframe", std::logic_error);',
             "}())",
@@ -658,7 +1015,8 @@ class SecurityEmitter:
             message, hint = refusal
             self._codegen_error(node, message, hint=hint)
 
-    def _check_security_tf_arms(self, node, resolving: set[str]) -> None:
+    def _check_security_tf_arms(self, node, resolving: set[str], *,
+                                validate_literals: bool = True) -> None:
         """Refuse an invalid timeframe string a registration-time timeframe
         expression can select: the expression itself, a ternary or switch
         arm, read through the constants and globals it names.
@@ -700,7 +1058,8 @@ class SecurityEmitter:
 
         def check(value) -> None:
             if isinstance(value, StringLiteral):
-                self._refuse_invalid_security_tf(value.value, value)
+                if validate_literals:
+                    self._refuse_invalid_security_tf(value.value, value)
             elif isinstance(value, Ternary):
                 check(value.true_val)
                 check(value.false_val)
@@ -1722,12 +2081,29 @@ class SecurityEmitter:
                 return any(per_bar(part, local, active) for part in value.values())
             if not isinstance(value, ASTNode):
                 return False
+            if TIMEFRAME_SOURCES_ANNOTATION in (value.annotations or {}):
+                return True
             if isinstance(value, Identifier):
                 name = value.name
                 binding = self.ctx.identifier_binding_nodes.get(id(value))
                 if isinstance(binding, (ForStmt, ForInStmt)):
                     return True
                 global_binding = self._security_identifier_is_global_binding(value)
+                if isinstance(binding, VarDecl) and not global_binding:
+                    key = ("declaration", id(binding))
+                    if key in active:
+                        return binding.is_var or binding.is_varip
+                    inventory = getattr(self, "_security_tf_values", None)
+                    if inventory is None:
+                        from .timeframe_values import TimeframeValues
+
+                        inventory = self._security_tf_values = TimeframeValues(self)
+                    writes = inventory.writes.get(inventory._binding(value), ())
+                    if ((binding.is_var or binding.is_varip)
+                            and any(write.op != ":=" for write in writes)):
+                        return True
+                    return per_bar(
+                        [binding.value, *writes], local, active | {key})
                 if name in local and not global_binding:
                     # The enclosing body also inspects every local definition.
                     return False
@@ -5576,7 +5952,12 @@ class SecurityEmitter:
             if isinstance(n, FuncCall):
                 _func, namespace = self._resolve_callee(n.callee)
                 if namespace == "request":
-                    return False
+                    nested = self._runtime_security_call_for_request(n)
+                    if nested is None or not nested.get("runtime_context"):
+                        return False
+                    # The child owns its payload and state. Its call's value
+                    # is supplied by the generic runtime context lookup.
+                    continue
                 if isinstance(n.callee, Identifier) and n.callee.name in self._func_names:
                     callee = self._func_info_map.get(n.callee.name)
                     if (callee is None or callee.node is None
@@ -5992,9 +6373,9 @@ class SecurityEmitter:
     def _security_check_helper_varip(
         self, stmt: VarDecl, node: ASTNode, *, sec_id: int | None = None,
     ) -> None:
-        """Expanded arms use historical bar state; fixed requests keep their gate."""
+        """Admit helper-owned varip on the historical requested-bar protocol."""
         allowed = (self._security_series_tf_local_decls if sec_id is None
-                   else self._security_calls[sec_id].get("series_tf_local_decls", ()))
+                   else self._security_calls[sec_id].get("historical_local_decls", ()))
         if id(stmt) not in allowed:
             self._codegen_error(
                 node,
@@ -7687,7 +8068,8 @@ class SecurityEmitter:
         else:
             if self._security_requested_used and self._security_chart_read is not None:
                 reason = self._security_chart_read
-        if state and (reason is not None or self._security_chart_read is not None):
+        if (state or item.get("runtime_context")) and (
+                reason is not None or self._security_chart_read is not None):
             # A chart fallback can call the ordinary function member and
             # share its state across arms.
             self._security_series_tf_refusal(
@@ -8322,7 +8704,10 @@ class SecurityEmitter:
             if not item.get("dead"):
                 self._refuse_security_reference_history(item)
         for item in self._security_calls:
-            self._emit_security_evaluator_requested(item, lines)
+            if item.get("runtime_context"):
+                self._emit_runtime_security_evaluator(item, lines)
+            else:
+                self._emit_security_evaluator_requested(item, lines)
 
         # Dispatch method. Security evaluators fire BEFORE on_bar, so we also
         # gate a TA reset here: whichever path fires first (evaluate_security
@@ -8333,6 +8718,8 @@ class SecurityEmitter:
         self._emit_ta_runtime_reset(lines, indent=2)
         lines.append("        switch (sec_id) {")
         for item in self._security_calls:
+            if item.get("runtime_context"):
+                continue
             sec_id = item["sec_id"]
             lines.append(f"            case {sec_id}: _eval_security_{sec_id}(bar, is_complete); break;")
         lines.append("        }")
@@ -9544,6 +9931,19 @@ class SecurityEmitter:
             return self._security_source_input_expr(expr_node)
 
         if isinstance(expr_node, FuncCall):
+            nested = self._runtime_security_call_for_request(expr_node)
+            if nested is not None and nested.get("runtime_context"):
+                def argument(value):
+                    return self._build_security_expr(
+                        sec_id, value, ta_range, ta_results, resolving,
+                        security_mutable_names, helper_binding_stack, emitted_lines)
+                tf = (expr_node.args[1] if len(expr_node.args) > 1
+                      else expr_node.kwargs["timeframe"])
+                args = [argument(tf)]
+                args.extend(argument(nested[key]) if nested.get(key) is not None else "false"
+                            for key in ("lookahead_node", "gaps_node"))
+                self._security_requested_used = True
+                return f"_runtime_request_{nested['sec_id']}(" + ", ".join(args) + ")"
             array_get = self._security_chart_array_get(expr_node, sec_id)
             if array_get is not None:
                 return self._build_security_chart_array_get(expr_node, array_get, (
@@ -10663,7 +11063,9 @@ class SecurityEmitter:
         if self._get_ta_site(node) is not None:
             return True
         if isinstance(node, FuncCall):
-            return (self._security_chart_array_get(node, sec_id) is not None
+            nested = self._runtime_security_call_for_request(node)
+            return ((nested is not None and nested.get("runtime_context"))
+                    or self._security_chart_array_get(node, sec_id) is not None
                     or self._security_call_inlinable(node))
         if isinstance(node, Identifier):
             return (self._security_fallback_owns_name(node, helper_binding_stack)

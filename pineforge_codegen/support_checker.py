@@ -87,6 +87,9 @@ from .codegen.constant_values import ConstantResolver
 # Rule tables
 # ---------------------------------------------------------------------------
 
+# Shared with the per-bar request-timeframe validator emitted by codegen.
+PINE_TF_SUFFIXES = ("S", "H", "D", "W", "M")
+
 # `ta.sum` is exposed by TA_CLASS_MAP only as a backing implementation for
 # `math.sum`; it is not a real Pine identifier. Strip from supported set.
 TA_PROPERTY_VARIABLES: frozenset[str] = frozenset(
@@ -3059,7 +3062,7 @@ class SupportChecker:
         if tf_str[-1].isalpha():
             suffix = tf_str[-1]
             digits = tf_str[:-1]
-            if suffix not in ("S", "H", "D", "W", "M"):
+            if suffix not in PINE_TF_SUFFIXES:
                 return f"unknown timeframe suffix '{suffix}'"
         if digits == "":
             # Bare suffix shorthand — Pine treats "D"/"W"/"M"/"S" as 1<suffix>.

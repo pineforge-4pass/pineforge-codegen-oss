@@ -4780,6 +4780,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         type_spec = self._type_spec_from_hint(node.type_hint) if node.type_hint else None
         if type_spec is None:
             type_spec = self._type_spec_from_expr(node.value)
+        if (type_spec is None and not node.type_hint
+                and not node.is_var and not node.is_varip
+                and isinstance(node.value, Ternary)):
+            # A non-persistent selection already emits a vector. Preserve an
+            # exact common array type so aliases inherit it through the scoped
+            # symbol, rather than declaring their storage as double. Keep
+            # persistent selection inference/checkpoint policy unchanged.
+            true_spec = self._type_spec_from_expr(node.value.true_val)
+            false_spec = self._type_spec_from_expr(node.value.false_val)
+            if (true_spec is not None and true_spec.kind == "array"
+                    and true_spec == false_spec):
+                type_spec = true_spec
         if self._collection_scope_stack:
             self._callable_collection_bindings[id(node)] = (
                 type_spec

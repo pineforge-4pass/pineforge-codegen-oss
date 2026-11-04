@@ -27,12 +27,14 @@ registration can evaluate:
   leads to (``h__pfctx1``, ...), each copy calling the copies of its callees
   that lead to its own contexts, and each request copy annotated with its
   context;
-* a value no registration can compute (a series, a reassigned local, a user
-  call, too many paths) is refused, naming the request, the parameter and the
-  path.
+* a same-symbol timeframe may retain chart reads and pure user calls:
+  codegen inventories its possible values and selects a registered stream
+  at the authored request; local storage stays in its lexical scope;
+* an unresolved symbol, local argument or excessive call graph is refused,
+  naming the request, the parameter and the path.
 
 A request whose timeframe and symbol are bare parameters, bound at every call
-site of its helper to a global expression, stays with the analyzer's call-site
+site of its helper to a setup expression, stays with the analyzer's call-site
 clones (``callsite_idx``), which emit it as every earlier build did. A helper
 no top-level statement reaches is marked dead: its requests never run and
 keep the chart timeframe.
@@ -118,6 +120,10 @@ _FEED_WARNING_ANNOTATION = "pf_request_feed_warning"
 # the global may be declared after the helper, where the analyzer binds
 # no name, and the codegen reads it as the global all the same.
 GLOBAL_ANNOTATION = "pf_security_global"
+# A local cell forwarded as a timeframe: its initializer and plain writes,
+# with the enclosing call path's parameters substituted. These are inventory
+# sources only; the authored cell still executes in its callable.
+TIMEFRAME_SOURCES_ANNOTATION = "pf_security_timeframe_sources"
 _REQUEST_FUNCS = ("security", "security_lower_tf")
 # Instances (a helper under one set of parameter values) the pass may build
 # before it refuses the script: diamond-shaped helper graphs multiply paths.
@@ -389,9 +395,13 @@ def replace_nodes(root, swaps: dict[int, ASTNode]) -> None:
 def context_key(value):
     """A hashable spelling of an AST value, blind to locations."""
     if isinstance(value, ASTNode):
-        return (type(value).__name__,) + tuple(
+        fields = tuple(
             (key, context_key(item)) for key, item in sorted(vars(value).items())
             if key not in ("loc", "annotations"))
+        sources = (value.annotations or {}).get(TIMEFRAME_SOURCES_ANNOTATION)
+        if sources is not None:
+            fields += ((TIMEFRAME_SOURCES_ANNOTATION, context_key(sources)),)
+        return (type(value).__name__,) + fields
     if isinstance(value, (list, tuple)):
         return tuple(context_key(item) for item in value)
     if isinstance(value, dict):
@@ -469,6 +479,7 @@ class ScriptIndex:
         self.decl_binding: dict[tuple, tuple] = {}
         self.unstable: set[tuple] = set()  # reassigned, var or varip
         self.reassigned: set[tuple] = set()
+        self.writes: dict[tuple, list[Assignment]] = {}
         # FuncCall id -> the callable whose body holds it (None: top level).
         self.owner: dict[int, str | None] = {}
         self.calls: dict[str, list[FuncCall]] = {name: [] for name in self.funcs}
@@ -542,6 +553,7 @@ class ScriptIndex:
                     if binding is not None:
                         self.unstable.add(binding)
                         self.reassigned.add(binding)
+                        self.writes.setdefault(binding, []).append(node)
             if isinstance(node, (FuncDef, MethodDef)):
                 name = self.definition_key(node)
                 params = {p: ("param", name if name in self.funcs else node.name, p)
@@ -603,22 +615,20 @@ class ScriptIndex:
                    in ("param", "local", "bound") for n in _walk(expr))
 
     def local_timeframe_selection(self, expr) -> bool:
-        """A local selection whose arms codegen can inspect after analysis.
+        """A local value codegen can inventory after lexical analysis.
 
         Keep the authored argument in its callable's scope. Parameter-derived
-        contexts still need this pass's call-path substitution; reassigned
-        aliases still need its existing resolution policy.
+        contexts still need this pass's call-path substitution.
         """
         authored = expr
         seen = set()
         while isinstance(expr, Identifier):
             binding = self.refs.get(id(expr))
-            if (binding is None or binding[0] != "local"
-                    or binding in seen or binding in self.reassigned):
+            if (binding is None or binding[0] != "local" or binding in seen):
                 return False
             seen.add(binding)
             expr = self.decls[binding].value
-        if not seen or not isinstance(expr, (Ternary, IfStmt, SwitchStmt)):
+        if not seen:
             return False
 
         def needs_parameters(value, active=frozenset()):
@@ -633,9 +643,12 @@ class ScriptIndex:
                 if binding[0] == "local" and binding not in active:
                     if needs_parameters(self.decls[binding].value, active | {binding}):
                         return True
+                    for write in self.writes.get(binding, ()):
+                        if needs_parameters(write.value, active | {binding}):
+                            return True
             return False
 
-        if needs_parameters(expr):
+        if needs_parameters(authored):
             return False
         try:
             self.resolve(authored, None)
@@ -664,14 +677,20 @@ class ScriptIndex:
 
     # -- values --------------------------------------------------------------
 
-    def resolve(self, expr, env: dict | None, seen: frozenset = frozenset()):
+    def resolve(self, expr, env: dict | None, seen: frozenset = frozenset(), *,
+                per_bar_timeframe: bool = False):
         """``expr``, read in a scope whose parameters ``env`` binds, as an
-        expression of globals, inputs, literals and built-ins."""
+        expression of globals, inputs, literals and built-ins.
+
+        A same-symbol per-bar timeframe also carries series reads and user
+        calls to codegen's value inventory. Symbol resolution stays strict.
+        """
         if isinstance(expr, _LITERALS):
             return expr
         if isinstance(expr, Identifier):
             binding = self.refs.get(id(expr))
-            if binding is None and expr.name in _BAR_SERIES:
+            if (not per_bar_timeframe and binding is None
+                    and expr.name in _BAR_SERIES):
                 raise _Unresolvable(f"it reads '{expr.name}', a series")
             if binding is None or binding[0] == "global":
                 return expr
@@ -681,11 +700,25 @@ class ScriptIndex:
                 arg, caller_env = env[binding[2]]
                 if arg is None:
                     raise _Unresolvable(f"parameter '{binding[2]}' has no argument")
-                return self.resolve(arg, caller_env, seen)
+                return self.resolve(arg, caller_env, seen,
+                                    per_bar_timeframe=per_bar_timeframe)
             if binding[0] == "local" and binding not in self.unstable and binding not in seen:
                 decl = self.decls[binding]
                 if decl.value is not None:
-                    return self.resolve(decl.value, env, seen | {binding})
+                    return self.resolve(decl.value, env, seen | {binding},
+                                        per_bar_timeframe=per_bar_timeframe)
+            if (per_bar_timeframe and binding[0] == "local"
+                    and binding not in seen):
+                writes = self.writes.get(binding, ())
+                if all(write.op == ":=" for write in writes):
+                    sources = [self.decls[binding].value,
+                               *(write.value for write in writes)]
+                    resolved = tuple(self.resolve(
+                        source, env, seen | {binding}, per_bar_timeframe=True)
+                        for source in sources)
+                    return replace(expr, annotations={
+                        **(expr.annotations or {}),
+                        TIMEFRAME_SOURCES_ANNOTATION: resolved})
             raise _Unresolvable(f"'{expr.name}' is not a value fixed before the first bar")
         if isinstance(expr, MemberAccess):
             if (isinstance(expr.object, Identifier)
@@ -693,34 +726,56 @@ class ScriptIndex:
                 return expr
             raise _Unresolvable(f"'{_spell(expr)}' is not a value fixed before the first bar")
         if isinstance(expr, FuncCall):
-            if isinstance(expr.callee, Identifier) and expr.callee.name in self.funcs:
+            if (not per_bar_timeframe and isinstance(expr.callee, Identifier)
+                    and expr.callee.name in self.funcs):
                 raise _Unresolvable(f"the user function call {expr.callee.name}(...)")
             if not (isinstance(expr.callee, Identifier) or (
                     isinstance(expr.callee, MemberAccess)
                     and isinstance(expr.callee.object, Identifier)
                     and id(expr.callee.object) not in self.refs)):
                 raise _Unresolvable(f"the method call {_spell(expr)}")
-            args = [self.resolve(a, env, seen) for a in expr.args]
-            kwargs = {k: self.resolve(v, env, seen) for k, v in expr.kwargs.items()}
+            args = [self.resolve(a, env, seen, per_bar_timeframe=per_bar_timeframe)
+                    for a in expr.args]
+            kwargs = {k: self.resolve(v, env, seen, per_bar_timeframe=per_bar_timeframe)
+                      for k, v in expr.kwargs.items()}
             if all(a is b for a, b in zip(args, expr.args)) and all(
                     kwargs[k] is expr.kwargs[k] for k in kwargs):
                 return expr
             return replace(expr, args=args, kwargs=kwargs)
         if isinstance(expr, Ternary):
-            parts = [self.resolve(p, env, seen)
+            parts = [self.resolve(p, env, seen, per_bar_timeframe=per_bar_timeframe)
                      for p in (expr.condition, expr.true_val, expr.false_val)]
             if all(a is b for a, b in zip(parts, (expr.condition, expr.true_val,
                                                   expr.false_val))):
                 return expr
             return replace(expr, condition=parts[0], true_val=parts[1], false_val=parts[2])
         if isinstance(expr, BinOp):
-            left, right = self.resolve(expr.left, env, seen), self.resolve(expr.right, env, seen)
+            left = self.resolve(expr.left, env, seen, per_bar_timeframe=per_bar_timeframe)
+            right = self.resolve(expr.right, env, seen, per_bar_timeframe=per_bar_timeframe)
             if left is expr.left and right is expr.right:
                 return expr
             return replace(expr, left=left, right=right)
         if isinstance(expr, UnaryOp):
-            operand = self.resolve(expr.operand, env, seen)
+            operand = self.resolve(expr.operand, env, seen,
+                                   per_bar_timeframe=per_bar_timeframe)
             return expr if operand is expr.operand else replace(expr, operand=operand)
+        if per_bar_timeframe and isinstance(
+                expr, (IfStmt, SwitchStmt, ExprStmt, VarDecl, Subscript)):
+            # Preserve statement-valued selections and history as authored
+            # syntax. Only parameter/local reads are substituted here; value
+            # discovery and emission remain codegen's responsibility.
+            def part(value):
+                if isinstance(value, ASTNode):
+                    return self.resolve(value, env, seen, per_bar_timeframe=True)
+                if isinstance(value, list):
+                    return [part(item) for item in value]
+                if isinstance(value, tuple):
+                    return tuple(part(item) for item in value)
+                return value
+
+            fields = {key: part(value) for key, value in vars(expr).items()
+                      if key not in ("loc", "annotations")}
+            return replace(expr, **fields)
         raise _Unresolvable(f"a {type(expr).__name__} is not a value fixed before the first bar")
 
     def resolve_payload(self, expr, env: dict | None, seen: frozenset = frozenset()):
@@ -1092,7 +1147,10 @@ def _plan(prog: ScriptIndex, owned: dict, context_owned: set[int],
             for what, arg in (("symbol", symbol), ("timeframe", tf)):
                 chain = " -> ".join(f"{name}()" for name, _ in here)
                 try:
-                    values.append(prog.resolve(arg, env) if arg is not None else None)
+                    values.append(prog.resolve(
+                        arg, env, per_bar_timeframe=(
+                            what == "timeframe" and not _is_feed(request)))
+                        if arg is not None else None)
                 except _Unresolvable as exc:
                     if id(request) not in context_owned:
                         raise _Fallback([id(request)]) from exc
@@ -1737,18 +1795,34 @@ def _type_context_params(prog: ScriptIndex, owned: dict, leads: set[str]) -> Non
     caller passes a string, which does not compile."""
     carriers: dict[str, set[str]] = {}
 
-    def bare_param(arg, func: str) -> str | None:
+    def carried_params(arg, func: str, seen=frozenset()) -> set[str]:
+        if isinstance(arg, ExprStmt):
+            return carried_params(arg.expr, func, seen)
         binding = prog.refs.get(id(arg)) if isinstance(arg, Identifier) else None
         if binding is not None and binding[0] == "param" and binding[1] == func:
-            return binding[2]
-        return None
+            return {binding[2]}
+        if binding is not None and binding[0] == "local" and binding not in seen:
+            sources = [prog.decls[binding].value]
+            sources.extend(write.value for write in prog.writes.get(binding, ())
+                           if write.op == ":=")
+            return set().union(*(carried_params(source, func, seen | {binding})
+                                 for source in sources))
+        if isinstance(arg, Ternary):
+            return (carried_params(arg.true_val, func, seen)
+                    | carried_params(arg.false_val, func, seen))
+        if isinstance(arg, (IfStmt, SwitchStmt)):
+            bodies = ((arg.body, arg.else_body) if isinstance(arg, IfStmt)
+                      else [body for _, body in arg.cases] + [arg.default_body])
+            return set().union(*(carried_params(body[-1], func, seen)
+                                 for body in bodies if body))
+        # A conversion's operands have their own types. Only values carried
+        # unchanged into a string slot inherit its string requirement.
+        return set()
 
     for func, requests in owned.items():
         for request in requests:
             for arg in _request_args(request):
-                param = bare_param(arg, func)
-                if param is not None:
-                    carriers.setdefault(func, set()).add(param)
+                carriers.setdefault(func, set()).update(carried_params(arg, func))
     changed = True
     while changed:
         changed = False
@@ -1756,9 +1830,9 @@ def _type_context_params(prog: ScriptIndex, owned: dict, leads: set[str]) -> Non
             for call in _body_calls(prog, func, leads):
                 callee = prog.call_target(call)
                 for param in carriers.get(callee, ()):
-                    passed = bare_param(prog.param_arg(callee, call, param), func)
-                    if passed is not None and passed not in carriers.get(func, set()):
-                        carriers.setdefault(func, set()).add(passed)
+                    passed = carried_params(prog.param_arg(callee, call, param), func)
+                    if passed - carriers.get(func, set()):
+                        carriers.setdefault(func, set()).update(passed)
                         changed = True
     for func, params in carriers.items():
         fdef = prog.funcs[func]
@@ -1816,4 +1890,7 @@ def _analyzer_resolves(prog: ScriptIndex, func: str, symbol, tf) -> bool:
                 return False
             if prog.depends_on_scope(call.args[index]):
                 return False
+            if param == (tf.name if isinstance(tf, Identifier) else None):
+                if not prog.registers_timeframe(call.args[index]):
+                    return False
     return True

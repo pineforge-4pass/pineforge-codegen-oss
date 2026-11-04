@@ -8,8 +8,9 @@ registered the chart timeframe (``input_tf_``) with no diagnostic: two calls
 of ``h`` with 60 and 240 lowered to one chart-timeframe context. A helper
 called with two inputs registered their defaults, so an override was
 ignored. ``security_contexts`` now resolves the context along every call
-path, one context per distinct value, and refuses one no registration can
-compute; the analyzer's call-site clones register an input as its getter.
+path, one context per distinct value. Same-symbol closed per-bar timeframes
+select among registered streams; the analyzer's call-site clones register
+an input as its getter.
 TradingView's tapes of the nested shapes are replayed in
 ``test_e2e_security_nested_contexts.py``.
 """
@@ -104,22 +105,24 @@ def test_helper_local_resolves_through_its_definition():
     compile_cpp(cpp, label="nested-local")
 
 
-@pytest.mark.parametrize("body, reason", [
+@pytest.mark.parametrize("body, streams, per_bar", [
     ('h(x) => g(x)\na = h(close > open ? "60" : "240")\n',
-     "on the call path h() -> g(): it reads 'close', a series"),
+     2, True),
     ('h(x) =>\n    t = x\n    t := "15"\n    g(t)\na = h(tfA)\n',
-     "on the call path h() -> g(): 't' is not a value fixed before the first bar"),
+     2, True),
     ('pick() => "60"\nh(x) => g(x)\na = h(pick())\n',
-     "on the call path h() -> g(): the user function call pick(...)"),
+     1, False),
 ])
-def test_unresolvable_context_is_refused(body, reason):
+def test_closed_timeframe_context_is_registered_and_compiles(body, streams, per_bar):
+    # Keep the original chart-selection, local-store and pure-call witnesses.
     src = HEAD + 'g(tf) => request.security(syminfo.tickerid, tf, close)\n' + body + \
         'b = close\n' + TAIL
-    with pytest.raises(CompileError) as err:
-        transpile(src)
-    messages = [d.message for d in err.value.diagnostics]
-    assert any(m.startswith("request.security timeframe cannot be resolved before "
-                            "the first bar") and m.endswith(reason) for m in messages), messages
+    cpp = transpile(src)
+    regs = _registrations(cpp)
+    assert len(regs) == streams
+    assert not any(re.match(r"\d+, input_tf_,", reg) for reg in regs)
+    assert ("_pf_selected_tf" in cpp) == per_bar
+    compile_cpp(cpp, label="closed-helper-context")
 
 
 def test_one_level_inputs_register_their_getters():
