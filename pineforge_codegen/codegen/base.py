@@ -1169,6 +1169,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._current_loop_var_specs: dict[str, "TypeSpec"] = {}
         # The counted loops' binders among them (``for (int i = ...)``).
         self._current_counted_loop_vars: set[str] = set()
+        # The position binders of ``for [index, value] in <array>`` among them:
+        # an array position is a present int (never an element or a map key).
+        self._current_loop_index_vars: set[str] = set()
         # Track array variables for codegen
         self._array_vars: set[str] = set()
         # Track map variables for codegen

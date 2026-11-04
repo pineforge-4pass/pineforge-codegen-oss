@@ -2342,11 +2342,15 @@ class StmtVisitor:
         saved_loop = self._current_loop_vars
         saved_loop_specs = self._current_loop_var_specs
         saved_counted = self._current_counted_loop_vars
+        saved_index = self._current_loop_index_vars
         self._current_loop_vars = set(self._current_loop_vars)
         self._current_loop_var_specs = dict(self._current_loop_var_specs)
         # Its binders shadow a counted loop's of the same spelling.
         self._current_counted_loop_vars = (
             self._current_counted_loop_vars - {node.var, *(node.vars or ())})
+        # ... and an outer array position binder of the same spelling.
+        self._current_loop_index_vars = (
+            self._current_loop_index_vars - {node.var, *(node.vars or ())})
         iterable_spec = self._type_spec_from_expr(node.iterable)
         if (iterable_spec is not None and iterable_spec.kind == "array"
                 and self._array_history_value_names()):
@@ -2377,6 +2381,12 @@ class StmtVisitor:
                         self._current_loop_var_specs[v] = tuple_specs[idx]
                     else:
                         self._current_loop_var_specs.pop(v, None)
+                    if (idx == 0 and len(node.vars) == 2
+                            and iterable_spec is not None
+                            and iterable_spec.kind == "array"):
+                        # The first binder of an array's [index, value] form
+                        # is the element's position: always a present int.
+                        self._current_loop_index_vars.add(v)
         map_pair_loop = (
             iterable_spec is not None
             and iterable_spec.kind == "map"
@@ -2531,6 +2541,7 @@ class StmtVisitor:
         self._current_loop_vars = saved_loop
         self._current_loop_var_specs = saved_loop_specs
         self._current_counted_loop_vars = saved_counted
+        self._current_loop_index_vars = saved_index
 
     def _visit_while(self, node: WhileStmt, lines: list[str], indent: int,
                      value_target: tuple[str, str | None] | None = None) -> None:

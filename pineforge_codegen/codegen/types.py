@@ -947,7 +947,11 @@ class TypeInferer:
             spec = (getattr(self, "_current_loop_var_specs", {}) or {}).get(name)
             if (spec is not None and spec.kind == "primitive"
                     and spec.name == "int"):
-                return runtime, True
+                # The position binder of ``for [index, value] in <array>`` is
+                # a present int; an element, a map's binder or a single binder
+                # is not shown to be (``_current_loop_index_vars``).
+                return runtime, name not in (
+                    getattr(self, "_current_loop_index_vars", ()) or ())
             return None
         local_types = (getattr(self, "_current_func_local_types", {}) or {}
                        if emitting else {})
