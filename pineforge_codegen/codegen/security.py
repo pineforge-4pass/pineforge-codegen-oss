@@ -6285,7 +6285,9 @@ class SecurityEmitter:
         self._security_check_outer_writes(body, set(), (), helper_params=set(params))
         self._security_require_value(node)
 
-        if len(body) == 1 and isinstance(body[0], (ExprStmt, IfStmt)):
+        # A helper whose one statement is a selection (``if``, or a ``switch``
+        # with its arms one expression each) is that selection's value.
+        if len(body) == 1 and isinstance(body[0], (ExprStmt, IfStmt, SwitchStmt)):
             return {
                 "mode": "expr",
                 "func_info": fi,
@@ -6304,7 +6306,7 @@ class SecurityEmitter:
         final_stmt = body[-1]
         if isinstance(final_stmt, ExprStmt):
             final_expr = final_stmt.expr
-        elif isinstance(final_stmt, IfStmt):
+        elif isinstance(final_stmt, (IfStmt, SwitchStmt)):
             final_expr = final_stmt
         elif isinstance(final_stmt, Assignment):
             target_name = self._get_target_name(final_stmt.target)
