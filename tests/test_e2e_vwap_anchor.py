@@ -33,7 +33,7 @@ from tests._e2e import (
 # The sizing is declared so that a comparison with an older build (PRE_C4) is
 # one of VWAP anchors alone: that build left an omitted initial_capital /
 # default_qty_type / default_qty_value to the host's defaults, which are not
-# TradingView's Pine v6 defaults (lane TV-DEFAULTS, test_e2e_strategy_defaults).
+# TradingView's Pine v6 defaults (test_e2e_strategy_defaults).
 HEADER = ('//@version=6\nstrategy("e2e-c4-vwap", overlay=true, initial_capital=1000000, '
           'default_qty_type=strategy.fixed, default_qty_value=1)\n')
 TRADE = ("if ta.crossover(close, x)\n"
@@ -149,7 +149,7 @@ ANCHOR_APPROXIMATION = (
     "exactly."
 )
 
-# The codegen before lane C4 (db003cb, origin/main when C4 began its
+# The codegen before the earlier changes (db003cb, origin/main at the prior
 # amendment): the band form dropped its anchor.
 PRE_C4 = "db003cbde884b5a40a99fc9aa72b998fb7279134"
 _SESSION_ANCHOR = ("anchorTs = timestamp(\"America/New_York\", year, month, dayofmonth, 9, 30)\n"

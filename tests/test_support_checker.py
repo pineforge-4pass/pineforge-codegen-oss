@@ -175,7 +175,7 @@ def _expect_deferred(src: str, line: int | None = None, col: int | None = None) 
 
 def test_request_financial_reaching_a_trade_reads_its_recorded_series():
     """Its value reaches a trade: it reads the series the requests manifest
-    records under its key (lane XSYM-E)."""
+    records under its key."""
     src = PRELUDE + 'a = request.financial(syminfo.tickerid, "REVENUE", "FY")\n' + TRADES_ON_A
     assert _errors(src) == []
     assert [d.message for d in _warnings(src) if "records under" in d.message] == [
@@ -388,7 +388,7 @@ FEED = ("another symbol's bars, read from the feed the requests manifest pins fo
 
 def test_request_security_alternate_symbol_reads_its_feed():
     """Another symbol whose value reaches a trade reads the feed a probe's
-    requests manifest pins for it (lane XSYM-E); it used to be a deferred
+    requests manifest pins for it; it used to be a deferred
     refusal whatever data the run was given."""
     src = PRELUDE + 'a = request.security("BINANCE:BTCUSDT", "60", close)\n' + TRADES_ON_A
     assert _errors(src) == []

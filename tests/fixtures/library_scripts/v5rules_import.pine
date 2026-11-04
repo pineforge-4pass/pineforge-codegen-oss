@@ -1,6 +1,6 @@
 //@version=6
 // SPDX-License-Identifier: Apache-2.0
-// Synthetic script (lane XSYM-C): xc_v5_lib's global code, calling the
+// Synthetic script: xc_v5_lib's global code, calling the
 // same functions from the synthetic v5 library pftest/V5Rules/1.
 strategy("xc v5 lib", overlay=true, initial_capital=1000000, default_qty_type=strategy.fixed, default_qty_value=1, margin_long=100, margin_short=100, pyramiding=4)
 import pftest/V5Rules/1 as R

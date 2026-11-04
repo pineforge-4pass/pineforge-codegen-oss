@@ -1,4 +1,4 @@
-"""Tests for the generated-C++ allowlist checker (CR-164 S1).
+"""Tests for the generated-C++ allowlist checker.
 
 (1) Every generated ``.cpp`` committed in this repository must pass with no
 findings -- the checker may never refuse real codegen output.

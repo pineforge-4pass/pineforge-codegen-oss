@@ -9,7 +9,7 @@ of its initializer. That was right only for a constant or a bar field:
 * ``var int signal = direction.neutral`` pushed ``direction.neutral`` -- raw
   Pine on a UDT handle, before ``direction`` was assigned -- which did not
   compile ("no member named 'neutral' in 'pf_safe_Label'": the ten
-  ai-distribution probes, lane XSYM-C); so did ``ta.sma(close, len)``,
+  ai-distribution probes); so did ``ta.sma(close, len)``,
   ``bar_index + 1``, ``color.red``, ``high[1]``, ``syminfo.mintick``,
   ``time`` and a user call;
 * ``var float first2 = b`` over ``b = close * 2`` pushed the member ``b``

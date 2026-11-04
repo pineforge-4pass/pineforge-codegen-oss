@@ -7,7 +7,7 @@ The history emitters of a call result, a precalculated ``ta.highest`` /
 it straight after the subscript's ``[`` (``codegen/visit_expr.py``), so the
 C++ read ``_hist_call_1[[&](){ ... }()]``: C++ parses ``[[`` as an attribute
 and the TU did not compile. cs-lev-tradleware-gaussian-channel-stochrsi-eth's
-``ta.tr(true)[lag]`` with ``lag = (per - 1) / (2 * N)`` was one (lane W2's
+``ta.tr(true)[lag]`` with ``lag = (per - 1) / (2 * N)`` was one (an earlier
 open findings). ``_history_offset_cpp`` now parenthesizes a lambda offset.
 
 TradingView truncates a fractional index toward zero: its tape of

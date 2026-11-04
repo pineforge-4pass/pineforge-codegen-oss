@@ -1,6 +1,6 @@
 """Where a lane integrated by CGINT5a meets a rule already on main, or changes
 a function one of main's lanes changed, the integration keeps both rules
-(integration lane CGINT5a: CG-SILENT items 1, 2 and 4, cut on 9361dbb, on
+(integration cases for items 1, 2 and 4, cut on 9361dbb, on
 main's CGINT4 and TV-DEFAULTS; item 3 and CG-CHART-EMA-SEED are held). Each
 case runs the composition end to end -- ``transpile_json``, the built
 runtime, ``run_strategy.py`` -- or pins the C++ where the rules decide the

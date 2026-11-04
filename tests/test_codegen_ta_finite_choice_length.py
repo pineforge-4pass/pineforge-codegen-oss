@@ -4,7 +4,7 @@ The engine extrema ABI owns one fixed-size history per object.  A Pine length
 that selects between two input-qualified values is therefore lowered to two
 fixed histories advanced on every bar, followed by a value selection.  These
 tests pin that bounded lowering. Every other series length of these two
-functions takes the general series-length route instead (lane K-TA-DYNLEN:
+functions takes the general series-length route:
 ``pineforge::source::SeriesLowest`` / ``SeriesHighest``, TradingView's
 re-windowing rule, ``tests/test_e2e_ta_dynamic_length.py``); the shapes below
 that used to be refused must still stay off the finite-choice rewrite.

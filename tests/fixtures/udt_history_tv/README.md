@@ -1,6 +1,6 @@
 # CG-UDT-HIST TradingView evidence
 
-Synthetic probes written for lane CG-UDT-HIST: the history-referencing
+Synthetic probes for user-defined-type history: the history-referencing
 operator `[]` on a user-defined object or a drawing reference. They contain no
 closed or scraped source. The twelve tapes were exported on 2026-10-01 with
 

@@ -1,5 +1,5 @@
 """E2E: every argument of a ``ta.*`` call reaches the engine parameter it
-belongs to, or the call is refused at transpile time (lane C5, defect 1).
+belongs to, or the call is refused at transpile time (a prior defect).
 
 The codegen routes a TA call's arguments by position: some to the engine
 class's constructor, the rest to ``compute()``. Several TradingView
@@ -82,7 +82,7 @@ from tests._e2e import (
 # The sizing is declared so that a comparison with an older build (PRE_C5) is
 # one of TA arguments alone: that build left an omitted initial_capital /
 # default_qty_type / default_qty_value to the host's defaults, which are not
-# TradingView's Pine v6 defaults (lane TV-DEFAULTS, test_e2e_strategy_defaults).
+# TradingView's Pine v6 defaults (test_e2e_strategy_defaults).
 HEADER = ('//@version=6\nstrategy("e2e-c5-ta-arguments", overlay=true, initial_capital=1000000, '
           'default_qty_type=strategy.fixed, default_qty_value=1)\n')
 
@@ -316,7 +316,7 @@ PIVOT_DEVELOPING_APPROX = (
     "need engine support: levels recalculated over the period in progress."
 )
 
-# The codegen before lane C5 (origin/main when the lane was rebased).
+# The codegen before the earlier changes (origin/main at the prior baseline).
 PRE_C5 = "e6a64cd83fd61bf82723bc74c77a8c1555c65897"
 
 

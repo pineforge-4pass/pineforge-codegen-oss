@@ -1,6 +1,6 @@
 # CG-SECURITY-2 TradingView trade evidence
 
-Synthetic probes written for lane CG-SECURITY-2 (`request.security` helper
+Synthetic probes for `request.security` helper
 shapes) and their unedited TradingView trade exports. They contain no closed
 or scraped source. Each was exported on 2026-09-26 with
 

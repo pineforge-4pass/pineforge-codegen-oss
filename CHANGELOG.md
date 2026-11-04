@@ -429,8 +429,8 @@ changes the emitted C++ and the other two only the repository's own CI.
   contract: the `promote-baseline` workflow refuses untrusted heads and actors
   (SEC846,
   [#242](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/242)),
-  and `test.yml` adopts the organization's CI canon (CR-241,
-  [#243](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/243)).
+  and `test.yml` adopts the organization's CI canon
+  ([#243](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/243)).
 
 ## 1.6.3 — 2026-10-23
 
@@ -500,8 +500,8 @@ emitter, a change of the licensor's written entity, and CI changes.
 - New command `pf-cpp-allowlist` (`pineforge_codegen.cpp_allowlist:main`,
   installed with the package), a checker for a generated C++ translation unit
   that flags dangerous primitives
-  ([#210](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/210),
-  CR-164 S1). It is a denylist with known false positives, a mitigation and not
+  ([#210](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/210)).
+  It is a denylist with known false positives, a mitigation and not
   proof that a unit is safe (the wording of the 1.6.3 security advisory).
 - A script identifier equal to a symbol that the checker refuses when it appears
   bare (`system`, `free`, `socket`, `open` and the rest of the list in

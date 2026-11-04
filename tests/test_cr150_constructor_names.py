@@ -1,4 +1,4 @@
-"""CR-150 constructor lookup and identifiers exposed by the 1.7.0 headers.
+"""Constructor lookup and identifiers exposed by the 1.7.0 headers.
 
 Compile the raw transpiler output with tests._compile, as the corpus sweep
 does. The lab must also run these compile cases with CXX=clang++; a text
@@ -22,7 +22,7 @@ from pineforge_codegen.codegen.host_members import HOST_MEMBER_NAMES
 from tests._compile import compile_cpp
 
 
-_PRELUDE = '//@version=6\nstrategy("CR-150 constructor names")\n'
+_PRELUDE = '//@version=6\nstrategy("constructor names")\n'
 _REPORT_NAMES = ("report", "report_sink", "report_sequence")
 _ENGINE_SCOPE_NAMES = (
     *_REPORT_NAMES, "source", "native_calendar", "RunFailureCode",
@@ -33,7 +33,7 @@ _ENGINE_SCOPE_NAMES = (
 # away the policy call and give these regressions a false green result.
 _REQUIRE_REPORT_HEADERS = """
 #ifndef PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1
-#error CR-150 regressions require the paired 1.7.0 trade-history policy headers
+#error Constructor regressions require the paired 1.7.0 trade-history policy headers
 #endif
 namespace pf_cr150_report = pineforge::report;
 namespace pf_cr150_report_sink = pineforge::report_sink;
@@ -54,7 +54,7 @@ if sample.value > open
     # Check spelling before compile_cpp can skip for missing native inputs.
     assert f"struct pf_safe_{name} {{" in cpp
     assert f"struct {name} {{" not in cpp
-    compile_cpp(cpp + _REQUIRE_REPORT_HEADERS, label=f"CR-150 type {name}")
+    compile_cpp(cpp + _REQUIRE_REPORT_HEADERS, label=f"constructor type {name}")
 
 
 @pytest.mark.parametrize("name", ("source", "report"))
@@ -72,7 +72,7 @@ plot(x)
     assert f"struct pf_safe_{name} {{" in code
     assert not re.search(rf"(?<!\w){name}\s+s_cs\d+\b", code), code
     assert re.search(rf"\bpf_safe_{name}\s+s_cs\d+\b", code), code
-    compile_cpp(cpp + _REQUIRE_REPORT_HEADERS, label=f"CR-150 cloned type {name}")
+    compile_cpp(cpp + _REQUIRE_REPORT_HEADERS, label=f"cloned constructor type {name}")
 
 
 def test_source_variable_is_escaped_in_generated_code() -> None:
@@ -118,7 +118,7 @@ if PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1 > 0
     rest = cpp.replace(escaped, "")
     guard = "#if defined(PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1)"
     assert rest.count("PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1") == rest.count(guard)
-    compile_cpp(cpp + _REQUIRE_REPORT_HEADERS, label="CR-150 policy macro variable")
+    compile_cpp(cpp + _REQUIRE_REPORT_HEADERS, label="constructor macro variable")
 
 
 @pytest.mark.parametrize(
@@ -160,7 +160,7 @@ int pf_cr150_call_trade_history_export() {
 """
     compile_cpp(
         cpp + _REQUIRE_REPORT_HEADERS + call_export,
-        label="CR-150 trade-history export name",
+        label="trade-history export name",
     )
 
 
@@ -240,7 +240,7 @@ def test_emitted_external_name_is_reserved(kind: str, name: str) -> None:
 def test_trade_history_constructor_compiles(declaration: str) -> None:
     """Exercise the enabled policy call, including a colliding script member."""
     cpp = transpile(_PRELUDE + declaration)
-    compile_cpp(cpp + _REQUIRE_REPORT_HEADERS, label="CR-150 policy constructor")
+    compile_cpp(cpp + _REQUIRE_REPORT_HEADERS, label="policy constructor")
 
 
 def test_script_function_named_policy_setter_is_escaped() -> None:

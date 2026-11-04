@@ -1,5 +1,5 @@
 """Synthetic request data for the end-to-end tests of requests of other
-symbols and recorded requests (lane XSYM-E).
+symbols and recorded requests.
 
 A probe's pinned request data reaches the engine's runner as
 ``PINEFORGE_REQUESTS_ROOT/<slug>/requests.json`` (``pineforge-probe-requests/v1``)

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Clean-room synthetic library for PineForge's library inliner tests
-// (lane XSYM-C). Not a published TradingView library.
+// Not a published TradingView library.
 
 //@version=6
 library("Base")

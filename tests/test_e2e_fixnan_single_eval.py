@@ -3,7 +3,7 @@
 ``fixnan(x)`` lowered to ``(is_na(x) ? prev : (prev = x))``: the argument's
 C++ appeared twice, so a stateful call inside it ran twice per bar. In
 TradingView's DMI/ADX helpers (``plus = fixnan(100 * ta.rma(plusDM, len) /
-truerange)``) the RMA stepped twice per bar and ADX inflated: lane W2's F03
+truerange)``) the RMA stepped twice per bar and ADX inflated: an earlier fix
 (deepwintrader-legend-buy-sell read ADX 29.94 where TradingView's is 21.77 and
 booked reversals TradingView never did). The argument is now bound once, the
 way ``nz`` binds its own.

@@ -12,7 +12,7 @@ security helper-parameter history currently requires a direct OHLC/time
 bar-series binding". CG-W9-SEC (on main) reads the requested bar's value of
 the series ``get_input_source`` selects (the ``_pf_src`` lambda,
 ``_security_source_input_expr``) and keeps one per completed requested bar
-for its history (``_sec<N>_hist_input_source_K``); lane CG-XSYM-A2 carried
+for its history (``_sec<N>_hist_input_source_K``); the earlier cases carried
 the same rule on a base without it, and its builder gave way to main's in
 the integration (CGINT4). A parameter of the helper holding the request,
 bound to such a value, is put in its place (``security_contexts``, lane

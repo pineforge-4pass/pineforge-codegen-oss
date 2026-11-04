@@ -2,7 +2,7 @@
 constructor cannot take -- neither a compile-time constant nor an
 input/timeframe expression the runtime reset re-reads.
 
-TradingView answers such a call by its Pine qualifier (lane K-TA-DYNLEN; the
+TradingView answers such a call by its Pine qualifier; the
 rules and their tapes are in the engine header
 ``pineforge/source/pine_ta_length.hpp`` and the replays in
 ``tests/test_e2e_ta_dynamic_length.py``):
@@ -359,7 +359,7 @@ def test_other_series_lengths_stay_refused(call: str) -> None:
 # Explicit sizing originally isolated TA lengths from LEGACY (7a39cb3):
 # that build left an omitted initial_capital /
 # default_qty_type / default_qty_value to the host's defaults, which are not
-# TradingView's Pine v6 defaults (lane TV-DEFAULTS, test_e2e_strategy_defaults).
+# TradingView's Pine v6 defaults (test_e2e_strategy_defaults).
 # The active whole-C++ comparison uses the immutable accepted scaffold pinned
 # by CPP_IDENTITY_REFERENCE; the probe's original sizing remains unchanged.
 _CONSTANT_AND_INPUT = """//@version=6

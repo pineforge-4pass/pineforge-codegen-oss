@@ -7,7 +7,7 @@ was bound to its initializer, a compound assignment to its right-hand side
 alone, and a self-reading assignment to an expression reading its own
 binding. So ``var int c = -1; c += 1; ta.highest(high, c % 5 + 1)`` built a
 ``ta::Highest`` of the constant length ``1 % 5 + 1``, whatever ``c`` held on
-the requested bar (lane CGINT4 found it); ``c := c + 1`` recursed until
+the requested bar (an earlier case found it); ``c := c + 1`` recursed until
 Python's stack ran out; and a local an if arm rebinds kept the value it held
 before the if.
 

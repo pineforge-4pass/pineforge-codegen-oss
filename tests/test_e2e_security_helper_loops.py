@@ -1,5 +1,4 @@
-"""``for`` and ``while`` loops in a ``request.security`` helper (lane TAIL-E,
-item 1).
+"""``for`` and ``while`` loops in a ``request.security`` helper (a prior item).
 
 A multi-statement helper with control flow was refused ("request.security
 does not support multi-statement helpers with control flow"): the TMO shape

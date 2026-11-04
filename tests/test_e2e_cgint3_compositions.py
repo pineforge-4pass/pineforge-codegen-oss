@@ -1,6 +1,6 @@
 """Where a lane integrated by CGINT3 meets a rule already on main, or two
 CGINT3 lanes change one function, the integration keeps both rules
-(integration lane CGINT3: W2-CG-LOWERING-TRIO, CG-W9-MISC and CG-W9-SEC on
+(integration cases on
 main's CGINT2 and CG-SESSION-3). Each case runs the composition end to end --
 ``transpile_json``, the built runtime, ``run_strategy.py`` -- and pins the C++
 where the rules decide the lowering. ``MAIN`` is the integration base, the

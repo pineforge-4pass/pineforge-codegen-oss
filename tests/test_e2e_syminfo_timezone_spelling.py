@@ -1,5 +1,4 @@
-"""``syminfo.timezone`` spells a UTC exchange zone "Etc/UTC" (lane TAIL-E,
-item 4).
+"""``syminfo.timezone`` spells a UTC exchange zone "Etc/UTC" (a prior item).
 
 TradingView names the zone of BINANCE:ETHUSDT.P and BINANCE:BTCUSDT
 "Etc/UTC": ``syminfo.timezone == "Etc/UTC"`` holds and ``== "UTC"`` does not

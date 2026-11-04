@@ -11193,7 +11193,7 @@ class SecurityEmitter:
         expression map holds (declared once, not ``var``), not replayed
         state, not a per-run value (an input or constant reads the same on
         either bar). The visitor used to render it from the chart's member,
-        silently (P6 of lane CG-SECURITY-2). Its history (``nz(s[1])``) stays
+        silently (P6 of a pre-existing defect). Its history (``nz(s[1])``) stays
         the visitor's, and a payload that reads it beside a name the builder
         owns falls back whole (``_emit_security_evaluator_requested``)."""
         if not self._security_identifier_is_global_binding(node):
@@ -11253,7 +11253,7 @@ class SecurityEmitter:
         ``evaluate_security`` resets the TA object before ``on_bar`` has
         initialized the member, so ``g(close, int(vf))`` built
         ``ta::SMA((int)vf)`` from an ``na`` member, a length of INT_MIN, and
-        the run crashed (P1 of lane CG-SECURITY-2's review)."""
+        the run crashed (P1 of a pre-existing review defect)."""
         if not (self._security_index_inputs
                 and self._security_identifier_is_global_binding(node)):
             return None

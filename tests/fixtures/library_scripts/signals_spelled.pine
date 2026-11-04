@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Synthetic script (lane XSYM-C): signals_import.pine with pftest/Signals/1 and
+// Synthetic script: signals_import.pine with pftest/Signals/1 and
 // pftest/Base/1 spelled out as user code, renamed by hand.
 //@version=6
 strategy("xc lib twin", overlay=true, initial_capital=1000000, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=2, margin_long=0, margin_short=0)

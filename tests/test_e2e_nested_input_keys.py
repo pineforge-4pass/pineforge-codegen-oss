@@ -1,6 +1,6 @@
 """E2E: an untitled input nested in a plain declaration is keyed by the
 declared name, and inputs of one script that share an override key are
-flagged with a warning (lane C5, defect 3).
+flagged with a warning (a prior defect).
 
 TradingView (Pine v6 reference, ``input.int``): ``title (const string) Title
 of the input. If not specified, the variable name is used as the input's
@@ -39,7 +39,7 @@ from tests._e2e import (
 # The sizing is declared so that the comparison with the PRE_C5 build below is
 # one of input keys alone: PRE_C5 left an omitted initial_capital /
 # default_qty_type / default_qty_value to the host's defaults, which are not
-# TradingView's Pine v6 defaults (lane TV-DEFAULTS, test_e2e_strategy_defaults).
+# TradingView's Pine v6 defaults (test_e2e_strategy_defaults).
 HEADER = ('//@version=6\nstrategy("e2e-c5-nested-input-keys", overlay=true, initial_capital=1000000, '
           'default_qty_type=strategy.fixed, default_qty_value=1)\n')
 
@@ -108,7 +108,7 @@ def _shared(key: str, *spots: tuple[int, int]) -> str:
             "Give each input its own title to override them apart.")
 
 
-# The codegen before lane C5 (origin/main when the lane was rebased).
+# The codegen before the earlier changes (origin/main at the prior baseline).
 PRE_C5 = "e6a64cd83fd61bf82723bc74c77a8c1555c65897"
 
 

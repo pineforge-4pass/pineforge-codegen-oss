@@ -1,5 +1,5 @@
 """Where two lanes integrated together change one function, or lower one
-shape, the integration keeps both lanes' rules (integration lane CGINT2:
+shape, the integration keeps both rule sets (integration case:
 CG-POPFIX, K-RUNERR, K-TA-DYNLEN, CG-SECURITY-2 and CG-SESSION-2 on one
 branch). Each case below runs the composition end to end -- ``transpile_json``,
 the built runtime, ``run_strategy.py`` -- against a spelling that reaches each

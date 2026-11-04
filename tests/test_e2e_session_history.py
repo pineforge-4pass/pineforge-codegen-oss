@@ -89,7 +89,7 @@ TRACE = "".join(
 # the extended-hours chart the engine's session_isfirstbar_ /
 # session_islastbar_ are the chart's day, the 04:00 and 19:45 bars, and its
 # session_isfirstbar_regular_ / session_islastbar_regular_ the regular day's
-# 09:30 and 15:45 bars (lane K-SESSION-WINDOWS), as TradingView's.
+# 09:30 and 15:45 bars (the session-window cases), as TradingView's.
 PINNED: dict[str, dict[str, int]] = {}
 QUARTER = 15 * 60_000
 

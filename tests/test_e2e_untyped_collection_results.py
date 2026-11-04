@@ -5,7 +5,7 @@ namespace forms ``matrix.row(m, 0)``, ``matrix.col`` and
 ``matrix.eigenvalues``, and both forms of ``array.abs``,
 ``array.standardize`` and ``array.sort_indices``, fell through
 ``_type_spec_from_expr`` to the scalar default: ``double r`` then took a
-vector and the TU did not compile (lane W2's open findings: matrix.row).
+vector and the TU did not compile (earlier open findings: matrix.row).
 Each now yields an array spec -- a row or column of the matrix's element
 type, eigenvalues and the new arrays of the array methods as the vectors of
 doubles their templates build.

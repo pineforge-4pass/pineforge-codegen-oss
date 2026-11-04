@@ -1,4 +1,4 @@
-# strategy() default tapes (lane TV-DEFAULTS)
+# strategy() default tapes
 
 TradingView changed three Pine v6 `strategy()` defaults around
 2026-09-24T20:45Z. For a v6 script that omits them it now uses

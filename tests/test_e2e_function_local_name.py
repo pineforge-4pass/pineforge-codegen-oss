@@ -5,11 +5,11 @@ Pine keeps functions and variables apart: ``fHist`` may keep a local series
 PineForge's symbol table holds one name per scope, the global scope holds
 the function ``f`` typed by what it returns, and ``_series_type_for``
 resolved the local's history member there: ``Series<std::string> f`` took
-fHist's doubles and the TU did not compile (lane W2's f04_tails_b probe,
+fHist's doubles and the TU did not compile (the f04_tails_b probe,
 which TradingView runs). The member now takes the type of the local in the
 scope of the function that keeps the series.
 
-Two TradingView tapes (lab tv --no-note) are replayed: lane W2's
+Two TradingView tapes (lab tv --no-note) are replayed:
 ``f04_tails_b`` (``fixtures/open_items_tv/tails_b``, fHist's series ``f``
 beside a string function ``f`` defined after it) and
 ``func_local_name`` (a float series beside a string and an int function,
