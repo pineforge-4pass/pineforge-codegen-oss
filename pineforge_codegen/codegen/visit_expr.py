@@ -707,11 +707,21 @@ class ExprVisitor:
         if name in self._current_func_series_params:
             return True
         if (name in self._current_func_param_types or name in BAR_FIELDS
-                or (name in BAR_BUILTINS
-                    and not (node.annotations or {}).get("tuple_builtin_binding"))):
+                or self._reads_builtin_variable(node)):
             return False
         return self._binding_is_series(
             name, self._call_site_var_name(node, self._safe_name(name)))
+
+    def _reads_builtin_variable(self, node: Identifier) -> bool:
+        """Whether ``node`` reads a builtin variable (``second``, ``hour``,
+        ``bar_index``...) and not a user variable of the same name
+        (``float second = na``). A read the analyzer bound to a user
+        declaration in scope is the user's: it carries the annotation a
+        tuple-destructured name does, or ``builtin_shadow_binding``."""
+        annotations = node.annotations or {}
+        return (node.name in BAR_BUILTINS
+                and not annotations.get("tuple_builtin_binding")
+                and not annotations.get("builtin_shadow_binding"))
 
     def _visit_ident(self, node: Identifier) -> str:
         name = node.name
@@ -729,8 +739,7 @@ class ExprVisitor:
             return self._safe_name(name)
         if name in BAR_FIELDS:
             return BAR_FIELDS[name]
-        if (name in BAR_BUILTINS
-                and not (node.annotations or {}).get("tuple_builtin_binding")):
+        if self._reads_builtin_variable(node):
             return BAR_BUILTINS[name]
         binding = self.ctx.identifier_decl_bindings.get(id(node))
         primitive_shadow_read = (

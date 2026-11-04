@@ -8452,6 +8452,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             node.annotations = {
                 **(node.annotations or {}), "tuple_builtin_binding": True,
             }
+        elif (id(node) not in self._identifier_binding_scopes
+                and node.name in BUILTIN_VARS
+                and node.name not in BAR_FIELDS
+                and getattr(sym, "_pf_decl_node_id", None) is not None
+                and (block_owner is None or any(
+                    id(body) == block_owner for body in self._block_node_stack
+                ))):
+            # A script variable named like a builtin variable (``float second
+            # = na``): this read, while its declaration is in scope, is the
+            # user's, not the builtin's. Retained like the tuple form above.
+            node.annotations = {
+                **(node.annotations or {}), "builtin_shadow_binding": True,
+            }
         # Later type queries can revisit a read after its source scope ended.
         # Validate only its first visit, while lexical ownership is live.
         if (self._pine_version == 6
