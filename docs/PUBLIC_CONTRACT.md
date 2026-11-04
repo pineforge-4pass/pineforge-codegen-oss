@@ -23,7 +23,9 @@ reserved names. `_safe_name` also escapes emitter temporary patterns and
 allocates a distinct name when the script already uses the preferred escape.
 An identifier that does not collide keeps its spelling.
 
-`bar` and `HUGE` use the existing C++ escape; authored input titles keep their Pine spellings.
+`bar` and `HUGE` use the existing C++ escape; unique input titles keep their
+Pine spellings. Repeated input titles use the ordinal override keys described
+under "Input manifest and override keys".
 
 The imported engine names `report`, `report_sink`, `report_sequence`, `source`,
 `native_calendar`, `pine_color`, `RunFailureCode`, `RunFailureInfo`, `QtyType`,
@@ -355,8 +357,12 @@ unchanged. All generated factory, setter and batch entry points contain both
 standard and non-standard exceptions; checked variants return a status and an
 optional caller-buffer error instead of silently substituting defaults.
 
-Checked inputs are keyed exactly as the generated getters: title, fallback
-binding name, or the empty key. Metadata lists every declared input (including
+Checked inputs are keyed exactly as the generated getters. The first explicit
+title keeps that title as its key; later inputs of the exact same title use
+`<title>#2`, `<title>#3`, etc., in declaration order, across groups and input
+types. Untitled inputs keep their binding-name fallback (or the empty key).
+The manifest's `title` and receipt's `name` publish these opaque override keys;
+consumers must use them verbatim. Metadata lists every declared input (including
 inline inputs), its storage type, default, options, declared numeric limits and
 UI step. Unknown/ambiguous keys, invalid booleans/enums/options, numeric suffixes,
 integer overflow, non-finite numeric strings and limit violations are refused
@@ -613,26 +619,39 @@ them identically.
   above, a plain `input(...)` whose default is not a literal is typed
   `string` with a `None` default.
 
-No key is renamed or removed and the override keys are unchanged; the values
-above are new or corrected values of existing keys, listed in the changelog.
+For a script whose explicit input titles are all different, no key is renamed
+or removed; a later input of a repeated title gets `<title>#<n>` as described
+in rule 1 below.
 The `title` is the **actual override key read by the emitted C++**:
 
-1. The value of an explicit compile-time constant `title`, if supplied.
+1. The value of an explicit compile-time constant `title`, if supplied. The
+   first occurrence keeps that value. Later occurrences of that exact title
+   append `#<n>` in declaration order, starting at 2 and taking the next
+   ordinal whose key is neither an authored explicit title anywhere in the
+   script nor a key already assigned. Groups and input types do not restart
+   the count.
 2. Otherwise, the name of the declaration containing the input call.
 3. Otherwise, the empty string `""`.
 
 For example, `length = input.int(14)` has key `"length"`, and
 `ta.ema(close, input.int(9, "Fast"))` has key `"Fast"`. The manifest includes
-both declared and inline global-scope calls, one row per call. If several
-calls share a title or fallback key, those rows retain the same `title` and
-their per-input `supported` flags do not reflect the collision. The translator
-warns about the colliding inputs. The legacy setters apply a shared override
-to all matching inputs; the checked setters refuse the key as ambiguous.
+both declared and inline global-scope calls, one row per call. Two inputs
+titled `"Length"` publish `"Length"` and `"Length#2"` when no input authors
+`"Length#2"`; a `"Length"` override sets only the first, and `"Length#2"` sets
+only the second. If another input authors `"Length#2"`, it keeps that key and
+the repeated `"Length"` gets `"Length#3"`, whether the authored `"Length#2"`
+comes before or after it.
+If several calls still share a key because of unchanged untitled fallbacks
+(including a fallback matching an explicit or assigned key), those rows retain
+the same `title` and their per-input `supported` flags do not reflect the
+collision. The translator warns about the colliding inputs. The legacy setters
+apply a shared override to all matching inputs; the checked setters refuse the
+key as ambiguous.
 On the paired 1.4.0 engine's normal checked path, a supplied shared key fails
 with `setting_rejected`, reason `ambiguous_key`; a completed run with no such
 override still reports the whole `fingerprint` as `null`. This differs from
 legacy-path unresolved provenance rows, which may remain inside a fingerprint.
-Give each input a unique title. Different `group=` labels do not separate keys.
+Give those remaining colliding inputs different explicit titles.
 An explicit title that is not a compile-time string constant raises
 `CompileError`.
 

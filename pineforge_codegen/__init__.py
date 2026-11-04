@@ -16,6 +16,7 @@ from .external_requests import lower_no_data_requests
 from .builtin_keywords import bind_builtin_keywords
 from .finite_ta_length import expand_finite_choice_extrema_lengths
 from .function_overloads import bind_scalar_overloads
+from .input_keys import assign_input_keys
 from .library_inline import inline_libraries
 from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
 from .method_binding import validate_call_argument_order
@@ -86,6 +87,9 @@ def _generate(pine_source: str, check_support: bool, filename: str,
                 raise CompileError(support_diagnostics)
         budget.check(phase=Phase.ANALYZER)
         ValueBindings(ast, filename, budget).resolve()
+        # Freeze declaration keys before request copies and TA argument text
+        # lose the original input call's identity.
+        assign_input_keys(ast, budget)
         sites = request_sites(ast)
         ast = lower_no_data_requests(ast)
         ast = specialize_security_contexts(ast, filename=filename)

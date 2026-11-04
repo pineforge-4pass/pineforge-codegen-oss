@@ -5135,8 +5135,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
     def _generate_cpp(self) -> str:
         self._uses_enum_string_lookup = False
-        # Every input is keyed by its title: refuse a non-constant one first,
-        # then flag inputs one override key would reach together.
+        # Titles already carry assigned declaration keys. Refuse an unproved
+        # title first, then flag any remaining shared fallback/suffix keys.
         self._check_input_titles()
         self._check_input_keys()
         # Context-sensitive instance pre-pass (needs the naming helpers populated

@@ -10,14 +10,11 @@ a plain declaration (``n = input.int(9) * 2``, ``x = ta.ema(close,
 input.int(9))``) was keyed ``""`` in the manifest and the C++ alike, so every
 such input of a script answered to one override.
 
-PineForge sets an input override by its key -- the title, else the name of
-the declaration holding the call -- so inputs sharing a key cannot be
-overridden apart: one override sets all of them. TradingView tells them apart
-(a title repeated across input groups is common, e.g. an "M" minute field in
-several time rows), so such a script keeps transpiling unchanged -- at its
-defaults every input reads its own default -- and one warning per shared key
-names every input the key reaches. Each such case must carry exactly its
-warnings and book the trades the same script books when transpiled by
+PineForge assigns later explicit duplicate titles a #n key, including across
+input groups. Untitled calls retain their declaration-name keys; remaining
+collisions still warn once per shared key. At defaults every input reads its
+own default. Each case must carry exactly its expected warnings and book the
+trades the same script books when transpiled by
 ``PRE_C5`` (e6a64cd).
 
 Each keyed case runs its untitled shape and the same strategy with an explicit
@@ -143,7 +140,7 @@ SHARED: tuple[Shared, ...] = (
            (("n", ((3, 5), (3, 20))),)),
     Shared("same_title", 'a = input.int(9, "Len")\nb = input.int(14, "Len")\n'
            "x = ta.ema(close, a + b)\n" + _long_on_cross("close", "x"),
-           (("Len", ((3, 5), (4, 5))),)),
+           ()),
     Shared("bound_name_and_title", 'len = input.int(9)\nfast = input.int(12, "len")\n'
            "x = ta.ema(close, len + fast)\n" + _long_on_cross("close", "x"),
            (("len", ((3, 7), (4, 8))),)),
@@ -160,7 +157,7 @@ SHARED: tuple[Shared, ...] = (
            'm2 = input.int(0, "M", group="End", inline="e")\n'
            'm3 = input.int(15, "M", group="Line")\n'
            "x = ta.ema(close, h1 + m1 + h2 + m2 + m3)\n" + _long_on_cross("close", "x"),
-           (("H", ((3, 6), (5, 6))), ("M", ((4, 6), (6, 6), (7, 6))))),
+           ()),
 )
 SHARED_BY_NAME = {c.name: c for c in SHARED}
 assert len(SHARED_BY_NAME) == len(SHARED), "duplicate case name"
