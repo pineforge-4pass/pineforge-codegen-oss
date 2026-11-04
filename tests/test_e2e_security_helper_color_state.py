@@ -8,7 +8,7 @@ import subprocess
 import pytest
 
 from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from pineforge_codegen.errors import CompileError, Phase
 from tests import _compile as compile_env
 
 
@@ -26,6 +26,18 @@ HEADER = '//@version=6\nstrategy("helper color state")\n'
 # Each pair is a requested two-minute candle. Both signs, and a change of
 # sign within a requested candle, exercise new slots and recomputations.
 DELTAS = (-1, -1, 1, 1, 1, -1, -1, -1, 1, 1, -1, -1)
+
+EPOCH_COUNTER_STATE = (
+    HEADER + "h() =>\n"
+    "    var int n = 0\n"
+    "    n += 1\n"
+    "    n\n"
+    "g() =>\n"
+    "    n = time\n"
+    "    n\n"
+    'out = request.security(syminfo.tickerid, "60", h())\n'
+    "plot(out + g())\n"
+)
 
 
 def _run_values(source, work, *, chart_tf="1"):
@@ -182,23 +194,19 @@ def test_color_helper_var_state_is_accepted():
     transpile(REPORTER)
 
 
-def test_epoch_local_keeps_counter_state_accepted_and_other_state_refused():
-    epoch = (
-        HEADER + "h() =>\n"
-        "    var int n = 0\n"
-        "    n += 1\n"
-        "    n\n"
-        "g() =>\n"
-        "    n = time\n"
-        "    n\n"
-        'out = request.security(syminfo.tickerid, "60", h())\n'
-        "plot(out + g())\n"
-    )
-    cpp = transpile(epoch)
+def test_epoch_local_keeps_counter_state_accepted():
+    cpp = transpile(EPOCH_COUNTER_STATE)
     declarations = {line.strip() for line in cpp.splitlines()}
     assert "int n = na<int>();" in declarations
     assert "int64_t n = current_bar_.timestamp;" in declarations
-    compile_env.compile_cpp(cpp)
+
+
+def test_epoch_local_counter_state_compiles():
+    # Keep the native skip confined to this test so it cannot hide refusals.
+    compile_env.compile_cpp(transpile(EPOCH_COUNTER_STATE))
+
+
+def test_requested_helper_varip_state_is_refused():
     varip = (
         HEADER + "f(src) =>\n"
         "    varip float state = src\n"
@@ -206,8 +214,14 @@ def test_epoch_local_keeps_counter_state_accepted_and_other_state_refused():
         "    state\n"
         'out = request.security(syminfo.tickerid, "2", f(close))\n'
     )
-    with pytest.raises(CompileError, match="varip"):
+    with pytest.raises(CompileError, match="varip") as caught:
         transpile(varip)
+    assert [(d.code, d.phase) for d in caught.value.diagnostics] == [
+        ("PF-E3027", Phase.CODEGEN),
+    ]
+
+
+def test_requested_helper_collection_state_is_refused():
     collection = (
         HEADER + "f() =>\n"
         "    var array<float> state = array.new<float>()\n"
@@ -216,4 +230,6 @@ def test_epoch_local_keeps_counter_state_accepted_and_other_state_refused():
     )
     with pytest.raises(CompileError, match="supports only int, float, bool and string values") as caught:
         transpile(collection)
-    assert any(d.code == "PF-E3093" for d in caught.value.diagnostics)
+    assert [(d.code, d.phase) for d in caught.value.diagnostics] == [
+        ("PF-E3093", Phase.CODEGEN),
+    ]
