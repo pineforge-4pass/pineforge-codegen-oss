@@ -271,9 +271,12 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
     m = re.search(r"\s+(?:UTC|GMT)([+-]\d{1,2})?(?::?(\d{2}))?$", txt, re.I)
     if m:
         txt = txt[: m.start()].strip()
-        h = int(m.group(1) or 0)
+        signed_hour = m.group(1) or "+0"
+        # Keep the written sign: int("-00") loses the minute offset's minus.
+        sign = -1 if signed_hour.startswith("-") else 1
+        h = abs(int(signed_hour))
         mm = int(m.group(2) or 0)
-        tzoff = timezone(timedelta(hours=h, minutes=(mm if h >= 0 else -mm)))
+        tzoff = timezone(sign * timedelta(hours=h, minutes=mm))
     dt = None
     try:
         dt = datetime.fromisoformat(txt)
