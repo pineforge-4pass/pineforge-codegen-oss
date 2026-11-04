@@ -119,6 +119,14 @@ Any other diff: run the tests that touch it, and the local-only row above if it 
 - No extra verification layers on top of the repo's gates: no home-made kits, receipt packs, second reads of the same suite, or reruns.
 - `python -m pytest --collect-only -q` gives today's collection size; never quote a fixed count.
 
+### What a script computes is a parity probe, not a CI test
+
+- A check of what a Pine script computes (script plus data gives expected values or trades) is a **probe** in the parity campaign's population, not a test in this suite. Crypto data goes to the public corpus; any other data goes to the private set. The campaign's parity sweep measures it against TradingView.
+- The evidence for a behaviour fix is a probe in that population, measured by a sweep, not a new test here. A new test here is a real unit test: one target (the parser, the analyzer, a diagnostic, the shape of emitted code), no duplicates.
+- Migration: an existing test leaves this suite only after its probe is admitted and measured in a parity sweep. Nothing is removed before that; until then the test stays and the local-only list above still applies to it.
+- Tests that need the paired engine or a built runtime skip in CI and so can never fail there; say so in the PR instead of counting them as CI coverage, and propose their probe.
+- The engine's own kernel tests (ctest, in the engine repository) are a separate class: they stay in the engine's CI, one target each, and are never probe candidates.
+
 ## Architectural invariants — do not break
 
 1. **Exact engine release pairing.** From 1.0.0 on, bumping `VERSION`
