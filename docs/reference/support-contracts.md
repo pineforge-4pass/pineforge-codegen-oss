@@ -1,5 +1,20 @@
 ## Support contracts
 
+`line.all`, `box.all`, `label.all` and `linefill.all` non-var declaration aliases and
+single-binder `for … in` loops take ordered snapshots of live handles at each
+collection read. Elements keep their drawing type; setters/deletion reach the
+live arena. Direct `size`, `first`, `last`, `get` keep their existing live-read
+lowering. Structural mutation, collection reassignment/escape, history and
+pair-binder iteration retain PF-E5086 pending TV evidence/provenance support;
+declaration tails yielding collections as callable/selection values are refused.
+`polyline.all` retains PF-E5085 until the engine has a Polyline handle/arena.
+`var`/`varip` aliases retain PF-E5086 until a TradingView capture establishes
+their lifetime semantics. Whether a later creation in the same bar is visible
+through the alias is not yet measured against TradingView.
+`tests/test_drawing_collections_alias.py` checks which forms are accepted and
+which keep their refusal, and that unrelated emitted C++ stays byte-identical
+to the base commit.
+
 Map namespace calls and receiver methods share named-slot argument binding:
 positional arguments fill the leading slots, and keywords fill the parameters
 with those names, including a functional receiver named `id`. Valid keyword
