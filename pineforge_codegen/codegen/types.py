@@ -3962,6 +3962,11 @@ class TypeInferer:
             return "int64_t"
         if sym is not None:
             return PINE_TYPE_TO_CPP.get(sym.pine_type, "double")
+        if local is not None and local.pine_type == PineType.STRING:
+            # A function-local string whose history is read (``tag[1]``) is a
+            # string series, as a global one is: its member was a series of
+            # doubles, and every push of a string into it failed to compile.
+            return "std::string"
         return "double"
 
     def _series_handle_type_name(self, name: str) -> str | None:
