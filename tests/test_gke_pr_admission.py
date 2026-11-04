@@ -534,7 +534,7 @@ def check_workflows(sources):
             'python -m pip install -e ".[dev]"',
             "python -m pytest -q tests/test_license_entity.py",
         ],
-        "pytest": ['python -m pip install -e ".[dev]"', "python -m pytest -q"],
+        "pytest": ['python -m pip install -e ".[dev]"', "python -m pytest -q -n auto"],
         "differential": [
             "set -euo pipefail\npython -m pip install -e .\nnpm ci",
             "npm run gate:selftest", "npm audit --audit-level=high", "npm run gate:full",
@@ -914,7 +914,7 @@ def test_real_workflow_mutations():
          "extra events"),
         ("        run: npm run gate:full", "        run: timeout 30 npm run gate:full", "time limit"),
         ("        run: npm run gate:full", "        run: true", "proof commands"),
-        ("        run: python -m pytest -q\n", "        run: echo pytest\n", "proof commands"),
+        ("        run: python -m pytest -q -n auto\n", "        run: echo pytest\n", "proof commands"),
         ('      PYTHONHASHSEED: "0"', '      PYTHONHASHSEED: ${{ toJSON(github) }}', "pod environment"),
         ("      - name: Run the test suite\n", "      - name: Run the test suite\n"
          "        env:\n          AUTH: ${{ toJSON(github) }}\n", "step environment"),

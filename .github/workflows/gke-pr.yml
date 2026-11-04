@@ -123,7 +123,7 @@ jobs:
       - name: Install with dev extras
         run: python -m pip install -e ".[dev]"
       - name: Run the test suite
-        run: python -m pytest -q
+        run: python -m pytest -q -n auto
 
   differential:
     needs: [admit]
