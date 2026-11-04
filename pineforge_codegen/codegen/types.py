@@ -571,6 +571,25 @@ class TypeInferer:
         "push": (1, 0), "unshift": (1, 0), "set": (2, 1), "insert": (2, 1),
         "fill": (1, 0),
     }
+    # Element reads whose checked lowering returns a stored element or stops
+    # the run (an empty receiver, an na or out-of-range index): none makes an
+    # na of its own, unlike ``min`` / ``max`` on an empty array.
+    _PRESENT_ARRAY_ELEMENT_READS = frozenset({
+        "get", "first", "last", "pop", "shift", "remove",
+    })
+    # Built-in array methods after which a receiver holds only values it
+    # already held: element reads, removals, reorderings and aggregates.
+    # ``slice`` (a view on TradingView) and ``concat`` (appends another
+    # array's elements) are absent; a stored value is ``_ARRAY_ELEMENT_WRITERS``.
+    _ELEMENT_PRESERVING_ARRAY_USES = frozenset({
+        "get", "first", "last", "pop", "shift", "remove", "clear", "size",
+        "includes", "indexof", "lastindexof", "sort", "reverse", "copy",
+        "sum", "avg", "min", "max", "range", "median", "mode", "stdev",
+        "variance", "every", "some", "join", "abs", "standardize",
+        "sort_indices", "covariance", "percentrank",
+        "percentile_linear_interpolation", "percentile_nearest_rank",
+        "binary_search", "binary_search_leftmost", "binary_search_rightmost",
+    })
 
     @staticmethod
     def _int_fits_int32(value: int) -> bool:
@@ -1101,6 +1120,8 @@ class TypeInferer:
         mutable name as nullable merely because it is mutable. A self-update
         such as ``n := n + 1`` contributes a dependency, not a new missing
         source. History, unknown calls and unproved parameters remain nullable.
+        An element read follows the values its array was given only for a
+        fresh array no reference lets escape (``_present_array_element_sources``).
         This query owns no alias cache and does not change the shared NA walk.
         """
         owner = self._func_info_map.get(
@@ -1152,6 +1173,12 @@ class TypeInferer:
                                        for other in self.ctx.func_infos) != 1):
                             return False
                         pending.append((terminal, info))
+                    continue
+                elements = self._present_array_element_sources(value)
+                if elements is not None:
+                    # A checked element read of a fresh array returns one of
+                    # the values its array was given, or stops the run.
+                    pending.extend(elements)
                     continue
             if isinstance(value, Identifier):
                 declaration = (
@@ -1240,6 +1267,215 @@ class TypeInferer:
             if self._int_operand_may_be_na(value, lexical_owner):
                 return False
         return True
+
+    def _present_array_element_sources(self, call):
+        """Every value a checked element read of a fresh array can return.
+
+        ``get``, ``first``, ``last``, ``pop``, ``shift`` and ``remove`` return
+        a stored element or stop the run on an empty array or an invalid
+        index. The receiver must be a declaration of
+        ``_fresh_array_element_inventory`` whose element slot the shared width
+        plan makes 64-bit, for its declaration and its name alike, so a store
+        keeps a present integer exactly. The plan registers a name only when
+        its scope declares it once, so sibling block declarations sharing one
+        member are never proved. A 32-bit element slot does not keep
+        a present value past int32 (its store narrows the value), and this
+        proof has no range proof for such stores, so their reads keep their
+        guards. A literal source must differ from the 64-bit slot's own na
+        (its minimum). None when any of this is not shown.
+        """
+        use = self._array_method_receiver(call)
+        if use is None or use[1] not in self._PRESENT_ARRAY_ELEMENT_READS:
+            return None
+        receiver = use[0]
+        bindings = self.ctx.identifier_decl_bindings
+        declaration = (bindings[id(receiver)] if id(receiver) in bindings
+                       else ValueBindings.declaration_of(receiver))
+        entry = self._fresh_array_element_inventory().get(declaration)
+        plan = getattr(self, "_array_widths", None)
+        if entry is None or plan is None:
+            return None
+        decl, owner, sources = entry
+        slots = plan.nodes.get(id(decl), set())
+        scope = owner.name if owner is not None else ""
+        if (not slots or plan.wide.isdisjoint(slots)
+                or not slots <= plan.names.get((scope, decl.name), set())):
+            return None
+        for source, _owner in sources:
+            literal = self._pure_int_literal_value(source, names=False)
+            if literal is not None and not -(1 << 63) < literal < (1 << 63):
+                return None
+        return list(sources)
+
+    def _fresh_array_element_inventory(self):
+        """Fresh arrays whose every reference reads or fills them in place.
+
+        Keyed by declaration identity: ``(declaration, owner, sources)``. A
+        declaration qualifies when each value it takes (its initializer and
+        every ``:=``) is an integer-array constructor and each authored
+        reference to it is the receiver of a built-in array method, called
+        without keywords, that reads, removes or reorders its elements
+        (``_ELEMENT_PRESERVING_ARRAY_USES``) or stores one value
+        (``_ARRAY_ELEMENT_WRITERS``). The sources are the constructors'
+        elements and the stored values, with their lexical owners. Any other
+        reference (an alias, an argument, a returned or selected value, a
+        field, history, a loop, a ``slice`` view, ``concat``, a keyword form
+        or a method the script declares) leaves the declaration out, as does
+        a constructor whose elements default to na and a name in a callable
+        without one analyzed identity. It reads syntax and analyzer bindings
+        only, so it is computed once.
+        """
+        cached = getattr(self, "_fresh_array_element_inventory_cache", None)
+        if cached is not None:
+            return cached
+        infos, shared = {}, set()
+        for info in self.ctx.func_infos:
+            if info.node is not None:
+                if id(info.node) in infos:
+                    shared.add(id(info.node))
+                infos[id(info.node)] = info
+        callables = [*(info.node for info in infos.values()),
+                     *(statement for statement in self.ctx.ast.body
+                       if isinstance(statement, (FuncDef, MethodDef)))]
+        user_methods = {node.name for node in callables
+                        if isinstance(node, MethodDef)}
+        unowned = set()
+
+        def defaults(node):
+            # Parameter defaults are syntax kept in annotations, which
+            # ``iter_ast_nodes`` skips (``method_binding`` walks them too).
+            return [default for default in
+                    (node.annotations or {}).get("param_defaults", ())
+                    if isinstance(default, ASTNode)]
+
+        def disown(root):
+            for child, _depth in iter_ast_nodes(root):
+                if isinstance(child, Identifier):
+                    unowned.add(child.name)
+                elif isinstance(child, (FuncDef, MethodDef)):
+                    for default in defaults(child):
+                        disown(default)
+
+        for node in callables:
+            if id(node) not in infos or id(node) in shared:
+                disown(node)
+        roots = [(statement, None) for statement in self.ctx.ast.body
+                 if not isinstance(statement, (FuncDef, MethodDef))]
+        for node_id, info in infos.items():
+            if node_id not in shared:
+                roots.append((info.node, info))
+                # A default reads only the script's top level.
+                roots.extend((default, None) for default in defaults(info.node))
+        declarations, assignments, receivers, references = {}, {}, {}, {}
+        for root, owner in roots:
+            for node, _depth in iter_ast_nodes(root):
+                if isinstance(node, (FuncDef, MethodDef)):
+                    if node is not root:
+                        # A nested callable has no lexical owner of its own.
+                        if isinstance(node, MethodDef):
+                            user_methods.add(node.name)
+                        disown(node)
+                elif isinstance(node, VarDecl):
+                    declarations[(id(node), node.name)] = (node, owner)
+                elif isinstance(node, Identifier):
+                    references.setdefault(node.name, []).append(node)
+                elif isinstance(node, Assignment):
+                    if isinstance(node.target, Identifier):
+                        assignments[id(node.target)] = (node, owner)
+                elif isinstance(node, FuncCall):
+                    use = self._array_method_receiver(node)
+                    if use is not None:
+                        receivers[id(use[0])] = (node, use[1], use[2], owner)
+        bindings = self.ctx.identifier_decl_bindings
+        inventory = {}
+        for key, (decl, owner) in declarations.items():
+            elements = self._fresh_int_array_elements(decl.value)
+            if elements is None or decl.name in unowned:
+                continue
+            sources = [(element, owner) for element in elements]
+            for node in references.get(decl.name, ()):
+                found = (bindings[id(node)] if id(node) in bindings
+                         else ValueBindings.declaration_of(node))
+                if found is not None and found != key:
+                    continue
+                write = assignments.get(id(node))
+                use = receivers.get(id(node))
+                if write is not None:
+                    values = (self._fresh_int_array_elements(write[0].value)
+                              if write[0].op == ":=" else None)
+                    if values is None:
+                        break
+                    sources.extend((value, write[1]) for value in values)
+                elif use is not None:
+                    call, method, arguments, use_owner = use
+                    if (call.kwargs or method in user_methods
+                            or self._wide_callable_args(call)):
+                        break
+                    if method in self._ARRAY_ELEMENT_WRITERS:
+                        index = self._ARRAY_ELEMENT_WRITERS[method][1]
+                        if index >= len(arguments):
+                            break
+                        sources.append((arguments[index], use_owner))
+                    elif method not in self._ELEMENT_PRESERVING_ARRAY_USES:
+                        break
+                else:
+                    break
+            else:
+                inventory[key] = (decl, owner, sources)
+        self._fresh_array_element_inventory_cache = inventory
+        return inventory
+
+    def _fresh_int_array_elements(self, value):
+        """The elements an integer-array constructor stores, else None.
+
+        ``array.from`` stores its arguments; ``array.new_int`` and
+        ``array.new<int>`` store ``initial_value`` (na when omitted) in each
+        slot, and nothing when ``size`` is omitted or 0.
+        """
+        if not (isinstance(value, FuncCall)
+                and isinstance(value.callee, MemberAccess)
+                and isinstance(value.callee.object, Identifier)
+                and self._is_array_namespace(value.callee.object)):
+            return None
+        method = value.callee.member
+        if method == "from":
+            return None if value.kwargs else list(value.args)
+        if not (method == "new_int" or (
+                method == "new"
+                and self._template_args_from_call(value) == ["int"])):
+            return None
+        arguments = list(value.args)
+        names = ("size", "initial_value")
+        if (len(arguments) > len(names)
+                or set(value.kwargs) - set(names)
+                or any(name in value.kwargs for name in names[:len(arguments)])):
+            return None
+        size = arguments[0] if arguments else value.kwargs.get("size")
+        initial = (arguments[1] if len(arguments) > 1
+                   else value.kwargs.get("initial_value"))
+        if size is None or self._pure_int_literal_value(size, names=False) == 0:
+            return []
+        return None if initial is None else [initial]
+
+    def _array_method_receiver(self, call):
+        """``(receiver, method, arguments)`` of a method call on a bare name
+        in either form, ``array.<method>(name, ...)`` or ``name.<method>(...)``,
+        ``arguments`` being those written after the receiver; else None."""
+        callee = call.callee
+        if (not isinstance(callee, MemberAccess)
+                or not isinstance(callee.object, Identifier)):
+            return None
+        if self._is_array_namespace(callee.object):
+            if not call.args or not isinstance(call.args[0], Identifier):
+                return None
+            return call.args[0], callee.member, list(call.args[1:])
+        return callee.object, callee.member, list(call.args)
+
+    def _is_array_namespace(self, node) -> bool:
+        """Whether this ``array`` names the built-in namespace, not a value."""
+        bindings = self.ctx.identifier_decl_bindings
+        return (node.name == "array" and bindings.get(id(node)) is None
+                and ValueBindings.declaration_of(node) is None)
 
     @staticmethod
     def _tuple_slot_types(cpp_type: str | None) -> list[str]:
