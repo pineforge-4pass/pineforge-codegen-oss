@@ -438,7 +438,7 @@ x = close.requested()
 ''',
 ], ids=["no-history", "plain-function-history", "dropped-method-read", "direct-requested-read"])
 def test_scripts_without_emitted_method_session_history_keep_exact_cpp(body, tmp_path) -> None:
-    base = "1e2e72e37047ea22a4fdfc189584668e9567fdee"
+    base = "d7d0d6594dbcc8fc2a217ac46b1f38e4a38396c6"
     reference = reference_codegen(base)
     assert reference is not None, f"required C++ identity reference {base} unavailable"
     pine = tmp_path / "strategy.pine"
