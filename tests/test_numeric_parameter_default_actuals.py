@@ -62,7 +62,7 @@ from pineforge_codegen.ast_nodes import (
 )
 from tests._numeric_expected import integer_arithmetic
 from tests.test_numeric_actual_inventory import _generator, _inc_body, _native_values
-from tests.test_numeric_missing_value_rows import _json, _sha
+from tests._numeric_support import _json, _sha
 
 
 _ROOT = Path(__file__).resolve().parents[1]
