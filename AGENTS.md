@@ -591,6 +591,10 @@ to transpile. A lowering that produces a value different from TradingView on
 TV-valid input is a defect: fix it with the correct lowering; never keep it
 with a warning.
 
+The one exception to this rule is a located refusal: a form PineForge cannot
+yet lower correctly may be refused with an error that names its source
+location, instead of being lowered with a wrong value.
+
 This exception covers only constructs PineForge refuses today. A form that compiles today keeps compiling: if its lowering is approximate, that is recorded as a defect and fixed by the correct lowering. A wrong value is never kept behind a warning, and such a form is never newly refused as unproven. A located refusal is allowed only as a labelled temporary fallback for one exact proven shape, listed as a compile gap.
 
 Input defaults use the input family's Pine type and qualifier contract.
