@@ -1310,9 +1310,22 @@ class TypeInferer:
                     declaration = declarations.get(binding[0][0])
                     cpp_type = self._integer_presence_storage_cpp_type(
                         declaration, binding_owner, declaration_counts, member_families)
-                    if cpp_type is None:
-                        return False
                     operations = updates.get(binding[0], set())
+                    if cpp_type is None:
+                        # The slot of a block's local (or of an inactive
+                        # callable's) is not read here. Presence does not need
+                        # its width when this exact declaration holds only
+                        # int literals that avoid the sentinel of every integer
+                        # family, and nothing updates it in place: the read is
+                        # bound to the declaration, not to the name.
+                        if (isinstance(declaration, VarDecl)
+                                and not (declaration.is_var or declaration.is_varip)
+                                and not operations
+                                and all(self._integer_presence_int32_constant(source) is not None
+                                        for source, _owner in binding[1])):
+                            pending.extend(binding[1])
+                            continue
+                        return False
                     if operations - {"+=", "-=", "*="}:
                         # Division/remainder can create NaN even with a
                         # present RHS, regardless of the destination width.
