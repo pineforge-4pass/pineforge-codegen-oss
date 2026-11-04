@@ -759,20 +759,29 @@ def _checked_array_fill_range(a: str, args: list[str], journal: str | None = Non
     )
 
 
-def checked_array_slice(a: str, args: list[str], *, result_type: str) -> str:
+def checked_array_slice(
+    a: str, args: list[str], *, result_type: str, view_function: str | None = None,
+) -> str:
     """``array.slice(id, index_from, index_to)`` — bounded range extraction.
 
-    ``result_type`` stays caller-supplied so the typed method lane keeps
-    emitting the receiver's own element type; only the bounds checks are new.
+    ``result_type`` keeps the receiver's element family. Full generation
+    supplies its lifetime-owning window helper; standalone table consumers
+    retain the historical range materialization.
     """
     check = _checked_array_range_prelude(method="slice")
+    result = (
+        f"{view_function}<{result_type}>(__pf_array, "
+        "(size_t)__pf_array_index_from, (size_t)__pf_array_index_to)"
+        if view_function else
+        f"{result_type}(__pf_array.begin()+(size_t)__pf_array_index_from, "
+        "__pf_array.begin()+(size_t)__pf_array_index_to)"
+    )
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_from_value){ "
         "return [&](auto&& __pf_raw_index_to_value){ "
         f"{check}"
-        f"return {result_type}(__pf_array.begin()+(size_t)__pf_array_index_from, "
-        "__pf_array.begin()+(size_t)__pf_array_index_to); "
+        f"return {result}; "
         f"}}(({args[1]})); }}(({args[0]})); }}(({a}))"
     )
 

@@ -494,35 +494,64 @@ int main() {
     assert run_emitted_tu(cpp, driver, opt="-O2", label="array initialization") == "ok\n"
 
 
-def test_concat_and_detached_slice_rollback():
+def test_slice_free_concat_keeps_journal_write_and_eager_source():
     source = _native_source("2, 5", "", "a.concat(b)\na.size()", "",
                             extra="var b = array.from(7, 9)\n")
-    source += "part = a.slice(0, 1)\npart.set(0, 99)\n"
     cpp = transpile(source)
     _enrolled(cpp)
     assert "this->_pf_array_journal.concat(a, a.end(), b.begin(), b.end())" in cpp
     assert "            b,\n" in _snapshot(cpp)
+
+
+def test_concat_and_detached_slice_rollback():
+    source = _native_source("2, 5", "", "a.concat(b)\na.size()", "",
+                            extra="var b = array.from(7, 9)\n")
+    # Slice shares elements; explicitly copy it to retain this detached-slice
+    # rollback control's original a=[2,5], b=[7,9], part=[99] baseline.
+    source += "part = a.slice(0, 1)\npart := part.copy()\npart.set(0, 99)\n"
+    cpp = transpile(source)
+    # Slice scripts checkpoint backing identity and contents eagerly. Keep
+    # _enrolled/journal-write assertions on the slice-free controls above.
+    assert "class _PFArrayJournal" not in cpp
+    for member in ("a", "b", "part"):
+        assert f"decltype(GeneratedStrategy::{member})>::take({member})," in _snapshot(cpp)
+        assert f"decltype(GeneratedStrategy::{member})>::restore(this->{member}," in cpp
     driver = r'''
 #include <cassert>
 #include <iostream>
+#include <vector>
+template <typename Array>
+std::vector<int> contents(const Array& array) {
+    return std::vector<int>(array.begin(), array.end());
+}
 int main() {
     GeneratedStrategy strategy;
     Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
     strategy.run(&bar, 1);
     assert(strategy.last_error().empty());
-    assert((strategy.a == std::vector<int>{2, 5}));
-    assert((strategy.part == std::vector<int>{99}));
+    assert((contents(strategy.a) == std::vector<int>{2, 5}));
+    assert((contents(strategy.b) == std::vector<int>{7, 9}));
+    assert((contents(strategy.part) == std::vector<int>{99}));
     strategy.snapshot_script_state();
     assert(strategy.mutate() == 4);
-    assert((strategy.a == std::vector<int>{2, 5, 7, 9}));
+    assert((contents(strategy.a) == std::vector<int>{2, 5, 7, 9}));
+    assert((contents(strategy.b) == std::vector<int>{7, 9}));
+    assert((contents(strategy.part) == std::vector<int>{99}));
+    strategy.b[0] = 70;
+    strategy.b.push_back(11);
+    strategy.part[0] = 101;
+    strategy.part.push_back(102);
+    assert((contents(strategy.b) == std::vector<int>{70, 9, 11}));
+    assert((contents(strategy.part) == std::vector<int>{101, 102}));
     strategy.restore_script_state();
-    assert((strategy.a == std::vector<int>{2, 5}));
-    assert((strategy.b == std::vector<int>{7, 9}));
-    assert((strategy.part == std::vector<int>{99}));
+    assert((contents(strategy.a) == std::vector<int>{2, 5}));
+    assert((contents(strategy.b) == std::vector<int>{7, 9}));
+    assert((contents(strategy.part) == std::vector<int>{99}));
     std::cout << "ok\n";
 }
 '''
-    # Concat appends [7,9]; the existing detached slice keeps [99] throughout rollback.
+    # Concat appends [7,9] without changing b or part; rollback restores all
+    # three preimages, including after direct content/size changes to b/part.
     assert run_emitted_tu(cpp, driver, opt="-O2", label="concat and slice") == "ok\n"
 
 

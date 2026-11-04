@@ -3369,11 +3369,10 @@ class TypeInferer:
         reference and render every use through that binding.  The lambda's
         deduced ``auto`` return copies scalar results before a temporary
         receiver dies; mutations still reach lvalue arrays through the
-        forwarding reference.  Single-use and plain-identifier lowerings
-        remain byte-for-byte unchanged.
-
-        This is receiver-only by design: Pine argument evaluation and the
-        separate empty-array semantics are outside this fix.
+        forwarding reference. Without slice storage, single-use and
+        plain-identifier lowerings remain byte-for-byte unchanged. Slice
+        storage always establishes the receiver before staged call arguments
+        and materializes bool reads before temporary receiver destruction.
         """
         counter = getattr(self, "_array_receiver_counter", 0)
         occupied = "\n".join((array_expr, *args))
@@ -3385,7 +3384,8 @@ class TypeInferer:
         self._array_receiver_counter = counter
 
         lowered = lower_receiver(receiver)
-        if lowered.count(receiver) <= 1 or array_expr.isidentifier():
+        if (not getattr(self, "_uses_array_slice_views", False)
+                and (lowered.count(receiver) <= 1 or array_expr.isidentifier())):
             return lower_receiver(array_expr)
         return (
             f"[&]() {{ auto&& {receiver} = ({array_expr}); "
@@ -3405,27 +3405,33 @@ class TypeInferer:
         arr_cpp_type = self._type_spec_to_cpp(spec)
         elem_cpp = self._type_spec_to_cpp(spec.element) if spec.element is not None else "double"
         if method == "copy":
-            lower_receiver = lambda recv: f"{arr_cpp_type}({recv})"
+            lower_receiver = (
+                (lambda recv: f"{self._slice_copy_cpp}({recv})")
+                if getattr(self, "_uses_array_slice_views", False) else
+                (lambda recv: f"{arr_cpp_type}({recv})")
+            )
         elif method == "slice":
-            # TradingView aliases primitive source elements bidirectionally.
-            # Our std::vector lowering owns a copy; a true view needs a
-            # lifetime-safe collection representation across all array lanes.
-            # Keep the compiling lowering and surface the measured divergence.
-            warned = getattr(self, "_slice_alias_warned_nodes", set())
-            if node is None or id(node) not in warned:
-                self._codegen_warning(
-                    node,
-                    "array.slice returns a copy in PineForge; TradingView slices "
-                    "share source elements, so writes through either array can diverge.",
-                    hint="Avoid mutating a slice or its source while the slice is used.",
-                )
-                if node is not None:
-                    warned.add(id(node))
-                    self._slice_alias_warned_nodes = warned
-            # Bounds-checked in the shared helper; the element type stays
-            # caller-supplied so the typed lane keeps its own vector type.
+            view_function = (self._slice_view_cpp
+                             if getattr(self, "_uses_array_slice_views", False)
+                             else None)
+            if view_function is None:
+                warned = getattr(self, "_slice_alias_warned_nodes", set())
+                if node is None or id(node) not in warned:
+                    self._codegen_warning(
+                        node,
+                        "array.slice returns a copy in PineForge; TradingView slices "
+                        "share source elements, so writes through either array can diverge.",
+                        hint="Avoid mutating a slice or its source while the slice is used.",
+                    )
+                    if node is not None:
+                        warned.add(id(node))
+                        self._slice_alias_warned_nodes = warned
+            # Endpoint checks and argument evaluation order stay in the
+            # shared helper. Storage lowering covers the whole translation
+            # unit so the window survives callable and record boundaries.
             lower_receiver = lambda recv: checked_array_slice(
-                recv, args, result_type=arr_cpp_type
+                recv, args, result_type=arr_cpp_type,
+                view_function=view_function,
             )
         elif method == "join" and elem_cpp == "std::string":
             join_args = list(args) or ['std::string(",")']
@@ -3468,11 +3474,22 @@ class TypeInferer:
                 "percentile_linear_interpolation": (0,),
                 "percentile_nearest_rank": (0,),
             }
+            slice_storage = getattr(self, "_uses_array_slice_views", False)
+            eager_indices = eager_scalar_arg_methods.get(method, ())
+            if slice_storage and method in {
+                "unshift", "fill", "includes", "indexof", "lastindexof",
+                "binary_search", "binary_search_leftmost", "binary_search_rightmost",
+                "sort", "concat", "covariance",
+            }:
+                # No iterator may be obtained before a call argument that
+                # can resize/rebind its source. The outer receiver binding
+                # above precedes these source-ordered argument bindings.
+                eager_indices = range(len(args))
             bound_args = list(args)
-            arg_bindings: list[tuple[str, str]] = []
+            arg_bindings: list[tuple[str, str, str]] = []
             occupied = "\n".join((array_expr, *args))
             counter = getattr(self, "_array_arg_counter", 0)
-            for arg_index in eager_scalar_arg_methods.get(method, ()):
+            for arg_index in eager_indices:
                 if arg_index >= len(args):
                     continue
                 while True:
@@ -3481,7 +3498,15 @@ class TypeInferer:
                     if token not in occupied:
                         break
                 bound_args[arg_index] = token
-                arg_bindings.append((token, args[arg_index]))
+                binding_type = "auto"
+                if slice_storage and method in {"concat", "covariance"}:
+                    binding_type = "auto&&"
+                elif (slice_storage and elem_cpp == "bool" and arg_index == 0
+                      and method in {"unshift", "fill", "includes", "indexof", "lastindexof"}):
+                    # Materialize vector<bool>'s proxy before later arguments
+                    # can change the backing allocation.
+                    binding_type = "bool"
+                arg_bindings.append((token, args[arg_index], binding_type))
             self._array_arg_counter = counter
 
             table = (V5_ARRAY_INDEX_METHODS
@@ -3497,13 +3522,30 @@ class TypeInferer:
                         normalize_negative=not self._pine_v5_body,
                     ) if adapter is not None else table[method](recv, a), "_pf_array_a",
                 )
-                for token, original in reversed(arg_bindings):
+                if (getattr(self, "_uses_array_slice_views", False)
+                        and method in {
+                            "median", "percentile_linear_interpolation",
+                            "percentile_nearest_rank",
+                        }):
+                    # These calculations sort a private working array.
+                    # An implicit view copy would sort the source elements.
+                    lowered = lowered.replace(
+                        f"auto __pf_c={recv};",
+                        f"auto __pf_c={self._slice_copy_cpp}({recv});",
+                    )
+                for token, original, binding_type in reversed(arg_bindings):
                     lowered = (
-                        f"[&](){{ auto {token}=({original}); "
+                        f"[&](){{ {binding_type} {token}=({original}); "
                         f"return {lowered}; }}()"
                     )
                 return lowered
 
+        if (getattr(self, "_uses_array_slice_views", False)
+                and elem_cpp == "bool" and method in {"get", "first", "last"}):
+            # The receiver-once scope can own a temporary bool array. Convert
+            # its proxy while that scope still owns the backing allocation.
+            read_receiver = lower_receiver
+            lower_receiver = lambda recv: f"bool({read_receiver(recv)})"
         try:
             return self._array_receiver_once_expr(array_expr, args, lower_receiver)
         except IndexError:

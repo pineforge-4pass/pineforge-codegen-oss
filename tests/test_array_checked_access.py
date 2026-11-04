@@ -64,7 +64,7 @@ def test_checked_get_binds_temporary_receiver_and_index_once():
     )
     # The temporary slice receiver is built exactly once (its own receiver
     # ``values`` is substituted once), and the index is evaluated once.
-    assert assignment.count("std::vector<int>(__pf_array.begin()") == 1
+    assert assignment.count("_pf_slice_view<_PFSliceArray<int>>") == 1
     assert assignment.count("values") == 1
     assert assignment.count("idx()") == 1
     assert "_PF_ARRAY_STOP" in assignment

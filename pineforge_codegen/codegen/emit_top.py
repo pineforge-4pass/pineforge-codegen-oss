@@ -164,6 +164,8 @@ class TopLevelEmitter:
         lines.append("#include <numeric>")
         lines.append("#include <string>")
         lines.append("#include <vector>")
+        if getattr(self, "_uses_array_slice_views", False):
+            lines.extend(("#include <stdexcept>", "#include <utility>"))
         if getattr(self, "_array_journal_members", {}):
             lines.extend(("#include <functional>", "#include <limits>",
                           "#include <stdexcept>", "#include <utility>"))
@@ -817,6 +819,7 @@ class TopLevelEmitter:
                     "",
                 ])
 
+        vector_traits_start = len(lines)
         lines.extend([
             "template <typename _PFElement, typename _PFAllocator>",
             f"struct {checkpoint_traits}<std::vector<_PFElement, _PFAllocator>> {{",
@@ -847,6 +850,9 @@ class TopLevelEmitter:
             "};",
             "",
         ])
+        if getattr(self, "_uses_array_slice_views", False):
+            from .array_slice import checkpoint_traits as slice_checkpoint_traits
+            lines[vector_traits_start:] = [slice_checkpoint_traits(checkpoint_traits)]
 
         if self._udt_has_array_fields():
             # A UDT array field: its binding, and the contents of an array it
@@ -1008,6 +1014,7 @@ class TopLevelEmitter:
             getattr(self, "_uses_map", False)
             or getattr(self, "_uses_matrix", False)
             or getattr(self, "_udt_defs", {})
+            or getattr(self, "_uses_array_slice_views", False)
         )
         journal_members = getattr(self, "_array_journal_members", {})
         journal = (f"this->{self._array_journal_member_name}" if journal_members else None)
