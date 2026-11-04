@@ -122,8 +122,7 @@ def test_series_call_and_operator_results_are_refused(declarations, condition):
 @pytest.mark.parametrize("declaration,invocation", [
     ("relay(bool enabled)", "relay(close > open)"),
     ("relay(bool enabled)", "relay(enabled=close > open)"),
-    ("method relay(bool enabled)", "(close > open).relay()"),
-], ids=["function", "named-function", "method"])
+], ids=["function", "named-function"])
 def test_forwarded_series_parameter_reaches_builtin_contract(declaration, invocation):
     argument = f"enabled ? {LONG} : {ALL}"
     source = (
@@ -131,6 +130,38 @@ def test_forwarded_series_parameter_reaches_builtin_contract(declaration, invoca
         + f"    1\nx = {invocation}\n"
     )
     _refused(source, argument, 4)
+
+
+def test_method_on_expression_receiver_forwarding_series_is_accepted_by_unknown_evidence():
+    # ACCEPTED BECAUSE THE EVIDENCE IS UNKNOWN, not because TradingView accepts
+    # it: whether TradingView refuses a series receiver that a method forwards
+    # into allow_entry_in's simple parameter is an open question (REPORT-Q2.md,
+    # round 3, QUESTIONS FOR TV). This source was the "method" row of the test
+    # above. The classifier refuses only what it proves, and it has no proof
+    # here: the analyzer gives the expression receiver `close > open` no type,
+    # so the typed-parameter check never runs for the call, and the classifier's
+    # own receiver hint is unresolved for it too (its method key is not found).
+    # When a later change gives this call evidence, move the source back into
+    # the refused rows above: the last assertion then fails, which is the
+    # signal to do so.
+    argument = f"enabled ? {LONG} : {ALL}"
+    source = (
+        HEADER + f"method relay(bool enabled) =>\n    {CALL}({argument})\n"
+        + "    1\nx = (close > open).relay()\n"
+    )
+    assert transpile(source, filename="direction.pine")
+
+    from pineforge_codegen.analyzer.qualifiers import ParameterQualifiers
+    from pineforge_codegen.analyzer.value_bindings import ValueBindings
+    from pineforge_codegen.lexer import Lexer
+    from pineforge_codegen.parser import Parser
+
+    ast = Parser(Lexer(source).tokenize(), source=source).parse()
+    bindings = ValueBindings(ast, "direction.pine")
+    bindings.resolve()
+    qualifiers = ParameterQualifiers(ast, bindings.declaration_bindings, "direction.pine")
+    assert qualifiers.active
+    assert qualifiers.infer(ast.body[-1].value, {}) is None
 
 
 def test_named_series_direction_is_refused():
