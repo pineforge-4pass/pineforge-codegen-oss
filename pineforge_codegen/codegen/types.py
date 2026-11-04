@@ -1819,11 +1819,30 @@ class TypeInferer:
             return cached
         parameters, arrays = {}, {}
         bodies = [(None, [stmt for stmt in self.ctx.ast.body
-                          if not isinstance(stmt, (FuncDef, MethodDef))])]
-        bodies.extend((info, info.node.body) for info in self.ctx.func_infos
+                          if not isinstance(stmt, (FuncDef, MethodDef))], True)]
+        bodies.extend((info, info.node.body, True) for info in self.ctx.func_infos
                       if info.node is not None)
-        for owner, body in bodies:
+        # Defaults are syntax stored in annotations, outside iter_ast_nodes.
+        # Include nested and unanalyzed callables, and synthetic analyzed copies.
+        roots = [self.ctx.ast, *(info.node for info in self.ctx.func_infos
+                                if info.node is not None)]
+        defaults, seen_defaults = [], set()
+        while roots:
+            for node, _depth in iter_ast_nodes(roots.pop()):
+                if not isinstance(node, (FuncDef, MethodDef)):
+                    continue
+                for default in (node.annotations or {}).get("param_defaults", ()):
+                    if (isinstance(default, ASTNode)
+                            and id(default) not in seen_defaults):
+                        seen_defaults.add(id(default))
+                        defaults.append(default)
+                        roots.append(default)
+        # A body partition does not prove a default's binding owner. Record
+        # unknown actuals rather than borrow an enclosing callable or global.
+        bodies.append((None, defaults, False))
+        for owner, body, partition_proved in bodies:
             for call, owner_proved in self._int_boundary_body_calls(body):
+                owner_proved = owner_proved and partition_proved
                 for info, bound in self._wide_callable_args(call):
                     for index, value in bound:
                         if isinstance(call.callee, MemberAccess):
