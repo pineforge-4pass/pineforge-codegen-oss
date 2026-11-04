@@ -22,6 +22,15 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Repeated explicit input titles now have separate override keys: the first
+  keeps the bare title, and later inputs use `<title>#<n>`, starting at 2 and
+  skipping authored titles and keys already assigned. The manifest, effective
+  settings receipt and input getters use the same keys. The checked input
+  setter now accepts the bare title for the first input instead of refusing
+  it as ambiguous; the legacy input setter now sets only the first input
+  instead of every input with that title. Repeated explicit titles no longer
+  trigger the shared-key warning; remaining collisions involving untitled
+  fallbacks still warn.
 - A chart TA constructor length that shadows a global input or constant now follows its lexical binding; an unsized percentile loop length keeps `PF-E5009` regardless of the counter's name (#295).
 - Constant-expression input defaults can size TA constructors while retaining the input getter in runtime resets (#295).
 - `line(na)` and `box(na)` emit the same missing handles as typed drawing declarations initialized with `na` (#295).

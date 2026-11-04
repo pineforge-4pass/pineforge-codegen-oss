@@ -31,6 +31,7 @@ from ..symbols import (
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from ..limits import TimeBudget, iter_ast_nodes, syntax_children
+from ..input_keys import assign_input_keys
 from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
 from ..security_contexts import (
     PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series,
@@ -641,6 +642,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._ast, self._value_bindings.declaration_bindings,
             self._filename, self._budget,
         )
+        assign_input_keys(self._ast, self._budget)
         self._loop_type_sources = LoopTypeSources(self._ast)
         self._loop_type_sources.widen_reassignments(
             self._value_bindings.declaration_bindings, budget=self._budget,
