@@ -1,7 +1,6 @@
 # CGINT7 TradingView trade evidence
 
-Synthetic probes written for integration lane CGINT7 (lanes TAIL-A, TAIL-E,
-TAIL-F, TAIL-G and TAIL-H picked onto codegen main 90bfa0b) and their
+Synthetic integration probes picked onto codegen main 90bfa0b and their
 unedited TradingView trade exports. They contain no closed or scraped source.
 Each was exported on 2026-09-29 with
 
@@ -50,5 +49,5 @@ timezone, Asia/Taipei (UTC+8).
   times 86400000 over `0 .. bar_index % 40` (past int32 from 7), the same
   loop over `(i * 1000000007) % 2147483647`, and both loops on the chart.
   TradingView computes every sum exactly; a helper loop's counter was a
-  helper-bound name the payload's 64-bit rule left 32 bits wide (lane TAIL-E
+  helper-bound name the payload's 64-bit rule left 32 bits wide (the requested-context
   meeting main's rule), which overflowed.

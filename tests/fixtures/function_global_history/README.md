@@ -1,4 +1,4 @@
-# Function-scope history tapes (lane CG-W9-FN)
+# Function-scope history tapes
 
 TradingView's rule for function blocks: "the history of series variables used
 inside Pine functions is created through each successive call to the

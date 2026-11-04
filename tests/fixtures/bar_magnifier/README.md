@@ -1,4 +1,4 @@
-# Bar-magnifier declaration tapes (lanes MAG-INTRABAR and CG-W9-MISC)
+# Bar-magnifier declaration tapes
 
 Does TradingView run a strategy on its bar magnifier because the script
 declares `use_bar_magnifier = true`? Each directory is one `lab tv` export
@@ -11,8 +11,8 @@ exit taken depends on the intrabar path.
 
 | tape | declares | trades | tv_trades.csv sha256 | provenance |
 |---|---|---:|---|---|
-| `mi-fx-eth-15` | `use_bar_magnifier=true` | 24 | `260265796c5247fdbd2bb0049793e722553f039cad108b484c68d391081e19fe` | R5 lane MAG-INTRABAR, copied byte-identical from pineforge-engine `tests/fixtures/magnifier_intrabars/mi-fx-eth-15` (engine main 1e360bd3) |
-| `w9mag-fx-eth-15-off` | `use_bar_magnifier=false` | 24 | `c1091b17b9d6aa73dc0c0806ee5fcbc27f8aaaad0988b5d29d5e4fc37249db37` | lane CG-W9-MISC, `lab tv --no-note` of the same script with the magnifier off (and its own title and header comment) |
+| `mi-fx-eth-15` | `use_bar_magnifier=true` | 24 | `260265796c5247fdbd2bb0049793e722553f039cad108b484c68d391081e19fe` | copied byte-identical from pineforge-engine `tests/fixtures/magnifier_intrabars/mi-fx-eth-15` (engine main 1e360bd3) |
+| `w9mag-fx-eth-15-off` | `use_bar_magnifier=false` | 24 | `c1091b17b9d6aa73dc0c0806ee5fcbc27f8aaaad0988b5d29d5e4fc37249db37` | `lab tv --no-note` of the same script with the magnifier off (and its own title and header comment) |
 
 TradingView's two tapes enter on the same bars at the same prices and differ
 on 7 of the 24 exits: with the magnifier the bracket leg the intrabar path

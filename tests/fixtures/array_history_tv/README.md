@@ -1,6 +1,6 @@
 # CG-ARRAY-HIST TradingView evidence
 
-Synthetic probes written for lane CG-ARRAY-HIST: the history-referencing
+Synthetic probes for array history: the history-referencing
 operator `[]` on an array or a matrix, and an int value given to a float
 field of a user-defined object. They contain no closed or scraped source.
 The ten tapes were exported on 2026-10-01 with

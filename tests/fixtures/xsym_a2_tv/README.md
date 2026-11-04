@@ -1,6 +1,6 @@
 # CG-XSYM-A2 TradingView trade evidence
 
-Synthetic probes written for lane CG-XSYM-A2 (`request.security` payload
+Synthetic probes for a `request.security` payload
 defects XSYM-A left open) and their unedited TradingView trade exports. They
 contain no closed or scraped source. Each was exported on 2026-09-28 with
 

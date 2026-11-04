@@ -1,9 +1,9 @@
 # Epochs through request.security: TradingView trade evidence
 
-Synthetic probes for lane CG-W9-SEC (W9-CG-EPOCH-INT64) and their unedited
+Synthetic probes for epoch integers and their unedited
 TradingView trade exports. They contain no closed or scraped source.
 `w9sec_epoch_var_int_daily` and `w9sec_epoch_int_param_tuple` are the draft's
-two witness scripts (lane W8D-NOTRADES, which exported them on
+two witness scripts, which exported them on
 BINANCE:BTCUSDT); `w9sec_epoch_security` spells the values. Each was exported
 on 2026-09-28 with
 

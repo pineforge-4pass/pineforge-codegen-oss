@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Synthetic script (lane XSYM-C) importing the clean-room pftest libraries.
+// Synthetic script importing the clean-room pftest libraries.
 //@version=6
 strategy("xc lib twin", overlay=true, initial_capital=1000000, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=2, margin_long=0, margin_short=0)
 import pftest/Signals/1 as S

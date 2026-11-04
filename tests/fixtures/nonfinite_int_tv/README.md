@@ -1,6 +1,6 @@
 # TAIL-C TradingView trade evidence: a Pine int holding an infinity
 
-A public probe written for R5 lane TAIL-C and its unedited TradingView trade export. It contains
+A public probe for a nonfinite Pine int and its unedited TradingView trade export. It contains
 no closed or scraped source. Exported on 2026-09-29 with `lab tv --no-note` on
 `BINANCE:ETHUSDT.P`, 15-minute chart; `rangeProof` `covered`. The tape's `Date and time` column
 is the exporting account's chart timezone, Asia/Taipei (UTC+8).
