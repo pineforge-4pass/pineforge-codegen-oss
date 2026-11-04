@@ -155,6 +155,24 @@ def test_numeric_guard_comparisons(condition):
     ))
 
 
+@pytest.mark.parametrize("condition", [
+    # Equality reads the string accessor directly on the left.
+    'strategy.closedtrades.entry_id(i) == "L"',
+    # Inequality reads the string accessor directly on the left.
+    'strategy.closedtrades.entry_id(i) != "L"',
+    # The string literal may stand on the left.
+    '"L" == strategy.closedtrades.entry_id(i)',
+    # A numeric comparison reads the profit accessor directly on the left.
+    "strategy.closedtrades.profit(i) > 0",
+    # The numeric literal may stand on the left.
+    "0.5 <= strategy.closedtrades.profit(i)",
+])
+def test_inline_accessor_comparisons_need_no_local(condition):
+    program = _parse(_script(body=f"if {condition}\n    total += 1\n"))
+    # The row read is the call itself: the fold has no row local at all.
+    _assert_plan(program, (0, (("total", "total"),), (), "_pf_ctf0_"))
+
+
 def test_six_accumulators_keep_declaration_order():
     program = _parse(_script(
         declarations=(
@@ -487,6 +505,31 @@ def test_plan_record_fields_are_fixed_and_frozen():
     # An inline accessor skips the required local declaration form.
     pytest.param(_script(body="total += strategy.closedtrades.profit(i)\n"),
                  (), id="inline_accessor_update"),
+    # An inline accessor in a comparison is a proved row read only against a literal.
+    pytest.param(_script(body=(
+        'if strategy.closedtrades.entry_id(i) == tag\n    total += 1\n'
+    ), prefix='string tag = "L"\n'), (), id="inline_comparison_non_literal"),
+    # The inline accessor must read the loop's own counter.
+    pytest.param(_script(body=(
+        'if strategy.closedtrades.entry_id(j) == "L"\n    total += 1\n'
+    ), prefix="int j = 0\n"), (), id="inline_comparison_other_counter"),
+    # An accessor call with a second argument is not the one-argument row read.
+    pytest.param(_script(body=(
+        'if strategy.closedtrades.entry_id(i, 0) == "L"\n    total += 1\n'
+    )), (), id="inline_comparison_extra_argument"),
+    # A string accessor is compared only with equality or inequality.
+    pytest.param(_script(body=(
+        'if strategy.closedtrades.entry_id(i) > "L"\n    total += 1\n'
+    )), (), id="inline_comparison_string_order"),
+    # A numeric accessor is compared only with a numeric literal.
+    pytest.param(_script(body=(
+        'if strategy.closedtrades.profit(i) == "L"\n    total += 1\n'
+    )), (), id="inline_comparison_numeric_string"),
+    # An inline comparison with an else branch is not a single guarded update.
+    pytest.param(_script(body=(
+        'if strategy.closedtrades.entry_id(i) == "L"\n    total += 1\n'
+        'else\n    total += 2\n'
+    )), (), id="inline_comparison_else"),
     # The row step must not read the current ledger count.
     pytest.param(_script(body="total += strategy.closedtrades\n"),
                  (), id="count_in_body"),
