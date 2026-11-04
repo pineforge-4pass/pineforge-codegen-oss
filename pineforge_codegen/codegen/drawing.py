@@ -199,6 +199,18 @@ ALL_DRAWING_METHODS = (
 class DrawingVisitor:
     """Drawing-objects-as-data emit helpers. Mixed into ``CodeGen``."""
 
+    def _emit_drawing_all_snapshot(self, kind):
+        # Copy IDs, not records. Deleting a drawing cannot invalidate iteration
+        # over this array, and a setter still writes through the handle.
+        handle = DRAWING_TYPE_TO_CPP[kind]
+        order = f"{DRAWING_ARENA[kind]}.order()"
+        return (
+            f"([&]() {{ std::vector<{handle}> __pf_snapshot; "
+            f"for (auto __pf_id : {order}) "
+            f"__pf_snapshot.push_back({handle}{{__pf_id}}); "
+            f"return __pf_snapshot; }}())"
+        )
+
     def _emit_drawing_all_read(self, node):
         from ..drawing_all import (
             drawing_all_call, drawing_all_refusal, DRAWING_ALL_READS,
@@ -218,7 +230,8 @@ class DrawingVisitor:
             self._codegen_error(node, drawing_all_refusal(kind))
         # DrawingArena::order() is a const deque of *live* ids, oldest first.
         # Each read borrows it afresh, so delete/collection is visible to the
-        # next read. Never expose its mutation or copy it into a mutable array.
+        # next read. Declaration aliases/iteration take a separate snapshot;
+        # this existing direct-read path deliberately keeps its emitted bytes.
         order = f"{DRAWING_ARENA[kind]}.order()"
         if method == "size":
             return f"static_cast<int>({order}.size())"

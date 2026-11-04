@@ -1,4 +1,4 @@
-"""Live drawing reads borrow arena order; collection mutations stay refused."""
+"""Live drawing reads borrow arena order; structural mutations stay refused."""
 
 import re
 
@@ -92,12 +92,11 @@ oldest.delete()
 
 @pytest.mark.parametrize("kind,handle,arena", KINDS)
 @pytest.mark.parametrize("use", [
-    "saved = {kind}.all",
     "{kind}.all.clear()",
     "array.pop({kind}.all)",
     "array.push({kind}.all, {kind}.all.first())",
 ])
-def test_drawing_collection_aliases_and_mutations_have_catalog_refusal(kind, handle, arena, use):
+def test_drawing_collection_mutations_have_catalog_refusal(kind, handle, arena, use):
     with pytest.raises(CompileError) as caught:
         transpile('//@version=6\nstrategy("Read only")\n' + use.format(kind=kind) + "\n")
     assert caught.value.diagnostics[0].code == "PF-E5086"

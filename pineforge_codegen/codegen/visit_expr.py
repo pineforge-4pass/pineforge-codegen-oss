@@ -867,7 +867,9 @@ class ExprVisitor:
         from ..drawing_all import drawing_all_kind, drawing_all_refusal
         kind = drawing_all_kind(node)
         if kind is not None:
-            self._codegen_error(node, drawing_all_refusal(kind))
+            if kind == "polyline":
+                self._codegen_error(node, drawing_all_refusal(kind))
+            return self._emit_drawing_all_snapshot(kind)
         # UDT field whose type was a drawing primitive (label/line/box/
         # linefill/polyline/table/chart.point) — the field is dropped from
         # the emitted struct, so a raw ``recv.field`` would fail to compile.

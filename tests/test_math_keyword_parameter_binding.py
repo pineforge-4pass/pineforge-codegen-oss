@@ -168,12 +168,16 @@ _ROUND_FORMS = (
 )
 
 
-@pytest.mark.parametrize("arguments", _ROUND_FORMS)
+# Keep the positional/positional spelling in _ROUND_FORMS and in the native
+# inventory below. Its public, unchecked and direct instances are retired from
+# this equivalence population because both sides would be the same source.
+@pytest.mark.parametrize("arguments", _ROUND_FORMS[1:])
 @pytest.mark.parametrize("path", ("public", "unchecked", "direct"))
 def test_round_precision_keeps_both_arguments(arguments, path):
     prefix = _HEADER + "pf_sample = close - open\npf_precision = bar_index % 3 + 1\n"
     expected = prefix + "pf_value = math.round(pf_sample, pf_precision)\nplot(pf_value)\n"
     actual = prefix + f"pf_value = math.round({arguments})\nplot(pf_value)\n"
+    assert actual != expected
     assert _generate(actual, path) == _generate(expected, path)
 
 
