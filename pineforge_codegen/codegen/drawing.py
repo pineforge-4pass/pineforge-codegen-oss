@@ -33,6 +33,11 @@ from .tables import (
 
 _MAP_VOID_METHODS = frozenset({"clear", "put_all"})
 
+# Largest declared line, box or label count the native arena factory accepts: its int32
+# domain minus the observed-slack it adds (drawing_bound_from_declared_count in
+# pineforge/drawing.hpp: INT32_MAX - kDrawingObservedSlack, with the slack 5).
+DRAWING_DECLARED_COUNT_MAX = 2**31 - 1 - 5
+
 # Builtin calls Pine types as void, each lowering to a void C++ statement. A
 # user function or selection arm ending in one returns no value, so it must be
 # emitted as a statement, never as ``return strategy_exit(...)``.
@@ -838,7 +843,13 @@ class DrawingVisitor:
         for node in self._walk_ast(self.ctx.ast):
             if isinstance(node, StrategyDecl):
                 for key, field in header_field.items():
-                    v = self._int_literal_value(node.kwargs.get(field))
+                    argument = node.kwargs.get(field)
+                    v = self._int_literal_value(argument)
+                    if v is not None and v > DRAWING_DECLARED_COUNT_MAX:
+                        # The native factory takes the count as an int32 and refuses more than
+                        # DRAWING_DECLARED_COUNT_MAX; a larger written value would wrap when it
+                        # is printed into the call, so it is refused here instead of narrowed.
+                        self._codegen_error(argument, "Numeric literal exceeds the generated C++ range.")
                     if v is not None and v > 0:
                         caps[key] = v
         return caps
