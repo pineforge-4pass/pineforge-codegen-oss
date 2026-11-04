@@ -26,7 +26,7 @@ from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from tests._numeric_expected import integer_arithmetic
-from tests.test_numeric_missing_value_rows import _git_identity, _json, _process, _sha
+from tests._numeric_support import _git_identity, _json, _process, _sha
 
 
 _ROOT = Path(__file__).resolve().parents[1]
