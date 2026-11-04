@@ -2122,6 +2122,25 @@ class TypeInferer:
                     or self._holds_wide_int_constant(expr.false_val))
         return False
 
+    def _narrow_int_store(self, cpp_val: str, value_node) -> str:
+        """``cpp_val`` as it is stored into a 32-bit ``int`` element, value or
+        slot of a collection or tuple (array, matrix and map elements, tuple
+        elements).
+
+        A 64-bit constant or provenance narrows na-preserving (quirk 9), and so
+        does an int the emission holds as a ``double`` (``_emitted_value_is_double``:
+        an int that can be na is declared one, its NaN being the na). Neither
+        may cross implicitly: a double NaN converted to ``int`` is undefined
+        (``na_preserving_int_cast``: 0 on aarch64, 0 or INT_MIN on x86-64 by
+        optimization level), where Pine stores na. Every other value keeps its
+        spelling, so a store of a present int is byte for byte what it was."""
+        if (self._holds_wide_int_constant(value_node)
+                or self._expr_returns_wide_int(value_node, None, set(), None)):
+            return na_preserving_int_cast(cpp_val, "int")
+        if self._emitted_value_is_double(value_node):
+            return self._coerce_int_slot(cpp_val, value_node, "int")
+        return cpp_val
+
     def _widen_int_slot(self, cpp_type: str, expr, owner_info=None) -> str:
         """``int64_t`` for an ``int`` slot ``expr`` gives a 64-bit value."""
         if cpp_type == "int" and (
@@ -5373,6 +5392,15 @@ class TypeInferer:
             if crossed_parameter and (
                     self._is_na_expr(value) or self._selection_contains_na(value)):
                 return True
+            if (isinstance(value, Identifier) and lexical_owner is None
+                    and value.name not in getattr(self, "_current_func_local_types", {})
+                    and value.name not in getattr(self, "_current_func_param_types", {})):
+                # A field written from a global whose initializer selects na
+                # (``int q = switch ... => na``, ``= cond ? na : v``, ``= na``)
+                # may hold na: the record stores it as INT64_MIN.
+                initial = getattr(self.ctx, "global_expr_map", {}).get(value.name)
+                if initial is not None and self._selection_contains_na(initial):
+                    return True
             if isinstance(value, Identifier):
                 declaration = self.ctx.identifier_decl_bindings.get(id(value))
                 if (lexical_owner is not None and value.name in lexical_owner.node.params
@@ -5420,6 +5448,18 @@ class TypeInferer:
             for key, value, lexical_owner in getattr(
                 self, "_udt_int_field_writes", ()))
 
+    def _selection_reads_na_capable_field(self, node, owner) -> bool:
+        """Whether an arm of a (nested) ternary reads a UDT ``int`` field that
+        may hold na (``_udt_field_may_hold_na``) or a wide value: the field is
+        ``int64_t`` storage, so C++ gives the whole conditional that type."""
+        if isinstance(node, Ternary):
+            return any(self._selection_reads_na_capable_field(arm, owner)
+                       for arm in (node.true_val, node.false_val))
+        return (isinstance(node, MemberAccess)
+                and self._udt_field_int_cpp_type(node) == "int64_t"
+                and (self._expr_returns_wide_int(node, owner, set(), None)
+                     or self._udt_field_may_hold_na(node, owner)))
+
     def _coerce_int_slot(self, cpp_val: str, node, target_cpp_type: str | None,
                          *, value_is_double: bool | None = None) -> str:
         """Route a value into a numeric destination without losing ``na``.
@@ -5465,6 +5505,13 @@ class TypeInferer:
                      or (target_cpp_type == "int"
                          and self._udt_field_may_hold_na(node, owner)))):
             source_cpp_type = self._udt_field_int_cpp_type(node) or source_cpp_type
+        if (isinstance(node, Ternary) and target_cpp_type == "int"
+                and self._selection_reads_na_capable_field(node, owner)):
+            # C++ gives the conditional the wider common type of its arms: a
+            # UDT int field (``int64_t`` storage) that may hold na makes the
+            # whole value ``int64_t``, and its INT64_MIN narrowed implicitly
+            # becomes 0.
+            source_cpp_type = "int64_t"
         if isinstance(node, Identifier):
             declaration = self.ctx.identifier_binding_nodes.get(id(node))
             if ((isinstance(declaration, VarDecl)

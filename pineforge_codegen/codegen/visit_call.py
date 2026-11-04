@@ -755,14 +755,13 @@ class CallVisitor:
                 and elem_spec.name == "bool"):
             return self._coerce_bool_expr(rendered, value_node)
         if (store and elem_spec is not None and elem_spec.kind == "primitive"
-                and elem_spec.name == "int"
-                and (self._holds_wide_int_constant(value_node)
-                     or self._expr_returns_wide_int(value_node, None, set(), None))):
+                and elem_spec.name == "int"):
             # A 64-bit value stored in a 32-bit element (an int array only an
-            # epoch widens, ``_wide_int_array_names``; a matrix<int>): the
+            # epoch widens, ``_wide_int_array_names``; a matrix<int>), or an
+            # int the emission holds as a double (an int that can be na): the
             # crossing keeps na (quirk 9), and a braced initializer does not
             # narrow implicitly.
-            return na_preserving_int_cast(rendered, "int")
+            return self._narrow_int_store(rendered, value_node)
         if (store and elem_spec is not None and elem_spec.kind == "primitive"
                 and elem_spec.name == "int64"):
             # int(na) carries the narrow integer sentinel; a timestamp array
@@ -900,14 +899,13 @@ class CallVisitor:
                     and spec.element is not None
                     and spec.element.kind == "primitive"
                     and spec.element.name == "int"
-                    and value_at < len(args)
-                    and (self._holds_wide_int_constant(arg_nodes[value_at])
-                         or self._expr_returns_wide_int(
-                             arg_nodes[value_at], None, set(), None))):
+                    and value_at < len(args)):
                 # A 64-bit value (a double where an operand can be na,
-                # ``_wide_int_arith_cpp``) narrows na-preserving into the int
-                # element (quirk 9), as an int array's element does.
-                args[value_at] = na_preserving_int_cast(args[value_at], "int")
+                # ``_wide_int_arith_cpp``) or an int held as a double narrows
+                # na-preserving into the int element (quirk 9), as an int
+                # array's element does.
+                args[value_at] = self._narrow_int_store(
+                    args[value_at], arg_nodes[value_at])
         if (spec is None or spec.kind != "matrix"
                 or spec.element is None
                 or spec.element.kind != "primitive"
@@ -1150,13 +1148,12 @@ class CallVisitor:
             args[-1] = self._coerce_int_slot(args[-1], arg_nodes[-1], "double")
         if (method == "put" and arg_nodes and spec is not None
                 and spec.kind == "map" and spec.value is not None
-                and spec.value.kind == "primitive" and spec.value.name == "int"
-                and (self._holds_wide_int_constant(arg_nodes[-1])
-                     or self._expr_returns_wide_int(arg_nodes[-1], None, set(), None))):
+                and spec.value.kind == "primitive" and spec.value.name == "int"):
             # A 64-bit value (a double where an operand can be na,
-            # ``_wide_int_arith_cpp``) narrows na-preserving into the int
-            # value (quirk 9), as an int array's element does.
-            args[-1] = na_preserving_int_cast(args[-1], "int")
+            # ``_wide_int_arith_cpp``) or an int held as a double narrows
+            # na-preserving into the int value (quirk 9), as an int array's
+            # element does.
+            args[-1] = self._narrow_int_store(args[-1], arg_nodes[-1])
         map_expr = graph_journal.receiver(self, map_expr, "map", method, node)
         occupied = "\n".join((map_expr, *args))
         counter = getattr(self, "_map_param_arg_counter", 0)
@@ -1680,6 +1677,11 @@ class CallVisitor:
                 # Same-width integer reads and direct numeric selections
                 # retain their existing argument expression.
                 cpp = na_preserving_int_cast(cpp, int_cpp)
+            elif int_cpp == "int" and isinstance(arg_node, MemberAccess):
+                # A UDT ``int`` field is ``int64_t`` storage: its na
+                # (INT64_MIN) passed into an ``int`` parameter would truncate
+                # to 0. ``_coerce_int_slot`` narrows exactly such a field read.
+                cpp = self._coerce_int_slot(cpp, arg_node, int_cpp)
             return cpp
         expected_cpp_type = self._series_param_element_cpp_type(
             func_info,

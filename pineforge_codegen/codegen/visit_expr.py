@@ -573,13 +573,17 @@ class ExprVisitor:
         """
         tuple_types = self._tuple_slot_types(target_cpp_type)
         if (tuple_types and isinstance(value_node, TupleLiteral)
-                and any(cpp_type == "double" and self._integer_na_operand(element)
+                and any((cpp_type == "double" and self._integer_na_operand(element))
+                        # An int the emission holds as a double (an int that can
+                        # be na) must not narrow implicitly into an int slot.
+                        or (cpp_type == "int"
+                            and self._emitted_value_is_double(element))
                         for element, cpp_type in zip(value_node.elements, tuple_types))):
             elements = [
                 self._coerce_int_slot(
                     self._visit_expr(element),
                     element, cpp_type,
-                ) if cpp_type == "double" else self._visit_expr(element)
+                ) if cpp_type in ("double", "int") else self._visit_expr(element)
                 for element, cpp_type in zip(value_node.elements, tuple_types)
             ]
             return f"std::make_tuple({', '.join(elements)})"
