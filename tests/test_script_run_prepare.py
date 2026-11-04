@@ -101,7 +101,10 @@ def test_udt_reset_is_not_assignment_or_a_reused_bar_checkpoint():
     assert "_pf_records_.clear();" in cpp
     assert "_pf_checkpoint_active_ = false;" in cpp
     # The arena never evicts; the collector applies max_lines_count = 23.
-    assert "this->_pf_lines_ = decltype(this->_pf_lines_){_PF_DRAWING_UNBOUNDED};" in preparation
+    assert (
+        "this->_pf_lines_ = decltype(this->_pf_lines_)"
+        "{::pineforge::drawing_bound_from_declared_count<LineRec>(23)};"
+    ) in preparation
     assert "_pf_collect_drawings(this->_pf_lines_, 23, _pf_held," in cpp
 
 

@@ -131,9 +131,16 @@ def test_arena_caps_from_header():
         'lb = label.new(bar_index, close, "x")',
         header="max_lines_count=300, max_boxes_count=100, max_labels_count=200",
     )
-    for arena, rec in (("_pf_lines_", "LineRec"), ("_pf_boxes_", "BoxRec"),
-                       ("_pf_labels_", "LabelRec"), ("_pf_linefills_", "LinefillRec")):
-        assert f"DrawingArena<{rec}> {arena}{{_PF_DRAWING_UNBOUNDED}};" in cpp
+    for arena, rec, declared in (
+        ("_pf_lines_", "LineRec", 300),
+        ("_pf_boxes_", "BoxRec", 100),
+        ("_pf_labels_", "LabelRec", 200),
+    ):
+        assert (
+            f"DrawingArena<{rec}> {arena}"
+            f"{{::pineforge::drawing_bound_from_declared_count<{rec}>({declared})}};"
+        ) in cpp
+    assert "DrawingArena<LinefillRec> _pf_linefills_{_PF_DRAWING_UNBOUNDED};" in cpp
     for arena, keep in (("_pf_lines_", 300), ("_pf_boxes_", 100), ("_pf_labels_", 200)):
         assert f"if ((int)this->{arena}.order().size() >= {keep + 6}) {{" in cpp
         assert f"_pf_collect_drawings(this->{arena}, {keep}, _pf_held," in cpp
