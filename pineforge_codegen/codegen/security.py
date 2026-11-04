@@ -4465,9 +4465,13 @@ class SecurityEmitter:
                     # Numeric helper history and persistent state are the
                     # evaluator's Series<double>, including their missing slots.
                     return False
-            # A materialized integer result can be missing even when its
-            # chart-side return inference uses a floating fallback.
-            return self._infer_type(node) in ("int", "int64_t", "double")
+            # The materialized result is the final expression as the
+            # evaluator renders it, over the helper's own locals as it stores
+            # them; a local this cannot prove keeps the integer guard.
+            return self._security_integer_na_operand(
+                final,
+                plan["binding_stack"] + (self._security_linear_helper_storage_frame(plan),),
+                depth + 1)
         if isinstance(node, UnaryOp):
             return node.op in ("+", "-") and self._security_integer_na_operand(
                 node.operand, bindings, depth + 1)
@@ -4479,6 +4483,59 @@ class SecurityEmitter:
             return any(self._security_integer_na_operand(side, bindings, depth + 1)
                        for side in sides)
         return self._integer_na_operand(node)
+
+    def _security_linear_helper_storage_frame(self, plan: dict) -> dict:
+        """A linear helper's own locals as its final expression reads them
+        (``_emit_security_linear_helper_call_scoped``), for missingness
+        queries only. Numeric persistent state and history-read locals are
+        the evaluator's Series<double> and a ``double`` local holds NaN, so
+        none carries an integer sentinel. An integer local that no statement
+        of the body reassigns holds its integer initializer's value. Every
+        other local (a reassigned or double-fed integer, a color, a string, a
+        tuple element) binds an opaque local that keeps the integer guard,
+        and every local shadows a same-named outer binding."""
+        func_name = plan["func_info"].name
+        local_series = set(plan.get("local_series_names", ()))
+        reassigned = {
+            self._get_target_name(stmt.target)
+            for stmt in self._walk_ast_list(plan["body"])
+            if isinstance(stmt, Assignment)
+        }
+        stack = plan["binding_stack"]
+        frame: dict = {}
+
+        def double_storage(name: str) -> str:
+            return self._security_series_binding(f"@storage:{func_name}:{name}")
+
+        def unproved(name: str) -> str:
+            return f"@unproved:{func_name}:{name}"
+
+        for stmt in plan["body"]:
+            if isinstance(stmt, TupleAssign):
+                for name in stmt.names:
+                    if name and name != "_":
+                        frame[name] = (double_storage(name) if name in local_series
+                                       else unproved(name))
+                continue
+            if not isinstance(stmt, VarDecl):
+                continue
+            cpp_type = self._type_for_decl(stmt)
+            persistent = stmt.is_var or stmt.is_varip
+            if persistent or stmt.name in local_series:
+                numeric = (cpp_type != "std::string"
+                           and not (persistent and self._security_helper_var_is_color(stmt)))
+                frame[stmt.name] = (double_storage(stmt.name) if numeric
+                                    else unproved(stmt.name))
+            elif cpp_type == "double":
+                frame[stmt.name] = double_storage(stmt.name)
+            elif (cpp_type in ("int", "int64_t")
+                    and stmt.value is not None
+                    and stmt.name not in reassigned
+                    and not self._security_emits_double(stmt.value, stack + (frame,))):
+                frame[stmt.name] = stmt.value
+            else:
+                frame[stmt.name] = unproved(stmt.name)
+        return frame
 
     def _security_helper_series_ref(self, series_name: str) -> str:
         """The map entry holding one helper series (string values in their

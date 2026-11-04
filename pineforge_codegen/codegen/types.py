@@ -1130,7 +1130,29 @@ class TypeInferer:
                     value.expr if isinstance(value, ExprStmt) else value.value,
                     lexical_owner,
                 ))
+                if isinstance(value, Assignment) and value.op != ":=":
+                    # A compound write yields its target's new value, which
+                    # reads the target as well as the right-hand side.
+                    if value.op not in ("+=", "-=", "*="):
+                        return False
+                    pending.append((value.target, lexical_owner))
                 continue
+            if isinstance(value, FuncCall):
+                # A user callable yields its body's terminal value. Its
+                # parameters read the actuals of every written call
+                # (``_int_boundary_inputs``), so that value is present when
+                # each source those reach is. Overloaded names are unproved.
+                callees = self._wide_callable_args(value)
+                if callees:
+                    for info, _bound in callees:
+                        terminal = self._selection_terminal_expr(
+                            info.node.body if info.node is not None else None)
+                        if (terminal is None
+                                or sum(other.name == info.name
+                                       for other in self.ctx.func_infos) != 1):
+                            return False
+                        pending.append((terminal, info))
+                    continue
             if isinstance(value, Identifier):
                 declaration = (
                     self.ctx.identifier_decl_bindings[id(value)]
