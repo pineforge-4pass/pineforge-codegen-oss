@@ -1793,6 +1793,25 @@ class TypeInferer:
                            for arg in expr.args)
         return False
 
+    @staticmethod
+    def _int_boundary_body_calls(body):
+        """Full syntax calls and whether the partition still proves their owner.
+
+        Bodies are partitioned by callable before this walk. A nested callable
+        is not owned by that partition: retain its calls as unproved actuals,
+        rather than borrowing an enclosing parameter or guessing global scope.
+        """
+        for stmt in body:
+            unproved_depth = None
+            for node, depth in iter_ast_nodes(stmt):
+                if unproved_depth is not None and depth <= unproved_depth:
+                    unproved_depth = None
+                if isinstance(node, (FuncDef, MethodDef)):
+                    if unproved_depth is None:
+                        unproved_depth = depth
+                elif isinstance(node, FuncCall):
+                    yield node, unproved_depth is None
+
     def _int_boundary_inputs(self):
         """Actuals and array writes, keyed by parameter or declaration identity."""
         cached = getattr(self, "_int_boundary_inputs_cache", None)
@@ -1804,9 +1823,7 @@ class TypeInferer:
         bodies.extend((info, info.node.body) for info in self.ctx.func_infos
                       if info.node is not None)
         for owner, body in bodies:
-            for call in self._walk_ast_list(body):
-                if not isinstance(call, FuncCall):
-                    continue
+            for call, owner_proved in self._int_boundary_body_calls(body):
                 for info, bound in self._wide_callable_args(call):
                     for index, value in bound:
                         if isinstance(call.callee, MemberAccess):
@@ -1822,7 +1839,8 @@ class TypeInferer:
                                 index < len(call.args)
                                 or info.node.params[index] in call.kwargs)
                         parameters.setdefault((info.name, index), []).append(
-                            (value, owner, written))
+                            (value, owner, written) if owner_proved
+                            else (None, None, written))
                 pair = self._array_receiver_and_value(call)
                 if pair is None:
                     continue
@@ -1830,9 +1848,17 @@ class TypeInferer:
                 receiver = (
                     (call.args[0] if call.args else call.kwargs.get("id"))
                     if namespace == "array" else call.callee.object)
-                binding = self._int_value_binding(receiver, owner)
+                if owner_proved:
+                    binding = self._int_value_binding(receiver, owner)
+                else:
+                    # Only an exact declaration receipt can identify a write
+                    # across an unproved owner. Its value proves no width or
+                    # presence; do not resolve it in the enclosing scope.
+                    declaration = self.ctx.identifier_decl_bindings.get(id(receiver))
+                    binding = (declaration, ()) if declaration is not None else None
                 if binding is not None:
-                    arrays.setdefault(binding[0], []).append((pair[1], owner))
+                    arrays.setdefault(binding[0], []).append(
+                        (pair[1], owner) if owner_proved else (None, None))
         self._int_boundary_inputs_cache = parameters, arrays
         return parameters, arrays
 
