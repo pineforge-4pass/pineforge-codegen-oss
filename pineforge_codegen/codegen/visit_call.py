@@ -2363,11 +2363,11 @@ class CallVisitor:
                 self._reject_unknown_element_type(node, elem_spec)
                 # Pine's omitted numeric fill is typed na, like an explicit na:
                 # float and int arrays alike (the elements of array.new<int>(size)
-                # and array.new_int(size) are na, not 0).
+                # and array.new_int(size) are na, not 0), and a color array's.
                 init_default = (
                     self._array_init_value_expr(elem_spec, NaLiteral())
                     if elem_spec.kind == "primitive"
-                    and elem_spec.name in ("float", "int", "int64")
+                    and elem_spec.name in ("float", "int", "int64", "color")
                     else self._default_for_spec(elem_spec)
                 )
                 arguments = self._collection_arg_nodes(
@@ -2381,11 +2381,15 @@ class CallVisitor:
                         init_val = self._array_init_value_expr(elem_spec, arguments[1])
                     else:
                         init_val = init_default
+                    # A missing size builds an empty array and the run goes on
+                    # (TradingView's tape of ``array.new<float>(size=n, ...)``
+                    # with ``int n = na`` is an empty array on every bar); a
+                    # size that is present but invalid (not finite, negative,
+                    # beyond size_t, beyond max_size) keeps its coded stop.
                     construct = (
                         "using _pf_array_new_size_type=decltype(_pf_array_new_size); "
                         "if constexpr(!std::is_same_v<_pf_array_new_size_type,bool>) { "
-                        "if(is_na(_pf_array_new_size)) "
-                        '_PF_ARRAY_STOP("size_invalid", "new", "cannot create std::vector larger than max_size()"); '
+                        f"if(is_na(_pf_array_new_size)) return {cpp_type}(); "
                         "} if(!std::isfinite((double)_pf_array_new_size)||"
                         "_pf_array_new_size<0||"
                         "(long double)_pf_array_new_size>(long double)std::numeric_limits<size_t>::max()) "
