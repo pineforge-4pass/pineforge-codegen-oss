@@ -253,8 +253,13 @@ you delete or weaken the special case, the test will tell you.
    request.security timeframe and an alias's read (`b = a`) agree; a call
    re-spelled for a derived length carries it as `title=`, since the
    re-parsed node has no declaration. `_input_key_literal` spells the key
-   as a C++ literal (a title holding `"` or `\` used to break the TU). Inputs
-   sharing a key cannot be overridden apart, so `_check_input_keys` warns
+   as a C++ literal (a title holding `"` or `\` used to break the TU).
+   `input_keys.assign_input_keys` normalizes later explicit duplicate titles
+   to `<title>#<n>` before helper copying and TA spelling, starting at 2 and
+   taking the next ordinal whose key is neither a provable authored title
+   anywhere in the script nor already assigned by the pass;
+   the first title and all untitled keys retain their previous spelling.
+   Remaining shared keys cannot be overridden apart, so `_check_input_keys` warns
    (see "Input keys" above; an untitled call nested in a plain declaration
    used to be keyed `""`).
    `tests/test_e2e_untitled_input_keys.py`,
