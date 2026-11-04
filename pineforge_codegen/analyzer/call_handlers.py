@@ -1890,6 +1890,22 @@ class CallHandlers:
         # Determine return type: re-analyze the function body with known param types
         # For now, use the cached return type from initial analysis
         return_type = self._func_return_types.get(func_name, PineType.FLOAT)
+        terminal = self._direct_terminal_return_expr(func_def)
+        if isinstance(terminal, FuncCall) and isinstance(terminal.callee, MemberAccess):
+            result_spec = self._callsite_terminal_return_spec(
+                func_def,
+                {
+                    name: spec
+                    for name, spec in zip(func_def.params, param_specs)
+                },
+            )
+            result_type = self._primitive_pine_type_from_spec(result_spec)
+            if result_type != PineType.UNKNOWN:
+                # Infer the registered result with the callee's parameter
+                # specs, then preserve it before primitive return inference.
+                self._func_return_type_specs[func_name] = result_spec
+                self._func_return_types[func_name] = result_type
+                return_type = result_type
 
         # If the return type was UNKNOWN or VOID, infer it ONLY when the body
         # is a single bare identifier that returns a parameter directly

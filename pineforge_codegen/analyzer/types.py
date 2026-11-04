@@ -804,6 +804,31 @@ class TypeHelper:
             return last_stmt
         return None
 
+    def _callsite_terminal_return_spec(
+        self,
+        func_def,
+        parameter_specs: dict[str, TypeSpec | None],
+    ) -> TypeSpec | None:
+        """Query a terminal result with callee parameters and lexical globals.
+
+        Arguments have already been typed in the caller. Reuse the read-only
+        operator query to carry their specs through nested collection calls
+        without visiting arguments or allocating TA/request state again.
+        """
+        previous_owner = self._current_top_level_stmt
+        previous_scope = self._symbols.current_scope
+        self._symbols.current_scope = self._operator_definition_scopes.get(
+            id(func_def), self._symbols.global_scope,
+        )
+        self._current_top_level_stmt = func_def
+        try:
+            return OperatorTypeQuery(
+                self, parameter_specs,
+            )._type_spec_from_expr(self._direct_terminal_return_expr(func_def))
+        finally:
+            self._current_top_level_stmt = previous_owner
+            self._symbols.current_scope = previous_scope
+
     def _terminal_map_selection_return_spec(
         self,
         value: ASTNode | None,
