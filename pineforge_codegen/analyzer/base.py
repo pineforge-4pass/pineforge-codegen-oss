@@ -5988,6 +5988,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     return_type_spec = terminal_spec
                 if terminal_spec is not None and terminal_spec.kind in ("map", "matrix"):
                     return_type_spec = terminal_spec
+                if terminal_spec is not None and terminal_spec.kind == "array":
+                    # An array the method returns is its return type, as a
+                    # function's is (``FuncInfo.return_type_spec``): without
+                    # it the method was emitted returning ``double``.
+                    return_type_spec = terminal_spec
                 if terminal_spec is not None and terminal_spec.kind == "udt":
                     # Methods may return ``self`` or another UDT-typed
                     # parameter/local, not only a syntactic ``Type.new``.
