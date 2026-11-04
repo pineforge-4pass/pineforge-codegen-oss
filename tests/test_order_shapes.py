@@ -35,6 +35,14 @@ def receipt(body, declaration=SOURCE, *, check_support=True):
     ('strategy.entry("L", strategy.long, 2, close, na)', 'strategy.entry(id="L", direction=strategy.long, qty=2, limit=close, stop=na)'),
     ('strategy.exit("X", limit=close)', 'strategy.exit("X", from_entry="", limit=close)'),
     ('strategy.exit("X")', 'strategy.exit("X", from_entry="")'),
+    # A literal na from_entry lowers to the same empty-string argument as an omitted one,
+    # so the receipt (class, target and order) must be the same, with and without an entry to match.
+    ('strategy.exit("X", limit=close)', 'strategy.exit("X", from_entry=na, limit=close)'),
+    ('strategy.exit("X")', 'strategy.exit("X", from_entry=na)'),
+    ('strategy.entry("L", strategy.long)\nstrategy.exit("X", limit=close)',
+     'strategy.entry("L", strategy.long)\nstrategy.exit("X", from_entry=na, limit=close)'),
+    ('strategy.exit("X", limit=close)\nstrategy.entry("L", strategy.short)',
+     'strategy.exit("X", from_entry=na, limit=close)\nstrategy.entry("L", strategy.short)'),
     ('strategy.exit("X", limit=close)', 'strategy.exit("X", limit=close, alert_message="a", disable_alert=true)'),
     ('strategy.order("L", strategy.long)', 'strategy.order(id="L", direction=strategy.long, qty=na)'),
     ('strategy.close("L")', 'strategy.close(id="L", alert_message="a", disable_alert=true)'),
@@ -122,7 +130,7 @@ def test_ids(call, identifier, expected):
 
 
 @pytest.mark.parametrize(("identifier", "expected"), [
-    ('"L"', "named"), ('""', "global"), ('input.string("L")', "dynamic"),
+    ('"L"', "named"), ('""', "global"), ('na', "global"), ('input.string("L")', "dynamic"),
 ])
 def test_from_entry_ids(identifier, expected):
     assert receipt(f'strategy.exit("X", from_entry={identifier}, limit=close)')["calls"][0]["from_entry"] == expected
