@@ -128,7 +128,7 @@ Any other diff: run the tests that touch it, and the local-only row above if it 
    strategy TU and relink on a pair change. `PF_ABI_VERSION` equality alone is
    insufficient. The transpiler does not ship a runtime artifact.
 2. **Pure-Python, zero runtime deps.** `pyproject.toml::dependencies = []`.
-  Do not introduce a runtime dependency. `dev` extras are pytest only.
+  Do not introduce a runtime dependency. `dev` extras are test tools only (pytest, pytest-xdist).
 3. **Compile tests need an engine checkout and Eigen.** The harness
    (`tests/_compile.py`) uses `PINEFORGE_ENGINE_INCLUDE` or a resolvable sibling
    checkout. It skips when the engine or Eigen is absent; runtime tests also
@@ -194,4 +194,4 @@ history is intentional.
   matching engine tag and its generated headers and static library are
   available.
 - **Don't introduce runtime dependencies.** Pure-Python is the install
-contract. Test extras (pytest) are the only allowed `[project.optional-dependencies]`.
+contract. Test extras (pytest, pytest-xdist) are the only allowed `[project.optional-dependencies]`.
