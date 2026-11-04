@@ -379,8 +379,21 @@ observed = requested(p)
     [
         "q := 7",
         "q := int(close)",
+        "q += 7",
+        "q -= 7",
+        "q *= 7",
+        "q /= 7",
+        "q %= 7",
     ],
-    ids=["literal-reassignment", "series-reassignment"],
+    ids=[
+        "literal-reassignment",
+        "series-reassignment",
+        "add-compound-reassignment",
+        "subtract-compound-reassignment",
+        "multiply-compound-reassignment",
+        "divide-compound-reassignment",
+        "modulo-compound-reassignment",
+    ],
 )
 def test_callable_ta_length_rejects_parameter_reassignment(
     reassignment: str,
