@@ -57,14 +57,14 @@ jobs:
       # the hub. Minted first so checkout can push with it.
       - name: Mint org App token
         id: app
-        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           app-id: ${{ secrets.PINEFORGE_APP_ID }}
           private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: pineforge-codegen-oss,pineforge-release
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
         with:
           fetch-depth: 0
           # App token bypasses the main ruleset for the release commit/tag push.
@@ -88,11 +88,11 @@ jobs:
       - name: Show diff
         run: git --no-pager diff
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.14"   # match the gate's runtime
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22"
 
@@ -128,7 +128,7 @@ jobs:
       # lags until the manual publish-pyodide.yml dispatch on main.
       - name: Publish to PyPI
         if: ${{ !inputs.dry_run }}
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
 
       # Commit + tag + push AFTER PyPI succeeds. A tag push publishes no npm;
       # npm requires a manual workflow_dispatch of publish-pyodide.yml on main
@@ -199,7 +199,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions: { contents: read, id-token: write }
     steps:
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.13"
 
@@ -285,6 +285,6 @@ jobs:
           fi
 
       - name: Publish placeholder to PyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
         with:
           packages-dir: ${{ steps.claim.outputs.dist }}
