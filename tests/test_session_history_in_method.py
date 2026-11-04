@@ -270,10 +270,6 @@ relay = Relay.new()
 a = relay.forwarded()
 b = bar_index % 2 == 1 ? relay.forwarded() : false
 ''',
-    SPARSE_METHOD + '''makeClock() => SessionClock.new()
-a = makeClock().previous()
-b = bar_index % 2 == 1 ? makeClock().previous() : false
-''',
     SPARSE_METHOD + '''clocks = array.from(clock)
 a = false
 for activeClock in clocks
@@ -285,11 +281,61 @@ a = close.previous()
 b = bar_index % 2 == 1 ? (close + open).previous() : false
 ''',
 ], ids=["function-through-method-and-wrapper", "method-through-method-with-keyword",
-        "typed-return-receiver", "typed-loop-receiver", "scalar-expression-receiver"])
+        "typed-loop-receiver", "scalar-expression-receiver"])
 def test_resolved_method_call_paths_keep_independent_histories(body: str) -> None:
     current, got = _native_session_rows(body)
     assert got["a"] == function_rule(current)["a"]
     _assert_odd_calls(current, got["b"])
+
+
+# The row that used to be the third body above, now a refusal. A function's
+# result is typed as a receiver by the codegen (codegen/types.py) but not by the
+# analyzer, whose `_type_spec_from_expr` gives a call of a user function a type
+# only for a drawing handle (analyzer/types.py). The history owner comes from the
+# analyzer's exact `Type.method` binding of each call (`_bind_typed_method_call`),
+# which a call on such a receiver never gets.
+FUNCTION_RESULT_RECEIVER = '''makeClock() => SessionClock.new()
+a = makeClock().previous()
+b = bar_index % 2 == 1 ? makeClock().previous() : false
+'''
+
+
+def test_method_called_on_a_function_result_keeps_pf_e5048_receiver_type_not_resolved() -> None:
+    """PineForge limit, not a TradingView question: nothing to capture.
+
+    The receiver ``makeClock()`` is a ``SessionClock`` to the codegen, but the
+    analyzer does not recover that type for the result of a user function, so
+    ``makeClock().previous()`` has no exact ``SessionClock.previous`` binding and
+    its flag history cannot be kept for this call site alone. It is refused by
+    the rule that refuses every call whose method cannot be statically resolved
+    to one declaration. If the analyzer's receiver typing ever accepts a user
+    type from a function's result, move FUNCTION_RESULT_RECEIVER back into the
+    parametrization above.
+    """
+    def build(body: str) -> str:
+        return ('//@version=6\nstrategy("function result receiver")\n'
+                + SPARSE_METHOD + body + 'if a or b\n    strategy.entry("L", strategy.long)\n')
+
+    # The same method, called the same ways on a declared variable of that type,
+    # translates: the refusal below belongs to the receiver expression.
+    transpile(build('''a = clock.previous()
+b = bar_index % 2 == 1 ? clock.previous() : false
+'''))
+
+    refused = build(FUNCTION_RESULT_RECEIVER)
+    with pytest.raises(CompileError) as caught:
+        transpile(refused)
+    errors = [diagnostic for diagnostic in caught.value.diagnostics
+              if diagnostic.code == "PF-E5048"]
+    # One error, at the "[" of the flag read inside previous(); the position is
+    # read off the source text.
+    read = refused.index("session.ispostmarket[") + len("session.ispostmarket")
+    line = refused.count("\n", 0, read) + 1
+    col = read - (refused.rfind("\n", 0, read) + 1) + 1
+    assert [(d.location.line, d.location.col) for d in errors] == [(line, col)], errors
+    why = ("session.ispostmarket[...] cannot be read in previous(), "
+           "a method, whose calls PineForge cannot always tell apart")
+    assert all(why in d.message for d in errors), errors
 
 
 @pytest.mark.parametrize("payload", ["previous()", "wrapped()"])
