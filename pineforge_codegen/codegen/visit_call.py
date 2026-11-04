@@ -331,6 +331,15 @@ def _whole_transparency(node) -> bool:
             and 0 <= node.value <= 100)
 
 
+# The `why` argument of PF-E5048 for a session flag read reached through a method
+# call: keyed by whether the owner is a method itself (`Type.method`) or a
+# function a method calls. The same two values the pinned catalog entry lists.
+_SESSION_METHOD_REFUSAL_WHY = {
+    True: "a method, whose calls PineForge cannot always tell apart",
+    False: "which a method calls",
+}
+
+
 class CallVisitor:
     """Function-call dispatch visitor methods shared across the codegen.
 
@@ -365,11 +374,13 @@ class CallVisitor:
         reader = self.ctx.session_method_reads.get(fi.name)
         if reader is not None and (id(node), fi.name) not in self.ctx.method_call_bindings:
             owner, read = reader
-            why = ("a method, whose calls PineForge cannot always tell apart"
-                   if "." in owner else "which a method calls")
+            flag = read.object.member
+            why = _SESSION_METHOD_REFUSAL_WHY.get("." in owner)
+            # The same text and argument names as the read refusal in visit_expr.py
+            # (PF-E5048): one code, its two `why` values spelled here.
             return self._refused_session_read(
                 read, read,
-                f"session.{read.object.member}[...] cannot be read in {owner.split('.')[-1]}(), "
+                f"session.{flag}[...] cannot be read in {owner.split('.')[-1]}(), "
                 f"{why}: PineForge keeps a session flag's history in a function by "
                 "each of its call sites, and cannot tell this one apart.",
             )
