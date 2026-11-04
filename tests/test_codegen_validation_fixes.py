@@ -1016,11 +1016,13 @@ def test_nonprecalculated_extrema_direct_history_uses_every_bar_clock():
 
     assert "std::vector<double> _precalc__ta_highest" not in cpp
     assert "_precalc__ta_highest" not in cpp
-    assert "_use_precalc" not in cpp
     hoist = _hoist_line(cpp, "_pf_every_bar_ta_1")
     assert "_ta_highest_1.compute(src)" in hoist
     assert "_use_precalc" not in hoist
     signal_line = _stmt_line(cpp, "signal = (")
+    # The unsafe contract covers evaluation and consumption; the generated
+    # class may still declare the shared selector for ordinary sites.
+    assert "_use_precalc" not in signal_line
     assert cpp.splitlines().index(hoist) < cpp.splitlines().index(signal_line)
     assert (
         "        if (history_advances_new_bar()) _hist_call_1.push(_pf_every_bar_ta_1);"
