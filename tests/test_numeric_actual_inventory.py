@@ -3,7 +3,7 @@
 Authored against 01919c40674bf2bd94e7b06cd036eb5536314678. Expectations follow
 Pine's na + 1 = na and finite a + 1 arithmetic, not captured codegen output.
 The review fixture is source-traced evidence, not a new TradingView capture.
-Run parent RED and candidate GREEN together on the approved C2 executor.
+Run parent RED and candidate GREEN together on the paired native environment when required.
 """
 
 from __future__ import annotations

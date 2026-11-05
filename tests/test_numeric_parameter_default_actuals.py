@@ -30,8 +30,7 @@ never hard-code 75 or any source estimate. Every changed hunk still needs
 genuine Claude review before C2; this source edit is not an acceptance.
 Finite/default and explicit-binding controls need not fail on the parent.
 Do not label a build/setup/abort as a numeric counterexample. Native evidence
-is scoped to the recorded engine/runtime (the planned old9fa kit), not an
-unobserved current engine. No executor is launched by this source change.
+is scoped to the recorded engine/runtime, not an unobserved current engine.
 
 Hash roles: identity.json's observer_sha256 is the LEGACY RUNNER field
 written by _native_values, hashing tests/test_numeric_actual_inventory.py.
@@ -40,7 +39,7 @@ its runner_sha256. C2 must join both files: identity.observer_sha256 must
 match source_binding.runner_sha256; the new observer must be bound to this
 module's bytes. Reading identity.json alone cannot identify the new observer.
 
-Commands for a later, admitted executor, with explicit real native inputs:
+Commands for a paired native run with explicit inputs:
     python -m pytest --collect-only -q tests/test_numeric_parameter_default_actuals.py
     python -m pytest -vv -ra --junitxml=defaults.xml --basetemp=defaults-artifacts \
         tests/test_numeric_parameter_default_actuals.py

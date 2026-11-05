@@ -533,7 +533,7 @@ def test_history_controls_consume_input_overrides(tmp_path):
     assert observed_values["override"][4] == 12.0
 
 
-# TV-safe input-derived probe for CORE capture. There is no TradingView tape
+# TV-safe input-derived probe. There is no TradingView tape
 # for this source yet. The native oracle below comes from the input schedule.
 _FINITE_RESULT_INPUT_SOURCE = """//@version=6
 strategy("Finite integer result probe", currency=currency.USDT, initial_capital=1000000000, default_qty_type=strategy.fixed)
