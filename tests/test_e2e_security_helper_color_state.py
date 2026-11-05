@@ -237,28 +237,51 @@ def _requested_state_model(deltas, size=2):
     return model
 
 
-def test_requested_helper_varip_state_matches_the_documented_running_state(tmp_path):
-    # A requested helper admits varip state on the historical requested-bar
-    # protocol (the runtime request contexts lowering): a requested bar
-    # advances the state once, when it completes, and its partial evaluations
-    # roll back. On historical bars varip and var give the same state. Both
-    # builds are held to values computed from the definition above, so an
-    # equality of two wrong runs cannot pass; whether TradingView keeps varip
-    # and var apart in a requested helper on a live bar is not measured by
-    # this row.
-    model = _requested_state_model(DELTAS)
-    assert len(set(model)) > 2
-    # The model must tell the rolled-back partial evaluations from a state
-    # that keeps them, or it could not catch the lowering keeping them.
+# Recorded, not computed (2026-11-05): the twelve values the released build
+# (codegen v1.10.0 at 47f0e8a5 on engine v1.10.0 at 59f98ba8) returns after each
+# prefix of the twelve one-minute bars (DELTAS), lookahead on, for two forms of the
+# same running state: ``ta.cum(close - open)`` inside the requested expression (the
+# built-in accumulator, REQUESTED_CUM below) and a requested helper holding ``var``
+# state (VARIP_STATE with kind="var"). Both returned this list; the release refuses
+# a requested helper's ``varip`` (PF-E3027). The first form has no helper state and
+# the second is the release's helper lowering, not the one these rows test, so the
+# list is an oracle that lowering did not produce.
+RELEASE_REQUESTED_STATE = [-1.0, -1.0, 0.0, 0.0, 1.0, -1.0, -2.0, -2.0, -1.0, -1.0, -2.0, -2.0]
+
+REQUESTED_CUM = (
+    HEADER
+    + 'out = request.security(syminfo.tickerid, "2", ta.cum(close - open), '
+    "lookahead=barmerge.lookahead_on)\n"
+    "plot(out)\n"
+)
+
+
+def test_the_recorded_release_values_tell_rollback_from_kept_partials():
+    # The recorded list is the documented behaviour (the model above, computed
+    # from the definition) and it differs from a state that keeps the partial
+    # evaluations of a requested candle, so it can fail a lowering that keeps
+    # them.
+    assert _requested_state_model(DELTAS) == RELEASE_REQUESTED_STATE
     kept, naive = 0.0, []
     for delta in DELTAS:
         kept += delta
         naive.append(kept)
-    assert model != naive
-    expected = _run_values(VARIP_STATE.format(kind="var"), tmp_path / "var")
-    actual = _run_values(VARIP_STATE.format(kind="varip"), tmp_path / "varip")
-    assert expected == model
-    assert actual == model
+    assert RELEASE_REQUESTED_STATE != naive
+    assert len(set(RELEASE_REQUESTED_STATE)) > 2
+
+
+@pytest.mark.parametrize("form", ["cum", "var", "varip"])
+def test_requested_state_forms_equal_the_recorded_release_values(form, tmp_path):
+    # A requested helper admits varip state on the historical requested-bar
+    # protocol (the runtime request contexts lowering): a requested bar
+    # advances the state once, when it completes, and its partial evaluations
+    # roll back. Each form is held to the list recorded from the released
+    # build, not to another build of this tree, so an equality of two wrong
+    # runs cannot pass. ``cum`` is the independent path (no helper state at
+    # all); whether TradingView keeps varip and var apart in a requested
+    # helper on a live bar is not measured by these rows.
+    source = REQUESTED_CUM if form == "cum" else VARIP_STATE.format(kind=form)
+    assert _run_values(source, tmp_path / form) == RELEASE_REQUESTED_STATE
 
 
 def test_requested_helper_collection_state_is_refused():
