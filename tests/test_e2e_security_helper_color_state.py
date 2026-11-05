@@ -217,17 +217,48 @@ VARIP_STATE = (
 )
 
 
-def test_requested_helper_varip_state_matches_var(tmp_path):
+def _requested_state_model(deltas, size=2):
+    """What a state that adds the requested candle's close - open once per
+    COMPLETED requested candle reads after each prefix of the one-minute bars,
+    with lookahead on.
+
+    Every bar opens at 100.0 and closes at 100 + delta, so a requested candle
+    of ``size`` bars (open: its first bar's open, close: its last bar's close)
+    adds the delta of its last bar. After ``count`` bars the state is the sum
+    of the candles completed before the one holding bar ``count`` plus that
+    candle's partial value, which the next evaluation rolls back: the
+    documented behaviour of a persistent variable evaluated once per
+    requested bar. Computed from the definition, not from a build."""
+    model = []
+    for count in range(1, len(deltas) + 1):
+        completed = (count - 1) // size
+        committed = sum(deltas[size * m + size - 1] for m in range(completed))
+        model.append(float(committed + deltas[count - 1]))
+    return model
+
+
+def test_requested_helper_varip_state_matches_the_documented_running_state(tmp_path):
     # A requested helper admits varip state on the historical requested-bar
     # protocol (the runtime request contexts lowering): a requested bar
     # advances the state once, when it completes, and its partial evaluations
-    # roll back, as for var. Only the two builds' values are compared;
-    # whether TradingView keeps varip and var apart in a requested helper is
-    # not measured by this row.
+    # roll back. On historical bars varip and var give the same state. Both
+    # builds are held to values computed from the definition above, so an
+    # equality of two wrong runs cannot pass; whether TradingView keeps varip
+    # and var apart in a requested helper on a live bar is not measured by
+    # this row.
+    model = _requested_state_model(DELTAS)
+    assert len(set(model)) > 2
+    # The model must tell the rolled-back partial evaluations from a state
+    # that keeps them, or it could not catch the lowering keeping them.
+    kept, naive = 0.0, []
+    for delta in DELTAS:
+        kept += delta
+        naive.append(kept)
+    assert model != naive
     expected = _run_values(VARIP_STATE.format(kind="var"), tmp_path / "var")
     actual = _run_values(VARIP_STATE.format(kind="varip"), tmp_path / "varip")
-    assert len(set(expected)) > 2
-    assert actual == expected
+    assert expected == model
+    assert actual == model
 
 
 def test_requested_helper_collection_state_is_refused():

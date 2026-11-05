@@ -334,6 +334,47 @@ out = request.security(syminfo.tickerid, "2", f(close))
     compile_env.compile_cpp(cpp, label="security-helper-varip")
 
 
+@pytest.mark.parametrize("kind", ["var", "varip"])
+def test_helper_local_persistent_state_counts_requested_bars(kind):
+    """Closes 3,6,9,12,15 on two-minute requested bars. The state starts at the
+    first requested bar's close (3.0) and adds 1.0 once per requested bar, so
+    the requested value is 4,5,6,7,8: a persistent variable evaluated once per
+    requested bar, on historical bars for ``var`` and ``varip`` alike. The
+    expected list is the definition of that behaviour written out, not the
+    output of a build."""
+    src = f"""//@version=6
+strategy("persistent helper state")
+f(float src) =>
+    {kind} float state = src
+    state += 1.0
+    state
+out = request.security(syminfo.tickerid, "2", f(close))
+"""
+    driver = r"""
+#include <iostream>
+struct TwoMinuteObserver : GeneratedStrategy {
+    void evaluate_security(int sec_id, const Bar& bar, bool complete) override {
+        GeneratedStrategy::evaluate_security(sec_id, bar, complete);
+        if (sec_id == 0 && complete) std::cout << _req_sec_0 << '\n';
+    }
+};
+int main() {
+    TwoMinuteObserver strategy;
+    Bar bars[] = {
+        Bar{3.0, 3.0, 3.0, 3.0, 1.0, 0},
+        Bar{6.0, 6.0, 6.0, 6.0, 1.0, 120000},
+        Bar{9.0, 9.0, 9.0, 9.0, 1.0, 240000},
+        Bar{12.0, 12.0, 12.0, 12.0, 1.0, 360000},
+        Bar{15.0, 15.0, 15.0, 15.0, 1.0, 480000},
+    };
+    strategy.run(bars, 5, "2", "2");
+    return 0;
+}
+"""
+    values = [float(value) for value in _compile_and_run(transpile(src) + driver).split()]
+    assert values == [4.0, 5.0, 6.0, 7.0, 8.0]
+
+
 def test_string_helper_local_var_state_keeps_string_storage():
     # TradingView keeps a helper's string state per requested context
     # (tests/test_e2e_security_helper_string_state.py replays its tape).
