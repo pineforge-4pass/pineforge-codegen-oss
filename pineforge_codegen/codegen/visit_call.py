@@ -706,22 +706,22 @@ class CallVisitor:
             return self._visit_expr(node)
         args = frame["args"]
         saved_memo = frame["memo"]
-        bindings = {}
+        helper_exprs = {}
         # A constructor is outside the fallback's pure-call inventory, so
         # that frame can mark its whole subtree as chart-rendered. Resolve
         # helper-bound names through its lexical stack even below operators
         # or builtin calls, while retaining the visitor for everything else.
         for child, _depth in iter_ast_nodes(node):
             if (isinstance(child, Identifier) and id(child) not in saved_memo
-                    and id(child) not in bindings
+                    and id(child) not in helper_exprs
                     and not self._security_identifier_is_global_binding(child)
                     and self._security_lookup_helper_binding_context(
                         child.name, args[5],
                     ) is not None):
-                bindings[id(child)] = self._build_security_expr(args[0], child, *args[1:])
-        if not bindings:
+                helper_exprs[id(child)] = self._build_security_expr(args[0], child, *args[1:])
+        if not helper_exprs:
             return self._visit_expr(node)
-        frame["memo"] = {**saved_memo, **bindings}
+        frame["memo"] = {**saved_memo, **helper_exprs}
         try:
             return self._visit_expr(node)
         finally:
