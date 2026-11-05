@@ -10,32 +10,25 @@ requested by the review:
 * input values that are never reassigned, covering typed and generic scalar
   families, an input source, and a lexical shadow next to a mutated control.
 
-The cases deliberately use ``tests._e2e`` as the outside-in harness.  The
-caller must run the module on spark2 with the paired engine, record the native
-test and validation identities, and attach the native receipt.  This author
-did not run a test, build, collection, transpilation, import, or native
-execution.
+The cases use ``tests._e2e`` as the outside-in harness and need a native engine
+build to run.
 
-The COOF row replaces the failed margin-specific witness in supplements
-6160556c / 6e438662 with the measured ``coof-sensitive.py`` contract: signal
-on bar 4, CSV entry fill and extra callback on bar 5 after history is finite,
-and an ordinary close on bar 6.  The off/on sources differ only in the COOF
-flag.  The original feed, source factory and arithmetic oracle are retained;
-the old failed margin attempts and receipts remain failed evidence, with no
-retroactive credit from this new source hash.  A position transition between
-the two fill-bar callbacks is not a precondition: the real CSV fill time must
-coincide with the extra callback instead.
+The COOF case covers a measured ``coof-sensitive.py`` contract: signal on bar
+4, CSV entry fill and extra callback on bar 5 after history is finite, and an
+ordinary close on bar 6.  The off/on sources differ only in the COOF flag.  The
+original feed, source factory and arithmetic oracle are retained; older
+margin attempts remain historical evidence and are not credited by this case.
+A position transition between the two fill-bar callbacks is not a precondition:
+the real CSV fill time must coincide with the extra callback instead.
 
-The row also compiles and runs an isolated generated-C++ mutant, deleting
-only the actual history gate's bar-marker restore and keeping its Series
-restore.  Missing or ambiguous restore matches, compile failures and native
-failures fail the test; only actual history-value mismatches kill the mutant.
-All positive callbacks use the independent feed/depth/gain oracle, for
-defaults (2, 1.0) and overrides (3, -0.5).  This source integration is unrun;
-the earlier diagnostic's acceptance does not validate this file.  Native and
-Claude acceptance remain caller steps.  The original margin-call branch,
-sibling argument order, other depths, full-suite and TradingView parity are
-unproved here; no publication, merge or release GO is claimed.
+The case also compiles and runs an isolated generated-C++ mutant, deleting only
+the actual history gate's bar-marker restore and keeping its Series restore.
+Missing or ambiguous restore matches, compile failures and native failures fail
+the test; only actual history-value mismatches kill the mutant.  All positive
+callbacks use the independent feed/depth/gain oracle, for defaults (2, 1.0)
+and overrides (3, -0.5).  The original margin-call branch, sibling argument
+order, other depths, full-suite behavior and TradingView parity are outside
+these cases.
 """
 
 from __future__ import annotations
