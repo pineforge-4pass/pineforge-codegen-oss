@@ -33,6 +33,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
   fallbacks still warn.
 - A chart TA constructor length that shadows a global input or constant now follows its lexical binding; an unsized percentile loop length keeps `PF-E5009` regardless of the counter's name (#295).
 - Constant-expression input defaults can size TA constructors while retaining the input getter in runtime resets (#295).
+- A `request.security` payload may read a global that is an element of a tuple declaration of a pure user function (`[_, g] = pair(x)` with `pair(value) => [value, value + 7.0]`), directly or through a function that reads it: the declaration is evaluated on the requested bar, as in TradingView, and only the element read is lowered. The function must have a one-tuple-literal body over its parameters, the requested bar's fields and literals, and be called positionally with arguments that have no state. A function with a `ta.*` call, `var`, `varip`, a request or a method, a multi-statement body, and the history of an element (`g[1]`) keep their refusals.
 - `line(na)` and `box(na)` emit the same missing handles as typed drawing declarations initialized with `na` (#295).
 - Literal `na` in emitted strategy string parameters uses the empty-string sentinel, including `strategy.exit`'s `from_entry` (#295).
 - Array bindings destructured from a helper's tuple retain their collection type for built-in method calls (#295).
