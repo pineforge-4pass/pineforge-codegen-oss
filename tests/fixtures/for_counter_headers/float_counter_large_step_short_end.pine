@@ -1,0 +1,9 @@
+//@version=6
+strategy("Large float step with a short end", currency = currency.USDT, initial_capital = 1000000)
+pf_count = 0
+for pf_v = 0.0 to 2999999.9999999 by 1000000.0
+    pf_count += 1
+if bar_index % 8 == 0
+    strategy.entry("pf_long", strategy.long, qty = 1 + pf_count / 100)
+if bar_index % 8 == 1
+    strategy.close("pf_long")

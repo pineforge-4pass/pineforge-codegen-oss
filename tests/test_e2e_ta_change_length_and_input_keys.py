@@ -1,6 +1,6 @@
 """E2E: ``ta.change(source, length)`` honours its length, an input title with
 ``"`` or ``\\`` compiles and overrides, and an untitled ``var`` input resizes
-the TA it feeds (lane C3).
+the TA it feeds (an earlier case).
 
 Three silent codegen defects, each pinned from outside:
 

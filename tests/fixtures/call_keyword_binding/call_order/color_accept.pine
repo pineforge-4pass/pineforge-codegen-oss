@@ -1,0 +1,11 @@
+//@version=6
+strategy("Color positional prefix", initial_capital = 1000000, currency = currency.NONE)
+// Named transparency preserves the red channel of the positional base color.
+shade = color.new(color.red, transp = 50)
+metric = color.r(shade)
+if metric < 0
+    strategy.cancel("L")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

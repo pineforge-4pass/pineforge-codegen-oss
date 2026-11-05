@@ -1,6 +1,6 @@
 """E2E: an input title given as a constant expression is keyed by its string
 value; a title that is not a compile-time constant is refused at transpile
-time (lane C4, defect 5).
+time (a prior defect).
 
 TradingView (Pine v6 reference, ``input.int``): ``title (const string)
 Title of the input.`` A title spelled through a name (``T = "Len"`` then

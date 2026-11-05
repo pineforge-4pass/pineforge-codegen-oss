@@ -3,7 +3,7 @@
 ``f1(x) => f0(x) + f0(x)``, ``f2(x) => f1(x) + f1(x)``, ...: the evaluator
 inlines each helper call on the requested bar, and every prepass walked, and
 the builder spelled, the leaf once per call path -- 2**22 copies for 22
-levels, so lane CG-SECURITY-2's ``diamond.pine`` ran for minutes (the
+levels, so the ``diamond.pine`` case ran for minutes (the
 analyzer's map-history validation and the known-value spelling of a global
 walked the same paths). A call of a pure helper (one expression over its
 parameters, the requested bar's fields and literals, through operators and
@@ -123,7 +123,7 @@ def test_a_script_name_spelled_like_a_lambda_is_escaped():
 # The sizing is declared so that the run books the entry every half hour
 # that the counts below expect: at TradingView's Pine v6 defaults for an
 # omitted initial_capital / default_qty_type / default_qty_value (100% of
-# equity, lane TV-DEFAULTS, test_e2e_strategy_defaults) v6's 100% margin
+# equity, test_e2e_strategy_defaults) v6's 100% margin
 # refuses the entries whose fill price rose above the price they were sized
 # at, and the payloads are compared on fewer exits.
 PROBE = "\n".join([

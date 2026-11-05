@@ -307,6 +307,7 @@ from .helpers import (
 )
 from .constant_fold import fold_numeric_expression
 from .session_market import SESSION_MARKET_CPP, SESSION_MARKET_MEMBER
+from .for_loops import TV_FLOAT_STEP_END_CPP
 
 # TypeInferer mixin owns the ~15 type-spec / C++-type inference helpers
 # previously scattered across this module; see ``codegen/types.py``.
@@ -549,6 +550,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # string local read with history) live in their own map; the member
         # is declared when a payload's helper holds one.
         self._security_string_series_declared: bool = False
+        self._security_persistent_helper_series: set[str] = set()
         self._security_string_series: set[str] = set()
         # Color var state shares the numeric double map, but reads retain the
         # ordinary packed-ARGB int64_t type (including its na sentinel).
@@ -779,6 +781,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._dead_fixnan_indices: set[int] = set()
         self._switch_counter = 0
         self._security_inline_counter = 0
+        # Declaration identities are membership keys, never emission order.
+        self._security_series_tf_local_decls: set[int] = set()
+        self._security_series_tf_emitted_state: set[tuple[int, int]] = set()
         # Codegen-only requested argument-history plans. Inner values are
         # frozen records, so speculative evaluator restore is two levels deep.
         self._security_arg_inventory: dict[int, dict] = {}
@@ -788,6 +793,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._security_arg_call_values: dict[tuple, str] = {}
         self._random_call_counter = 0
         self._for_counter = 0
+        self._uses_tv_float_step_end = False
         # Retain each loop node alongside its plan; ids are lookup keys only.
         self._closed_trade_folds: dict[int, tuple[ForStmt, object]] = {}
         self._tuple_assign_counter = 0
@@ -1174,6 +1180,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._security_ta_variant_names: dict[tuple[int, int, tuple], str] = {}
         # Reassigned globals a timeframe reads (``_security_tf_replay_prologue``).
         self._security_tf_mutable_reads: set[str] = set()
+        self._expand_security_series_timeframes()
         for item in self._security_calls:
             sec_id = item["sec_id"]
             tf_node = item["tf_node"]
@@ -1268,6 +1275,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "symbol_node": item.get("symbol_node"),
                 "ignore_invalid_node": item.get("ignore_invalid_node"),
             })
+        self._security_selection_local_members = self._security_selection_local_member_names()
+        self._global_member_vars.difference_update(self._security_selection_local_members)
+        from .array_field_width import prepare_array_widths
+        prepare_array_widths(self)
         self._register_global_aggregate_member_types()
         self._uses_map = self._detect_map_usage()
         self._uses_matrix = self._detect_matrix_usage()
@@ -1308,6 +1319,24 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # flags share the class-member namespace with those fresh members, so
         # allocating the flags here would not yet have the complete collision
         # inventory.
+
+        self._discard_wide_int_constant_folds()
+
+    def _discard_wide_int_constant_folds(self) -> None:
+        """Read widened callable values from their emitted storage.
+
+        Stable UDF folding substitutes actuals before arithmetic, losing the
+        wide parameter's binary64 boundary: an exact integer difference can
+        disagree with the callable's result. Resolve those dependencies only
+        after the callable and collection inventories have been initialized.
+        Aliases follow their declaration bindings through the same query.
+        """
+        for stmt in self.ctx.ast.body:
+            if (isinstance(stmt, VarDecl)
+                    and stmt.name in self._known_vars
+                    and stmt.name not in self._input_backed_vars
+                    and self._crosses_wide_int_boundary(stmt.value, None, set())):
+                self._known_vars.pop(stmt.name)
 
     def _scalar_var_init_depends_on_runtime_input(self, init_ast) -> bool:
         """Whether a nominally constant initializer depends on input state.
@@ -5070,6 +5099,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 1. Includes
         self._emit_includes(lines)
+        tv_float_step_end_at = len(lines)
         if self._array_journal_members:
             lines.append(graph_journal.runtime(self, ARRAY_JOURNAL_CPP).replace(
                 "@JOURNAL@", self._array_journal_cpp_name))
@@ -5279,6 +5309,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # bar/TA expressions never leak into namespace-scope C++ initializers.
         if self._udt_has_array_fields():
             lines.append(UDT_ARRAY_FIELD_CPP)
+        from .array_field_width import timestamp_array_fields
+        timestamp_fields = timestamp_array_fields(self)
         for type_name, fields in self._udt_defs.items():
             record_type = self._udt_record_cpp_type(type_name)
             lines.append(f"struct {record_type} {{")
@@ -5288,6 +5320,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if f.name in omitted:
                     continue
                 spec = field_specs.get(f.name) or self._type_spec_from_hint_name(f.type_name)
+                if (type_name, f.name) in timestamp_fields:
+                    spec = TypeSpec.array(TypeSpec.primitive("int64"))
                 array_field = self._udt_array_field_cpp(spec, type_name)
                 if array_field is not None:
                     lines.append(f"    {array_field} {self._safe_name(f.name)} = {array_field}();")
@@ -5759,6 +5793,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         #     (so user-defined functions can reference them)
         seen_global = set()
         for name, ptype in self.ctx.global_var_decls:
+            if name in self._security_selection_local_members:
+                continue
             exact_scalar_override = (
                 name in self._qualified_func_var_raw_names
                 and name in self._ordinary_global_binding_names
@@ -6078,6 +6114,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         exports: list[str] = []
         emit_capabilities_exports(self, exports)
         lines[self._capabilities_export_at:self._capabilities_export_at] = exports
+        # A float counter may first appear in a requested evaluator.
+        if self._uses_tv_float_step_end:
+            lines.insert(tv_float_step_end_at, TV_FLOAT_STEP_END_CPP)
         # Function bodies and security evaluators can select the enum lookup.
         if self._uses_enum_string_lookup:
             lines.insert(0, ENUM_STRING_INCLUDE)

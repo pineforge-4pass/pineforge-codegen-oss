@@ -1,6 +1,6 @@
 # TAIL-A TradingView trade evidence
 
-Synthetic probes written for lane TAIL-A (a `request.security` payload that
+Synthetic probes for a `request.security` payload that
 reads the history of a global bound to a multi-statement user function,
 reached through two helpers' parameters) and their unedited TradingView trade
 exports. They contain no closed or scraped source. Each was exported on

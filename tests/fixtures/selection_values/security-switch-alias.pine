@@ -1,0 +1,12 @@
+//@version=6
+strategy("Requested switch alias", currency = currency.NONE, initial_capital = 1000000)
+// Derived: security's builder has a dedicated switch-to-ternary path for this global alias.
+chosen = switch
+    close >= open => high
+    => low
+value = request.security(syminfo.tickerid, timeframe.period, chosen)
+plot(value, "selected")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

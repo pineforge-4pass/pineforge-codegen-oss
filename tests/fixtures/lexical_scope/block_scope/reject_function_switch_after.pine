@@ -1,0 +1,16 @@
+//@version=6
+strategy("Function switch local after block", currency = currency.NONE)
+// Derived: callable case locals lack the script-block owner marker.
+readValue() =>
+    switch bar_index % 2
+        0 =>
+            float inside = close - open
+            inside
+        =>
+            open - close
+    inside
+signalValue = readValue()
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

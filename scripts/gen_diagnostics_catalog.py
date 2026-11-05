@@ -1090,6 +1090,19 @@ STRATEGY_DECLARATION_PRESENTATION = {
     ),
 }
 
+# Public reason vocabulary for the located series-timeframe diagnostic.
+# Keep authored vocabulary here so --write also repairs a stale catalog.
+SERIES_TIMEFRAME_REASONS = [
+    "the timeframe set is not closed at compile time",
+    "state declared outside the requested expression cannot be replayed by this request; "
+    "move the state into a helper used by the requested expression",
+    "the requested expression requires chart evaluation, which would share its state "
+    "between timeframes; use an expression that can run entirely on the requested bars",
+    "the requested expression state could not receive a separate copy for each timeframe; "
+    "remove unused stateful arguments or simplify the stateful helper",
+    "another symbol is not yet supported",
+]
+
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -1105,6 +1118,9 @@ def main(argv=None) -> int:
     if args.write:
         ensure_uncatalogued(catalog)
         added = merge(catalog, templates)
+        catalog["codes"]["PF-E3111"]["args"]["reason"] = {
+            "kind": "vocab", "values": list(SERIES_TIMEFRAME_REASONS),
+        }
         # Ordinary request calls share the nz/fixnan argument binder. Keep
         # these codes' pinned meaning and historical explanation; their short
         # presentation must name the actual callee instead of those two names.
@@ -1143,7 +1159,12 @@ def main(argv=None) -> int:
     invalid = invalid_user_messages(catalog)
     for code in invalid:
         print(f"invalid or missing user_message: {code}")
-    return 1 if missing or invalid else 0
+    stale_reasons = catalog["codes"]["PF-E3111"]["args"]["reason"] != {
+        "kind": "vocab", "values": SERIES_TIMEFRAME_REASONS,
+    }
+    if stale_reasons:
+        print("PF-E3111 reason vocabulary differs from SERIES_TIMEFRAME_REASONS")
+    return 1 if missing or invalid or stale_reasons else 0
 
 
 if __name__ == "__main__":

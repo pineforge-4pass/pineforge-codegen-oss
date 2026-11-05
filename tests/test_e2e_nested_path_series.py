@@ -9,7 +9,7 @@ writing the original member, so the paths shared one series. cs-lev-
 tradleware-gaussian-channel-stochrsi-eth calls its Gaussian filter
 ``f_pole`` twice, for the price and for the true range; the second path's
 nine filters all wrote the price filter's ``_f``, the channel band sat about
-20 true ranges wide and the script never traded (lane W2, F04, hidden behind
+20 true ranges wide and the script never traded (an earlier finding, hidden behind
 the filter's former ``return 0.0``).
 
 The shape runs end to end beside the same filter spelled out once per call

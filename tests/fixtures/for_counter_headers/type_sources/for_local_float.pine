@@ -1,0 +1,8 @@
+//@version=6
+strategy("Counter source type", currency=currency.NONE)
+float acc = 0.0
+for outerIndex = 0 to 0
+    first = 0.5
+    for walkIndex = first to 1.0 by 0.25
+        acc += 1.0
+plot(acc)

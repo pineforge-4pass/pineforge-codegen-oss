@@ -153,9 +153,10 @@ from ..ast_nodes import (
 )
 from ..collection_history import history_annotation, literal_offset
 from ..external_requests import RECORDED_KEY_ANNOTATION, request_stop_marker
+from ..intrinsic_binding import validate_intrinsic_keywords
 from ..limits import iter_ast_nodes
 from ..security_contexts import ticker_symbol_arg
-from ..symbols import TypeSpec, method_receiver_type_name
+from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from ..method_binding import (
     MethodBindError,
     bind_function_defaults,
@@ -163,6 +164,7 @@ from ..method_binding import (
     signature_from_callable,
 )
 from .. import signatures as sigs
+from .color_constants import color_arguments
 from .drawing import ALL_DRAWING_METHODS
 from .helpers import (
     color_alpha_cast, cpp_is_plain_read, evaluate_args_once,
@@ -712,8 +714,9 @@ class CallVisitor:
         )
         if (elem_spec is not None and elem_spec.kind == "primitive"
                 and elem_spec.name == "float"
-                and isinstance(value_node, Ternary)
-                and self._selection_contains_na(value_node)):
+                and ((isinstance(value_node, Ternary)
+                      and self._selection_contains_na(value_node))
+                     or self._infer_type(value_node) == "int64_t")):
             rendered = self._coerce_double_slot(rendered, value_node)
         if (elem_spec is not None and elem_spec.kind == "primitive"
                 and elem_spec.name == "bool"):
@@ -728,13 +731,10 @@ class CallVisitor:
             # narrow implicitly.
             return na_preserving_int_cast(rendered, "int")
         if (store and elem_spec is not None and elem_spec.kind == "primitive"
-                and elem_spec.name == "int64"
-                and self._holds_na_aware_wide_double(value_node)
-                and self._emitted_value_is_double(value_node)):
-            # A 64-bit product over an operand that can be na is a double
-            # (``_wide_int_arith_cpp``): an epoch array's element narrows it
-            # na-preserving too.
-            return na_preserving_int_cast(rendered, "int64_t")
+                and elem_spec.name == "int64"):
+            # int(na) carries the narrow integer sentinel; a timestamp array
+            # must translate it, as well as double NaN, at the element store.
+            return self._coerce_int_slot(rendered, value_node, "int64_t")
         return rendered
 
     def _array_method_args(
@@ -794,8 +794,10 @@ class CallVisitor:
             optional = MATRIX_OPTIONAL_PARAMS.get(method, {})
             aliases = MATRIX_METHOD_KWARG_ALIASES.get(method, {})
             receiver = MATRIX_RECEIVER_KEYWORD.get(method, "id")
-        elif method in CHECKED_ARRAY_METHOD_KWARGS:
-            slots = list(CHECKED_ARRAY_METHOD_KWARGS[method])
+        elif (method in CHECKED_ARRAY_METHOD_KWARGS
+              or (functional and method == "push")):
+            slots = (["value"] if method == "push"
+                     else list(CHECKED_ARRAY_METHOD_KWARGS[method]))
             optional = ARRAY_OPTIONAL_PARAMS.get(method, {})
             aliases = {}
             receiver = "id"
@@ -971,17 +973,13 @@ class CallVisitor:
         node: FuncCall,
         *,
         functional: bool,
-        allow_keywords: bool,
     ) -> list:
-        """Validate and bind one established map-call form.
+        """Validate and bind map arguments in declared parameter order.
 
-        Map lowerings index directly into their argument arrays.  Before this
-        guard, malformed calls therefore either reached a raw ``IndexError``
-        or, for keyword-only ``map.*`` functional calls, silently lowered to
-        ``0``.  Keep routing policy separate from signature validation: only
-        the typed-map UDF-parameter method lane currently accepts canonical
-        keywords; all other lanes retain their established positional-only
-        semantics and fail closed when keywords are supplied.
+        A positional prefix fills the leading slots; keywords fill their own
+        named slots in both namespace and receiver forms. Map lowerings index
+        directly into the returned list, so reject unknown, duplicate, missing
+        and excess arguments before emission.
         """
         if method == "new":
             param_names: list[str] = []
@@ -1040,17 +1038,6 @@ class CallVisitor:
                 node,
                 f"map.{method}: missing required argument '{missing[0]}'",
                 hint=f"Expected {signature}.",
-            )
-
-        if node.kwargs and not allow_keywords:
-            form = "functional" if functional else "receiver-method"
-            self._codegen_error(
-                node,
-                (
-                    f"map.{method}: keyword arguments are not supported "
-                    f"for this {form} call form"
-                ),
-                hint=f"Use the established positional form: {signature}.",
             )
 
         if method == "put":
@@ -1595,6 +1582,7 @@ class CallVisitor:
             if param_index < len(param_specs)
             else None
         )
+        param_spec = self._array_param_spec(func_info, param_index, param_spec)
         method_series = self.ctx.func_series_vars.get(func_info.name, set())
         if (param_spec is not None
                 and (param_spec.kind in {"map", "matrix"}
@@ -1604,26 +1592,31 @@ class CallVisitor:
             # positional/keyword/default merging. Lower a bare ``na`` (and
             # nullable selections containing it) against the declared exact
             # parameter type instead of the legacy numeric ``na<double>()``.
-            return self._visit_rhs_value(
-                arg_node,
-                target_cpp_type=(
-                    self._func_param_int_cpp_type(
-                        func_info, param_index,
-                        self._callable_target_callsite_idx(func_info, call_node),
-                    )
-                    or self._type_spec_to_cpp(param_spec)
-                ),
+            target_cpp_type = (
+                self._func_param_int_cpp_type(
+                    func_info, param_index,
+                    self._callable_target_callsite_idx(func_info, call_node),
+                )
+                or self._type_spec_to_cpp(param_spec)
             )
+            cpp = self._visit_rhs_value(arg_node, target_cpp_type=target_cpp_type)
+            return (self._coerce_int_slot(cpp, arg_node, target_cpp_type)
+                    if target_cpp_type == "int64_t" else cpp)
         if param_name not in method_series:
             cpp = self._visit_expr(arg_node)
             int_cpp = self._func_param_int_cpp_type(
                 func_info, param_index,
                 self._callable_target_callsite_idx(func_info, call_node))
-            if (int_cpp is not None
-                    and self._holds_na_aware_wide_double(arg_node)
+            if int_cpp == "int64_t":
+                cpp = self._coerce_int_slot(cpp, arg_node, int_cpp)
+            elif (int_cpp is not None
+                    and (self._holds_na_aware_wide_double(arg_node)
+                         or isinstance(arg_node, (Identifier, Subscript)))
                     and self._emitted_value_is_double(arg_node)):
-                # A double-valued 64-bit product (``_wide_int_arith_cpp``)
-                # narrows na-preserving into an integer parameter (quirk 9).
+                # An integer stored as double (including a bare-na global)
+                # must translate NaN to the parameter's integer sentinel.
+                # Same-width integer reads and direct numeric selections
+                # retain their existing argument expression.
                 cpp = na_preserving_int_cast(cpp, int_cpp)
             return cpp
         expected_cpp_type = self._series_param_element_cpp_type(
@@ -1735,7 +1728,6 @@ class CallVisitor:
                     callee.member,
                     node,
                     functional=False,
-                    allow_keywords=False,
                 )
                 receiver = f"({self._visit_expr(callee.object)})"
                 return self._map_param_method_expr(
@@ -1874,7 +1866,6 @@ class CallVisitor:
                             meth,
                             node,
                             functional=False,
-                            allow_keywords=False,
                         )
                         return self._map_param_method_expr(
                             recv,
@@ -1962,7 +1953,6 @@ class CallVisitor:
                             meth_raw,
                             node,
                             functional=False,
-                            allow_keywords=True,
                         )
                         return self._map_param_method_expr(
                             m, meth_raw, arg_nodes, param_spec, node
@@ -1982,7 +1972,6 @@ class CallVisitor:
                             meth_raw,
                             node,
                             functional=False,
-                            allow_keywords=False,
                         )
                         return self._map_param_method_expr(
                             m, meth_raw, arg_nodes, recv_spec, node
@@ -2208,7 +2197,6 @@ class CallVisitor:
                 func_name,
                 node,
                 functional=False,
-                allow_keywords=False,
             )
             return self._map_param_method_expr(
                 m, func_name, arg_nodes, namespace_spec, node
@@ -2220,20 +2208,19 @@ class CallVisitor:
                 # This dispatch point comes after lexical receiver routing, so
                 # a parameter/local/global named ``map`` retains precedence
                 # over the built-in namespace.
-                self._map_call_arg_nodes(
+                arg_nodes = self._map_call_arg_nodes(
                     func_name,
                     node,
                     functional=True,
-                    allow_keywords=False,
                 )
             if func_name == "new":
                 spec = self._type_spec_from_expr(node) or TypeSpec.map(TypeSpec.primitive("string"), TypeSpec.primitive("float"))
                 return f"{self._type_spec_to_cpp(spec)}::new_()"
-            if func_name in MAP_METHODS and node.args:
-                m = self._visit_expr(node.args[0])
-                spec = self._type_spec_from_expr(node.args[0]) if node.args else None
+            if func_name in MAP_METHODS:
+                m = self._visit_expr(arg_nodes[0])
+                spec = self._type_spec_from_expr(arg_nodes[0])
                 return self._map_param_method_expr(
-                    m, func_name, list(node.args[1:]), spec, node
+                    m, func_name, arg_nodes[1:], spec, node
                 )
             return "0"
 
@@ -2283,6 +2270,9 @@ class CallVisitor:
                 target = getattr(self, "_array_ctor_target_name", None)
                 if target is not None:
                     spec = self._widen_array_spec_for_name(target, spec)
+                expected = getattr(self, "_array_ctor_expected", None)
+                if expected is not None and expected[0] is node:
+                    spec = expected[1]
                 cpp_type = self._type_spec_to_cpp(spec)
                 elem_spec = spec.element if spec.element is not None else TypeSpec.primitive("float")
                 self._reject_unknown_element_type(node, elem_spec)
@@ -2333,6 +2323,9 @@ class CallVisitor:
                             and declared.element != spec.element):
                         spec = declared
                     spec = self._widen_array_spec_for_name(target, spec)
+                expected = getattr(self, "_array_ctor_expected", None)
+                if expected is not None and expected[0] is node:
+                    spec = expected[1]
                 elem_spec = spec.element
                 self._reject_unknown_element_type(node, elem_spec)
                 for a in node.args:
@@ -2405,6 +2398,7 @@ class CallVisitor:
                 args = _merge_kwargs(
                     node.args, node.kwargs,
                     sigs.get_param_names("request", func_name), self._visit_expr,
+                    intrinsic=sigs.get_intrinsic("request", func_name),
                 )
                 effects = [f"(void)({arg})" for arg in args]
                 effects += [request_stop(marker), "na<double>()"]
@@ -2432,6 +2426,7 @@ class CallVisitor:
                 candidates = [
                     item for item in self._security_calls
                     if not item.get("is_lower_tf_array")
+                    and not item.get("series_tf_extra")
                     and (exprn := item["expr_node"]) is not None
                     and (len(all_args) > 2 and exprn is all_args[2])
                 ]
@@ -2448,6 +2443,8 @@ class CallVisitor:
                 expr_node = chosen["expr_node"] if chosen else None
 
                 if sec_id is not None and expr_node is not None:
+                    if chosen.get("series_tf_sites"):
+                        return self._security_series_tf_value(chosen, all_args[1])
                     if isinstance(expr_node, TupleLiteral):
                         parts = []
                         for i, el in enumerate(expr_node.elements):
@@ -2476,11 +2473,21 @@ class CallVisitor:
                             ltf_all_args.append(None)
                         ltf_all_args[i] = node.kwargs[pname]
                 ltf_expr_node = ltf_all_args[2] if len(ltf_all_args) > 2 else None
-                for item in self._security_calls:
-                    if not item.get("is_lower_tf_array"):
-                        continue
-                    if item["expr_node"] is ltf_expr_node:
-                        return f"_req_sec_lower_tf_{item['sec_id']}"
+                candidates = [
+                    item for item in self._security_calls
+                    if item.get("is_lower_tf_array")
+                    and not item.get("series_tf_extra")
+                    and item["expr_node"] is ltf_expr_node
+                ]
+                if candidates:
+                    chosen = next(
+                        (item for item in candidates
+                         if item.get("callsite_idx") == self._active_call_site_idx),
+                        candidates[0],
+                    )
+                    if chosen.get("series_tf_sites"):
+                        return self._security_series_tf_value(chosen, ltf_all_args[1])
+                    return f"_req_sec_lower_tf_{chosen['sec_id']}"
                 return "std::vector<double>{}"
             # request.earnings / dividends / splits / financial reading the
             # series recorded under their key (external_requests).
@@ -2631,7 +2638,10 @@ class CallVisitor:
                 return lowered
             node = self._check_time_bars_back(func_name, node)
         if func_name == "time" and namespace is None and (node.args or node.kwargs):
-            args = _merge_kwargs(node.args, node.kwargs, sigs.get_param_names(None, "time"), self._visit_expr)
+            args = _merge_kwargs(
+                node.args, node.kwargs, sigs.get_param_names(None, "time"),
+                self._visit_expr, intrinsic=sigs.get_intrinsic(None, "time"),
+            )
             tf_e = args[0] if len(args) > 0 else 'script_tf_'
             sess = args[1] if len(args) > 1 else 'std::string("")'
             tz_e = args[2] if len(args) > 2 else 'std::string("")'
@@ -2642,7 +2652,10 @@ class CallVisitor:
         # time_close(timeframe) or time_close(tf, session, tz) — same
         # session-tz default as time() above.
         if func_name == "time_close" and namespace is None and (node.args or node.kwargs):
-            args = _merge_kwargs(node.args, node.kwargs, sigs.get_param_names(None, "time_close"), self._visit_expr)
+            args = _merge_kwargs(
+                node.args, node.kwargs, sigs.get_param_names(None, "time_close"),
+                self._visit_expr, intrinsic=sigs.get_intrinsic(None, "time_close"),
+            )
             tf_e = args[0] if len(args) > 0 else 'script_tf_'
             sess = args[1] if len(args) > 1 else 'std::string("")'
             tz_e = args[2] if len(args) > 2 else 'std::string("")'
@@ -2722,6 +2735,7 @@ class CallVisitor:
                     node.args, node.kwargs,
                     sigs.get_param_names(None, "timestamp"),
                     lambda a: a,
+                    intrinsic=sigs.get_intrinsic(None, "timestamp"),
                 )
                 if len(merged) < 3 or any(a is None for a in merged[:3]):
                     self._codegen_error(
@@ -2798,13 +2812,13 @@ class CallVisitor:
                 # ``str.tostring(na)`` ("NaN"), whose formatter a script
                 # without str.tostring does not declare.
                 return "na<std::string>()"
-            inferred = self._infer_type(arg)
+            inferred = self._text_type(arg)
             if inferred == "std::string":
                 return self._visit_expr(arg)
             if inferred == "bool":
                 if self._pine_v5_body:
                     self._refuse_v5_bool_na_observer(node, "string()", [arg])
-                visited = self._visit_expr(arg)
+                visited = self._bool_text_condition(arg, self._visit_expr(arg))
                 return f'(({visited}) ? std::string("true") : std::string("false"))'
             return self._visit_str_call("tostring", node)
 
@@ -2824,6 +2838,7 @@ class CallVisitor:
                     node.kwargs,
                     sigs.get_param_names("ta", "pivot_point_levels"),
                     self._visit_expr,
+                    intrinsic=sigs.get_intrinsic("ta", "pivot_point_levels"),
                 )
             else:
                 args = [self._visit_expr(a) for a in node.args]
@@ -3023,20 +3038,38 @@ class CallVisitor:
                     # narrowing. Pine ``int`` UDT fields are emitted as
                     # ``int64_t`` (see base.py) but are initialised from
                     # ``na<double>()`` / doubles in places, so cast to the
-                    # field's type. ``na<double>()`` for an int field → 0.
-                    f_cpp_type = self._type_spec_to_cpp(field_specs.get(f.name) or self._type_spec_from_hint_name(f.type_name))
+                    # field's type while retaining the missing sentinel.
+                    field_spec = (field_specs.get(f.name)
+                                  or self._type_spec_from_hint_name(f.type_name))
+                    field_spec = self._array_widths.widen(
+                        field_spec, {("field", namespace, f.name)})
+                    f_cpp_type = self._type_spec_to_cpp(field_spec)
                     if f_cpp_type == "int":
                         f_cpp_type = "int64_t"
-                    val = self._visit_rhs_value(
-                        value_node,
-                        target_cpp_type=(
-                            f_cpp_type
-                            if (self._is_nullable_collection_cpp_type(f_cpp_type)
-                                or f_cpp_type in self._udt_defs
-                                or f_cpp_type in DRAWING_TYPE_TO_CPP.values())
-                            else None
-                        ),
-                    )
+                    previous_expected = getattr(self, "_array_ctor_expected", None)
+                    if (field_spec is not None and field_spec.kind == "array"
+                            and field_spec.element == TypeSpec.primitive("int64")):
+                        # Request lowering can copy the constructor AST. Its
+                        # resolved field target remains authoritative even
+                        # when the copied call has no entry in the width plan.
+                        # Only this actual constructor receives the context.
+                        self._array_ctor_expected = (value_node, field_spec)
+                    try:
+                        val = self._visit_rhs_value(
+                            value_node,
+                            target_cpp_type=(
+                                f_cpp_type
+                                if (self._is_nullable_collection_cpp_type(f_cpp_type)
+                                    or (f_cpp_type == "std::vector<int64_t>"
+                                        and ("field", namespace, f.name)
+                                            in self._array_widths.wide)
+                                    or f_cpp_type in self._udt_defs
+                                    or f_cpp_type in DRAWING_TYPE_TO_CPP.values())
+                                else None
+                            ),
+                        )
+                    finally:
+                        self._array_ctor_expected = previous_expected
                     if f_cpp_type == "int64_t":
                         val = self._coerce_int_slot(val, value_node, "int64_t")
                         if val == "na<double>()":
@@ -3049,9 +3082,7 @@ class CallVisitor:
                           and val == "na<double>()"):
                         val = f"{f_cpp_type}{{}}"
                     array_field = self._udt_array_field_cpp(
-                        field_specs.get(f.name)
-                        or self._type_spec_from_hint_name(f.type_name),
-                        namespace)
+                        field_spec, namespace)
                     if array_field is not None:
                         val = (f"{array_field}()" if val == "na<double>()"
                                else self._udt_array_field_value(
@@ -3215,7 +3246,8 @@ class CallVisitor:
             if fi_lookup is not None:
                 param_specs = getattr(fi_lookup, "param_type_specs", []) or []
                 if arg_idx < len(param_specs):
-                    param_spec = param_specs[arg_idx]
+                    param_spec = self._array_param_spec(
+                        fi_lookup, arg_idx, param_specs[arg_idx])
                     if (param_spec is not None
                             and (param_spec.kind in {"map", "matrix"}
                                  or self._selection_contains_na(arg_node))):
@@ -3258,7 +3290,8 @@ class CallVisitor:
                 # Known intrinsic — use signature registry for kwargs resolution
                 param_names = sigs.get_param_names(namespace, func_name)
                 merged = _merge_kwargs(
-                    node.args, node.kwargs, param_names, lambda a: a
+                    node.args, node.kwargs, param_names, lambda a: a,
+                    intrinsic=sigs.get_intrinsic(namespace, func_name),
                 )
                 ordered_arg_nodes = list(merged)
                 all_args = [self._visit_expr(a) for a in merged]
@@ -3296,6 +3329,38 @@ class CallVisitor:
                 func_name, ordered_arg_nodes, all_args,
                 self.ctx.func_call_cs_map.get(id(node), (None, None))[1],
             )
+            fi = self._func_info_map[func_name]
+            declared = self.ctx.func_declared_param_type_specs.get(func_name, ())
+            call_site_idx = self._callable_target_callsite_idx(fi, node)
+            if (self._current_instance_name, id(node)) in self._instance_dispatch:
+                # Instance dispatch uses the written callee's type profile,
+                # including inherited calls composed from its natural cs0.
+                call_site_idx = self.ctx.func_call_cs_map.get(id(node), (None, 0))[1]
+            variant_param_types = self.ctx.func_callsite_param_types.get(
+                (fi.name, call_site_idx), (),
+            ) if call_site_idx is not None else ()
+            param_specs = getattr(fi, "param_type_specs", ()) or ()
+            param_names = fi.node.params if fi.node is not None else ()
+            series_params = self.ctx.func_series_vars.get(fi.name, set())
+            for index, arg in enumerate(ordered_arg_nodes):
+                if (index >= len(all_args) or index >= len(param_names)
+                        or (index < len(declared) and declared[index] is not None)
+                        or param_names[index] in series_params):
+                    continue
+                # Match the emitted scalar parameter: a clone's primitive
+                # profile takes precedence over the base FuncInfo inference.
+                if index < len(variant_param_types) and variant_param_types[index] in {
+                    PineType.INT, PineType.FLOAT, PineType.BOOL,
+                    PineType.STRING, PineType.COLOR,
+                }:
+                    is_string_param = variant_param_types[index] == PineType.STRING
+                elif index < len(param_specs) and param_specs[index] is not None:
+                    is_string_param = self._type_spec_to_cpp(param_specs[index]) == "std::string"
+                else:
+                    is_string_param = (index < len(fi.param_types)
+                                       and fi.param_types[index] == PineType.STRING)
+                if is_string_param:
+                    all_args[index] = self._legacy_bool_string_value(arg, all_args[index])
         # Default args (parser does not store defaults): isInSession(sess, res = timeframe.period)
         if namespace is None and func_name in self._func_names:
             fi = self._func_info_map.get(func_name)
@@ -3742,25 +3807,12 @@ class CallVisitor:
     _FROM_GRADIENT_PARAMS = (
         "value", "bottom_value", "top_value", "bottom_color", "top_color",
     )
-    # TradingView's parameter names of the other color.* functions.
-    _COLOR_PARAMS = {
-        "new": ("color", "transp"),
-        "rgb": ("red", "green", "blue", "transp"),
-        "r": ("color",), "g": ("color",), "b": ("color",), "t": ("color",),
-    }
-
     def _color_arg_nodes(self, func_name: str, node) -> list:
         """The argument nodes of a ``color.*`` call in parameter order: the
         positional ones, then each keyword in its parameter's slot, up to the
         last one given (``color.new(transp = 40, color = c)`` is
         ``color.new(c, 40)``). A slot nothing fills is None."""
-        params = self._COLOR_PARAMS.get(func_name, ())
-        bound = list(node.args)
-        for index, name in enumerate(params):
-            if index >= len(node.args) and name in node.kwargs:
-                bound += [None] * (index + 1 - len(bound))
-                bound[index] = node.kwargs[name]
-        return bound
+        return color_arguments(func_name, node)
 
     # Builtins whose call has no state and no side effect.
     _PURE_CALL_NAMESPACES = frozenset({"color", "math", "str"})
@@ -3874,10 +3926,12 @@ class CallVisitor:
 
     def _visit_str_call(self, func_name: str, node) -> str:
         args = _merge_kwargs(node.args, node.kwargs,
-                             sigs.get_param_names("str", func_name), self._visit_expr)
+                             sigs.get_param_names("str", func_name), self._visit_expr,
+                             intrinsic=sigs.get_intrinsic("str", func_name))
         arg_nodes = _merge_kwargs(
             node.args, node.kwargs,
             sigs.get_param_names("str", func_name), lambda a: a,
+            intrinsic=sigs.get_intrinsic("str", func_name),
         )
 
         if func_name == "repeat":
@@ -3921,13 +3975,14 @@ class CallVisitor:
                             f"::pineforge::source::pine_enum_str_at("
                             f"{self._safe_name(et)}_str_values, {n}, {var})"
                         )
-            inferred = self._infer_type(val_arg) if val_arg is not None else ""
+            inferred = self._text_type(val_arg) if val_arg is not None else ""
             if inferred == "std::string":
                 return args[0] if args else 'std::string("")'
             if inferred == "bool":
                 if self._pine_v5_body:
                     self._refuse_v5_bool_na_observer(node, "str.tostring()", [val_arg])
-                return (f'({args[0]} ? std::string("true") : '
+                condition = self._bool_text_condition(val_arg, args[0])
+                return (f'({condition} ? std::string("true") : '
                         'std::string("false"))')
             if len(args) >= 2:
                 return f"pine_str_tostring_tv({args[0]}, {args[1]}, syminfo_mintick_)"
@@ -4004,7 +4059,10 @@ class CallVisitor:
         return f'std::string("") /* unsupported: str.{comment_name} */'
 
     def _visit_math_call(self, func_name: str, node: FuncCall) -> str:
-        args = _merge_kwargs(node.args, node.kwargs, sigs.get_param_names("math", func_name), self._visit_expr)
+        args = _merge_kwargs(
+            node.args, node.kwargs, sigs.get_param_names("math", func_name),
+            self._visit_expr, intrinsic=sigs.get_intrinsic("math", func_name),
+        )
         # Handle special cases first
         if func_name == "round" and len(args) == 2:
             return _math_round_digits_expr(args)
@@ -4051,6 +4109,11 @@ class CallVisitor:
         """
         # sig_key is like "strategy.entry" -> namespace="strategy", func_name="entry"
         parts = sig_key.split(".", 1)
+        validate_intrinsic_keywords(
+            sigs.get_intrinsic(parts[0], parts[1]) if len(parts) == 2
+            else sigs.get_intrinsic(None, sig_key),
+            node.kwargs,
+        )
         if len(parts) == 2:
             param_names = sigs.get_param_names(parts[0], parts[1]) or []
         else:

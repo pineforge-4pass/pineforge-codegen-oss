@@ -1,0 +1,13 @@
+//@version=6
+strategy("Earlier function local", overlay = true, initial_capital = 1000000)
+// Declaring first makes value equal this bar's close minus open.
+probe() =>
+    float lateValue = close - open
+    value = lateValue
+    value
+signalValue = probe()
+plot(signalValue, "signal")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

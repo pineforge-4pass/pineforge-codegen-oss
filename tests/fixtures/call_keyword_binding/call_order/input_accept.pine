@@ -1,0 +1,10 @@
+//@version=6
+strategy("Input positional prefix", initial_capital = 1000000, currency = currency.NONE)
+// Default 3 precedes title and optional lower bound.
+metric = input.int(3, title = "Length", minval = 1)
+if metric < 0
+    strategy.cancel("L")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

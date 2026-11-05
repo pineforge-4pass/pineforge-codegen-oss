@@ -1,7 +1,7 @@
 # Colors as TradingView reads them back
 
 Copied unchanged from the engine repository, branch `r5/w11-time-color` at
-`4d43785d` (lane W11-ENG-TIME-COLOR), `tests/fixtures/color_tv/`, where
+`4d43785d` (the time/color handling), `tests/fixtures/color_tv/`, where
 `tests/test_color_tapes.cpp` replays them through `include/pineforge/color.hpp`.
 Here `tests/test_e2e_color_tapes.py` replays them end to end, through the
 transpiler.

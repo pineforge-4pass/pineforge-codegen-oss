@@ -1,6 +1,6 @@
 # TAIL-F TradingView trade evidence
 
-Synthetic probes written for lane TAIL-F (the constructs of two open library
+Synthetic probes for the constructs of two open library
 chains the population imports: `TradingView/Request/3` with
 `TradingView/LibraryCOT/5`, and `thequantscience/XGBoostMini/1`) and their
 unedited TradingView trade exports. They contain no closed, scraped or

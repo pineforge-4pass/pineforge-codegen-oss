@@ -11,7 +11,7 @@ identical behaviour. Compatibility/control rows do not call this pin.
 
 Runtime probes reuse the native synthetic-bar harness, including its engine
 skip guard, from test_security_helper_local_var. A skip is not a runtime
-verdict: the supervisor must run these cases with the paired built engine.
+verdict: the maintainer must run these cases with the paired built engine.
 """
 
 from __future__ import annotations

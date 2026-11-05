@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Clean-room synthetic library for PineForge's library inliner tests
-// (lane TAIL-F). Not a published TradingView library. Its switch arms are
+// Not a published TradingView library. Its switch arms are
 // written on their `=>` lines, several statements joined by commas, as the
 // open TradingView/Request/3 library writes `=> runtime.error(...), ""`: a
 // default arm that stops the script, never taken, then the arm's value.

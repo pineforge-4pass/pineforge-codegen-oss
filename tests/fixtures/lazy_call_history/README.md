@@ -1,4 +1,4 @@
-# A user call's history below a lazy edge (lane TAIL-G)
+# A user call's history below a lazy edge
 
 A history read `f(...)[k]` on a user function's call that sits in the lazily
 evaluated right operand of `and`/`or`, or in a ternary's arm, reads the call's
@@ -10,7 +10,7 @@ the first bar of every session.
 `tg-lazyhist-btc15` is one `lab tv` export (channel `ws-report-v1`,
 `rangeProof` covered), byte for byte: `strategy.pine`, `tv_trades.csv` (times
 at UTC+8), `metrics.json`, `meta.json`. `metrics.json` `tvTradesCsvHash` is
-the sha256 of `tv_trades.csv`. The probe is synthetic (lane TAIL-G); no closed
+the sha256 of `tv_trades.csv`. The probe is synthetic; no closed
 or scraped strategy is involved. The command (`--no-note`: no campaign note was
 recorded):
 

@@ -1,0 +1,11 @@
+//@version=6
+strategy("Array function positional receiver", initial_capital = 1000000, currency = currency.NONE)
+values = array.from(2.0, 3.0)
+// Explicit id precedes the named index and selects the value 2.
+metric = array.get(values, index = 0)
+if metric < 0
+    strategy.cancel("L")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

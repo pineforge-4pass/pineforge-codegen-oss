@@ -1,6 +1,6 @@
 # request.security_lower_tf computed timeframe: TradingView trade evidence
 
-A synthetic probe written for lane CG-W9-SEC and its unedited TradingView
+A synthetic probe for lower-timeframe security and its unedited TradingView
 trade export. It contains no closed or scraped source. It was exported on
 2026-09-28 with
 

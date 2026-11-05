@@ -5,16 +5,20 @@ from collections.abc import Mapping
 from .lexer import Lexer
 from .parser import Parser
 from .analyzer import Analyzer
+from .analyzer.value_bindings import ValueBindings
 from .codegen import CodeGen
 from .cpp_allowlist import REASONS, check_generated_cpp
 from .diagnostic_codes import diagnostics_catalog, render_diagnostic
-from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+from .errors import (
+    CodegenInvariantError, CompileError, Diagnostic, Level, Phase, SourceLocation,
+)
 from .external_requests import lower_no_data_requests
 from .builtin_keywords import bind_builtin_keywords
 from .finite_ta_length import expand_finite_choice_extrema_lengths
 from .function_overloads import bind_scalar_overloads
 from .library_inline import inline_libraries
 from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
+from .method_binding import validate_call_argument_order
 from .pragmas import extract_pf_trace_pragmas
 from .request_discovery import discover_requests, request_sites
 from .request_feed_inventory import build_request_feed_inventory
@@ -43,6 +47,7 @@ def _parse_bounded(pine_source: str, filename: str, budget: TimeBudget | None = 
                  budget=budget).parse()
     check_ast_depth(ast, filename)
     budget.check(phase=Phase.PARSER)
+    validate_call_argument_order(ast, filename=filename)
     return ast, pragmas, budget
 
 
@@ -80,6 +85,7 @@ def _generate(pine_source: str, check_support: bool, filename: str,
             if any(d.level == Level.ERROR for d in support_diagnostics):
                 raise CompileError(support_diagnostics)
         budget.check(phase=Phase.ANALYZER)
+        ValueBindings(ast, filename, budget).resolve()
         sites = request_sites(ast)
         ast = lower_no_data_requests(ast)
         ast = specialize_security_contexts(ast, filename=filename)
@@ -103,8 +109,22 @@ def _generate(pine_source: str, check_support: bool, filename: str,
         # consumes them directly from the context to emit the on_bar tail
         # ``if (trace_enabled_) { trace(...); ... }`` block.
         ctx.pf_trace_pragmas = pragmas
-        gen = CodeGen(ctx, budget=budget)
-        cpp = gen.generate()
+        try:
+            gen = CodeGen(ctx, budget=budget)
+            cpp = gen.generate()
+        except CodegenInvariantError as error:
+            node_kind = error.node_kind
+            location = getattr(error.node, "loc", None)
+            if location is None:
+                raise RuntimeError(
+                    f"Internal error: AST node '{node_kind}' has no source "
+                    "location for its missing value lowering."
+                ) from error
+            raise CompileError([Diagnostic(
+                level=Level.ERROR, phase=Phase.CODEGEN, location=location,
+                message=f"Internal error: no value lowering for AST node '{node_kind}'.",
+                hint="Report this translator error to PineForge.",
+            )]) from error
         budget.check(phase=Phase.CODEGEN)
         apart = gen.block_locals_needing_names - renamed
         if apart:

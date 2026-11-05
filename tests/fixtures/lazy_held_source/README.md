@@ -1,4 +1,4 @@
-# Lazily executed `ta.mom` held-source tape (lane W8A-SIGSTATE-1)
+# Lazily executed `ta.mom` held-source tape
 
 A `ta.change` / `ta.mom` / `ta.roc` call below a lazy edge (a short-circuit
 `and`/`or` right operand or a ternary arm) reads the call's own `source`

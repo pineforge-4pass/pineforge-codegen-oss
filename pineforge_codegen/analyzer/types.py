@@ -39,10 +39,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from .. import signatures as sigs
 from ..ast_nodes import (
-    ASTNode, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall, Identifier, IfStmt,
+    ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall, Identifier, IfStmt,
     MemberAccess, NaLiteral, NumberLiteral, StringLiteral, Subscript, Ternary,
-    SwitchStmt, TupleLiteral, UnaryOp,
+    SwitchStmt, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..errors import Phase
 from ..matrix_overloads import matrix_sum_has_rhs
@@ -52,6 +53,7 @@ from ..symbols import (
     method_receiver_type_name,
     unify_type_specs,
 )
+from .operators import join_value_types, reference_value_type
 
 # Drawing-objects-as-data type names (spec §4.1). Defined locally — the
 # analyzer must not import from ``codegen`` (codegen imports analyzer, so the
@@ -647,8 +649,9 @@ class TypeHelper:
             if ns == "map" and func in {
                 "put", "get", "remove", "contains", "size", "keys",
                 "values", "copy", "put_all", "clear",
-            } and value.args:
-                recv_spec = self._type_spec_from_expr(value.args[0])
+            }:
+                receiver = value.args[0] if value.args else value.kwargs.get("id")
+                recv_spec = self._type_spec_from_expr(receiver)
                 if recv_spec is not None and recv_spec.kind == "map":
                     if func in ("put", "get", "remove"):
                         return recv_spec.value
@@ -888,71 +891,30 @@ class TypeHelper:
 
         callee = value.callee
         method = callee.member
-        receiver = None
+        param_names = sigs.get_param_names("map", method)
+        if param_names is None:
+            return None
         if isinstance(callee.object, Identifier) and callee.object.name == "map":
-            # Functional form: map.method(id, ...). Keyword-only receiver
-            # routing remains a separate residual, so require the established
-            # positional receiver here.
-            functional_arity = {
-                "clear": 1,
-                "keys": 1,
-                "values": 1,
-                "copy": 1,
-                "put_all": 2,
-                "get": 2,
-                "remove": 2,
-                "put": 3,
-            }.get(method)
-            if (
-                functional_arity is not None
-                and len(value.args) == functional_arity
-                and not value.kwargs
-            ):
-                receiver = value.args[0]
+            receiver = value.args[0] if value.args else value.kwargs.get("id")
         elif isinstance(callee.object, Identifier):
             # Global/local/typed-parameter method forms only. Do not infer an
             # arbitrary expression receiver that codegen cannot route.
-            is_parameter = (
-                parameter_specs is not None
-                and callee.object.name in parameter_specs
-            )
-            valid_method_shape = False
-            expected_arity = {
-                "clear": 0,
-                "keys": 0,
-                "values": 0,
-                "copy": 0,
-                "put_all": 1,
-                "get": 1,
-                "remove": 1,
-                "put": 2,
-            }.get(method)
-            if expected_arity is not None:
-                valid_method_shape = (
-                    len(value.args) == expected_arity and not value.kwargs
-                )
-            if is_parameter and not valid_method_shape:
-                if method == "put_all":
-                    valid_method_shape = (
-                        not value.args and set(value.kwargs) == {"id2"}
-                    )
-                elif method in ("get", "remove"):
-                    valid_method_shape = (
-                        not value.args and set(value.kwargs) == {"key"}
-                    )
-                elif method == "put":
-                    valid_method_shape = (
-                        (
-                            len(value.args) == 1
-                            and set(value.kwargs) == {"value"}
-                        )
-                        or (
-                            not value.args
-                            and set(value.kwargs) == {"key", "value"}
-                        )
-                    )
-            if valid_method_shape:
-                receiver = callee.object
+            param_names = param_names[1:]
+            receiver = callee.object
+        else:
+            return None
+
+        # Match the map binder's positional-prefix/named-slot rule without
+        # changing the codegen diagnostics of malformed calls.
+        if len(value.args) > len(param_names):
+            return None
+        if any(name not in param_names for name in value.kwargs):
+            return None
+        if any(name in value.kwargs for name in param_names[:len(value.args)]):
+            return None
+        provided = set(param_names[:len(value.args)]) | set(value.kwargs)
+        if provided != set(param_names):
+            return None
         if receiver is None:
             return None
 
@@ -1391,3 +1353,136 @@ class TypeHelper:
             if isinstance(val, (int, float)):
                 return -val
         return None
+
+
+class OperatorTypeQuery(TypeHelper):
+    """Read refusal proofs without changing storage or callable return facts."""
+
+    def __init__(self, analyzer, parameter_types):
+        self._analyzer = analyzer
+        self._parameter_types = parameter_types
+
+    def __getattr__(self, name):
+        return getattr(self._analyzer, name)
+
+    def check_body(self, body):
+        for node in body:
+            self._check_node(node)
+
+    def _check_node(self, node):
+        if not isinstance(node, ASTNode):
+            if isinstance(node, (tuple, list)):
+                for child in node:
+                    self._check_node(child)
+            elif isinstance(node, dict):
+                for child in node.values():
+                    self._check_node(child)
+            return
+        if isinstance(node, VarDecl):
+            self._check_node(node.value)
+            spec = (
+                TypeSpec("enum", name=node.type_hint)
+                if node.type_hint in self._enum_defs else
+                self._type_spec_from_hint(node.type_hint) or reference_value_type(node.type_hint)
+                if node.type_hint else
+                self._analyzer._operator_operand_type(node.value, self._parameter_types)
+            )
+            self._parameter_types[node.name] = spec
+            return
+        if isinstance(node, Assignment):
+            self._check_node(node.value)
+            if node.op != ":=":
+                self._analyzer._check_operator_operands(
+                    node, node.op[:-1], (node.target, node.value), self._parameter_types,
+                )
+            if isinstance(node.target, Identifier):
+                name = node.target.name
+                if self._parameter_types.get(name) is None:
+                    self._parameter_types[name] = self._analyzer._operator_operand_type(
+                        node.value, self._parameter_types,
+                    )
+            return
+        if isinstance(node, TupleAssign):
+            self._check_node(node.value)
+            # A tuple's legacy scalar slots do not establish operand proofs.
+            for name in node.names:
+                self._parameter_types[name] = None
+            return
+        if isinstance(node, (IfStmt, SwitchStmt)):
+            if isinstance(node, IfStmt):
+                self._check_node(node.condition)
+                bodies = [node.body, node.else_body]
+            else:
+                self._check_node(node.expr)
+                for condition, _body in node.cases:
+                    self._check_node(condition)
+                    if node.expr is not None and condition is not None:
+                        self._analyzer._check_operator_operands(
+                            node, "==", (node.expr, condition), self._parameter_types,
+                        )
+                bodies = [body for _condition, body in node.cases] + [node.default_body]
+            branches = []
+            for body in bodies:
+                local_types = dict(self._parameter_types)
+                OperatorTypeQuery(self._analyzer, local_types).check_body(body)
+                branches.append(local_types)
+            for name in list(self._parameter_types):
+                spec = branches[0].get(name)
+                for branch in branches[1:]:
+                    other = branch.get(name)
+                    spec = join_value_types(spec, other) if spec is not None and other is not None else None
+                self._parameter_types[name] = spec
+            return
+        # Loop bodies have their own lexical bindings. Shadow loop variables
+        # before checking their operators, rather than borrowing a global.
+        body = getattr(node, "body", None)
+        if isinstance(body, list):
+            local_types = dict(self._parameter_types)
+            names = [getattr(node, "var", None), *(getattr(node, "vars", None) or ())]
+            for name in names:
+                if name is not None:
+                    local_types[name] = None
+            for field, value in vars(node).items():
+                if field not in {"loc", "annotations", "body"}:
+                    self._check_node(value)
+            OperatorTypeQuery(self._analyzer, local_types).check_body(body)
+            return
+        for field, value in vars(node).items():
+            if field not in {"loc", "annotations"}:
+                self._check_node(value)
+        if isinstance(node, BinOp):
+            op, operands = node.op, (node.left, node.right)
+        elif isinstance(node, UnaryOp):
+            op, operands = node.op, (node.operand,)
+        elif isinstance(node, Ternary):
+            op, operands = "?:", (node.condition, node.true_val, node.false_val)
+        else:
+            return
+        self._analyzer._check_operator_operands(node, op, operands, self._parameter_types)
+
+    def _type_spec_from_expr(self, value, **kwargs):
+        if isinstance(value, Identifier):
+            return self._analyzer._operator_operand_type(
+                value, self._parameter_types,
+            )
+        return super()._type_spec_from_expr(value, **kwargs)
+
+    def _visit(self, node):
+        # TypeHelper's array.from fallback normally visits its arguments.
+        # Here it asks for facts only, so no TA or request is registered again.
+        spec = self._analyzer._operator_operand_type(node, self._parameter_types)
+        if spec is not None and spec.kind == "primitive":
+            return next((ptype for ptype in PineType if ptype.value == spec.name),
+                        PineType.UNKNOWN)
+        return PineType.UNKNOWN
+
+    def _array_from_element_spec(self, value):
+        # Array construction must not recover a coarse symbol/call result
+        # after the operator query deliberately left its source unresolved.
+        return self._analyzer._operator_operand_type(value, self._parameter_types)
+
+    @staticmethod
+    def _pine_type_to_spec(pine_type):
+        if pine_type in {PineType.UNKNOWN, PineType.VOID}:
+            return None
+        return TypeSpec.primitive(pine_type.value)

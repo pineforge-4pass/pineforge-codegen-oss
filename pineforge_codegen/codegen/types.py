@@ -50,6 +50,7 @@ from ..cpp_names import cpp_identifier_fragment
 from ..errors import Phase
 from ..external_requests import UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
+from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
 from ..matrix_overloads import matrix_sum_has_rhs
 from ..symbols import (
     PineType,
@@ -261,7 +262,7 @@ class TypeInferer:
                 or owner_spec.name not in self._udt_defs):
             return None
         return self._udt_array_field_cpp(
-            self._udt_field_type_specs.get(owner_spec.name, {}).get(node.member),
+            self._type_spec_from_expr(node),
             owner_spec.name)
 
     # Builtin namespaces whose calls never return a user object.
@@ -777,23 +778,27 @@ class TypeInferer:
         bound = self._int_arith_bound(node, owner_info)
         return bound is not None and bound > (1 << 31) - 1
 
-    def _int_arith_bound(self, node: BinOp, owner_info=None) -> int | None:
+    def _int_arith_bound(self, node: BinOp, owner_info=None,
+                         binding_bounds=None) -> int | None:
         """The bound on ``|value|`` of a ``+ - *`` over two 32-bit integer
         operands, uncapped; None when an operand is not one."""
-        left = self._narrow_int_bound(node.left, owner_info)
+        binding_bounds = {} if binding_bounds is None else binding_bounds
+        left = self._narrow_int_bound(node.left, owner_info, binding_bounds)
         if left is None:
             return None
-        right = self._narrow_int_bound(node.right, owner_info)
+        right = self._narrow_int_bound(node.right, owner_info, binding_bounds)
         if right is None:
             return None
         return left * right if node.op == "*" else left + right
 
-    def _narrow_int_bound(self, node, owner_info=None) -> int | None:
+    def _narrow_int_bound(self, node, owner_info=None,
+                          binding_bounds=None) -> int | None:
         """A bound on ``|value|`` of an integer expression the C++ holds in a
         32-bit ``int``, else None (a double, a 64-bit integer, or a shape this
         does not know). Literals and inlined constants are exact, an
         ``input.int`` is its declared range (its default and 2**24 without
         one), and any other runtime integer is ``_RUNTIME_INT_BOUND``."""
+        binding_bounds = {} if binding_bounds is None else binding_bounds
         if isinstance(node, NumberLiteral):
             value = node.value
             if type(value) is int and self._int_fits_int32(value):
@@ -802,19 +807,43 @@ class TypeInferer:
         if isinstance(node, UnaryOp):
             if node.op != "-":
                 return None
-            return self._narrow_int_bound(node.operand, owner_info)
+            return self._narrow_int_bound(node.operand, owner_info, binding_bounds)
         if isinstance(node, BinOp):
             if node.op not in ("+", "-", "*"):
                 return None
-            bound = self._int_arith_bound(node, owner_info)
+            bound = self._int_arith_bound(node, owner_info, binding_bounds)
             # A node past int32 is computed in 64 bits: no longer 32-bit.
             return bound if bound is not None and bound <= (1 << 31) - 1 else None
         if isinstance(node, Ternary):
-            arms = [self._narrow_int_bound(arm, owner_info)
+            arms = [self._narrow_int_bound(arm, owner_info, binding_bounds)
                     for arm in (node.true_val, node.false_val)]
             return None if None in arms else max(arms)
         if isinstance(node, Identifier):
-            return self._narrow_int_name_bound(node.name, owner_info)
+            bound = self._narrow_int_name_bound(node.name, owner_info)
+            if bound is not None:
+                return bound
+            declaration = self.ctx.identifier_binding_nodes.get(id(node))
+            if (not isinstance(declaration, VarDecl)
+                    or self.ctx.identifier_binding_scopes.get(id(node)) == "global"
+                    or declaration.type_hint not in (None, "int")
+                    or (declaration.annotations or {}).get(FLOAT_REASSIGNMENT)):
+                return None
+            binding = self._int_value_binding(node, owner_info)
+            if binding is None:
+                return None
+            key, values = binding
+            if key not in binding_bounds:
+                # A shadow's own writes decide its family, not a same-named
+                # global. Memoize shared declarations; a cycle alone proves
+                # no bound and never starts another walk of its writes.
+                binding_bounds[key] = None
+                bounds = [self._narrow_int_bound(value, owner, binding_bounds)
+                          for value, owner in values]
+                if bounds and all(value is not None for value in bounds):
+                    candidate = max(self._RUNTIME_INT_BOUND, *bounds)
+                    if self._int_fits_int32(candidate):
+                        binding_bounds[key] = candidate
+            return binding_bounds[key]
         return None
 
     @contextlib.contextmanager
@@ -933,7 +962,7 @@ class TypeInferer:
         if (getattr(self, "_int_width_scan_depth", 0) == 0
                 and self._literal_wide_global(name)):
             # A top-level int constant past int32 initializes an int64_t
-            # slot (CGINT5a), reassigned or not: where it is emitted it is no
+            # slot, reassigned or not: where it is emitted it is no
             # 32-bit operand. A width scan keeps it one: it cannot tell the
             # block local that may shadow it there (``int g = bar_index``),
             # and a product it reads is 64-bit either way.
@@ -965,8 +994,282 @@ class TypeInferer:
         """Whether ``node`` is a 64-bit ``+ - *`` (``_int_arith_leaves_int32``)
         over an operand that can be na, which ``_wide_int_arith_cpp`` emits
         as a double."""
-        return (isinstance(node, BinOp) and self._int_arith_leaves_int32(node)
-                and self._int_operand_may_be_na(node))
+        return (isinstance(node, BinOp)
+                and (self._arithmetic_has_wide_int_operand(node)
+                     or (self._int_arith_leaves_int32(node)
+                         and self._int_operand_may_be_na(node))))
+
+    def _arithmetic_has_wide_int_operand(self, node) -> bool:
+        """Arithmetic over an integer that crossed a widened value boundary.
+
+        Existing 64-bit chart readings, guarded history parameters and literal
+        slots keep their lowering. Newly widened parameters and collection
+        reads must preserve missingness and Pine's binary64 arithmetic.
+        """
+        if not isinstance(node, BinOp) or node.op not in {"+", "-", "*"}:
+            return False
+        types = (self._infer_type(node.left), self._infer_type(node.right))
+        if not all(t in {"int", "int64_t"} for t in types):
+            return False
+        owner = self._func_info_map.get(
+            getattr(self, "_active_func_name", "") or "")
+        seen = set()
+        return any(self._crosses_wide_int_boundary(arg, owner, seen)
+                   for arg in (node.left, node.right))
+
+    def _crosses_wide_int_boundary(self, expr, owner, seen) -> bool:
+        """Follow values, excluding the old chart/literal width sources.
+
+        All paths share this query's visited set: a repeated node has the
+        same successors, so only its first visit needs to expand them.
+        """
+        if expr is None:
+            return False
+        key = (id(expr), getattr(owner, "name", ""))
+        if key in seen:
+            return False
+        seen.add(key)
+        if isinstance(expr, ExprStmt):
+            return self._crosses_wide_int_boundary(expr.expr, owner, seen)
+        if isinstance(expr, (Assignment, VarDecl)):
+            return self._crosses_wide_int_boundary(expr.value, owner, seen)
+        if isinstance(expr, Identifier):
+            declaration = self.ctx.identifier_decl_bindings.get(id(expr))
+            if (owner is not None and expr.name in owner.node.params
+                    and declaration in (None, (id(owner.node), expr.name))):
+                index = owner.node.params.index(expr.name)
+                # Only a newly widened scalar parameter is a boundary.
+                # Chart-fed and history parameters keep their old lowering.
+                return (self._param_is_integer_scalar(owner, index)
+                        and self._func_param_int_cpp_type(
+                            owner, index, None) == "int64_t"
+                        and not self._legacy_wide_int_value(expr, owner, set()))
+            binding = self._int_value_binding(expr, owner)
+            if binding is not None:
+                # Different reads share one declaration's whole write list.
+                key = ("binding", binding[0])
+                if key in seen:
+                    return False
+                seen.add(key)
+                crossed = any(self._crosses_wide_int_boundary(
+                    value, lexical_owner, seen)
+                    for value, lexical_owner in binding[1])
+                if not crossed:
+                    return False
+                decl = self.ctx.identifier_binding_nodes.get(id(expr))
+                return not (
+                    (isinstance(decl, VarDecl)
+                     and self._literal_wide_global(expr.name, decl))
+                    or (isinstance(decl, VarDecl)
+                        and self.ctx.identifier_binding_scopes.get(id(expr)) == "global"
+                        and not (decl.is_var or decl.is_varip)
+                        and self._expr_is_int64_builtin(decl.value))
+                    or self._legacy_wide_int_value(expr, owner, set()))
+            return False
+        if isinstance(expr, MemberAccess):
+            type_name = self._udt_receiver_type_name(expr.object, owner)
+            return (type_name, expr.member) in self._wide_udt_int_fields()
+        if isinstance(expr, (Subscript, UnaryOp)):
+            value = expr.object if isinstance(expr, Subscript) else expr.operand
+            return self._crosses_wide_int_boundary(value, owner, seen)
+        if isinstance(expr, BinOp):
+            return expr.op not in self._NON_INTEGER_BINOPS and any(
+                self._crosses_wide_int_boundary(arg, owner, seen)
+                for arg in (expr.left, expr.right))
+        if isinstance(expr, Ternary):
+            return any(self._crosses_wide_int_boundary(arg, owner, seen)
+                       for arg in (expr.true_val, expr.false_val))
+        if isinstance(expr, IfStmt):
+            return any(body and self._crosses_wide_int_boundary(
+                body[-1], owner, seen) for body in (expr.body, expr.else_body))
+        if isinstance(expr, SwitchStmt):
+            return any(body and self._crosses_wide_int_boundary(
+                body[-1], owner, seen)
+                for body in [*(body for _case, body in expr.cases),
+                             expr.default_body])
+        if isinstance(expr, FuncCall):
+            name, namespace = self._resolve_callee(expr.callee)
+            plan = getattr(self, "_array_widths", None)
+            if (plan is not None and not plan.wide.isdisjoint(
+                    plan.elements.get(id(expr), ()))):
+                return not self._legacy_wide_int_value(expr, owner, set())
+            callees = self._wide_callable_args(expr)
+            if callees:
+                return any(info.node.body and self._crosses_wide_int_boundary(
+                    info.node.body[-1], info, seen) for info, _bound in callees)
+            if ((namespace is None and name in {"int", "nz", "fixnan"})
+                    or (namespace == "math" and name in {"abs", "min", "max"})):
+                return any(self._crosses_wide_int_boundary(arg, owner, seen)
+                           for arg in expr.args)
+        return False
+
+    def _int_boundary_inputs(self):
+        """Actuals and array writes, keyed by parameter or declaration identity."""
+        cached = getattr(self, "_int_boundary_inputs_cache", None)
+        if cached is not None:
+            return cached
+        parameters, arrays = {}, {}
+        bodies = [(None, [stmt for stmt in self.ctx.ast.body
+                          if not isinstance(stmt, (FuncDef, MethodDef))])]
+        bodies.extend((info, info.node.body) for info in self.ctx.func_infos
+                      if info.node is not None)
+        for owner, body in bodies:
+            for call in self._walk_ast_list(body):
+                if not isinstance(call, FuncCall):
+                    continue
+                for info, bound in self._wide_callable_args(call):
+                    for index, value in bound:
+                        written = (
+                            isinstance(call.callee, Identifier)
+                            and (index < len(call.args)
+                                 or info.node.params[index] in call.kwargs))
+                        parameters.setdefault((info.name, index), []).append(
+                            (value, owner, written))
+                pair = self._array_receiver_and_value(call)
+                if pair is None:
+                    continue
+                _name, namespace = self._resolve_callee(call.callee)
+                receiver = (
+                    (call.args[0] if call.args else call.kwargs.get("id"))
+                    if namespace == "array" else call.callee.object)
+                binding = self._int_value_binding(receiver, owner)
+                if binding is not None:
+                    arrays.setdefault(binding[0], []).append((pair[1], owner))
+        self._int_boundary_inputs_cache = parameters, arrays
+        return parameters, arrays
+
+    def _legacy_wide_int_value(self, expr, owner, seen, epoch_only=False) -> bool:
+        """Whether the existing chart/array/parameter lowering already held 64 bits.
+
+        Follow each declaration's own writes and written scalar actuals.
+        Array elements use the established epoch-only sources; scalar slots
+        also admit existing wide constants, products and record writes.
+        """
+        if expr is None:
+            return False
+        key = ("expr", id(expr), getattr(owner, "name", ""), epoch_only)
+        if key in seen:
+            return False
+        seen.add(key)
+        if isinstance(expr, ExprStmt):
+            return self._legacy_wide_int_value(expr.expr, owner, seen, epoch_only)
+        if isinstance(expr, Identifier):
+            declaration = self.ctx.identifier_decl_bindings.get(id(expr))
+            if (owner is not None and expr.name in owner.node.params
+                    and declaration in (None, (id(owner.node), expr.name))):
+                index = owner.node.params.index(expr.name)
+                if expr.name in self.ctx.func_series_vars.get(owner.name, ()):
+                    return self._series_param_element_cpp_type(owner, index) == "int64_t"
+                actuals = self._int_boundary_inputs()[0].get((owner.name, index), ())
+                return any(written and self._legacy_wide_int_value(
+                    value, caller, seen, epoch_only)
+                           for value, caller, written in actuals)
+            binding = self._int_value_binding(expr, owner)
+            if binding is not None:
+                key = ("binding", binding[0], epoch_only)
+                if key in seen:
+                    return False
+                seen.add(key)
+                return any(self._legacy_wide_int_value(
+                    value, lexical_owner, seen, epoch_only)
+                           for value, lexical_owner in binding[1])
+            return self._expr_is_int64_builtin(expr)
+        if isinstance(expr, (Subscript, UnaryOp)):
+            if isinstance(expr, UnaryOp) and self._literal_overflows_int32(expr):
+                return True
+            value = expr.object if isinstance(expr, Subscript) else expr.operand
+            return self._legacy_wide_int_value(value, owner, seen, epoch_only)
+        if isinstance(expr, BinOp):
+            return expr.op not in self._NON_INTEGER_BINOPS and (
+                self._literal_overflows_int32(expr)
+                or (not epoch_only and self._int_arith_leaves_int32(expr, owner))
+                or any(self._legacy_wide_int_value(arg, owner, seen, epoch_only)
+                       for arg in (expr.left, expr.right)))
+        if isinstance(expr, Ternary):
+            return any(self._legacy_wide_int_value(arg, owner, seen, epoch_only)
+                       for arg in (expr.true_val, expr.false_val))
+        if isinstance(expr, (IfStmt, SwitchStmt)):
+            bodies = ([expr.body, expr.else_body] if isinstance(expr, IfStmt)
+                      else [*(body for _case, body in expr.cases), expr.default_body])
+            return any(body and self._legacy_wide_int_value(
+                body[-1], owner, seen, epoch_only)
+                       for body in bodies)
+        if isinstance(expr, MemberAccess):
+            if epoch_only:
+                return False
+            type_name = self._udt_receiver_type_name(expr.object, owner)
+            self._wide_udt_int_fields()
+            return any(
+                field == (type_name, expr.member)
+                and (self._holds_wide_int_constant(value)
+                     or self._legacy_wide_int_value(value, lexical_owner, seen))
+                for field, value, lexical_owner in getattr(
+                    self, "_udt_int_field_writes", ()))
+        if not isinstance(expr, FuncCall):
+            return False
+        name, namespace = self._resolve_callee(expr.callee)
+        if namespace is None and self._expr_is_int64_builtin(expr):
+            return True
+        if name in self._WIDE_ARRAY_ELEMENT_READS:
+            receiver = (
+                (expr.args[0] if expr.args else expr.kwargs.get("id"))
+                if namespace == "array" else
+                expr.callee.object if isinstance(expr.callee, MemberAccess) else None)
+            if isinstance(receiver, Identifier):
+                binding = self._int_value_binding(receiver, owner)
+                if binding is not None:
+                    values = list(self._int_boundary_inputs()[1].get(binding[0], ()))
+                    for value, lexical_owner in binding[1]:
+                        if not isinstance(value, FuncCall):
+                            continue
+                        ctor, ns = self._resolve_callee(value.callee)
+                        if ns != "array":
+                            continue
+                        if ctor == "from":
+                            values.extend((arg, lexical_owner) for arg in value.args)
+                        elif ctor == "new_int" or (
+                                ctor == "new" and self._template_args_from_call(value) == ["int"]):
+                            initial = (value.args[1] if len(value.args) > 1
+                                       else value.kwargs.get("initial_value"))
+                            values.append((initial, lexical_owner))
+                    return any(self._legacy_wide_int_value(
+                        value, lexical_owner, seen, epoch_only=True)
+                               for value, lexical_owner in values)
+        if namespace == "request" and name == "security":
+            return self._legacy_wide_int_value(
+                self._security_payload_node(expr), owner, seen, epoch_only)
+        if ((namespace is None and name in {"int", "float", "nz", "fixnan"})
+                or (namespace == "math" and name in {"abs", "min", "max"})):
+            return any(self._legacy_wide_int_value(arg, owner, seen, epoch_only)
+                       for arg in expr.args)
+        for info, _bound in self._wide_callable_args(expr):
+            if (self._callsite_callable_return_pine_type(info, None) != PineType.INT
+                    or not info.node.body):
+                continue
+            if any(param in self.ctx.func_series_vars.get(info.name, ())
+                   and self._series_param_element_cpp_type(info, index) == "int64_t"
+                   for index, param in enumerate(info.node.params)):
+                return True
+            terminal = self._selection_terminal_expr(info.node.body)
+            if ((not epoch_only and self._holds_wide_int_constant(terminal))
+                    or self._legacy_wide_int_value(terminal, info, seen, epoch_only)):
+                return True
+        return False
+
+    def _wide_value_arithmetic_cpp(self, node, left, right):
+        """Pine numeric arithmetic after a wide storage/parameter boundary.
+
+        TradingView uses binary64 numeric values above 2**53: a measured
+        subtraction there yields 16, not the exact-integer delta 17.
+        Contemporary timestamps retain their full value, and an integer na
+        never becomes finite. Legacy integer products keep their lowering;
+        this path follows the types of widened parameters and array reads.
+        """
+        return (f"[&]() -> double {{ auto _pf_wide_l = ({left}); "
+                f"auto _pf_wide_r = ({right}); "
+                f"return (is_na(_pf_wide_l) || is_na(_pf_wide_r)) "
+                f"? na<double>() : (static_cast<double>(_pf_wide_l) {node.op} "
+                f"static_cast<double>(_pf_wide_r)); }}()")
 
     def _holds_na_aware_wide_double(self, expr) -> bool:
         """Whether ``expr`` holds such a double-valued product: an integer
@@ -1052,13 +1355,15 @@ class TypeInferer:
         """The user type of a field read's receiver: a method's own receiver
         parameter by its declared type, anything else by its TypeSpec."""
         owner_node = getattr(owner_info, "node", None)
-        if (getattr(owner_info, "is_udt_method", False)
-                and owner_node is not None and owner_node.params
+        if (owner_node is not None
                 and isinstance(receiver, Identifier)
-                and receiver.name == owner_node.params[0]):
+                and receiver.name in owner_node.params):
             specs = list(getattr(owner_info, "param_type_specs", ()) or ())
-            return (method_receiver_type_name(specs[0] if specs else None)
-                    or getattr(owner_info, "udt_type_name", None))
+            index = owner_node.params.index(receiver.name)
+            return (method_receiver_type_name(
+                        specs[index] if index < len(specs) else None)
+                    or (getattr(owner_info, "udt_type_name", None)
+                        if index == 0 else None))
         try:
             spec = self._type_spec_from_expr(receiver)
         except Exception as exc:  # an unresolvable receiver holds no wide field
@@ -1129,16 +1434,21 @@ class TypeInferer:
                 continue
             for child in self._walk_ast(stmt):
                 collect(child, None)
-        changed = True
-        with self._int_width_scan(epoch_only=False):
-            while changed:
-                changed = False
-                for key, value, owner in writes:
-                    if key not in fields and (
-                            self._holds_wide_int_constant(value)
-                            or self._expr_returns_wide_int(value, owner, set(), None)):
-                        fields.add(key)
-                        changed = True
+        self._udt_int_field_writes = writes
+        self._wide_udt_int_field_scanning = True
+        try:
+            changed = True
+            with self._int_width_scan(epoch_only=False):
+                while changed:
+                    changed = False
+                    for key, value, owner in writes:
+                        if key not in fields and (
+                                self._holds_wide_int_constant(value)
+                                or self._expr_returns_wide_int(value, owner, set(), None)):
+                            fields.add(key)
+                            changed = True
+        finally:
+            self._wide_udt_int_field_scanning = False
         return fields
 
     def _array_receiver_and_value(self, call):
@@ -1248,7 +1558,17 @@ class TypeInferer:
 
     def _widen_array_spec_for_name(self, name, spec):
         """``array<int>`` -> ``array<int64>`` when ``name`` is a wide int
-        array; every other spec (and ``None``) passes through unchanged."""
+        array. A wide tuple binding may supply an otherwise absent spec."""
+        plan = getattr(self, "_array_widths", None)
+        owner = getattr(self, "_active_func_name", None) or ""
+        storage = plan.names.get((owner, name), ()) if plan is not None else ()
+        if plan is not None:
+            if not plan.wide.isdisjoint(storage):
+                # The plan resolves Pine integer expressions before lexical
+                # loop scopes unwind; a captured float fallback is not a
+                # competing element type for that same constructor.
+                spec = plan.name_specs.get((owner, name), spec)
+            return plan.widen(spec, storage)
         if (spec is None or spec.kind != "array" or spec.element is None
                 or spec.element.kind != "primitive"
                 or spec.element.name != "int"):
@@ -1256,6 +1576,18 @@ class TypeInferer:
         if name in self._wide_int_array_names():
             return TypeSpec.array(TypeSpec.primitive("int64"))
         return spec
+
+    def _array_param_spec(self, info, index, spec):
+        plan = getattr(self, "_array_widths", None)
+        if plan is None or info.node is None or index >= len(info.node.params):
+            return spec
+        return plan.widen(spec, {("name", info.name, info.node.params[index])})
+
+    def _array_return_spec(self, info):
+        spec = getattr(info, "return_type_spec", None)
+        plan = getattr(self, "_array_widths", None)
+        return (plan.widen(spec, {("return", info.name)})
+                if plan is not None else spec)
 
     def _collection_spec_for_name_raw(self, name: str) -> TypeSpec | None:
         """Resolve collection metadata with lexical precedence.
@@ -1418,6 +1750,10 @@ class TypeInferer:
                         return TypeSpec.primitive("int64")
                     return TypeSpec.primitive("int")
             return None
+        if isinstance(node, FuncCall):
+            func_name, namespace = self._resolve_callee(node.callee)
+            if namespace is None and func_name in {"int", "float", "bool", "string"}:
+                return TypeSpec.primitive(func_name)
         if self._is_color_value(node):
             # A color is a packed-ARGB ``int64_t``: ``array.from(color.red,
             # color.new(c, 50))`` is ``std::vector<int64_t>``, which a
@@ -1595,6 +1931,25 @@ class TypeInferer:
         return specs
 
     def _type_spec_from_expr(
+        self,
+        node,
+        *,
+        _ternary_arms: tuple[TypeSpec | None, TypeSpec | None, bool] | None = None,
+    ) -> TypeSpec | None:
+        spec = self._type_spec_from_expr_raw(node, _ternary_arms=_ternary_arms)
+        plan = getattr(self, "_array_widths", None)
+        if plan is None:
+            return spec
+        if not plan.wide.isdisjoint(plan.elements.get(id(node), ())):
+            return TypeSpec.primitive("int64")
+        storage = plan.nodes.get(id(node), ())
+        if not plan.wide.isdisjoint(storage):
+            # Outside the callable's emission scope, an array-valued tuple
+            # element still needs the type resolved in its lexical owner.
+            return plan.widen(plan.specs.get(id(node), spec), storage)
+        return spec
+
+    def _type_spec_from_expr_raw(
         self,
         node,
         *,
@@ -1785,13 +2140,17 @@ class TypeInferer:
         if isinstance(node, MemberAccess):
             owner = self._type_spec_from_expr(node.object)
             if owner is not None and owner.kind == "udt" and owner.name:
-                return (self._udt_field_type_specs.get(owner.name) or {}).get(node.member)
+                spec = (self._udt_field_type_specs.get(owner.name) or {}).get(node.member)
+                plan = getattr(self, "_array_widths", None)
+                return (plan.widen(spec, {("field", owner.name, node.member)})
+                        if plan is not None else spec)
             return None
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
             if namespace is None:
                 func_info = self._func_info_map.get(func_name)
-                return_spec = getattr(func_info, "return_type_spec", None)
+                return_spec = (self._array_return_spec(func_info)
+                               if func_info is not None else None)
                 if return_spec is not None:
                     return return_spec
                 udt_return = getattr(func_info, "udt_return_type", None)
@@ -1814,9 +2173,7 @@ class TypeInferer:
                     method_info is not None
                     and getattr(method_info, "is_udt_method", False)
                 ):
-                    return_spec = getattr(
-                        method_info, "return_type_spec", None
-                    )
+                    return_spec = self._array_return_spec(method_info)
                     if return_spec is not None:
                         return return_spec
                     udt_return = getattr(
@@ -1967,8 +2324,9 @@ class TypeInferer:
             if namespace == "map" and func_name in {
                 "put", "get", "remove", "contains", "size", "keys",
                 "values", "copy", "put_all", "clear",
-            } and node.args:
-                receiver_spec = self._type_spec_from_expr(node.args[0])
+            }:
+                receiver_node = node.args[0] if node.args else node.kwargs.get("id")
+                receiver_spec = self._type_spec_from_expr(receiver_node)
                 if receiver_spec is not None and receiver_spec.kind == "map":
                     if func_name in ("put", "get", "remove"):
                         return receiver_spec.value
@@ -2534,10 +2892,20 @@ class TypeInferer:
 
     def _type_for_decl(self, node: VarDecl) -> str:
         """Determine the C++ type for a ``VarDecl``: explicit hint, then symbol, then RHS inference."""
+        if (node.annotations or {}).get(FLOAT_REASSIGNMENT):
+            return "double"
         history_value_cpp = (self._array_history_value_cpp_type(node.name)
                              if not getattr(self, "_active_func_name", None) else None)
         if history_value_cpp is not None:
             return history_value_cpp
+        plan = getattr(self, "_array_widths", None)
+        if plan is not None:
+            spec = plan.specs.get(id(node)) or (
+                self._type_spec_from_hint_name(node.type_hint)
+                or self._type_spec_from_expr(node.value))
+            wide_spec = plan.widen(spec, plan.nodes.get(id(node), ()))
+            if wide_spec != spec:
+                return self._type_spec_to_cpp(wide_spec)
         if (node.type_hint == "int"
                 and not getattr(self, "_active_func_name", None)
                 and self._numeric_na_value(node.value)):
@@ -2622,17 +2990,20 @@ class TypeInferer:
         if handle is not None:
             return handle
         sym = self._variable_symbol(name)
-        # A float or bool an epoch reaches keeps its type: the analyzer types
-        # every request.security value float (a double holds an epoch
-        # exactly), and a name is keyed by spelling across scopes.
-        if self._is_int64_builtin_init(name) and (
-            sym is None
-            or sym.pine_type not in (PineType.FLOAT, PineType.BOOL, PineType.STRING)
+        local = self._callable_series_local_symbol(name)
+        local_decl = getattr(local, "_pf_decl_node", None)
+        width_sym = sym
+        if local is not None and local.pine_type == PineType.INT and (
+                sym is None or sym is local or not getattr(sym, "is_series", False)):
+            width_sym = local
+        else:
+            local_decl = None
+        # Only integer locals need the declaration-specific width lookup.
+        # Other families keep the established symbol lookup and double fallback.
+        if self._is_int64_builtin_init(name, local_decl) and (
+            width_sym is None
+            or width_sym.pine_type not in (PineType.FLOAT, PineType.BOOL, PineType.STRING)
         ):
-            # So does a function's local, which the global scope does not
-            # hold: ``float x = time`` is a float series (``x - x[1]`` is na
-            # on the first bar, not a difference with the integer sentinel).
-            local = self._callable_series_local_symbol(name) if sym is None else None
             if local is not None and local.pine_type == PineType.FLOAT:
                 return "double"
             return "int64_t"
@@ -2717,18 +3088,26 @@ class TypeInferer:
     def _callable_series_local_symbol(self, name: str):
         """The symbol of the function-local series ``name``: the one every
         function or method keeping it as a series (``func_series_vars``)
-        declares in its scope, else None when they disagree or none does."""
+        declares with a VarDecl, else None when they disagree or none does.
+
+        The same inventory holds history parameters, which have no local
+        declaration. Their analyzer type must not replace the established
+        na-aware fallback for a plain local initialized from ``param[k]``.
+        """
         scope_names = {
             # A method ``Type.name`` scopes its body as ``method_Type_name``.
             f"method_{owner.replace('.', '_', 1)}" if "." in owner
             else f"func_{owner}"
             for owner, names in getattr(self.ctx, "func_series_vars", {}).items()
             if name in names
+            and (not getattr(self, "_active_func_name", None)
+                 or owner == self._active_func_name)
         }
         found = [
             scope.symbols[name]
             for scope in self.ctx.symbols.all_scopes
             if scope.name in scope_names and name in scope.symbols
+            and isinstance(getattr(scope.symbols[name], "_pf_decl_node", None), VarDecl)
         ]
         if not found or any(s.pine_type != found[0].pine_type for s in found):
             return None
@@ -2841,7 +3220,7 @@ class TypeInferer:
     def _func_int_return_uses_wide_history(
         self,
         func_info,
-        seen: set[str] | None = None,
+        seen: set[tuple] | None = None,
         call_site_idx: int | None = None,
     ) -> bool:
         """Whether an integer callable must preserve the ``int64_t`` family.
@@ -2864,9 +3243,10 @@ class TypeInferer:
         if seen is None:
             seen = set()
         func_name = getattr(func_info, "name", "")
-        if func_name in seen:
+        key = ("callable", func_name, call_site_idx)
+        if key in seen:
             return False
-        seen = {*seen, func_name}
+        seen.add(key)
 
         series_names = self.ctx.func_series_vars.get(func_info.name, set())
         if any(
@@ -2895,66 +3275,130 @@ class TypeInferer:
         "/", "==", "!=", "<", ">", "<=", ">=", "and", "or",
     })
 
+    def _int_value_binding(self, expr, owner, decl=None):
+        """The declaration and writes of this value, in their lexical owners.
+
+        Authored identifiers use the analyzer's declaration identity. A
+        synthetic member/local read may use an unambiguous name within its
+        owner, but never a different callable's declaration of that name.
+        """
+        cached = getattr(self, "_int_value_bindings_cache", None)
+        if cached is None:
+            values, names, writes = {}, {}, []
+            bodies = [(None, [stmt for stmt in self.ctx.ast.body
+                              if not isinstance(stmt, (FuncDef, MethodDef))])]
+            bodies.extend((info, info.node.body) for info in self.ctx.func_infos
+                          if info.node is not None)
+            for lexical_owner, body in bodies:
+                scope = lexical_owner.name if lexical_owner is not None else ""
+                for node in self._walk_ast_list(body):
+                    if isinstance(node, VarDecl):
+                        key = (id(node), node.name)
+                        values[key] = [(node.value, lexical_owner)]
+                        names.setdefault((scope, node.name), set()).add(key)
+                        meta = self.ctx.var_member_metadata_by_node.get(id(node))
+                        if meta is not None:
+                            names.setdefault(("", meta[1]), set()).add(key)
+                    elif isinstance(node, TupleAssign):
+                        for index, name in enumerate(node.names):
+                            if not name or name == "_":
+                                continue
+                            value = self._tuple_element_value(
+                                node.value, index, lexical_owner)
+                            key = (id(node), name)
+                            values[key] = [value] if value is not None else []
+                            names.setdefault((scope, name), set()).add(key)
+                    elif (isinstance(node, Assignment)
+                          and isinstance(node.target, Identifier)):
+                        writes.append((node, lexical_owner))
+            for node, lexical_owner in writes:
+                key = self.ctx.identifier_decl_bindings.get(id(node.target))
+                if key is None:
+                    scope = lexical_owner.name if lexical_owner is not None else ""
+                    if (lexical_owner is not None
+                            and node.target.name in lexical_owner.node.params):
+                        continue
+                    candidates = names.get((scope, node.target.name), ())
+                    if not candidates and scope:
+                        candidates = names.get(("", node.target.name), ())
+                    key = next(iter(candidates)) if len(candidates) == 1 else None
+                if key in values:
+                    values[key].append((node.value, lexical_owner))
+            cached = self._int_value_bindings_cache = (values, names)
+        values, names = cached
+        key = ((id(decl), expr.name) if decl is not None
+               else self.ctx.identifier_decl_bindings.get(id(expr)))
+        if key is not None:
+            if (owner is not None and expr.name in owner.node.params
+                    and key == (id(owner.node), expr.name)):
+                # Parameter declarations have no local initializer/write
+                # list. Let callers consult their actual-argument provenance.
+                return None
+            return key, values.get(key, ())
+        if decl is None and id(expr) in self.ctx.identifier_decl_bindings:
+            return None
+        scope = owner.name if owner is not None else ""
+        if owner is not None and expr.name in owner.node.params:
+            return None
+        candidates = names.get((scope, expr.name), ())
+        if not candidates and scope:
+            candidates = names.get(("", expr.name), ())
+        if len(candidates) == 1:
+            key = next(iter(candidates))
+            return key, values[key]
+        return None
+
     def _expr_returns_wide_int(
         self,
         expr,
         owner_info,
-        seen: set[str],
+        seen: set[tuple],
         call_site_idx: int | None = None,
     ) -> bool:
-        """Trace wide integer provenance through a callable return expression."""
+        """Trace wide integer provenance with one visited set per query.
+
+        Owner and return specialization determine successors. Never reuse
+        this set across queries: the outer provenance fixpoint can grow.
+        """
         if expr is None:
             return False
+        # Statement values can synthesize short-lived Identifier objects.
+        # Their declaration keys below are stable even if Python reuses ids.
+        if not isinstance(expr, Identifier):
+            key = ("expr", id(expr), getattr(owner_info, "name", ""), call_site_idx)
+            if key in seen:
+                return False
+            seen.add(key)
+        if isinstance(expr, (Assignment, VarDecl)):
+            # A value-producing write leaves its stored value. Follow both
+            # sides: field provenance may still be growing while a callable
+            # parameter has already become wide in the outer fixpoint.
+            target = self._statement_value_node(expr)
+            return (
+                self._expr_returns_wide_int(
+                    target, owner_info, seen, call_site_idx)
+                or self._expr_returns_wide_int(
+                    expr.value, owner_info, seen, call_site_idx)
+            )
         if isinstance(expr, Subscript):
             return self._expr_returns_wide_int(
                 expr.object, owner_info, seen, call_site_idx
             )
         if isinstance(expr, Identifier):
-            # A terminal local can be a narrow-looking alias for ``time[1]``.
-            # Resolve its declaration inside this callable without consulting
-            # the already-popped analyzer scope.
-            node = getattr(owner_info, "node", None)
-            if node is not None:
-                if expr.name in node.params:
-                    # A parameter is wide when a written call feeds it a wide
-                    # value (``_wide_int_provenance``).
-                    return (
-                        getattr(owner_info, "name", ""),
-                        node.params.index(expr.name),
-                    ) in self._wide_int_provenance()[1]
-                local_key = (
-                    f"{getattr(owner_info, 'name', '')}:local:{expr.name}"
-                )
-                if local_key in seen:
+            binding = self._int_value_binding(expr, owner_info)
+            if binding is not None:
+                key, values = binding
+                key = ("binding", key, call_site_idx)
+                if key in seen:
                     return False
-                local_seen = {*seen, local_key}
-                for child in self._walk_ast_list(node.body):
-                    if (
-                        isinstance(child, VarDecl)
-                        and child.name == expr.name
-                        and child.value is not None
-                    ):
-                        if self._expr_returns_wide_int(
-                            child.value,
-                            owner_info,
-                            local_seen,
-                            call_site_idx,
-                        ):
-                            return True
-                    if (
-                        isinstance(child, Assignment)
-                        and isinstance(child.target, Identifier)
-                        and child.target.name == expr.name
-                    ):
-                        if self._expr_returns_wide_int(
-                            child.value,
-                            owner_info,
-                            local_seen,
-                            call_site_idx,
-                        ):
-                            return True
-            # A name some declaration or reassignment makes wide carries the
-            # epoch wherever it is read (``_wide_int_provenance``).
+                seen.add(key)
+                return any(self._expr_returns_wide_int(
+                    value, lexical_owner, seen, call_site_idx)
+                    for value, lexical_owner in values)
+            node = getattr(owner_info, "node", None)
+            if node is not None and expr.name in node.params:
+                return (owner_info.name, node.params.index(expr.name)) in (
+                    self._wide_int_provenance()[1])
             return (self._expr_is_int64_builtin(expr)
                     or expr.name in self._wide_int_provenance()[0])
         if self._expr_is_int64_builtin(expr):
@@ -2965,8 +3409,6 @@ class TypeInferer:
             return True
         epoch_only = getattr(self, "_wide_int_epoch_only", False)
         if isinstance(expr, MemberAccess):
-            if epoch_only:
-                return False
             # A UDT ``int`` field is ``int64_t`` storage; a read of one some
             # write fills with a wide value keeps it (``_wide_udt_int_fields``).
             type_name = self._udt_receiver_type_name(expr.object, owner_info)
@@ -2986,10 +3428,18 @@ class TypeInferer:
                 receiver = None
                 if namespace == "array":
                     receiver = expr.args[0] if expr.args else expr.kwargs.get("id")
-                elif (isinstance(expr.callee, MemberAccess)
-                      and isinstance(expr.callee.object, Identifier)):
+                elif isinstance(expr.callee, MemberAccess):
                     receiver = expr.callee.object
+                plan = getattr(self, "_array_widths", None)
+                if plan is not None and not plan.wide.isdisjoint(
+                        plan.nodes.get(id(receiver), ())):
+                    return True
+                receiver_spec = self._type_spec_from_expr(receiver)
+                if (receiver_spec is not None and receiver_spec.kind == "array"
+                        and receiver_spec.element == TypeSpec.primitive("int64")):
+                    return True
                 if (isinstance(receiver, Identifier)
+                        and (plan is None or id(receiver) not in plan.nodes)
                         and receiver.name in self._wide_int_array_names()):
                     return True
             if namespace is None and func_name in {
@@ -3015,6 +3465,13 @@ class TypeInferer:
                     for arg in expr.args
                 )
 
+            resolved_methods = self._wide_method_call_bindings().get(id(expr), ())
+            if resolved_methods:
+                return any(
+                    self._func_int_return_uses_wide_history(
+                        info, seen, call_site_idx=call_site_idx)
+                    for info, _binding in resolved_methods
+                )
             callee_info = None
             if namespace is None and func_name:
                 callee_info = self._func_info_map.get(func_name)
@@ -3121,14 +3578,15 @@ class TypeInferer:
     def _expr_is_int64_builtin(self, expr) -> bool:
         """True if ``expr`` is a top-level int64-returning Pine builtin: either a
         call to one of ``INT64_BUILTINS`` (``time(...)``, ``timestamp(...)``, …)
-        or a bare ``Identifier`` spelled like ``time`` / ``time_close`` /
-        ``timenow`` (which Pine exposes as a value, not a call)."""
+        or ``input.time(...)``, or a bare ``Identifier`` spelled like ``time`` /
+        ``time_close`` / ``timenow`` (which Pine exposes as a value, not a call)."""
         from .tables import INT64_BUILTINS, INT64_BUILTIN_IDENTIFIERS
         if expr is None:
             return False
         if isinstance(expr, FuncCall):
             func_name, namespace = self._resolve_callee(expr.callee)
-            return namespace is None and func_name in INT64_BUILTINS
+            return ((namespace is None and func_name in INT64_BUILTINS)
+                    or (namespace == "input" and func_name == "time"))
         if isinstance(expr, Identifier):
             return expr.name in INT64_BUILTIN_IDENTIFIERS
         return False
@@ -3168,10 +3626,10 @@ class TypeInferer:
         ``int`` keeps the whole epoch in each (lab tv pf-krunerr-int64-probe1,
         2026-09-26: 1743468300000 where 32-bit slots read -288422176); the
         runtime stores it, and the na sentinel, in 64 bits, so each slot is
-        ``int64_t``. Iterated to a fixpoint and cached. Names are keyed by
-        spelling across scopes, as the reassignment scan before this one was:
-        a same-spelled narrow name widens with a wide one, which only drops a
-        narrowing.
+        ``int64_t``. Iterated to a fixpoint and cached. The name set contains
+        script storage and generated persistent members; authored reads
+        resolve declarations through ``_int_value_binding`` so another
+        callable's local cannot widen this slot.
         """
         # The epoch-only mode (``_wide_int_array_names``) keeps its own sets.
         cache_attr = ("_wide_int_epoch_provenance_cache"
@@ -3190,10 +3648,16 @@ class TypeInferer:
 
         def collect(node, owner) -> None:
             if isinstance(node, VarDecl) and node.value is not None:
-                bindings.append((node.name, node.value, owner))
+                if owner is None:
+                    bindings.append((node.name, node.value, owner))
+                metadata = self.ctx.var_member_metadata_by_node.get(id(node))
+                if metadata is not None and (
+                        owner is not None or metadata[1] != node.name):
+                    bindings.append((metadata[1], node.value, owner))
             elif (isinstance(node, Assignment)
                     and isinstance(node.target, Identifier)):
-                bindings.append((node.target.name, node.value, owner))
+                if owner is None:
+                    bindings.append((node.target.name, node.value, owner))
             elif isinstance(node, TupleAssign):
                 # ``[t0, t1] = request.security(sym, tf, f())``: each name is
                 # bound to the element its tuple evaluates.
@@ -3202,12 +3666,11 @@ class TypeInferer:
                         self._tuple_element_value(node.value, index, owner)
                         if name and name != "_" else None
                     )
-                    if element is not None:
+                    if element is not None and owner is None:
                         bindings.append((name, *element))
-            elif (isinstance(node, FuncCall)
-                    and isinstance(node.callee, Identifier)
-                    and node.callee.name in self._func_info_map):
-                calls.append((node, owner))
+            elif isinstance(node, FuncCall):
+                calls.extend((callee, bound, owner)
+                             for callee, bound in self._wide_callable_args(node))
 
         # Callable bodies resolve their locals and parameters against their
         # lexical owner; everything outside them is global.
@@ -3233,24 +3696,60 @@ class TypeInferer:
                             value, owner, set(), None):
                         names.add(name)
                         changed = True
-                for call, owner in calls:
-                    callee = self._func_info_map[call.callee.name]
-                    callee_params = list(getattr(callee.node, "params", ()) or ())
-                    bound = list(enumerate(call.args))
-                    bound += [
-                        (callee_params.index(key), arg)
-                        for key, arg in call.kwargs.items()
-                        if key in callee_params
-                    ]
+                for callee, bound, owner in calls:
                     for index, arg in bound:
                         key = (callee.name, index)
                         if (key not in params
                                 and self._param_is_integer_scalar(callee, index)
-                                and self._expr_returns_wide_int(
-                                    arg, owner, set(), None)):
+                                and (self._expr_returns_wide_int(
+                                    arg, owner, set(), None)
+                                     or (not getattr(self, "_wide_int_epoch_only", False)
+                                         and self._holds_wide_int_constant(arg)))):
                             params.add(key)
                             changed = True
+                if changed and not getattr(
+                        self, "_wide_udt_int_field_scanning", False):
+                    # A field scan may have run before these call parameters
+                    # became wide. Its reads participate in the next round.
+                    self.__dict__.pop("_wide_udt_int_field_cache", None)
         return names, params
+
+    def _wide_method_call_bindings(self):
+        """Analyzed receiver calls, independent of the current emission scope."""
+        cached = getattr(self, "_wide_method_bindings_cache", None)
+        if cached is not None:
+            return cached
+        bindings = {}
+        for (node_id, name), bound in getattr(
+                self.ctx, "method_call_bindings", {}).items():
+            info = self._func_info_map.get(name)
+            if info is not None and getattr(info, "is_udt_method", False):
+                bindings.setdefault(node_id, []).append((info, bound))
+        self._wide_method_bindings_cache = bindings
+        return bindings
+
+    def _wide_callable_args(self, call):
+        """Callable identity and actuals in full parameter-slot order."""
+        methods = self._wide_method_call_bindings().get(id(call), ())
+        if methods and isinstance(call.callee, MemberAccess):
+            return [
+                (info, [(0, call.callee.object),
+                        *enumerate(binding.args_by_param, start=1)])
+                for info, binding in methods
+            ]
+        if not isinstance(call.callee, Identifier):
+            return []
+        info = self._func_info_map.get(call.callee.name)
+        if info is None or info.node is None:
+            return []
+        names = list(info.node.params or ())
+        defaults = self._user_call_args_with_defaults(info.name, call)
+        if defaults is not None:
+            return [(info, list(enumerate(defaults)))]
+        bound = list(enumerate(call.args))
+        bound += [(names.index(key), arg) for key, arg in call.kwargs.items()
+                  if key in names]
+        return [(info, bound)]
 
     @staticmethod
     def _security_payload_node(call: FuncCall):
@@ -3287,12 +3786,14 @@ class TypeInferer:
     def _param_is_integer_scalar(self, fi, index: int) -> bool:
         """Whether parameter ``index`` of ``fi`` is a scalar integer slot:
         declared ``int`` or untyped, not a history parameter (those are
-        ``Series<int64_t>`` already) and not a method receiver."""
+        ``Series<int64_t>`` already). An int method receiver is eligible too."""
         node = getattr(fi, "node", None)
         if node is None or index >= len(node.params or ()):
             return False
         if getattr(fi, "is_udt_method", False) and index == 0:
-            return False
+            specs = getattr(fi, "param_type_specs", ())
+            return (bool(specs) and specs[0] is not None
+                    and specs[0].kind == "primitive" and specs[0].name == "int")
         if node.params[index] in self.ctx.func_series_vars.get(fi.name, set()):
             return False
         declared = list(
@@ -3324,6 +3825,21 @@ class TypeInferer:
         must every name a copy of such a value reaches
         (``_wide_int_provenance``).
         """
+        owner = (self._func_info_map.get(
+            getattr(self, "_active_func_name", "") or "")
+            if not getattr(self, "_int_width_scan_depth", 0) else None)
+        read = Identifier(name=name)
+        binding = self._int_value_binding(read, owner, decl)
+        if binding is not None:
+            key, values = binding
+            seen = {("binding", key, None)}
+            return (self._literal_wide_global(name, decl)
+                    or any(self._expr_returns_wide_int(
+                        value, lexical_owner, seen, None)
+                        for value, lexical_owner in values))
+        if owner is not None and name in owner.node.params:
+            return (owner.name, owner.node.params.index(name)) in (
+                self._wide_int_provenance()[1])
         expr = (
             self.ctx.global_expr_map.get(name)
             or self.ctx.var_member_init_exprs.get(name)
@@ -3370,6 +3886,23 @@ class TypeInferer:
         r"^\s*(?:\(\s*)*[-+]?(?:0[xX][0-9a-fA-F]+|\d+)(?:LL|ULL|L|U)?"
         r"(?:\s*\))*\s*$"
     )
+
+    def _for_counter_cpp_type(
+        self, start, *, step=None, pine_v5: bool | None = None,
+    ) -> str:
+        """Choose counter storage with the dedicated source-evidence query."""
+        if pine_v5 is None:
+            pine_v5 = self._pine_v5_body
+        sources = getattr(self, "_loop_type_sources", None)
+        if sources is None:
+            sources = self._loop_type_sources = LoopTypeSources(self.ctx.ast)
+        counter_type = for_counter_type(
+            start, sources,
+            self.ctx.identifier_decl_bindings, self.ctx.identifier_binding_scopes,
+            step=step, pine_v5=pine_v5,
+            counter_types=self.ctx.for_counter_types,
+        )
+        return "double" if counter_type == PineType.FLOAT else "int"
 
     def _emitted_value_is_double(self, node) -> bool:
         """True when the C++ expression emitted for ``node`` has type ``double``.
@@ -3451,6 +3984,16 @@ class TypeInferer:
                     return declared == "double"
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            if func_name in {"min", "max"}:
+                receiver = None
+                if namespace == "array":
+                    receiver = node.args[0] if node.args else node.kwargs.get("id")
+                elif isinstance(node.callee, MemberAccess):
+                    receiver = node.callee.object
+                spec = self._type_spec_from_expr(receiver)
+                if spec is not None and spec.kind == "array":
+                    # The empty-array arm of these templates is na<double>().
+                    return True
             if (namespace, func_name) in self._DOUBLE_EMITTING_INT_CALLS:
                 # The 2-arg precision overload is a float in Pine as well and
                 # falls through to the generic check.
@@ -3540,7 +4083,7 @@ class TypeInferer:
         while ``na()`` reads it as na, ``==``/``!=`` are false, ``str.tostring``
         prints NaN and ``strategy.entry(qty = ...)`` trades the default quantity
         (lab tv tailc-a-na-compare, tailc-a-divzero-readout,
-        tailc-a-qty-nonfinite2; R5 lane TAIL-C). A C++ ``int`` narrows it to
+        tailc-a-qty-nonfinite2; the nonfinite-int case). A C++ ``int`` narrows it to
         ``na<int>()``, which orders as na. So a name is stored as the ``double``
         its value already is when every binding of it -- a global declaration
         or ``:=`` -- is a one-argument ``math.floor``/``math.ceil``/
@@ -3704,7 +4247,10 @@ class TypeInferer:
             return None
         param = node.params[index]
         if getattr(fi, "is_udt_method", False) and index == 0:
-            return None
+            specs = getattr(fi, "param_type_specs", ())
+            if not (specs and specs[0] is not None
+                    and specs[0].kind == "primitive" and specs[0].name == "int"):
+                return None
         if fi.name == "isInSession" and index < 2:
             return None
         if param in self.ctx.func_series_vars.get(fi.name, set()):
@@ -3800,6 +4346,75 @@ class TypeInferer:
         )
         return spec is not None and self._type_spec_to_cpp(spec) == "double"
 
+    def _udt_field_may_hold_na(self, node, owner) -> bool:
+        """A missing callable actual stored in a field changes sentinel width.
+
+        Records already store ints in 64 bits. Finite count writes keep their
+        established read lowering; a missing actual needs its sentinel restored
+        when the callable returns through a narrower slot.
+        """
+        type_name = self._udt_receiver_type_name(node.object, owner)
+        if type_name is None:
+            return False
+        self._wide_udt_int_fields()
+        actuals = self._int_boundary_inputs()[0]
+        seen = set()
+
+        def missing(value, lexical_owner, crossed_parameter=False):
+            key = (id(value), getattr(lexical_owner, "name", ""), crossed_parameter)
+            if key in seen:
+                return False
+            seen.add(key)
+            if crossed_parameter and (
+                    self._is_na_expr(value) or self._selection_contains_na(value)):
+                return True
+            if isinstance(value, Identifier):
+                declaration = self.ctx.identifier_decl_bindings.get(id(value))
+                if (lexical_owner is not None and value.name in lexical_owner.node.params
+                        and declaration in (None, (id(lexical_owner.node), value.name))):
+                    index = lexical_owner.node.params.index(value.name)
+                    return any(missing(arg, caller, True) for arg, caller, _written in
+                               actuals.get((lexical_owner.name, index), ()))
+                binding = self._int_value_binding(value, lexical_owner)
+                if binding is not None:
+                    key = ("binding", binding[0], crossed_parameter)
+                    if key in seen:
+                        return False
+                    seen.add(key)
+                    return any(missing(arg, caller, crossed_parameter)
+                               for arg, caller in binding[1])
+            if isinstance(value, (ExprStmt, VarDecl, Assignment)):
+                inner = value.expr if isinstance(value, ExprStmt) else value.value
+                return missing(inner, lexical_owner, crossed_parameter)
+            if isinstance(value, UnaryOp):
+                return missing(value.operand, lexical_owner, crossed_parameter)
+            if isinstance(value, BinOp) and value.op not in self._NON_INTEGER_BINOPS:
+                return any(missing(arg, lexical_owner, crossed_parameter)
+                           for arg in (value.left, value.right))
+            if isinstance(value, Ternary):
+                return any(missing(arg, lexical_owner, crossed_parameter)
+                           for arg in (value.true_val, value.false_val))
+            if isinstance(value, (IfStmt, SwitchStmt)):
+                bodies = ([value.body, value.else_body] if isinstance(value, IfStmt)
+                          else [*(body for _case, body in value.cases), value.default_body])
+                return any(missing(self._selection_terminal_expr(body),
+                                   lexical_owner, crossed_parameter) for body in bodies)
+            if isinstance(value, FuncCall):
+                name, namespace = self._resolve_callee(value.callee)
+                if namespace is None and name in {"int", "float"}:
+                    return any(missing(arg, lexical_owner, crossed_parameter)
+                               for arg in value.args)
+                return any(info.node.body and missing(
+                    info.node.body[-1], info, crossed_parameter)
+                    for info, _bound in self._wide_callable_args(value))
+            return False
+
+        return any(
+            key == (type_name, node.member)
+            and missing(value, lexical_owner)
+            for key, value, lexical_owner in getattr(
+                self, "_udt_int_field_writes", ()))
+
     def _coerce_int_slot(self, cpp_val: str, node, target_cpp_type: str | None,
                          *, value_is_double: bool | None = None) -> str:
         """Route a value into an ``int``/``int64_t`` slot without losing ``na``.
@@ -3833,6 +4448,13 @@ class TypeInferer:
         if node is None:
             return cpp_val
         source_cpp_type = self._infer_type(node)
+        owner = self._func_info_map.get(
+            getattr(self, "_active_func_name", "") or "")
+        if (isinstance(node, MemberAccess)
+                and (self._expr_returns_wide_int(node, owner, set(), None)
+                     or (target_cpp_type == "int"
+                         and self._udt_field_may_hold_na(node, owner)))):
+            source_cpp_type = self._udt_field_int_cpp_type(node) or source_cpp_type
         if (isinstance(node, Identifier)
                 and self._is_int64_builtin_init(node.name)):
             source_cpp_type = "int64_t"
@@ -4019,6 +4641,14 @@ class TypeInferer:
         var/global member, return its ``TypeSpec``; else ``None``. Pine
         collections are reference types, so a local bound to such an lvalue and
         then mutated through must ALIAS it, not value-copy."""
+        if isinstance(expr, MemberAccess):
+            spec = self._type_spec_from_expr(expr)
+            if (spec is not None and spec.kind == "array"
+                    and spec.element == TypeSpec.primitive("int64")):
+                # A timestamp field passed through a local is still the
+                # same vector. Copy/slice calls retain their separate path.
+                return spec
+            return None
         if not isinstance(expr, Identifier):
             return None
         name = expr.name
@@ -4127,6 +4757,83 @@ class TypeInferer:
             return "std::vector<double>"
         return "double"
 
+    def _text_type(self, node) -> str:
+        """Pine bool provenance is consumed only by explicit text conversion."""
+        if not self._pine_v5_body:
+            from .bool_text import BoolTextTypes
+            query = getattr(self, "_bool_text_types", None)
+            if query is None:
+                query = self._bool_text_types = BoolTextTypes(
+                    self.ctx, self._type_spec_from_hint_name,
+                    getattr(self, "_budget", None),
+                )
+            if query.is_bool(
+                node, getattr(self, "_active_func_name", None),
+                getattr(self, "_active_call_site_idx", None),
+            ):
+                return "bool"
+        return self._infer_type(node)
+
+    def _contains_bool_text(self, node) -> bool:
+        if node is None or self._pine_v5_body:
+            return False
+        self._text_type(node)
+        return self._bool_text_types.contains_conversion(
+            node, getattr(self, "_active_func_name", None),
+            getattr(self, "_active_call_site_idx", None),
+        )
+
+    def _has_bool_text(self) -> bool:
+        if self._pine_v5_body:
+            return False
+        cached = getattr(self, "_program_has_bool_text", None)
+        if cached is None:
+            cached = self._program_has_bool_text = self._contains_bool_text(self.ctx.ast)
+        return cached
+
+    def _bool_text_storage_type(self, node) -> str:
+        """The emitted value's type at a text boundary, leaving storage alone."""
+        if isinstance(node, Identifier):
+            name = node.name
+            series_param = self._current_func_series_param_types.get(name)
+            if series_param is not None:
+                return series_param
+            param = self._current_func_param_types.get(name)
+            if param is not None:
+                return param
+            if self._identifier_reads_series(node):
+                return self._series_type_for(name)
+            local = self._current_func_local_types.get(name)
+            if local is not None:
+                return local
+            if name not in self._current_func_locals:
+                # Hoisted globals use the initializer's emitted type, which
+                # can differ from the analyzer's compatibility PineType.
+                slot = self._slot_scalar_cpp_type(name)
+                if slot is not None:
+                    return slot
+        return self._infer_type(node)
+
+    def _bool_text_condition(self, node, value: str) -> str:
+        """Read a legacy bool slot as a value, without changing that slot."""
+        storage = self._bool_text_storage_type(node)
+        if storage == "bool":
+            return value
+        if storage != "std::string":
+            return self._coerce_bool_expr(value, node)
+        return evaluate_args_once(
+            [value], {0},
+            lambda args: f"(!({args[0]}).empty() && ({args[0]})[0] != '\\0')",
+            "_pf_text_bool_",
+        )
+
+    def _legacy_bool_string_value(self, node, value: str) -> str:
+        """Carry a bool across a legacy string parameter or return boundary."""
+        if (self._bool_text_storage_type(node) != "std::string"
+                and self._has_bool_text() and self._text_type(node) == "bool"):
+            return f"std::string(1, static_cast<char>({self._coerce_bool_expr(value, node)}))"
+        return value
+
     def _infer_type(
         self,
         node,
@@ -4142,6 +4849,12 @@ class TypeInferer:
         and ternaries / if / switch expressions. Returns the string
         ``"double"`` as the safe fallback when no narrower type can be
         determined."""
+        plan = getattr(self, "_array_widths", None)
+        if plan is not None and not plan.wide.isdisjoint(
+                plan.nodes.get(id(node), ())):
+            spec = self._type_spec_from_expr(node)
+            if spec is not None and spec.kind == "array":
+                return self._type_spec_to_cpp(spec)
         if isinstance(node, Subscript) and history_annotation(node) is not None:
             # An array's or a matrix's history is a collection of its type
             # (collection_history.py): a loop's local bound to it is one.
@@ -4368,10 +5081,7 @@ class TypeInferer:
                 if node.member == "multiplier":
                     return "int"
                 return "bool"
-            # chart.is_* are Pine bools (the emitter lowers them to C++
-            # ``true``/``false``): str.tostring(chart.is_standard) reads "true"
-            # on TradingView (lab tv pf-krunerr-env-facts, 2026-09-26), not the
-            # numeric "1".
+            # Chart predicates are emitted as C++ bool literals.
             if ename == "chart" and node.member in (
                     "is_standard", "is_heikinashi", "is_kagi", "is_linebreak",
                     "is_pnf", "is_range", "is_renko"):
@@ -4447,6 +5157,8 @@ class TypeInferer:
                 last = node.body[-1]
                 if isinstance(last, ExprStmt):
                     return self._infer_type(last.expr)
+                if isinstance(last, (IfStmt, SwitchStmt)):
+                    return self._infer_type(last)
             return "double"
         if isinstance(node, SwitchStmt):
             if self._selection_contains_na(node):
@@ -4466,6 +5178,8 @@ class TypeInferer:
                     last = case_body[-1]
                     if isinstance(last, ExprStmt):
                         return self._infer_type(last.expr)
+                    if isinstance(last, (IfStmt, SwitchStmt)):
+                        return self._infer_type(last)
             return "double"
         return "double"
 

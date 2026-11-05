@@ -128,7 +128,7 @@ and warns when any path can select another symbol. It preserves previously
 accepted scripts and their current-symbol lowering; an unconditional alternate
 symbol remains rejected. A legacy bare-name admission that lexical resolution
 finds unsafe also remains accepted with a warning, preventing a new refusal
-before the supervisor's population sweep.
+before the maintainer's population sweep.
 
 The 314 public corpus strategies all still transpile, and their emitted C++
 hashes are unchanged. There is no public TU or public trade tape to regrade

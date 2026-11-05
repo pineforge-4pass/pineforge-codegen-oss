@@ -1,0 +1,12 @@
+//@version=6
+strategy("Aggregate local outside loop", currency = currency.NONE)
+// Derived: an array ID declaration has the same lexical owner as a scalar declaration.
+array<float> captured = array.new<float>()
+for i = 0 to 1
+    array<float> inside = array.from(close, open)
+    captured := inside
+captured := inside
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

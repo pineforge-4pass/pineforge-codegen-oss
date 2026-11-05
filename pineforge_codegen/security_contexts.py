@@ -482,6 +482,48 @@ class ScriptIndex:
         return any(isinstance(n, Identifier) and self.refs.get(id(n), ("global",))[0]
                    in ("param", "local", "bound") for n in _walk(expr))
 
+    def local_timeframe_selection(self, expr) -> bool:
+        """A local selection whose arms codegen can inspect after analysis.
+
+        Keep the authored argument in its callable's scope. Parameter-derived
+        contexts still need this pass's call-path substitution; reassigned
+        aliases still need its existing resolution policy.
+        """
+        authored = expr
+        seen = set()
+        while isinstance(expr, Identifier):
+            binding = self.refs.get(id(expr))
+            if (binding is None or binding[0] != "local"
+                    or binding in seen or binding in self.reassigned):
+                return False
+            seen.add(binding)
+            expr = self.decls[binding].value
+        if not seen or not isinstance(expr, (Ternary, IfStmt, SwitchStmt)):
+            return False
+
+        def needs_parameters(value, active=frozenset()):
+            for node in _walk(value):
+                if not isinstance(node, Identifier):
+                    continue
+                binding = self.refs.get(id(node))
+                if binding is None:
+                    continue
+                if binding[0] == "param":
+                    return True
+                if binding[0] == "local" and binding not in active:
+                    if needs_parameters(self.decls[binding].value, active | {binding}):
+                        return True
+            return False
+
+        if needs_parameters(expr):
+            return False
+        try:
+            self.resolve(authored, None)
+        except _Unresolvable:
+            return True
+        # Preserve the original context substitution for setup-safe aliases.
+        return False
+
     def param_arg(self, func: str, call: FuncCall, param: str):
         """The argument ``call`` binds to ``param`` of ``func`` (its default
         when omitted), or None."""
@@ -747,11 +789,14 @@ def _specialize(program: Program, filename: str, method_bindings: dict | None = 
         for request in requests:
             symbol, tf = _request_args(request)
             reads = _payload_params(prog, owner, request)
+            local_selection = (
+                not _is_feed(request) and not prog.depends_on_scope(symbol)
+                and prog.local_timeframe_selection(tf))
             if (owner not in prog.methods or reads) and (
                     prog.depends_on_scope(symbol) or prog.depends_on_scope(tf)) and (
-                    _is_feed(request) or not (
+                    _is_feed(request) or not (local_selection or (
                         _request_name(request) == "security"
-                        and _analyzer_resolves(prog, owner, symbol, tf))):
+                        and _analyzer_resolves(prog, owner, symbol, tf)))):
                 context_owned.add(id(request))
             if reads and not _analyzer_binds_payload(prog, owner, request, reads):
                 payload_reads[id(request)] = reads

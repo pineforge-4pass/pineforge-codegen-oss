@@ -572,7 +572,7 @@ if bar_index % 20 == 5
 if bar_index % 20 == 15
     strategy.close("L")
 """,
-        (3, 10),  # Column zero cannot continue the plus, which ends at column 10.
+        (3, 10),  # Hand derivation: width 0 refuses at the plus end, as width 4 does.
         id="column_zero_operand",
     ),
     pytest.param(
@@ -585,7 +585,7 @@ if bar_index % 20 == 5
 if bar_index % 20 == 15
     strategy.close("L")
 """,
-        (3, 10),  # Four spaces cannot continue the plus, which ends at column 10.
+        (3, 10),  # cont_top_4/error.json: width 4 refuses; this shorter plus line ends at 3:10.
         id="four_space_operand",
     ),
     pytest.param(

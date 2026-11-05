@@ -1,0 +1,11 @@
+//@version=6
+strategy("pf_fstep_b", currency = currency.USDT, initial_capital = 1000000)
+pf_count = 0
+for pf_i = 1 to 2
+    pf_first = 0.25 * pf_i
+    for pf_v = pf_first to 1.0 by 0.25
+        pf_count += 1
+if bar_index % 8 == 0
+    strategy.entry("pf_long", strategy.long, qty = 1 + pf_count / 100)
+if bar_index % 8 == 1
+    strategy.close("pf_long")

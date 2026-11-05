@@ -36,6 +36,12 @@ MAX_SOURCE_CHARS = 5 * 1024 * 1024
 # levels deep.
 MAX_NESTING_DEPTH = 512
 
+# A closed per-bar timeframe set allocates one requested stream per value.
+# Refuse larger inventories rather than silently dropping possible values.
+MAX_SECURITY_TIMEFRAME_VALUES = 128
+# Deterministic interpreter work, including Cartesian products of operands.
+MAX_SECURITY_TIMEFRAME_WORK = 16384
+
 # The parser's recursive descent spends up to 12 Python frames per nesting
 # level (a nested call), the later passes a few per tree level; this is more
 # than three times the most either needs.

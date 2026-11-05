@@ -1,0 +1,10 @@
+//@version=6
+strategy("Float loop with an approximate third step", initial_capital = 1000000, currency = currency.NONE)
+float acc = 0.0
+for x = 0.0 to 1.0 by 0.333333333333
+    acc += 1
+// TradingView measurement: quantity 4.
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = acc)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

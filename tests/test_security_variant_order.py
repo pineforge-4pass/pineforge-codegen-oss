@@ -6,7 +6,7 @@ requested-context variant per binding (``_sec0__ta_sma_1_v0``, ``_v1``,
 variants were numbered in ``sorted(..., key=repr)`` order of those
 signatures (codegen/base.py): memory-address order, so the same script
 could number its variants differently from one process or platform to the
-next (CPython against Pyodide's wasm32 addresses; lane CG-SECURITY-2's
+next (CPython against Pyodide's wasm32 addresses; the earlier security
 pre-existing defects). ``_security_variant_order_key`` numbers them by
 where each binding's value is written, and the TU no longer depends on the
 node ids. The test maps every signature's ids through a bijection that

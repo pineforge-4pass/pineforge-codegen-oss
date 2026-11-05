@@ -71,6 +71,7 @@ from ..ast_nodes import (
     Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, NaLiteral,
 )
 from ..method_binding import bind_function_defaults
+from ..loop_types import FLOAT_REASSIGNMENT
 from ..pine_spelling import sub_outside_literals
 from ..external_requests import FEED_LOWERING, LOWERING_ANNOTATION
 from ..security_contexts import CONTEXT_ANNOTATION, DEAD_ANNOTATION
@@ -78,6 +79,7 @@ from ..symbols import PineType, unify_pine_types
 from .. import signatures as sigs
 from .. import tv_input_choices as tv_in
 from .contracts import FixnanCallSite, FuncInfo, SecurityCallInfo, TACallSite
+from .types import OperatorTypeQuery
 from .tables import (
     BAR_FIELDS, TA_CLASS_MAP, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
     TA_TUPLE_RETURNS, TA_TUPLE_ELEMENT_COUNTS, TA_COMPUTE_ARGS,
@@ -242,6 +244,11 @@ class CallHandlers:
         loops/collections remain unknown and cannot silently pick FLOAT.
         """
         if isinstance(stmt, VarDecl):
+            if (stmt.annotations or {}).get(FLOAT_REASSIGNMENT):
+                # Return variants must keep the declaration's widened storage
+                # family even when its written hint or initializer is int.
+                local_types[stmt.name] = PineType.FLOAT
+                return
             hinted = {
                 "int": PineType.INT,
                 "float": PineType.FLOAT,
@@ -392,6 +399,32 @@ class CallHandlers:
             },
         )
         return inferred if inferred != PineType.UNKNOWN else fallback
+
+    def _check_callsite_operator_types(self, func_def, bound_args) -> None:
+        """Validate a written call without publishing its proofs to codegen."""
+        declared = self._param_type_specs_from_def(func_def)
+        local_types = {
+            name: (
+                declared[index] if index < len(declared) and declared[index] is not None
+                else self._operator_operand_type(bound_args[index])
+                if index < len(bound_args) else None
+            )
+            for index, name in enumerate(func_def.params)
+        }
+        previous_owner = self._current_top_level_stmt
+        previous_scope = self._symbols.current_scope
+        # Arguments were queried in the caller. Free names in the body
+        # belong to the definition's lexical scope; parameters and locals
+        # are supplied separately by the operator query's environment.
+        self._symbols.current_scope = self._operator_definition_scopes.get(
+            id(func_def), self._symbols.global_scope,
+        )
+        self._current_top_level_stmt = func_def
+        try:
+            OperatorTypeQuery(self, local_types).check_body(func_def.body)
+        finally:
+            self._current_top_level_stmt = previous_owner
+            self._symbols.current_scope = previous_scope
 
     def _merge_ta_args(self, func_name: str, node: FuncCall) -> list:
         """Merge positional args and kwargs into a unified positional list."""
@@ -1865,6 +1898,7 @@ class CallHandlers:
         # parameter's family independently at each written call.  Do this
         # before the legacy FuncInfo merge so the first call cannot dictate
         # every later call's return type.
+        self._check_callsite_operator_types(func_def, bound_args)
         return_type = self._callsite_callable_return_type(
             func_def, effective_param_types, return_type
         )

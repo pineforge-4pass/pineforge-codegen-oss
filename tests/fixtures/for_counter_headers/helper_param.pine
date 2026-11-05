@@ -1,0 +1,12 @@
+//@version=6
+strategy("carrier probe helper_param", initial_capital = 1000000000000, currency = currency.NONE)
+n = input.int(5, "Numerator")
+count_from(p) =>
+    float acc = 0.0
+    for i = p to p + 2
+        acc += i
+    acc
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = count_from(n / 2))
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

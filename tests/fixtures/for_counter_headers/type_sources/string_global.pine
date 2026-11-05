@@ -1,0 +1,5 @@
+//@version=6
+strategy("Counter source type", currency=currency.NONE)
+s = str.tostring(close)
+a = array.from(s)
+plot(array.size(a))

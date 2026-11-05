@@ -1,9 +1,9 @@
 # K-RUNERR TradingView trade evidence
 
-Public probes written for lane K-RUNERR and their unedited TradingView trade
+Public probes for runtime errors and their unedited TradingView trade
 exports. They contain no closed or scraped source. Exported on 2026-09-26 with
 `lab tv --no-note` on `BINANCE:ETHUSDT.P`, 15-minute chart (`env_facts` again
-on 2026-09-27, lane CG-LINUX-RED); `rangeProof` `covered` for each. The tapes'
+on 2026-09-27); `rangeProof` `covered` for each. The tapes'
 `Date and time` column is the exporting account's chart timezone, Asia/Taipei
 (UTC+8).
 

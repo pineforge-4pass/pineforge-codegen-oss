@@ -20,6 +20,79 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## Unreleased (next release)
+
+- An affine chart loop proved endless is stopped with the loop-time error when
+  its result reaches an effect. Omission is limited to an unused loop statement
+  with no calls, whose writes have no readers except self-updates, a break
+  condition or one further unused variable declaration. Other flagged loops
+  stop when their result is read in a shape not measured, where TradingView
+  may drop them. Endless loops in functions, methods and `request.security`
+  still never end here while TradingView stops them; data-dependent endless
+  loops still hang.
+- Pine v6 calls refuse a positional argument after a named argument with
+  `PF-E2074` at that positional expression. The check also covers strategy
+  declarations, unused functions and v6 library bodies before lowering.
+- A v6 counted loop whose start has positive int check evidence now refuses a
+  float-typed step during translation with `PF-E2079` at the step expression
+  and the hint "Use an int step or a float counter." An unknown start with
+  a positively float step still selects a float counter.
+- Counted loops can read their own counter in the end and step expressions,
+  including when it shadows an outer binding and inside a `request.security`
+  helper. The counter now wins over an outer same-named variable. The step is
+  read once at counter 0. TradingView measurements establish that direction
+  is fixed from the start and the first end read at counter 0, then an end
+  that reads this counter is read again at the start before the first
+  continuation test. The v6 end also refreshes between iterations. A non-positive
+  v6 step stops the run instead of being converted into a positive step.
+  This changes generated C++ for explicit-step loops; regenerate and
+  relink affected strategies.
+- A v6 counted loop uses a float counter when its start has positive float
+  evidence, or when its start is unknown and its step has positive float
+  evidence, including inside a `request.security` helper. A start whose value
+  has positive int evidence keeps an int counter. Without float evidence, the
+  existing int route is unchanged; v5 library loops keep their existing
+  int-counter route.
+  Counter-family inference follows declaration sources in a dedicated query,
+  independently of shared expression and storage inference.
+  A division in a loop start keeps its fraction unless it is a constant
+  division with an exact integer result, which keeps the int route. The float-step
+  refusal follows TradingView's check type (a division of two ints is int).
+- Float-counter loops accumulate the counter by repeated double addition.
+  TradingView's measured loop-end rule admits a counter whose excess beyond
+  the end, computed as one double subtraction in the loop's direction, is
+  strictly below `1e-10`. The named value `kTvFloatStepEnd` is emitted only
+  for float-counter loops. Measured on TradingView at the 0.3 scale (counted
+  up to a 9.999e-11 shortfall, not counted from 1.0e-10) and at counter
+  magnitudes of about 1, 1e3, 1e6 and 1e9; no magnitude-independent constant
+  is claimed; not a constant TradingView publishes.
+  `0.0 to 0.3 by 0.1` counts four iterations;
+  `0.0 to 2999.9999999999 by 1000.0` counts three.
+  A positive infinite step exits after one iteration with a finite end
+  and needs no non-finite-step guard.
+- Known loop gaps: a float counter passed to
+  an untyped helper truncates here, while TradingView passes the fractional
+  value (accumulating `twice(x)` from 0.0 to 1.0 by 0.25 gives 2 here and 5
+  on TradingView). `array.from(x)` can also truncate a float counter through
+  inferred `array<int>` storage. An unknown start from an untyped parameter
+  with a positively float step now selects a float counter, independently
+  of shared parameter inference. For `f(x)` containing
+  `for v = x to 1.0 by 0.25`, TradingView refuses `f(0)` with CE10106 and
+  accepts `f(0.0)`. PineForge accepts and runs both with a float counter
+  because this inference cannot distinguish their call-argument types;
+  refusing the unknown start would also refuse the valid float-argument call.
+  Block-local/enclosing-counter bindings and stops inside `request.security`
+  have no TradingView tape.
+- A Pine v6 function or method reading a later local without an earlier
+  visible binding is refused during analysis at the read (`PF-E2075`),
+  using the same declaration-order rule as later globals (`PF-E2053`).
+  Reading a loop counter or `for ... in` binder after its loop without
+  another visible binding is now refused at translate time (`PF-E2054`);
+  these reads were previously accepted.
+  TradingView accepts a namespace call after an expired block local with the
+  same name; PineForge's analysis no longer refuses it, but code generation
+  still rejects some such calls (a known gap).
+
 ## 1.9.1 — 2026-10-31
 
 - Translation checks the generated C++ against a fixed allowlist and refuses a
@@ -324,8 +397,8 @@ changes the emitted C++ and the other two only the repository's own CI.
   contract: the `promote-baseline` workflow refuses untrusted heads and actors
   (SEC846,
   [#242](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/242)),
-  and `test.yml` adopts the organization's CI canon (CR-241,
-  [#243](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/243)).
+  and `test.yml` adopts the organization's CI canon
+  ([#243](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/243)).
 
 ## 1.6.3 — 2026-10-23
 
@@ -395,8 +468,8 @@ emitter, a change of the licensor's written entity, and CI changes.
 - New command `pf-cpp-allowlist` (`pineforge_codegen.cpp_allowlist:main`,
   installed with the package), a checker for a generated C++ translation unit
   that flags dangerous primitives
-  ([#210](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/210),
-  CR-164 S1). It is a denylist with known false positives, a mitigation and not
+  ([#210](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/210)).
+  It is a denylist with known false positives, a mitigation and not
   proof that a unit is safe (the wording of the 1.6.3 security advisory).
 - A script identifier equal to a symbol that the checker refuses when it appears
   bare (`system`, `free`, `socket`, `open` and the rest of the list in

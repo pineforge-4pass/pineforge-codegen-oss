@@ -1,0 +1,16 @@
+//@version=6
+strategy("Callable bound float-step check", initial_capital = 1000000000000, currency = currency.NONE)
+n = input.int(5, "Numerator")
+measure(int seed) =>
+    var int s = seed
+    s := seed
+    s := s / 2
+    s
+x = measure(n)
+count_v = 0.0
+for i = x to 6 by 0.5
+    count_v += 1
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1 + count_v / 100)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

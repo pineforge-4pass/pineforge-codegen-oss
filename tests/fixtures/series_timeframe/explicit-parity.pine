@@ -1,0 +1,11 @@
+//@version=6
+strategy("Workaround: both timeframes requested, value chosen per bar (bar rule)", currency = currency.NONE, initial_capital = 1000000)
+// The chart index chooses between independently updated requested values.
+got_a = request.security(syminfo.tickerid, "240", bar_index)
+got_b = request.security(syminfo.tickerid, "1D", bar_index)
+got_v = bar_index % 2 == 0 ? got_a : got_b
+qty_v = 1 + got_v % 5
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = qty_v)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

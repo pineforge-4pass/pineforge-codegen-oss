@@ -50,6 +50,7 @@ from .ast_nodes import (
 )
 from .errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from .builtin_keywords import POSITIONAL_BUILTINS
+from .intrinsic_binding import intrinsic_keyword_diagnostics
 from .pine_spelling import expr_start
 from .external_requests import (
     ABSENT_LOWERING, CHART_FALLBACK_ANNOTATION, FEED_LOWERING, FEED_WARNING_ANNOTATION,
@@ -73,6 +74,7 @@ from .codegen.drawing import (
     LINE_METHODS, LINE_NOOP, BOX_METHODS, BOX_NOOP,
     LABEL_METHODS, LABEL_NOOP, LINEFILL_METHODS, LINEFILL_NOOP,
 )
+from .codegen.constant_values import ConstantResolver
 
 
 # ---------------------------------------------------------------------------
@@ -1310,6 +1312,11 @@ class SupportChecker:
             )
             return
         if not self._is_color_constant_or_builder(defval):
+            resolver = getattr(self, "_constant_default_resolver", None)
+            if resolver is None:
+                resolver = self._constant_default_resolver = ConstantResolver(self._ast)
+            if resolver.input_default(node) is not None:
+                return
             self._err(
                 node,
                 "input.color(...) defval must be a color constant "
@@ -1635,6 +1642,9 @@ class SupportChecker:
             return
 
         full = f"{ns}.{name}" if ns else name
+        self._diagnostics.extend(intrinsic_keyword_diagnostics(
+            sigs.get_intrinsic(ns, name), node.kwargs,
+        ))
 
         # The footprint another symbol's feed carries: the column of the
         # request.security whose whole expression this is.

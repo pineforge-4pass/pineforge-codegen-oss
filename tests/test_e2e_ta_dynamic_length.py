@@ -3,7 +3,7 @@ input: each lowering replays a TradingView tape through transpile, compile and
 run.
 
 TradingView accepts a length the constructor cannot take. Its Pine qualifier
-decides the answer (lab tv, lane K-TA-DYNLEN, 2026-09-26; the engine header
+decides the answer (lab tv, 2026-09-26; the engine header
 ``pineforge/source/pine_ta_length.hpp`` states each rule with its tapes):
 
 * a series length for ta.highest / ta.lowest / ta.highestbars /

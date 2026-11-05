@@ -457,6 +457,12 @@ or generation error; its `diagnostics` attribute carries `Diagnostic` objects.
 1.5.0) notes; use `transpile_full()` to read them. The `diagnostics` of a
 `CompileError` can carry them beside its errors.
 
+A counted-loop counter is visible in its loop's end and step expressions
+and its body, but not after the loop. A `for ... in` binder is local to the
+loop body. Reading either outside its scope raises analyzer `PF-E2054` at
+the identifier, unless an enclosing declaration or builtin supplies that
+name. Reassigning a name with no visible declaration retains `PF-E2020`.
+
 `transpile()`, `transpile_full()` and `transpile_with_request_inventory()` check
 the generated C++ allowlist even with `check_support=False` and raise
 `CompileError` with at most 20 fixed reasons at `filename:1:1` when it reports
@@ -631,6 +637,24 @@ producing an envelope. The JSON entry point does not accept a `filename`
 argument.
 
 ## Diagnostic codes
+
+Pine v6 call arguments must put all positional arguments before named
+arguments. `PF-E2074` is a fatal analyzer diagnostic at the first positional
+expression that follows a named argument in the same call. It covers calls
+and strategy declarations before argument rewriting or unused-code removal,
+including v6 library bodies, and remains enforced with `check_support=False`.
+Nested calls have independent argument lists; all-named calls may name
+parameters in any order. Imported v5 libraries retain their existing policy.
+
+Callable value reads follow declaration order. A Pine v6 function or method
+reading a later local without an earlier visible binding reports `PF-E2075`
+at that identifier; a later direct global retains `PF-E2053`. Earlier outer
+bindings remain visible before a local shadow is declared.
+
+A Pine v6 `for` loop whose counter start has positive int evidence reports
+`PF-E2079` for a float-typed step. This fatal analyzer diagnostic points at the
+step expression, with the hint "Use an int step or a float counter."
+Unknown starts are not refused by this diagnostic.
 
 Every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
 `CompileError`'s `diagnostics`, and in the glue envelopes) carries the stable

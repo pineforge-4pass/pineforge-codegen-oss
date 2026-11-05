@@ -1,0 +1,17 @@
+//@version=6
+strategy("Qualified names and value bindings", overlay = true, initial_capital = 1000000)
+// Namespace and field labels are not unresolved value reads; a numeric str is a real binding.
+enum Direction
+    up
+    down
+type Reading
+    float value
+float str = close - open
+reading = Reading.new(str)
+direction = Direction.up
+signalValue = direction == Direction.up ? reading.value + math.abs(str) : close
+plot(signalValue, "signal")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

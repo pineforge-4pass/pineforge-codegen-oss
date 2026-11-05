@@ -11,7 +11,7 @@ one was captured where the user's expression is read inside that C++:
 appended the empty local ``r`` to itself, ``str.repeat("x", i)`` counted to
 the loop's own ``i``, ``str.upper(s)`` initialized ``s`` from itself (UB),
 and ``_pna_l > close``, ``fixnan(.. _fixnan_v)``, ``str.pos(s, p)``,
-``array.median(c)`` and more did not compile (lane W2's open findings;
+``array.median(c)`` and more did not compile (earlier open findings;
 the templates' short locals found by this lane).
 
 ``helpers.is_emitter_temporary`` now names every temporary the emitter

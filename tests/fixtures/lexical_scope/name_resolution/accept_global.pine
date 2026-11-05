@@ -1,0 +1,11 @@
+//@version=6
+strategy("Earlier global binding", overlay = true, initial_capital = 1000000)
+// The global is visible both at the function definition and at the direct read.
+float lateValue = close - open
+probe() => lateValue
+signalValue = probe() + lateValue
+plot(signalValue, "signal")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

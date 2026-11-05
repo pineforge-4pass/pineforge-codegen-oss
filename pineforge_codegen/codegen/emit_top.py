@@ -233,6 +233,11 @@ class TopLevelEmitter:
         # in favour of fully qualified names emitted at each call site.
         lines.append("using namespace pineforge;")
         lines.append("")
+        from .endless_for import plan_endless_for_loops
+        self._endless_for_actions = plan_endless_for_loops(self.ctx.ast)
+        if "stop" in self._endless_for_actions.values():
+            lines.append("inline constexpr int kLoopTimeLimitMs = 2000;")
+            lines.append("")
         lines.append(RUN_STOP_SHIMS_CPP)
         self._emit_ta_compat_shims(lines)
         if getattr(self, "_uses_drawing", False):
@@ -1458,7 +1463,7 @@ class TopLevelEmitter:
             lines.append("    }")
 
     def _emit_foreign_security_lookups(self, lines: list[str]) -> None:
-        """The run-time lookups of another symbol's request (lane XSYM-E):
+        """The run-time lookups of another symbol's request:
         whether its symbol string is the chart's, and whether its data is
         installed (``strategy_set_symbol_feed`` / ``_facts``). An engine
         without the symbol-keyed registration has neither."""
@@ -1713,6 +1718,7 @@ class TopLevelEmitter:
                     func_name_i, namespace_i = self._resolve_callee(stmt.value.callee)
                     is_static_global_input = (
                         stmt.name in self._global_member_vars
+                        and not self._decl_binding_is_series(id(stmt), stmt.name)
                         and not self._is_source_input(stmt.value)
                         and stmt.name not in self._array_vars
                         and stmt.name not in getattr(self, "_matrix_specs", {})
@@ -1722,12 +1728,9 @@ class TopLevelEmitter:
                     )
                     if is_static_global_input:
                         safe = self._safe_name(stmt.name)
-                        default = self._get_input_default(stmt.value)
-                        default_cpp = self._visit_expr(default) if default is not None else "0"
                         title = self._get_input_title(stmt.value, var_name=stmt.name)
-                        getter = self._input_getter_for_call(stmt.value, func_name_i, namespace_i)
-                        default_cpp = self._coerce_string_input_default(getter, default_cpp)
-                        cpp_val = f'{getter}({self._input_key_literal(title)}, {default_cpp})'
+                        cpp_val = self._render_input_value(
+                            stmt.value, func_name_i, namespace_i, title)
                         static_vars.append(f"{safe} = {cpp_val};")
 
         if static_vars:
@@ -2355,7 +2358,10 @@ class TopLevelEmitter:
                     )
                 spec = recv_spec
                 if recv_spec is not None:
-                    cpp_t = self._type_spec_to_cpp(recv_spec)
+                    recv_spec = self._array_param_spec(fi, i, recv_spec)
+                    spec = recv_spec
+                    cpp_t = self._wide_declared_int_param(
+                        fi, i, self._type_spec_to_cpp(recv_spec))
                     if (
                         recv_spec.kind in {"array", "matrix"}
                         or (
@@ -2429,7 +2435,7 @@ class TopLevelEmitter:
                 # established drawing-handle route, and an untyped ``s`` used as
                 # a string -> ``std::string``. User UDT field mutation propagates
                 # through the arena even though the handle parameter is by value.
-                spec = fi.param_type_specs[i]
+                spec = self._array_param_spec(fi, i, fi.param_type_specs[i])
                 cpp_t = self._wide_declared_int_param(
                     fi, i, self._type_spec_to_cpp(spec))
                 if spec.kind == "udt":
@@ -2488,6 +2494,8 @@ class TopLevelEmitter:
             # The history parameter is represented as int64_t so timestamp
             # values and their na sentinel cannot narrow at the return edge.
             ret_type = "int64_t"
+        elif ("return", fi.name) in self._array_widths.wide:
+            ret_type = self._type_spec_to_cpp(self._array_return_spec(fi))
         elif (
             type_call_site_idx is not None
             and self._callsite_callable_return_pine_type(
@@ -2503,7 +2511,7 @@ class TopLevelEmitter:
         elif getattr(fi, "return_type_spec", None) is not None:
             # Exact return TypeSpec (collections plus narrowly cached primitive
             # terminal reads) takes precedence over the coarse PineType slot.
-            ret_type = self._type_spec_to_cpp(fi.return_type_spec)
+            ret_type = self._type_spec_to_cpp(self._array_return_spec(fi))
         else:
             ret_type = PINE_TYPE_TO_CPP.get(fi.return_type, "double")
         if return_udt:
@@ -2512,10 +2520,15 @@ class TopLevelEmitter:
             rhs_return_cpp_type = self._safe_name(return_udt_name)
         elif (self._is_nullable_collection_cpp_type(ret_type)
               or ret_type in DRAWING_TYPE_TO_CPP.values()
+              or (ret_type == "std::vector<int64_t>"
+                  and ("return", fi.name) in self._array_widths.wide)
               or ret_type in ("int", "int64_t")):
             rhs_return_cpp_type = ret_type
         else:
             rhs_return_cpp_type = None
+        if (ret_type == "std::string" and self._has_bool_text()
+                and self._text_type(self._selection_terminal_expr(node.body)) == "bool"):
+            rhs_return_cpp_type = "std::string"
 
         # For per-call-site variants, suffix the function name and activate TA + var remapping
         func_name = (

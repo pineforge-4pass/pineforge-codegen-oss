@@ -129,17 +129,32 @@ def test_literal_declaration_cannot_retroactively_authorize_earlier_use(
 ) -> None:
     if prefix.startswith("x ="):
         body = prefix + "var int p = 5\n"
-        expected_line = 3
+        expected_col = 24
     else:
         body = prefix
-        expected_line = 5
+        expected_col = 9
     source = '//@version=6\nstrategy("predecl")\n' + body
 
-    _assert_exact_pivot_ctor_rejection(
-        source,
-        filename="stable-var-predecl.pine",
-        expected_line=expected_line,
+    # name_resolution/ref_top_global (CE10272): a later declaration cannot bind
+    # the first authored read, including an argument to a TA constructor.
+    filename = "stable-var-predecl.pine"
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename=filename)
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.code == "PF-E2075"
+    assert diagnostic.args == {"name": "p"}
+    assert diagnostic.message == (
+        "Variable 'p' is not declared in the current lexical scope before this use."
     )
+    assert diagnostic.hint is None
+    assert (
+        diagnostic.location.file,
+        diagnostic.location.line,
+        diagnostic.location.col,
+        diagnostic.location.end_col,
+    ) == (filename, 3, expected_col, expected_col + 1)
 
 
 @pytest.mark.parametrize(

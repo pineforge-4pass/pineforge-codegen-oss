@@ -1,6 +1,6 @@
 # request.security payload source series: TradingView trade evidence
 
-Synthetic probes written for lane CG-W9-SEC (`request.security` payloads
+Synthetic probes for `request.security` payloads
 reading a source input and the derived bar series) and their unedited
 TradingView trade exports. They contain no closed or scraped source. Each was
 exported on 2026-09-28 with

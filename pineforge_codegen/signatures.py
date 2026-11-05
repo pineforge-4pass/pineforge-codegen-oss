@@ -35,11 +35,22 @@ class FuncSig:
     tuple_count: int = 0         # number of tuple elements
 
 
+@dataclass(frozen=True)
+class InputDefaultContract:
+    """The Pine base type and qualifier required of an input default."""
+    pine_type: PineType
+    qualifier: str = "const"
+
+
 @dataclass
 class IntrinsicFunc:
     """Complete intrinsic function definition with all overloads."""
     name: str                    # e.g. "ta.sma" or "math.abs"
     signatures: list[FuncSig] = field(default_factory=list)
+    # Declared parameter names are the complete, verified keyword set.
+    # False preserves the record's existing keyword policy.
+    keyword_names_verified: bool = False
+    default_contract: InputDefaultContract | None = None
 
     @property
     def primary(self) -> FuncSig:
@@ -73,8 +84,10 @@ def _sig(params: list[tuple], ret: PineType = PineType.FLOAT,
                    returns_tuple=returns_tuple, tuple_count=tuple_count)
 
 
-def _func(name: str, *sigs: FuncSig) -> IntrinsicFunc:
-    return IntrinsicFunc(name=name, signatures=list(sigs))
+def _func(name: str, *sigs: FuncSig,
+          keyword_names_verified: bool = False) -> IntrinsicFunc:
+    return IntrinsicFunc(name=name, signatures=list(sigs),
+                         keyword_names_verified=keyword_names_verified)
 
 
 # Shortcuts for common param types
@@ -156,7 +169,8 @@ _ta("crossunder", _sig([("source1", F), ("source2", F)], ret=B))
 _ta("cross",      _sig([("source1", F), ("source2", F)], ret=B))
 _ta("rising",     _sig([("source", F), ("length", I)], ret=B))
 _ta("falling",    _sig([("source", F), ("length", I)], ret=B))
-_ta("change",     _sig([("source", F), ("length", I, 1)]))
+_ta("change",     _sig([("source", F), ("length", I, 1)]),
+                  _sig([("source", B), ("length", I, 1)], ret=B))
 
 # --- Extremes & Lookback ---
 # ta.highest / ta.lowest have TWO overloads:
@@ -213,7 +227,8 @@ _ta("dev",     _sig([("source", F), ("length", I)]))
 # --- Cumulative & Historical ---
 _ta("cum",        _sig([("source", F)]))
 _ta("barssince",  _sig([("condition", B)], ret=I))
-_ta("valuewhen",  _sig([("condition", B), ("source", F), ("occurrence", I)]))
+_ta("valuewhen",  _sig([("condition", B), ("source", F), ("occurrence", I)]),
+                  _sig([("condition", B), ("source", B), ("occurrence", I)], ret=B))
 _ta("correlation", _sig([("source1", F), ("source2", F), ("length", I)]))
 
 # --- Chart all-time extremes (single series) ---
@@ -234,8 +249,11 @@ _ta("pivot_point_levels",
 
 MATH_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 
-def _math(short_name: str, *sigs: FuncSig) -> None:
-    MATH_FUNCTIONS[short_name] = _func(f"math.{short_name}", *sigs)
+def _math(short_name: str, *sigs: FuncSig,
+          keyword_names_verified: bool = False) -> None:
+    MATH_FUNCTIONS[short_name] = _func(
+        f"math.{short_name}", *sigs, keyword_names_verified=keyword_names_verified,
+    )
 
 # Arithmetic
 _math("abs",    _sig([("x", F)]))
@@ -261,7 +279,7 @@ _math("avg",
       _sig([("x", F), ("y", F), ("z", F), ("w", F), ("u", F)]),
       _sig([("x", F), ("y", F), ("z", F), ("w", F), ("u", F), ("v", F)]))
 _math("sum",    _sig([("source", F), ("length", I)]))  # rolling sum → math::Sum in runtime
-_math("pow",    _sig([("base", F), ("exp", F)]))
+_math("pow", _sig([("base", F), ("exponent", F)]), keyword_names_verified=True)
 _math("sqrt",   _sig([("x", F)]))
 _math("exp",    _sig([("x", F)]))
 _math("log",    _sig([("x", F)]))
@@ -407,6 +425,25 @@ _map("copy",     _sig([("id", F)], ret=F))
 _map("put_all",  _sig([("id", F), ("id2", F)], ret=VOID))
 
 
+# Scalar collection predicates. Collection storage and argument validation
+# retain their TypeSpec-aware dispatch; these signatures describe Pine values
+# independently of the historical C++ storage family.
+ARRAY_FUNCTIONS: dict[str, IntrinsicFunc] = {
+    "includes": _func("array.includes", _sig([("id", F), ("value", F)], ret=B)),
+    "every": _func("array.every", _sig([("id", F)], ret=B)),
+    "some": _func("array.some", _sig([("id", F)], ret=B)),
+}
+
+MATRIX_FUNCTIONS: dict[str, IntrinsicFunc] = {
+    name: _func(f"matrix.{name}", _sig([("id", F)], ret=B))
+    for name in (
+        "is_square", "is_identity", "is_diagonal", "is_antidiagonal",
+        "is_symmetric", "is_antisymmetric", "is_triangular",
+        "is_stochastic", "is_binary", "is_zero",
+    )
+}
+
+
 # ============================================================================
 # syminfo.* functions
 # ============================================================================
@@ -428,6 +465,17 @@ REQUEST_FUNCTIONS: dict[str, IntrinsicFunc] = {
     "currency_rate": _func(
         "request.currency_rate",
         _sig([("from", S), ("to", S), ("ignore_invalid_currency", B, False)]),
+    ),
+}
+
+# Requests with payload-dependent returns keep their custom registration and
+# argument binder. The bool overload describes the value, without changing the
+# numeric storage chosen by that registration.
+REQUEST_VALUE_FUNCTIONS: dict[str, IntrinsicFunc] = {
+    "security": _func(
+        "request.security",
+        _sig([("symbol", S), ("timeframe", S), ("expression", F)]),
+        _sig([("symbol", S), ("timeframe", S), ("expression", B)], ret=B),
     ),
 }
 
@@ -489,8 +537,14 @@ _builtin("input",
 
 INPUT_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 
-def _input(short_name: str, *sigs: FuncSig) -> None:
-    INPUT_FUNCTIONS[short_name] = _func(f"input.{short_name}", *sigs)
+def _input(short_name: str, *sigs: FuncSig,
+           default_type: PineType | None = None, default_qualifier: str = "const") -> None:
+    intrinsic = _func(f"input.{short_name}", *sigs)
+    intrinsic.default_contract = InputDefaultContract(
+        default_type if default_type is not None else sigs[0].params[0].pine_type,
+        default_qualifier,
+    )
+    INPUT_FUNCTIONS[short_name] = intrinsic
 
 # Common trailing: tooltip, inline, group, display (plot_display), confirm
 _C = [("tooltip", S, None), ("inline", S, None), ("group", S, None),
@@ -502,16 +556,41 @@ _input("float",  _sig([("defval", F), ("title", S, ""), ("minval", F, None),
                        ("maxval", F, None), ("step", F, None)] + _C, ret=F))
 _input("bool",   _sig([("defval", B), ("title", S, "")] + _C, ret=B))
 _input("string", _sig([("defval", S), ("title", S, ""), ("options", S, None)] + _C, ret=S))
-_input("source", _sig([("defval", F), ("title", S, "")] + _C, ret=F))
-_input("color",  _sig([("defval", I), ("title", S, "")] + _C, ret=I))
+_input("source", _sig([("defval", F), ("title", S, "")] + _C, ret=F),
+       default_qualifier="series")
+_input("color",  _sig([("defval", I), ("title", S, "")] + _C, ret=I),
+       default_type=PineType.COLOR)
 _input("timeframe", _sig([("defval", S, ""), ("title", S, "")] + _C, ret=S))
 _input("session", _sig([("defval", S, ""), ("title", S, "")] + _C, ret=S))
 _input("symbol", _sig([("defval", S, ""), ("title", S, "")] + _C, ret=S))
 _input("price",  _sig([("defval", F), ("title", S, "")] + _C, ret=F))
 _input("time",   _sig([("defval", I), ("title", S, "")] + _C, ret=I))
 _input("text_area", _sig([("defval", S), ("title", S, "")] + _C, ret=S))
-# defval is an enum member (typed as float in Pine's overloads; value is int index)
-_input("enum",   _sig([("defval", F), ("title", S, "")] + _C, ret=I))
+# The erased signature uses float; the default must carry a declared enum
+# identity, which the existing enum resolver checks, not a primitive proof.
+_input("enum",   _sig([("defval", F), ("title", S, "")] + _C, ret=I),
+       default_type=PineType.UNKNOWN)
+
+
+# Value-level inventory, including namespaces whose storage/binding has a
+# dedicated implementation. The legacy arity-only lookup below deliberately
+# remains separate: it cannot select a payload- or source-dependent overload.
+FUNCTION_REGISTRIES = (
+    TA_FUNCTIONS, MATH_FUNCTIONS, STRATEGY_FUNCTIONS, STR_FUNCTIONS,
+    MAP_FUNCTIONS, ARRAY_FUNCTIONS, MATRIX_FUNCTIONS, SYMINFO_FUNCTIONS,
+    REQUEST_FUNCTIONS, REQUEST_VALUE_FUNCTIONS, BUILTIN_FUNCTIONS,
+    INPUT_FUNCTIONS,
+)
+
+
+def get_value_function(name: str) -> IntrinsicFunc | None:
+    """Find a builtin's declared overloads by its full Pine name."""
+    short_name = name.rsplit(".", 1)[-1]
+    for registry in FUNCTION_REGISTRIES:
+        function = registry.get(short_name) or registry.get(name)
+        if function is not None and function.name == name:
+            return function
+    return None
 
 
 # ============================================================================
@@ -691,12 +770,22 @@ TIMEFRAME_VARIABLES: dict[str, PineType] = {
     "timeframe.period": S,
     "timeframe.multiplier": I,
     "timeframe.isintraday": B,
+    "timeframe.isminutes": B,
+    "timeframe.isseconds": B,
     "timeframe.isdaily": B,
     "timeframe.isweekly": B,
     "timeframe.ismonthly": B,
     "timeframe.isdwm": B,
     "timeframe.main_period": S,
     "timeframe.isticks": B,
+}
+
+# These previously unregistered values inherited the analyzer's string
+# fallback. Keep that storage contract separate from their correct Pine type:
+# a bool assigned there is a single byte, decoded only at a text conversion.
+VARIABLE_STORAGE_COMPATIBILITY: dict[str, PineType] = {
+    "timeframe.isminutes": S,
+    "timeframe.isseconds": S,
 }
 
 # display.* plot_display constants (PineScript v6 — values for C++ codegen)
@@ -765,6 +854,30 @@ def merge_kwargs_to_positional(
     while merged and merged[-1] is None:
         merged.pop()
     return merged
+
+
+def get_intrinsic(namespace: str | None, func_name: str) -> IntrinsicFunc | None:
+    """Look up a registry record and its keyword-name validation policy."""
+    registry = {
+        "ta": TA_FUNCTIONS,
+        "math": MATH_FUNCTIONS,
+        "strategy": STRATEGY_FUNCTIONS,
+        "str": STR_FUNCTIONS,
+        "input": INPUT_FUNCTIONS,
+        "map": MAP_FUNCTIONS,
+        "syminfo": SYMINFO_FUNCTIONS,
+        "request": REQUEST_FUNCTIONS,
+        "array": ARRAY_FUNCTIONS,
+        "matrix": MATRIX_FUNCTIONS,
+        None: BUILTIN_FUNCTIONS,
+    }.get(namespace)
+    record = registry.get(func_name) if registry is not None else None
+    if record is None and namespace == "request":
+        # request.security keeps its custom binder; its value-level record is
+        # reachable here too. These records declare no verified keyword names,
+        # so every keyword check treats them as it treated an unknown call.
+        record = REQUEST_VALUE_FUNCTIONS.get(func_name)
+    return record
 
 
 def get_param_names(namespace: str | None, func_name: str) -> list[str] | None:
@@ -845,19 +958,20 @@ def is_intrinsic_function(namespace: str | None, func_name: str) -> bool:
     return False
 
 
+def get_variable_type(namespace: str | None, name: str) -> PineType:
+    """Return a builtin variable's declared type, or UNKNOWN for other names."""
+    if namespace is None:
+        return BUILTIN_VARIABLES.get(name, PineType.UNKNOWN)
+    full = f"{namespace}.{name}"
+    for table in (
+        STRATEGY_VARIABLES, BARSTATE_VARIABLES, SYMINFO_VARIABLES,
+        TIMEFRAME_VARIABLES, BUILTIN_VARIABLES, DISPLAY_VARIABLES,
+    ):
+        if full in table:
+            return table[full]
+    return PineType.UNKNOWN
+
+
 def is_intrinsic_variable(namespace: str | None, name: str) -> bool:
     """Check if a name is a known TradingView built-in variable."""
-    if namespace is None:
-        return name in BUILTIN_VARIABLES
-    full = f"{namespace}.{name}"
-    if (full in STRATEGY_VARIABLES
-            or full in BARSTATE_VARIABLES
-            or full in SYMINFO_VARIABLES
-            or full in TIMEFRAME_VARIABLES
-            or full in BUILTIN_VARIABLES
-            or full in DISPLAY_VARIABLES):
-        return True
-    # e.g. strategy + "opentrades.capital_held" -> strategy.opentrades.capital_held
-    if namespace == "strategy" and "." in name:
-        return f"strategy.{name}" in STRATEGY_VARIABLES
-    return False
+    return get_variable_type(namespace, name) != PineType.UNKNOWN

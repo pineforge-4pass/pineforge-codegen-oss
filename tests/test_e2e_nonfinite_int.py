@@ -9,7 +9,7 @@ codegen narrowed the value into a C++ ``int`` at the assignment, where the
 infinity became ``na<int>()`` and ordered as na: ``if shares > 0`` never held
 where TradingView entered at the default quantity (the job-2545 MR VWAP SVP
 TDV strategy's VWAP reset bars, ``shares = math.floor(riskPerTrade /
-riskDiff)``; R5 lane TAIL-C).
+riskDiff)``; the nonfinite-int case).
 
 A plain global int fed only by those calls and read by an ordering comparison
 is now stored as the ``double`` its value already is (``_nonfinite_int_names``);

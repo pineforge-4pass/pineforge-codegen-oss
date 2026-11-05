@@ -1,0 +1,12 @@
+//@version=6
+strategy("Empty argument lists", initial_capital = 1000000, currency = currency.NONE)
+// Empty constructors contain no positional-after-keyword violation.
+values = array.new<float>()
+lookup = map.new<string, float>()
+metric = array.size(values) + map.size(lookup)
+if metric < 0
+    strategy.cancel("L")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

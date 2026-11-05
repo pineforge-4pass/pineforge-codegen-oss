@@ -1,0 +1,14 @@
+//@version=6
+strategy("Earlier method bindings", overlay = true, initial_capital = 1000000)
+// Both the earlier global and the receiver bind; the local is declared before use.
+float adjustment = close - open
+method measure(float self) =>
+    float lateValue = self - open
+    value = lateValue
+    value + adjustment
+signalValue = close.measure()
+plot(signalValue, "signal")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

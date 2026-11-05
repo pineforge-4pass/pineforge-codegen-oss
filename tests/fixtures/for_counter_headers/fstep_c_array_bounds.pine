@@ -1,0 +1,10 @@
+//@version=6
+strategy("pf_fstep_c", currency = currency.USDT, initial_capital = 1000000)
+pf_floats = array.from(0.5, 1.5)
+pf_count = 0
+for pf_v = array.min(pf_floats) to array.max(pf_floats) by 0.5
+    pf_count += 1
+if bar_index % 8 == 0
+    strategy.entry("pf_long", strategy.long, qty = 1 + pf_count / 100)
+if bar_index % 8 == 1
+    strategy.close("pf_long")

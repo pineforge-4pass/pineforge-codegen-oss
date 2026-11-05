@@ -3,8 +3,8 @@
 ``request.security(sym, tf, request.footprint(ticks, va))`` followed by
 ``.delta()`` (or ``footprint.delta(fp)``) is the footprint delta of the
 requested bar. The requests manifest pins it as a named column of the
-symbol's feed, ``fp_delta_<ticks>_<va>`` (lane XSYM-B), and the engine hands
-a foreign site its bar's column (``security_column_value``, lane XSYM-D). It
+symbol's feed, ``fp_delta_<ticks>_<va>``, and the engine hands
+a foreign site its bar's column (``security_column_value``). It
 was a deferred refusal, and ``fp.delta()`` did not compile (a double has no
 member). A footprint value is now its delta; every other ``footprint.*``
 member stays refused by name, and a feed without the column is missing data:

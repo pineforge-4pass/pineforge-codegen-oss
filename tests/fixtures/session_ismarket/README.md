@@ -12,7 +12,7 @@ its open, and its Signal is the flags TradingView evaluated there.
 at the tape's entry times: the flags are a function of the bars' times and
 the symbol's session and timezone only.
 
-## `hm-g236-*`: session.ismarket (engine lane H-MEASURE, row G2-36)
+## `hm-g236-*`: session.ismarket (engine session calendar, row G2-36)
 
 The Signal is `M1` when `session.ismarket` is true, `M0` when it is false.
 
@@ -20,7 +20,7 @@ The Signal is `M1` when `session.ismarket` is true, `M0` when it is false.
 |---|---|---|---|---|---|---|---|
 | `hm-g236-eth-60-24x7` | BINANCE:ETHUSDT.P 60 | 2025-03-07 .. 03-11 | 97 | all `M1` | `96b7e8890b41a9e8aa60698a43cdffd5f42c55bb8d2d0223f7985c13b5040b74` | 2026-09-25 19:01:29 | `tv-tape-hm-g236-eth-60-24x7-96b7e889` |
 
-## `cgim-flags-*`: every session flag (codegen lane CG-ISMARKET)
+## `cgim-flags-*`: every session flag
 
 The same public chart and window, with a probe that carries every flag in its
 Signal, a letter and a digit each: `M` session.ismarket, `P`
@@ -66,7 +66,7 @@ kept in a private repository and overlaid by the lab onto the paired engine tree
 at `tests/codegen-fixtures/session_ismarket/`. This function-history tape is read
 by `tests/test_e2e_session_history.py`.
 
-## `cgs2-flags-*-15`: sessions with two windows (codegen lane CG-SESSION-2)
+## `cgs2-flags-*-15`: sessions with two windows
 
 The every-flag probe of `cgim-flags-*` above (the same `strategy.pine`, sha256
 `78898de72eeff09ef33a75e40f94da2b8ec9fbc301264183ba048e2e5f130225`) on the public
@@ -84,7 +84,7 @@ first window's open (09:00, 09:30) and its last in the last window
 (15:30, 15:45). TSE:7203's last bar opens at 15:30, the published end
 of the afternoon window, and TradingView keeps it in the session.
 
-## `ksw-flags-*`: the same public charts at 60 and 240 minutes (engine lane K-SESSION-WINDOWS)
+## `ksw-flags-*`: the same public charts at 60 and 240 minutes (session-window handling)
 
 The every-flag probe (the `cgim-flags-*` source with its title and header
 comment changed, `strategy.pine` sha256

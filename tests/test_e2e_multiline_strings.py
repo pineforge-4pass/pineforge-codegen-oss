@@ -1,6 +1,6 @@
 """E2E: a multiline string literal (``\"\"\"...\"\"\"`` / ``'''...'''``) and a
 line-wrapped single-line one denote the value the Pine manual documents
-(lane C5, defect 2).
+(a prior defect).
 
 TradingView, Pine v6 User Manual, Strings, "Multiline strings":
 

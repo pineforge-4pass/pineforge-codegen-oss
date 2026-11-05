@@ -1,5 +1,5 @@
 """E2E: the emitted strategy translation unit rounds each product on its own,
-as TradingView does (lane FPC).
+as TradingView does (floating point contraction).
 
 TradingView runs Pine in JavaScript, which has no fused multiply-add: in
 ``close * 1.1 - open * 1.1`` each product rounds to a double before the

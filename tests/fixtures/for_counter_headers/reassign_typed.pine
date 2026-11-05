@@ -1,0 +1,12 @@
+//@version=6
+strategy("carrier probe reassign_typed", initial_capital = 1000000000000, currency = currency.NONE)
+n = input.int(5, "Numerator")
+float s = n
+s := s / 2
+float acc = 0.0
+for i = s to s + 2
+    acc += i
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = acc)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

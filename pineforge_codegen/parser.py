@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import re
+from contextlib import contextmanager
 
 from .lexer import Token, TokenType
 from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
@@ -82,6 +83,9 @@ class Parser:
         # parser never discards a node it built, so ids stay unique).
         self._depth = 0
         self._subtree_depths: dict[int, tuple[ASTNode, int]] = {}
+        # These parent productions admit expressions, not local blocks.
+        # Keep the role active through a simple statement's initializer too.
+        self._expression_slots: list[str] = []
 
     # ------------------------------------------------------------------
     # Helpers
@@ -147,6 +151,19 @@ class Parser:
         """Set loc on a node from a token and return the node."""
         node.loc = self._loc(tok)
         return node
+
+    @contextmanager
+    def _expression_slot(self, role: str):
+        """Parse authored values under their parent's expression grammar."""
+        self._expression_slots.append(role)
+        try:
+            yield
+        finally:
+            self._expression_slots.pop()
+
+    def _parse_expression_in_slot(self, role: str):
+        with self._expression_slot(role):
+            return self._parse_expression()
 
     # Nesting budget.  Recursive descent spends Python frames per level, and
     # the tree it builds must stay shallow: freeing a tree some 4,000 levels
@@ -1050,7 +1067,7 @@ class Parser:
                 default = None
                 if self._check(TokenType.EQUALS) and self._peek().type != TokenType.EQUALS:
                     self._advance()  # =
-                    default = self._parse_expression()
+                    default = self._parse_expression_in_slot("type field default")
                 fields.append(TypeField(type_name=type_name, name=field_name, default=default))
                 self._skip_newlines()
             self._consume(TokenType.DEDENT)
@@ -1073,7 +1090,7 @@ class Parser:
                     if (self._check(TokenType.EQUALS)
                             and self._peek().type != TokenType.EQUALS):
                         self._advance()  # =
-                        member_values[mname] = self._parse_expression()
+                        member_values[mname] = self._parse_expression_in_slot("enum title")
                 else:
                     self._advance()  # skip unexpected tokens
                 self._skip_newlines()
@@ -1208,17 +1225,24 @@ class Parser:
 
         # Traditional: for var = start to end [by step]
         self._consume(TokenType.EQUALS)
-        start = self._parse_expression()
+        start = self._parse_expression_in_slot("for start")
         self._consume(TokenType.TO)
-        end = self._parse_expression()
+        end = self._parse_expression_in_slot("for end")
         step = None
+        step_location = None
         if self._match(TokenType.BY):
+            step_location = self._loc(self._current())
             step = self._parse_expression()
+            last_token = self.tokens[self.pos - 1]
+            if last_token.line == step_location.line:
+                step_location.end_col = last_token.end_col
         self._consume(TokenType.NEWLINE)
         self._consume(TokenType.INDENT)
         body = self._parse_block()
         self._consume(TokenType.DEDENT)
         node = ForStmt(var=var_name, start=start, end=end, step=step, body=body)
+        if step_location is not None:
+            node.annotations = {"for_step_location": step_location}
         return self._set_loc(node, start_tok)
 
     def _parse_while_stmt(self) -> WhileStmt:
@@ -1299,6 +1323,10 @@ class Parser:
         (``tests/fixtures/tail_f_tv``). A lone expression is the node an arm
         always held.
         """
+        with self._expression_slot("inline switch arm"):
+            return self._parse_arm_simple_statements()
+
+    def _parse_arm_simple_statements(self) -> list:
         first_token = self._current()
         body: list = []
         while True:
@@ -1420,6 +1448,12 @@ class Parser:
     def _parse_expression(self):
         self._enter(self._current())
         try:
+            if (self._expression_slots
+                    and self._current().type in (TokenType.IF, TokenType.SWITCH)):
+                cur = self._current()
+                raise ParseError(
+                    f"Unexpected token {cur.type.name}({cur.value!r})", cur,
+                )
             # if/switch can be used as expressions (RHS of assignments)
             if self._check(TokenType.IF):
                 return self._parse_if_expr()
@@ -1442,11 +1476,11 @@ class Parser:
         expr = self._parse_or()
         if self._match(TokenType.QUESTION):
             self._skip_newlines()
-            true_val = self._parse_expression()
+            true_val = self._parse_expression_in_slot("ternary operand")
             self._skip_newlines()
             self._consume(TokenType.COLON, "Expected ':' in ternary")
             self._skip_newlines()
-            false_val = self._parse_expression()
+            false_val = self._parse_expression_in_slot("ternary operand")
             node = Ternary(condition=expr, true_val=true_val, false_val=false_val)
             return self._set_loc(node, start_tok)
         return expr
@@ -1695,8 +1729,9 @@ class Parser:
         call_arg_order: list = []
 
         while not self._check(TokenType.RPAREN) and not self._at_end():
-            # Detect kwargs: IDENT = value (but not IDENT == value)
-            if (self._current().type == TokenType.IDENT
+            # A call label may be an identifier or a type keyword, before =.
+            if ((self._current().type == TokenType.IDENT
+                    or self._current().type in TYPE_KEYWORDS)
                     and self._peek().type == TokenType.EQUALS
                     and self._peek(2).type != TokenType.EQUALS):
                 key_tok = self._advance()
@@ -1720,6 +1755,9 @@ class Parser:
                     )
                 self._advance()  # consume =
                 val = self._parse_expression()
+                val.annotations = {
+                    **(val.annotations or {}), "keyword_location": self._loc(key_tok),
+                }
                 kwargs[key_tok.value] = val
                 call_arg_order.append(val)
             else:

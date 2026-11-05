@@ -1,6 +1,6 @@
 """Session flags on a session with more than one window.
 
-TradingView's every-flag tapes (lane CG-ISMARKET's probe) on charts
+TradingView's every-flag tapes on charts
 whose session has two windows: the public TSE:7203 and HKEX:700 tapes
 (``fixtures/session_ismarket``) and US futures tapes kept in a private
 repository and overlaid onto the paired engine's
@@ -282,7 +282,7 @@ def test_pre_and_post_market_read_every_window(engine: Path, tmp_path: Path) -> 
     """Pre-market is 04:00 to the session day's first open and post-market its
     last close to 20:00, whichever window the session names first; a bar in
     the break between two windows is neither, and so is every bar of a
-    session with an overnight window (engine lane K-SESSION-WINDOWS F6, which
+    session with an overnight window (the session-window handling, which
     the tapes above hold no off-market bar to test: every one of their bars is
     in market and neither pre- nor post-market)."""
     work = tmp_path / "run"
