@@ -375,7 +375,7 @@ int main() {
 def test_unrelated_lowerings_keep_cpp_diagnostics_and_manifests(tmp_path, body):
     from tests._e2e import reference_codegen, transpile_json
 
-    reference = reference_codegen("5631f3e7c3aea91cf763de7ceaf893c31c5f85bf")
+    reference = reference_codegen("3ec62ae589f5b777122d03f1e7a706e7cda67ba8")
     assert reference is not None, "the source-preservation baseline must be available"
     pine = tmp_path / "strategy.pine"
     pine.write_text(HEADER + body)
