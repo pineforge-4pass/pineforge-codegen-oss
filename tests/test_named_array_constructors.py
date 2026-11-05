@@ -356,6 +356,12 @@ int main() {
     assert output.splitlines() == ["", "1"]
 
 
+_REFERENCE_SPELLING = {
+    "m = matrix.new<float>(rows = 2, columns = 3, initial_value = close)\n":
+        "m = matrix.new<float>(2, 3, close)\n",
+}
+
+
 @pytest.mark.parametrize("body", [
     "values = array.new<float>()\n",
     "values = array.new<float>(3)\n",
@@ -378,8 +384,12 @@ def test_unrelated_lowerings_keep_cpp_diagnostics_and_manifests(tmp_path, body):
     reference = reference_codegen("3ec62ae589f5b777122d03f1e7a706e7cda67ba8")
     assert reference is not None, "the source-preservation baseline must be available"
     pine = tmp_path / "strategy.pine"
-    pine.write_text(HEADER + body)
+    # The reference read the keywords of matrix.new by position, as a call with
+    # no counts (a 0 by 0 matrix): that keyword spelling is held to what the
+    # reference emitted for the positional one, which the keywords now reach.
+    pine.write_text(HEADER + _REFERENCE_SPELLING.get(body, body))
     previous = transpile_json(pine, reference)
+    pine.write_text(HEADER + body)
     current = transpile_json(pine)
     assert previous["ok"] and current["ok"], (previous, current)
     assert current == previous

@@ -42,21 +42,32 @@ CALENDAR = (
     "// @pf-trace skip_kw=skip_kw\n// @pf-trace skip_pos=skip_pos\n"
 )
 
-MATRIX = (
+# Three scripts, so that a matrix the keywords build wrongly stops only the rows
+# that read it: the dimensions are read without reading an element (a 0 by 0
+# matrix has none, and the read of one stops the run).
+MATRIX_DIMENSIONS = (
     "matrix<float> kw = matrix.new<float>(rows = 2, columns = 3, initial_value = 1.5)\n"
     "matrix<float> pos = matrix.new<float>(2, 3, 1.5)\n"
     "matrix<float> mixed = matrix.new<float>(2, columns = 3, initial_value = 1.5)\n"
-    "matrix<float> no_rows_kw = matrix.new<float>(columns = 4)\n"
-    "matrix<float> no_rows_pos = matrix.new<float>(0, 4)\n"
-    "float kw_rows = kw.rows()\nfloat kw_columns = kw.columns()\nfloat kw_last = kw.get(1, 2)\n"
+    "float kw_rows = kw.rows()\nfloat kw_columns = kw.columns()\n"
     "float pos_rows = pos.rows()\nfloat pos_columns = pos.columns()\n"
     "float mixed_rows = mixed.rows()\nfloat mixed_columns = mixed.columns()\n"
+    + "".join(f"// @pf-trace {name}={name}\n" for name in (
+        "kw_rows", "kw_columns", "pos_rows", "pos_columns", "mixed_rows", "mixed_columns"))
+)
+MATRIX_FILL = (
+    "matrix<float> kw = matrix.new<float>(rows = 2, columns = 3, initial_value = 1.5)\n"
+    "matrix<float> pos = matrix.new<float>(2, 3, 1.5)\n"
+    "float kw_last = kw.get(1, 2)\nfloat pos_last = pos.get(1, 2)\n"
+    "// @pf-trace kw_last=kw_last\n// @pf-trace pos_last=pos_last\n"
+)
+MATRIX_NO_ROWS = (
+    "matrix<float> no_rows_kw = matrix.new<float>(columns = 4)\n"
+    "matrix<float> no_rows_pos = matrix.new<float>(0, 4)\n"
     "float no_rows_kw_rows = no_rows_kw.rows()\nfloat no_rows_kw_columns = no_rows_kw.columns()\n"
     "float no_rows_pos_rows = no_rows_pos.rows()\nfloat no_rows_pos_columns = no_rows_pos.columns()\n"
     + "".join(f"// @pf-trace {name}={name}\n" for name in (
-        "kw_rows", "kw_columns", "kw_last", "pos_rows", "pos_columns",
-        "mixed_rows", "mixed_columns", "no_rows_kw_rows", "no_rows_kw_columns",
-        "no_rows_pos_rows", "no_rows_pos_columns"))
+        "no_rows_kw_rows", "no_rows_kw_columns", "no_rows_pos_rows", "no_rows_pos_columns"))
 )
 
 # `math.random(seed = 3)` skips `min` and `max`, which default to 0 and 1. Each
@@ -81,7 +92,9 @@ TIME_CALLS = (
 SOURCES = {
     "calendar": HEADER + CALENDAR,
     "time": HEADER + TIME_CALLS,
-    "matrix": HEADER + MATRIX,
+    "matrix_dimensions": HEADER + MATRIX_DIMENSIONS,
+    "matrix_fill": HEADER + MATRIX_FILL,
+    "matrix_no_rows": HEADER + MATRIX_NO_ROWS,
     "random_keyword": HEADER + RANDOM_KEYWORD,
     "random_positional": HEADER + RANDOM_POSITIONAL,
 }
@@ -148,16 +161,22 @@ def test_time_keyword_after_a_skipped_session_keeps_its_own_slot(runs):
                            f"{'open' if offset == 0 else 'close'} time; first {wrong[:3]}")
 
 
-def test_matrix_keywords_name_the_dimensions_and_the_fill(runs):
-    outcome = _ran(runs, "matrix")
-    for name, expected in (("kw_rows", 2.0), ("kw_columns", 3.0), ("kw_last", 1.5),
+def test_matrix_keywords_name_the_dimensions(runs):
+    outcome = _ran(runs, "matrix_dimensions")
+    for name, expected in (("kw_rows", 2.0), ("kw_columns", 3.0),
                            ("pos_rows", 2.0), ("pos_columns", 3.0),
                            ("mixed_rows", 2.0), ("mixed_columns", 3.0)):
         _all_bars_equal(outcome, name, expected)
 
 
+def test_matrix_keywords_name_the_fill(runs):
+    outcome = _ran(runs, "matrix_fill")
+    for name in ("kw_last", "pos_last"):
+        _all_bars_equal(outcome, name, 1.5)
+
+
 def test_a_matrix_that_skips_its_rows_has_the_rows_default(runs):
-    outcome = _ran(runs, "matrix")
+    outcome = _ran(runs, "matrix_no_rows")
     # No row count named is the same matrix as zero rows written out.
     for kw_name, pos_name in (("no_rows_kw_rows", "no_rows_pos_rows"),
                               ("no_rows_kw_columns", "no_rows_pos_columns")):
@@ -204,3 +223,36 @@ def test_a_keyword_no_parameter_has_is_refused_with_the_typed_code(name, line, c
     codes = [d.code for d in caught.value.diagnostics]
     assert codes == [code], codes
     assert name in caught.value.diagnostics[0].message
+
+
+# Calls whose every keyword is a parameter of SOME overload of `timestamp`, so the
+# keyword-name check passes, but that bind to no overload: the lowering refuses
+# them with the code the typed methods use for the same fault. (call, code, the
+# name the message quotes)
+NO_OVERLOAD = [
+    ('x = timestamp(dateString = "2024-03-01", year = 2024)\n', "PF-E2027", "year"),
+    ('x = timestamp(2024, dateString = "2024-03-01")\n', "PF-E2027", "dateString"),
+    ('x = timestamp("UTC+5", 2024, 3, 1, timezone = "UTC+5")\n', "PF-E2024", "timezone"),
+]
+
+
+@pytest.mark.parametrize("line,code,quoted", NO_OVERLOAD, ids=[row[2] for row in NO_OVERLOAD])
+def test_a_timestamp_that_binds_to_no_overload_is_refused_with_the_typed_code(line, code, quoted):
+    with pytest.raises(CompileError) as caught:
+        transpile(HEADER + line)
+    codes = [d.code for d in caught.value.diagnostics]
+    assert codes == [code], codes
+    assert f"'{quoted}'" in caught.value.diagnostics[0].message
+
+
+# The two offsets Pine v6 gives time() and time_close() are parameters of their
+# records: naming them is no unknown keyword (the lowering reads them by name).
+OFFSET_KEYWORDS = [
+    'x = time("60", bars_back = -1)\n',
+    'x = time_close("60", timeframe_bars_back = 1)\n',
+]
+
+
+@pytest.mark.parametrize("line", OFFSET_KEYWORDS, ids=["time", "time_close"])
+def test_the_offset_keywords_of_time_are_no_unknown_keywords(line):
+    assert "pine_time_offset" in transpile(HEADER + line)
