@@ -57,7 +57,6 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - `line(na)` and `box(na)` emit the same missing handles as typed drawing declarations initialized with `na` (#295).
 - Literal `na` in emitted strategy string parameters uses the empty-string sentinel, including `strategy.exit`'s `from_entry` (#295).
 - Array bindings destructured from a helper's tuple retain their collection type for built-in method calls (#295).
-- `strategy.default_entry_qty()` raises `PF-E5084` until the strategy host exposes a default-quantity query; the message says that TradingView accepts the call and that PineForge does not support it yet (#295).
 - `if` and `switch` expressions reassigned to a history-bearing variable update its current Series slot (#295).
 - Pine identifiers `bar` and `HUGE` use the existing C++ name escape without changing authored input titles (#295).
 - Colliding direct scalar history locals in ordinary functions get declaration-owned Series storage and retain separate call-site histories, including computed initializers that read a same-named global and locals of different scalar families (#295).
@@ -87,6 +86,14 @@ supported as exact pairs; on the 0.x line they are independent. See the
   with an internal `ValueError`. As in TradingView, the zone word is plain
   arithmetic on the date fields: the value is the fields read as UTC minus the
   signed offset.
+- `strategy.default_entry_qty(fill_price)` reads the engine host's query of the
+  default order size at a price (`default_entry_qty`); it used to lower to an
+  undeclared function, so a script that used it did not build. It needs an
+  engine whose strategy host provides the query. The calls TradingView refuses
+  are refused too, at the offending argument or call, also inside the arm of a
+  switch: no price, a second price, a price given both by position and by name,
+  an unknown argument name (`PF-E1088`), and a string, bool, color or
+  collection price (`PF-E2083` to `PF-E2086`, only for a type the syntax proves).
 - An affine chart loop proved endless is stopped with the loop-time error when
   its result reaches an effect. Omission is limited to an unused loop statement
   with no calls, whose writes have no readers except self-updates, a break

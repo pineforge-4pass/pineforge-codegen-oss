@@ -62,6 +62,7 @@ HOST_MEMBER_NAMES = frozenset({
     "count_wintrades",
     "current_bar_",
     "current_equity",
+    "default_entry_qty",
     "evaluate_security",
     "eventrades",
     "fill_report",
