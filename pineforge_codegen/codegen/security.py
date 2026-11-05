@@ -6072,6 +6072,42 @@ class SecurityEmitter:
                 and len(node.args) == len(info.node.params)
                 and self._security_pure_body(info.node))
 
+    def _security_pure_user_tuple_element(self, name: str, call):
+        """The element expression a payload reads when it reads ``name``, a
+        global of a tuple declaration ``[.., name, ..] = f(args)`` whose call
+        is PURE: ``f`` is a user function whose body is one tuple literal of
+        pure expressions over its parameters (``_security_pure_expr``), called
+        positionally with arguments that have no state either (no ta.*, var,
+        varip, request or method in them or in the globals they read,
+        ``_security_call_has_state``). TradingView evaluates such a
+        declaration on the requested bar; its value is the element's, and
+        reading one element evaluates only that element, so a second read of
+        the declaration cannot advance anything. None for every other call,
+        which keeps its refusal: a function with state would advance twice,
+        and an element with history has no series on the requested clock."""
+        binding = self._direct_program_tuple_bindings.get(name)
+        if (binding is None or not isinstance(call, FuncCall)
+                or not isinstance(call.callee, Identifier) or call.kwargs
+                or call.callee.name not in self._func_names):
+            return None
+        info = self._func_info_map.get(call.callee.name)
+        if info is None or info.node is None:
+            return None
+        body = info.node.body
+        if (len(body) != 1 or not isinstance(body[0], ExprStmt)
+                or not isinstance(body[0].expr, TupleLiteral)
+                or len(call.args) != len(info.node.params)):
+            return None
+        _declaration, index = binding
+        elements = body[0].expr.elements
+        params = set(info.node.params)
+        if index >= len(elements) or not all(
+                self._security_pure_expr(element, params) for element in elements):
+            return None
+        if self._security_call_has_state(call):
+            return None
+        return elements[index]
+
     def _security_shared_call_key(self, node, helper_binding_stack) -> tuple | None:
         """What a pure call (``_security_pure_call``) evaluates on the
         requested bar: its function and the canonical value of each argument
@@ -9206,6 +9242,19 @@ class SecurityEmitter:
                 if expr_node.name in self._security_arg_global_values:
                     return self._security_arg_global_values[expr_node.name]
                 value = global_expr_map[expr_node.name]
+                if (expr_node.name in self._direct_program_tuple_binding_names
+                        and self._security_ta_tuple_element_field(expr_node.name) is None):
+                    # An element of a tuple declaration whose call is a pure
+                    # user function: only that element is lowered, on the
+                    # requested bar, with the call's arguments bound to the
+                    # function's parameters.
+                    element = self._security_pure_user_tuple_element(
+                        expr_node.name, value)
+                    if element is not None:
+                        _info, bound_stack = self._security_bind_helper_args(value, ())
+                        return self._build_security_expr(
+                            sec_id, element, ta_range, ta_results, resolving,
+                            security_mutable_names, bound_stack, emitted_lines)
                 # A global bound to a user call is one value per requested
                 # bar, however many reads the payload makes (``g - g[1]``):
                 # every read inlined the call again, which advanced its TA
