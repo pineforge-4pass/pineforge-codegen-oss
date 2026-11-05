@@ -270,26 +270,13 @@ STRATEGY_UNSUPPORTED_PARAMS: dict[str, set[str]] = {
 # a follow-up must plumb alert events before codegen may claim support.
 
 # strategy.closedtrades / strategy.opentrades accessor surfaces are NOT
-# symmetric in Pine v6. opentrades has no exit_* fields (a trade has not
-# closed yet). Both lack ``direction`` (Pine has ``size`` whose sign carries
-# the direction). Splitting the whitelist makes the support checker reject
-# typos like ``strategy.opentrades.exit_price(0)`` that previously slipped
-# through into codegen and produced trade-accessor calls the runtime does
-# not implement on the open-trades side.
-CLOSED_TRADE_ACCESSOR_METHODS: frozenset[str] = frozenset({
-    "profit", "profit_percent", "commission",
-    "entry_bar_index", "exit_bar_index", "entry_comment", "exit_comment",
-    "entry_id", "exit_id", "entry_price", "exit_price", "entry_time",
-    "exit_time", "size", "max_runup", "max_runup_percent",
-    "max_drawdown", "max_drawdown_percent",
-})
-OPEN_TRADE_ACCESSOR_METHODS: frozenset[str] = frozenset({
-    "profit", "profit_percent", "commission",
-    "entry_bar_index", "entry_comment", "entry_id",
-    "entry_price", "entry_time",
-    "size", "max_runup", "max_runup_percent",
-    "max_drawdown", "max_drawdown_percent",
-})
+# symmetric in Pine v6 (the sets and the reason live in ``signatures``, beside
+# the keyword records of the same accessors). Splitting the whitelist makes the
+# support checker reject typos like ``strategy.opentrades.exit_price(0)`` that
+# previously slipped through into codegen and produced trade-accessor calls the
+# runtime does not implement on the open-trades side.
+CLOSED_TRADE_ACCESSOR_METHODS: frozenset[str] = sigs.CLOSED_TRADE_ACCESSOR_METHODS
+OPEN_TRADE_ACCESSOR_METHODS: frozenset[str] = sigs.OPEN_TRADE_ACCESSOR_METHODS
 # Back-compat alias for any external consumer still importing the union set
 # (kept as the union of the two new sets so a stale import never silently
 # narrows). New code should prefer the side-specific constant above.

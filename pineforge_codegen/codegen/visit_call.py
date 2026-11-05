@@ -153,6 +153,7 @@ from ..ast_nodes import (
 )
 from ..collection_history import history_annotation, literal_offset
 from ..array_binding import bind_array_constructor_arguments
+from ..diagnostic_codes import render_diagnostic
 from ..external_requests import RECORDED_KEY_ANNOTATION, request_stop_marker
 from ..intrinsic_binding import bind_intrinsic_arguments, validate_intrinsic_keywords
 from ..limits import iter_ast_nodes
@@ -203,6 +204,7 @@ from .tables import (
     _math_minmax_na_expr,
     _math_round_digits_expr,
     _matrix_functional_receiver,
+    _bind_kwargs_aligned,
     _merge_kwargs,
 )
 
@@ -2808,13 +2810,7 @@ class CallVisitor:
                 return lowered
             node = self._check_time_bars_back(func_name, node)
         if func_name == "time" and namespace is None and (node.args or node.kwargs):
-            args = _merge_kwargs(
-                node.args, node.kwargs, sigs.get_param_names(None, "time"),
-                self._visit_expr, intrinsic=sigs.get_intrinsic(None, "time"),
-            )
-            tf_e = args[0] if len(args) > 0 else 'script_tf_'
-            sess = args[1] if len(args) > 1 else 'std::string("")'
-            tz_e = args[2] if len(args) > 2 else 'std::string("")'
+            tf_e, sess, tz_e = self._time_call_arguments(node, "time")
             return (
                 f"pine_time(current_bar_.timestamp, {tf_e}, {sess}, {tz_e}, script_tf_"
                 " PF_PINE_TIME_SESSION_DAY_ARGS(syminfo_.timezone, syminfo_.session))"
@@ -2822,13 +2818,7 @@ class CallVisitor:
         # time_close(timeframe) or time_close(tf, session, tz) — same
         # session-tz default as time() above.
         if func_name == "time_close" and namespace is None and (node.args or node.kwargs):
-            args = _merge_kwargs(
-                node.args, node.kwargs, sigs.get_param_names(None, "time_close"),
-                self._visit_expr, intrinsic=sigs.get_intrinsic(None, "time_close"),
-            )
-            tf_e = args[0] if len(args) > 0 else 'script_tf_'
-            sess = args[1] if len(args) > 1 else 'std::string("")'
-            tz_e = args[2] if len(args) > 2 else 'std::string("")'
+            tf_e, sess, tz_e = self._time_call_arguments(node, "time_close")
             return (
                 f"pine_time_close(current_bar_.timestamp, {tf_e}, {sess}, {tz_e}, script_tf_"
                 " PF_PINE_TIME_SESSION_DAY_ARGS(syminfo_.timezone, syminfo_.session))"
@@ -2836,8 +2826,30 @@ class CallVisitor:
 
         # timestamp(year, month, day, hour, minute) → Unix ms
         if func_name == "timestamp" and namespace is None:
-            is_tz_first = False
-            if node.args:
+            # Each argument binds at the slot of its parameter, whichever way
+            # it is written: the numeric overload is (year, month, day, hour,
+            # minute, second) and the timezone-first one puts ``timezone`` in
+            # front. A keyword used to be read from the compressed list (a
+            # skipped ``hour`` moved ``minute`` into its slot) or, for
+            # ``timezone`` on the numeric overload, dropped with no
+            # diagnostic. A keyword no overload has is refused first.
+            timestamp_record = sigs.get_intrinsic(None, "timestamp")
+            numeric_params = ("year", "month", "day", "hour", "minute", "second")
+            zoned_params = ("timezone", *numeric_params)
+            is_tz_first = "timezone" in node.kwargs
+            date_string_node = None
+            if "dateString" in node.kwargs:
+                # dateString is the only parameter of its overload: a positional
+                # argument is no part of it, and neither is any other keyword.
+                if node.args:
+                    self._codegen_error(node, *render_diagnostic(
+                        "PF-E2027", {"key": "timestamp", "name": "dateString"}))
+                for other in node.kwargs:
+                    if other != "dateString":
+                        self._codegen_error(node, *render_diagnostic(
+                            "PF-E2027", {"key": "timestamp", "name": other}))
+                date_string_node = node.kwargs["dateString"]
+            elif node.args:
                 first_arg_spec = self._type_spec_from_expr(node.args[0])
                 if first_arg_spec is not None and first_arg_spec.kind == "primitive" and first_arg_spec.name == "string":
                     is_tz_first = True
@@ -2845,38 +2857,42 @@ class CallVisitor:
                     is_tz_first = True
                 elif self._infer_type(node.args[0]) == "std::string":
                     is_tz_first = True
-
-            if is_tz_first:
+                if node.kwargs and "timezone" in node.kwargs:
+                    # The first parameter is ``timezone``: a positional first
+                    # argument already fills it.
+                    self._codegen_error(node, *render_diagnostic(
+                        "PF-E2024", {"key": "timestamp", "name": "timezone"}))
                 # A single string argument is the timestamp(dateString)
-                # overload, NOT the timezone-first form. It used to fall
-                # through with year=1970 defaults — silently wrong. Pine
-                # dateString is a const string, so parse it at transpile
-                # time (common as the input.time defval); reject loudly when
-                # it is not a literal or does not parse.
-                if len(node.args) == 1:
-                    if isinstance(node.args[0], StringLiteral):
-                        ms = _parse_pine_datestring_ms(node.args[0].value)
-                        if ms is None:
-                            self._codegen_error(
-                                node,
-                                f"timestamp(dateString): could not parse "
-                                f"'{node.args[0].value}'.",
-                                hint="Supported forms: ISO-8601 "
-                                     "(\"2025-01-01[THH:MM:SS][±HH:MM]\") and "
-                                     "\"DD MMM YYYY [hh:mm[:ss]] [±HHMM]\" / "
-                                     "\"MMM DD YYYY ...\"; no time zone = "
-                                     "GMT+0.",
-                            )
-                        return f"{ms}LL"
-                    self._codegen_error(
-                        node,
-                        "timestamp(dateString) requires a literal string in "
-                        "PineForge (Pine v6 dateString is a const string).",
-                        hint="Use a string literal, or timestamp(year, month, "
-                             "day[, hour, minute, second]).",
-                    )
+                # overload, NOT the timezone-first form.
+                if is_tz_first and len(node.args) == 1 and not node.kwargs:
+                    date_string_node = node.args[0]
+
+            if date_string_node is not None:
+                # It used to fall through with year=1970 defaults — silently
+                # wrong. Pine dateString is a const string, so parse it at
+                # transpile time (common as the input.time defval); reject
+                # loudly when it is not a literal or does not parse.
+                if isinstance(date_string_node, StringLiteral):
+                    ms = _parse_pine_datestring_ms(date_string_node.value)
+                    if ms is None:
+                        # PF-E5027, rendered from the catalog: the string is the
+                        # call's first argument or its dateString keyword.
+                        self._codegen_error(node, *render_diagnostic(
+                            "PF-E5027", {"args": date_string_node.value}))
+                    return f"{ms}LL"
+                self._codegen_error(
+                    node,
+                    "timestamp(dateString) requires a literal string in "
+                    "PineForge (Pine v6 dateString is a const string).",
+                    hint="Use a string literal, or timestamp(year, month, "
+                         "day[, hour, minute, second]).",
+                )
+            if is_tz_first:
+                bound = _bind_kwargs_aligned(
+                    node.args, node.kwargs, zoned_params, intrinsic=timestamp_record,
+                )
                 # timezone-first form requires year, month, and day.
-                if len(node.args) < 4:
+                if len(bound) < 4 or any(a is None for a in bound[:4]):
                     self._codegen_error(
                         node,
                         "timestamp(timezone, ...) requires year, month, and "
@@ -2884,28 +2900,25 @@ class CallVisitor:
                         hint="Pine v6 signature: timestamp(timezone, year, "
                              "month, day[, hour, minute, second]).",
                     )
-                args = [self._visit_expr(a) for a in node.args]
+                args = [self._visit_expr(a) if a is not None else None for a in bound]
                 # Every calendar field lands in an ``int`` inside the lambda.
                 fields = [
-                    self._coerce_int_slot(a, node.args[i], "int")
+                    self._coerce_int_slot(a, bound[i], "int") if a is not None else None
                     for i, a in enumerate(args)
                 ]
                 tz = args[0]
-                yr = fields[1] if len(fields) > 1 else "1970"
-                mo = fields[2] if len(fields) > 2 else "1"
-                dy = fields[3] if len(fields) > 3 else "1"
-                hr = fields[4] if len(fields) > 4 else "0"
-                mn = fields[5] if len(fields) > 5 else "0"
-                sc = fields[6] if len(fields) > 6 else "0"
+                yr = fields[1]
+                mo = fields[2]
+                dy = fields[3]
+                hr = fields[4] if len(fields) > 4 and fields[4] is not None else "0"
+                mn = fields[5] if len(fields) > 5 and fields[5] is not None else "0"
+                sc = fields[6] if len(fields) > 6 and fields[6] is not None else "0"
                 return _timestamp_calendar_lambda(tz, yr, mo, dy, hr, mn, sc)
             else:
                 # Numeric form requires year, month, and day (hour/minute/
                 # second default to 0). Anything shorter used to emit "0".
-                merged = _merge_kwargs(
-                    node.args, node.kwargs,
-                    sigs.get_param_names(None, "timestamp"),
-                    lambda a: a,
-                    intrinsic=sigs.get_intrinsic(None, "timestamp"),
+                merged = _bind_kwargs_aligned(
+                    node.args, node.kwargs, numeric_params, intrinsic=timestamp_record,
                 )
                 if len(merged) < 3 or any(a is None for a in merged[:3]):
                     self._codegen_error(
@@ -2918,14 +2931,15 @@ class CallVisitor:
                     )
                 args = [
                     self._coerce_int_slot(self._visit_expr(a), a, "int")
+                    if a is not None else None
                     for a in merged
                 ]
                 yr = args[0]
-                mo = args[1] if len(args) > 1 else "1"
-                dy = args[2] if len(args) > 2 else "1"
-                hr = args[3] if len(args) > 3 else "0"
-                mn = args[4] if len(args) > 4 else "0"
-                sc = args[5] if len(args) > 5 else "0"
+                mo = args[1]
+                dy = args[2]
+                hr = args[3] if len(args) > 3 and args[3] is not None else "0"
+                mn = args[4] if len(args) > 4 and args[4] is not None else "0"
+                sc = args[5] if len(args) > 5 and args[5] is not None else "0"
                 # No timezone argument: Pine resolves the calendar fields in
                 # syminfo.timezone (the EXCHANGE tz), not UTC. This used to be
                 # a bare timegm(), which put e.g. timestamp(y, m, d, 8, 0, 0)
@@ -4110,7 +4124,61 @@ class CallVisitor:
         vec = "{" + ", ".join(rest) + "}"
         return f'pine_str_format_tv({fmt_arg}, {vec})'
 
+    def _time_call_arguments(self, node, func_name: str) -> tuple[str, str, str]:
+        """The timeframe, session and timezone of ``time(...)`` / ``time_close(...)``.
+
+        Each argument is read at the slot of its parameter and visited once, in
+        parameter order. A skipped ``session`` (``time("60", timezone = "UTC")``)
+        used to move the timezone into the session slot, because the compressed
+        argument list leaves a skipped parameter no slot; it now takes the
+        empty default an omitted argument has."""
+        bound = _bind_kwargs_aligned(
+            node.args, node.kwargs, sigs.get_param_names(None, func_name),
+            intrinsic=sigs.get_intrinsic(None, func_name),
+        )
+
+        def lowered(index: int, default: str) -> str:
+            if index < len(bound) and bound[index] is not None:
+                return self._visit_expr(bound[index])
+            return default
+
+        timeframe = lowered(0, 'script_tf_')
+        session = lowered(1, 'std::string("")')
+        timezone = lowered(2, 'std::string("")')
+        return timeframe, session, timezone
+
+    def _visit_format_time_call(self, node) -> str:
+        """``str.format_time(time, format, timezone)``, each argument at its own slot.
+
+        ``format`` and ``timezone`` are optional, so a keyword can skip one:
+        ``str.format_time(time, timezone = "Asia/Tokyo")``. The compressed
+        argument list moved that timezone into the format slot (the call
+        formatted the time with the pattern "Asia/Tokyo" and ignored the
+        zone). A skipped slot now takes the omitted-argument default below,
+        the same one ``str.format_time(time)`` has."""
+        bound = _bind_kwargs_aligned(
+            node.args, node.kwargs, sigs.get_param_names("str", "format_time"),
+            intrinsic=sigs.get_intrinsic("str", "format_time"),
+        )
+
+        def slot(index: int):
+            return bound[index] if index < len(bound) else None
+
+        # Visit in parameter order, once each.
+        ts_node, fmt_node, tz_node = slot(0), slot(1), slot(2)
+        ts = self._visit_expr(ts_node) if ts_node is not None else "0"
+        fmt = self._visit_expr(fmt_node) if fmt_node is not None else '"yyyy-MM-dd"'
+        tz = self._visit_expr(tz_node) if tz_node is not None else '"UTC"'
+        if (ts_node is not None and self._holds_na_aware_wide_double(ts_node)
+                and self._emitted_value_is_double(ts_node)):
+            # A double-valued 64-bit product (``_wide_int_arith_cpp``)
+            # narrows na-preserving into the int64_t timestamp (quirk 9).
+            ts = na_preserving_int_cast(ts, "int64_t")
+        return f'pine_str_format_time({ts}, {fmt}, {tz})'
+
     def _visit_str_call(self, func_name: str, node) -> str:
+        if func_name == "format_time":
+            return self._visit_format_time_call(node)
         args = _merge_kwargs(node.args, node.kwargs,
                              sigs.get_param_names("str", func_name), self._visit_expr,
                              intrinsic=sigs.get_intrinsic("str", func_name))
@@ -4201,18 +4269,6 @@ class CallVisitor:
             if format_node is not None:
                 return self._str_format_expr(format_node, node.args[1:])
             return 'std::string("")'
-
-        if func_name == "format_time":
-            ts = args[0] if args else "0"
-            ts_node = node.args[0] if node.args else node.kwargs.get("time")
-            if (ts_node is not None and self._holds_na_aware_wide_double(ts_node)
-                    and self._emitted_value_is_double(ts_node)):
-                # A double-valued 64-bit product (``_wide_int_arith_cpp``)
-                # narrows na-preserving into the int64_t timestamp (quirk 9).
-                ts = na_preserving_int_cast(ts, "int64_t")
-            fmt = args[1] if len(args) > 1 else '"yyyy-MM-dd"'
-            tz = args[2] if len(args) > 2 else '"UTC"'
-            return f'pine_str_format_time({ts}, {fmt}, {tz})'
 
         if func_name == "replace":
             if len(args) >= 4:
