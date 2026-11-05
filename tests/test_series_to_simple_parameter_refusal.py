@@ -10,11 +10,48 @@ from pineforge_codegen import transpile
 from pineforge_codegen.diagnostic_codes import render_diagnostic
 from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._e2e import reference_codegen, transpile_json
+from tests._numeric_expected import integer_arithmetic, require_numeric_hunk
 
 
 CPP_REFERENCE = "290fdf7ae39eb786082fd11b8187ae6b640ab66e"
 ARRAY_FIELD_REFERENCE = "a4dea950f4f3c3ba64bb2461ea95eb4bab8b8d52"
 HEADER = '//@version=6\nstrategy("Parameter qualifiers")\n'
+
+# The two array-field controls compile from a4dea950 on (64-bit timestamps in an
+# int array, array fields no longer refused). Three intended changes of the batch
+# since then show in their complete C++; each one is replaced exactly once, as
+# (what a4dea950 emits, what the tree emits now), and the rest of the translation
+# unit stays equal to a4dea950's.
+_ARRAY_FIELD_HUNKS = (
+    # 1e2e72e: an omitted or na array field of a record is na, and a record copy
+    # shares its array fields (the default field is empty-handed, and reading
+    # through a na field stops with the typed na message).
+    ("    _PFArrayField()\n"
+     "        : owned_(std::make_shared<std::vector<T>>()), data_(owned_.get()) {}\n",
+     "    _PFArrayField() = default;\n"),
+    ("    std::vector<T>& operator*() const { return *data_; }\n",
+     "    bool is_na() const { return data_ == nullptr; }\n"
+     "    std::vector<T>& operator*() const {\n"
+     "        if (is_na())\n"
+     "            _PF_NA_STOP(\"array\", \"Cannot call array methods when ID of array is 'na'.\");\n"
+     "        return *data_;\n"
+     "    }\n"),
+    # 7f2cdbd1: a missing array size builds the empty array and the script goes on;
+    # a size that is present but invalid keeps its coded stop.
+    ("if(is_na(_pf_array_new_size)) _PF_ARRAY_STOP(\"size_invalid\", \"new\", "
+     "\"cannot create std::vector larger than max_size()\");",
+     "if(is_na(_pf_array_new_size)) return std::vector<int64_t>();"),
+)
+_ARRAY_FIELD_CONTROLS = {
+    "array_field_element_to_simple_function": _ARRAY_FIELD_HUNKS,
+    # a925fb3a and 2b13f9f: integer arithmetic checks a missing operand before it
+    # computes (here the integer parameter plus the array size).
+    "array_field_element_to_simple_method": _ARRAY_FIELD_HUNKS + ((
+        "return (amount + (double)(*_pf_udt_Ledger.get(receiver).values).size());",
+        "return " + integer_arithmetic(
+            "amount", "+", "(double)(*_pf_udt_Ledger.get(receiver).values).size()") + ";",
+    ),),
+}
 
 
 def _pair(name, body, refused_text, accepted_text, token, *, at=None, code="PF-E2080"):
@@ -348,12 +385,17 @@ def reference():
     return tree
 
 
-def _assert_unchanged(source, reference, tmp_path):
+def _assert_unchanged(source, reference, tmp_path, hunks=()):
     pine = tmp_path / "strategy.pine"
     pine.write_text(source, encoding="utf-8")
     before = transpile_json(pine, root=reference)
     assert before["ok"], before
-    assert transpile(source) == before["cpp"]
+    cpp = transpile(source)
+    for previous, expected in hunks:
+        # The new fragment must appear exactly once; it is put back to what the
+        # reference emits and the whole translation unit is compared.
+        cpp = require_numeric_hunk(cpp, previous, expected)
+    assert cpp == before["cpp"]
 
 
 @pytest.mark.parametrize("source,control,code,position", _CASES)
@@ -369,14 +411,13 @@ def test_refused_sources_were_accepted_by_reference(
 @pytest.mark.parametrize("source,control,code,position", _CASES)
 def test_paired_controls_keep_complete_cpp(
         source, control, code, position, reference, tmp_path, request):
-    if request.node.callspec.id in {
-            "array_field_element_to_simple_function",
-            "array_field_element_to_simple_method",
-    }:
+    hunks = ()
+    if request.node.callspec.id in _ARRAY_FIELD_CONTROLS:
         reference = reference_codegen(ARRAY_FIELD_REFERENCE)
         if reference is None:
             pytest.skip("the timestamp array-field reference is unavailable")
-    _assert_unchanged(control, reference, tmp_path)
+        hunks = _ARRAY_FIELD_CONTROLS[request.node.callspec.id]
+    _assert_unchanged(control, reference, tmp_path, hunks)
 
 
 @pytest.mark.parametrize("body", [

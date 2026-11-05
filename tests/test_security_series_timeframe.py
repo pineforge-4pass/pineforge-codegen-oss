@@ -1332,7 +1332,10 @@ def assert_selection_counter_result(body, sec_id, key):
     target = targets[0]
     assert f"{target} = {ref}[0];" in body
     assert f"{target} = 0;" in body
-    assert f"    return {target};\n}}());" in body
+    # The selection's int result is converted at the requested double boundary
+    # (a925fb3a): the lambda's closing call and the adapter's tail follow it.
+    adapter_tail = integer_to_double("\0").split("\0")[1]
+    assert f"    return {target};\n}}())" + adapter_tail + ";" in body
     return target
 
 
@@ -1357,8 +1360,9 @@ def test_requested_selection_owns_its_persistent_declaration(persistent):
         check = lambda candidate: assert_selection_counter_result(candidate, sec_id, key)
         target = check(body)
         assert_body_mutation_rejected(
-            body, check, f"{ref}.update(({ref}[0] + 1));",
-            f"{ref}.update(({ref}[0] + 2));")
+            body, check,
+            f"{ref}.update({integer_store(integer_arithmetic(f'{ref}[0]', '+', '1'))});",
+            f"{ref}.update({integer_store(integer_arithmetic(f'{ref}[0]', '+', '2'))});")
         assert_body_mutation_rejected(
             body, check, f"{target} = {ref}[0];", f"{target} = 0;")
         assert_body_mutation_rejected(
