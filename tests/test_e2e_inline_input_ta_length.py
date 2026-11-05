@@ -425,21 +425,30 @@ def test_inline_input_matches_bound_spelling(case_name: str, case_runs) -> None:
 # A length that really is a series stays refused with the same diagnostic
 # when an inline input is one of its leaves: the input is a stable leaf, the
 # rest of the expression is not.
+#
+# TradingView compiles a series length for ta.sma and ta.wma, and the refusal
+# says so; it refuses one for ta.ema and ta.rsi, whose refusal keeps the plain
+# wording (the third element of a row is the name the refusal gives the call).
 SERIES_LENGTHS = (
     ('ta.ema(close, close > open ? input.int(2, "A") : input.int(4, "B"))',
-     "ta::EMA", '(close > open) ? input.int(2, "A") : input.int(4, "B")'),
+     "ta::EMA", '(close > open) ? input.int(2, "A") : input.int(4, "B")', ""),
     ('ta.sma(close, input.int(9, "Base") + bar_index % 5)',
-     "ta::SMA", 'input.int(9, "Base") + (bar_index % 5)'),
+     "ta.sma", 'input.int(9, "Base") + (bar_index % 5)',
+     " TradingView accepts a series length for ta.sma(); "
+     "PineForge does not support it yet."),
     ('ta.rsi(close, math.max(input.int(14, "Len"), int(volume)))',
-     "ta::RSI", 'math.max(input.int(14, "Len"), int(volume))'),
+     "ta::RSI", 'math.max(input.int(14, "Len"), int(volume))', ""),
     ('ta.wma(close, input.source(close, "Src"))',
-     "ta::WMA", 'input.source(close, "Src")'),
+     "ta.wma", 'input.source(close, "Src")',
+     " TradingView accepts a series length for ta.wma(); "
+     "PineForge does not support it yet."),
 )
 
 
-@pytest.mark.parametrize("expr,class_name,arg", SERIES_LENGTHS)
+@pytest.mark.parametrize("expr,class_name,arg,tradingview", SERIES_LENGTHS)
 def test_series_length_with_inline_input_is_still_refused(
-        expr: str, class_name: str, arg: str, tmp_path: Path) -> None:
+        expr: str, class_name: str, arg: str, tradingview: str,
+        tmp_path: Path) -> None:
     pine = tmp_path / "strategy.pine"
     pine.write_text('//@version=6\nstrategy("e2e-inline-refused")\n'
                     f"x = {expr}\n"
@@ -449,5 +458,5 @@ def test_series_length_with_inline_input_is_still_refused(
     assert [d["message"] for d in result["diagnostics"]] == [
         f"Unsupported TA constructor length '{arg}' for {class_name}: it is "
         "neither a compile-time constant nor derived from an input, so "
-        "PineForge cannot size the indicator buffer. — Use a literal, an "
-        "input.*() value, or arithmetic over those for TA lengths."]
+        f"PineForge cannot size the indicator buffer.{tradingview} — Use a "
+        "literal, an input.*() value, or arithmetic over those for TA lengths."]

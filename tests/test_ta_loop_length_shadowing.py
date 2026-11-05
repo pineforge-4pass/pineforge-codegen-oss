@@ -26,7 +26,7 @@ def test_percentile_loop_length_refusal_is_independent_of_input_name(input_name,
         with pytest.raises(CompileError, match="Unsupported TA constructor length") as caught:
             transpile(script)
         diagnostic = caught.value.diagnostics[0]
-        assert diagnostic.code == "PF-E5009"
+        assert diagnostic.code == "PF-E5092"
         expected_line = next(
             number for number, line in enumerate(script.splitlines(), start=1)
             if "ta.percentile_nearest_rank" in line
