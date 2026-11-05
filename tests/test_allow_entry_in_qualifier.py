@@ -249,14 +249,10 @@ def reference():
     return tree
 
 
-@pytest.mark.parametrize("declarations,argument", ACCEPTED)
-def test_non_series_directions_keep_complete_cpp(declarations, argument, reference, tmp_path):
-    source = _accepted_source(declarations, argument)
-    pine = tmp_path / "strategy.pine"
-    pine.write_text(source, encoding="utf-8")
-    before = transpile_json(pine, root=reference)
-    assert before["ok"], before
-    assert transpile(source) == before["cpp"]
+# What each accepted shape admits is held to the bare literal of the value it
+# means, by value, in tests/test_e2e_risk_direction_values.py: the emitted C++
+# of an older build is not the contract (the direction is lowered by its value
+# now, and the C++ text of that lowering is not what the engine admits).
 
 
 @pytest.mark.parametrize("declarations,argument", ACCEPTED)
@@ -317,12 +313,11 @@ def test_bound_namespace_root_is_not_a_builtin_contract():
     qualifiers.check_builtin(ast.body[-1].body[-1].expr)
 
 
-def test_literal_string_direction_is_not_rejected_as_series(reference, tmp_path):
-    # The host lowering represents strategy.direction.* as integers.
-    # Whether literal strings should lower to those integers is a separate gap.
-    source = _accepted_source("", '"long"')
-    pine = tmp_path / "strategy.pine"
-    pine.write_text(source, encoding="utf-8")
-    before = transpile_json(pine, root=reference)
-    assert before["ok"], before
-    assert transpile(source) == before["cpp"]
+def test_literal_string_direction_is_not_rejected_as_series():
+    # A string literal is a constant, so it is not refused as a series argument.
+    # Which direction a literal string means is NOT pinned here: the host
+    # lowering represents strategy.direction.* as integers, and whether a
+    # literal string equals the constant is not measured against TradingView
+    # (the older build lowered every such string to all directions; the
+    # current lowering reads its text).
+    assert transpile(_accepted_source("", '"long"'), filename="direction.pine")
