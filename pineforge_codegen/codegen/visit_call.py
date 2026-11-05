@@ -152,6 +152,7 @@ from ..ast_nodes import (
     VarDecl,
 )
 from ..collection_history import history_annotation, literal_offset
+from ..array_binding import bind_array_constructor_arguments
 from ..external_requests import RECORDED_KEY_ANNOTATION, request_stop_marker
 from ..intrinsic_binding import bind_intrinsic_arguments, validate_intrinsic_keywords
 from ..limits import iter_ast_nodes
@@ -159,7 +160,6 @@ from ..security_contexts import ticker_symbol_arg
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from ..method_binding import (
     MethodBindError,
-    _written_actuals,
     bind_function_defaults,
     bind_method_call,
     signature_from_callable,
@@ -729,6 +729,34 @@ class CallVisitor:
             + cpp_type
             + ">(_pf_series_raw); }())"
         )
+
+    def _array_constructor_arg_expr(self, node: ASTNode) -> str:
+        """Keep requested helper bindings while rendering constructor slots."""
+        frame = self._security_fallback_frame
+        if frame is None:
+            return self._visit_expr(node)
+        args = frame["args"]
+        saved_memo = frame["memo"]
+        bindings = {}
+        # A constructor is outside the fallback's pure-call inventory, so
+        # that frame can mark its whole subtree as chart-rendered. Resolve
+        # helper-bound names through its lexical stack even below operators
+        # or builtin calls, while retaining the visitor for everything else.
+        for child, _depth in iter_ast_nodes(node):
+            if (isinstance(child, Identifier) and id(child) not in saved_memo
+                    and id(child) not in bindings
+                    and not self._security_identifier_is_global_binding(child)
+                    and self._security_lookup_helper_binding_context(
+                        child.name, args[5],
+                    ) is not None):
+                bindings[id(child)] = self._build_security_expr(args[0], child, *args[1:])
+        if not bindings:
+            return self._visit_expr(node)
+        frame["memo"] = {**saved_memo, **bindings}
+        try:
+            return self._visit_expr(node)
+        finally:
+            frame["memo"] = saved_memo
 
     def _array_init_value_expr(self, elem_spec: TypeSpec | None, value_node,
                                store: bool = True, render=None) -> str:
@@ -2370,17 +2398,53 @@ class CallVisitor:
                     and elem_spec.name in ("float", "int", "int64", "color")
                     else self._default_for_spec(elem_spec)
                 )
-                arguments = self._collection_arg_nodes(
-                    "array", func_name, node, False
-                )
-                if arguments:
-                    size_arg = self._visit_expr(arguments[0])
-                    if len(arguments) > 1 and arguments[1] is not None:
-                        self._warn_narrow_int_element(arguments[1], spec,
-                                                      arguments[1])
-                        init_val = self._array_init_value_expr(elem_spec, arguments[1])
+                size_node, value_node = bind_array_constructor_arguments(node, func_name)
+                if size_node is not None or value_node is not None:
+                    size_arg = (
+                        self._array_constructor_arg_expr(size_node)
+                        if size_node is not None else "0"
+                    )
+                    if value_node is not None:
+                        self._warn_narrow_int_element(value_node, spec, value_node)
+                        init_val = self._array_init_value_expr(
+                            elem_spec, value_node,
+                            render=self._array_constructor_arg_expr,
+                        )
                     else:
                         init_val = init_default
+                    bindings = ""
+                    if any(
+                        not cpp_is_plain_read(value) for value in (size_arg, init_val)
+                    ) and (
+                        node.kwargs
+                        or self._expr_contains_user_call(size_node)
+                        or self._expr_contains_user_call(value_node)
+                    ):
+                        # C++ function operands have no left-to-right guarantee
+                        # (g++ runs the right one first), and Pine evaluates the
+                        # arguments of a call in its parameter order even when the
+                        # keywords are written reversed. A keyword call, or one
+                        # that calls a user function, stages the supplied slots
+                        # once, in registered formal order, so a call that may
+                        # have effects runs when Pine runs it.
+                        # Allocate against authored names without renaming them.
+                        occupied = set(getattr(self, "_safe_name_occupied", ()))
+                        values = [size_arg, init_val]
+                        for index, (name, arg) in enumerate(zip(
+                            sigs.ARRAY_NEW_PARAMETERS, (size_node, value_node),
+                        )):
+                            if arg is None:
+                                continue
+                            base = f"_pf_array_new_{name}_arg"
+                            temporary = base
+                            suffix = 2
+                            while temporary in occupied:
+                                temporary = f"{base}_{suffix}"
+                                suffix += 1
+                            occupied.add(temporary)
+                            bindings += f"auto {temporary} = ({values[index]}); "
+                            values[index] = temporary
+                        size_arg, init_val = values
                     # A missing size builds an empty array and the run goes on
                     # (TradingView's tape of ``array.new<float>(size=n, ...)``
                     # with ``int n = na`` is an empty array on every bar); a
@@ -2399,40 +2463,14 @@ class CallVisitor:
                         '_PF_ARRAY_STOP("size_invalid", "new", _pf_array_new_error.what()); '
                         f"return {cpp_type}(); }} "
                     )
-                    if (len(arguments) > 1 and arguments[1] is not None
-                            and (self._expr_contains_user_call(arguments[0])
-                                 or self._expr_contains_user_call(arguments[1]))):
-                        # Pine evaluates a call's arguments as they are written.
-                        # C++ leaves the order of a call's arguments unspecified
-                        # (g++ runs the right one first), so a call that may
-                        # have effects binds the argument written first before
-                        # the other is evaluated: the size, unless the fill is
-                        # written before it (``initial_value=f(), size=g()``).
-                        written = [id(part) for part in _written_actuals(node)]
-                        fill_first = (
-                            id(arguments[0]) in written
-                            and id(arguments[1]) in written
-                            and written.index(id(arguments[1]))
-                            < written.index(id(arguments[0]))
-                        )
-                        if fill_first:
-                            return (
-                                "[&](auto _pf_array_new_value){ "
-                                "return [&](auto _pf_array_new_size){ "
-                                + construct
-                                + f"}}(({size_arg})); }}(({init_val}))"
-                            )
-                        return (
-                            "[&](auto _pf_array_new_size){ "
-                            "return [&](auto _pf_array_new_value){ "
-                            + construct
-                            + f"}}(({init_val})); }}(({size_arg}))"
-                        )
-                    return (
+                    constructor = (
                         "[&](auto _pf_array_new_size, auto _pf_array_new_value){ "
                         + construct
                         + f"}}(({size_arg}), ({init_val}))"
                     )
+                    if bindings:
+                        return f"([&](){{ {bindings}return {constructor}; }}())"
+                    return constructor
                 return f"{cpp_type}()"
             if func_name == "from":
                 spec = self._type_spec_from_expr(node) or TypeSpec.array(TypeSpec.primitive("float"))

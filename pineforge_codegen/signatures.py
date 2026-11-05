@@ -382,6 +382,8 @@ _strat("close_all", _sig([
 _strat("cancel", _sig([("id", S)], ret=VOID), keyword_names_verified=True)
 _strat("cancel_all", _sig([], ret=VOID), keyword_names_verified=True)
 
+ARRAY_NEW_PARAMETERS = ("size", "initial_value")
+
 _strat("convert_to_account", _sig([("value", F)], ret=F))
 _strat("convert_to_symbol", _sig([("value", F)], ret=F))
 _strat("default_entry_qty", _sig([("fill_price", F)], ret=F))

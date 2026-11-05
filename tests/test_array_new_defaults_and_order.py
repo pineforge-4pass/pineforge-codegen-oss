@@ -1,12 +1,16 @@
 """array.new: the omitted fill of an int array, and the order of size and fill.
 
 Pine's omitted initial_value is na: for array<int> as for array<float> (C1
-emitted 0 for the int array). Pine evaluates a call's arguments as they are
-written; C++ leaves the order of a call's arguments unspecified and g++ runs the
-right one first, so an array.new whose size or fill calls a user function binds
-the argument written first (the size, unless the fill is written before it)
-before the other is evaluated. Every other array.new keeps its emitted text.
+emitted 0 for the int array). TradingView evaluates the arguments of an
+array.new call in PARAMETER order (size, then initial_value), also when the
+keywords are written reversed (a held tape of a reversed-keyword call: the size
+helper ran first). C++ leaves the order of a call's arguments unspecified and
+g++ runs the right one first, so an array.new whose size or fill calls a user
+function stages the supplied slots once, size first. Every other array.new
+keeps its emitted text.
 """
+
+import re
 
 import pytest
 
@@ -68,42 +72,43 @@ ORDER_SOURCE = (
 
 
 @pytest.mark.parametrize(
-    "statement, size, fill",
+    "statement",
     [
         pytest.param(
+            "a = array.new<float>(nextSize(), nextValue())",
+            id="positional-size-and-fill-call",
+        ),
+        pytest.param(
             "a = array.new<float>(nextSize(), initial_value=nextValue())",
-            "nextSize()", "nextValue()", id="size-and-fill-call",
+            id="mixed-size-and-fill-call",
         ),
         pytest.param(
-            "a = array.new<float>(nextSize(), 1.0)",
-            "nextSize()", "1.0", id="size-call",
+            "a = array.new<float>(nextSize(), 1.0)", id="size-call",
         ),
         pytest.param(
-            "a = array.new<float>(3, nextValue())",
-            "3", "nextValue()", id="fill-call",
+            "a = array.new<float>(3, nextValue())", id="fill-call",
+        ),
+        pytest.param(
+            "a = array.new<float>(initial_value=nextValue(), size=nextSize())",
+            id="reversed-keywords-size-and-fill-call",
         ),
     ],
 )
-def test_a_user_call_in_size_or_fill_binds_the_size_first(statement, size, fill):
+def test_a_user_call_in_size_or_fill_runs_the_size_first(statement):
     cpp = transpile(ORDER_SOURCE + statement + "\nplot(a.size())\n")
-    line = _emitted_line(cpp, "a = [&](auto _pf_array_new_size")
-    assert line.startswith(
-        "        a = [&](auto _pf_array_new_size){ "
-        "return [&](auto _pf_array_new_value){ ")
-    assert line.endswith(f"}}(({fill})); }}(({size}));")
-
-
-def test_a_fill_written_before_the_size_is_bound_first():
-    cpp = transpile(
-        ORDER_SOURCE
-        + "a = array.new<float>(initial_value=nextValue(), size=nextSize())\n"
-        "plot(a.size())\n"
-    )
-    line = _emitted_line(cpp, "a = [&](auto _pf_array_new_value")
-    assert line.startswith(
-        "        a = [&](auto _pf_array_new_value){ "
-        "return [&](auto _pf_array_new_size){ ")
-    assert line.endswith("}((nextSize())); }((nextValue()));")
+    line = _emitted_line(cpp, "a = ([&](){ auto _pf_array_new_")
+    size_slot = line.index("auto _pf_array_new_size_arg = (")
+    fill_slot = line.index("auto _pf_array_new_initial_value_arg = (")
+    # The size slot is staged in its own statement before the fill slot, so
+    # the C++ operand rules cannot run the fill first (g++ runs the right
+    # operand of a call first).
+    assert size_slot < fill_slot, line
+    assert ";" in line[size_slot:fill_slot], line
+    calls = [m.start() for m in re.finditer(r"\bnextSize(?:_cs\d+)?\(", line)]
+    fills = [m.start() for m in re.finditer(r"\bnextValue(?:_cs\d+)?\(", line)]
+    assert len(calls) <= 1 and len(fills) <= 1, line
+    if calls and fills:
+        assert calls[0] < fills[0], line
 
 
 def test_array_new_without_a_user_call_keeps_its_two_argument_call():
