@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..ast_nodes import (
-    ASTNode,
+    ArgOrder, ASTNode,
     Program, StrategyDecl, ImportStmt,
     VarDecl, Assignment, TupleAssign,
     IfStmt, ForStmt, ForInStmt, WhileStmt, SwitchStmt, BreakStmt, ContinueStmt,
@@ -7583,6 +7583,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     )
                 return self._handle_user_func_call(func_name, node)
 
+            # A typed user method called in function syntax is the member
+            # call: ``pair(holder, x)`` is ``holder.pair(x)``.
+            if (self._method_signatures
+                    and self._rewrite_function_syntax_method_call(node)):
+                return self._visit_FuncCall(node)
+
             # Built-in functions we don't specifically handle
             # Visit args for side effects
             for arg in node.args:
@@ -7780,6 +7786,96 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             raise AssertionError("unreachable") from exc
         self._method_call_bindings[cache_key] = bound
         return bound
+
+    def _receiver_method_key(self, receiver: ASTNode, name: str) -> str | None:
+        """The key of the typed method ``name`` of ``receiver``'s type, if any.
+
+        Resolves the receiver the way the member call does, without visiting
+        it: a user type, a collection, or a primitive family.
+        """
+        spec = self._type_spec_from_expr(receiver)
+        type_name = method_receiver_type_name(spec)
+        if type_name is None and spec is None:
+            receiver_types: dict[str, PineType] = {}
+            for child, _depth in iter_ast_nodes(receiver):
+                if isinstance(child, Identifier):
+                    sym = self._symbols.resolve(child.name)
+                    if sym is not None and (
+                        sym.type_spec is None or sym.type_spec.kind == "primitive"
+                    ):
+                        receiver_types[child.name] = sym.pine_type
+            primitive = self._callsite_primitive_expr_type(receiver, receiver_types)
+            if primitive in {
+                PineType.INT, PineType.FLOAT, PineType.BOOL,
+                PineType.STRING, PineType.COLOR,
+            }:
+                type_name = primitive.value
+        if type_name is None:
+            return None
+        key = f"{type_name}.{name}"
+        return key if key in self._method_signatures else None
+
+    def _rewrite_function_syntax_method_call(self, node: FuncCall) -> bool:
+        """Rewrite ``m(recv, ...)`` / ``m(self=recv, ...)`` to ``recv.m(...)``.
+
+        Pine calls a typed method in function syntax too. The receiver is the
+        first positional argument, or the argument named like the first
+        parameter the method declares. The call is rewritten once, here,
+        where the receiver's type is known, so every later stage (the method
+        binding, the call and tuple emitters) sees the one member form. A
+        name that no typed method of the receiver's type bears is left alone.
+
+        The member form evaluates its receiver first. A receiver written
+        after other arguments is therefore rewritten only when no argument
+        of the call calls a function, where the order cannot be seen.
+        """
+        callee = node.callee
+        name = callee.name
+        if self._symbols.resolve(name) is not None:
+            return False
+        receiver: ASTNode | None = None
+        rest_args = list(node.args)
+        rest_kwargs = dict(node.kwargs)
+        receiver_first = True
+        if node.args:
+            receiver = rest_args.pop(0)
+            if self._receiver_method_key(receiver, name) is None:
+                return False
+        else:
+            for key, signature in self._method_signatures.items():
+                declaration = signature.declaration
+                if (key.rsplit(".", 1)[-1] != name or declaration is None
+                        or not declaration.params):
+                    continue
+                keyword = declaration.params[0]
+                candidate = node.kwargs.get(keyword)
+                if candidate is None or self._receiver_method_key(
+                        candidate, name) != key:
+                    continue
+                receiver = candidate
+                receiver_first = next(iter(node.kwargs)) == keyword
+                del rest_kwargs[keyword]
+                break
+            if receiver is None:
+                return False
+        if not receiver_first and any(
+            isinstance(child, FuncCall)
+            for actual in (receiver, *rest_args, *rest_kwargs.values())
+            for child, _depth in iter_ast_nodes(actual)
+        ):
+            return False
+        member = MemberAccess(object=receiver, member=name)
+        member.loc = callee.loc
+        node.callee = member
+        node.args = rest_args
+        node.kwargs = rest_kwargs
+        notes = node.annotations or {}
+        order = notes.get("call_arg_order")
+        if isinstance(order, ArgOrder):
+            node.annotations = dict(notes, call_arg_order=ArgOrder(
+                actual for actual in order if actual is not receiver
+            ))
+        return True
 
     def _record_deferred_param_call_edge(
         self,
