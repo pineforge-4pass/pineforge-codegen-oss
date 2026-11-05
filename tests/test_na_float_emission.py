@@ -72,7 +72,17 @@ def test_integer_source_controls_keep_their_existing_emission(tmp_path, body):
     current = transpile_json(pine)
     assert previous.get("ok"), previous
     assert current.get("ok"), current
-    assert current["cpp"] == previous["cpp"]
+    cpp = current["cpp"]
+    if body == "items = array.new<int>(3, 0)\nfloat observed = array.size(items) * 2\n":
+        # 7f2cdbd1: a missing array size returns an empty array. The present
+        # size and fill, including all other invalid-size stops, stay frozen.
+        cpp = require_numeric_hunk(
+            cpp,
+            'if(is_na(_pf_array_new_size)) _PF_ARRAY_STOP("size_invalid", "new", '
+            '"cannot create std::vector larger than max_size()");',
+            "if(is_na(_pf_array_new_size)) return std::vector<int>();",
+        )
+    assert cpp == previous["cpp"]
 
 
 @pytest.mark.parametrize("tail", ["", "observed := 0.375\n"])

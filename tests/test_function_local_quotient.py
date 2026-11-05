@@ -6,6 +6,9 @@ import pytest
 
 from pineforge_codegen import transpile
 from tests._e2e import reference_codegen, transpile_json
+from tests._numeric_expected import (
+    integer_arithmetic, integer_store, require_numeric_hunk,
+)
 from tests.test_bool_string_inference import _messages, _run_native, native_env
 
 
@@ -130,4 +133,25 @@ def test_integer_callable_controls_keep_complete_reference_cpp(tmp_path, body):
     before = transpile_json(pine, root=reference)
     assert before["ok"], before.get("diagnostics")
     cpp = transpile(source)
+    # a925fb3a preserves nullable arithmetic and numeric argument boundaries;
+    # 2b13f9f computes integral sums in the wide intermediate family.
+    if "s := s + 2" in body:
+        cpp = require_numeric_hunk(
+            cpp, "s = (s + 2);",
+            f"s = {integer_store(integer_arithmetic('s', '+', '2'))};",
+        )
+    elif "s := math.floor(seed / 2)" in body:
+        quotient = integer_arithmetic("seed", "/", "2")
+        floor_value = f"std::floor({quotient})"
+        cpp = require_numeric_hunk(
+            cpp,
+            f"s = {integer_store('std::floor(((double)(seed) / (double)(2)))')};",
+            f"s = {integer_store(floor_value)};",
+        )
+    elif "for counter =" in body:
+        argument = f"measure({integer_store('counter')})"
+        cpp = require_numeric_hunk(
+            cpp, "observed += measure(counter);",
+            f"observed = {integer_arithmetic('observed', '+', argument)};",
+        )
     assert cpp == before["cpp"]

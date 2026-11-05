@@ -20,6 +20,7 @@ from tests._e2e import (
     skip_unless_e2e_env, transpile_json,
 )
 from tests._pine_libraries import Layout
+from tests._numeric_expected import require_numeric_hunk
 
 
 HEADER = '//@version=6\nstrategy("Bool text", overlay=true)\n'
@@ -466,7 +467,13 @@ def test_native_timeframe_bool_values_match_pine_reference(
     ("", "str.tostring(ta.sma(close, 5)[1])"),
 ))
 def test_numeric_tostring_keeps_complete_reference_cpp(tmp_path, body, expression):
-    reference = reference_codegen(NUMERIC_REFERENCE)
+    # 493fde6 gives this inline history its checkpointed per-bar marker.
+    revision = (
+        "493fde62b2aa54a052f45c23ed0c8f24f91c96d7"
+        if (body, expression) == ("", "str.tostring(ta.sma(close, 5)[1])")
+        else NUMERIC_REFERENCE
+    )
+    reference = reference_codegen(revision)
     assert reference is not None, "required numeric C++ reference is unavailable"
     pine = tmp_path / "strategy.pine"
     pine.write_text(_source(body, expression), encoding="utf-8")
@@ -612,7 +619,26 @@ def test_omitted_text_sinks_keep_reference_cpp(tmp_path, statement):
     previous = transpile_json(pine, reference)
     assert current["ok"], current.get("diagnostics")
     assert previous["ok"], previous.get("diagnostics")
-    assert current["cpp"] == previous["cpp"]
+    cpp = current["cpp"]
+    if statement == (
+        "label.new(bar_index, close, tooltip = str.tostring(session.isfirstbar_regular))"
+    ):
+        # 63035915 bounds every drawing arena and its run-start reset.
+        for record, member in (
+            ("LineRec", "_pf_lines_"), ("BoxRec", "_pf_boxes_"),
+            ("LabelRec", "_pf_labels_"),
+        ):
+            bound = f"::pineforge::drawing_bound_from_declared_count<{record}>(50)"
+            cpp = require_numeric_hunk(
+                cpp, f"DrawingArena<{record}> {member}{{_PF_DRAWING_UNBOUNDED}};",
+                f"DrawingArena<{record}> {member}{{{bound}}};",
+            )
+            cpp = require_numeric_hunk(
+                cpp,
+                f"this->{member} = decltype(this->{member}){{_PF_DRAWING_UNBOUNDED}};",
+                f"this->{member} = decltype(this->{member}){{{bound}}};",
+            )
+    assert cpp == previous["cpp"]
 
 
 @pytest.mark.parametrize("body,comment", (

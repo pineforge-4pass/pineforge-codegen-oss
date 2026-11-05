@@ -232,9 +232,10 @@ _ROWS = [
         "selected = choose_value(5, not c)\n"
         "y = selected + 1\n"
         "plot(selected)\nplot(y)\n",
-        ("double choose_value(", f"? (na<double>()) : ({integer_to_double('value')})"),
+        ("double choose_value(int value, bool choose)",
+         "? (na<double>()) : (value)"),
         "1 0 0 6 1 1\n",  # The integer argument is 5; the missing function result is NaN.
-        1,
+        0,  # ea9ad9d: the parameter's only actual is the present literal 5.
         id="untyped-parameter-na-first",
     ),
     pytest.param(
@@ -242,9 +243,10 @@ _ROWS = [
         "selected = choose_value(5, c)\n"
         "y = selected + 1\n"
         "plot(selected)\nplot(y)\n",
-        ("double choose_value(", f"? ({integer_to_double('value')}) : (na<double>())"),
+        ("double choose_value(int value, bool choose)",
+         "? (value) : (na<double>())"),
         "1 0 0 6 1 1\n",  # Bear selects NaN; bull returns the integer argument 5, then adds 1.
-        1,
+        0,  # ea9ad9d: the parameter's only actual is the present literal 5.
         id="untyped-parameter-na-second",
     ),
 ]

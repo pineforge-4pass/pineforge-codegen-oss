@@ -217,7 +217,10 @@ def test_post_fill_recalc_updates_current_history_slot_but_barstate_stays_new():
     )
     assert "static thread_local Series" not in cpp
     assert re.search(
-        r"if \(history_advances_new_bar\(\)\) _hist_call_\d+\.push\(_hv\);",
+        r"if \(history_advances_new_bar\(\) && "
+        r"(_pf_hist_bar_hist_call_(\d+)) != bar_index_\) "
+        r"_hist_call_\2\.push\(_hv\); else _hist_call_\2\.update\(_hv\); "
+        r"\1 = bar_index_;",
         on_bar,
     )
     assert re.search(
@@ -301,7 +304,13 @@ def test_inline_history_buffers_are_owned_independent_and_clear_at_bar_zero():
             in cpp
         )
     for member in hist_members:
-        assert f"if (history_advances_new_bar()) {member}.push(" in cpp
+        # 493fde6: repeated evaluations on a new bar update one history slot.
+        clock = f"_pf_hist_bar{member}"
+        assert (
+            f"if (history_advances_new_bar() && {clock} != bar_index_) "
+            f"{member}.push(_hv); else {member}.update(_hv); "
+            f"{clock} = bar_index_;"
+        ) in cpp
         assert f"else {member}.update(" in cpp
     for member in arg_members:
         assert (
