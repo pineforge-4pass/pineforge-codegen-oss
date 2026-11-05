@@ -170,6 +170,45 @@ Any other diff: run the tests that touch it, and the local-only row above if it 
    snapshots, retaining traversal order at ties. Inline TA identity keys are
    an unordered membership set.
 
+## Emission invariant
+
+Emit C++ only for a form the analyzer knows how to lower correctly.
+Never emit a placeholder, an empty expression, an undeclared
+identifier, or a C++ operator or conversion that does not exist.
+
+A change must not make a script that TradingView accepts, and that
+transpiles and compiles today, fail to transpile. This non-regression rule
+takes precedence over adding refusals for missing or incorrect lowerings,
+including emitter fallbacks. Refuse only a form TradingView refuses, or a
+form that already fails the C++ compile. When the lowering of a
+TradingView-valid form is approximate or wrong, implement its semantics;
+until then it keeps compiling and is recorded as a defect, never newly
+refused as unproven.
+
+For a form eligible for refusal under this rule, diagnose a missing lowering
+at translation time, before it reaches the emitter, with a `PF-E` diagnostic
+at its Pine line and column and a message naming the construct.
+Give every emission path either a correct lowering or an analyzer refusal
+permitted by this rule in front of it. An emitter fallback must raise an
+internal error that the translator turns into a located `PF-E` refusal;
+it must never print a placeholder such as `/* unknown */`. Bypassing the
+support checker does not waive this invariant.
+
+Match TradingView's Pine v6 grammar and typing. Refuse a form TradingView
+refuses through one general grammar or typing rule, not a list of shapes.
+Emit correct C++ for a form TradingView accepts; refusing it is a support
+gap to fix. Fix construct classes generically: no feature flags, per-script,
+per-id or per-literal special cases, or shape lists where a signature or
+grammar rule exists.
+
+Treat any generated-C++ compile failure as a P0 defect. When TradingView
+refuses a form and PineForge instead fails in g++, the matching outcome
+is still a P0 defect, not a valid translation-time refusal.
+
+The notes in `docs/reference/` and `docs/codegen-coverage-gaps.md` describe
+existing behavior. Documented approximations and unsupported fallbacks there
+are implementation gaps, not exceptions to this invariant.
+
 ## Conventions
 
 Quoted from `docs/reference/conventions.md`, which holds the rest.
@@ -177,7 +216,7 @@ Quoted from `docs/reference/conventions.md`, which holds the rest.
 - **Type system.** `PineType` (in `symbols.py`) is intentionally small and aligns with TradingView's primitive types. For collection / composite types use `TypeSpec`.
 - **Type strings.** Codegen's `_infer_type` returns a C++ type STRING (e.g. `"std::string"`, `"PineMatrix"`) — that's what most emission paths consume.
 - **Errors.** Use `errors.CompileError` for fatal issues raised from the transpiler. Carry `SourceLocation` so users can map back to the Pine line/col.
-- **Stubs.** When emitting a fallback / unsupported stub, include a `/* unsupported: ... */` marker in the source so a later compile error has context. Avoid emitting bare empty literals.
+- **Stubs.** A comment cannot substitute for a lowering. Apply the [emission invariant](#emission-invariant) instead of emitting an unsupported stub or leaving a failure for the C++ compiler.
 - **Escapes.** A string a script spells reaches the C++ only as a string literal's value (`_cpp_string_escape`) or as comment text (`_cpp_comment_escape`): escape every script-derived value where it is written into a literal or a comment, a validated one too (`tests/test_emitted_string_literals.py`).
 - **Helper underscores.** Codegen-internal helpers in `codegen/tables.py` are underscore-prefixed (`_matrix_add_row`, `_merge_kwargs`); they are not part of the package's external surface.
 - **Reserved names.** `codegen/helpers.py::CPP_RESERVED` carries every C++17 and C++20 keyword/operator alternative plus header macros and emitter names that can collide.
