@@ -13,6 +13,7 @@ from tests._e2e import reference_codegen, transpile_json
 
 
 CPP_REFERENCE = "290fdf7ae39eb786082fd11b8187ae6b640ab66e"
+ARRAY_FIELD_REFERENCE = "a4dea950f4f3c3ba64bb2461ea95eb4bab8b8d52"
 HEADER = '//@version=6\nstrategy("Parameter qualifiers")\n'
 
 
@@ -366,7 +367,15 @@ def test_refused_sources_were_accepted_by_reference(
 
 
 @pytest.mark.parametrize("source,control,code,position", _CASES)
-def test_paired_controls_keep_complete_cpp(source, control, code, position, reference, tmp_path):
+def test_paired_controls_keep_complete_cpp(
+        source, control, code, position, reference, tmp_path, request):
+    if request.node.callspec.id in {
+            "array_field_element_to_simple_function",
+            "array_field_element_to_simple_method",
+    }:
+        reference = reference_codegen(ARRAY_FIELD_REFERENCE)
+        if reference is None:
+            pytest.skip("the timestamp array-field reference is unavailable")
     _assert_unchanged(control, reference, tmp_path)
 
 

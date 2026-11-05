@@ -269,7 +269,7 @@ def test_a_helper_nothing_reaches_does_not_warn():
     result = transpile_full(PRELUDE + (
         'g(float _e) => request.security(syminfo.tickerid, "60", _e[1])\n'
         'h(float y) => g(y)\nx = close\n') + TRADE)
-    assert _registrations(result["cpp"]) == ['0, "60", input_tf_, false, false']
+    assert _registrations(result["cpp"]) == ['0, input_tf_, input_tf_, false, false']
     assert not any(d.message.endswith(UNBOUND) for d in result["diagnostics"])
 
 

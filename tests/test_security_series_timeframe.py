@@ -11,6 +11,7 @@ from pineforge_codegen.ast_nodes import BinOp
 from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.codegen.timeframe_values import TimeframeValues
 from pineforge_codegen.errors import CompileError, Level, Phase
+from tests._numeric_expected import integer_arithmetic, integer_store, integer_to_double
 from tests._timeframe_value_cases import CASES as SCALAR_CASES
 
 
@@ -907,7 +908,8 @@ def assert_counter_result(body, sec_id, key):
     assert f'_req_sec_{sec_id} = _security_helper_series_["{key}"][0];' in body
 
 
-def assert_counter_sum_result(body, sec_id, keys, global_counter=None):
+def assert_counter_sum_result(
+        body, sec_id, keys, global_counter=None, na_aware_result=False):
     terms = []
     if global_counter is not None:
         assert_global_counter_protocol(body, sec_id, global_counter)
@@ -916,7 +918,9 @@ def assert_counter_sum_result(body, sec_id, keys, global_counter=None):
         assert_counter_protocol(body, sec_id, key)
         terms.append(f'_security_helper_series_["{key}"][0]')
     assert len(terms) == 2
-    assert f"_req_sec_{sec_id} = ({terms[0]} + {terms[1]});" in body
+    result = (integer_arithmetic(terms[0], "+", terms[1])
+              if na_aware_result else f"({terms[0]} + {terms[1]})")
+    assert f"_req_sec_{sec_id} = {result};" in body
 
 
 def assert_body_mutation_rejected(body, check, original, replacement):
@@ -1059,7 +1063,7 @@ def test_reassigned_alias_uses_the_replayed_global_counter(persistent):
         assert_global_counter_protocol(body, sec_id, "saved_v")
         assert f"_sec{sec_id}_alias_v = 0;" in body
         assert f"_sec{sec_id}_alias_v = _sec{sec_id}_saved_v;" in body
-        assert f"_req_sec_{sec_id} = _sec{sec_id}_alias_v;" in body
+        assert f"_req_sec_{sec_id} = {integer_to_double(f'_sec{sec_id}_alias_v')};" in body
         assert body.index(f"_sec{sec_id}_saved_v += 1;") < body.index(
             f"_sec{sec_id}_alias_v = _sec{sec_id}_saved_v;")
         assert not re.search(r"\b(?:saved_v|alias_v)\b", body)
@@ -1117,7 +1121,7 @@ def test_outside_counter_chain_is_independent_of_the_chart_and_other_arm(
             assert f"security_series_slot_is_new({sec_id})" in body
             assert f"{state}.push({state}[0]);" in body
             assert body.count(f"{state}.update({state}[0] + 1);") == 1
-            assert f"_req_sec_{sec_id} = {state}[1];" in body
+            assert f"_req_sec_{sec_id} = {integer_to_double(f'{state}[1]')};" in body
         else:
             assert_global_counter_protocol(body, sec_id, counter)
     chart = chart_body(cpp)
@@ -1162,7 +1166,7 @@ def test_two_requests_get_four_global_counter_chains_and_keep_chart_storage(pers
     for sec_id in range(4):
         body = requested_body(cpp, sec_id)
         assert_global_counter_protocol(body, sec_id, "count_v")
-        assert f"_req_sec_{sec_id} = _sec{sec_id}_count_v;" in body
+        assert f"_req_sec_{sec_id} = {integer_to_double(f'_sec{sec_id}_count_v')};" in body
         assert set(re.findall(r"\b_sec\d+_count_v\b", body)) == {
             f"_sec{sec_id}_count_v"}
         assert not re.search(r"\bcount_v\b", body)
@@ -1191,10 +1195,14 @@ def test_global_replay_and_helper_owned_counter_both_belong_to_the_site(persiste
         (key,) = set(re.findall(
             rf'_security_helper_series_\["(_sec{sec_id}_payload_\d+_tally_v)"\]', body))
         check = lambda candidate: assert_counter_sum_result(
-            candidate, sec_id, (key,), global_counter="count_v")
+            candidate, sec_id, (key,), global_counter="count_v",
+            na_aware_result=True)
         check(body)
         ref = f'_security_helper_series_["{key}"]'
-        result = f"_req_sec_{sec_id} = (_sec{sec_id}_count_v + {ref}[0]);"
+        result = (
+            f"_req_sec_{sec_id} = "
+            f"{integer_arithmetic(f'_sec{sec_id}_count_v', '+', f'{ref}[0]')};"
+        )
         for replacement in (
                 f"_req_sec_{sec_id} = 0;",
                 f"_req_sec_{sec_id} = _sec{sec_id}_count_v;",
@@ -1218,7 +1226,7 @@ def test_outside_counter_value_probe_has_two_replayed_chains():
     for sec_id in (0, 1):
         body = requested_body(cpp, sec_id)
         assert_global_counter_protocol(body, sec_id, "runs_v")
-        assert f"_req_sec_{sec_id} = _sec{sec_id}_runs_v;" in body
+        assert f"_req_sec_{sec_id} = {integer_to_double(f'_sec{sec_id}_runs_v')};" in body
         assert not re.search(r"\bruns_v\b", body)
     assert not re.search(r"\b_sec\d+_runs_v\b", chart_body(cpp))
 
@@ -1315,9 +1323,10 @@ def assert_selection_counter_result(body, sec_id, key):
     assert f"security_series_slot_is_new({sec_id})" in body
     assert f"{ref}.push({ref}[0]);" in body
     assert f"{ref}.update({ref}.size() > 1 ? {ref}[1] : {seed}[0]);" in body
-    assert body.count(f"{ref}.update(({ref}[0] + 1));") == 1
+    update = f"{ref}.update({integer_store(integer_arithmetic(f'{ref}[0]', '+', '1'))});"
+    assert body.count(update) == 1
     targets = re.findall(
-        rf"_req_sec_{sec_id} = \(\[&\]\(\) -> int \{{\n"
+        rf"_req_sec_{sec_id} = \[&\]\(\)\{{ auto _pf_w = \(\(\[&\]\(\) -> int \{{\n"
         r"    int (__selection_value_\d+) = na<int>\(\);", body)
     assert len(targets) == 1
     target = targets[0]
