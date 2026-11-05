@@ -316,17 +316,22 @@ plot(current + previous)
     compile_env.compile_cpp(cpp, label="security-helper-bound-history-index")
 
 
-def test_helper_local_varip_remains_rejected():
+def test_helper_local_varip_is_admitted_on_the_historical_protocol():
+    # Since the runtime request contexts lowering, a requested helper's varip
+    # state is admitted: a requested bar is evaluated once, when it completes,
+    # the historical protocol on which varip and var keep the same state.
+    # (The refusal this row replaces came from the build that kept only var.)
     src = """//@version=6
-strategy("varip reject")
+strategy("varip admitted")
 f(float src) =>
     varip float state = src
     state += 1.0
     state
 out = request.security(syminfo.tickerid, "2", f(close))
 """
-    with pytest.raises(CompileError, match="varip"):
-        transpile(src)
+    cpp = transpile(src)
+    assert "_security_helper_series_" in cpp
+    compile_env.compile_cpp(cpp, label="security-helper-varip")
 
 
 def test_string_helper_local_var_state_keeps_string_storage():

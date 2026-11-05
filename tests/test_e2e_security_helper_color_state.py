@@ -206,19 +206,28 @@ def test_epoch_local_counter_state_compiles():
     compile_env.compile_cpp(transpile(EPOCH_COUNTER_STATE))
 
 
-def test_requested_helper_varip_state_is_refused():
-    varip = (
-        HEADER + "f(src) =>\n"
-        "    varip float state = src\n"
-        "    state += 1.0\n"
-        "    state\n"
-        'out = request.security(syminfo.tickerid, "2", f(close))\n'
-    )
-    with pytest.raises(CompileError, match="varip") as caught:
-        transpile(varip)
-    assert [(d.code, d.phase) for d in caught.value.diagnostics] == [
-        ("PF-E3027", Phase.CODEGEN),
-    ]
+VARIP_STATE = (
+    HEADER + "f(x) =>\n"
+    "    {kind} float state = 0.0\n"
+    "    state += x\n"
+    "    state\n"
+    'out = request.security(syminfo.tickerid, "2", f(close - open), '
+    "lookahead=barmerge.lookahead_on)\n"
+    "plot(out)\n"
+)
+
+
+def test_requested_helper_varip_state_matches_var(tmp_path):
+    # A requested helper admits varip state on the historical requested-bar
+    # protocol (the runtime request contexts lowering): a requested bar
+    # advances the state once, when it completes, and its partial evaluations
+    # roll back, as for var. Only the two builds' values are compared;
+    # whether TradingView keeps varip and var apart in a requested helper is
+    # not measured by this row.
+    expected = _run_values(VARIP_STATE.format(kind="var"), tmp_path / "var")
+    actual = _run_values(VARIP_STATE.format(kind="varip"), tmp_path / "varip")
+    assert len(set(expected)) > 2
+    assert actual == expected
 
 
 def test_requested_helper_collection_state_is_refused():
