@@ -399,7 +399,7 @@ def test_max_bars_back_unsupported_depth_has_a_located_diagnostic(
     with pytest.raises(CompileError) as caught:
         transpile(source)
     diagnostic, = caught.value.diagnostics
-    assert diagnostic.code == "PF-E5091"
+    assert diagnostic.code == "PF-E5093"
     assert diagnostic.phase == Phase.CODEGEN
     assert diagnostic.message == (
         "max_bars_back(): num must resolve to a positive compile-time integer."
