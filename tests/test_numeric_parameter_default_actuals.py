@@ -1,50 +1,18 @@
-"""F1-1 parameter-default actuals; original source authored on d910.
+"""Parameter-default actuals and binding behavior.
 
-Source tracing: parser._parse_func_def stores expression roots in
-annotations["param_defaults"]; method_binding and CallVisitor materialize
-them at omitted calls. These fixtures call from the top level only; they do
-not cover defaults expanded inside callers with same-named formals.
-formal-shadow is CURRENT-CODEGEN-BINDING-PIN: its unchanged missing result
-assumes the current binding to global k. TradingView default admission and
-formal-shadow binding remain UNRUN; no Pine parity or native agreement is
-claimed. Codegen default admission and all native values also remain UNRUN.
-Ordinary annotations remain non-syntax.
+The cases cover omitted defaults at top level and in methods, missing and
+finite arithmetic, explicit overrides, input-derived defaults, and controls
+for positional and named calls. A formal-shadow case documents the current
+binding rule; nested and ternary defaults remain outside this module.
 
-The arithmetic reference is independently missing + 1 = missing, finite + 1,
-and the authored explicit override, subject to the formal-shadow binding pin.
-Never generate a golden with codegen. The exact review script is retained
-separately from input-driven variants. All default roots here are direct
-calls; nested/ternary defaults and same-root identity dedup remain UNPROVED.
+Expected values come from independent source arithmetic and authored inputs,
+never from generated C++. Native cases use the paired engine when
+``PINEFORGE_REQUIRE_NATIVE=1``; without the paired inputs they skip with a
+reason so collection remains useful on an engine-free checkout.
 
-Later ONE fresh genuine C2 kit must retain this whole module's collection,
-raw results and exact identities: defaults d910 RED / candidate GREEN, plus
-the original rows 01919c40 RED / candidate GREEN, with the receiver-use fix.
-The candidate requires 0 errors and 0 skips, including every O0/O2 node.
-Source arithmetic only, UNCOLLECTED: original 7 guard + 7 inventory +
-2 visible controls + 1 unknown-owner + 1 method + 1 array = 19 source;
-7 * 2 = 14 native; 19 + 14 = 33. This module has 8 inventory + 7 guard +
-8 binding + 2 overridden-root + 1 annotation = 26 source; 8 * 2 = 16 native;
-26 + 16 = 42. Combined intended arithmetic is 33 + 42 = 75, UNCOLLECTED.
-The kit must derive its IDs/counts from actual remote by-name collection,
-never hard-code 75 or any source estimate. Every changed hunk still needs
-genuine Claude review before C2; this source edit is not an acceptance.
-Finite/default and explicit-binding controls need not fail on the parent.
-Do not label a build/setup/abort as a numeric counterexample. Native evidence
-is scoped to the recorded engine/runtime, not an unobserved current engine.
-
-Hash roles: identity.json's observer_sha256 is the LEGACY RUNNER field
-written by _native_values, hashing tests/test_numeric_actual_inventory.py.
-The new observer is source_binding.json's observer_sha256, separately from
-its runner_sha256. C2 must join both files: identity.observer_sha256 must
-match source_binding.runner_sha256; the new observer must be bound to this
-module's bytes. Reading identity.json alone cannot identify the new observer.
-
-Commands for a paired native run with explicit inputs:
-    python -m pytest --collect-only -q tests/test_numeric_parameter_default_actuals.py
-    python -m pytest -vv -ra --junitxml=defaults.xml --basetemp=defaults-artifacts \
-        tests/test_numeric_parameter_default_actuals.py
-The combined collection must also name tests/test_numeric_actual_inventory.py.
-Full engine-enabled and corpus gates remain the supervisor's separate gates.
+The observer and runner source hashes in the emitted artifact metadata bind
+this module to the numeric inventory it shares. The run identity supplies the
+paired engine and generated-header identities.
 """
 
 from __future__ import annotations
@@ -440,7 +408,7 @@ def test_default_result_native_after_real_strategy_run(tmp_path, case_id, opt):
             "process_helper_sha256": _sha(
                 (_ROOT / "tests/_numeric_support.py").read_bytes(),
             ),
-            "runtime_scope": "actual identity.json only; planned old9fa, no current-engine claim",
+            "runtime_scope": "actual identity.json only; engine identity comes from run inputs",
         })
     cpp = transpile(case.source)
     for name in _SCHEDULES:

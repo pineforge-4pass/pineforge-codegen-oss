@@ -1,7 +1,7 @@
 """array.new: the omitted fill of an int array, and the order of size and fill.
 
-Pine's omitted initial_value is na: for array<int> as for array<float> (C1
-emitted 0 for the int array). TradingView evaluates the arguments of an
+Pine's omitted initial_value is na: for array<int> as for array<float> (the earlier
+codegen emitted 0 for the int array). TradingView evaluates the arguments of an
 array.new call in PARAMETER order (size, then initial_value), also when the
 keywords are written reversed (a held tape of a reversed-keyword call: the size
 helper ran first). C++ leaves the order of a call's arguments unspecified and

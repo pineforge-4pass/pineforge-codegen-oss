@@ -1,6 +1,6 @@
 """An int that can be na crosses into int storage with its na kept.
 
-C1 declares an int global that can be na (``int q = switch ... => na``) as a
+The codegen declares an int global that can be na (``int q = switch ... => na``) as a
 ``double`` (NaN is its na). Every store of it into an integer element, tuple
 slot or parameter must narrow na-preserving: an implicit double to int
 conversion of NaN is undefined and gave 0 on the engine runs, where Pine

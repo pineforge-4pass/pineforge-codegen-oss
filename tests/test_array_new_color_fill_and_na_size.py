@@ -2,7 +2,7 @@
 
 A color array's omitted initial_value is na, like a float or int array's:
 TradingView's tape of ``array.new<color>(size=2)`` reads na from its first
-element, where C1 filled 0 (a valid packed color). A missing size
+element, where the earlier codegen filled 0 (a valid packed color). A missing size
 (``int n = na`` passed as ``size``) builds an empty array and the script goes
 on: TradingView's tape of that probe is an empty array on every bar, where the
 generated code stopped the run with the coded size_invalid error. A size that is

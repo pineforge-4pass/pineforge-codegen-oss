@@ -1,6 +1,6 @@
 """Native value tests for slice element sharing.
 
-C3-18's TradingView tape establishes bidirectional element sharing and detached
+The recorded TradingView tape establishes bidirectional element sharing and detached
 copy. Resize rows below explicitly pin PineForge compatibility, not TV behavior.
 All behavioral rows compile the complete emitted TU against the paired engine.
 """
