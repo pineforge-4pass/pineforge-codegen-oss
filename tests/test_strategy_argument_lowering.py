@@ -88,28 +88,19 @@ def _assert_quantity_pair(cpp: str, control: str) -> None:
 
 
 def _assert_risk_pair(cpp: str, control: str) -> None:
+    # The bare constant is lowered to its signed value (long: 1). The input
+    # selection is lowered by its value as well, so it is not the constant
+    # "all directions" (0) that an argument which is not the bare constant used
+    # to get; the entries each lowering admits are held to the bare literal's
+    # by value in tests/test_e2e_risk_direction_values.py.
     argument, = _calls(cpp, "set_pine_risk_direction")
     control_argument, = _calls(control, "set_pine_risk_direction")
-    # Read the condition and both signed enum values from the emitted call.
-    selected = re.fullmatch(
-        r'\(\(\((\w+) == std::string\(("(?:[^"\\]|\\.)*")\)\)\)'
-        r" \? \((-?\d+)\) : \((-?\d+)\)\)",
-        argument,
-    )
-    assert selected is not None, argument
-    name, comparison, true_value, false_value = selected.groups()
-    default = re.search(
-        rf'{name} = get_input_string\("(?:[^"\\]|\\.)*", '
-        r'std::string\(("(?:[^"\\]|\\.)*")\)\);',
-        cpp,
-    )
-    assert default is not None
-    # The default input chooses the same signed value as the literal control.
-    assert (true_value if default[1] == comparison else false_value) == control_argument
+    assert control_argument == "1"
+    assert argument != "0"
+    # The input is read before the call that uses it, in the same bar.
     on_bar = cpp[cpp.index("void on_source_bar("):]
-    assert on_bar.index(f"{name} = get_input_string(") < on_bar.index(
-        f"set_pine_risk_direction({argument});",
-    )
+    assert on_bar.index("dir = get_input_string(") < on_bar.index(
+        "set_pine_risk_direction(")
 
 
 @pytest.mark.parametrize("long_id,short_id", [("Long", "Short"), ("Buy", "Sell")])
@@ -191,26 +182,10 @@ def test_integer_selection_without_explicit_na_keeps_integer_storage(selection):
     assert "double q = " not in cpp
 
 
-@pytest.mark.parametrize("true_direction,false_direction", [
-    ("long", "short"), ("short", "long"), ("long", "all"), ("all", "short"),
-])
-@pytest.mark.parametrize("default", ["Long", "Short"])
-def test_input_direction_retains_both_runtime_arms(true_direction, false_direction, default):
-    source, _control = _risk_pair()
-    source = source.replace(
-        "strategy.direction.long : strategy.direction.short",
-        f"strategy.direction.{true_direction} : strategy.direction.{false_direction}",
-    ).replace("input.string('Long'", f"input.string('{default}'")
-    prefix = _HEADER + _RISK_INPUT.replace("input.string('Long'", f"input.string('{default}'")
-    chosen = true_direction if default == "Long" else false_direction
-    control = prefix + f"strategy.risk.allow_entry_in(strategy.direction.{chosen})\n" + _RISK_ENTRIES
-    cpp = transpile(source)
-    _assert_risk_pair(cpp, transpile(control))
-    argument, = _calls(cpp, "set_pine_risk_direction")
-    for direction, arm in ((true_direction, "?"), (false_direction, ":")):
-        literal = transpile(prefix + f"strategy.risk.allow_entry_in(strategy.direction.{direction})\n")
-        value, = _calls(literal, "set_pine_risk_direction")
-        assert f"{arm} ({value})" in argument
+# The eight input-direction shapes (each pair of constants, each default) that
+# a text pin of the emitted call used to cover are run, with the input at its
+# default and overridden, against the bare literal of the side they select in
+# tests/test_e2e_risk_direction_values.py.
 
 
 @pytest.mark.parametrize("pair,check", [
