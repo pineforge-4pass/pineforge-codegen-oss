@@ -4918,6 +4918,12 @@ class SecurityEmitter:
                     # Numeric helper history and persistent state are the
                     # evaluator's Series<double>, including their missing slots.
                     return False
+            # A result that is not numeric carries no integer sentinel: a
+            # string result is read from the string series and is never
+            # converted to a number. The chart-side type of the call decides
+            # this, before the helper's locals are queried.
+            if self._infer_type(node) not in ("int", "int64_t", "double"):
+                return False
             # The materialized result is the final expression as the
             # evaluator renders it, over the helper's own locals as it stores
             # them; a local this cannot prove keeps the integer guard.
