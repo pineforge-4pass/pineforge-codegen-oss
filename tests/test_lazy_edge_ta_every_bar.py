@@ -364,7 +364,7 @@ def test_expression_statement_and_strategy_call_arguments_hoist():
         "plot(pred ? ta.sma(close, 5)[1] : na)\n"
         "if pred\n"
         "    strategy.entry(\"L\", strategy.long)\n"
-        "strategy.close(\"L\", when = pred and ta.ema(close, 9)[1] > close)"
+        "strategy.close(\"L\", qty_percent = pred and ta.ema(close, 9)[1] > close ? 100 : 50)"
     )
     assert "_ta_sma_1.compute(current_bar_.close)" in _hoist(cpp, 1)
     assert "_ta_ema_2.compute(current_bar_.close)" in _hoist(cpp, 2)

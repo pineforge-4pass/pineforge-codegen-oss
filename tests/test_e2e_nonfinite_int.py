@@ -114,7 +114,7 @@ def test_only_a_floor_fed_global_keeps_the_double():
         "shares = math.floor(100 / z)\nx = shares + 1\nplot(x > 0 ? 1 : 0)\n",
         "f(int v) => v > 0\nshares = math.floor(100 / z)\nplot(f(shares) ? 1 : 0)\n",
         "shares = math.floor(100 / z)\nshares := 3\nplot(shares > 0 ? 1 : 0)\n",
-        "shares = math.floor(100 / z, 2)\nplot(shares > 0 ? 1 : 0)\n",
+        "shares = math.round(100 / z, 2)\nplot(shares > 0 ? 1 : 0)\n",
     ):
         cpp = transpile(head + body)
         assert "std::isfinite(shares) ? shares" not in cpp, body
