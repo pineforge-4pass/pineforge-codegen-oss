@@ -111,6 +111,15 @@ class TypeHelper:
             args.append(tail)
         return args
 
+    def _named_element_spec(self, name: str) -> TypeSpec:
+        """The TypeSpec of a type name written as a collection's generic
+        argument that no primitive or UDT hint resolved: a declared enum is
+        the enum (``Choice.second`` is one, and two kinds of one name never
+        compare), any other name keeps the udt identity it always had."""
+        if name in self._enum_defs:
+            return TypeSpec("enum", name=name)
+        return TypeSpec.udt(name)
+
     def _type_spec_from_hint(self, hint: str | None) -> TypeSpec | None:
         if not hint:
             return None
@@ -120,17 +129,18 @@ class TypeHelper:
             return TypeSpec.primitive(hint)
         if hint.startswith("array<") and hint.endswith(">"):
             inner = hint[len("array<"):-1]
-            elem = self._type_spec_from_hint(inner) or TypeSpec.udt(inner)
+            elem = self._type_spec_from_hint(inner) or self._named_element_spec(inner)
             return TypeSpec.array(elem)
         if hint.startswith("matrix<") and hint.endswith(">"):
             inner = hint[len("matrix<"):-1]
-            return TypeSpec.matrix(self._type_spec_from_hint(inner) or TypeSpec.udt(inner))
+            return TypeSpec.matrix(
+                self._type_spec_from_hint(inner) or self._named_element_spec(inner))
         if hint.startswith("map<") and hint.endswith(">"):
             inner = hint[len("map<"):-1]
             parts = self._split_top_level_type_args(inner)
             if len(parts) == 2:
-                key = self._type_spec_from_hint(parts[0]) or TypeSpec.udt(parts[0])
-                val = self._type_spec_from_hint(parts[1]) or TypeSpec.udt(parts[1])
+                key = self._type_spec_from_hint(parts[0]) or self._named_element_spec(parts[0])
+                val = self._type_spec_from_hint(parts[1]) or self._named_element_spec(parts[1])
                 return TypeSpec.map(key, val)
         if hint in self._udt_fields:
             return TypeSpec.udt(hint)
@@ -588,7 +598,7 @@ class TypeHelper:
                 if func == "new_string":
                     return TypeSpec.array(TypeSpec.primitive("string"))
                 if targs:
-                    elem = self._type_spec_from_hint(targs[0]) or TypeSpec.udt(targs[0])
+                    elem = self._type_spec_from_hint(targs[0]) or self._named_element_spec(targs[0])
                     return TypeSpec.array(elem)
                 if func == "from" and value.args:
                     elem_specs = [
@@ -631,7 +641,7 @@ class TypeHelper:
                     return arg_spec.element
             if ns == "matrix" and func == "new":
                 if targs:
-                    elem = self._type_spec_from_hint(targs[0]) or TypeSpec.udt(targs[0])
+                    elem = self._type_spec_from_hint(targs[0]) or self._named_element_spec(targs[0])
                 else:
                     elem = TypeSpec.primitive("float")
                 return TypeSpec.matrix(elem)

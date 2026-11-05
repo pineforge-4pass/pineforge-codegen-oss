@@ -170,6 +170,10 @@ BUILTIN_BOOLS = sorted({
     for name, pine_type in table.items()
     if "." in name and pine_type == PineType.BOOL
 })
+TIMEFRAME_BOOLS = sorted(
+    name for name, pine_type in signatures.TIMEFRAME_VARIABLES.items()
+    if pine_type == PineType.BOOL
+)
 
 
 def _bool_calls():
@@ -342,7 +346,7 @@ def test_bool_values_keep_their_type_through_text_conversion(
     )
 
 
-@pytest.mark.parametrize("value", sorted(signatures.VARIABLE_STORAGE_COMPATIBILITY),
+@pytest.mark.parametrize("value", TIMEFRAME_BOOLS,
                          ids=lambda value: f"Pine reference-stored-parameter-{value}")
 def test_stored_compat_bool_can_cross_an_untyped_parameter(tmp_path, native_env, value):
     _assert_native_text(
@@ -352,12 +356,12 @@ def test_stored_compat_bool_can_cross_an_untyped_parameter(tmp_path, native_env,
     )
 
 
-@pytest.mark.parametrize("seed", sorted(signatures.VARIABLE_STORAGE_COMPATIBILITY),
+@pytest.mark.parametrize("seed", TIMEFRAME_BOOLS,
                          ids=lambda seed: f"Pine reference-legacy-{seed}")
 def test_legacy_string_parameter_receives_na_predicate_safely(
         tmp_path, native_env, seed):
-    # Both calls pass Pine bools. The first call historically inferred a STRING
-    # parameter; the second passes a numeric TA slot whose first value is NaN.
+    # Regression for predicates that historically inferred a STRING parameter.
+    # Both calls pass Pine bools; the TA slot's first value is numeric NaN.
     # Sanitization makes the old NaN->char UB a runtime failure on every host;
     # this test never asserts the implementation's cast or helper spelling.
     _, expected = _assert_native_text(
@@ -372,7 +376,7 @@ def test_legacy_string_parameter_receives_na_predicate_safely(
     assert expected[0] == "false", "Pine reference: no previous bool on bar zero"
 
 
-@pytest.mark.parametrize("value", sorted(signatures.VARIABLE_STORAGE_COMPATIBILITY),
+@pytest.mark.parametrize("value", TIMEFRAME_BOOLS,
                          ids=lambda value: f"Pine reference-once-{value}")
 def test_legacy_bool_helper_result_is_evaluated_once(tmp_path, native_env, value):
     _assert_native_text(
@@ -386,6 +390,56 @@ def test_legacy_bool_helper_result_is_evaluated_once(tmp_path, native_env, value
         + '    runtime.error("text evaluated the predicate more than once")\n',
         "rendered", value,
     )
+
+
+@pytest.mark.parametrize("value,shape", [
+    pytest.param(value, shape, id=f"{shape}-{value}")
+    for value in TIMEFRAME_BOOLS for shape in ("parameter", "history")
+])
+def test_native_timeframe_bool_values_match_pine_reference(
+        tmp_path, native_env, value, shape):
+    """Pine reference: transported predicates select and fill the same quantity."""
+    if shape == "parameter":
+        body = "q(p) => p ? 2 : 1\n" + f"qty = q({value})\n"
+    else:
+        body = f"flag = {value}\nqty = flag[1] ? 2 : 1\n"
+    source = (
+        '//@version=6\n'
+        'strategy("t1", initial_capital = 1000000, currency = currency.NONE)\n'
+        + body
+        + "if bar_index > 6 and bar_index % 7 == 3\n"
+        + '    strategy.entry("L", strategy.long, qty = qty)\n'
+        + "if bar_index > 6 and bar_index % 7 == 5\n"
+        + '    strategy.close("L")\n'
+        + f"if {value}\n"
+        + '    log.info("Pine reference {0} 2", bar_index)\n'
+        + "else\n"
+        + '    log.info("Pine reference {0} 1", bar_index)\n'
+        + 'log.info("observed {0} {1}", bar_index, qty)\n'
+        + "if bar_index > 6 and bar_index % 7 == 4\n"
+        + '    log.info("filled {0} {1}", bar_index - 1, strategy.position_size)\n'
+    )
+    stderr = _run_native(tmp_path, native_env, source)
+    count = native_env[2]
+    reference = _messages(stderr, "Pine reference", count)
+    assert set(reference.values()) <= {"1", "2"}, reference
+    history = 1 if shape == "history" else 0
+    expected = {
+        bar: float(reference[bar - history]) if bar >= history else 1.0
+        for bar in range(count)
+    }
+    assert {
+        bar: float(message)
+        for bar, message in _messages(stderr, "observed", count).items()
+    } == expected, "Pine reference: the transported predicate selects the quantity"
+    entries = {
+        bar: expected[bar] for bar in range(7, count - 1) if bar % 7 == 3
+    }
+    assert entries, "the chart must include a filled entry"
+    assert {
+        bar: float(message)
+        for bar, message in _messages(stderr, "filled", len(entries)).items()
+    } == entries, "Pine reference: the filled position carries the quantity"
 
 
 @pytest.mark.parametrize("body,expression", (
@@ -601,13 +655,14 @@ def _assert_reference_cpp(tmp_path, source):
     "session.isfirstbar", "barstate.isconfirmed", "ta.crossover(close, open)",
     "ta.crossunder(close, open)", "ta.cross(close, open)",
     "ta.rising(close, 2)", "ta.falling(close, 2)",
-    "timeframe.isintraday", "timeframe.isminutes", "timeframe.isseconds",
+    "timeframe.isintraday",
     "array.includes(a, 1)", "array.every(a)",
     "array.some(a)", 'str.contains("ab", "a")',
     'str.startswith("ab", "a")', 'str.endswith("ab", "b")',
     'map.contains(m, "a")', 'request.security(syminfo.tickerid, "60", close > open)',
 ))
 def test_bool_conditions_keep_complete_reference_cpp(tmp_path, initializer):
+    """Frozen-C++ control for conditions whose storage remains unchanged."""
     source = (
         HEADER + "a = array.from(1, 2)\nm = map.new<string, float>()\n"
         + f"flag = {initializer}\nalias = flag\n"
