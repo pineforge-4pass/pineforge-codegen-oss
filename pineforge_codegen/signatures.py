@@ -577,10 +577,12 @@ _builtin("timestamp",
          keyword_names_verified=True)
 _builtin("time",
          _sig([("timeframe", S), ("session", S), ("timezone", S, "")], ret=I),
-         _sig([("timeframe", S)], ret=I))
+         _sig([("timeframe", S)], ret=I),
+         keyword_names_verified=True)
 _builtin("time_close",
          _sig([("timeframe", S), ("session", S), ("timezone", S, "")], ret=I),
-         _sig([("timeframe", S)], ret=I))
+         _sig([("timeframe", S)], ret=I),
+         keyword_names_verified=True)
 _builtin("year",     _sig([("time", I, None), ("timezone", S, "")], ret=I))
 _builtin("month",    _sig([("time", I, None), ("timezone", S, "")], ret=I))
 _builtin("dayofmonth", _sig([("time", I, None), ("timezone", S, "")], ret=I))

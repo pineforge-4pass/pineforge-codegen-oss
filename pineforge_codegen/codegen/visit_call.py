@@ -2809,13 +2809,7 @@ class CallVisitor:
                 return lowered
             node = self._check_time_bars_back(func_name, node)
         if func_name == "time" and namespace is None and (node.args or node.kwargs):
-            args = _merge_kwargs(
-                node.args, node.kwargs, sigs.get_param_names(None, "time"),
-                self._visit_expr, intrinsic=sigs.get_intrinsic(None, "time"),
-            )
-            tf_e = args[0] if len(args) > 0 else 'script_tf_'
-            sess = args[1] if len(args) > 1 else 'std::string("")'
-            tz_e = args[2] if len(args) > 2 else 'std::string("")'
+            tf_e, sess, tz_e = self._time_call_arguments(node, "time")
             return (
                 f"pine_time(current_bar_.timestamp, {tf_e}, {sess}, {tz_e}, script_tf_"
                 " PF_PINE_TIME_SESSION_DAY_ARGS(syminfo_.timezone, syminfo_.session))"
@@ -2823,13 +2817,7 @@ class CallVisitor:
         # time_close(timeframe) or time_close(tf, session, tz) — same
         # session-tz default as time() above.
         if func_name == "time_close" and namespace is None and (node.args or node.kwargs):
-            args = _merge_kwargs(
-                node.args, node.kwargs, sigs.get_param_names(None, "time_close"),
-                self._visit_expr, intrinsic=sigs.get_intrinsic(None, "time_close"),
-            )
-            tf_e = args[0] if len(args) > 0 else 'script_tf_'
-            sess = args[1] if len(args) > 1 else 'std::string("")'
-            tz_e = args[2] if len(args) > 2 else 'std::string("")'
+            tf_e, sess, tz_e = self._time_call_arguments(node, "time_close")
             return (
                 f"pine_time_close(current_bar_.timestamp, {tf_e}, {sess}, {tz_e}, script_tf_"
                 " PF_PINE_TIME_SESSION_DAY_ARGS(syminfo_.timezone, syminfo_.session))"
@@ -4145,6 +4133,29 @@ class CallVisitor:
         rest = [f"_PFTvFormatValue({self._visit_expr(orig)})" for orig in arg_nodes]
         vec = "{" + ", ".join(rest) + "}"
         return f'pine_str_format_tv({fmt_arg}, {vec})'
+
+    def _time_call_arguments(self, node, func_name: str) -> tuple[str, str, str]:
+        """The timeframe, session and timezone of ``time(...)`` / ``time_close(...)``.
+
+        Each argument is read at the slot of its parameter and visited once, in
+        parameter order. A skipped ``session`` (``time("60", timezone = "UTC")``)
+        used to move the timezone into the session slot, because the compressed
+        argument list leaves a skipped parameter no slot; it now takes the
+        empty default an omitted argument has."""
+        bound = _bind_kwargs_aligned(
+            node.args, node.kwargs, sigs.get_param_names(None, func_name),
+            intrinsic=sigs.get_intrinsic(None, func_name),
+        )
+
+        def lowered(index: int, default: str) -> str:
+            if index < len(bound) and bound[index] is not None:
+                return self._visit_expr(bound[index])
+            return default
+
+        timeframe = lowered(0, 'script_tf_')
+        session = lowered(1, 'std::string("")')
+        timezone = lowered(2, 'std::string("")')
+        return timeframe, session, timezone
 
     def _visit_format_time_call(self, node) -> str:
         """``str.format_time(time, format, timezone)``, each argument at its own slot.
