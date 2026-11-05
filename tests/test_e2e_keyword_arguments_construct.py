@@ -245,6 +245,18 @@ def test_a_timestamp_that_binds_to_no_overload_is_refused_with_the_typed_code(li
     assert f"'{quoted}'" in caught.value.diagnostics[0].message
 
 
+# `time("60", timezone = "UTC+5")` skips `session`. No value tells the binding
+# apart (a timezone without a session filters nothing, so the row that runs it
+# passes on the old binding too), and the emitted call is read instead: the
+# timezone is its fourth argument and the session is the empty default. The old
+# binding moved the timezone into the session slot.
+@pytest.mark.parametrize("function", ["time", "time_close"])
+def test_time_keyword_timezone_is_the_timezone_argument_of_the_emitted_call(function):
+    cpp = transpile(HEADER + f'x = {function}("60", timezone = "UTC+5")\n')
+    assert (f'pine_{function}(current_bar_.timestamp, std::string("60"), std::string(""), '
+            'std::string("UTC+5"), script_tf_ ') in cpp
+
+
 # The two offsets Pine v6 gives time() and time_close() are parameters of their
 # records: naming them is no unknown keyword (the lowering reads them by name).
 OFFSET_KEYWORDS = [
