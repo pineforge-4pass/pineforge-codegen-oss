@@ -105,7 +105,17 @@ probe(map<string, int> map) =>
 observed = probe(map.new<string, int>())
 ''',
             "26d575a62c58e2bb4f2129bd147282214d72897232eab2e7e6aa18b945fa616f",
-            (_integer_map_get_return_hunk(0, 0),),
+            # a579dae1 types the helper's result from the map its parameter
+            # binds (int), and with it the variable that reads it: main emits
+            # them as double behind no adapter. The three declarations are
+            # the whole difference from main's C++ (measured: a diff of the two
+            # emissions, 3 hunks), so the digest stays main's.
+            (
+                ("    double observed = 0.0;\n", "    int observed = 0;\n"),
+                ("        this->observed = 0.0;\n", "        this->observed = 0;\n"),
+                ("    double probe(PineMap<std::string, int> map) {",
+                 "    int probe(PineMap<std::string, int> map) {"),
+            ),
         ),
         (
             '''//@version=6
@@ -137,9 +147,11 @@ def test_lexical_identifier_named_map_remains_a_receiver(
     hunks: tuple,
 ):
     cpp = transpile(source)
-    # The helpers keep their existing double signatures. A missing integer
-    # getter needs conversion at that return; the global getter stays integer.
-    if hunks:
+    # The helper that reads a map of another scope keeps its existing double
+    # signature: a missing integer getter needs conversion at that return; the
+    # global getter stays integer. The helper that takes the map as a parameter
+    # is int (its hunks above require that signature).
+    if hunks and "    int probe(" not in cpp:
         assert "    double probe(" in cpp
     for previous, expected in hunks:
         cpp = require_numeric_hunk(cpp, previous, expected)

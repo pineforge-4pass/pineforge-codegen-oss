@@ -1614,9 +1614,8 @@ class TopLevelEmitter:
         "initial_capital": "initial_capital_",
     }
 
-    @staticmethod
     def _emit_history_series_write(
-            lines: list[str], pad: str, member: str, value: str) -> None:
+            self, lines: list[str], pad: str, member: str, value: str) -> None:
         """Emit one Pine-series write without conflating history with isnew.
 
         Historical fill recalculations keep ``barstate.isnew`` true, but a
@@ -1624,11 +1623,30 @@ class TopLevelEmitter:
         checkpoint must replace that bar's current history slot rather than
         append a duplicate slot.  The engine exposes those independent facts
         as ``is_first_tick_`` and ``history_advances_new_bar()`` respectively.
+
+        The new-bar flag stays true throughout a loop, so a write inside a
+        loop body would open one slot per iteration. TradingView commits one
+        slot per bar, holding the last evaluation: inside a loop the first
+        reach of the bar opens the slot and later reaches update it, told
+        apart by a flag local to the outermost loop's execution
+        (``_loop_scoped_history_flags``).
         """
+        flags = self._loop_history_flags
+        if flags is None:
+            lines.append(
+                f"{pad}if (history_advances_new_bar()) {member}.push({value});"
+            )
+            lines.append(f"{pad}else {member}.update({value});")
+            return
+        flag = flags.get(member)
+        if flag is None:
+            self._loop_history_flag_count += 1
+            flag = flags[member] = f"_pf_slot_open_{self._loop_history_flag_count}"
         lines.append(
-            f"{pad}if (history_advances_new_bar()) {member}.push({value});"
+            f"{pad}if (history_advances_new_bar() && !{flag}) {member}.push({value});"
         )
         lines.append(f"{pad}else {member}.update({value});")
+        lines.append(f"{pad}{flag} = true;")
 
     def _emit_on_bar(self, lines: list[str]) -> None:
         self._lexical_drawing_types = {}
@@ -2264,6 +2282,10 @@ class TopLevelEmitter:
         when it was inlined from a v5 library (``library_v5``)."""
         node = fi.node
         previous = self._pine_v5_body
+        # A function is its own C++ scope: a loop flag of the code that
+        # called it does not exist inside it.
+        previous_loop_flags = self._loop_history_flags
+        self._loop_history_flags = None
         self._pine_v5_body = (
             node is not None
             and (getattr(node, "annotations", None) or {}).get("pine_version") == 5
@@ -2272,6 +2294,7 @@ class TopLevelEmitter:
             self._emit_func_def_body(fi, lines, call_site_idx, instance)
         finally:
             self._pine_v5_body = previous
+            self._loop_history_flags = previous_loop_flags
 
     def _emit_func_def_body(self, fi: FuncInfo, lines: list[str],
                             call_site_idx: int | None = None,

@@ -446,5 +446,33 @@ def test_scripts_without_emitted_method_session_history_keep_exact_cpp(body, tmp
                     + 'if x\n    strategy.entry("L", strategy.long)\n', encoding="utf-8")
     now, before = transpile_json(pine), transpile_json(pine, reference)
     assert now["ok"] and before["ok"], (now["diagnostics"], before["diagnostics"])
-    assert now["cpp"] == before["cpp"]
+    if "request.security" in body:
+        # The history read in a request.security payload commits its slot once,
+        # where the requested evaluator closes (the push moved out of the read
+        # so that a loop or a helper that reads it several times on one
+        # requested bar opens one slot, not one per read): the one emission
+        # difference to the reference. Everything outside the evaluators stays
+        # exact, and the evaluator still pushes the requested history once.
+        assert "void _eval_security_0(" in now["cpp"]
+        assert _without_security_evaluators(now["cpp"]) == _without_security_evaluators(before["cpp"])
+        assert now["cpp"].count("_sec0_expr_hist_0.push(") == 1
+    else:
+        assert now["cpp"] == before["cpp"]
     compile_cpp(now["cpp"], label="unchanged method emission")
+
+
+def _without_security_evaluators(cpp: str) -> str:
+    """The emitted C++ with each request.security evaluator method removed.
+
+    An evaluator opens at a class-level line `    void _eval_security_<n>(` and
+    closes at the next line that is exactly the class-level `    }`."""
+    kept, skipping = [], False
+    for line in cpp.splitlines():
+        if skipping:
+            skipping = line != "    }"
+            continue
+        if line.startswith("    void _eval_security_"):
+            skipping = not line.rstrip().endswith("{}")
+            continue
+        kept.append(line)
+    return "\n".join(kept)

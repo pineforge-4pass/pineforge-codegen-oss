@@ -360,7 +360,12 @@ UNCHANGED_SOURCES = {
 @pytest.mark.parametrize("shape", tuple(UNCHANGED_SOURCES))
 def test_other_scripts_keep_complete_reference_cpp(tmp_path, shape):
     source = HEADER + UNCHANGED_SOURCES[shape]
-    reference = reference_codegen(CPP_REFERENCE)
+    # 493fde6 adds checkpointed per-bar markers to the two inline TA histories.
+    revision = (
+        "493fde62b2aa54a052f45c23ed0c8f24f91c96d7"
+        if shape == "ta_constants" else CPP_REFERENCE
+    )
+    reference = reference_codegen(revision)
     assert reference is not None, "required C++ reference is unavailable"
     pine = tmp_path / "strategy.pine"
     pine.write_text(source, encoding="utf-8")

@@ -205,4 +205,20 @@ def test_unrelated_and_existing_direct_read_cpp_stays_byte_identical(body, tmp_p
     path.write_text(source, encoding="utf-8")
     before = transpile_json(path, root=reference)
     assert before["ok"], before["diagnostics"]
-    assert transpile(source) == before["cpp"]
+    expected = before["cpp"]
+    if "DrawingArena<LineRec>" in expected:
+        # 63035915 bounds members and run-reset arenas by the default count.
+        # Require each of its six exact replacements; retain whole-C++ equality.
+        for kind, record in (("lines", "LineRec"), ("boxes", "BoxRec"),
+                             ("labels", "LabelRec")):
+            arena = f"_pf_{kind}_"
+            bound = f"::pineforge::drawing_bound_from_declared_count<{record}>(50)"
+            for prefix in (
+                f"DrawingArena<{record}> {arena}",
+                f"this->{arena} = decltype(this->{arena})",
+            ):
+                previous = prefix + "{_PF_DRAWING_UNBOUNDED};"
+                replacement = prefix + "{" + bound + "};"
+                assert expected.count(previous) == 1
+                expected = expected.replace(previous, replacement, 1)
+    assert transpile(source) == expected

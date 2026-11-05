@@ -74,6 +74,7 @@ classes from ``..ast_nodes``.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import functools
 import re
 
 from ..errors import Phase
@@ -123,6 +124,33 @@ from .tables import (
 # Sentinel for "no block-scoped overlay was activated" so an empty saved map
 # is still distinguishable from the no-op case.
 _NO_BLOCK_REMAP = object()
+
+
+def _loop_scoped_history_flags(visit):
+    """Give the outermost loop of a body the flags of the series it writes.
+
+    A series declared or written in a loop opens its bar's history slot at
+    the first reach and updates it afterwards
+    (``_emit_history_series_write``); the flag that tells the two apart is a
+    C++ local declared just before the OUTERMOST loop statement, so nested
+    loops share it and each execution of the loop starts with the slot closed.
+    The declarations are inserted once the body is emitted, when the series it
+    writes are known.
+    """
+    @functools.wraps(visit)
+    def wrapper(self, node, lines, indent, *args, **kwargs):
+        if self._loop_history_flags is not None:
+            return visit(self, node, lines, indent, *args, **kwargs)
+        start = len(lines)
+        self._loop_history_flags = flags = {}
+        try:
+            return visit(self, node, lines, indent, *args, **kwargs)
+        finally:
+            self._loop_history_flags = None
+            if flags:
+                pad = "    " * indent
+                lines[start:start] = [f"{pad}bool {flag} = false;" for flag in flags.values()]
+    return wrapper
 
 
 class StmtVisitor:
@@ -1965,6 +1993,7 @@ class StmtVisitor:
                 )
                 lines.append(f"{pad}}}")
 
+    @_loop_scoped_history_flags
     def _visit_for(self, node: ForStmt, lines: list[str], indent: int,
                    value_target: tuple[str, str | None] | None = None) -> None:
         action = getattr(self, "_endless_for_actions", {}).get(id(node))
@@ -2377,6 +2406,7 @@ class StmtVisitor:
             )
         lines.append("#endif")
 
+    @_loop_scoped_history_flags
     def _visit_for_in(self, node, lines: list[str], indent: int,
                       value_target: tuple[str, str | None] | None = None) -> None:
         pad = "    " * indent
@@ -2585,6 +2615,7 @@ class StmtVisitor:
         self._current_counted_loop_vars = saved_counted
         self._current_loop_index_vars = saved_index
 
+    @_loop_scoped_history_flags
     def _visit_while(self, node: WhileStmt, lines: list[str], indent: int,
                      value_target: tuple[str, str | None] | None = None) -> None:
         pad = "    " * indent

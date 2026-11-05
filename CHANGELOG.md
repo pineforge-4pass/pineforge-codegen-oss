@@ -33,6 +33,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
   fallbacks still warn.
 - A chart TA constructor length that shadows a global input or constant now follows its lexical binding; an unsized percentile loop length is still refused regardless of the counter's name, now as `PF-E5092` (#295). That refusal covers a series length for `ta.sma` and `ta.percentile_nearest_rank`, the two `ta.*` functions with a recorded TradingView result that a series length compiles; its message names the Pine function (`ta.sma`, not `ta::SMA`) and says that TradingView accepts the call. Every other `ta.*` function keeps `PF-E5009` and its wording, which makes no claim about TradingView: the functions where TradingView refuses a series length too (`ta.rma`, `ta.ema`, `ta.rsi`, `ta.atr`, `ta.dmi`, `ta.macd`, `ta.kc`, `ta.hma`, `ta.tsi`, `ta.rci` and the `atrPeriod` of `ta.supertrend`) and the ones with no recorded result.
 - Constant-expression input defaults can size TA constructors while retaining the input getter in runtime resets (#295).
+- A `request.security` payload may read a global that is an element of a tuple declaration of a pure user function (`[_, g] = pair(x)` with `pair(value) => [value, value + 7.0]`), directly or through a function that reads it: the declaration is evaluated on the requested bar, as in TradingView, and only the element read is lowered. The function must have a one-tuple-literal body over its parameters, the requested bar's fields and literals, and be called positionally with arguments that have no state. A function with a `ta.*` call, `var`, `varip`, a request or a method, a multi-statement body, and the history of an element (`g[1]`) keep their refusals.
 - `line(na)` and `box(na)` emit the same missing handles as typed drawing declarations initialized with `na` (#295).
 - Literal `na` in emitted strategy string parameters uses the empty-string sentinel, including `strategy.exit`'s `from_entry` (#295).
 - Array bindings destructured from a helper's tuple retain their collection type for built-in method calls (#295).
@@ -48,10 +49,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `strategy.risk.allow_entry_in` retains input-dependent directions (#292).
 - Methods whose first parameter is never referenced in their body now report `PF-E5087` at that parameter, with a hint to use it or declare a function instead.
 - Consumed `if`/`switch` selections mixing value and void arms now report located `PF-E5088`; requested void selections keep `PF-E3102`.
+- A `request.security` payload that reads the history of an expression inside a loop, or at several reads of one helper parameter, commits one history slot per requested bar holding the last evaluation of that bar, as TradingView does; every read of the bar sees the history before this bar. Regenerate C++ and relink strategies.
 - `input.enum` options named through immutable enum-member declarations now retain their choices and checked-settings support.
 - Array fields in records that stay within one bar preserve omitted and explicit `na` IDs, distinct from empty arrays.
 - Copying a record that stays within one bar shares its array fields while keeping scalar fields independent.
 - A block-local `string` declaration at top level may now shadow a script-level `float` binding with declared or literal types without sharing storage; every other cross-type shadow keeps its existing refusal.
+- A series variable declared or written inside a loop opens its bar's history slot at the first reach and updates it afterwards, so `y[i]` in the loop reads the slot committed `i` bars back, as TradingView does; every iteration used to open a slot of its own. Regenerate C++ and relink strategies.
 - An affine chart loop proved endless is stopped with the loop-time error when
   its result reaches an effect. Omission is limited to an unused loop statement
   with no calls, whose writes have no readers except self-updates, a break

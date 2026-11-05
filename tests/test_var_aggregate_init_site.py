@@ -58,7 +58,12 @@ def test_top_level_var_array_without_a_statement_read_stays_in_the_preamble():
         + "var a = array.new<float>(size=2, initial_value=float(bar_index + 2))\n"
         "plot(a.get(0))\n"
     )
-    assert "a = [&](auto _pf_array_new_size" in _preamble(cpp)
+    # ad7bb8c stages keyword arguments once, in parameter order.
+    assert (
+        "a = ([&](){ auto _pf_array_new_size_arg = (2); "
+        "auto _pf_array_new_initial_value_arg = ((double)((pine_bar_index() + 2))); "
+        "return [&](auto _pf_array_new_size, auto _pf_array_new_value){"
+    ) in _preamble(cpp)
     assert "_pf_var_init_a" not in cpp
 
 

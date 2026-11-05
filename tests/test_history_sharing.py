@@ -757,8 +757,12 @@ var a = switch choice
     => array.from(7, 9)
 ''' + HISTORY
     cpp = transpile(source)
-    # With no collection TypeSpec, a[3] registers scalar Series<double> storage.
-    assert "    Series<double> a;" in cpp
+    # 3ec62ae5 declares the member as the vector the arms build (a selection
+    # of arrays is an array variable); the history read is still the scalar
+    # one, with no collection history, and equal to the eager output below.
+    # That read of `(a[3]).size()` emits `None()` on main and on the release
+    # too (an invalid statement this pin has always held and does not judge).
+    assert "    std::vector<int> a;" in cpp
     assert "_pf_collection_hist_a" not in cpp
     assert "class _PFCachedCollectionHistory" not in cpp
     assert cpp == _eager_cpp(source, monkeypatch)
