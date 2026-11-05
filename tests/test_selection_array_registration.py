@@ -11,6 +11,7 @@ declaration with one constructor.
 import pytest
 
 from pineforge_codegen import transpile
+from tests._compile import compile_cpp
 
 HEADER = '//@version=6\nstrategy("selection array", initial_capital = 100000)\n'
 ENTRY = 'if v > 0\n    strategy.entry("L", strategy.long)\n'
@@ -63,6 +64,10 @@ def test_a_selection_of_arrays_takes_the_array_lowering(declaration):
     )
     assert ".get(0)" not in cpp, [l for l in cpp.splitlines() if ".get(0)" in l]
     assert "index_out_of_bounds" in cpp
+    # The text above can be matched by a lowering that does not build: the
+    # generated program must compile too (its value is read in
+    # test_e2e_array_element_oracles.py).
+    compile_cpp(cpp, label="selection-array")
 
 
 def test_the_same_array_with_one_constructor_is_unchanged():
@@ -74,6 +79,7 @@ def test_the_same_array_with_one_constructor_is_unchanged():
     )
     assert ".get(0)" not in cpp
     assert "index_out_of_bounds" in cpp
+    compile_cpp(cpp, label="selection-array-control")
 
 
 def test_a_selection_of_scalars_is_not_registered_as_an_array():
