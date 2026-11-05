@@ -1167,12 +1167,23 @@ class TopLevelEmitter:
                                     "arithmetic over those for TA constructor "
                                     "arguments.")
                         else:
-                            message = (
-                                f"Unsupported TA constructor length '{a}' for "
-                                f"{site.class_name}: it is neither a compile-time "
-                                "constant nor derived from an input, so PineForge "
-                                "cannot size the indicator buffer."
-                            )
+                            tv_name = self._ta_tradingview_series_length_name(site)
+                            if tv_name is None:
+                                message = (
+                                    f"Unsupported TA constructor length '{a}' for "
+                                    f"{site.class_name}: it is neither a compile-time "
+                                    "constant nor derived from an input, so PineForge "
+                                    "cannot size the indicator buffer."
+                                )
+                            else:
+                                message = (
+                                    f"Unsupported TA constructor length '{a}' for "
+                                    f"{tv_name}: it is neither a compile-time "
+                                    "constant nor derived from an input, so PineForge "
+                                    "cannot size the indicator buffer. TradingView "
+                                    f"accepts a series length for {tv_name}(); "
+                                    "PineForge does not support it yet."
+                                )
                             hint = ("Use a literal, an input.*() value, or "
                                     "arithmetic over those for TA lengths.")
                         self._codegen_error(getattr(site, "node", None), message, hint=hint)

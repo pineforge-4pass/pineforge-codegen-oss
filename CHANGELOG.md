@@ -31,12 +31,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
   instead of every input with that title. Repeated explicit titles no longer
   trigger the shared-key warning; remaining collisions involving untitled
   fallbacks still warn.
-- A chart TA constructor length that shadows a global input or constant now follows its lexical binding; an unsized percentile loop length keeps `PF-E5009` regardless of the counter's name (#295).
+- A chart TA constructor length that shadows a global input or constant now follows its lexical binding; an unsized percentile loop length is still refused regardless of the counter's name, now as `PF-E5092` (#295). That refusal covers a series length for `ta.sma` and `ta.percentile_nearest_rank`, the two `ta.*` functions with a recorded TradingView result that a series length compiles; its message names the Pine function (`ta.sma`, not `ta::SMA`) and says that TradingView accepts the call. Every other `ta.*` function keeps `PF-E5009` and its wording, which makes no claim about TradingView: the functions where TradingView refuses a series length too (`ta.rma`, `ta.ema`, `ta.rsi`, `ta.atr`, `ta.dmi`, `ta.macd`, `ta.kc`, `ta.hma`, `ta.tsi`, `ta.rci` and the `atrPeriod` of `ta.supertrend`) and the ones with no recorded result.
 - Constant-expression input defaults can size TA constructors while retaining the input getter in runtime resets (#295).
 - `line(na)` and `box(na)` emit the same missing handles as typed drawing declarations initialized with `na` (#295).
 - Literal `na` in emitted strategy string parameters uses the empty-string sentinel, including `strategy.exit`'s `from_entry` (#295).
 - Array bindings destructured from a helper's tuple retain their collection type for built-in method calls (#295).
-- `strategy.default_entry_qty()` raises `PF-E5084` until the strategy host exposes a default-quantity query (#295).
+- `strategy.default_entry_qty()` raises `PF-E5084` until the strategy host exposes a default-quantity query; the message says that TradingView accepts the call and that PineForge does not support it yet (#295).
 - `if` and `switch` expressions reassigned to a history-bearing variable update its current Series slot (#295).
 - Pine identifiers `bar` and `HUGE` use the existing C++ name escape without changing authored input titles (#295).
 - Colliding direct scalar history locals in ordinary functions get declaration-owned Series storage and retain separate call-site histories, including computed initializers that read a same-named global and locals of different scalar families (#295).
