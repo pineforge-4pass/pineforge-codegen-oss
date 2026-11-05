@@ -107,6 +107,7 @@ from ..ast_nodes import (
 )
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from ..external_requests import UNPINNED_ANNOTATION
+from ..security_contexts import ScriptIndex
 from .for_loops import for_continuation
 from .helpers import cpp_code_only
 from .tables import (
@@ -455,15 +456,12 @@ class StmtVisitor:
                         val = self._visit_expr(node.expr.args[0])
                         # The percent flag travels with the matching setter so
                         # every risk update atomically replaces both fields.
-                        if risk_func in ("max_drawdown", "max_intraday_loss") and len(node.expr.args) >= 2:
-                            arg2 = node.expr.args[1]
-                            is_pct = (isinstance(arg2, MemberAccess)
-                                      and isinstance(arg2.object, Identifier)
-                                      and arg2.object.name == "strategy"
-                                      and arg2.member == "percent_of_equity")
-                        else:
-                            is_pct = False
                         if risk_func in ("max_drawdown", "max_intraday_loss"):
+                            type_arg = (
+                                node.expr.args[1] if len(node.expr.args) >= 2
+                                else node.expr.kwargs.get("type")
+                            )
+                            is_pct = self._risk_type_is_percent_of_equity(type_arg)
                             lines.append(
                                 f"{pad}{setter}(({cast_type})({val}), "
                                 f"{'true' if is_pct else 'false'});"
@@ -491,6 +489,30 @@ class StmtVisitor:
             if stripped == "color" or stripped.startswith("(int64_t)pine_color::"):
                 return
             lines.append(f"{pad}{cpp};")
+
+    def _risk_type_is_percent_of_equity(self, expr) -> bool:
+        """Recognize the risk enum through unmodified lexical aliases."""
+        seen = set()
+        while isinstance(expr, Identifier):
+            index = getattr(self, "_risk_type_index", None)
+            if index is None:
+                index = self._risk_type_index = ScriptIndex(self.ctx.ast)
+            declaration = self.ctx.identifier_binding_nodes.get(
+                id(expr), index.decls.get(index.refs.get(id(expr)))
+            )
+            if not isinstance(declaration, VarDecl):
+                return False
+            binding = index.decl_binding.get((id(declaration), declaration.name))
+            if binding is None or binding in seen or binding in index.reassigned:
+                return False
+            seen.add(binding)
+            expr = declaration.value
+        return (
+            isinstance(expr, MemberAccess)
+            and isinstance(expr.object, Identifier)
+            and expr.object.name == "strategy"
+            and expr.member == "percent_of_equity"
+        )
 
     def _concat_receiver_name(self, expr) -> str | None:
         """If ``expr`` is a Pine ``matrix.concat`` call (in either method

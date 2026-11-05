@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from tests._legacy_cpp import legacy_cpp
 from pineforge_codegen import transpile
 
@@ -190,6 +192,39 @@ strategy.risk.max_intraday_loss(500, strategy.cash)
         "set_pine_risk_max_drawdown((double)(500), false);",
         "set_pine_risk_max_intraday_loss((double)(10), true);",
         "set_pine_risk_max_intraday_loss((double)(500), false);",
+    ]
+
+
+@pytest.mark.parametrize("risk_func", ("max_drawdown", "max_intraday_loss"))
+@pytest.mark.parametrize("enum_member", ("percent_of_equity", "cash"))
+@pytest.mark.parametrize(
+    ("declaration", "type_argument", "value"),
+    (
+        ("", "type = strategy.{enum_member}", 11),
+        ("t = strategy.{enum_member}\n", "t", 12),
+        ("t = strategy.{enum_member}\n", "type = t", 13),
+    ),
+    ids=("A2-keyword", "A3-variable", "variable-keyword"),
+)
+def test_risk_type_argument_uses_the_supplied_enum(
+    risk_func, enum_member, declaration, type_argument, value,
+):
+    source = (
+        '//@version=6\nstrategy("source host risk type")\n'
+        + declaration.format(enum_member=enum_member)
+        + f"strategy.risk.{risk_func}({value}, "
+        + type_argument.format(enum_member=enum_member)
+        + ")\n"
+    )
+    cpp = transpile(source)
+    calls = [
+        line.strip()
+        for line in cpp.splitlines()
+        if line.lstrip().startswith("set_pine_risk_max_")
+    ]
+    expected_flag = "true" if enum_member == "percent_of_equity" else "false"
+    assert calls == [
+        f"set_pine_risk_{risk_func}((double)({value}), {expected_flag});"
     ]
 
 
