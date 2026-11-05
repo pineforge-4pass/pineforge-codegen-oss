@@ -5251,32 +5251,30 @@ class TypeInferer:
         self._nonfinite_int_names_cache = frozenset((bound & ordered) - rejected)
         return self._nonfinite_int_names_cache
 
+    def _global_hint_names(self) -> dict[str, frozenset[str]]:
+        """Index explicit top-level scalar hints once per TypeInferer pass."""
+        cached = getattr(self, "_global_hint_names_cache", None)
+        if cached is not None:
+            return cached
+        names = {"color": set(), "bool": set(), "string": set()}
+        for stmt in self.ctx.ast.body:
+            if isinstance(stmt, VarDecl) and stmt.type_hint in names:
+                names[stmt.type_hint].add(stmt.name)
+        cached = {kind: frozenset(values) for kind, values in names.items()}
+        self._global_hint_names_cache = cached
+        return cached
+
     def _global_color_hint(self, name: str) -> bool:
         """A top-level ``color`` declaration must keep its 64-bit na sentinel."""
-        return any(
-            isinstance(stmt, VarDecl)
-            and stmt.name == name
-            and stmt.type_hint == "color"
-            for stmt in self.ctx.ast.body
-        )
+        return name in self._global_hint_names()["color"]
 
     def _global_bool_hint(self, name: str) -> bool:
         """A top-level declared bool keeps its type when initialized by na."""
-        return any(
-            isinstance(stmt, VarDecl)
-            and stmt.name == name
-            and stmt.type_hint == "bool"
-            for stmt in self.ctx.ast.body
-        )
+        return name in self._global_hint_names()["bool"]
 
     def _global_string_hint(self, name: str) -> bool:
         """An explicit string declaration keeps string storage for bare na."""
-        return any(
-            isinstance(stmt, VarDecl)
-            and stmt.name == name
-            and stmt.type_hint == "string"
-            for stmt in self.ctx.ast.body
-        )
+        return name in self._global_hint_names()["string"]
 
     def _global_float_na_selection(self, name: str, ptype: PineType) -> bool:
         """Explicit floats and nullable float selections retain double storage."""

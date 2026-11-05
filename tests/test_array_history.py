@@ -767,6 +767,15 @@ def _many_binding_script(binding_count: int) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _many_binding_type_script(binding_count: int) -> str:
+    lines = ["a = array.from(close, open)", "float r = 0.0"]
+    for i in range(binding_count):
+        lines.append(f"color c{i} = na")
+        lines.append(f"p{i} = a[1]")
+        lines.append(f"r += p{i}.size()")
+    return "\n".join(lines) + "\n"
+
+
 def _many_binding_work(monkeypatch, binding_count: int, *, quadratic: bool = False):
     """Return collection-history candidate visits for a generated script.
 
@@ -802,6 +811,45 @@ def _many_binding_work(monkeypatch, binding_count: int, *, quadratic: bool = Fal
 
     transpile(_script(_many_binding_script(binding_count)))
     return list(visits_by_checker.values())
+
+
+def _many_binding_type_work(monkeypatch, binding_count: int):
+    """Count scalar-slot calls and global-hint scan work for one source."""
+    from collections import Counter
+
+    from pineforge_codegen.codegen.types import TypeInferer
+
+    counts = Counter()
+    original_slot = TypeInferer._slot_scalar_cpp_type
+    original_color = TypeInferer._global_color_hint
+
+    def counted_slot(self, name):
+        counts["slot_calls"] += 1
+        return original_slot(self, name)
+
+    def counted_color(self, name):
+        cache = getattr(self, "_global_hint_names_cache", None)
+        counts["hint_scan"] += len(self.ctx.ast.body) if cache is None else 1
+        return original_color(self, name)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(TypeInferer, "_slot_scalar_cpp_type", counted_slot)
+        patch.setattr(TypeInferer, "_global_color_hint", counted_color)
+        transpile(_script(_many_binding_type_script(binding_count)))
+    return counts
+
+
+def test_many_binding_type_lookup_scales_linearly(monkeypatch):
+    """The hint index and slot lookup both scale with bindings, not N squared."""
+    small = _many_binding_type_work(monkeypatch, 32)
+    large = _many_binding_type_work(monkeypatch, 64)
+    assert small["slot_calls"] > 0 and small["hint_scan"] > 0, (
+        "type lookup instrumentation did not exercise the production paths",
+        small, large)
+    assert large["slot_calls"] <= small["slot_calls"] * 2 + 128, (
+        "slot lookup work is superlinear", small, large)
+    assert large["hint_scan"] <= small["hint_scan"] * 2 + 128, (
+        "global hint scan work is superlinear", small, large)
 
 
 def _assert_many_binding_work_is_linear(visits_by_checker, binding_count: int) -> None:
