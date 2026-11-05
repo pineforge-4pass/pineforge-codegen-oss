@@ -334,14 +334,27 @@ out = request.security(syminfo.tickerid, "2", f(close))
     compile_env.compile_cpp(cpp, label="security-helper-varip")
 
 
+# Recorded, not computed (2026-11-05): what the released build (codegen v1.10.0 at
+# 47f0e8a5 on engine v1.10.0 at 59f98ba8) returns after each of the five two-minute bars
+# (closes 3, 6, 9, 12, 15) for four forms of the same running count: a top-level
+# ``var float state = close`` with ``state += 1.0`` and the same with ``varip``
+# (no request.security at all), the requested accumulator ``ta.cum(1.0)`` (1, 2,
+# 3, 4, 5, plus the first close 3.0), and the requested helper below with ``var``
+# (the release refuses a requested helper's ``varip``, PF-E3027). All four
+# returned this list. Three of the forms have no helper state and the fourth is
+# the release's lowering, not the one these rows test, so the list is an oracle
+# the lowering under test did not produce.
+RELEASE_RUNNING_COUNT = [4.0, 5.0, 6.0, 7.0, 8.0]
+
+
 @pytest.mark.parametrize("kind", ["var", "varip"])
 def test_helper_local_persistent_state_counts_requested_bars(kind):
     """Closes 3,6,9,12,15 on two-minute requested bars. The state starts at the
     first requested bar's close (3.0) and adds 1.0 once per requested bar, so
     the requested value is 4,5,6,7,8: a persistent variable evaluated once per
     requested bar, on historical bars for ``var`` and ``varip`` alike. The
-    expected list is the definition of that behaviour written out, not the
-    output of a build."""
+    expected list is RELEASE_RUNNING_COUNT, recorded from the released build
+    for forms that do not go through this lowering (see above)."""
     src = f"""//@version=6
 strategy("persistent helper state")
 f(float src) =>
@@ -372,7 +385,7 @@ int main() {
 }
 """
     values = [float(value) for value in _compile_and_run(transpile(src) + driver).split()]
-    assert values == [4.0, 5.0, 6.0, 7.0, 8.0]
+    assert values == RELEASE_RUNNING_COUNT
 
 
 def test_string_helper_local_var_state_keeps_string_storage():
