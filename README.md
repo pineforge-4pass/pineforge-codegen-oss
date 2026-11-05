@@ -409,8 +409,10 @@ lists what 1.0.0 reads, warns about or refuses for such requests.
 ### Skip the support checker
 
 `check_support=False` on either Python function is **experimental**. It
-bypasses the gate and can produce C++ the engine will not accept or execute
-faithfully:
+bypasses the support gate. Existing paths can produce C++ the engine will
+not accept or execute faithfully; those are defects under the
+[emission invariant](AGENTS.md#emission-invariant), which applies even when
+the gate is bypassed. See the [open defects](docs/codegen-coverage-gaps.md).
 
 ```python
 from pathlib import Path
@@ -449,6 +451,9 @@ fields, such as `// @pf-trace gap=close - e` or
 pragma itself is not computed: `// @pf-trace rsi=ta.rsi(close, 14)` records
 `na` on every bar, and its C++ carries an `/* unsupported: ta.rsi */` marker.
 0.10.4, 1.0.0, 1.0.1, 1.1.0, 1.2.0 and 1.3.0 all behave this way.
+This placeholder is an implementation gap under the
+[emission invariant](AGENTS.md#emission-invariant); see the
+[open defects](docs/codegen-coverage-gaps.md).
 
 ### Advanced: run the pipeline stages directly
 

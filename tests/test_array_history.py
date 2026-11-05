@@ -759,21 +759,73 @@ def test_a_diamond_of_helpers_is_walked_once_per_helper():
     assert time.monotonic() - started < 30
 
 
-def test_many_bindings_are_walked_once_each():
-    # Each binding's uses come from an index of the script's names: a walk of
-    # the rest of the script per binding took 57 s for these 4,000 (7 s now,
-    # 4 s for the same script binding array.copy(a) instead). The budget is
-    # CPU time, which a loaded host's queue does not stretch: alone on a Linux
-    # test host this takes 13-14 s; in full-suite xdist runs there (load 45-74)
-    # 27-33 s of CPU took 57-78 s of wall clock.
+def _many_binding_script(binding_count: int) -> str:
     lines = ["a = array.from(close, open)", "float r = 0.0"]
-    for i in range(4000):
+    for i in range(binding_count):
         lines.append(f"p{i} = a[1]")
         lines.append(f"r += p{i}.size()")
-    import time
-    started = time.process_time()
-    transpile(_script("\n".join(lines) + "\n"))
-    assert time.process_time() - started < 60
+    return "\n".join(lines) + "\n"
+
+
+def _many_binding_work(monkeypatch, binding_count: int, *, quadratic: bool = False):
+    """Return collection-history candidate visits for a generated script.
+
+    The quadratic branch is a test-local mutation: it deliberately scans every
+    identifier for every region query, so the same assertion proves that the
+    production index is doing linear work.
+    """
+    from collections import Counter
+
+    from pineforge_codegen.ast_nodes import Identifier
+    from pineforge_codegen.collection_history import CollectionHistoryChecker
+
+    visits_by_checker = {}
+    original_in_region = CollectionHistoryChecker._in_region
+
+    def counted_in_region(self, read, name, region, start, top):
+        visits_by_checker.setdefault(self, Counter())[name] += 1
+        return original_in_region(self, read, name, region, start, top)
+
+    monkeypatch.setattr(CollectionHistoryChecker, "_in_region", counted_in_region)
+
+    if quadratic:
+        def quadratic_region(self, name, region, start, top):
+            reads = []
+            for node in self._nodes_by_id.values():
+                if (isinstance(node, Identifier)
+                        and self._in_region(node, name, region, start, top)
+                        and node.name == name):
+                    reads.append(node)
+            return reads
+
+        monkeypatch.setattr(CollectionHistoryChecker, "_region_reads", quadratic_region)
+
+    transpile(_script(_many_binding_script(binding_count)))
+    return list(visits_by_checker.values())
+
+
+def _assert_many_binding_work_is_linear(visits_by_checker, binding_count: int) -> None:
+    assert visits_by_checker, "collection-history region queries did not run"
+    expected = {f"p{i}": 1 for i in range(binding_count)}
+    for visits in visits_by_checker:
+        # Each binding contributes one source read and one consumer read;
+        # the remaining queries belong to the script's fixed scaffold.
+        assert sum(visits.values()) <= binding_count * 2 + 32, (
+            "collection-history candidate work is not linear", binding_count, visits)
+        assert {name: visits[name] for name in expected} == expected, (
+            "each bound history must be visited exactly once", binding_count, visits)
+
+
+@pytest.mark.parametrize("binding_count", [32, 4000])
+def test_many_bindings_are_walked_once_each(monkeypatch, binding_count):
+    visits = _many_binding_work(monkeypatch, binding_count)
+    _assert_many_binding_work_is_linear(visits, binding_count)
+
+
+def test_many_bindings_work_count_rejects_quadratic_walk(monkeypatch):
+    visits = _many_binding_work(monkeypatch, 32, quadratic=True)
+    with pytest.raises(AssertionError, match="collection-history candidate work is not linear"):
+        _assert_many_binding_work_is_linear(visits, 32)
 
 
 def test_the_changing_methods_are_the_codegen_s_mutating_ones():
