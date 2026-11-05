@@ -462,9 +462,19 @@ class StmtVisitor:
                                 else node.expr.kwargs.get("type")
                             )
                             is_pct = self._risk_type_is_percent_of_equity(type_arg)
+                            if is_pct is None:
+                                # Mutable aliases and computed enums must use
+                                # the value at this call, not an initializer.
+                                type_value = self._visit_expr(type_arg)
+                                percent_flag = (
+                                    f"(({type_value}) == "
+                                    "static_cast<int>(QtyType::PERCENT_OF_EQUITY))"
+                                )
+                            else:
+                                percent_flag = "true" if is_pct else "false"
                             lines.append(
                                 f"{pad}{setter}(({cast_type})({val}), "
-                                f"{'true' if is_pct else 'false'});"
+                                f"{percent_flag});"
                             )
                         else:
                             lines.append(f"{pad}{setter}(({cast_type})({val}));")
@@ -490,8 +500,10 @@ class StmtVisitor:
                 return
             lines.append(f"{pad}{cpp};")
 
-    def _risk_type_is_percent_of_equity(self, expr) -> bool:
-        """Recognize the risk enum through unmodified lexical aliases."""
+    def _risk_type_is_percent_of_equity(self, expr) -> bool | None:
+        """Prove an enum through lexical aliases, or leave it for evaluation."""
+        if expr is None:
+            return False
         seen = set()
         while isinstance(expr, Identifier):
             index = getattr(self, "_risk_type_index", None)
@@ -501,18 +513,21 @@ class StmtVisitor:
                 id(expr), index.decls.get(index.refs.get(id(expr)))
             )
             if not isinstance(declaration, VarDecl):
-                return False
+                return None
             binding = index.decl_binding.get((id(declaration), declaration.name))
             if binding is None or binding in seen or binding in index.reassigned:
-                return False
+                return None
             seen.add(binding)
             expr = declaration.value
-        return (
+        if (
             isinstance(expr, MemberAccess)
             and isinstance(expr.object, Identifier)
             and expr.object.name == "strategy"
-            and expr.member == "percent_of_equity"
-        )
+            and expr.member in ("percent_of_equity", "cash")
+            and self._type_spec_from_expr(expr.object) is None
+        ):
+            return expr.member == "percent_of_equity"
+        return None
 
     def _concat_receiver_name(self, expr) -> str | None:
         """If ``expr`` is a Pine ``matrix.concat`` call (in either method
