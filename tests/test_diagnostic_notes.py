@@ -83,7 +83,8 @@ CATALOG_ENTRY_ADDITIONS = {
 # (PF-E2080, PF-E2082) and the strategy() declaration errors (PF-E5080 to
 # PF-E5082), the missing value lowering error (PF-E5083) and the requested
 # selection errors (PF-E3102 to PF-E3105 and PF-E3110), including an unmeasured empty
-# requested-timeframe arm, and the two math keyword refusals (PF-E5089, PF-E5090).
+# requested-timeframe arm, the two math keyword refusals (PF-E5089, PF-E5090)
+# and the max_bars_back refusal (PF-E5093).
 CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2040", "PF-E2041", "PF-E2042", "PF-E2043", "PF-E2044",
                      "PF-E2045", "PF-E2046", "PF-E2047", "PF-E2048", "PF-E2049",
@@ -101,6 +102,7 @@ CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2082",  # Keyword elements in array.from.
                      "PF-E3102", "PF-E3103", "PF-E3104", "PF-E3105", "PF-E3110",
                      "PF-E3111",
+                     "PF-E5093",  # max_bars_back(): num must resolve to a positive compile-time integer.
                      "PF-E5080", "PF-E5081", "PF-E5082", "PF-E5083", "PF-W1553"} | set(CATALOG_ENTRY_ADDITIONS)
 CATALOG_ADDITIONS.update(DELTA.get("added_codes", ()))
 CATALOG_ADDITIONS |= set(DELTA["catalog_additions"])
