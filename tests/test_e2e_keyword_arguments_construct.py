@@ -1,4 +1,8 @@
-"""A keyword argument of `timestamp` or `matrix.new` reaches its own parameter, or the call is refused.
+"""A keyword argument of `timestamp`, `time`, `matrix.new` or `math.random` reaches its own parameter, or the call is refused.
+
+The same fault in `time` and `time_close` (`time("60", timezone = "UTC+5")`
+skips `session`: the timezone moved into the session slot) and in
+`math.random(seed = 3)` (the seed became the minimum) has its rows below too.
 
 `timestamp(timezone = "UTC+5", year = 2024, month = 3, day = 1)` ignored the
 timezone (the numeric overload does not name one, and a keyword it does not know
@@ -61,8 +65,22 @@ MATRIX = (
 RANDOM_KEYWORD = "float random_value = math.random(seed = 3)\n// @pf-trace random_value=random_value\n"
 RANDOM_POSITIONAL = "float random_value = math.random(0.0, 1.0, 3)\n// @pf-trace random_value=random_value\n"
 
+# `time("60", timezone = "UTC+5")` skips `session`. With no session the call is the
+# open time of the hour bar the chart bar is in, and `time_close` the close time:
+# the timezone changes neither.
+TIME_CALLS = (
+    'float time_kw = time("60", timezone = "UTC+5")\n'
+    'float time_pos = time("60", "", "UTC+5")\n'
+    'float close_kw = time_close("60", timezone = "UTC+5")\n'
+    'float close_pos = time_close("60", "", "UTC+5")\n'
+    "// @pf-trace t=time\n"
+    "// @pf-trace time_kw=time_kw\n// @pf-trace time_pos=time_pos\n"
+    "// @pf-trace close_kw=close_kw\n// @pf-trace close_pos=close_pos\n"
+)
+
 SOURCES = {
     "calendar": HEADER + CALENDAR,
+    "time": HEADER + TIME_CALLS,
     "matrix": HEADER + MATRIX,
     "random_keyword": HEADER + RANDOM_KEYWORD,
     "random_positional": HEADER + RANDOM_POSITIONAL,
@@ -112,6 +130,20 @@ def test_timestamp_keyword_after_a_skipped_hour_keeps_its_own_slot(runs):
         _all_bars_equal(runs["calendar"], name, expected)
 
 
+def test_time_keyword_after_a_skipped_session_keeps_its_own_slot(runs):
+    outcome = runs["time"]
+    hour = 3_600_000
+    stamps = _column(outcome, "t")
+    assert len(stamps) == BARS
+    for name, offset in (("time_pos", 0), ("time_kw", 0), ("close_pos", hour), ("close_kw", hour)):
+        column = _column(outcome, name)
+        assert len(column) == BARS, name
+        wrong = [(bar, column[bar], (stamps[bar] // hour) * hour + offset) for bar in sorted(column)
+                 if not column[bar] == (stamps[bar] // hour) * hour + offset]
+        assert not wrong, (f"{name}: {len(wrong)} of {BARS} bars differ from the hour bar's "
+                           f"{'open' if offset == 0 else 'close'} time; first {wrong[:3]}")
+
+
 def test_matrix_keywords_name_the_dimensions_and_the_fill(runs):
     outcome = runs["matrix"]
     for name, expected in (("kw_rows", 2.0), ("kw_columns", 3.0), ("kw_last", 1.5),
@@ -152,6 +184,8 @@ def test_random_keyword_seed_keeps_the_default_range(runs):
 # math records have their own, every other record PF-E2027)
 UNKNOWN = [
     ("math.random", "float x = math.random(sead = 3)\n", "PF-E5090"),
+    ("time", 'x = time("60", zone = "UTC")\n', "PF-E2027"),
+    ("time_close", 'x = time_close("60", zone = "UTC")\n', "PF-E2027"),
     ("timestamp", 'x = timestamp(zone = "UTC", year = 2024, month = 3, day = 1)\n', "PF-E2027"),
     ("matrix.new", "matrix<float> x = matrix.new<float>(row = 2, columns = 3)\n", "PF-E2027"),
     ("str.format_time", 'x = str.format_time(time, fmt = "yyyy")\n', "PF-E2027"),
