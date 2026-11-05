@@ -203,6 +203,7 @@ from .tables import (
     _math_minmax_na_expr,
     _math_round_digits_expr,
     _matrix_functional_receiver,
+    _bind_kwargs_aligned,
     _merge_kwargs,
 )
 
@@ -4110,7 +4111,38 @@ class CallVisitor:
         vec = "{" + ", ".join(rest) + "}"
         return f'pine_str_format_tv({fmt_arg}, {vec})'
 
+    def _visit_format_time_call(self, node) -> str:
+        """``str.format_time(time, format, timezone)``, each argument at its own slot.
+
+        ``format`` and ``timezone`` are optional, so a keyword can skip one:
+        ``str.format_time(time, timezone = "Asia/Tokyo")``. The compressed
+        argument list moved that timezone into the format slot (the call
+        formatted the time with the pattern "Asia/Tokyo" and ignored the
+        zone). A skipped slot now takes the omitted-argument default below,
+        the same one ``str.format_time(time)`` has."""
+        bound = _bind_kwargs_aligned(
+            node.args, node.kwargs, sigs.get_param_names("str", "format_time"),
+            intrinsic=sigs.get_intrinsic("str", "format_time"),
+        )
+
+        def slot(index: int):
+            return bound[index] if index < len(bound) else None
+
+        # Visit in parameter order, once each.
+        ts_node, fmt_node, tz_node = slot(0), slot(1), slot(2)
+        ts = self._visit_expr(ts_node) if ts_node is not None else "0"
+        fmt = self._visit_expr(fmt_node) if fmt_node is not None else '"yyyy-MM-dd"'
+        tz = self._visit_expr(tz_node) if tz_node is not None else '"UTC"'
+        if (ts_node is not None and self._holds_na_aware_wide_double(ts_node)
+                and self._emitted_value_is_double(ts_node)):
+            # A double-valued 64-bit product (``_wide_int_arith_cpp``)
+            # narrows na-preserving into the int64_t timestamp (quirk 9).
+            ts = na_preserving_int_cast(ts, "int64_t")
+        return f'pine_str_format_time({ts}, {fmt}, {tz})'
+
     def _visit_str_call(self, func_name: str, node) -> str:
+        if func_name == "format_time":
+            return self._visit_format_time_call(node)
         args = _merge_kwargs(node.args, node.kwargs,
                              sigs.get_param_names("str", func_name), self._visit_expr,
                              intrinsic=sigs.get_intrinsic("str", func_name))
@@ -4201,18 +4233,6 @@ class CallVisitor:
             if format_node is not None:
                 return self._str_format_expr(format_node, node.args[1:])
             return 'std::string("")'
-
-        if func_name == "format_time":
-            ts = args[0] if args else "0"
-            ts_node = node.args[0] if node.args else node.kwargs.get("time")
-            if (ts_node is not None and self._holds_na_aware_wide_double(ts_node)
-                    and self._emitted_value_is_double(ts_node)):
-                # A double-valued 64-bit product (``_wide_int_arith_cpp``)
-                # narrows na-preserving into the int64_t timestamp (quirk 9).
-                ts = na_preserving_int_cast(ts, "int64_t")
-            fmt = args[1] if len(args) > 1 else '"yyyy-MM-dd"'
-            tz = args[2] if len(args) > 2 else '"UTC"'
-            return f'pine_str_format_time({ts}, {fmt}, {tz})'
 
         if func_name == "replace":
             if len(args) >= 4:

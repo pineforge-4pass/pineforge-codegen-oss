@@ -388,6 +388,42 @@ _strat("convert_to_account", _sig([("value", F)], ret=F))
 _strat("convert_to_symbol", _sig([("value", F)], ret=F))
 _strat("default_entry_qty", _sig([("fill_price", F)], ret=F))
 
+# strategy.closedtrades / strategy.opentrades accessor surfaces are NOT
+# symmetric in Pine v6. opentrades has no exit_* fields (a trade has not
+# closed yet). Both lack ``direction`` (Pine has ``size`` whose sign carries
+# the direction). Splitting the whitelist makes the support checker reject
+# typos like ``strategy.opentrades.exit_price(0)`` that previously slipped
+# through into codegen and produced trade-accessor calls the runtime does
+# not implement on the open-trades side.
+CLOSED_TRADE_ACCESSOR_METHODS: frozenset[str] = frozenset({
+    "profit", "profit_percent", "commission",
+    "entry_bar_index", "exit_bar_index", "entry_comment", "exit_comment",
+    "entry_id", "exit_id", "entry_price", "exit_price", "entry_time",
+    "exit_time", "size", "max_runup", "max_runup_percent",
+    "max_drawdown", "max_drawdown_percent",
+})
+OPEN_TRADE_ACCESSOR_METHODS: frozenset[str] = frozenset({
+    "profit", "profit_percent", "commission",
+    "entry_bar_index", "entry_comment", "entry_id",
+    "entry_price", "entry_time",
+    "size", "max_runup", "max_runup_percent",
+    "max_drawdown", "max_drawdown_percent",
+})
+
+# Every accessor takes the one parameter ``trade_num``. The records exist for
+# keyword binding only (the return type is not read from them): a call that
+# names it, ``strategy.closedtrades.profit(trade_num = 1)``, is bound to its
+# position like the positional spelling, and any other keyword is refused.
+TRADE_ACCESSOR_FUNCTIONS: dict[str, IntrinsicFunc] = {
+    f"strategy.{side}.{method}": _func(
+        f"strategy.{side}.{method}", _sig([("trade_num", I)], ret=F),
+        keyword_names_verified=True,
+    )
+    for side, methods in (("closedtrades", CLOSED_TRADE_ACCESSOR_METHODS),
+                          ("opentrades", OPEN_TRADE_ACCESSOR_METHODS))
+    for method in sorted(methods)
+}
+
 
 # ============================================================================
 # str.* functions
@@ -395,15 +431,19 @@ _strat("default_entry_qty", _sig([("fill_price", F)], ret=F))
 
 STR_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 
-def _str(short_name: str, *sigs: FuncSig) -> None:
-    STR_FUNCTIONS[short_name] = _func(f"str.{short_name}", *sigs)
+def _str(short_name: str, *sigs: FuncSig,
+         keyword_names_verified: bool = False) -> None:
+    STR_FUNCTIONS[short_name] = _func(
+        f"str.{short_name}", *sigs, keyword_names_verified=keyword_names_verified,
+    )
 
 _str("tostring",
      _sig([("value", F)], ret=S),
      _sig([("value", F), ("format", S)], ret=S))
 _str("tonumber",    _sig([("string", S)], ret=F))
 _str("format",      _sig([("formatString", S)], ret=S))  # variadic
-_str("format_time", _sig([("time", I), ("format", S), ("timezone", S, "")], ret=S))
+_str("format_time", _sig([("time", I), ("format", S), ("timezone", S, "")], ret=S),
+     keyword_names_verified=True)
 _str("length",      _sig([("string", S)], ret=I))
 _str("contains",    _sig([("source", S), ("str", S)], ret=B))
 _str("startswith",  _sig([("source", S), ("str", S)], ret=B))
@@ -505,8 +545,10 @@ REQUEST_VALUE_FUNCTIONS: dict[str, IntrinsicFunc] = {
 
 BUILTIN_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 
-def _builtin(name: str, *sigs: FuncSig) -> None:
-    BUILTIN_FUNCTIONS[name] = _func(name, *sigs)
+def _builtin(name: str, *sigs: FuncSig, keyword_names_verified: bool = False) -> None:
+    BUILTIN_FUNCTIONS[name] = _func(
+        name, *sigs, keyword_names_verified=keyword_names_verified,
+    )
 
 _builtin("na",       _sig([("x", F)], ret=B))
 _builtin("nz",
@@ -539,8 +581,8 @@ _builtin("bool",     _sig([("x", F)], ret=B))
 _builtin("string",   _sig([("x", F)], ret=S))
 
 # Timeframe
-_builtin("timeframe.change", _sig([("timeframe", S)], ret=B))
-_builtin("timeframe.in_seconds", _sig([("timeframe", S)], ret=F))
+_builtin("timeframe.change", _sig([("timeframe", S)], ret=B), keyword_names_verified=True)
+_builtin("timeframe.in_seconds", _sig([("timeframe", S)], ret=F), keyword_names_verified=True)
 
 # Plain input() — overloaded on type of defval (PineScript v6)
 _builtin("input",

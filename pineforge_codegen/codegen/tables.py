@@ -1418,6 +1418,31 @@ STR_ARGS_READ_REPEATEDLY = {
 # kwarg merge helper (used by visitor / dispatch sites that accept kwargs)
 # ---------------------------------------------------------------------------
 
+def _bind_kwargs_aligned(args: list, kwargs: dict, param_names: list | None,
+                         *, intrinsic: IntrinsicFunc | None = None) -> list:
+    """The call's arguments at the slots of their parameters, unvisited.
+
+    Positional arguments keep their places and each keyword lands at the
+    position of the parameter it names. A parameter that is skipped while a
+    later one is named stays ``None``: the caller applies that parameter's own
+    default, or refuses the call, instead of reading the later argument in the
+    skipped slot. Trailing ``None`` slots are dropped. Registry callers supply
+    their record so verified keyword names are checked first.
+    """
+    validate_intrinsic_keywords(intrinsic, kwargs)
+    bound = list(args)
+    if kwargs and param_names:
+        for i, pname in enumerate(param_names):
+            if pname in kwargs:
+                while len(bound) <= i:
+                    bound.append(None)
+                if bound[i] is None:
+                    bound[i] = kwargs[pname]
+        while bound and bound[-1] is None:
+            bound.pop()
+    return bound
+
+
 def _merge_kwargs(args: list, kwargs: dict, param_names: list | None, visit_expr,
                   *, intrinsic: IntrinsicFunc | None = None) -> list:
     """Merge positional + kwargs into a unified positional list of C++ exprs.
@@ -1427,17 +1452,10 @@ def _merge_kwargs(args: list, kwargs: dict, param_names: list | None, visit_expr
     AST node; pass ``lambda x: x`` when the caller wants raw nodes back.
     Registry callers supply their record so verified keyword names are checked
     before any argument is evaluated or omitted.
+
+    The list is COMPRESSED: a skipped parameter leaves no slot, so a caller
+    that reads fixed indices reads a later keyword in the skipped slot. A call
+    whose parameters can be skipped binds with ``_bind_kwargs_aligned``.
     """
-    validate_intrinsic_keywords(intrinsic, kwargs)
-    if not kwargs or not param_names:
-        return [visit_expr(a) for a in args]
-    merged = list(args)
-    for i, pname in enumerate(param_names):
-        if pname in kwargs:
-            while len(merged) <= i:
-                merged.append(None)
-            if merged[i] is None:
-                merged[i] = kwargs[pname]
-    while merged and merged[-1] is None:
-        merged.pop()
-    return [visit_expr(a) for a in merged if a is not None]
+    bound = _bind_kwargs_aligned(args, kwargs, param_names, intrinsic=intrinsic)
+    return [visit_expr(a) for a in bound if a is not None]
