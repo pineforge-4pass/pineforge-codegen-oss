@@ -9596,12 +9596,14 @@ class SecurityEmitter:
                     emitted_lines,
                 )
                 pushes = getattr(self, "_security_global_hist_pushes", None)
-                if pushes is not None and self._security_reads_global_history(sec_id, expr_node):
+                if pushes is not None:
                     # A helper inlines its argument at every read of its
-                    # parameter, so this read can be emitted more than once:
-                    # each keeps the value, and the evaluator pushes it once
-                    # where it closes (``_emit_security_evaluator``), after
-                    # every read has seen the history before this bar.
+                    # parameter and a loop runs one read once per iteration,
+                    # so this read can run more than once on a requested bar:
+                    # each keeps the value, and the evaluator pushes the last
+                    # one once where it closes (``_emit_security_evaluator``),
+                    # after every read has seen the history before this bar.
+                    # TradingView commits one slot per requested bar.
                     if (hist, cpp_t) not in pushes:
                         pushes.append((hist, cpp_t))
                     return (
