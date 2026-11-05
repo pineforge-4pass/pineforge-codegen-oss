@@ -844,6 +844,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # the declaration-derived checkpoint inventory.
         self._inline_history_members: list[dict] = []
         self._inline_history_member_by_key: dict[tuple, str] = {}
+        # While the outermost loop of a body is being emitted: the series
+        # written inside it (member -> the local flag that says the bar's
+        # slot is open). None outside any loop (emit_top._emit_history_series_write).
+        self._loop_history_flags: dict[str, str] | None = None
+        self._loop_history_flag_count = 0
         # request.security/request.security_lower_tf inline their Pine helper
         # expressions on the requested clock instead of calling the ordinary
         # emitted UDF methods.  The chart-clocked plain-UDF history factor must

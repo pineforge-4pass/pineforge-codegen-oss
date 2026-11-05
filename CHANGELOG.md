@@ -53,6 +53,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - Array fields in records that stay within one bar preserve omitted and explicit `na` IDs, distinct from empty arrays.
 - Copying a record that stays within one bar shares its array fields while keeping scalar fields independent.
 - A block-local `string` declaration at top level may now shadow a script-level `float` binding with declared or literal types without sharing storage; every other cross-type shadow keeps its existing refusal.
+- A series variable declared or written inside a loop opens its bar's history slot at the first reach and updates it afterwards, so `y[i]` in the loop reads the slot committed `i` bars back, as TradingView does; every iteration used to open a slot of its own. Regenerate C++ and relink strategies.
 - An affine chart loop proved endless is stopped with the loop-time error when
   its result reaches an effect. Omission is limited to an unused loop statement
   with no calls, whose writes have no readers except self-updates, a break
