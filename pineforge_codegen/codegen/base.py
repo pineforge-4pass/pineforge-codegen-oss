@@ -2458,7 +2458,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return None
 
     def _compute_max_bars_back_cap(self) -> int | None:
-        """Combine the resolved declaration with literal max_bars_back calls."""
+        """Combine the declaration with proven constant max_bars_back depths."""
+        from .constant_values import ConstantResolver
+
         ast = getattr(self.ctx, "ast", None)
         if ast is None:
             return None
@@ -2481,8 +2483,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 elif "num" in node.kwargs:
                     num_node = node.kwargs["num"]
                 val = self._int_literal_value(num_node)
-                if val is not None and val > 0:
-                    caps.append(val)
+                if val is None:
+                    resolver = getattr(self, "_constant_default_resolver", None)
+                    if resolver is None:
+                        resolver = self._constant_default_resolver = ConstantResolver(
+                            ast, self._budget,
+                        )
+                    proof = resolver.expression(num_node)
+                    if proof is not None and proof.pine_type == PineType.INT:
+                        val = proof.value
+                if val is None or val <= 0:
+                    self._codegen_error(
+                        num_node if num_node is not None else node,
+                        "max_bars_back(): num must resolve to a positive compile-time integer.",
+                    )
+                caps.append(val)
         return max(caps) if caps else None
 
     def _series_decl_suffix(self) -> str:
