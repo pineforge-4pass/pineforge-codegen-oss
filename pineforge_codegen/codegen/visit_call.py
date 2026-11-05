@@ -153,6 +153,7 @@ from ..ast_nodes import (
 )
 from ..collection_history import history_annotation, literal_offset
 from ..array_binding import bind_array_constructor_arguments
+from ..diagnostic_codes import render_diagnostic
 from ..external_requests import RECORDED_KEY_ANNOTATION, request_stop_marker
 from ..intrinsic_binding import bind_intrinsic_arguments, validate_intrinsic_keywords
 from ..limits import iter_ast_nodes
@@ -2838,15 +2839,15 @@ class CallVisitor:
             is_tz_first = "timezone" in node.kwargs
             date_string_node = None
             if "dateString" in node.kwargs:
-                if node.args or len(node.kwargs) > 1:
-                    self._codegen_error(
-                        node,
-                        "timestamp(dateString = ...) takes no other argument.",
-                        hint="Pine v6 signatures: timestamp(dateString), "
-                             "timestamp(year, month, day[, hour, minute, "
-                             "second]) and timestamp(timezone, year, month, "
-                             "day[, hour, minute, second]).",
-                    )
+                # dateString is the only parameter of its overload: a positional
+                # argument is no part of it, and neither is any other keyword.
+                if node.args:
+                    self._codegen_error(node, *render_diagnostic(
+                        "PF-E2027", {"key": "timestamp", "name": "dateString"}))
+                for other in node.kwargs:
+                    if other != "dateString":
+                        self._codegen_error(node, *render_diagnostic(
+                            "PF-E2027", {"key": "timestamp", "name": other}))
                 date_string_node = node.kwargs["dateString"]
             elif node.args:
                 first_arg_spec = self._type_spec_from_expr(node.args[0])
@@ -2859,13 +2860,8 @@ class CallVisitor:
                 if node.kwargs and "timezone" in node.kwargs:
                     # The first parameter is ``timezone``: a positional first
                     # argument already fills it.
-                    self._codegen_error(
-                        node,
-                        "timestamp(...) gives timezone twice: its slot is the "
-                        "first positional argument.",
-                        hint="Pass the timezone once, first, or by keyword "
-                             "with no positional arguments.",
-                    )
+                    self._codegen_error(node, *render_diagnostic(
+                        "PF-E2024", {"key": "timestamp", "name": "timezone"}))
                 # A single string argument is the timestamp(dateString)
                 # overload, NOT the timezone-first form.
                 if is_tz_first and len(node.args) == 1 and not node.kwargs:
@@ -2879,16 +2875,10 @@ class CallVisitor:
                 if isinstance(date_string_node, StringLiteral):
                     ms = _parse_pine_datestring_ms(date_string_node.value)
                     if ms is None:
-                        self._codegen_error(
-                            node,
-                            f"timestamp(dateString): could not parse "
-                            f"'{date_string_node.value}'.",
-                            hint="Supported forms: ISO-8601 "
-                                 "(\"2025-01-01[THH:MM:SS][±HH:MM]\") and "
-                                 "\"DD MMM YYYY [hh:mm[:ss]] [±HHMM]\" / "
-                                 "\"MMM DD YYYY ...\"; no time zone = "
-                                 "GMT+0.",
-                        )
+                        # PF-E5027, rendered from the catalog: the string is the
+                        # call's first argument or its dateString keyword.
+                        self._codegen_error(node, *render_diagnostic(
+                            "PF-E5027", {"args": date_string_node.value}))
                     return f"{ms}LL"
                 self._codegen_error(
                     node,

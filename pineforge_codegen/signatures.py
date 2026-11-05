@@ -575,12 +575,17 @@ _builtin("timestamp",
                ("hour", I, 0), ("minute", I, 0), ("second", I, 0)], ret=I),
          _sig([("dateString", S)], ret=I),
          keyword_names_verified=True)
+# The widest overload names every parameter Pine v6 gives time() and
+# time_close(), the two offsets included (``time("60", bars_back = -1)``): a
+# keyword the validator does not find there is refused.
 _builtin("time",
-         _sig([("timeframe", S), ("session", S), ("timezone", S, "")], ret=I),
+         _sig([("timeframe", S), ("session", S), ("timezone", S, ""),
+               ("bars_back", I, 0), ("timeframe_bars_back", I, 0)], ret=I),
          _sig([("timeframe", S)], ret=I),
          keyword_names_verified=True)
 _builtin("time_close",
-         _sig([("timeframe", S), ("session", S), ("timezone", S, "")], ret=I),
+         _sig([("timeframe", S), ("session", S), ("timezone", S, ""),
+               ("bars_back", I, 0), ("timeframe_bars_back", I, 0)], ret=I),
          _sig([("timeframe", S)], ret=I),
          keyword_names_verified=True)
 _builtin("year",     _sig([("time", I, None), ("timezone", S, "")], ret=I))
@@ -944,6 +949,11 @@ def get_intrinsic(namespace: str | None, func_name: str) -> IntrinsicFunc | None
         None: BUILTIN_FUNCTIONS,
     }.get(namespace)
     record = registry.get(func_name) if registry is not None else None
+    if record is None and namespace is None:
+        # The trade accessors are called through a three-part name
+        # (strategy.closedtrades.profit), so no namespace holds them: their
+        # records are keyed by the whole dotted name and found here.
+        record = TRADE_ACCESSOR_FUNCTIONS.get(func_name)
     if record is None and namespace == "request":
         # request.security keeps its custom binder; its value-level record is
         # reachable here too. These records declare no verified keyword names,
