@@ -19,8 +19,11 @@ The calls whose single parameter is a timeframe or a trade number
 ``strategy.closedtrades`` and ``strategy.opentrades``) take the same route: the
 lowering reads their argument by position, so a keyword spelling was read as a
 call without its argument (the chart's timeframe, trade 0) and raised no
-diagnostic. A keyword none of them declares is refused with the unknown-keyword
-code, as TradingView refuses it. These records are bound here only
+diagnostic. So does ``matrix.new``, whose lowering read ``rows``, ``columns``
+and ``initial_value`` by position (``matrix.new<float>(rows = 2, columns = 3)``
+built a matrix with no rows and no columns); a count it skips takes its default
+(0). A keyword none of them declares is refused with the unknown-keyword code,
+as TradingView refuses it. These records are bound here only
 (``keyword_bound_builtin``): the support checker's arity policy for them is
 unchanged.
 """
@@ -37,10 +40,11 @@ POSITIONAL_BUILTINS = {
     "fixnan": sigs.BUILTIN_FUNCTIONS["fixnan"],
 }
 
-# Calls with one parameter that the lowering reads by position (see above).
+# Calls whose lowering reads its arguments by position (see above).
 KEYWORD_ONLY_BOUND_BUILTINS = {
     "timeframe.change": sigs.BUILTIN_FUNCTIONS["timeframe.change"],
     "timeframe.in_seconds": sigs.BUILTIN_FUNCTIONS["timeframe.in_seconds"],
+    "matrix.new": sigs.MATRIX_NEW,
 }
 
 

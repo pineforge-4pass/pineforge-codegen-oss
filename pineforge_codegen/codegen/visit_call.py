@@ -2837,8 +2837,30 @@ class CallVisitor:
 
         # timestamp(year, month, day, hour, minute) → Unix ms
         if func_name == "timestamp" and namespace is None:
-            is_tz_first = False
-            if node.args:
+            # Each argument binds at the slot of its parameter, whichever way
+            # it is written: the numeric overload is (year, month, day, hour,
+            # minute, second) and the timezone-first one puts ``timezone`` in
+            # front. A keyword used to be read from the compressed list (a
+            # skipped ``hour`` moved ``minute`` into its slot) or, for
+            # ``timezone`` on the numeric overload, dropped with no
+            # diagnostic. A keyword no overload has is refused first.
+            timestamp_record = sigs.get_intrinsic(None, "timestamp")
+            numeric_params = ("year", "month", "day", "hour", "minute", "second")
+            zoned_params = ("timezone", *numeric_params)
+            is_tz_first = "timezone" in node.kwargs
+            date_string_node = None
+            if "dateString" in node.kwargs:
+                if node.args or len(node.kwargs) > 1:
+                    self._codegen_error(
+                        node,
+                        "timestamp(dateString = ...) takes no other argument.",
+                        hint="Pine v6 signatures: timestamp(dateString), "
+                             "timestamp(year, month, day[, hour, minute, "
+                             "second]) and timestamp(timezone, year, month, "
+                             "day[, hour, minute, second]).",
+                    )
+                date_string_node = node.kwargs["dateString"]
+            elif node.args:
                 first_arg_spec = self._type_spec_from_expr(node.args[0])
                 if first_arg_spec is not None and first_arg_spec.kind == "primitive" and first_arg_spec.name == "string":
                     is_tz_first = True
@@ -2846,38 +2868,53 @@ class CallVisitor:
                     is_tz_first = True
                 elif self._infer_type(node.args[0]) == "std::string":
                     is_tz_first = True
-
-            if is_tz_first:
-                # A single string argument is the timestamp(dateString)
-                # overload, NOT the timezone-first form. It used to fall
-                # through with year=1970 defaults — silently wrong. Pine
-                # dateString is a const string, so parse it at transpile
-                # time (common as the input.time defval); reject loudly when
-                # it is not a literal or does not parse.
-                if len(node.args) == 1:
-                    if isinstance(node.args[0], StringLiteral):
-                        ms = _parse_pine_datestring_ms(node.args[0].value)
-                        if ms is None:
-                            self._codegen_error(
-                                node,
-                                f"timestamp(dateString): could not parse "
-                                f"'{node.args[0].value}'.",
-                                hint="Supported forms: ISO-8601 "
-                                     "(\"2025-01-01[THH:MM:SS][±HH:MM]\") and "
-                                     "\"DD MMM YYYY [hh:mm[:ss]] [±HHMM]\" / "
-                                     "\"MMM DD YYYY ...\"; no time zone = "
-                                     "GMT+0.",
-                            )
-                        return f"{ms}LL"
+                if node.kwargs and "timezone" in node.kwargs:
+                    # The first parameter is ``timezone``: a positional first
+                    # argument already fills it.
                     self._codegen_error(
                         node,
-                        "timestamp(dateString) requires a literal string in "
-                        "PineForge (Pine v6 dateString is a const string).",
-                        hint="Use a string literal, or timestamp(year, month, "
-                             "day[, hour, minute, second]).",
+                        "timestamp(...) gives timezone twice: its slot is the "
+                        "first positional argument.",
+                        hint="Pass the timezone once, first, or by keyword "
+                             "with no positional arguments.",
                     )
+                # A single string argument is the timestamp(dateString)
+                # overload, NOT the timezone-first form.
+                if is_tz_first and len(node.args) == 1 and not node.kwargs:
+                    date_string_node = node.args[0]
+
+            if date_string_node is not None:
+                # It used to fall through with year=1970 defaults — silently
+                # wrong. Pine dateString is a const string, so parse it at
+                # transpile time (common as the input.time defval); reject
+                # loudly when it is not a literal or does not parse.
+                if isinstance(date_string_node, StringLiteral):
+                    ms = _parse_pine_datestring_ms(date_string_node.value)
+                    if ms is None:
+                        self._codegen_error(
+                            node,
+                            f"timestamp(dateString): could not parse "
+                            f"'{date_string_node.value}'.",
+                            hint="Supported forms: ISO-8601 "
+                                 "(\"2025-01-01[THH:MM:SS][±HH:MM]\") and "
+                                 "\"DD MMM YYYY [hh:mm[:ss]] [±HHMM]\" / "
+                                 "\"MMM DD YYYY ...\"; no time zone = "
+                                 "GMT+0.",
+                        )
+                    return f"{ms}LL"
+                self._codegen_error(
+                    node,
+                    "timestamp(dateString) requires a literal string in "
+                    "PineForge (Pine v6 dateString is a const string).",
+                    hint="Use a string literal, or timestamp(year, month, "
+                         "day[, hour, minute, second]).",
+                )
+            if is_tz_first:
+                bound = _bind_kwargs_aligned(
+                    node.args, node.kwargs, zoned_params, intrinsic=timestamp_record,
+                )
                 # timezone-first form requires year, month, and day.
-                if len(node.args) < 4:
+                if len(bound) < 4 or any(a is None for a in bound[:4]):
                     self._codegen_error(
                         node,
                         "timestamp(timezone, ...) requires year, month, and "
@@ -2885,28 +2922,25 @@ class CallVisitor:
                         hint="Pine v6 signature: timestamp(timezone, year, "
                              "month, day[, hour, minute, second]).",
                     )
-                args = [self._visit_expr(a) for a in node.args]
+                args = [self._visit_expr(a) if a is not None else None for a in bound]
                 # Every calendar field lands in an ``int`` inside the lambda.
                 fields = [
-                    self._coerce_int_slot(a, node.args[i], "int")
+                    self._coerce_int_slot(a, bound[i], "int") if a is not None else None
                     for i, a in enumerate(args)
                 ]
                 tz = args[0]
-                yr = fields[1] if len(fields) > 1 else "1970"
-                mo = fields[2] if len(fields) > 2 else "1"
-                dy = fields[3] if len(fields) > 3 else "1"
-                hr = fields[4] if len(fields) > 4 else "0"
-                mn = fields[5] if len(fields) > 5 else "0"
-                sc = fields[6] if len(fields) > 6 else "0"
+                yr = fields[1]
+                mo = fields[2]
+                dy = fields[3]
+                hr = fields[4] if len(fields) > 4 and fields[4] is not None else "0"
+                mn = fields[5] if len(fields) > 5 and fields[5] is not None else "0"
+                sc = fields[6] if len(fields) > 6 and fields[6] is not None else "0"
                 return _timestamp_calendar_lambda(tz, yr, mo, dy, hr, mn, sc)
             else:
                 # Numeric form requires year, month, and day (hour/minute/
                 # second default to 0). Anything shorter used to emit "0".
-                merged = _merge_kwargs(
-                    node.args, node.kwargs,
-                    sigs.get_param_names(None, "timestamp"),
-                    lambda a: a,
-                    intrinsic=sigs.get_intrinsic(None, "timestamp"),
+                merged = _bind_kwargs_aligned(
+                    node.args, node.kwargs, numeric_params, intrinsic=timestamp_record,
                 )
                 if len(merged) < 3 or any(a is None for a in merged[:3]):
                     self._codegen_error(
@@ -2919,14 +2953,15 @@ class CallVisitor:
                     )
                 args = [
                     self._coerce_int_slot(self._visit_expr(a), a, "int")
+                    if a is not None else None
                     for a in merged
                 ]
                 yr = args[0]
-                mo = args[1] if len(args) > 1 else "1"
-                dy = args[2] if len(args) > 2 else "1"
-                hr = args[3] if len(args) > 3 else "0"
-                mn = args[4] if len(args) > 4 else "0"
-                sc = args[5] if len(args) > 5 else "0"
+                mo = args[1]
+                dy = args[2]
+                hr = args[3] if len(args) > 3 and args[3] is not None else "0"
+                mn = args[4] if len(args) > 4 and args[4] is not None else "0"
+                sc = args[5] if len(args) > 5 and args[5] is not None else "0"
                 # No timezone argument: Pine resolves the calendar fields in
                 # syminfo.timezone (the EXCHANGE tz), not UTC. This used to be
                 # a bare timegm(), which put e.g. timestamp(y, m, d, 8, 0, 0)

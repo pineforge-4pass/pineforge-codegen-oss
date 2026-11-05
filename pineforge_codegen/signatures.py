@@ -295,7 +295,8 @@ _math("sqrt",   _sig([("number", F)]), keyword_names_verified=True)
 _math("exp",    _sig([("number", F)]), keyword_names_verified=True)
 _math("log",    _sig([("number", F)]), keyword_names_verified=True)
 _math("log10",  _sig([("number", F)]), keyword_names_verified=True)
-_math("random", _sig([("min", F, 0.0), ("max", F, 1.0), ("seed", I, None)]))
+_math("random", _sig([("min", F, 0.0), ("max", F, 1.0), ("seed", I, None)]),
+      keyword_names_verified=True)
 
 # Trigonometry
 _math("sin",    _sig([("angle", F)]), keyword_names_verified=True)
@@ -502,6 +503,16 @@ MATRIX_FUNCTIONS: dict[str, IntrinsicFunc] = {
     )
 }
 
+# matrix.new<type>(rows, columns, initial_value): the row and column counts
+# default to 0. The record exists for keyword binding only (its element type
+# is the call's template argument): ``rows = 2, columns = 3`` is bound to its
+# positions, a skipped count takes its default, any other keyword is refused.
+MATRIX_NEW = _func(
+    "matrix.new",
+    _sig([("rows", I, 0), ("columns", I, 0), ("initial_value", F)], ret=F),
+    keyword_names_verified=True,
+)
+
 
 # ============================================================================
 # syminfo.* functions
@@ -555,9 +566,15 @@ _builtin("nz",
          _sig([("source", F)], ret=F),
          _sig([("source", F), ("replacement", F)], ret=F))
 _builtin("fixnan",   _sig([("source", F)], ret=F))
+# The three overloads of Pine v6 (the numeric one first: it stays the primary
+# record); their parameter names are the complete keyword set.
 _builtin("timestamp",
          _sig([("year", I), ("month", I), ("day", I),
-               ("hour", I, 0), ("minute", I, 0), ("second", I, 0)], ret=I))
+               ("hour", I, 0), ("minute", I, 0), ("second", I, 0)], ret=I),
+         _sig([("timezone", S), ("year", I), ("month", I), ("day", I),
+               ("hour", I, 0), ("minute", I, 0), ("second", I, 0)], ret=I),
+         _sig([("dateString", S)], ret=I),
+         keyword_names_verified=True)
 _builtin("time",
          _sig([("timeframe", S), ("session", S), ("timezone", S, "")], ret=I),
          _sig([("timeframe", S)], ret=I))
