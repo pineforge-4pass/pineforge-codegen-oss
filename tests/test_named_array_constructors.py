@@ -289,15 +289,12 @@ int main() {
     assert output.splitlines() == ["", "3 4"]
 
 
-@pytest.mark.parametrize("size", ["-1", "int(na)"])
 @pytest.mark.parametrize("arguments", [
     "SIZE, 1.0", "size = SIZE, initial_value = 1.0",
 ])
-def test_constructor_keeps_existing_negative_and_na_size_guards(size, arguments):
-    # Negative sizes still stop. Int-na stopping is a known approximation,
-    # deliberately preserved here; TradingView completes an empty array.
+def test_constructor_keeps_the_negative_size_guard(arguments):
     output = run_emitted_tu(transpile(
-        HEADER + f"values = array.new<float>({arguments.replace('SIZE', size)})\n"
+        HEADER + f"values = array.new<float>({arguments.replace('SIZE', '-1')})\n"
     ), r"""
 #include <iostream>
 int main() {
@@ -308,6 +305,28 @@ int main() {
 }
 """, opt="-O0", label="named_array_invalid_size")
     assert output.strip() == "cannot create std::vector larger than max_size()"
+
+
+@pytest.mark.parametrize("arguments", [
+    "SIZE, 1.0", "size = SIZE, initial_value = 1.0",
+])
+def test_constructor_completes_an_empty_array_for_a_missing_size(arguments):
+    # A missing size completes an empty array without stopping the script, as
+    # TradingView does (the integration branch builds the empty array; the
+    # earlier stop on an int na was a documented approximation).
+    output = run_emitted_tu(transpile(
+        HEADER + f"values = array.new<float>({arguments.replace('SIZE', 'int(na)')})\n"
+    ), r"""
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    strategy.run(&bar, 1);
+    std::cout << strategy.last_error() << "\n"
+              << strategy.values.size() << "\n";
+}
+""", opt="-O0", label="named_array_missing_size")
+    assert output.splitlines() == ["", "0"]
 
 
 @pytest.mark.parametrize("scope", ["member", "local", "parameter"])
