@@ -96,8 +96,8 @@ from dataclasses import replace
 from .ast_nodes import (
     ArgOrder, ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, ForInStmt,
     ForStmt, FuncCall, FuncDef, Identifier, IfStmt, MemberAccess, MethodDef,
-    NaLiteral, NumberLiteral, Program, StringLiteral, Subscript, SwitchStmt,
-    Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, WhileStmt,
+    NaLiteral, NumberLiteral, Program, StrategyDecl, StringLiteral, Subscript,
+    SwitchStmt, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, WhileStmt,
 )
 from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from .pine_spelling import input_binding_names
@@ -176,6 +176,21 @@ class _FeedFallback(Exception):
 def _is_feed(request) -> bool:
     """``request`` reads another symbol's pinned feed."""
     return (request.annotations or {}).get(_LOWERING_ANNOTATION) == _FEED_LOWERING
+
+
+def dynamic_requests_enabled(program: Program) -> bool:
+    """Whether a request's timeframe may be a series string.
+
+    Pine v6, the only version PineForge translates (a version 5 script is
+    refused at its first line), has dynamic requests on; a literal
+    ``dynamic_requests = false`` in the ``strategy()`` declaration turns them
+    off. Without them the timeframe is registered before the first bar and a
+    series timeframe is refused."""
+    for stmt in program.body:
+        if isinstance(stmt, StrategyDecl):
+            declared = stmt.kwargs.get("dynamic_requests")
+            return not (isinstance(declared, BoolLiteral) and declared.value is False)
+    return True
 
 
 def reads_bar_series(expr) -> str | None:
@@ -445,6 +460,7 @@ class ScriptIndex:
 
     def __init__(self, program: Program, method_bindings: dict | None = None) -> None:
         self.program = program
+        self.dynamic_requests = dynamic_requests_enabled(program)
         self.method_bindings = method_bindings or {}
         targets: dict[int, set[str]] = {}
         for node_id, key in self.method_bindings:
@@ -1149,7 +1165,8 @@ def _plan(prog: ScriptIndex, owned: dict, context_owned: set[int],
                 try:
                     values.append(prog.resolve(
                         arg, env, per_bar_timeframe=(
-                            what == "timeframe" and not _is_feed(request)))
+                            what == "timeframe" and not _is_feed(request)
+                            and prog.dynamic_requests))
                         if arg is not None else None)
                 except _Unresolvable as exc:
                     if id(request) not in context_owned:

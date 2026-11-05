@@ -467,11 +467,12 @@ class SecurityEmitter:
 
     def _expand_security_series_timeframes(self) -> None:
         """Give every closed arm its own continuously evaluated request state."""
-        from ..security_contexts import context_key
+        from ..security_contexts import context_key, dynamic_requests_enabled
         from ..limits import MAX_SECURITY_TIMEFRAME_VALUES
         from ..support_checker import invalid_tf_literal
         from .timeframe_values import OpenTimeframeSet, TimeframeValues
 
+        dynamic_requests = dynamic_requests_enabled(self.ctx.ast)
         extras = []
         self._security_series_tf_global_declarations = {
             id(stmt) for stmt in self.ctx.ast.body if isinstance(stmt, VarDecl)}
@@ -484,8 +485,15 @@ class SecurityEmitter:
             # evaluator loop sets this flag for timeframe resolution.
             self._security_tf_lower = bool(item.get("is_lower_tf_array"))
             registration_reads = set(self._security_tf_mutable_reads)
-            leaves, series, setup_error = self._security_series_tf_choices(
-                item["tf_node"])
+            if dynamic_requests:
+                leaves, series, setup_error = self._security_series_tf_choices(
+                    item["tf_node"])
+            else:
+                # dynamic_requests = false registers every timeframe before
+                # the first bar: a series timeframe is not expanded here, and
+                # the registration check refuses it where its first unsafe
+                # node is.
+                leaves, series, setup_error = [], [], None
             local_state, outside_state = self._security_series_tf_state_declarations(
                 item["expr_node"])
             # Fixed and expanded requests use the same historical requested
