@@ -771,6 +771,9 @@ def _many_binding_type_script(binding_count: int) -> str:
     lines = ["a = array.from(close, open)", "float r = 0.0"]
     for i in range(binding_count):
         lines.append(f"color c{i} = na")
+        lines.append(f"bool b{i} = false")
+        lines.append(f"string s{i} = na")
+        lines.append(f"float q{i} = na")
         lines.append(f"p{i} = a[1]")
         lines.append(f"r += p{i}.size()")
     return "\n".join(lines) + "\n"
@@ -814,28 +817,56 @@ def _many_binding_work(monkeypatch, binding_count: int, *, quadratic: bool = Fal
 
 
 def _many_binding_type_work(monkeypatch, binding_count: int):
-    """Count scalar-slot calls and global-hint scan work for one source."""
+    """Count actual top-level-body visits and scalar-slot calls."""
     from collections import Counter
 
+    from pineforge_codegen.codegen.base import CodeGen
     from pineforge_codegen.codegen.types import TypeInferer
 
     counts = Counter()
     original_slot = TypeInferer._slot_scalar_cpp_type
-    original_color = TypeInferer._global_color_hint
+    original_init = CodeGen.__init__
 
     def counted_slot(self, name):
         counts["slot_calls"] += 1
         return original_slot(self, name)
 
-    def counted_color(self, name):
-        cache = getattr(self, "_global_hint_names_cache", None)
-        counts["hint_scan"] += len(self.ctx.ast.body) if cache is None else 1
-        return original_color(self, name)
+    def counted_init(self, ctx, budget=None):
+        class CountingBody(list):
+            def __iter__(body_self):
+                for statement in super().__iter__():
+                    counts["body_items"] += 1
+                    if counts["scan_active"]:
+                        counts["hint_items"] += 1
+                    yield statement
+
+        if not isinstance(ctx.ast.body, CountingBody):
+            ctx.ast.body = CountingBody(ctx.ast.body)
+        return original_init(self, ctx, budget=budget)
+
+    def count_hint(method_name):
+        original = getattr(TypeInferer, method_name)
+
+        def counted(self, *args, **kwargs):
+            counts[f"{method_name}_calls"] += 1
+            counts["scan_active"] += 1
+            try:
+                return original(self, *args, **kwargs)
+            finally:
+                counts["scan_active"] -= 1
+
+        return counted
 
     with monkeypatch.context() as patch:
+        patch.setattr(CodeGen, "__init__", counted_init)
         patch.setattr(TypeInferer, "_slot_scalar_cpp_type", counted_slot)
-        patch.setattr(TypeInferer, "_global_color_hint", counted_color)
+        for method_name in (
+            "_global_color_hint", "_global_bool_hint", "_global_string_hint",
+            "_global_float_na_selection",
+        ):
+            patch.setattr(TypeInferer, method_name, count_hint(method_name))
         transpile(_script(_many_binding_type_script(binding_count)))
+    counts.pop("scan_active", None)
     return counts
 
 
@@ -843,13 +874,19 @@ def test_many_binding_type_lookup_scales_linearly(monkeypatch):
     """The hint index and slot lookup both scale with bindings, not N squared."""
     small = _many_binding_type_work(monkeypatch, 32)
     large = _many_binding_type_work(monkeypatch, 64)
-    assert small["slot_calls"] > 0 and small["hint_scan"] > 0, (
+    assert small["slot_calls"] > 0 and small["body_items"] > 0, (
         "type lookup instrumentation did not exercise the production paths",
         small, large)
+    for method_name in (
+        "_global_color_hint", "_global_bool_hint", "_global_string_hint",
+        "_global_float_na_selection",
+    ):
+        assert small[f"{method_name}_calls"] > 0, (
+            "hint predicate was not exercised", method_name, small, large)
     assert large["slot_calls"] <= small["slot_calls"] * 2 + 128, (
         "slot lookup work is superlinear", small, large)
-    assert large["hint_scan"] <= small["hint_scan"] * 2 + 128, (
-        "global hint scan work is superlinear", small, large)
+    assert large["hint_items"] - small["hint_items"] <= 512, (
+        "top-level hint scan work is superlinear", small, large)
 
 
 def _assert_many_binding_work_is_linear(visits_by_checker, binding_count: int) -> None:

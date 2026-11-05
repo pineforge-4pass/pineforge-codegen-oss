@@ -5256,7 +5256,7 @@ class TypeInferer:
         cached = getattr(self, "_global_hint_names_cache", None)
         if cached is not None:
             return cached
-        names = {"color": set(), "bool": set(), "string": set()}
+        names = {"color": set(), "bool": set(), "string": set(), "float": set()}
         for stmt in self.ctx.ast.body:
             if isinstance(stmt, VarDecl) and stmt.type_hint in names:
                 names[stmt.type_hint].add(stmt.name)
@@ -5283,8 +5283,7 @@ class TypeInferer:
             ptype == PineType.FLOAT
             and (
                 (isinstance(expr, Ternary) and self._selection_contains_na(expr))
-                or any(isinstance(stmt, VarDecl) and stmt.name == name
-                       and stmt.type_hint == "float" for stmt in self.ctx.ast.body)
+                or name in self._global_hint_names()["float"]
             )
         )
 
