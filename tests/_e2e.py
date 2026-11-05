@@ -31,6 +31,7 @@ import io
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -300,6 +301,27 @@ def ok(outcomes: dict[str, Outcome], key: str) -> Outcome:
         pytest.fail(f"[{key}] {outcome.error}\n--- source ---\n{outcome.build.source}",
                     pytrace=False)
     return outcome
+
+
+# The line the engine runner prints on stderr when a run stops with one of the
+# engine's own failure codes (scripts/run_strategy.py).
+RUN_FAILURE_CODE = re.compile(r"^run failure code: ([a-z][a-z0-9_]*)$", re.MULTILINE)
+
+
+def assert_run_stopped_with(outcomes: dict[str, Outcome], key: str, code: str,
+                            message: str) -> None:
+    """The run of ``key`` stopped with the engine's failure ``code`` and its
+    ``message``.
+
+    A run that crashes prints no ``run failure code`` line, so the code tells
+    a stopped run from a crashed one. The error text embeds the job's work
+    directory, so a substring check on free text (``"-11" not in error``)
+    fails whenever a job id contains ``-11`` and says nothing about a crash."""
+    error = outcomes[key].error
+    assert error is not None, f"[{key}] the run did not stop"
+    assert message in error, f"[{key}] {message!r} is not in the error:\n{error}"
+    assert RUN_FAILURE_CODE.findall(error) == [code], (
+        f"[{key}] expected exactly the failure code {code!r}:\n{error}")
 
 
 def chart_feed_head(engine_root: Path, base: Path, bars: int) -> Path:
