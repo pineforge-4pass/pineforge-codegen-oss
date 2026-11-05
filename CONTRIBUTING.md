@@ -7,6 +7,9 @@ line with `git commit -s`. Material contributions also require a Contributor
 License Agreement so PINEFORGE LLC can include them in its commercial licenses;
 contact luis@4pass.com.tw before opening a material pull request.
 
+Read the [emission invariant](AGENTS.md#emission-invariant) before changing
+the translator: it governs lowerings, refusals and generated-C++ failures.
+
 ## Local setup
 
 Use Python 3.11 or newer, Node 22, a C++17 compiler, CMake, and a matching

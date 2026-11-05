@@ -72,9 +72,9 @@ literal, so a sign's operand text can start with one: `unary_sign_cpp`
 (`codegen/helpers.py`) parenthesizes it there (`-NEG` over `NEG = -5` is
 `(-(-5))`; it was `(--5)`, a decrement of a literal), on the chart and in
 a `request.security` payload (`tests/test_e2e_negated_constants.py`).
-- **Comments in emitted C++.** When emitting a fallback / unsupported
-stub, include a `/* unsupported: ... */` marker in the source so a
-later compile error has context. Avoid emitting bare empty literals.
+- **Comments in emitted C++.** A comment cannot substitute for a lowering.
+Apply the emission invariant (`AGENTS.md#emission-invariant`) instead of
+emitting an unsupported stub or leaving a failure for the C++ compiler.
 A string a script spells reaches the C++ only as a string literal's
 value (`_cpp_string_escape`) or as comment text (`_cpp_comment_escape`):
 escape every script-derived value where it is written into a literal or
@@ -96,13 +96,15 @@ are not part of the package's external surface.
 grammar only. `array.new<T>` and `array.from<T>` accept a Pine primitive, a
 drawing/visual type, an enum the script declares, or a declared UDT; anything
 else is refused before generation (and again in the emitter, because a switch
-arm downgrades the checker's error to a warning). A nested element type's
-inner name is not validated; an undeclared one becomes `double` and writes no
-raw text. A call on a user type left after its constructor, `copy` and typed
+arm downgrades the checker's error to a warning). Validate nested element
+types too: the current substitution of `double` for an undeclared inner name
+is an implementation gap under the emission invariant.
+A call on a user type left after its constructor, `copy` and typed
 methods, an unknown method outside its receiver's own table, and a member read
 on a non-user-type value are refused instead of emitted. A `chart.point` read
-of `time` / `index` / `price` stays allowed; a receiver the resolver cannot
-place keeps the historical pass-through for a Pine table method name.
+of `time` / `index` / `price` stays allowed. The historical pass-through of a
+Pine table method on an unresolved receiver is also an implementation gap;
+resolve the receiver and implement its signature under the emission invariant.
 - **Reserved names.** `codegen/helpers.py::CPP_RESERVED` carries every C++17
 and C++20 keyword/operator alternative plus header macros and emitter names
 that can collide. `_safe_name` allocates distinct escapes against all authored
