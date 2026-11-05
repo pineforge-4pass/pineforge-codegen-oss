@@ -202,6 +202,8 @@ with a warning.
 
 This exception covers only constructs PineForge refuses today. A form that compiles today keeps compiling: if its lowering is approximate, that is recorded as a defect and fixed by the correct lowering. A wrong value is never kept behind a warning, and such a form is never newly refused as unproven. A located refusal is allowed only as a labelled temporary fallback for one exact proven shape, listed as a compile gap.
 
+The emission invariant (`AGENTS.md#emission-invariant`) states this rule for every emission path. The notes in this file describe existing behavior: a documented approximation or unsupported fallback is an implementation gap, not an exception to the invariant.
+
 Input defaults use the input family's Pine type and qualifier contract.
 An explicit `const color` carrier with a proven initializer supplies its
 packed value to the getter and settings descriptor before `on_bar`; the
