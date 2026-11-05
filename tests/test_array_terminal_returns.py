@@ -233,9 +233,9 @@ observed = pick()
     compile_cpp(cpp)
 
 
-def test_scalar_array_binding_is_not_misclassified_as_builtin_namespace():
+def test_scalar_local_named_array_does_not_change_the_namespace_call_type():
     source = r'''//@version=6
-strategy("Array namespace shadow remains fail closed")
+strategy("Array namespace call beside a scalar local")
 global_values = array.from("x")
 blocked() =>
     int array = 1
@@ -243,8 +243,13 @@ blocked() =>
 observed = blocked()
 '''
     cpp = transpile(source)
-    assert "std::string blocked(" not in cpp
-    assert "double blocked(" in cpp
+    # The call is the array namespace's get over an array<string>: a string
+    # function (a579dae1 types a terminal call from its callee's bound specs).
+    # It used to keep the unrefined double, which a string body does not
+    # compile with; the engine reads its value in
+    # test_e2e_array_terminal_temporaries.py.
+    assert "std::string blocked(" in cpp
+    assert "double blocked(" not in cpp
 
 
 def test_temporary_array_from_receiver_reuses_captured_type_without_new_clones():
@@ -415,7 +420,7 @@ observed = read_value()
         "array.get(array.slice(values, 0, 1), 0)",
     ),
 )
-def test_arbitrary_temporary_array_receivers_remain_fail_closed(terminal: str):
+def test_arbitrary_temporary_array_receivers_type_the_terminal_result(terminal: str):
     source = f'''//@version=6
 strategy("Temporary receiver scope boundary")
 values = array.from("x")
@@ -426,8 +431,13 @@ blocked() =>
 observed = blocked()
 '''
     cpp = transpile(source)
-    assert "std::string blocked(" not in cpp
-    assert "double blocked(" in cpp
+    # a579dae1 types a helper's terminal call from the callee's bound parameter
+    # specs and its lexical globals, so the element of an array<string> is a
+    # string whatever the receiver is spelled as. The helper used to keep the
+    # unrefined double, which a string-returning body does not compile with; the
+    # value is read on the engine in test_e2e_array_terminal_temporaries.py.
+    assert "std::string blocked(" in cpp
+    assert "double blocked(" not in cpp
 
 
 def test_nested_method_copy_udt_element_preserves_handle_type():
