@@ -48,6 +48,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `strategy.risk.allow_entry_in` retains input-dependent directions (#292).
 - Methods whose first parameter is never referenced in their body now report `PF-E5087` at that parameter, with a hint to use it or declare a function instead.
 - Consumed `if`/`switch` selections mixing value and void arms now report located `PF-E5088`; requested void selections keep `PF-E3102`.
+- A `request.security` payload that reads the history of an expression inside a loop, or at several reads of one helper parameter, commits one history slot per requested bar holding the last evaluation of that bar, as TradingView does; every read of the bar sees the history before this bar. Regenerate C++ and relink strategies.
 - `input.enum` options named through immutable enum-member declarations now retain their choices and checked-settings support.
 - Array fields in records that stay within one bar preserve omitted and explicit `na` IDs, distinct from empty arrays.
 - Copying a record that stays within one bar shares its array fields while keeping scalar fields independent.
