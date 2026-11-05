@@ -6354,6 +6354,30 @@ class TypeInferer:
             return "double"
         return "double"
 
+    def _tuple_element_has_float_arithmetic(self, expr) -> bool:
+        """Whether division forces a tuple element's numeric result to float.
+
+        Unlike ``_infer_type``'s double fallback for integer arithmetic, a
+        division and its numeric consumers require floating storage. Follow
+        value operands only: casts, calls and boolean results have their own
+        type boundaries, and a selection's condition does not type its value.
+        """
+        pending = [expr]
+        while pending:
+            node = pending.pop()
+            if isinstance(node, BinOp):
+                if node.op == "/":
+                    return True
+                if node.op in ("+", "-", "*", "%"):
+                    pending.extend((node.left, node.right))
+            elif isinstance(node, UnaryOp) and node.op in ("+", "-"):
+                pending.append(node.operand)
+            elif isinstance(node, Ternary):
+                pending.extend((node.true_val, node.false_val))
+            elif isinstance(node, Subscript):
+                pending.append(node.object)
+        return False
+
     def _tuple_literal_element_cpp_type(
         self, literal: TupleLiteral, index: int,
         local_types: dict[str, str], owner_info,
@@ -6389,10 +6413,18 @@ class TypeInferer:
                 # integer-returning builtins still have a coarse FLOAT family
                 # in analysis. Do not replace an established wide integer
                 # representation with either int or double at the tuple
-                # boundary; bool/string/color metadata still refines its
-                # respective family.
-                if (cpp_type != "int64_t"
-                        or annotated_type not in ("int", "double")):
+                # boundary. A coarse INT family also cannot narrow a
+                # floating arithmetic result; integer-only arithmetic keeps
+                # its analyzed family despite _infer_type's double fallback.
+                # Bool/string/color metadata still refines its respective
+                # family.
+                preserve_float = (
+                    cpp_type == "double" and annotated_type == "int"
+                    and self._tuple_element_has_float_arithmetic(expr)
+                )
+                if (not preserve_float
+                        and (cpp_type != "int64_t"
+                             or annotated_type not in ("int", "double"))):
                     cpp_type = annotated_type
         return self._widen_int_slot(cpp_type, expr, owner_info)
 
