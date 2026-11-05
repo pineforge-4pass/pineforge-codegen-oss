@@ -1772,8 +1772,15 @@ class SupportChecker:
         positional_func = positional_builtin(full)
         # Bare builtins and unary math overload families share signature
         # validation. Other math records retain their existing arity policy.
+        # A name the script binds anywhere (a variable, a parameter, a loop
+        # variable, a tuple element) spelled like a namespace, as in
+        # ``float math = ...`` with ``math.abs()``, can make the call a method
+        # call on that value; only a namespace no binding shares is checked
+        # as the namespace's function.
         if (positional_func is not None
-                and (ns is None or len(positional_func.primary.params) == 1)
+                and (ns is None
+                     or (len(positional_func.primary.params) == 1
+                         and not self._binding_counts.get(ns)))
                 and not self._check_builtin_arguments(node, full, func=positional_func)):
             self._visit_children(node)
             return
