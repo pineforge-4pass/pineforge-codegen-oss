@@ -1748,10 +1748,11 @@ class TopLevelEmitter:
                 # declaration statements, not in the global on_bar preamble.
                 if name in getattr(self, "_func_local_var_names", ()):
                     continue
-                # A wide int array member (``std::vector<int64_t>``, see
-                # ``_wide_int_array_names``) needs its first-bar constructor
-                # spelled with the same element type: name the target for
-                # visit_call's ``array.new_*`` / ``array.from`` lowering.
+                # A typed array member, including a wide int array
+                # (``std::vector<int64_t>``, see ``_wide_int_array_names``),
+                # needs its first-bar constructor spelled with the same
+                # element type: name the target for visit_call's
+                # ``array.new_*`` / ``array.from`` lowering.
                 self._array_ctor_target_name = name
                 safe = self._safe_name(name)
                 runtime_info = self._runtime_scalar_var_init_by_member.get(name)
@@ -1791,7 +1792,23 @@ class TopLevelEmitter:
                 if name in self._array_vars:
                     for stmt in self.ctx.ast.body:
                         if isinstance(stmt, VarDecl) and stmt.name == name:
-                            cpp_val = self._visit_expr(stmt.value)
+                            previous_expected = getattr(
+                                self, "_array_ctor_expected", None
+                            )
+                            hinted = self._type_spec_from_hint_name(
+                                stmt.type_hint
+                            )
+                            if hinted is not None and hinted.kind == "array":
+                                self._array_ctor_expected = (
+                                    stmt.value,
+                                    self._widen_array_spec_for_name(
+                                        name, hinted
+                                    ),
+                                )
+                            try:
+                                cpp_val = self._visit_expr(stmt.value)
+                            finally:
+                                self._array_ctor_expected = previous_expected
                             lines.append(f"            {self._array_journal_initializer(safe, cpp_val)}")
                             break
                     continue
