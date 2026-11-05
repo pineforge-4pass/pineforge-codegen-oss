@@ -1,0 +1,56 @@
+# Scripts the front end is allowed to reject in the translate-implies-compile
+# sweep. One repository-relative label per line, sorted, without duplicates.
+# A rejection that is not listed here fails the sweep; a listed script that no
+# longer rejects also fails, so this file only shrinks toward the truth.
+# Engine corpus labels would be prefixed engine-corpus/; none is rejected today.
+#
+# Measured on a clean run of the whole fixture set (one shard) against the
+# paired engine tree: 46 rejections. The 13 under tests/gate-corpus/err are
+# the expected-error gate fixtures; the pine_libraries entries are library
+# sources, not strategies.
+tests/fixtures/array_history_tv/ahist_bound_push.pine
+tests/fixtures/array_history_tv/ahist_eq.pine
+tests/fixtures/array_history_tv/ahist_field_noparen.pine
+tests/fixtures/array_history_tv/ahist_field_paren.pine
+tests/fixtures/array_history_tv/ahist_fn.pine
+tests/fixtures/array_history_tv/ahist_m_noparen.pine
+tests/fixtures/array_history_tv/ahist_method.pine
+tests/fixtures/array_history_tv/ahist_mfield.pine
+tests/fixtures/array_history_tv/ahist_noparen.pine
+tests/fixtures/array_history_tv/ahist_param_push.pine
+tests/fixtures/array_history_tv/ahist_slice_set.pine
+tests/fixtures/color_tv/w11-color-v5-eth15/strategy.pine
+tests/fixtures/drawing_lifetime/w9dg-pin-holders/strategy.pine
+tests/fixtures/open_items_tv/tuple_literal_decl.pine
+tests/fixtures/open_items_tv/tuple_literal_ternary.pine
+tests/fixtures/open_items_tv/tuple_literal_var.pine
+tests/fixtures/pine_libraries/pftest/ArmLine/1.pine
+tests/fixtures/pine_libraries/pftest/Base/1.pine
+tests/fixtures/pine_libraries/pftest/Overloads/1.pine
+tests/fixtures/pine_libraries/pftest/Signals/1.pine
+tests/fixtures/pine_libraries/pftest/V5Rules/1.pine
+tests/fixtures/pine_libraries/pftest/W11ColorV5/1.pine
+tests/fixtures/popfix_tv/lowertf_no_arm.pine
+tests/fixtures/popfix_tv/tf_switch_na_arm.pine
+tests/fixtures/tail_f_tv/array_ref_args.pine
+tests/fixtures/udt_history_tv/udth_box_eq.pine
+tests/fixtures/udt_history_tv/udth_eq.pine
+tests/fixtures/udt_history_tv/udth_field_noparen.pine
+tests/fixtures/udt_history_tv/udth_field_paren.pine
+tests/fixtures/udt_history_tv/udth_method_noparen.pine
+tests/fixtures/udt_history_tv/udth_noparen.pine
+tests/fixtures/xsym_lib_tv/xc_v5_lib.pine
+tests/fixtures/xsym_lib_tv/xc_v5_negindex.pine
+tests/gate-corpus/err/const_ns_plot_style_free.pine
+tests/gate-corpus/err/const_ns_shape_free.pine
+tests/gate-corpus/err/export_func.pine
+tests/gate-corpus/err/footprint_new.pine
+tests/gate-corpus/err/matrix_unknown_elem.pine
+tests/gate-corpus/err/multi_error_one_line.pine
+tests/gate-corpus/err/sec_tf_invalid.pine
+tests/gate-corpus/err/unknown_color.pine
+tests/gate-corpus/err/unknown_math.pine
+tests/gate-corpus/err/unknown_str.pine
+tests/gate-corpus/err/unknown_strategy_fn.pine
+tests/gate-corpus/err/unknown_syminfo.pine
+tests/gate-corpus/err/unknown_ta.pine
