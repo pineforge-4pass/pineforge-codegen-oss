@@ -388,7 +388,18 @@ you delete or weaken the special case, the test will tell you.
     whatever order they are written in: the support checker binds `nz` and
     `fixnan` to their signatures (`_check_builtin_arguments`, refusing what
     TradingView refuses) and `builtin_keywords` rewrites them positionally
-    (`tests/test_e2e_builtin_keyword_names.py`).
+    (`tests/test_e2e_builtin_keyword_names.py`). The same holds for the other
+    built-ins whose lowering reads its arguments by position
+    (`timeframe.change`, `timeframe.in_seconds`, the trade accessors of
+    `strategy.closedtrades` and `strategy.opentrades`, `matrix.new`, and
+    `math.random`) and for those that bind by parameter slot
+    (`str.format_time`, `timestamp`, `time`, `time_close`): a keyword that
+    skips a parameter keeps the later arguments in their own slots, a skipped
+    parameter takes its declared default, and a keyword the call does not have
+    is refused with `PF-E2027` (`PF-E5090` for math)
+    (`tests/test_e2e_keyword_arguments.py`,
+    `tests/test_e2e_keyword_arguments_construct.py`,
+    `tests/test_e2e_keyword_hole_binding.py`).
 17. **A function's last statement is its value.** TradingView returns the
     value of a function's (or an if/switch arm's) last statement, whatever
     the statement: `x := e` and every `x op= e` yield x's new value (typed as

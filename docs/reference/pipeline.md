@@ -52,8 +52,11 @@ existing parser grammar.
   (requests the support checker lowered), `security_contexts.
   specialize_security_contexts` (helper request contexts),
   `finite_ta_length`'s bounded extrema lengths and `builtin_keywords`
-  (`nz` / `fixnan` keyword arguments in parameter order, the helper copies
-  `security_contexts` made included).
+  (keyword arguments of `nz`, `fixnan`, the math records, `timeframe.change`,
+  `timeframe.in_seconds`, the `strategy.closedtrades` / `strategy.opentrades`
+  accessors and `matrix.new` in parameter order, a skipped parameter that
+  declares a literal default taking it; the helper copies `security_contexts`
+  made included).
 6. `CodeGen(ctx).generate()` → C++ source string.
 
 Pragmas are reattached to `ctx.pf_trace_pragmas` between (5) and (6)

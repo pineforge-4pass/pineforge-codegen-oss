@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from .ast_nodes import ASTNode, FuncCall
+from .ast_nodes import ASTNode, BoolLiteral, FuncCall, NumberLiteral, StringLiteral
 from .diagnostic_codes import render_diagnostic
 from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from .pine_spelling import expr_start
-from .signatures import IntrinsicFunc
+from .signatures import IntrinsicFunc, Param
 
 
 def intrinsic_keyword_diagnostics(
@@ -97,28 +97,54 @@ def validate_intrinsic_keywords(
         raise CompileError(diagnostics)
 
 
+def _default_literal(param: Param, anchor: ASTNode) -> ASTNode | None:
+    """The literal a parameter's declared default stands for, else None.
+
+    A parameter that declares no default (``None``) or a default that is not a
+    plain number, string or bool has none to stand for."""
+    default = param.default
+    location = expr_start(anchor).loc or anchor.loc
+    if isinstance(default, bool):
+        return BoolLiteral(value=default, loc=location)
+    if isinstance(default, (int, float)):
+        return NumberLiteral(value=default, loc=location)
+    if isinstance(default, str):
+        return StringLiteral(value=default, loc=location)
+    return None
+
+
 def bind_intrinsic_arguments(
     node: FuncCall, intrinsic: IntrinsicFunc, *, filename: str | None = None,
 ) -> None:
     """Move supplied keyword expressions to their canonical argument slots.
 
     Keep the original AST nodes, including their locations and annotations.
+    A keyword that skips parameters takes its place after them, and each
+    skipped parameter becomes the literal of its declared default
+    (``matrix.new<float>(columns = 4)`` is ``matrix.new<float>(0, 4)``,
+    ``math.random(seed = 3)`` is ``math.random(0.0, 1.0, 3)``). A skipped
+    parameter with no declared default leaves the call as written.
     Argument-count, duplicate-slot and required-slot diagnostics remain with
-    the existing signature validators; a call with a gap is left as written.
+    the existing signature validators.
     """
     validate_intrinsic_keywords(intrinsic, node.kwargs, filename=filename)
     if not node.kwargs:
         return
-    names = intrinsic.param_names
-    remaining = names[len(node.args):]
-    if not set(node.kwargs) <= set(remaining):
+    widest = max(intrinsic.signatures, key=lambda signature: len(signature.params))
+    remaining = widest.params[len(node.args):]
+    names = [param.name for param in remaining]
+    if not set(node.kwargs) <= set(names):
         return
+    last = max(names.index(name) for name in node.kwargs)
+    anchor = next(iter(node.kwargs.values()))
     bound = list(node.args)
-    for name in remaining:
-        if name not in node.kwargs:
-            break
-        bound.append(node.kwargs[name])
-    if len(bound) != len(node.args) + len(node.kwargs):
-        return
+    for param in remaining[:last + 1]:
+        if param.name in node.kwargs:
+            bound.append(node.kwargs[param.name])
+            continue
+        literal = _default_literal(param, anchor)
+        if literal is None:
+            return
+        bound.append(literal)
     node.args = bound
     node.kwargs = {}
