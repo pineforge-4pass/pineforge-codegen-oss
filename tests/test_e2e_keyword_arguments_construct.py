@@ -55,7 +55,18 @@ MATRIX = (
         "no_rows_pos_rows", "no_rows_pos_columns"))
 )
 
-SOURCES = {"calendar": HEADER + CALENDAR, "matrix": HEADER + MATRIX}
+# `math.random(seed = 3)` skips `min` and `max`, which default to 0 and 1. Each
+# spelling is its own script: the value depends on the call's position in the
+# script, so two calls in one script would differ whatever their seeds.
+RANDOM_KEYWORD = "float random_value = math.random(seed = 3)\n// @pf-trace random_value=random_value\n"
+RANDOM_POSITIONAL = "float random_value = math.random(0.0, 1.0, 3)\n// @pf-trace random_value=random_value\n"
+
+SOURCES = {
+    "calendar": HEADER + CALENDAR,
+    "matrix": HEADER + MATRIX,
+    "random_keyword": HEADER + RANDOM_KEYWORD,
+    "random_positional": HEADER + RANDOM_POSITIONAL,
+}
 
 
 def _column(outcome, name):
@@ -122,18 +133,36 @@ def test_a_matrix_that_skips_its_rows_has_the_rows_default(runs):
     assert set(_column(outcome, "no_rows_kw_rows").values()) == {0.0}
 
 
+def test_random_keyword_seed_keeps_the_default_range(runs):
+    keyword = _column(runs["random_keyword"], "random_value")
+    positional = _column(runs["random_positional"], "random_value")
+    assert len(keyword) == len(positional) == BARS
+    # Without min and max the range is [0, 1): the seed must not become the minimum.
+    outside = [(bar, value) for bar, value in sorted(keyword.items()) if not 0.0 <= value < 1.0]
+    assert not outside, f"{len(outside)} of {BARS} values outside [0, 1); first {outside[:3]}"
+    # The same seed gives the same sequence whichever way the seed is written.
+    different = [(bar, keyword[bar], positional[bar]) for bar in sorted(keyword)
+                 if not keyword[bar] == positional[bar]]
+    assert not different, f"{len(different)} bars differ from the positional seed; first {different[:3]}"
+    # Non-vacuity: the values move.
+    assert len(set(keyword.values())) > 100
+
+
+# (call, source line, the code the record's namespace refuses an unknown keyword with:
+# math records have their own, every other record PF-E2027)
 UNKNOWN = [
-    ("timestamp", 'x = timestamp(zone = "UTC", year = 2024, month = 3, day = 1)\n'),
-    ("matrix.new", "matrix<float> x = matrix.new<float>(row = 2, columns = 3)\n"),
-    ("str.format_time", 'x = str.format_time(time, fmt = "yyyy")\n'),
+    ("math.random", "float x = math.random(sead = 3)\n", "PF-E5090"),
+    ("timestamp", 'x = timestamp(zone = "UTC", year = 2024, month = 3, day = 1)\n', "PF-E2027"),
+    ("matrix.new", "matrix<float> x = matrix.new<float>(row = 2, columns = 3)\n", "PF-E2027"),
+    ("str.format_time", 'x = str.format_time(time, fmt = "yyyy")\n', "PF-E2027"),
 ]
 
 
-@pytest.mark.parametrize("name,line", UNKNOWN, ids=[row[0] for row in UNKNOWN])
-def test_a_keyword_no_parameter_has_is_refused_with_the_typed_code(name, line):
+@pytest.mark.parametrize("name,line,code", UNKNOWN, ids=[row[0] for row in UNKNOWN])
+def test_a_keyword_no_parameter_has_is_refused_with_the_typed_code(name, line, code):
     source = HEADER + line
     with pytest.raises(CompileError) as caught:
         transpile(source)
     codes = [d.code for d in caught.value.diagnostics]
-    assert codes == ["PF-E2027"], codes
+    assert codes == [code], codes
     assert name in caught.value.diagnostics[0].message
