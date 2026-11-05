@@ -48,10 +48,9 @@ def _assert_exact_pivot_ctor_rejection(
         diagnostic.location.end_col,
     ) == (filename, expected_line, 17, 18)
     assert diagnostic.message == (
-        "Unsupported TA constructor length 'p' for ta.pivothigh: it is "
+        "Unsupported TA constructor length 'p' for ta::PivotHigh: it is "
         "neither a compile-time constant nor derived from an input, so "
-        "PineForge cannot size the indicator buffer. TradingView accepts a "
-        "series length for ta.pivothigh(); PineForge does not support it yet."
+        "PineForge cannot size the indicator buffer."
     )
     assert diagnostic.hint == (
         "Use a literal, an input.*() value, or arithmetic over those for TA "

@@ -426,9 +426,10 @@ def test_inline_input_matches_bound_spelling(case_name: str, case_runs) -> None:
 # when an inline input is one of its leaves: the input is a stable leaf, the
 # rest of the expression is not.
 #
-# TradingView compiles a series length for ta.sma and ta.wma, and the refusal
-# says so; it refuses one for ta.ema and ta.rsi, whose refusal keeps the plain
-# wording (the third element of a row is the name the refusal gives the call).
+# A recorded TradingView result says a series length compiles for ta.sma, and
+# the refusal says so; TradingView refuses one for ta.ema and ta.rsi, and there
+# is no recorded result for ta.wma, so those refusals keep the plain wording
+# (the second element of a row is the name the refusal gives the call).
 SERIES_LENGTHS = (
     ('ta.ema(close, close > open ? input.int(2, "A") : input.int(4, "B"))',
      "ta::EMA", '(close > open) ? input.int(2, "A") : input.int(4, "B")', ""),
@@ -439,9 +440,7 @@ SERIES_LENGTHS = (
     ('ta.rsi(close, math.max(input.int(14, "Len"), int(volume)))',
      "ta::RSI", 'math.max(input.int(14, "Len"), int(volume))', ""),
     ('ta.wma(close, input.source(close, "Src"))',
-     "ta.wma", 'input.source(close, "Src")',
-     " TradingView accepts a series length for ta.wma(); "
-     "PineForge does not support it yet."),
+     "ta::WMA", 'input.source(close, "Src")', ""),
 )
 
 
