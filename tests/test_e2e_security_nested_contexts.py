@@ -569,8 +569,11 @@ def test_fixed_primitive_input_lookahead_native_values(
                          ids=["hour-to-four-hour", "four-hour-to-hour"])
 @pytest.mark.parametrize("forwarder, call", [
     pytest.param('forward() => fetch()\n', "forward()", id="transitive"),
-    pytest.param('method forward(float anchor) => fetch()\n', "close.forward()",
-                 id="method"),
+    # TradingView refuses a method whose first parameter is unused (PF-E5087),
+    # so the receiver is read in a way that cannot change the value: a finite
+    # close times zero is zero, and adding zero leaves the requested value.
+    pytest.param('method forward(float anchor) => fetch() + anchor * 0.0\n',
+                 "close.forward()", id="method"),
 ])
 def test_reached_request_helper_native_values(
         request_value_feed, tmp_path, forwarder, call, default, override):
