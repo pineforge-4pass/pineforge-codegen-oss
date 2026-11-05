@@ -103,11 +103,15 @@ def runs(tmp_path_factory):
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("keyword_arguments_construct")
     feed = chart_feed_head(engine, base, BARS)
-    outcomes = execute_all(engine, feed, base / "runs",
-                           {name: Build(source, trace=True) for name, source in SOURCES.items()})
-    for name, outcome in outcomes.items():
-        assert outcome.error is None, f"[{name}] {outcome.error}"
-    return outcomes
+    return execute_all(engine, feed, base / "runs",
+                       {name: Build(source, trace=True) for name, source in SOURCES.items()})
+
+
+def _ran(runs, name):
+    """One script's run; a script that did not run fails only the rows that read it."""
+    outcome = runs[name]
+    assert outcome.error is None, f"[{name}] {outcome.error}"
+    return outcome
 
 
 def _milliseconds(moment: datetime) -> float:
@@ -119,7 +123,7 @@ def test_timestamp_keyword_zone_is_the_named_zone(runs):
     expected = _milliseconds(datetime(2024, 3, 1, tzinfo=timezone(timedelta(hours=5))))
     assert expected == 1709233200000.0
     for name in ("zone_pos", "zone_kw"):
-        _all_bars_equal(runs["calendar"], name, expected)
+        _all_bars_equal(_ran(runs, "calendar"), name, expected)
 
 
 def test_timestamp_keyword_after_a_skipped_hour_keeps_its_own_slot(runs):
@@ -127,11 +131,11 @@ def test_timestamp_keyword_after_a_skipped_hour_keeps_its_own_slot(runs):
     expected = _milliseconds(datetime(2024, 3, 1, 0, 30, tzinfo=timezone.utc))
     assert expected == 1709253000000.0
     for name in ("skip_pos", "skip_kw"):
-        _all_bars_equal(runs["calendar"], name, expected)
+        _all_bars_equal(_ran(runs, "calendar"), name, expected)
 
 
 def test_time_keyword_after_a_skipped_session_keeps_its_own_slot(runs):
-    outcome = runs["time"]
+    outcome = _ran(runs, "time")
     hour = 3_600_000
     stamps = _column(outcome, "t")
     assert len(stamps) == BARS
@@ -145,7 +149,7 @@ def test_time_keyword_after_a_skipped_session_keeps_its_own_slot(runs):
 
 
 def test_matrix_keywords_name_the_dimensions_and_the_fill(runs):
-    outcome = runs["matrix"]
+    outcome = _ran(runs, "matrix")
     for name, expected in (("kw_rows", 2.0), ("kw_columns", 3.0), ("kw_last", 1.5),
                            ("pos_rows", 2.0), ("pos_columns", 3.0),
                            ("mixed_rows", 2.0), ("mixed_columns", 3.0)):
@@ -153,7 +157,7 @@ def test_matrix_keywords_name_the_dimensions_and_the_fill(runs):
 
 
 def test_a_matrix_that_skips_its_rows_has_the_rows_default(runs):
-    outcome = runs["matrix"]
+    outcome = _ran(runs, "matrix")
     # No row count named is the same matrix as zero rows written out.
     for kw_name, pos_name in (("no_rows_kw_rows", "no_rows_pos_rows"),
                               ("no_rows_kw_columns", "no_rows_pos_columns")):
@@ -166,8 +170,8 @@ def test_a_matrix_that_skips_its_rows_has_the_rows_default(runs):
 
 
 def test_random_keyword_seed_keeps_the_default_range(runs):
-    keyword = _column(runs["random_keyword"], "random_value")
-    positional = _column(runs["random_positional"], "random_value")
+    keyword = _column(_ran(runs, "random_keyword"), "random_value")
+    positional = _column(_ran(runs, "random_positional"), "random_value")
     assert len(keyword) == len(positional) == BARS
     # Without min and max the range is [0, 1): the seed must not become the minimum.
     outside = [(bar, value) for bar, value in sorted(keyword.items()) if not 0.0 <= value < 1.0]
