@@ -1446,19 +1446,27 @@ class TaSiteHelper:
     # arguments those literals bring to the constructor stay here
     # (``_ta_arg_takes_plan``).
 
-    # The ta.* functions whose series length TradingView refuses at compile
-    # time (the list above; pine_ta_length.hpp pins it with 52 compile probes):
-    # a series length there is refused here too, so the refusal must not say
-    # that TradingView accepts the call.
-    _TA_TV_REFUSES_SERIES_LENGTH = frozenset({
-        "rma", "ema", "rsi", "atr", "dmi", "macd", "kc", "hma", "tsi", "rci",
-        "supertrend",
+    # The ta.* functions with a RECORDED TradingView result that a series
+    # length compiles: their refusal names the Pine function and says that
+    # TradingView accepts the call. Every other function keeps the plain
+    # wording, which makes no claim about TradingView -- the functions in the
+    # list above, where TradingView refuses a series length as well, and the
+    # ones with no recorded result. Recorded results:
+    # * ta.sma: pine_ta_length.hpp, the engine's note on its TradingView
+    #   compile probes, names it among the functions that declare a series
+    #   length;
+    # * ta.percentile_nearest_rank: issue #295 reports that a script with a
+    #   loop-counter length compiles on TradingView.
+    # A function joins this set only with its own recorded result.
+    _TA_TV_ACCEPTS_SERIES_LENGTH = frozenset({
+        "sma", "percentile_nearest_rank",
     })
 
     def _ta_tradingview_series_length_name(self, site: "TACallSite") -> str | None:
-        """``ta.<name>`` of a ta.* site whose series length TradingView
-        compiles but PineForge cannot size (the refusal says so), or None
-        where TradingView refuses a series length as well, or the site is
+        """``ta.<name>`` of a ta.* site whose series length TradingView is
+        recorded to compile but PineForge cannot size (the refusal says so),
+        or None for every other site: a function with no recorded result, one
+        where TradingView refuses a series length as well, or a site that is
         not a ta.* call."""
         node = getattr(site, "node", None)
         if not isinstance(node, FuncCall):
@@ -1466,7 +1474,7 @@ class TaSiteHelper:
         func_name, namespace = self._resolve_callee(node.callee)
         if namespace != "ta" or not func_name:
             return None
-        if func_name in self._TA_TV_REFUSES_SERIES_LENGTH:
+        if func_name not in self._TA_TV_ACCEPTS_SERIES_LENGTH:
             return None
         return f"ta.{func_name}"
 
