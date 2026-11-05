@@ -3717,7 +3717,8 @@ class CallVisitor:
         if func_name == "default_entry_qty":
             self._codegen_error(
                 node,
-                "strategy.default_entry_qty() requires a default-quantity "
+                "TradingView accepts strategy.default_entry_qty(); PineForge "
+                "does not support it yet: it requires a default-quantity "
                 "query on the engine strategy host.",
                 hint="Use the default quantity of strategy.entry() by omitting qty.",
             )

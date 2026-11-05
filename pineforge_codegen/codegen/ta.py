@@ -1446,6 +1446,30 @@ class TaSiteHelper:
     # arguments those literals bring to the constructor stay here
     # (``_ta_arg_takes_plan``).
 
+    # The ta.* functions whose series length TradingView refuses at compile
+    # time (the list above; pine_ta_length.hpp pins it with 52 compile probes):
+    # a series length there is refused here too, so the refusal must not say
+    # that TradingView accepts the call.
+    _TA_TV_REFUSES_SERIES_LENGTH = frozenset({
+        "rma", "ema", "rsi", "atr", "dmi", "macd", "kc", "hma", "tsi", "rci",
+        "supertrend",
+    })
+
+    def _ta_tradingview_series_length_name(self, site: "TACallSite") -> str | None:
+        """``ta.<name>`` of a ta.* site whose series length TradingView
+        compiles but PineForge cannot size (the refusal says so), or None
+        where TradingView refuses a series length as well, or the site is
+        not a ta.* call."""
+        node = getattr(site, "node", None)
+        if not isinstance(node, FuncCall):
+            return None
+        func_name, namespace = self._resolve_callee(node.callee)
+        if namespace != "ta" or not func_name:
+            return None
+        if func_name in self._TA_TV_REFUSES_SERIES_LENGTH:
+            return None
+        return f"ta.{func_name}"
+
     _TA_SERIES_EXTREME_CLASSES = {
         "highest": "pineforge::source::SeriesHighest",
         "lowest": "pineforge::source::SeriesLowest",

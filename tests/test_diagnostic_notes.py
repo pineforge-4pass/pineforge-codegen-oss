@@ -27,7 +27,7 @@ CATALOG_ENTRY_ADDITIONS = {
     "PF-E5084": {
         "severity": "error",
         "area": "codegen",
-        "message": "strategy.default_entry_qty() requires a default-quantity query on the engine strategy host.",
+        "message": "TradingView accepts strategy.default_entry_qty(); PineForge does not support it yet: it requires a default-quantity query on the engine strategy host.",
         "hint": "Use the default quantity of strategy.entry() by omitting qty.",
         "explanation": "The generated strategy host does not expose the quantity calculation previously emitted as calc_qty. A host query is needed to implement default_entry_qty; omit qty on strategy.entry to use the engine's default sizing.",
         "args": {},
@@ -50,6 +50,24 @@ CATALOG_ENTRY_ADDITIONS = {
         "explanation": "Drawing collections are read-only views of live handles. Only direct reads are lowered; aliases, mutations and other uses are refused instead of exposing a stale mutable copy.",
         "args": {"kind": {"kind": "identifier"}},
         "user_message": "Use direct size(), first(), last() or get() reads on ''{kind}.all''.",
+    },
+    "PF-E5091": {
+        "severity": "error",
+        "area": "codegen",
+        "message": "Unsupported TA constructor length ''{a}'' for ta.{func_name}: it is neither a compile-time constant nor derived from an input, so PineForge cannot size the indicator buffer. TradingView accepts a series length for ta.{func_name}(); PineForge does not support it yet.",
+        "hint": "Use a literal, an input.*() value, or arithmetic over those for TA constructor arguments.",
+        "explanation": "A TA indicator's length is neither a constant nor derived from an input, so PineForge cannot size its buffer. TradingView compiles a series length for this function, so this is a limit of PineForge, not an error in the script; use a literal, an input or arithmetic on those.",
+        "args": {"a": {"kind": "identifier"}, "func_name": {"kind": "identifier"}},
+        "user_message": "PineForge cannot size ta.{func_name} from a series length, which TradingView accepts.",
+    },
+    "PF-E5092": {
+        "severity": "error",
+        "area": "codegen",
+        "message": "Unsupported TA constructor length ''{a}'' for ta.{func_name}: it is neither a compile-time constant nor derived from an input, so PineForge cannot size the indicator buffer. TradingView accepts a series length for ta.{func_name}(); PineForge does not support it yet.",
+        "hint": "Use a literal, an input.*() value, or arithmetic over those for TA lengths.",
+        "explanation": "A TA indicator's length is not a literal and not derived from an input, so PineForge cannot size its buffer. TradingView compiles a series length for this function, so this is a limit of PineForge, not an error in the script; use a literal, an input or arithmetic on those.",
+        "args": {"a": {"kind": "identifier"}, "func_name": {"kind": "identifier"}},
+        "user_message": "PineForge cannot size ta.{func_name} from a series length, which TradingView accepts.",
     },
 }
 # Codes added after this snapshot: the continuation and indentation errors
