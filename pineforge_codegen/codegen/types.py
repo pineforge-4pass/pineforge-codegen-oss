@@ -4895,7 +4895,9 @@ class TypeInferer:
         function that returns a float (``floor`` / ``ceil`` / ``round`` are
         ``int`` in Pine and ``double`` in the lowering), a float series
         built-in, a float ``input``, a float ``ta`` function, ``float(...)``,
-        arithmetic, ternaries, unary signs, ``nz`` / ``fixnan`` /
+        a builtin float member (``strategy.equity``), a float field of a
+        record, a history read of any of those (``x[1]``), arithmetic,
+        ternaries, unary signs, ``nz`` / ``fixnan`` /
         ``math.abs`` / ``math.min`` / ``math.max`` that carry one of those,
         and a user variable one of whose writes is such an expression (the
         same declaration-and-writes lookup the width analysis uses; ``seen``
@@ -4927,6 +4929,22 @@ class TypeInferer:
         if isinstance(node, Ternary):
             return (self._int_cast_arg_is_floating(node.true_val, owner_info, seen)
                     or self._int_cast_arg_is_floating(node.false_val, owner_info, seen))
+        if isinstance(node, Subscript):
+            # A history read: ``x[1]`` is floating when ``x`` is.
+            return self._int_cast_arg_is_floating(node.object, owner_info, seen)
+        if isinstance(node, MemberAccess):
+            if (isinstance(node.object, Identifier)
+                    and node.object.name not in self._known_vars):
+                # A builtin variable the signature tables type: float for
+                # ``strategy.equity`` or ``syminfo.mintick``, int for
+                # ``strategy.opentrades``.
+                key = f"{node.object.name}.{node.member}"
+                for table in (sigs.STRATEGY_VARIABLES, sigs.SYMINFO_VARIABLES,
+                              sigs.BUILTIN_VARIABLES):
+                    if key in table:
+                        return table[key] == PineType.FLOAT
+            # A field of a record is floating when its declared type is float.
+            return self._udt_field_is_double(node)
         if isinstance(node, Identifier):
             if (node.name in self._FLOAT_SERIES_BUILTINS
                     and node.name not in self._known_vars

@@ -38,7 +38,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `bar_index`, a narrow input) that meets one of them in a selection arm, a
   position of a tuple-valued selection, a store or a `request.security`
   payload stays `na` instead of becoming the
-  number -2147483648. This changes generated C++ for scripts that use these
+  number -2147483648. A history read (`int(x[1])`), a builtin float member
+  (`int(strategy.equity)`) and a float field of a record (`int(b.v)`) count as
+  floating values too. This changes generated C++ for scripts that use these
   forms: regenerate and relink affected strategies.
 - Repeated explicit input titles now have separate override keys: the first
   keeps the bare title, and later inputs use `<title>#<n>`, starting at 2 and
