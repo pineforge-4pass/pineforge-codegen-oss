@@ -401,8 +401,9 @@ int main() {
 @pytest.mark.parametrize("opt", ["-O0", "-O2"])
 @pytest.mark.parametrize("declaration,source_type,source_cpp_type,missing,expected", [
     pytest.param(
-        "int sourceValue = int(close)", "int", "int", "int(na)", "bar.close",
-        id="int32",
+        # int(<float series>) is a 64-bit int (the row was "int32" while it was 32-bit).
+        "int sourceValue = int(close)", "int", "int64_t", "int(na)", "bar.close",
+        id="int-of-close",
     ),
     pytest.param(
         "int sourceValue = time", "int", "int64_t", "int(na)",
@@ -464,7 +465,7 @@ int main() {
     const double closes[] = {-7.0, 0.0, 13.0, -2147483647.0};
     for (unsigned index = 0; index < sizeof(closes) / sizeof(closes[0]); ++index) {
         GeneratedStrategy strategy;
-        static_assert(std::is_same_v<decltype(strategy.sourceValue), int>);
+        static_assert(std::is_same_v<decltype(strategy.sourceValue), SOURCE_CPP_TYPE>);
         static_assert(std::is_same_v<decltype(strategy.promotedControl), double>);
         static_assert(std::is_same_v<decltype(strategy.observedValue), double>);
         const double close = closes[index];
@@ -501,17 +502,22 @@ int main() {
     pine.write_text(source, encoding="utf-8")
     previous = transpile_json(pine, base)
     assert previous.get("ok"), previous
+    # The same oracle for both: the reference's int(close) is a 32-bit int, the
+    # current one is a 64-bit int (Pine's int is 64-bit).
     assert run_emitted_tu(
-        previous["cpp"], driver, opt=opt, label="base-finite-integer-arithmetic",
+        previous["cpp"], driver.replace("SOURCE_CPP_TYPE", "int"), opt=opt,
+        label="base-finite-integer-arithmetic",
     ) == "ok\n"
     assert run_emitted_tu(
-        transpile(source), driver, opt=opt, label="current-finite-integer-arithmetic",
+        transpile(source), driver.replace("SOURCE_CPP_TYPE", "int64_t"), opt=opt,
+        label="current-finite-integer-arithmetic",
     ) == "ok\n"
 
 
 @pytest.mark.parametrize("opt", ["-O0", "-O2"])
 @pytest.mark.parametrize("declaration,cpp_type,source_input", [
-    ("int sourceValue = int(close)", "int", "static_cast<int64_t>(bar.close)"),
+    # int(<float series>) is a 64-bit int, like the epoch below it.
+    ("int sourceValue = int(close)", "int64_t", "static_cast<int64_t>(bar.close)"),
     ("int sourceValue = time", "int64_t", "bar.timestamp"),
 ])
 def test_native_nullable_arithmetic_keeps_semantic_width_and_single_evaluation(

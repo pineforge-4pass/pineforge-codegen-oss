@@ -10,7 +10,10 @@ from pineforge_codegen import transpile
 from pineforge_codegen.diagnostic_codes import render_diagnostic
 from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._e2e import reference_codegen, transpile_json
-from tests._numeric_expected import integer_arithmetic, require_numeric_hunk
+from tests._numeric_expected import (
+    INT64_STORE_BRANCHES, int64_store, integer_arithmetic, integer_store,
+    require_numeric_hunk,
+)
 
 
 CPP_REFERENCE = "290fdf7ae39eb786082fd11b8187ae6b640ab66e"
@@ -51,6 +54,22 @@ _ARRAY_FIELD_CONTROLS = {
         "return " + integer_arithmetic(
             "amount", "+", "(double)(*_pf_udt_Ledger.get(receiver).values).size()") + ";",
     ),),
+}
+
+# The 64-bit int() change spells the na-preserving store of an int into an int64_t slot (a
+# record's int field) with the range check of a floating value. An integer operand takes
+# the last branch, which is the store the reference emits, so only the spelling of the
+# store differs, by one line per case; nothing else of the translation unit moves. Each
+# fragment is replaced exactly once, as (what the reference emits, what the tree emits now).
+_INT64_STORE_HUNKS = {
+    "series_to_simple_int_method": (
+        (integer_store("amount", "int64_t"), int64_store("amount")),
+    ),
+    # The sum before the store is the same text in both; "}())); " ends it.
+    "named_method_series_argument": (
+        ("}())); return is_na(_pf_v) ? na<int64_t>() : (int64_t)_pf_v; }()",
+         "}())); " + INT64_STORE_BRANCHES),
+    ),
 }
 
 
@@ -417,6 +436,7 @@ def test_paired_controls_keep_complete_cpp(
         if reference is None:
             pytest.skip("the timestamp array-field reference is unavailable")
         hunks = _ARRAY_FIELD_CONTROLS[request.node.callspec.id]
+    hunks += _INT64_STORE_HUNKS.get(request.node.callspec.id, ())
     _assert_unchanged(control, reference, tmp_path, hunks)
 
 
