@@ -543,7 +543,10 @@ class StmtVisitor:
                         and type_spec is not None
                         and type_spec.kind == "array"
                     ):
-                        self._array_ctor_expected = (node.value, type_spec)
+                        self._array_ctor_expected = (
+                            node.value,
+                            self._widen_array_spec_for_name(node.name, type_spec),
+                        )
                     target_cpp_type = info.get("drawing_cpp")
                     if (
                         target_cpp_type is None

@@ -22,6 +22,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Typed `array.from()` initializers now match their declared element type, including function-local `var` and `varip` arrays of timestamps.
 - `timestamp("...")` date strings with a `UTC` or `GMT` zone word now give
   TradingView's value for four forms that differed. A negative zone with a
   zero hour keeps its sign (`GMT-00:30`, `UTC-0:30`). Minutes of 60 or more
