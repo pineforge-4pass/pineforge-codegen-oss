@@ -24,8 +24,13 @@ def _run(cpp):
     return run_emitted_tu(cpp, DRIVER, opt="-O0").strip()
 
 
-@pytest.mark.parametrize("hint", ["", "int ", "simple int "])
-@pytest.mark.parametrize("actual", ["start", "time"])
+@pytest.mark.parametrize("hint, actual", [
+    ("", "start"), ("", "time"),
+    ("int ", "start"), ("int ", "time"),
+    # TradingView refuses a series value (the bar time) for a simple parameter, so only the
+    # time input is passed to a simple int parameter.
+    ("simple int ", "start"),
+])
 def test_integer_identity_preserves_time_inputs(hint, actual):
     # start is 1704067200000 and time is 1743466500000; identity preserves both.
     cpp = transpile(HEADER + INPUT + f"identity({hint}value) => value\n"
@@ -134,6 +139,7 @@ type Count
 method store(Stamp self, int value) =>
     self.t := value
 method store(Count self, int value) =>
+    int base = self.n
     value
 var s = Stamp.new()
 var c = Count.new()
@@ -148,8 +154,8 @@ ok = got == time and total == 6 ? 1 : 0
 
 
 @pytest.mark.parametrize("tail", [
-    "    int copied = value",
-    "    int copied = 0\n    copied := value",
+    "    int base = self.t\n    int copied = value",
+    "    int base = self.t\n    int copied = 0\n    copied := value",
     "    if bar_index == 0\n        self.t := value\n    else\n        self.t := value",
     "    switch\n        bar_index == 0 => self.t := value\n        => self.t := value",
 ])

@@ -10,6 +10,7 @@ from pineforge_codegen.ast_nodes import ForStmt, IfStmt
 from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
+from tests._numeric_expected import integer_arithmetic, integer_store, require_numeric_hunk
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,10 @@ def test_fold_reuses_one_body_and_excludes_the_newest_final_run():
     cpp = "\n".join(lines)
 
     # The plain statements occur once, with only the accumulator names remapped.
+    expected_count = integer_store(integer_arithmetic("_pf_ctf0_a0", "+", "1"))
+    cpp = require_numeric_hunk(
+        cpp, "_pf_ctf0_a0 += 1;", f"_pf_ctf0_a0 = {expected_count};",
+    )
     assert dedent("""\
         auto _pf_ctf0_step = [&](int i, auto& _pf_ctf0_a0, auto& _pf_ctf0_a1) {
             std::string entryId = closed_trade_entry_id(i);
@@ -258,7 +263,10 @@ def test_fold_preserves_bound_visits_counter_names_and_later_plain_loop(monkeypa
         for (int j = _for_start_1; (_for_down_1 ? (j >= _for_end_1) : (j <= _for_end_1)); j += (_for_down_1 ? -_for_step_1 : _for_step_1), _for_end_1 = (4)) {
             other += 1;
         }
-    """).rstrip()
+    """).rstrip().replace(
+        "other += 1;",
+        f"other = {integer_store(integer_arithmetic('other', '+', '1'))};",
+    )
 
 
 def test_two_fold_plans_keep_separate_members_and_steps():

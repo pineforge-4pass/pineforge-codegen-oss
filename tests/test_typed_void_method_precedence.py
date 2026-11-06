@@ -13,7 +13,7 @@ CASES = (
         "drawing-direct",
         '''//@version=6
 strategy("drawing direct precedence")
-method set_text(label self) => 11
+method set_text(label self) => self, 11
 method delegate(label self) => self.set_text()
 var label drawing_usage = label.new(bar_index, close, "usage")
 ''',
@@ -24,7 +24,7 @@ var label drawing_usage = label.new(bar_index, close, "usage")
         "array-direct",
         '''//@version=6
 strategy("array direct precedence")
-method push(array<int> self) => 12
+method push(array<int> self) => self, 12
 method delegate(array<int> self) => self.push()
 ''',
         "_udt_array_int_delegate",
@@ -34,7 +34,7 @@ method delegate(array<int> self) => self.push()
         "map-direct",
         '''//@version=6
 strategy("map direct precedence")
-method clear(map<string, int> self) => 13
+method clear(map<string, int> self) => self, 13
 method delegate(map<string, int> self) => self.clear()
 ''',
         "_udt_map_string_int_delegate",
@@ -44,7 +44,7 @@ method delegate(map<string, int> self) => self.clear()
         "drawing-shadow",
         '''//@version=6
 strategy("drawing namespace shadow precedence")
-method set_text(int self, label other) => 21
+method set_text(int self, label other) => self, 21
 method delegate(int label, label other) => label.set_text(other)
 var label drawing_usage = label.new(bar_index, close, "usage")
 ''',
@@ -55,7 +55,7 @@ var label drawing_usage = label.new(bar_index, close, "usage")
         "array-shadow",
         '''//@version=6
 strategy("array namespace shadow precedence")
-method push(int self, array<int> other) => 22
+method push(int self, array<int> other) => self, 22
 method delegate(int array, array<int> other) => array.push(other)
 ''',
         "_udt_int_delegate",
@@ -65,7 +65,7 @@ method delegate(int array, array<int> other) => array.push(other)
         "map-shadow",
         '''//@version=6
 strategy("map namespace shadow precedence")
-method clear(int self, map<string, int> other) => 23
+method clear(int self, map<string, int> other) => self, 23
 method delegate(int map, map<string, int> other) => map.clear(other)
 ''',
         "_udt_int_delegate",
@@ -129,7 +129,7 @@ var label drawing_usage = label.new(bar_index, close, "usage")
 def test_typed_user_method_precedence_inside_terminal_if() -> None:
     source = '''//@version=6
 strategy("typed precedence terminal if")
-method push(array<int> self) => 42
+method push(array<int> self) => self, 42
 method choose(array<int> self, bool enabled) =>
     if enabled
         self.push()
@@ -147,7 +147,7 @@ method choose(array<int> self, bool enabled) =>
 def test_typed_user_method_precedence_inside_terminal_switch() -> None:
     source = '''//@version=6
 strategy("typed precedence terminal switch")
-method clear(int self, map<string, int> other) => 43
+method clear(int self, map<string, int> other) => self, 43
 method choose(int map, map<string, int> other, int mode) =>
     switch mode
         1 => map.clear(other)

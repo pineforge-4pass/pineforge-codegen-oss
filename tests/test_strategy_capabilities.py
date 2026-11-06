@@ -391,3 +391,55 @@ int main() {
         assert receipt['version'] == 1
         assert receipt['process_orders_on_close'] is (declaration == 'process_orders_on_close=true')
         assert receipt['calls'][0]['call'] == 'entry'
+
+
+# A request inside a function nothing calls is registered inert but never evaluated, so it is
+# not an execution requirement: the receipts must describe only the requests that can run.
+REQUEST_HEADER = '//@version=6\nstrategy("dead request receipt")\n'
+LIVE_REQUEST = 'h = request.security(syminfo.tickerid, "60", close)\n'
+ENTRY = 'if h > close\n    strategy.entry("L", strategy.long)'
+UNCALLED_WRAPPERS = {
+    'formals': 'wrapper(sym, tf, expr) =>\n    request.security(sym, tf, expr)\n',
+    'timeframe-formal': 'unused(tf) =>\n    request.security(syminfo.tickerid, tf, close)\n',
+    'literal': 'unused() =>\n    request.security(syminfo.tickerid, "15", close)\n',
+}
+
+
+@pytest.mark.parametrize('placement', ['before', 'after'])
+@pytest.mark.parametrize('wrapper', sorted(UNCALLED_WRAPPERS))
+def test_uncalled_request_wrapper_is_not_an_execution_requirement(wrapper, placement):
+    uncalled = UNCALLED_WRAPPERS[wrapper]
+    parts = (uncalled, LIVE_REQUEST) if placement == 'before' else (LIVE_REQUEST, uncalled)
+    case = REQUEST_HEADER + ''.join(parts) + ENTRY
+    control = REQUEST_HEADER + LIVE_REQUEST + ENTRY
+    assert emitted_receipt(case) == emitted_receipt(control)
+    assert emitted_confirmed_receipt(case) == emitted_confirmed_receipt(control)
+    assert len(emitted_receipt(case)['requests']) == 1
+
+
+def test_called_request_wrapper_keeps_its_requirement():
+    source = (REQUEST_HEADER + 'wrapper(tf) =>\n    request.security(syminfo.tickerid, tf, close)\n'
+              + 'h = wrapper("5")\n' + ENTRY)
+    receipt = emitted_receipt(source)
+    assert not receipt['unresolved']
+    assert [(request['timeframe'], request['feed']) for request in receipt['requests']] == [('5', 'chart')]
+    assert emitted_confirmed_receipt(source)['requests'] == [{**receipt['requests'][0], 'expression': 'close'}]
+
+
+def test_reached_wrapper_and_uncalled_one_are_told_apart():
+    source = (REQUEST_HEADER + 'unused(tf) =>\n    request.security(syminfo.tickerid, tf, close)\n'
+              + 'used(tf) =>\n    request.security(syminfo.tickerid, tf, close)\n'
+              + 'h = used("5")\n' + ENTRY)
+    receipt = emitted_receipt(source)
+    assert not receipt['unresolved']
+    assert [request['timeframe'] for request in receipt['requests']] == ['5']
+
+
+def test_live_dynamic_request_still_reports_its_requirement_beside_an_uncalled_wrapper():
+    source = (REQUEST_HEADER + UNCALLED_WRAPPERS['formals']
+              + 'tf = input.timeframe("15", "Requested timeframe")\n'
+              + 'h = request.security(syminfo.tickerid, tf, close)\n' + ENTRY)
+    receipt = emitted_receipt(source)
+    assert len(receipt['requests']) == 1
+    assert len(receipt['unresolved']) == 1
+    assert re.fullmatch(r'request\.security\[\d+\]\.timeframe', receipt['unresolved'][0])

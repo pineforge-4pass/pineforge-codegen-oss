@@ -364,7 +364,7 @@ def test_expression_statement_and_strategy_call_arguments_hoist():
         "plot(pred ? ta.sma(close, 5)[1] : na)\n"
         "if pred\n"
         "    strategy.entry(\"L\", strategy.long)\n"
-        "strategy.close(\"L\", when = pred and ta.ema(close, 9)[1] > close)"
+        "strategy.close(\"L\", qty_percent = pred and ta.ema(close, 9)[1] > close ? 100 : 50)"
     )
     assert "_ta_sma_1.compute(current_bar_.close)" in _hoist(cpp, 1)
     assert "_ta_ema_2.compute(current_bar_.close)" in _hoist(cpp, 2)
@@ -422,9 +422,14 @@ def test_if_body_and_loop_body_sites_keep_execution_gated_lowering():
     )
     assert "_pf_every_bar_ta_" not in cpp
     on_bar = _on_bar(cpp)
-    # In-block compute + call-local history push, reached only when executed.
+    # 493fde6 opens history once per bar and updates repeated evaluations.
+    # The compute and its history write are still reached only when executed.
     assert "_ta_highest_1.compute(current_bar_.high)" in on_bar
-    assert "if (history_advances_new_bar()) _hist_call_1.push(_hv)" in on_bar
+    assert (
+        "if (history_advances_new_bar() && _pf_hist_bar_hist_call_1 != bar_index_) "
+        "_hist_call_1.push(_hv); else _hist_call_1.update(_hv); "
+        "_pf_hist_bar_hist_call_1 = bar_index_;"
+    ) in on_bar
     assert "_ta_sma_2.compute(current_bar_.close)" in on_bar
 
 

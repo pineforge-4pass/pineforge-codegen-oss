@@ -59,11 +59,15 @@ class _Refusal(NamedTuple):
 _ROWS = [
     pytest.param(_Refusal(
         "f(x) => x[bar_index % 3] - x\n", "f(close - open)", "PF-E3094",
-        method_sha256="1599a040ecfb28fec6e2b692c19222f38f6edd0401a323a4f8c8d2e606124955",
+        # the emitted method now also checks a negative history offset; the only
+        # difference from the earlier text is that check
+        method_sha256="ed6ec3056ccf926c25147f7605d2d692d1264f41a66d91ffa02dd0bfe92a28d1",
     ), id="dynamic-offset"),
     pytest.param(_Refusal(
         "n = input.int(2)\nf(x) => x[n] - x\n", "f(close - open)", "PF-E3094",
-        (4, 10), "295c763ead51e01ed6d518ccca9e8dcd7a8531fd369a5701a73b31ad8e2cdec5",
+        # the emitted method now also checks a negative history offset; the only
+        # difference from the earlier text is that check
+        (4, 10), "09895365528abf4d4ae3839dcb163c23ae068371810c12d7e1e46a386e0f26f1",
     ), id="input-offset"),
     pytest.param(_Refusal(
         "f(x) => x[2147483647] - x\n", "f(close - open)", "PF-E3095",
@@ -121,7 +125,7 @@ def _source(row: _Refusal, envelope: str = "root") -> str:
         payload = f"nz({payload})"
     elif envelope == "method":
         definitions += (
-            "method wrap(float receiver, float d) => "
+            "method wrap(float receiver, float d) => receiver * 0 + "
             + payload.replace("close - open", "d") + "\n"
         )
         payload = "close.wrap(close - open)"
@@ -277,36 +281,51 @@ def _assert_unchanged_method(row, monkeypatch):
     assert "wrap" in body
     assert "_arg_hist_" not in body
     if row.method_sha256 is not None:
-        # Compare the earlier method emission with the rollback hook removed:
-        # requested state now survives that hook, so its body is excluded from
-        # the compatibility hash. The id-sites receipt exports are additive
-        # metadata the pinned emission predates.
-        assert hashlib.sha256(
-            without_id_sites_receipt(without_restore_script_state(candidate["cpp"])).encode()
-        ).hexdigest() == row.method_sha256
+        # The historical hash describes an unused-receiver method, which is
+        # now refused. Keep the valid method's equality check above and check
+        # the original source's located refusal instead of inventing a new hash.
+        original = method_source.replace("=> receiver * 0 + ", "=> ")
+        with pytest.raises(CompileError) as caught:
+            transpile(original)
+        diagnostic, = caught.value.diagnostics
+        assert diagnostic.code == "PF-E5087"
+        assert diagnostic.args == {"name": "receiver"}
+        assert diagnostic.location.line == next(
+            line for line, text in enumerate(original.splitlines(), 1)
+            if text.startswith("method wrap(")
+        )
 
 
 @pytest.mark.parametrize("row", _ROWS)
 def test_product_refusal_and_unchanged_builtin_and_method_envelopes(row, monkeypatch):
     _assert_refusal(lambda: transpile(_source(row)), row)
-    _assert_refusal(lambda: transpile(_source(row, "builtin")), row, old=True)
+    # A scalar builtin no longer hides an argument-history diagnostic.
+    # The invalid offset/body/state still reports its own located refusal.
+    _assert_refusal(lambda: transpile(_source(row, "builtin")), row)
     _assert_unchanged_method(row, monkeypatch)
 
 
-def test_reporter_inventory_admission_preserves_each_non_inventory_edge(monkeypatch):
+def test_reporter_inventory_composes_values_and_preserves_method_boundary(monkeypatch):
     row = _Refusal(
         "f(x) => x[2] - x\na = ta.sma(close, 3)\nb = f(a)\n", "b", "",
         method_sha256="67c196a5569ba5b4560a12ee13f4e04c5d09a5a2cfbcc41c4ae51dad7279529d",
     )
-    # This helper call through a global value admits argument history.
-    # Its builtin and method forms keep their existing lowering.
+    # Every value read shares the same requested sample, including across
+    # builtin and selection edges. Methods keep their existing lowering.
     cpp = transpile(_source(row))
     _assert_sampled_sites(cpp, 1)
-    _assert_refusal(lambda: transpile(_source(row, "builtin")), row, old=True)
     _assert_unchanged_method(row, monkeypatch)
-    for payload in ("b + nz(b)", "close > open ? b : na"):
+    samples = [children[-1] for children in _CHART_CLOSES]
+    values = _difference(_sma(samples, 3))
+    for payload, expected in (
+        ("nz(b)", [0.0 if math.isnan(value) else value for value in values]),
+        ("b + nz(b)", [2 * value for value in values]),
+        ("close > open ? b : na", values),
+    ):
         boundary = row._replace(payload=payload)
-        _assert_refusal(lambda: transpile(_source(boundary)), boundary, old=True)
+        composed = transpile(_source(boundary))
+        _assert_sampled_sites(composed, 1)
+        _assert_completed(_run_requested(composed)["chart15"], expected)
 
 
 def _sample_member(cpp: str) -> tuple[str, int]:

@@ -16,6 +16,7 @@ from tests._legacy_cpp import legacy_cpp, without_restore_script_state, without_
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError, Level, Phase
 from tests.test_map_param_methods import _compile_and_run
+from tests._numeric_expected import integer_arithmetic, integer_to_double, require_numeric_hunk
 
 
 def test_duplicate_keyword_argument_is_a_parser_compile_error():
@@ -70,13 +71,31 @@ observed = typed_keywords(global_values, global_source)
 
 def test_valid_existing_positional_and_typed_keyword_forms_do_not_drift():
     cpp = transpile(_VALID_EXISTING_FORMS)
+    # The integer sum now preserves missingness before its float return.
+    total = integer_arithmetic(
+        integer_arithmetic("first", "+", "removed"), "+", "((present) ? (1) : (0))",
+    )
+    cpp = require_numeric_hunk(
+        cpp, "return ((first + removed) + ((present) ? (1) : (0)));",
+        f"return {integer_to_double(total)};",
+    )
     assert sha256(without_source_rename(legacy_cpp(cpp)).encode()).hexdigest() == (
         "c955f34b39e168579eab09094728963148a1a2c16d5c46b2bc2975d681d7963c"
     )
 
 
+def _integer_map_get_return_hunk(receiver: int, argument: int) -> tuple[str, str]:
+    value = (
+        f"[&](auto&& __pf_map_receiver_{receiver})->decltype(auto){{ "
+        f"return [&](auto&& __pf_map_param_arg_{argument})->decltype(auto){{ "
+        f"return __pf_map_receiver_{receiver}.get(__pf_map_param_arg_{argument}); "
+        '}((std::string("key"))); }((map))'
+    )
+    return f"return {value};", f"return {integer_to_double(value)};"
+
+
 @pytest.mark.parametrize(
-    ("source", "expected_hash"),
+    ("source", "expected_hash", "hunks"),
     [
         (
             '''//@version=6
@@ -86,6 +105,17 @@ probe(map<string, int> map) =>
 observed = probe(map.new<string, int>())
 ''',
             "26d575a62c58e2bb4f2129bd147282214d72897232eab2e7e6aa18b945fa616f",
+            # a579dae1 types the helper's result from the map its parameter
+            # binds (int), and with it the variable that reads it: main emits
+            # them as double behind no adapter. The three declarations are
+            # the whole difference from main's C++ (measured: a diff of the two
+            # emissions, 3 hunks), so the digest stays main's.
+            (
+                ("    double observed = 0.0;\n", "    int observed = 0;\n"),
+                ("        this->observed = 0.0;\n", "        this->observed = 0;\n"),
+                ("    double probe(PineMap<std::string, int> map) {",
+                 "    int probe(PineMap<std::string, int> map) {"),
+            ),
         ),
         (
             '''//@version=6
@@ -97,6 +127,7 @@ probe() =>
 observed = probe()
 ''',
             "cd9dfe67b885610a9052479ba587cefe52719ce5d5f372a6d32d6ad4a3a76be4",
+            (_integer_map_get_return_hunk(1, 2),),
         ),
         (
             '''//@version=6
@@ -106,14 +137,24 @@ map.put("key", 1)
 observed = map.get("key")
 ''',
             "e9e3aa71cdc225eb5f135867121a71c433e9f3d6e893eaa57df018cf0d8bdf6c",
+            (),
         ),
     ],
 )
 def test_lexical_identifier_named_map_remains_a_receiver(
     source: str,
     expected_hash: str,
+    hunks: tuple,
 ):
     cpp = transpile(source)
+    # The helper that reads a map of another scope keeps its existing double
+    # signature: a missing integer getter needs conversion at that return; the
+    # global getter stays integer. The helper that takes the map as a parameter
+    # is int (its hunks above require that signature).
+    if hunks and "    int probe(" not in cpp:
+        assert "    double probe(" in cpp
+    for previous, expected in hunks:
+        cpp = require_numeric_hunk(cpp, previous, expected)
     assert sha256(legacy_cpp(cpp).encode()).hexdigest() == expected_hash
 
 
@@ -320,17 +361,22 @@ for i = 0 to 0
 
 
 @pytest.mark.parametrize(
-    ("source", "expected_hash", "expected_value"),
+    ("source", "expected_hash", "expected_value", "hunks"),
     [
         (
             _LATER_GLOBAL_MAP_SOURCE,
             "7a2128df4b4c4f4e10af1c129c3f6430b0f66974b3d33a1ae7c891439f5611b2",
             34.0,  # The namespace read returns 3 and the later receiver read returns 4: 3*10+4.
+            (("observed = ((before * 10) + after);",
+              "observed = " + integer_to_double(integer_arithmetic(
+                  integer_arithmetic("before", "*", "10"), "+", "after",
+              )) + ";"),),
         ),
         (
             _FOR_BLOCK_LOCAL_MAP_SOURCE,
             "173e0a55a404e280c651be398382a7cd3e852baf3b78fc646a4f4fce1cad8e97",
             8.0,  # The sole iteration puts 8 at "key" and reads it before leaving the block.
+            (),
         ),
     ],
 )
@@ -338,9 +384,13 @@ def test_map_namespace_resolution_respects_source_order_and_lexical_roots(
     source: str,
     expected_hash: str,
     expected_value: float,
+    hunks: tuple,
 ):
     cpp = transpile(source)
-    assert sha256(legacy_cpp(cpp).encode()).hexdigest() == expected_hash
+    pinned = cpp
+    for previous, expected in hunks:
+        pinned = require_numeric_hunk(pinned, previous, expected)
+    assert sha256(legacy_cpp(pinned).encode()).hexdigest() == expected_hash
     assert _run_observed(cpp) == expected_value
 
 

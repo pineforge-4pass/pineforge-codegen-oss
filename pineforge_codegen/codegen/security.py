@@ -83,9 +83,15 @@ from ..external_requests import (
     FOOTPRINT_COLUMN_ANNOTATION, RECORDED_KEY_ANNOTATION, REQUEST_REF_ANNOTATION,
 )
 from ..external_requests import _nodes as walk_request_nodes
-from ..limits import iter_ast_nodes
-from .helpers import na_preserving_int_cast, unary_sign_cpp
-from ..security_contexts import GLOBAL_ANNOTATION, UNREACHED_ANNOTATION
+from ..limits import iter_ast_nodes, syntax_children
+from .helpers import (
+    _CPP_COMMENT_OR_LITERAL as _SECURITY_CPP_LITERALS,
+    na_preserving_int_cast, unary_sign_cpp,
+)
+from ..security_contexts import (
+    GLOBAL_ANNOTATION, TIMEFRAME_SOURCES_ANNOTATION, UNREACHED_ANNOTATION,
+    _FIXED_INPUT_KINDS,
+)
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .tables import (
     ARRAY_JOURNAL_DELTA_METHODS, ARRAY_JOURNAL_FULL_METHODS, MATRIX_VOID_METHODS,
@@ -96,11 +102,11 @@ from .tables import (
 )
 
 
-_SECURITY_CPP_LITERALS = re.compile(r'"(?:[^"\\\n]|\\.)*"' + r"|'(?:[^'\\\n]|\\.)*'")
 _SECURITY_CPP_SCOPES = re.compile(
-    _SECURITY_CPP_LITERALS.pattern + "|" + "|".join(
-        r"\b" + re.escape(body) for body in TIMEZONE_LAMBDA_BODIES
-    )
+    _SECURITY_CPP_LITERALS.pattern
+    + r"|(?P<return_type>\)\s*->\s*[\w:\s<>,*&()]+(?=\{))"
+    + "|" + "|".join(r"\b" + re.escape(body) for body in TIMEZONE_LAMBDA_BODIES),
+    re.S,
 )
 
 
@@ -179,12 +185,19 @@ class _SecurityHelperArgumentFrame(dict):
         super().__init__(values)
         self.caller_stack = caller_stack
         self.call = call
+        self.float_parameters: frozenset[str] = frozenset()
         # Runtime metadata only: the dict's values remain the authored ASTs,
         # which key TA discovery and binding signatures.
         self.samples: dict[str, _SecurityArgumentSample] = {}
         # Bound by a typed method call, which every earlier build called on
         # the chart (``_security_info_without_methods``).
         self.method = method
+
+
+@dataclass(frozen=True)
+class _SecurityArgumentCall:
+    result_history: bool
+    globals: tuple[Identifier, ...]
 
 
 @dataclass(frozen=True)
@@ -205,7 +218,9 @@ class _SecurityArgumentHistoryRead:
 @dataclass(frozen=True)
 class _SecurityArgumentSample:
     current: str
-    member: str
+    # None marks an eager current-value argument sampled in caller scope,
+    # without a backing history member; it must never supply a subscript read.
+    member: str | None
 
 
 class SecurityEmitter:
@@ -243,7 +258,26 @@ class SecurityEmitter:
         This walk does not render C++ or allocate emission counters. A request
         which passes the setup proof therefore retains its original emitter.
         """
+        sources = (getattr(node, "annotations", None) or {}).get(
+            TIMEFRAME_SOURCES_ANNOTATION)
+        if sources is not None:
+            return list(sources)
         if isinstance(node, Identifier):
+            # A storage cell's initializer is not its value at the request.
+            # Inventory its writes as well, without moving chart execution
+            # into evaluator registration.
+            if self._security_tf_values.mutable(node):
+                binding = self._security_tf_values._binding(node)
+                declaration = self._security_tf_values.declarations.get(binding)
+                writes = self._security_tf_values.writes.get(binding, ())
+                dynamic = (self._security_series_tf_local_binding(node) is not None
+                           or self._security_tf_expr_is_per_bar(node))
+                if (declaration is not None and dynamic
+                        and all(write.op == ":=" for write in writes)):
+                    # Plain stores can carry setup values, including inputs,
+                    # without interpreting their defaults as constants.
+                    return [declaration.value, *(write.value for write in writes)]
+                return [node]
             name = node.name
             binding = self._security_series_tf_local_binding(node)
             if binding is not None or not self._security_identifier_is_global_binding(node):
@@ -275,7 +309,13 @@ class SecurityEmitter:
         has_series_condition = False
         block_selection = False
         normalization_failed = False
-        local_selection = self._security_series_tf_local_binding(node) is not None
+        active_sources = set()
+        notes = getattr(node, "annotations", None) or {}
+        local_selection = (
+            self._security_series_tf_local_binding(node) is not None
+            or TIMEFRAME_SOURCES_ANNOTATION in notes)
+        if TIMEFRAME_SOURCES_ANNOTATION in notes:
+            series.append(node)
 
         def condition(value):
             nonlocal has_series_condition
@@ -298,10 +338,26 @@ class SecurityEmitter:
 
         def walk(value):
             nonlocal normalization_failed, block_selection, has_computed_value
+            if (self._security_tf_values.mutable(value)
+                    and (local_selection or self._security_tf_expr_is_per_bar(value))):
+                series.append(value)
+                has_computed_value = True
             sources = self._security_series_tf_sources(value)
             if len(sources) != 1 or sources[0] is not value:
-                for source in sources:
-                    walk(source)
+                binding = (self._security_tf_values._binding(value)
+                           if isinstance(value, Identifier) else None)
+                key = ("binding", binding) if binding is not None else ("node", id(value))
+                if key in active_sources:
+                    # A copy cycle adds no values beyond the participating
+                    # cells' seeds and other stores. Operators remain leaves
+                    # and must pass the ordinary bounded value proof.
+                    return
+                active_sources.add(key)
+                try:
+                    for source in sources:
+                        walk(source)
+                finally:
+                    active_sources.remove(key)
                 return
             if isinstance(value, Ternary):
                 condition(value.condition)
@@ -319,7 +375,9 @@ class SecurityEmitter:
                         # selections cannot yet be expanded into closed arms.
                         normalization_failed = True
                         return
-                self._check_security_tf_arms(value, set())
+                self._check_security_tf_arms(
+                    value, set(), validate_literals=not (
+                        local_selection or self._security_tf_expr_is_per_bar(value)))
                 if isinstance(value, IfStmt):
                     condition(value.condition)
                     arm(value.body, value)
@@ -337,7 +395,8 @@ class SecurityEmitter:
                 # An opaque call with no explicit bar read keeps its existing
                 # registration path; conservative implicit-state classification
                 # alone must not introduce a new closed-set requirement.
-                if (isinstance(value, (FuncCall, BinOp, UnaryOp))
+                if ((isinstance(value, (FuncCall, BinOp, UnaryOp))
+                     or self._security_tf_values.mutable(value))
                         and (local_selection or self._security_tf_expr_is_per_bar(
                             value, implicit_calls=False))):
                     series.append(value)
@@ -368,13 +427,18 @@ class SecurityEmitter:
         from ..limits import syntax_children
         from ..security_contexts import ScriptIndex
 
-        index = ScriptIndex(self.ctx.ast, self.ctx.method_call_bindings)
-        writes: dict[tuple, list[ASTNode]] = {}
-        for node, _depth in iter_ast_nodes(self.ctx.ast):
-            if isinstance(node, Assignment) and isinstance(node.target, Identifier):
-                binding = index.refs.get(id(node.target))
-                if binding is not None:
-                    writes.setdefault(binding, []).append(node.value)
+        inventory = getattr(self, "_security_tf_state_inventory", None)
+        if inventory is None:
+            index = ScriptIndex(self.ctx.ast, self.ctx.method_call_bindings)
+            writes: dict[tuple, list[ASTNode]] = {}
+            for node, _depth in iter_ast_nodes(self.ctx.ast):
+                if isinstance(node, Assignment) and isinstance(node.target, Identifier):
+                    binding = index.refs.get(id(node.target))
+                    if binding is not None:
+                        writes.setdefault(binding, []).append(node.value)
+            self._security_tf_state_inventory = (index, writes)
+        else:
+            index, writes = inventory
         pending = [root]
         seen: set[int] = set()
         owned: set[int] = set()
@@ -403,14 +467,16 @@ class SecurityEmitter:
 
     def _expand_security_series_timeframes(self) -> None:
         """Give every closed arm its own continuously evaluated request state."""
-        from ..security_contexts import context_key
+        from ..security_contexts import context_key, dynamic_requests_enabled
         from ..limits import MAX_SECURITY_TIMEFRAME_VALUES
+        from ..support_checker import invalid_tf_literal
         from .timeframe_values import OpenTimeframeSet, TimeframeValues
 
+        dynamic_requests = dynamic_requests_enabled(self.ctx.ast)
         extras = []
-        values = None
         self._security_series_tf_global_declarations = {
             id(stmt) for stmt in self.ctx.ast.body if isinstance(stmt, VarDecl)}
+        values = self._security_tf_values = TimeframeValues(self)
         next_id = len(self._security_calls)
         for item in self._security_calls:
             if item.get("dead"):
@@ -418,15 +484,28 @@ class SecurityEmitter:
             # Choice discovery validates selection arms too, before the later
             # evaluator loop sets this flag for timeframe resolution.
             self._security_tf_lower = bool(item.get("is_lower_tf_array"))
-            leaves, series, setup_error = self._security_series_tf_choices(
-                item["tf_node"])
+            registration_reads = set(self._security_tf_mutable_reads)
+            if dynamic_requests:
+                leaves, series, setup_error = self._security_series_tf_choices(
+                    item["tf_node"])
+            else:
+                # dynamic_requests = false registers every timeframe before
+                # the first bar: a series timeframe is not expanded here, and
+                # the registration check refuses it where its first unsafe
+                # node is.
+                leaves, series, setup_error = [], [], None
+            local_state, outside_state = self._security_series_tf_state_declarations(
+                item["expr_node"])
+            # Fixed and expanded requests use the same historical requested
+            # bar protocol: repeated partial evaluations roll back, completed
+            # requested bars advance each helper's own storage.
+            self._security_series_tf_local_decls.update(local_state)
+            item["historical_local_decls"] = frozenset(local_state)
             if not series:
                 continue
             if item.get("foreign"):
                 self._security_series_tf_refusal(
                     series[0], "another symbol is not yet supported")
-            local_state, outside_state = self._security_series_tf_state_declarations(
-                item["expr_node"])
             # Reuse exactly the fixed request's replay plan. A same-spelled
             # helper/block binding is not the global that plan carries.
             rebound_state = {
@@ -439,12 +518,14 @@ class SecurityEmitter:
                     series[0],
                     "state declared outside the requested expression cannot be replayed by this request; "
                     "move the state into a helper used by the requested expression")
-            self._security_series_tf_local_decls.update(local_state)
             arms = []
             keys = set()
             computed = False
+            runtime = False
             for leaf in leaves:
-                resolved = self._substitute_tf_input_reads(leaf, set())
+                resolved = (self._substitute_tf_input_reads(leaf, set())
+                            if isinstance(leaf, Identifier) and not values.mutable(leaf)
+                            else leaf)
                 allowed = isinstance(resolved, StringLiteral) or (
                     isinstance(resolved, MemberAccess)
                     and isinstance(resolved.object, Identifier)
@@ -458,30 +539,40 @@ class SecurityEmitter:
                     candidates = [resolved]
                 else:
                     computed = True
-                    if values is None:
-                        values = TimeframeValues(self)
                     try:
                         # Interpret the authored leaf, not setup substitution:
                         # input defaults and first-bar values are not constants.
                         candidates = values.strings(leaf)
                     except (OpenTimeframeSet, ValueError, TypeError, KeyError,
                             ArithmeticError, RecursionError):
-                        if setup_error is not None:
-                            raise setup_error
-                        # Closing open inventories needs the run-time
-                        # registration spec, including reached-request limits.
-                        self._security_series_tf_refusal(
-                            leaf, "the timeframe set is not closed at compile time")
+                        if self._infer_type(leaf) != "std::string":
+                            if setup_error is not None:
+                                raise setup_error
+                            self._security_series_tf_refusal(
+                                leaf, "the timeframe set is not closed at compile time")
+                        runtime = True
+                        break
                 for candidate in candidates:
                     key = context_key(candidate)
                     if key not in keys:
                         keys.add(key)
                         arms.append(candidate)
                     if computed and len(arms) > MAX_SECURITY_TIMEFRAME_VALUES:
-                        # The run-time registration spec must also replace
-                        # this finite-inventory bound for larger/open sets.
-                        self._security_series_tf_refusal(
-                            leaf, "the timeframe set is not closed at compile time")
+                        runtime = True
+                        break
+                if runtime:
+                    break
+            if runtime:
+                # Inventory bounds limit this optimization, not the language.
+                # The authored argument is evaluated at its reached call; one
+                # typed template supplies arbitrarily many runtime instances.
+                item["runtime_context"] = True
+                item["series_tf_sites"] = [item["sec_id"]]
+                item["series_tf_local_decls"] = frozenset(local_state)
+                item["series_tf_outside_decls"] = frozenset(outside_state)
+                item["series_tf_state_node"] = series[0]
+                self._security_tf_mutable_reads = registration_reads
+                continue
             original = dict(item)
             sites = []
             for arm_index, leaf in enumerate(arms):
@@ -489,6 +580,14 @@ class SecurityEmitter:
                 site = item if arm_index == 0 else dict(original)
                 site["sec_id"] = sec_id
                 site["tf_node"] = leaf
+                if isinstance(leaf, StringLiteral) and leaf.value:
+                    label = ("request.security_lower_tf" if item.get("is_lower_tf_array")
+                             else "request.security")
+                    invalid = invalid_tf_literal(leaf.value, label)
+                    if invalid is not None:
+                        # An invalid computed value owns no engine stream.
+                        # Its request read stops only if that value is reached.
+                        site["series_tf_invalid"] = invalid[0]
                 if local_state:
                     site["series_tf_local_decls"] = frozenset(local_state)
                 if outside_state:
@@ -501,7 +600,231 @@ class SecurityEmitter:
                     extras.append(site)
                     next_id += 1
             item["series_tf_sites"] = sites
+            # Inspection may follow a chart condition through substitution.
+            # Expanded streams register only their leaves, so none of those
+            # transient reads belongs to the first-bar registration replay.
+            self._security_tf_mutable_reads = registration_reads
         self._security_calls.extend(extras)
+        self._promote_nested_runtime_requests()
+
+    def _promote_nested_runtime_requests(self) -> None:
+        """A request evaluated inside a runtime instance uses its parent's key.
+
+        This is a dependency walk over payloads and helper definitions, not an
+        inventory of possible argument strings.
+        """
+        pending = [item for item in self._security_calls if item.get("runtime_context")]
+        seen = set()
+        while pending:
+            item = pending.pop()
+            if item["sec_id"] in seen:
+                continue
+            seen.add(item["sec_id"])
+            roots = [item["expr_node"]]
+            visited_helpers = set()
+            while roots:
+                for node, _depth in iter_ast_nodes(roots.pop()):
+                    if not isinstance(node, FuncCall):
+                        continue
+                    nested = self._runtime_security_call_for_request(node)
+                    if nested is not None and nested is not item:
+                        nested["runtime_context"] = True
+                        nested["series_tf_sites"] = [nested["sec_id"]]
+                        nested.setdefault("series_tf_state_node", nested["tf_node"])
+                        pending.append(nested)
+                    name = self._security_user_call_key(node)
+                    info = self._func_info_map.get(name)
+                    if info is not None and info.node is not None and name not in visited_helpers:
+                        visited_helpers.add(name)
+                        roots.append(info.node)
+        if seen:
+            # Ownership changed from chart/static calls to nested templates.
+            self._security_body_expression_cache = {}
+            self._security_global_value_cache = {}
+
+    def _runtime_security_call_for_request(self, node):
+        function, namespace = self._resolve_callee(node.callee)
+        if namespace != "request" or function not in ("security", "security_lower_tf"):
+            return None
+        payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
+        candidates = [
+            item for item in self._security_calls
+            if not item.get("series_tf_extra") and item["expr_node"] is payload
+            and bool(item.get("is_lower_tf_array")) == (function == "security_lower_tf")]
+        return next((item for item in candidates
+                     if item.get("callsite_idx") == self._active_call_site_idx),
+                    candidates[0] if candidates else None)
+
+    @staticmethod
+    def _runtime_security_cpp(text: str, replacements: dict[str, str]) -> str:
+        """Rewrite identifier tokens, preserving C++ literals and comments."""
+        tokens = re.compile(
+            r'//[^\n]*|/\*.*?\*/|' + _SECURITY_CPP_LITERALS.pattern
+            + r'|\bthis\s*->\s*[A-Za-z_][A-Za-z_0-9]*|[A-Za-z_][A-Za-z_0-9]*',
+            re.DOTALL)
+        def rewrite(match):
+            token = match.group()
+            member = re.sub(r"^this\s*->\s*", "", token)
+            if member == token:
+                previous = match.start()
+                while previous and text[previous - 1].isspace():
+                    previous -= 1
+                if (text[max(0, previous - 1):previous] == "."
+                        or text[max(0, previous - 2):previous] in ("->", "::")):
+                    return token
+            return replacements.get(member, token)
+        return tokens.sub(rewrite, text)
+
+    def _runtime_security_member_names(self, sec_id: int) -> list[str]:
+        item = self._security_calls[sec_id]
+        info = self._security_eval_info[sec_id]
+        owned = {"_security_helper_series_", "_security_helper_series_str_"}
+        if item.get("is_lower_tf_array"):
+            owned.add(f"_req_sec_lower_tf_{sec_id}")
+        elif item.get("returns_tuple") and isinstance(item["expr_node"], TupleLiteral):
+            owned.update(f"_req_sec_{sec_id}_{i}" for i in range(item["tuple_size"]))
+        else:
+            owned.add(f"_req_sec_{sec_id}")
+        owned.update(
+            self._security_ohlc_hist_series_cpp(sec_id, field)
+            for field in self._security_ohlc_hist_fields_by_sec.get(sec_id, ()))
+        owned.update(self._security_ta_hist_series_names(sec_id))
+        owned.update(self._security_expr_hist_series_names(sec_id))
+        owned.update(cell.member for cell in self._security_arg_histories.get(sec_id, {}).values())
+        if sec_id in self._security_bar_index_secs:
+            owned.add(self._security_bar_index_member(sec_id))
+        for name in info.get("mutable_globals", ()):
+            owned.add(self._security_state_name(sec_id, name))
+            variable = self._global_mutable_infos.get(name)
+            if variable is not None and getattr(variable, "is_var", False):
+                owned.add(self._security_init_flag_name(sec_id, name))
+        for variants in (info.get("ta_variants") or {}).values():
+            owned.update(variant["member_name"] for variant in variants)
+        names = []
+        for declaration in self._runtime_security_declarations:
+            name = self._script_state_member_name(declaration)
+            if name in owned:
+                names.append(name)
+        return names
+
+    def _emit_runtime_security_templates(self, lines: list[str]) -> None:
+        """Emit concrete state types after their prototype member declarations.
+
+        Prototypes are immutable seeds reset by the ordinary lifecycle. Every
+        instance owns its Series, TA objects, tuple fields and helper maps.
+        """
+        for item in self._security_calls:
+            if not item.get("runtime_context"):
+                continue
+            sec_id = item["sec_id"]
+            names = self._runtime_security_member_names(sec_id)
+            lines.extend((
+                f"    struct _RuntimeSec{sec_id} : pineforge::RuntimeContextEvaluator {{",
+                "        GeneratedStrategy* owner;",
+                "        pineforge::source::PineRuntimeSecurityCursor cursor;",
+                "        bool slot_is_new(int) const noexcept { return cursor.slot_new; }",
+                "        int lower_sub_bar(int) const noexcept { return cursor.sub_bar_index; }",
+            ))
+            for name in names:
+                lines.append(f"        decltype(GeneratedStrategy::{name}) {name};")
+            initializers = ["owner(owner_value)",
+                            "cursor(owner_value->make_runtime_security_cursor(tf, lookahead, gaps, lower, heikinashi))"]
+            initializers.extend(
+                f"{name}(owner_value->{name})"
+                for name in names if not name.startswith("_security_helper_series"))
+            lines.append(
+                f"        _RuntimeSec{sec_id}(GeneratedStrategy* owner_value, const std::string& tf, "
+                "bool lookahead, bool gaps, bool lower, bool heikinashi)")
+            lines.append("            : " + ", ".join(initializers) + " {}")
+            lines.extend((
+                "        void consume(pineforge::RuntimeContextService&, pineforge::RuntimeContextHandle,",
+                "                     const pineforge::RuntimeContextEvent& event) override {",
+                f"            owner->_runtime_feed_{sec_id}(*this, event);",
+                "        }",
+                "        void observe_owned_storage(pineforge::OwnedStorage& out) const noexcept override {",
+                "            out.metadata(sizeof(*this));",
+                "            pineforge::observe_owned_members(out, cursor.timeframe, cursor.chart_timeframe,",
+                "                cursor.timezone, cursor.session, cursor.aggregator);",
+            ))
+            # Walk every declared instance member, including aggregate result
+            # fields and helper maps. Hooks add external ownership only; the
+            # containing object above already covers their inline storage.
+            # An engine type without a public hook marks the observation
+            # incomplete rather than pretending its storage is zero.
+            for name in names:
+                lines.append(f"            pineforge::observe_owned_storage(out, {name});")
+            lines.extend((
+                "        }",
+                "        std::uint64_t storage_bytes() const noexcept override {",
+                "            pineforge::OwnedStorage out;",
+                "            observe_owned_storage(out);",
+                "            return out.usage().storage_bytes();",
+                "        }",
+                "    };",
+            ))
+
+    def _runtime_security_result(self, item: dict, prefix: str) -> str:
+        sec_id = item["sec_id"]
+        if item.get("is_lower_tf_array"):
+            return f"{prefix}_req_sec_lower_tf_{sec_id}"
+        if item.get("returns_tuple") and isinstance(item["expr_node"], TupleLiteral):
+            return "std::make_tuple(" + ", ".join(
+                f"{prefix}_req_sec_{sec_id}_{i}" for i in range(item["tuple_size"])) + ")"
+        return f"{prefix}_req_sec_{sec_id}"
+
+    def _emit_runtime_security_evaluator(self, item: dict, lines: list[str]) -> None:
+        sec_id = item["sec_id"]
+        body = []
+        self._emit_security_evaluator_requested(item, body)
+        names = self._runtime_security_member_names(sec_id)
+        replacements = {name: f"_pf_state.{name}" for name in names}
+        replacements["security_series_slot_is_new"] = "_pf_state.slot_is_new"
+        replacements["security_lower_tf_sub_bar_index"] = "_pf_state.lower_sub_bar"
+        expected = f"    void _eval_security_{sec_id}(const Bar& bar, bool is_complete) {{"
+        if not body or body[0] != expected:
+            raise AssertionError("unexpected runtime evaluator declaration")
+        body[0] = (
+            f"    void _eval_security_{sec_id}(_RuntimeSec{sec_id}& _pf_state, "
+            "const Bar& bar, bool is_complete) {")
+        text = self._runtime_security_cpp("\n".join(body), replacements)
+        lines.extend(text.splitlines())
+        lines.extend((
+            f"    void _runtime_feed_{sec_id}(_RuntimeSec{sec_id}& state,",
+            "                             const pineforge::RuntimeContextEvent& event) {",
+            "        state.cursor.feed(event, [&](const Bar& bar, bool complete) {",
+            "            pineforge::source::PineRuntimeSecurityScope scope(*this, state.cursor);",
+            f"            _eval_security_{sec_id}(state, bar, complete);",
+            "        }, [&]() {",
+        ))
+        for name in names:
+            if name.startswith("_req_sec"):
+                condition = "true" if item.get("is_lower_tf_array") else "state.cursor.gaps_on"
+                lines.append(f"            if ({condition}) state.{name} = this->{name};")
+        lines.extend((
+            "        });",
+            "    }",
+            "    " + "decltype(" + self._runtime_security_result(
+                item, f"std::declval<_RuntimeSec{sec_id}&>().") + ")"
+            + f" _runtime_request_{sec_id}(const std::string& authored_tf, bool lookahead, bool gaps) {{",
+        ))
+        self._emit_ta_runtime_reset(lines, indent=2)
+        info = self._security_eval_info[sec_id]
+        lower = "true" if item.get("is_lower_tf_array") else "false"
+        ha = "true" if item.get("heikinashi") else "false"
+        lines.extend((
+            "        auto& service = runtime_contexts();",
+            "        const std::string tf = runtime_security_timeframe(authored_tf);",
+            "        const std::string arguments = std::to_string(tf.size()) + \":\" + tf",
+            "            + (lookahead ? \":1\" : \":0\") + (gaps ? \":1\" : \":0\");",
+            f"        const pineforge::RuntimeContextKey key{{{sec_id}, arguments, service.active_context()}};",
+            "        const auto handle = service.get_or_create(key, [&]() {",
+            f"            return std::make_unique<_RuntimeSec{sec_id}>(this, tf, lookahead, gaps, {lower}, {ha});",
+            "        });",
+            "        service.advance(handle, runtime_security_frontier());",
+            f"        auto& state = dynamic_cast<_RuntimeSec{sec_id}&>(service.published(handle));",
+            f"        return {self._runtime_security_result(item, 'state.')};",
+            "    }",
+        ))
 
     def _security_series_tf_value(self, item, tf_node) -> str:
         """Select by the authored chart value, preserving its lazy evaluation.
@@ -510,10 +833,22 @@ class SecurityEmitter:
         bindings. Expanding its condition here would evaluate it twice
         when the script already bound the timeframe to a name.
         """
+        from ..support_checker import PINE_TF_SUFFIXES
+        if item.get("runtime_context"):
+            args = [self._visit_expr(tf_node)]
+            args.extend(self._visit_expr(item[key]) if item.get(key) is not None else "false"
+                        for key in ("lookahead_node", "gaps_node"))
+            return f"_runtime_request_{item['sec_id']}(" + ", ".join(args) + ")"
+
         def result(sec_id):
             if item.get("is_lower_tf_array"):
                 return f"_req_sec_lower_tf_{sec_id}"
-            if isinstance(item["expr_node"], TupleLiteral):
+            # Literal tuples have one member per element. A helper tuple or
+            # TA result owns the aggregate member that its evaluator assigns
+            # and clear_security resets; select that value without rebuilding
+            # it from element members that were never declared.
+            if (item.get("returns_tuple")
+                    and isinstance(item["expr_node"], TupleLiteral)):
                 return "std::make_tuple(" + ", ".join(
                     f"_req_sec_{sec_id}_{i}" for i in range(item["tuple_size"])) + ")"
             return f"_req_sec_{sec_id}"
@@ -525,6 +860,36 @@ class SecurityEmitter:
             target += "_"
         value = self._visit_expr(tf_node)
         lines = ["([&]() {", f"    const std::string {target} = {value};"]
+        suffixes = self._cpp_string_escape("".join(PINE_TF_SUFFIXES))
+        label = ("request.security_lower_tf" if item.get("is_lower_tf_array")
+                 else "request.security")
+        # A numeric family's finite remainder can also be na on a runtime
+        # bar. Validate the actual string before result lookup, rather than
+        # misclassifying "NaN" as an internal inventory failure.
+        lines.extend((
+            "    const auto _pf_valid_tf = [](const std::string& _pf_tf) {",
+            "        if (_pf_tf.empty()) return true;",
+            "        auto _pf_tf_digits = _pf_tf.size();",
+            "        const char _pf_tf_suffix = _pf_tf.back();",
+            "        if ((_pf_tf_suffix >= 'A' && _pf_tf_suffix <= 'Z') ||",
+            "            (_pf_tf_suffix >= 'a' && _pf_tf_suffix <= 'z')) {",
+            f'            if (std::string("{suffixes}").find(_pf_tf_suffix) == std::string::npos)',
+            "                return false;",
+            "            --_pf_tf_digits;",
+            "        }",
+            "        if (_pf_tf_digits == 0) return true;",
+            "        bool _pf_tf_positive = false;",
+            "        for (decltype(_pf_tf_digits) _pf_tf_i = 0; _pf_tf_i < _pf_tf_digits; ++_pf_tf_i) {",
+            "            const char _pf_tf_digit = _pf_tf[_pf_tf_i];",
+            "            if (_pf_tf_digit < '0' || _pf_tf_digit > '9') return false;",
+            "            _pf_tf_positive = _pf_tf_positive || _pf_tf_digit != '0';",
+            "        }",
+            "        return _pf_tf_positive;",
+            "    };",
+            f"    if (!_pf_valid_tf({target})) {{",
+            f'        pine_runtime_error(std::string("{label}: invalid timeframe: ") + {target});',
+            "    }",
+        ))
         sites = item["series_tf_sites"]
         for sec_id in sites:
             info = self._security_eval_info[sec_id]
@@ -535,7 +900,19 @@ class SecurityEmitter:
             condition = f"{target} == {arm}"
             if arm == "script_tf_":
                 condition = f"({target}.empty() || {condition})"
-            lines.append(f"    if ({condition}) return {result(sec_id)};")
+            invalid = info.get("series_tf_invalid")
+            if invalid is not None:
+                message = self._cpp_string_escape(invalid)
+                lines.extend((
+                    f"    if ({condition}) {{",
+                    f'        pine_runtime_error(std::string("{message}"));',
+                    # Retain the expression's scalar/tuple/array return type
+                    # even when every inventoried value is invalid.
+                    f"        return {result(sec_id)};",
+                    "    }",
+                ))
+            else:
+                lines.append(f"    if ({condition}) return {result(sec_id)};")
         lines.extend((
             '    _PF_ENGINE_INVARIANT("Requested timeframe matched no registered timeframe", std::logic_error);',
             "}())",
@@ -646,7 +1023,8 @@ class SecurityEmitter:
             message, hint = refusal
             self._codegen_error(node, message, hint=hint)
 
-    def _check_security_tf_arms(self, node, resolving: set[str]) -> None:
+    def _check_security_tf_arms(self, node, resolving: set[str], *,
+                                validate_literals: bool = True) -> None:
         """Refuse an invalid timeframe string a registration-time timeframe
         expression can select: the expression itself, a ternary or switch
         arm, read through the constants and globals it names.
@@ -688,7 +1066,8 @@ class SecurityEmitter:
 
         def check(value) -> None:
             if isinstance(value, StringLiteral):
-                self._refuse_invalid_security_tf(value.value, value)
+                if validate_literals:
+                    self._refuse_invalid_security_tf(value.value, value)
             elif isinstance(value, Ternary):
                 check(value.true_val)
                 check(value.false_val)
@@ -708,6 +1087,31 @@ class SecurityEmitter:
         """A timeframe string as the C++ string literal registration and the
         evaluator's ``timeframe.*`` reads spell it."""
         return f'"{self._cpp_string_escape(tf)}"'
+
+    def _security_lookahead_value(self, node):
+        """A computed lookahead's value before on_bar initializes its aliases."""
+        if node is None or isinstance(node, MemberAccess):
+            return None
+        from ..security_contexts import ScriptIndex, resolve_barmerge_value
+
+        index = getattr(self, "_security_barmerge_index", None)
+        if index is None:
+            index = self._security_barmerge_index = ScriptIndex(self.ctx.ast)
+        value = resolve_barmerge_value(index, node, "lookahead_on", "lookahead_off")
+        if value is None:
+            self._codegen_error(
+                node,
+                "request.security lookahead must be barmerge.lookahead_on or barmerge.lookahead_off.",
+                hint="Use barmerge.lookahead_* constants selected by values fixed before the first bar.",
+            )
+        return value
+
+    def _security_lookahead_expr(self, value) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, MemberAccess):
+            return "true" if value.member == "lookahead_on" else "false"
+        return f"static_cast<bool>({self._security_tf_runtime_expr(value)})"
 
     def _security_tf_unresolved(self, tf_node, what: str) -> None:
         """Refuse a request.security timeframe registration cannot compute."""
@@ -1034,6 +1438,19 @@ class SecurityEmitter:
                 return node
             return replace(node, operand=operand)
         if isinstance(node, FuncCall):
+            name, namespace = self._resolve_callee(node.callee)
+            if namespace == "input" and name in _FIXED_INPUT_KINDS:
+                # Retain the input call for the normal typed runtime getter,
+                # including int64 time and string session/text-area values.
+                # Only its default needs setup substitution; titles/options
+                # are descriptors and keep their authored binding provenance.
+                default = self._get_input_default(node)
+                substituted = self._substitute_tf_input_reads(default, resolving)
+                if substituted is default:
+                    return node
+                if node.args:
+                    return replace(node, args=[substituted, *node.args[1:]])
+                return replace(node, kwargs={**node.kwargs, "defval": substituted})
             new_args = [self._substitute_tf_input_reads(a, resolving) for a in node.args]
             new_kwargs = {
                 k: (self._substitute_tf_input_reads(v, resolving)
@@ -1672,12 +2089,29 @@ class SecurityEmitter:
                 return any(per_bar(part, local, active) for part in value.values())
             if not isinstance(value, ASTNode):
                 return False
+            if TIMEFRAME_SOURCES_ANNOTATION in (value.annotations or {}):
+                return True
             if isinstance(value, Identifier):
                 name = value.name
                 binding = self.ctx.identifier_binding_nodes.get(id(value))
                 if isinstance(binding, (ForStmt, ForInStmt)):
                     return True
                 global_binding = self._security_identifier_is_global_binding(value)
+                if isinstance(binding, VarDecl) and not global_binding:
+                    key = ("declaration", id(binding))
+                    if key in active:
+                        return binding.is_var or binding.is_varip
+                    inventory = getattr(self, "_security_tf_values", None)
+                    if inventory is None:
+                        from .timeframe_values import TimeframeValues
+
+                        inventory = self._security_tf_values = TimeframeValues(self)
+                    writes = inventory.writes.get(inventory._binding(value), ())
+                    if ((binding.is_var or binding.is_varip)
+                            and any(write.op != ":=" for write in writes)):
+                        return True
+                    return per_bar(
+                        [binding.value, *writes], local, active | {key})
                 if name in local and not global_binding:
                     # The enclosing body also inspects every local definition.
                     return False
@@ -1850,7 +2284,8 @@ class SecurityEmitter:
         if op == ":=":
             lines.append(f"{pad}{safe} = {self._coerce_int_slot(val_cpp, value, int_slot)};")
             return
-        rhs = self._compound_assign_rhs(safe, op, val_cpp)
+        rhs = self._compound_assign_rhs(
+            safe, op, val_cpp, Identifier(name=name), value)
         if rhs is not None:
             rhs = self._coerce_int_slot(rhs, value, int_slot, value_is_double=True)
         else:
@@ -2035,6 +2470,11 @@ class SecurityEmitter:
                 and (self._holds_na_aware_wide_double(value_node)
                      or "_pf_wide_l" in value_cpp)):
             return na_preserving_int_cast(value_cpp, cpp_type)
+        if cpp_type == "std::string" and self._selection_node_is_na(value_node):
+            # A bare na stored into a string copy is the string na, as it is
+            # in a helper's string series and in the chart's own declaration:
+            # the numeric na pushed into a series of strings failed g++.
+            return "na<std::string>()"
         return value_cpp
 
     def _security_relevant_top_level_stmts(self, mutable_globals: list[str]) -> list[ASTNode]:
@@ -2059,14 +2499,16 @@ class SecurityEmitter:
         # The names below are C++ tokens of the rendered text: a string
         # literal's contents (``"bull"`` beside a helper local ``bull``) stay.
         result = cpp.replace("current_bar_.", "bar.")
-        # Recognize the exact emitted suffixes before any substitution can
-        # change them. They contain no script expressions, so every token
-        # inside stays intact; argument initializers remain outside. Literals
-        # participate so template-like text inside a string is never a scope.
+        # Fixed lambda return types and the exact emitted calendar suffixes
+        # contain no Pine value reads. Protect them before rebinding values,
+        # including in nested lambdas; argument initializers and other lambda
+        # bodies remain outside. Comments and literals participate so their
+        # signature-like text cannot hide a value read from substitution.
         parts: list[tuple[str, bool]] = []
         last = 0
         for match in _SECURITY_CPP_SCOPES.finditer(result):
-            if match.group(0) not in TIMEZONE_LAMBDA_BODIES:
+            if (match.group("return_type") is None
+                    and match.group(0) not in TIMEZONE_LAMBDA_BODIES):
                 continue
             parts.append((result[last:match.start()], False))
             parts.append((match.group(0), True))
@@ -2177,6 +2619,13 @@ class SecurityEmitter:
             )
             return bound, lexical_stack
         return None
+
+    @staticmethod
+    def _security_float_parameter(name, bindings) -> bool:
+        for frame in reversed(bindings or ()):
+            if name in frame:
+                return name in getattr(frame, "float_parameters", ())
+        return False
 
     def _security_index_reads_helper_local(
         self,
@@ -2760,11 +3209,13 @@ class SecurityEmitter:
         )
 
     def _security_argument_inventory(self, item: dict) -> dict:
-        """Helper calls reached from the payload root through arithmetic,
-        comparison and parentheses only, without mutating helper/TA inventories.
+        """Helper calls reached through scalar expression composition.
 
-        A shared definition also reached outside those positions stays on the old
-        path: node identity cannot distinguish those two evaluation edges.
+        Arguments and tuple elements are value edges. A global initializer
+        has its own top-level clock, even when read through a lazy edge.
+        Calls executed only in a lazy arm, helper bodies and method receivers
+        retain their existing unconditional-call and dependency boundaries.
+        A definition also reached outside these positions stays on the old path.
         """
         if (item.get("foreign") or item.get("heikinashi")
                 or item.get("is_lower_tf_array")
@@ -2772,9 +3223,11 @@ class SecurityEmitter:
             return {}
         candidates, outside, seen = {}, set(), set()
         globals_ = getattr(self.ctx, "global_expr_map", {}) or {}
+        global_reads, global_parents = {}, {}
         nested_request = False
 
-        def walk(node, inventory: bool, result_history: bool = False) -> None:
+        def walk(node, inventory: bool, result_history: bool = False,
+                 conditional: bool = False, globals: tuple = ()) -> None:
             nonlocal nested_request
             if not isinstance(node, ASTNode):
                 if isinstance(node, (list, tuple)):
@@ -2784,10 +3237,13 @@ class SecurityEmitter:
                     for child in node.values():
                         walk(child, False)
                 return
-            key = (id(node), inventory, result_history)
+            key = (id(node), inventory, result_history, conditional,
+                   tuple(n.name for n in globals))
             if key in seen:
                 return
             seen.add(key)
+            if self._budget is not None:
+                self._budget.check(node.loc, Phase.CODEGEN)
             if (isinstance(node, FuncCall)
                     and self._resolve_callee(node.callee)[1] == "request"):
                 nested_request = True
@@ -2795,36 +3251,68 @@ class SecurityEmitter:
                 if (self._security_identifier_is_global_binding(node)
                         and node.name not in self._global_mutable_infos
                         and node.name in globals_):
-                    walk(globals_[node.name], inventory, result_history)
+                    global_reads.setdefault(node.name, node)
+                    global_parents.setdefault(node.name, set()).update(
+                        n.name for n in globals)
+                    # The immediate declaration owns the expression. Keep
+                    # parent edges separately so alias diamonds do not expand
+                    # the walk once per path to the same initializer.
+                    walk(globals_[node.name], inventory, result_history, False,
+                         (node,))
                 return
             if isinstance(node, BinOp) and node.op in (
                 "+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=",
+                "and", "or",
             ):
-                walk(node.left, inventory, result_history)
-                walk(node.right, inventory, result_history)
+                walk(node.left, inventory, result_history, conditional, globals)
+                walk(node.right, inventory, result_history,
+                     conditional or node.op in ("and", "or"), globals)
                 return
-            if isinstance(node, UnaryOp) and node.op in ("+", "-"):
-                walk(node.operand, inventory, result_history)
+            if isinstance(node, UnaryOp) and node.op in ("+", "-", "not"):
+                walk(node.operand, inventory, result_history, conditional, globals)
+                return
+            if isinstance(node, Ternary):
+                walk(node.condition, inventory, result_history, conditional, globals)
+                walk(node.true_val, inventory, result_history, True, globals)
+                walk(node.false_val, inventory, result_history, True, globals)
+                return
+            if isinstance(node, TupleLiteral):
+                for element in node.elements:
+                    walk(element, inventory, result_history, conditional, globals)
                 return
             if isinstance(node, Subscript):
                 # A root result-history spelling is inventoried for a
                 # located refusal only; it is never admitted for sampling.
-                walk(node.object, inventory, True)
+                walk(node.object, inventory, True, conditional, globals)
                 walk(node.index, False)
                 return
             if (isinstance(node, FuncCall) and isinstance(node.callee, Identifier)
                     and node.callee.name in self._func_names):
-                if inventory:
+                if inventory and not conditional:
                     previous = candidates.get(id(node))
-                    candidates[id(node)] = (
-                        node, result_history or bool(previous and previous[1]))
+                    roots = {n.name: n for n in previous.globals} if previous else {}
+                    roots.update((n.name, n) for n in globals)
+                    candidates[id(node)] = _SecurityArgumentCall(
+                        result_history or bool(previous and previous.result_history),
+                        tuple(roots.values()))
                 else:
                     outside.add(id(node))
                 info = self._func_info_map.get(node.callee.name)
                 if info is not None and info.node is not None:
                     walk(info.node.body, False)
-            # Every other edge leaves those positions: builtin/method arguments,
-            # receivers, lazy operands, selections, statements and bodies.
+                for argument in (*node.args, *node.kwargs.values()):
+                    walk(argument, inventory, result_history, conditional, globals)
+                return
+            if isinstance(node, FuncCall):
+                name, namespace = self._resolve_callee(node.callee)
+                if (self._get_ta_site(node) is None
+                        and ((namespace is None and name in _SECURITY_PURE_CALLS)
+                             or namespace in _SECURITY_PURE_CALL_NAMESPACES)):
+                    for argument in (*node.args, *node.kwargs.values()):
+                        walk(argument, inventory, result_history, conditional, globals)
+                    return
+            # Stateful builtins, methods, statements and helper bodies keep
+            # their dependency-aware lowering and existing admission rules.
             for name, value in vars(node).items():
                 if name != "annotations":
                     walk(value, False)
@@ -2832,7 +3320,19 @@ class SecurityEmitter:
         walk(item.get("expr_node"), True)
         if nested_request:
             return {}
-        return {key: value for key, value in candidates.items() if key not in outside}
+        admitted = {}
+        for key, value in candidates.items():
+            if key in outside:
+                continue
+            names, pending = set(), [n.name for n in value.globals]
+            while pending:
+                name = pending.pop()
+                if name not in names:
+                    names.add(name)
+                    pending.extend(global_parents.get(name, ()))
+            admitted[key] = replace(value, globals=tuple(
+                node for name, node in global_reads.items() if name in names))
+        return admitted
 
     def _security_argument_call_is_conditional(self, root, target) -> bool:
         """A nested call reached through a branch, loop or once initializer."""
@@ -3073,7 +3573,7 @@ class SecurityEmitter:
                 "derived helper-parameter history requires dependency-aware "
                 "helper evaluation for this body",
             )
-        if inventory[id(root.call)][1]:
+        if inventory[id(root.call)].result_history:
             self._codegen_error(
                 read,
                 "composing derived helper-parameter and helper-result history "
@@ -4006,7 +4506,7 @@ class SecurityEmitter:
 
     def _security_global_history_value(self, node) -> ASTNode | None:
         """The value of ``g`` in a payload's ``g[k]`` when ``g`` is a global
-        bound to a user function call or an operator expression, else None.
+        bound to a helper, a request or an operator expression, else None.
 
         TradingView evaluates ``g`` on every requested bar and ``g[k]`` reads
         it ``k`` requested bars back. Such a value has no series on the
@@ -4028,11 +4528,31 @@ class SecurityEmitter:
             or name in self._global_mutable_infos
         ):
             return None
-        value = global_expr_map[name]
-        if (isinstance(value, FuncCall) and isinstance(value.callee, Identifier)
-                and self._security_user_call_key(value) is not None):
-            return value
-        if isinstance(value, (BinOp, UnaryOp, Ternary)) and self._is_compound_history_object(value):
+        value = original = global_expr_map[name]
+        seen = {name}
+        while isinstance(value, Identifier):
+            name = value.name
+            if (not self._security_identifier_is_global_binding(value)
+                    or name not in global_expr_map or name in seen
+                    or name in self._direct_program_tuple_binding_names
+                    or name in self._global_mutable_infos):
+                return None
+            seen.add(name)
+            value = global_expr_map[name]
+        if isinstance(value, FuncCall):
+            if (not isinstance(original, Identifier)
+                    and isinstance(value.callee, Identifier)
+                    and self._security_user_call_key(value) is not None):
+                return value
+            if self._resolve_callee(value.callee) == ("security", "request"):
+                # The nested request's returned value is sampled on this
+                # evaluator's clock, just like a helper's returned value.
+                # Keep the authored subscript: a synthetic one has no slot
+                # in the expression-history inventory.
+                return value
+        if (not isinstance(original, Identifier)
+                and isinstance(value, (BinOp, UnaryOp, Ternary))
+                and self._is_compound_history_object(value)):
             return value
         return None
 
@@ -4221,13 +4741,22 @@ class SecurityEmitter:
             helper_binding_stack,
             emitted_lines,
         )
-        args = _merge_kwargs(
+        arg_nodes = _merge_kwargs(
             node.args,
             node.kwargs,
             sigs.get_param_names("math", func_name),
-            visit,
+            lambda arg: arg,
             intrinsic=sigs.get_intrinsic("math", func_name),
         )
+        intrinsic = sigs.MATH_FUNCTIONS.get(func_name)
+        params = (max(intrinsic.signatures, key=lambda sig: len(sig.params)).params
+                  if intrinsic is not None else [])
+        args = [
+            self._security_float_cpp(visit(arg), arg, helper_binding_stack)
+            if index < len(params) and params[index].pine_type == PineType.FLOAT
+            else visit(arg)
+            for index, arg in enumerate(arg_nodes)
+        ]
         if func_name == "round" and len(args) == 2:
             return _math_round_digits_expr(args)
         if func_name == "round_to_mintick":
@@ -4318,12 +4847,162 @@ class SecurityEmitter:
             return expr_cpp
         if value is None or isinstance(value, NaLiteral):
             return f"na<{cpp_type}>()"
+        if cpp_type == "double":
+            return self._security_float_cpp(expr_cpp, value, helper_binding_stack)
         if cpp_type in ("int", "int64_t", "bool"):
             return self._coerce_int_slot(
                 expr_cpp, value, cpp_type,
                 value_is_double=self._security_emits_double(value, helper_binding_stack),
             )
         return expr_cpp
+
+    def _security_float_cpp(self, rendered, node, bindings=()) -> str:
+        """Adapt a builder-owned value without re-evaluating it on the chart."""
+        if not self._security_integer_na_operand(node, bindings):
+            return rendered
+        return self._coerce_double_slot(rendered, None)
+
+    def _security_integer_na_operand(self, node, bindings=(), depth=0) -> bool:
+        """Resolve integer missingness on the same bindings as the evaluator."""
+        if node is None or depth > 64:
+            return node is not None
+        if self._text_type(node) == "bool":
+            return False
+        if self._security_emits_double(node, bindings):
+            return False
+        if isinstance(node, Subscript) and isinstance(node.object, Identifier):
+            if not self._security_identifier_is_global_binding(node.object):
+                context = self._security_lookup_helper_binding_context(
+                    node.object.name, bindings)
+                if context is not None and isinstance(context[0], str):
+                    series = self._security_series_binding_target(context[0])
+                    if (series is not None
+                            and series not in self._security_string_series
+                            and series not in self._security_color_series):
+                        return False
+        if isinstance(node, Identifier):
+            if not self._security_identifier_is_global_binding(node):
+                context = self._security_lookup_helper_binding_context(node.name, bindings)
+                if context is not None:
+                    value, stack = context
+                    if isinstance(value, ASTNode):
+                        return self._security_integer_na_operand(value, stack, depth + 1)
+                    if value in getattr(self, "_security_counted_loop_bindings", ()):
+                        # The binding identifies the counter even if an inner
+                        # declaration later shadows its authored spelling.
+                        return False
+                    return (
+                        self._security_local_cpp_types.get(value) in (None, "int", "int64_t")
+                        and self._infer_type(node) in ("int", "int64_t", "double")
+                    )
+            value = getattr(self.ctx, "global_expr_map", {}).get(node.name)
+            if value is not None and node.name not in self._global_mutable_infos:
+                return self._security_integer_na_operand(value, (), depth + 1)
+        if isinstance(node, FuncCall) and self._security_user_call_key(node) is not None:
+            plan = self._security_helper_call_plan(node, bindings)
+            if plan["mode"] != "linear":
+                return self._security_integer_na_operand(
+                    plan["expr"], plan["binding_stack"], depth + 1)
+            final = plan["expr"]
+            if isinstance(final, Identifier):
+                declaration = self.ctx.identifier_binding_nodes.get(id(final))
+                if (declaration is None
+                        and id(final) not in self.ctx.identifier_decl_bindings):
+                    # Value-producing declaration/assignment tails have a
+                    # synthetic read. Only an unambiguous declaration of this
+                    # helper's own top-level block can supply its storage.
+                    declarations = [
+                        stmt for stmt in plan["body"]
+                        if isinstance(stmt, VarDecl) and stmt.name == final.name
+                    ]
+                    if len(declarations) == 1:
+                        declaration = declarations[0]
+                if (isinstance(declaration, VarDecl)
+                        and any(declaration is stmt for stmt in plan["body"])
+                        and (declaration.is_var or declaration.is_varip
+                             or final.name in plan.get("local_series_names", ()))
+                        and not self._security_helper_var_is_color(declaration)
+                        and self._type_for_decl(declaration) != "std::string"):
+                    # Numeric helper history and persistent state are the
+                    # evaluator's Series<double>, including their missing slots.
+                    return False
+            # A result that is not numeric carries no integer sentinel: a
+            # string result is read from the string series and is never
+            # converted to a number. The chart-side type of the call decides
+            # this, before the helper's locals are queried.
+            if self._infer_type(node) not in ("int", "int64_t", "double"):
+                return False
+            # The materialized result is the final expression as the
+            # evaluator renders it, over the helper's own locals as it stores
+            # them; a local this cannot prove keeps the integer guard.
+            return self._security_integer_na_operand(
+                final,
+                plan["binding_stack"] + (self._security_linear_helper_storage_frame(plan),),
+                depth + 1)
+        if isinstance(node, UnaryOp):
+            return node.op in ("+", "-") and self._security_integer_na_operand(
+                node.operand, bindings, depth + 1)
+        if isinstance(node, BinOp) and node.op not in ("+", "-", "*", "/", "%"):
+            return False
+        if isinstance(node, (BinOp, Ternary)):
+            sides = ((node.left, node.right) if isinstance(node, BinOp)
+                     else (node.true_val, node.false_val))
+            return any(self._security_integer_na_operand(side, bindings, depth + 1)
+                       for side in sides)
+        return self._integer_na_operand(node)
+
+    def _security_linear_helper_storage_frame(self, plan: dict) -> dict:
+        """A linear helper's own locals as its final expression reads them
+        (``_emit_security_linear_helper_call_scoped``), for missingness
+        queries only. Numeric persistent state and history-read locals are
+        the evaluator's Series<double> and a ``double`` local holds NaN, so
+        none carries an integer sentinel. An integer local that no statement
+        of the body reassigns holds its integer initializer's value. Every
+        other local (a reassigned or double-fed integer, a color, a string, a
+        tuple element) binds an opaque local that keeps the integer guard,
+        and every local shadows a same-named outer binding."""
+        func_name = plan["func_info"].name
+        local_series = set(plan.get("local_series_names", ()))
+        reassigned = {
+            self._get_target_name(stmt.target)
+            for stmt in self._walk_ast_list(plan["body"])
+            if isinstance(stmt, Assignment)
+        }
+        stack = plan["binding_stack"]
+        frame: dict = {}
+
+        def double_storage(name: str) -> str:
+            return self._security_series_binding(f"@storage:{func_name}:{name}")
+
+        def unproved(name: str) -> str:
+            return f"@unproved:{func_name}:{name}"
+
+        for stmt in plan["body"]:
+            if isinstance(stmt, TupleAssign):
+                for name in stmt.names:
+                    if name and name != "_":
+                        frame[name] = (double_storage(name) if name in local_series
+                                       else unproved(name))
+                continue
+            if not isinstance(stmt, VarDecl):
+                continue
+            cpp_type = self._type_for_decl(stmt)
+            persistent = stmt.is_var or stmt.is_varip
+            if persistent or stmt.name in local_series:
+                numeric = (cpp_type != "std::string"
+                           and not (persistent and self._security_helper_var_is_color(stmt)))
+                frame[stmt.name] = (double_storage(stmt.name) if numeric
+                                    else unproved(stmt.name))
+            elif cpp_type == "double":
+                frame[stmt.name] = double_storage(stmt.name)
+            elif (cpp_type in ("int", "int64_t")
+                    and stmt.value is not None
+                    and stmt.name not in reassigned
+                    and not self._security_emits_double(stmt.value, stack + (frame,))):
+                frame[stmt.name] = stmt.value
+            else:
+                frame[stmt.name] = unproved(stmt.name)
+        return frame
 
     def _security_helper_series_ref(self, series_name: str) -> str:
         """The map entry holding one helper series (string values in their
@@ -4642,6 +5321,9 @@ class SecurityEmitter:
                         self._security_store_string_series(stmt, series_name)
                         if stmt.value is None or isinstance(stmt.value, NaLiteral):
                             expr_cpp = "na<std::string>()"
+                    if not is_color_state and cpp_type != "std::string":
+                        expr_cpp = self._security_float_cpp(
+                            expr_cpp, stmt.value, runtime_stack_local)
                     if is_persistent_var:
                         if not is_color_state and cpp_type == "int64_t":
                             # Preserve the epoch-width refusal and diagnostic.
@@ -4760,27 +5442,59 @@ class SecurityEmitter:
                         expr_cpp = "na<std::string>()"
                     elif series_name in self._security_color_series:
                         expr_cpp = self._security_color_series_store(expr_cpp)
+                    else:
+                        expr_cpp = self._security_float_cpp(
+                            expr_cpp, stmt.value, runtime_stack_local)
                 elif stmt.op == ":=":
                     expr_cpp = self._security_local_value(
                         expr_cpp, stmt.value, self._security_local_cpp_types.get(binding),
                         runtime_stack_local,
                     )
+                elif self._security_local_cpp_types.get(binding) == "double":
+                    expr_cpp = self._security_float_cpp(
+                        expr_cpp, stmt.value, runtime_stack_local)
                 if series_name is not None:
                     ref = self._security_helper_series_ref(series_name)
                     if stmt.op == ":=":
                         lines.append(f'{pad}{ref}.update({expr_cpp});')
                     else:
                         op_char = stmt.op[0]
-                        lines.append(
-                            f'{pad}{ref}.update('
-                            f'{_series_expr(series_name, "0")} {op_char} {expr_cpp});'
+                        current = _series_expr(series_name, "0")
+                        rhs = self._compound_assign_rhs(
+                            current, stmt.op, expr_cpp, stmt.target, stmt.value,
+                            target_is_double=(
+                                series_name not in self._security_color_series
+                                and series_name not in self._security_string_series),
+                            value_is_double=(
+                                series_name not in self._security_color_series
+                                and series_name not in self._security_string_series),
                         )
+                        if rhs is None:
+                            rhs = f"{current} {op_char} {expr_cpp}"
+                        lines.append(f'{pad}{ref}.update({rhs});')
                     return
 
                 if stmt.op == ":=":
                     lines.append(f"{pad}{binding} = {expr_cpp};")
                 else:
-                    lines.append(f"{pad}{binding} {stmt.op} {expr_cpp};")
+                    if (self._security_local_cpp_types.get(binding) == "double"
+                            and stmt.op in ("+=", "-=", "*=")
+                            and not self._security_integer_na_operand(
+                                stmt.value, runtime_stack_local)):
+                        # Native compound assignment preserves a missing target
+                        # when the RHS cannot supply an integer sentinel.
+                        rhs = None
+                    else:
+                        rhs = self._compound_assign_rhs(
+                            binding, stmt.op, expr_cpp, stmt.target, stmt.value)
+                    if rhs is None:
+                        lines.append(f"{pad}{binding} {stmt.op} {expr_cpp};")
+                    else:
+                        result = BinOp(left=stmt.target, op=stmt.op[0], right=stmt.value)
+                        rhs = self._security_local_value(
+                            rhs, result, self._security_local_cpp_types.get(binding),
+                            runtime_stack_local)
+                        lines.append(f"{pad}{binding} = {rhs};")
                 return
 
             if isinstance(stmt, IfStmt):
@@ -4979,10 +5693,12 @@ class SecurityEmitter:
                 loop_depth[0] += 1
                 saved_scope = self._security_open_scope()
                 saved_counted = self._current_counted_loop_vars
+                saved_bindings = getattr(self, "_security_counted_loop_bindings", frozenset())
                 saved_loop = self._current_loop_vars
                 saved_loop_specs = self._current_loop_var_specs
                 if isinstance(stmt, ForStmt) and stmt.var:
                     self._current_counted_loop_vars = saved_counted | {stmt.var}
+                    self._security_counted_loop_bindings = saved_bindings | {var}
                     if counter_cpp_type == "double":
                         self._current_loop_vars = saved_loop | {stmt.var}
                         self._current_loop_var_specs = {
@@ -4993,6 +5709,7 @@ class SecurityEmitter:
                         emit_stmt(child, body_bindings, body_indent)
                 finally:
                     self._current_counted_loop_vars = saved_counted
+                    self._security_counted_loop_bindings = saved_bindings
                     self._current_loop_vars = saved_loop
                     self._current_loop_var_specs = saved_loop_specs
                     self._security_scope_path = saved_scope
@@ -5254,7 +5971,12 @@ class SecurityEmitter:
             if isinstance(n, FuncCall):
                 _func, namespace = self._resolve_callee(n.callee)
                 if namespace == "request":
-                    return False
+                    nested = self._runtime_security_call_for_request(n)
+                    if nested is None or not nested.get("runtime_context"):
+                        return False
+                    # The child owns its payload and state. Its call's value
+                    # is supplied by the generic runtime context lookup.
+                    continue
                 if isinstance(n.callee, Identifier) and n.callee.name in self._func_names:
                     callee = self._func_info_map.get(n.callee.name)
                     if (callee is None or callee.node is None
@@ -5357,6 +6079,42 @@ class SecurityEmitter:
         return (info is not None and info.node is not None
                 and len(node.args) == len(info.node.params)
                 and self._security_pure_body(info.node))
+
+    def _security_pure_user_tuple_element(self, name: str, call):
+        """The element expression a payload reads when it reads ``name``, a
+        global of a tuple declaration ``[.., name, ..] = f(args)`` whose call
+        is PURE: ``f`` is a user function whose body is one tuple literal of
+        pure expressions over its parameters (``_security_pure_expr``), called
+        positionally with arguments that have no state either (no ta.*, var,
+        varip, request or method in them or in the globals they read,
+        ``_security_call_has_state``). TradingView evaluates such a
+        declaration on the requested bar; its value is the element's, and
+        reading one element evaluates only that element, so a second read of
+        the declaration cannot advance anything. None for every other call,
+        which keeps its refusal: a function with state would advance twice,
+        and an element with history has no series on the requested clock."""
+        binding = self._direct_program_tuple_bindings.get(name)
+        if (binding is None or not isinstance(call, FuncCall)
+                or not isinstance(call.callee, Identifier) or call.kwargs
+                or call.callee.name not in self._func_names):
+            return None
+        info = self._func_info_map.get(call.callee.name)
+        if info is None or info.node is None:
+            return None
+        body = info.node.body
+        if (len(body) != 1 or not isinstance(body[0], ExprStmt)
+                or not isinstance(body[0].expr, TupleLiteral)
+                or len(call.args) != len(info.node.params)):
+            return None
+        _declaration, index = binding
+        elements = body[0].expr.elements
+        params = set(info.node.params)
+        if index >= len(elements) or not all(
+                self._security_pure_expr(element, params) for element in elements):
+            return None
+        if self._security_call_has_state(call):
+            return None
+        return elements[index]
 
     def _security_shared_call_key(self, node, helper_binding_stack) -> tuple | None:
         """What a pure call (``_security_pure_call``) evaluates on the
@@ -5511,6 +6269,12 @@ class SecurityEmitter:
                 frames = (_SecurityHelperArgumentFrame(written, base_stack, method=True),)
                 if declared:
                     frames += (_SecurityHelperArgumentFrame(declared, (), method=True),)
+                float_parameters = frozenset(
+                    param for index, param in enumerate(params)
+                    if self._func_param_int_cpp_type(
+                        fi, index, self._callable_target_callsite_idx(fi, node)) == "double")
+                for frame in frames:
+                    frame.float_parameters = float_parameters
                 return fi, base_stack + frames
         if not isinstance(node.callee, Identifier):
             self._codegen_error(
@@ -5558,6 +6322,10 @@ class SecurityEmitter:
             base_stack,
             call=node,
         )
+        new_frame.float_parameters = frozenset(
+            param for index, param in enumerate(params)
+            if self._func_param_int_cpp_type(
+                fi, index, self._callable_target_callsite_idx(fi, node)) == "double")
         return fi, base_stack + (new_frame,)
 
     def _security_helper_call_plan(
@@ -5572,7 +6340,9 @@ class SecurityEmitter:
         self._security_check_outer_writes(body, set(), (), helper_params=set(params))
         self._security_require_value(node)
 
-        if len(body) == 1 and isinstance(body[0], (ExprStmt, IfStmt)):
+        # A helper whose one statement is a selection (``if``, or a ``switch``
+        # with its arms one expression each) is that selection's value.
+        if len(body) == 1 and isinstance(body[0], (ExprStmt, IfStmt, SwitchStmt)):
             return {
                 "mode": "expr",
                 "func_info": fi,
@@ -5591,7 +6361,7 @@ class SecurityEmitter:
         final_stmt = body[-1]
         if isinstance(final_stmt, ExprStmt):
             final_expr = final_stmt.expr
-        elif isinstance(final_stmt, IfStmt):
+        elif isinstance(final_stmt, (IfStmt, SwitchStmt)):
             final_expr = final_stmt
         elif isinstance(final_stmt, Assignment):
             target_name = self._get_target_name(final_stmt.target)
@@ -5660,9 +6430,9 @@ class SecurityEmitter:
     def _security_check_helper_varip(
         self, stmt: VarDecl, node: ASTNode, *, sec_id: int | None = None,
     ) -> None:
-        """Expanded arms use historical bar state; fixed requests keep their gate."""
+        """Admit helper-owned varip on the historical requested-bar protocol."""
         allowed = (self._security_series_tf_local_decls if sec_id is None
-                   else self._security_calls[sec_id].get("series_tf_local_decls", ()))
+                   else self._security_calls[sec_id].get("historical_local_decls", ()))
         if id(stmt) not in allowed:
             self._codegen_error(
                 node,
@@ -6833,29 +7603,19 @@ class SecurityEmitter:
                         (idx, current_sig if inline_helper is True else inline_helper)
                     )
 
-        def walk(value) -> None:
-            if value is None:
-                return
-            if hasattr(value, "__dict__"):
-                self._collect_security_ta_binding_stacks(
-                    value,
-                    resolving,
-                    helper_binding_stack,
-                    collected,
-                    inline_ta_indices,
-                    inline_helper,
-                )
-                return
-            if isinstance(value, (list, tuple)):
-                for item in value:
-                    walk(item)
-                return
-            if isinstance(value, dict):
-                for item in value.values():
-                    walk(item)
-
-        for child in vars(expr_node).values():
-            walk(child)
+        # Binding/type annotations are metadata, not authored dependencies.
+        # Keep them for the consumers above without walking enum internals
+        # or annotation back edges. Reverse the stack-based syntax iterator
+        # to retain the previous field/list/dict traversal order.
+        for child in reversed(list(syntax_children(expr_node))):
+            self._collect_security_ta_binding_stacks(
+                child,
+                resolving,
+                helper_binding_stack,
+                collected,
+                inline_ta_indices,
+                inline_helper,
+            )
         return collected
 
     def _emit_security_rebind_var_decl(
@@ -7242,22 +8002,12 @@ class SecurityEmitter:
                     key = (idx, self._security_binding_stack_signature(binding_stack))
                     occurrences.setdefault(key, []).append(lazy)
 
-            for child in vars(node).values():
-                walk_value(child, lazy, binding_stack, resolving)
-
-        def walk_value(value, lazy: bool, binding_stack, resolving: set[str]) -> None:
-            if value is None or unsafe:
-                return
-            if hasattr(value, "__dict__"):
-                walk(value, lazy, binding_stack, resolving)
-                return
-            if isinstance(value, (list, tuple)):
-                for item in value:
-                    walk_value(item, lazy, binding_stack, resolving)
-                return
-            if isinstance(value, dict):
-                for item in value.values():
-                    walk_value(item, lazy, binding_stack, resolving)
+            # Binding/type annotations are metadata, not authored dependencies.
+            # Keep them for the consumers above without walking enum internals
+            # or annotation back edges. Reverse the stack-based syntax iterator
+            # to retain the previous field/list/dict traversal order.
+            for child in reversed(list(syntax_children(node))):
+                walk(child, lazy, binding_stack, resolving)
 
         walk(expr_node, False, (), set())
         if unsafe:
@@ -7375,7 +8125,8 @@ class SecurityEmitter:
         else:
             if self._security_requested_used and self._security_chart_read is not None:
                 reason = self._security_chart_read
-        if state and (reason is not None or self._security_chart_read is not None):
+        if (state or item.get("runtime_context")) and (
+                reason is not None or self._security_chart_read is not None):
             # A chart fallback can call the ordinary function member and
             # share its state across arms.
             self._security_series_tf_refusal(
@@ -7678,6 +8429,10 @@ class SecurityEmitter:
         """Emit one ``_eval_security_N`` method
         (``_emit_security_evaluator_body``), with the values of its long pure
         calls (``_security_share_pure_call``) computed where it opens."""
+        if item.get("dead"):
+            lines.append(
+                f"    void _eval_security_{item['sec_id']}(const Bar&, bool) {{}}")
+            return
         start = len(lines)
         outer = (getattr(self, "_security_shared_calls", None),
                  getattr(self, "_security_shared_definitions", None),
@@ -7694,13 +8449,24 @@ class SecurityEmitter:
         self._security_double_hist_nodes = set()
         outer_arg_sec = self._security_arg_history_sec
         outer_arg_values = self._security_arg_call_values
+        outer_arg_globals = self._security_arg_globals
+        outer_arg_global_values = self._security_arg_global_values
         self._security_arg_history_sec = item["sec_id"]
         self._security_arg_call_values = {}
+        inventory = self._security_arg_inventory.get(item["sec_id"], {})
+        self._security_arg_globals = {
+            node.name: node
+            for call_id, _parameter in self._security_arg_histories.get(item["sec_id"], {})
+            for node in inventory[call_id].globals
+        }
+        self._security_arg_global_values = {}
         try:
             self._emit_security_evaluator_body(item, lines)
         finally:
             self._security_arg_history_sec = outer_arg_sec
             self._security_arg_call_values = outer_arg_values
+            self._security_arg_globals = outer_arg_globals
+            self._security_arg_global_values = outer_arg_global_values
             (self._security_shared_calls, self._security_shared_definitions,
              self._security_shared_globals, self._security_global_hist_pushes,
              self._security_double_hist_nodes, self._security_array_values) = outer
@@ -7839,6 +8605,14 @@ class SecurityEmitter:
 
         self._emit_security_rebinds(sec_id, info, lines, ta_results, indent=2, emitted_lines=lines)
         emit_security_ta(post_rebind_ta_indices)
+        # A global is an unconditional statement of the requested context,
+        # even when the payload reads it only in an untaken selection arm.
+        # Its sampled dependencies keep declaration order and one value.
+        for stmt in self.ctx.ast.body:
+            if isinstance(stmt, VarDecl) and stmt.name in self._security_arg_globals:
+                self._build_security_expr(
+                    sec_id, self._security_arg_globals[stmt.name], None, ta_results,
+                    security_mutable_names=security_mutable_names, emitted_lines=lines)
         returns_tuple = item.get("returns_tuple", False)
         tuple_size = item.get("tuple_size", 0)
         if (
@@ -7875,6 +8649,8 @@ class SecurityEmitter:
                     # members``): it narrows na-preserving into the integer
                     # element (quirk 9).
                     el_cpp = na_preserving_int_cast(el_cpp, elem_t)
+                elif elem_t == "double":
+                    el_cpp = self._security_float_cpp(el_cpp, el)
                 lines.append(f"        _req_sec_{sec_id}_{i} = {el_cpp};")
             self._emit_security_ohlc_hist_pushes(sec_id, lines)
             self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
@@ -7890,6 +8666,18 @@ class SecurityEmitter:
             emitted_lines=lines,
         )
         if item.get("is_lower_tf_array"):
+            # Match the accumulator's element type before adapting its value.
+            # An integer sentinel must not pass through a floating NaN.
+            ctype = self._infer_cpp_type_for_security_elem(expr_node)
+            if ctype not in ("double", "int", "bool"):
+                ctype = "double"
+            if ctype == "double":
+                expr_cpp = self._security_float_cpp(expr_cpp, expr_node)
+            elif ctype == "int":
+                expr_cpp = self._coerce_int_slot(
+                    expr_cpp, expr_node, ctype,
+                    value_is_double=self._security_emits_double(expr_node, ()),
+                )
             # ``request.security_lower_tf`` accumulates one element per
             # synthesised sub-bar of the current chart bar. The runtime's
             # ``feed_security_eval_state`` resets ``lower_tf_sub_bar_index``
@@ -7904,6 +8692,7 @@ class SecurityEmitter:
                 f"        _req_sec_lower_tf_{sec_id}.push_back({expr_cpp});"
             )
         else:
+            expr_cpp = self._security_float_cpp(expr_cpp, expr_node)
             lines.append(f"        _req_sec_{sec_id} = {expr_cpp};")
         self._emit_security_ohlc_hist_pushes(sec_id, lines)
         self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
@@ -7969,9 +8758,13 @@ class SecurityEmitter:
             return
 
         for item in self._security_calls:
-            self._refuse_security_reference_history(item)
+            if not item.get("dead"):
+                self._refuse_security_reference_history(item)
         for item in self._security_calls:
-            self._emit_security_evaluator_requested(item, lines)
+            if item.get("runtime_context"):
+                self._emit_runtime_security_evaluator(item, lines)
+            else:
+                self._emit_security_evaluator_requested(item, lines)
 
         # Dispatch method. Security evaluators fire BEFORE on_bar, so we also
         # gate a TA reset here: whichever path fires first (evaluate_security
@@ -7982,6 +8775,8 @@ class SecurityEmitter:
         self._emit_ta_runtime_reset(lines, indent=2)
         lines.append("        switch (sec_id) {")
         for item in self._security_calls:
+            if item.get("runtime_context"):
+                continue
             sec_id = item["sec_id"]
             lines.append(f"            case {sec_id}: _eval_security_{sec_id}(bar, is_complete); break;")
         lines.append("        }")
@@ -8360,6 +9155,9 @@ class SecurityEmitter:
         """Build C++ expression for a security evaluator."""
         if expr_node is None:
             return "na<double>()"
+        checked_offset = getattr(self, "_security_history_offset_overrides", {}).get(id(expr_node))
+        if checked_offset is not None:
+            return checked_offset
         selection = getattr(self, "_security_selection_context", None)
         if selection is not None and id(expr_node) in selection["reads"]:
             return selection["reads"][id(expr_node)]
@@ -8402,7 +9200,7 @@ class SecurityEmitter:
                     if series_name is not None:
                         return self._security_helper_series_value(series_name, "0")
                     return bound
-                return self._build_security_expr(
+                rendered = self._build_security_expr(
                     sec_id,
                     bound,
                     ta_range,
@@ -8412,6 +9210,9 @@ class SecurityEmitter:
                     bound_stack,
                     emitted_lines,
                 )
+                if self._security_float_parameter(expr_node.name, helper_binding_stack):
+                    rendered = self._security_float_cpp(rendered, bound, bound_stack)
+                return rendered
             bar_fields = {
                 **SECURITY_BAR_FIELD_EXPRS,
                 "hl2": "((bar.high + bar.low) / 2.0)",
@@ -8446,7 +9247,22 @@ class SecurityEmitter:
                 and expr_node.name in global_expr_map
                 and expr_node.name not in resolving
             ):
+                if expr_node.name in self._security_arg_global_values:
+                    return self._security_arg_global_values[expr_node.name]
                 value = global_expr_map[expr_node.name]
+                if (expr_node.name in self._direct_program_tuple_binding_names
+                        and self._security_ta_tuple_element_field(expr_node.name) is None):
+                    # An element of a tuple declaration whose call is a pure
+                    # user function: only that element is lowered, on the
+                    # requested bar, with the call's arguments bound to the
+                    # function's parameters.
+                    element = self._security_pure_user_tuple_element(
+                        expr_node.name, value)
+                    if element is not None:
+                        _info, bound_stack = self._security_bind_helper_args(value, ())
+                        return self._build_security_expr(
+                            sec_id, element, ta_range, ta_results, resolving,
+                            security_mutable_names, bound_stack, emitted_lines)
                 # A global bound to a user call is one value per requested
                 # bar, however many reads the payload makes (``g - g[1]``):
                 # every read inlined the call again, which advanced its TA
@@ -8477,6 +9293,10 @@ class SecurityEmitter:
                     emitted_lines,
                 )
                 resolving.remove(expr_node.name)
+                symbol = self._variable_symbol(expr_node.name)
+                if (symbol is not None
+                        and self._global_float_na_selection(expr_node.name, symbol.pine_type)):
+                    resolved = self._security_float_cpp(resolved, value)
                 if shares:
                     # A lowering that emitted no statement is one expression,
                     # which any scope can read; one that did is read in its
@@ -8510,6 +9330,12 @@ class SecurityEmitter:
                             "of a TA tuple it does not compute once per requested bar",
                         )
                     return f"{resolved}.{field}"
+                if expr_node.name in self._security_arg_globals:
+                    if not resolved.isidentifier():
+                        name = f"_sec{sec_id}_arg_global_{len(self._security_arg_global_values)}"
+                        emitted_lines.append(f"        const auto {name} = {resolved};")
+                        resolved = name
+                    self._security_arg_global_values[expr_node.name] = resolved
                 return resolved
 
         if (
@@ -8530,6 +9356,11 @@ class SecurityEmitter:
                 sec_id, expr_node.index, ta_range, ta_results, resolving,
                 security_mutable_names, helper_binding_stack, emitted_lines,
             )
+            offset = self._checked_history_offset_cpp(
+                offset, expr_node.index,
+                constant=self._resolve_security_index_literal(
+                    expr_node.index, helper_binding_stack) is not None,
+            )
             return (f"([&]() -> double {{ auto _pf_bar_back = ({offset}); "
                     f"if (is_na(_pf_bar_back) || {member} - _pf_bar_back < 0) "
                     f"return na<double>(); return (double)({member} - _pf_bar_back); }}())")
@@ -8538,7 +9369,7 @@ class SecurityEmitter:
             if isinstance(expr_node.object, Identifier):
                 sample = self._security_sampled_argument(
                     expr_node.object.name, helper_binding_stack)
-                if sample is not None:
+                if sample is not None and sample.member is not None:
                     offset = self._resolve_security_index_literal(
                         expr_node.index, helper_binding_stack)
                     if offset is None or offset < 0:
@@ -8571,6 +9402,11 @@ class SecurityEmitter:
                                 helper_binding_stack,
                                 emitted_lines,
                             )
+                            index_cpp = self._checked_history_offset_cpp(
+                                index_cpp, expr_node.index,
+                                constant=self._resolve_security_index_literal(
+                                    expr_node.index, helper_binding_stack) is not None,
+                            )
                             return self._security_helper_series_value(series_name, index_cpp)
                         return bound
                     # Function parameters retain Pine's series identity. Apply
@@ -8578,6 +9414,7 @@ class SecurityEmitter:
                     # nested offsets before lowering. Unsupported scalar/
                     # expression bindings fail closed in the shared helper.
                     local_index = expr_node.index
+                    combines_offsets = isinstance(bound, Subscript)
                     resolved_local_index = self._resolve_security_index_literal(
                         expr_node.index, helper_binding_stack
                     )
@@ -8590,7 +9427,7 @@ class SecurityEmitter:
                         # here and hand the C++ over by name, outside the
                         # binding stack (whose shape keys the TA variants).
                         index_name = f"__pf_security_index_{id(expr_node)}"
-                        self._security_raw_cpp[index_name] = self._build_security_expr(
+                        index_cpp = self._build_security_expr(
                             sec_id,
                             expr_node.index,
                             ta_range,
@@ -8600,7 +9437,29 @@ class SecurityEmitter:
                             helper_binding_stack,
                             emitted_lines,
                         )
-                        local_index = Identifier(name=index_name)
+                        self._security_raw_cpp[index_name] = (
+                            index_cpp if not combines_offsets
+                            else self._checked_history_offset_cpp(
+                                index_cpp, expr_node.index, constant=False,
+                            )
+                        )
+                        local_index = Identifier(name=index_name, loc=expr_node.index.loc)
+                    offset_overrides = {}
+                    if (isinstance(bound, Subscript)
+                            and isinstance(bound.object, Identifier)
+                            and self._security_bar_history_field(bound.object) is not None
+                            and self._resolve_security_index_literal(
+                                bound.index, bound_stack) is None):
+                        # Each authored offset must be valid before adding
+                        # them: a positive outer offset cannot hide a negative
+                        # offset of the series passed into this helper.
+                        bound_index = self._build_security_expr(
+                            sec_id, bound.index, ta_range, ta_results, resolving,
+                            security_mutable_names, bound_stack, emitted_lines,
+                        )
+                        offset_overrides[id(bound.index)] = self._checked_history_offset_cpp(
+                            bound_index, bound.index, constant=False,
+                        )
                     composed = self._compose_security_helper_history_subscript(
                         bound,
                         local_index,
@@ -8609,16 +9468,32 @@ class SecurityEmitter:
                     )
                     if isinstance(composed, _SecurityArgumentHistoryRead):
                         return f"{composed.member}[{composed.offset}]"
-                    return self._build_security_expr(
-                        sec_id,
-                        composed,
-                        ta_range,
-                        ta_results,
-                        resolving,
-                        security_mutable_names,
-                        bound_stack,
-                        emitted_lines,
-                    )
+                    # A direct field keeps the authored offset's check at
+                    # its consuming initializer. Composed offsets were
+                    # checked individually above; their sum is only an
+                    # internal address calculation.
+                    if combines_offsets:
+                        composed.index.annotations = {
+                            **(composed.index.annotations or {}),
+                            "pf_checked_history_offset": True,
+                        }
+                    # Keep the original index nodes for type/width queries;
+                    # only their emitted values gain the check.
+                    saved_offsets = getattr(self, "_security_history_offset_overrides", {})
+                    self._security_history_offset_overrides = {**saved_offsets, **offset_overrides}
+                    try:
+                        return self._build_security_expr(
+                            sec_id,
+                            composed,
+                            ta_range,
+                            ta_results,
+                            resolving,
+                            security_mutable_names,
+                            bound_stack,
+                            emitted_lines,
+                        )
+                    finally:
+                        self._security_history_offset_overrides = saved_offsets
                 field = self._security_bar_history_field(expr_node.object)
                 if field is not None:
                     idx_lit = self._resolve_security_index_literal(
@@ -8654,12 +9529,16 @@ class SecurityEmitter:
                         helper_binding_stack,
                         emitted_lines,
                     )
+                    index_cpp, offset_check = self._history_offset_initializer_cpp(
+                        index_cpp, expr_node.index, "_hidx", constant=False,
+                    )
                     index_cpp = self._coerce_int_slot_with_cast(
                         index_cpp, expr_node.index, "int"
                     )
                     return (
                         f"([&]() -> {cpp_t} {{ "
                         f"int _hidx = {index_cpp}; "
+                        f"{offset_check}"
                         f"if (is_na(_hidx)) return na<{cpp_t}>(); "
                         f"return (_hidx <= 0) ? {current} : {hist}[_hidx - 1]; "
                         f"}}())"
@@ -8741,6 +9620,11 @@ class SecurityEmitter:
                     helper_binding_stack,
                     emitted_lines,
                 )
+                index_cpp, offset_check = self._history_offset_initializer_cpp(
+                    index_cpp, expr_node.index, "_hidx",
+                    constant=self._resolve_security_index_literal(
+                        expr_node.index, helper_binding_stack) is not None,
+                )
                 index_cpp = self._coerce_int_slot_with_cast(
                     index_cpp, expr_node.index, "int"
                 )
@@ -8775,12 +9659,14 @@ class SecurityEmitter:
                     emitted_lines,
                 )
                 pushes = getattr(self, "_security_global_hist_pushes", None)
-                if pushes is not None and self._security_reads_global_history(sec_id, expr_node):
+                if pushes is not None:
                     # A helper inlines its argument at every read of its
-                    # parameter, so this read can be emitted more than once:
-                    # each keeps the value, and the evaluator pushes it once
-                    # where it closes (``_emit_security_evaluator``), after
-                    # every read has seen the history before this bar.
+                    # parameter and a loop runs one read once per iteration,
+                    # so this read can run more than once on a requested bar:
+                    # each keeps the value, and the evaluator pushes the last
+                    # one once where it closes (``_emit_security_evaluator``),
+                    # after every read has seen the history before this bar.
+                    # TradingView commits one slot per requested bar.
                     if (hist, cpp_t) not in pushes:
                         pushes.append((hist, cpp_t))
                     return (
@@ -8788,6 +9674,7 @@ class SecurityEmitter:
                         f"{cpp_t} _hv = ({inner}); "
                         f"if (is_complete) {{ {hist}_next = _hv; {hist}_set = true; }} "
                         f"int _hidx = {index_cpp}; "
+                        f"{offset_check}"
                         f"if (is_na(_hidx)) return na<{cpp_t}>(); "
                         f"return (_hidx <= 0) ? _hv : {hist}[_hidx - 1]; }}())"
                     )
@@ -8795,6 +9682,7 @@ class SecurityEmitter:
                     f"([&]() -> {cpp_t} {{ "
                     f"{cpp_t} _hv = ({inner}); "
                     f"int _hidx = {index_cpp}; "
+                    f"{offset_check}"
                     f"if (is_na(_hidx)) return na<{cpp_t}>(); "
                     f"{cpp_t} _out = (_hidx <= 0) ? _hv : {hist}[_hidx - 1]; "
                     f"if (is_complete) {hist}.push(_hv); "
@@ -8867,6 +9755,9 @@ class SecurityEmitter:
                         )
                     finally:
                         self._security_index_inputs = saved_index_inputs
+                    index_cpp, offset_check = self._history_offset_initializer_cpp(
+                        index_cpp, expr_node.index, "_hidx", constant=False,
+                    )
                     index_cpp = self._coerce_int_slot_with_cast(
                         index_cpp, expr_node.index, "int"
                     )
@@ -8896,6 +9787,7 @@ class SecurityEmitter:
                     return (
                         "([&]() -> double { "
                         f"int _hidx = {index_cpp}; "
+                        f"{offset_check}"
                         "if (is_na(_hidx) || _hidx < 0) return na<double>(); "
                         f"return (_hidx == 0) ? {current} : {hist}[_hidx - 1]; "
                         "}())"
@@ -9005,6 +9897,12 @@ class SecurityEmitter:
                     expr_node, left, right,
                     lambda left, right: self._wide_int_arith_cpp(
                         expr_node, left, right, lower))
+            if (expr_node.op in ("+", "-", "*", "/", "%")
+                    and any(self._security_integer_na_operand(side, helper_binding_stack)
+                            for side in (expr_node.left, expr_node.right))):
+                return self._left_operand_first(
+                    expr_node, left, right,
+                    lambda a, b: self._na_arithmetic_cpp(expr_node, a, b, lower))
             return self._left_operand_first(expr_node, left, right, lower)
 
         if isinstance(expr_node, UnaryOp):
@@ -9013,7 +9911,12 @@ class SecurityEmitter:
             )
             if expr_node.op == "not":
                 return f"!({self._coerce_bool_expr(operand, expr_node.operand)})"
-            return unary_sign_cpp(expr_node.op, operand)
+            return self._numeric_unary_cpp(
+                expr_node, operand,
+                source_is_double=(
+                    not self._security_integer_na_operand(
+                        expr_node.operand, helper_binding_stack)),
+            )
 
         if isinstance(expr_node, Ternary):
             cond = self._build_security_expr(
@@ -9025,6 +9928,10 @@ class SecurityEmitter:
             fv = self._build_security_expr(
                 sec_id, expr_node.false_val, ta_range, ta_results, resolving, security_mutable_names, helper_binding_stack, emitted_lines
             )
+            if (self._security_emits_double(expr_node.true_val, helper_binding_stack)
+                    or self._security_emits_double(expr_node.false_val, helper_binding_stack)):
+                tv = self._security_float_cpp(tv, expr_node.true_val, helper_binding_stack)
+                fv = self._security_float_cpp(fv, expr_node.false_val, helper_binding_stack)
             cond = self._coerce_bool_expr(cond, expr_node.condition)
             return f"(({cond}) ? ({tv}) : ({fv}))"
 
@@ -9096,6 +10003,19 @@ class SecurityEmitter:
             return self._security_source_input_expr(expr_node)
 
         if isinstance(expr_node, FuncCall):
+            nested = self._runtime_security_call_for_request(expr_node)
+            if nested is not None and nested.get("runtime_context"):
+                def argument(value):
+                    return self._build_security_expr(
+                        sec_id, value, ta_range, ta_results, resolving,
+                        security_mutable_names, helper_binding_stack, emitted_lines)
+                tf = (expr_node.args[1] if len(expr_node.args) > 1
+                      else expr_node.kwargs["timeframe"])
+                args = [argument(tf)]
+                args.extend(argument(nested[key]) if nested.get(key) is not None else "false"
+                            for key in ("lookahead_node", "gaps_node"))
+                self._security_requested_used = True
+                return f"_runtime_request_{nested['sec_id']}(" + ", ".join(args) + ")"
             array_get = self._security_chart_array_get(expr_node, sec_id)
             if array_get is not None:
                 return self._build_security_chart_array_get(expr_node, array_get, (
@@ -9115,7 +10035,7 @@ class SecurityEmitter:
                 sampled_site = any(key[0] == id(expr_node) for key in cells)
                 sample_key = (id(expr_node), self._security_binding_stack_signature(
                     helper_binding_stack))
-                if sampled_site and sample_key in self._security_arg_call_values:
+                if sample_key in self._security_arg_call_values:
                     return self._security_arg_call_values[sample_key]
                 call_key = f"func:{func_name}"
                 if call_key in resolving:
@@ -9137,6 +10057,30 @@ class SecurityEmitter:
                     helper_binding_stack,
                 )
                 frame = plan["binding_stack"][-1]
+                sampled_call_ids = {key[0] for key in cells}
+                sampled_arguments = {
+                    parameter: argument
+                    for parameter, argument in frame.items()
+                    if (id(expr_node), parameter) not in cells
+                    and sampled_call_ids.intersection(self._security_subtree_ids(argument))
+                } if cells else {}
+                has_samples = sampled_site or bool(sampled_arguments)
+                if has_samples and emitted_lines is None:
+                    self._codegen_error(
+                        expr_node,
+                        "request.security multi-statement helpers require "
+                        "statement-capable security evaluation context",
+                    )
+                # A call's arguments execute in its caller scope, before its
+                # body selects an arm or reads a parameter more than once.
+                # Runtime values do not replace the ASTs that key TA variants.
+                for parameter, argument_node in sampled_arguments.items():
+                    argument = self._build_security_expr(
+                        sec_id, argument_node, ta_range, ta_results, resolving,
+                        security_mutable_names, frame.caller_stack, emitted_lines)
+                    name = self._security_next_inline_name(sec_id, func_name, parameter)
+                    emitted_lines.append(f"        const auto {name} = {argument};")
+                    frame.samples[parameter] = _SecurityArgumentSample(name, None)
                 for parameter in plan["func_info"].node.params:
                     cell = cells.get((id(expr_node), parameter))
                     if cell is None:
@@ -9186,12 +10130,15 @@ class SecurityEmitter:
                         resolving,
                     )
                 resolving.remove(call_key)
-                if sampled_site:
+                if has_samples:
                     # One written call is one runtime result per evaluation.
                     # Distinct AST sites never use the pure-call value key.
-                    first = next(cell for key, cell in cells.items()
-                                 if key[0] == id(expr_node))
-                    result = f"{first.member}_result"
+                    prefix = (
+                        next(cell.member for key, cell in cells.items()
+                             if key[0] == id(expr_node))
+                        if sampled_site else
+                        self._security_next_inline_name(sec_id, func_name, "arguments"))
+                    result = f"{prefix}_result"
                     emitted_lines.append(f"        const auto {result} = {resolved};")
                     resolved = self._security_arg_call_values[sample_key] = result
                 if share_key is not None:
@@ -9251,6 +10198,7 @@ class SecurityEmitter:
                 security_mutable_names, helper_binding_stack, emitted_lines,
             )
             if expr_node.callee.name == "float":
+                x = self._security_float_cpp(x, expr_node.args[0], helper_binding_stack)
                 return f"(double)({x})"
             return na_preserving_int_cast(x)
 
@@ -9745,6 +10693,16 @@ class SecurityEmitter:
         """Reject void results before a default-valued emitter can hide them."""
         from ..diagnostic_codes import render_diagnostic
 
+        if self._value_is_void(node):
+            message, hint = render_diagnostic("PF-E3102", {})
+            self._codegen_error(node.callee if isinstance(node, FuncCall) else node,
+                                message, hint=hint)
+
+    def _value_is_void(self, node, bindings=None) -> bool:
+        """Share requested-value classification with ordinary selection checks.
+
+        A list denotes an arm body, including the bindings before its terminal.
+        """
         expressions = getattr(self.ctx, "global_expr_map", {}) or {}
         functions = {}
 
@@ -9801,10 +10759,9 @@ class SecurityEmitter:
                         or sigs.get_return_type(namespace, name, len(value.args)) == PineType.VOID)
             return False
 
-        if void(node, {}, set()):
-            message, hint = render_diagnostic("PF-E3102", {})
-            self._codegen_error(node.callee if isinstance(node, FuncCall) else node,
-                                message, hint=hint)
+        local = {} if bindings is None else bindings
+        return (block(node, local, set()) if isinstance(node, list)
+                else void(node, local, set()))
 
     def _emit_security_selection_stmt(self, node, lines, pad) -> bool:
         """Emit a selection's bindings without touching chart member storage."""
@@ -10067,11 +11024,22 @@ class SecurityEmitter:
                             return (series_name not in self._security_string_series
                                     and series_name not in self._security_color_series)
                         return self._security_local_cpp_types.get(bound) == "double"
+                    if (self._security_float_parameter(node.name, helper_binding_stack)
+                            and self._infer_type(bound) in ("int", "int64_t", "double")
+                            and self._int_operand_may_be_na(bound)):
+                        return True
                     return self._security_emits_double(bound, bound_stack, depth + 1)
             else:
                 global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
                 if (node.name in global_expr_map
                         and node.name not in self._global_mutable_infos):
+                    symbol = self._variable_symbol(node.name)
+                    value = global_expr_map[node.name]
+                    if (symbol is not None
+                            and self._global_float_na_selection(node.name, symbol.pine_type)
+                            and self._infer_type(value) in ("int", "int64_t", "double")
+                            and self._int_operand_may_be_na(value)):
+                        return True
                     return self._security_emits_double(
                         global_expr_map[node.name], (), depth + 1
                     )
@@ -10167,7 +11135,9 @@ class SecurityEmitter:
         if self._get_ta_site(node) is not None:
             return True
         if isinstance(node, FuncCall):
-            return (self._security_chart_array_get(node, sec_id) is not None
+            nested = self._runtime_security_call_for_request(node)
+            return ((nested is not None and nested.get("runtime_context"))
+                    or self._security_chart_array_get(node, sec_id) is not None
                     or self._security_call_inlinable(node))
         if isinstance(node, Identifier):
             return (self._security_fallback_owns_name(node, helper_binding_stack)
@@ -10256,9 +11226,16 @@ class SecurityEmitter:
         args = frame["args"]
         # A source input reads the requested bar wherever it sits, as a bar
         # field does (the visitor spells ``close`` from ``bar``); it inlines
-        # no call beside a chart read.
+        # no call beside a chart read. So does ``bar_index`` once the
+        # evaluator keeps a counter for it: under a builtin call kept on the
+        # chart's terms (``array.new(3, float(bar_index))``) it is the
+        # requested bar's, as the ``close`` beside it is, and not the chart's
+        # ``pine_bar_index()``.
         source = (isinstance(node, Identifier)
-                  and self._security_source_input_call(node) is not None)
+                  and (self._security_source_input_call(node) is not None
+                       or (id(node) in frame["chart"]
+                           and self._security_is_bar_index(node)
+                           and args[0] in self._security_bar_index_secs)))
         if (id(node) in frame["chart"] and not source) or not self._security_fallback_owns(
             node, args[5], args[0]
         ):

@@ -306,15 +306,28 @@ UNSAFE_ARMS = (
      '    candidate\n', 6, 5, "ForStmt"),
     ('    candidate = str.tostring(math.random())\n    candidate\n',
      5, 41, "math.random"),
-    ('    candidate = str.tostring(close[1])\n    candidate\n', 5, 35, "history"),
-    ('    candidate = str.tostring(bar_index)\n    candidate\n', 5, 30, "bar_index"),
     ('    candidate = missing_value\n    candidate\n', 5, 17, "missing_value"),
 )
 
+# A history read and bar_index make the timeframe a series string. Pine v6, the
+# only version PineForge translates, has dynamic requests on, so such a request
+# runs (tests/test_e2e_series_timeframe_dynamic_requests.py reads its values);
+# with dynamic_requests = false in the declaration the timeframe must be
+# registered before the first bar and these arms are refused, as the arms above
+# are in every case.
+SERIES_ARMS = (
+    ('    candidate = str.tostring(close[1])\n    candidate\n', 5, 35, "history"),
+    ('    candidate = str.tostring(bar_index)\n    candidate\n', 5, 30, "bar_index"),
+)
 
-@pytest.mark.parametrize("arm,line,col,construct", UNSAFE_ARMS)
-def test_registration_unsafe_arm_is_a_located_refusal(arm, line, col, construct):
-    pine = ('//@version=6\nstrategy("Setup selection")\npick = input.bool(true)\n'
+HEADER_V6 = '//@version=6\nstrategy("Setup selection")\n'
+HEADERS_WITHOUT_DYNAMIC_REQUESTS = {
+    "dynamic-requests-off": '//@version=6\nstrategy("Setup selection", dynamic_requests = false)\n',
+}
+
+
+def assert_located_refusal(header, arm, line, col, construct):
+    pine = (header + 'pick = input.bool(true)\n'
             'tf = if pick\n' + arm + 'else\n    "1D"\n'
             'value = request.security(syminfo.tickerid, tf, close)\nplot(value)\n')
     # The first unsafe node, rather than a constructor traceback, owns the error.
@@ -327,6 +340,52 @@ def test_registration_unsafe_arm_is_a_located_refusal(arm, line, col, construct)
     assert diagnostic.location.line == line
     assert diagnostic.location.col == col
     assert construct in diagnostic.message
+
+
+@pytest.mark.parametrize("arm,line,col,construct", UNSAFE_ARMS)
+def test_registration_unsafe_arm_is_a_located_refusal(arm, line, col, construct):
+    assert_located_refusal(HEADER_V6, arm, line, col, construct)
+
+
+@pytest.mark.parametrize("header", HEADERS_WITHOUT_DYNAMIC_REQUESTS.values(),
+                         ids=HEADERS_WITHOUT_DYNAMIC_REQUESTS.keys())
+@pytest.mark.parametrize("arm,line,col,construct", SERIES_ARMS)
+def test_series_arm_without_dynamic_requests_is_a_located_refusal(
+        header, arm, line, col, construct):
+    assert_located_refusal(header, arm, line, col, construct)
+
+
+@pytest.mark.parametrize("arm,line,col,construct", SERIES_ARMS)
+def test_series_arm_with_dynamic_requests_is_admitted(arm, line, col, construct):
+    pine = (HEADER_V6 + 'pick = input.bool(true)\n'
+            'tf = if pick\n' + arm + 'else\n    "1D"\n'
+            'value = request.security(syminfo.tickerid, tf, close)\nplot(value)\n')
+    # No refusal: the translation unit exists and asks the paired runtime engine
+    # for its request contexts (its values are read by the engine rows of
+    # test_e2e_series_timeframe_dynamic_requests.py).
+    cpp = transpile_full(pine)["cpp"]
+    assert "PINEFORGE_HAS_RUNTIME_CONTEXT_SERVICE_V1" in cpp
+
+
+@pytest.mark.parametrize("declaration", (
+    'strategy("Setup selection")',
+    'strategy("Setup selection", dynamic_requests = true)',
+), ids=("dynamic-requests-default", "dynamic-requests-on"))
+def test_version_5_script_is_refused_before_its_requests_are_read(declaration):
+    # Version 5 has dynamic requests off unless the declaration turns them on, and
+    # PineForge translates version 6 only: the script is refused at its first
+    # line, whatever its requests or its declaration say.
+    arm, _line, _col, _construct = SERIES_ARMS[0]
+    pine = ('//@version=5\n' + declaration + '\npick = input.bool(true)\n'
+            'tf = if pick\n' + arm + 'else\n    "1D"\n'
+            'value = request.security(syminfo.tickerid, tf, close)\nplot(value)\n')
+    with pytest.raises(CompileError) as caught:
+        transpile_full(pine)
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code.startswith("PF-E")
+    assert diagnostic.location.line == 1
+    assert "v6 only" in diagnostic.message
 
 
 ARM_KINDS = {

@@ -449,6 +449,7 @@ def test_udt_method_persistent_state_isolated_per_written_callsite(
         "type Holder\n"
         "    float pad\n"
         "method probe(Holder self, bool active) =>\n"
+        "    self\n"
         "    float observed = -1.0\n"
         "    if active\n"
         f"        {declaration}\n"

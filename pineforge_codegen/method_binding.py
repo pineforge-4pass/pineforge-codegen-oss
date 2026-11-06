@@ -10,10 +10,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .ast_nodes import ASTNode, FuncCall, FuncDef, MethodDef, Program, StrategyDecl
+from .ast_nodes import ASTNode, FuncCall, FuncDef, Identifier, MethodDef, Program, StrategyDecl
 from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
-from .limits import syntax_children
+from .limits import iter_ast_nodes, syntax_children
 from .pine_spelling import expr_start
+
+
+def method_receiver_is_used(node: MethodDef) -> bool:
+    """Query body syntax with the shared walker, including nested bodies.
+
+    Assignment targets count conservatively: the syntax walker does not
+    distinguish reads from writes. Parameter defaults are outside the body.
+    """
+    return bool(node.params) and any(
+        isinstance(child, Identifier) and child.name == node.params[0]
+        for stmt in node.body
+        for child, _depth in iter_ast_nodes(stmt)
+    )
 
 
 @dataclass(frozen=True)

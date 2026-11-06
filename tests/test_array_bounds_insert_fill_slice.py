@@ -289,13 +289,11 @@ int main() {
     "s = a.slice(0, 2)",
     "array<int> s = array.slice(a, 0, 2)",
 ])
-def test_slice_copy_has_located_alias_warning(body: str):
+def test_slice_view_has_no_obsolete_copy_warning(body: str):
     source = "//@version=6\nstrategy(\"T\")\na = array.from(1, 2, 3)\n" + body + "\n"
     result = transpile_full(source)
     warnings = [d for d in result["diagnostics"] if "array.slice returns a copy" in d.message]
-    assert len(warnings) == 1
-    assert warnings[0].location.line == 4
-    assert "share source elements" in warnings[0].message
+    assert not warnings
 
 
 def test_array_copy_does_not_get_slice_alias_warning():

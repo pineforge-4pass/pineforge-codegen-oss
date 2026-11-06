@@ -265,8 +265,14 @@ def test_an_int_product_is_64_bit():
                     's := (s * 48271) % 2147483647\n'
                     'v = (array.get(st, 0) * 48271) % 2147483647\n'
                     'x = s + v\n' + TAIL)
-    assert "((int64_t)(s) * (48271))" in cpp
-    assert cpp.count("(int64_t)([&](auto&& __pf_array)") == 1
+    from tests._numeric_expected import integer_arithmetic
+    wide = "((int64_t)(_pna_l) * (_pna_r))"
+    product = integer_arithmetic("s", "*", "48271", wide)
+    # Count the complete result contract for both operand forms.
+    result_contract = product[product.index("using _pf_val_t = "):]
+    assert product in cpp
+    assert cpp.count("auto _pna_l = ([&](auto&& __pf_array)") == 1
+    assert cpp.count(result_contract) == 2
     compile_cpp(cpp, label="int product")
 
 
@@ -280,7 +286,8 @@ def test_a_product_no_modulo_or_division_reads_takes_mains_rule():
                     'x = m + q\n' + TAIL)
     assert "(n * 7200000)" not in cpp
     assert "static_cast<double>((static_cast<int64_t>(_pf_wide_l) * _pf_wide_r))" in cpp
-    assert "((int64_t)(n) * (3))" in cpp
+    from tests._numeric_expected import integer_arithmetic
+    assert integer_arithmetic("n", "*", "3", "((int64_t)(_pna_l) * (_pna_r))") in cpp
 
 
 def test_a_float_for_in_element_keeps_its_product():
@@ -289,7 +296,8 @@ def test_a_float_for_in_element_keeps_its_product():
     assert "total += ((double)((v * 2)) / (double)(3));" in cpp
     cpp = transpile(HEAD + 'counts = array.from(1, 2)\nfloat total = 0.0\n'
                     'for c in counts\n    total += c * 3 / 2\nx = total\n' + TAIL)
-    assert "((int64_t)(c) * (3))" in cpp
+    from tests._numeric_expected import integer_arithmetic
+    assert integer_arithmetic("c", "*", "3", "((int64_t)(_pna_l) * (_pna_r))") in cpp
 
 
 def test_a_float_or_rounded_operand_keeps_its_product():

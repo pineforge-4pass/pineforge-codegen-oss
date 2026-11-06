@@ -244,6 +244,27 @@ def _comparison_local(node: object, visible: dict[str, str]) -> str | None:
     return None
 
 
+def _comparison_accessor(node: object, counter: str) -> str | None:
+    """The accessor read directly by a comparison with a literal, if any.
+
+    The call is the same pure row read as a declared local, so the comparison
+    needs no local; the caller counts the call as a read of the loop counter.
+    """
+    if not isinstance(node, BinOp):
+        return None
+    call, literal = node.left, node.right
+    if _accessor(call, counter) is None:
+        call, literal = literal, call
+    accessor = _accessor(call, counter)
+    if accessor == "entry_id":
+        if node.op in ("==", "!=") and isinstance(literal, StringLiteral):
+            return accessor
+    elif accessor == "profit":
+        if node.op in _NUMBER_COMPARISONS and _number(literal):
+            return accessor
+    return None
+
+
 class _Body:
     def __init__(self) -> None:
         self.locals: dict[str, tuple[VarDecl, str]] = {}
@@ -285,10 +306,16 @@ def _match_body(loop: ForStmt) -> _Body | None:
             declared_here.append(stmt.name)
             result.counter_reads += 1
         elif isinstance(stmt, IfStmt):
-            name = _comparison_local(stmt.condition, visible)
-            if name is None or stmt.else_body or not stmt.body:
+            if stmt.else_body or not stmt.body:
                 return None
-            result.reads[name] += 1
+            name = _comparison_local(stmt.condition, visible)
+            if name is not None:
+                result.reads[name] += 1
+            elif _comparison_accessor(stmt.condition, loop.var):
+                # The accessor call is the row read itself: no local to count.
+                result.counter_reads += 1
+            else:
+                return None
             frames.append((iter(stmt.body), []))
         elif isinstance(stmt, Assignment):
             if (

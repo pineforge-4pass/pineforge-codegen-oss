@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from tests._legacy_cpp import legacy_cpp
 from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError, Phase
 
 
 _CONFIG_SOURCE = '''//@version=6
@@ -191,6 +194,221 @@ strategy.risk.max_intraday_loss(500, strategy.cash)
         "set_pine_risk_max_intraday_loss((double)(10), true);",
         "set_pine_risk_max_intraday_loss((double)(500), false);",
     ]
+
+
+@pytest.mark.parametrize("risk_func", ("max_drawdown", "max_intraday_loss"))
+@pytest.mark.parametrize("enum_member", ("percent_of_equity", "cash"))
+@pytest.mark.parametrize(
+    ("declaration", "type_argument", "value"),
+    (
+        ("", "type = strategy.{enum_member}", 11),
+        ("t = strategy.{enum_member}\n", "t", 12),
+        ("t = strategy.{enum_member}\n", "type = t", 13),
+    ),
+    ids=("A2-keyword", "A3-variable", "variable-keyword"),
+)
+def test_risk_type_argument_uses_the_supplied_enum(
+    risk_func, enum_member, declaration, type_argument, value,
+):
+    source = (
+        '//@version=6\nstrategy("source host risk type")\n'
+        + declaration.format(enum_member=enum_member)
+        + f"strategy.risk.{risk_func}({value}, "
+        + type_argument.format(enum_member=enum_member)
+        + ")\n"
+    )
+    cpp = transpile(source)
+    calls = [
+        line.strip()
+        for line in cpp.splitlines()
+        if line.lstrip().startswith("set_pine_risk_max_")
+    ]
+    expected_flag = "true" if enum_member == "percent_of_equity" else "false"
+    assert calls == [
+        f"set_pine_risk_{risk_func}((double)({value}), {expected_flag});"
+    ]
+
+
+@pytest.mark.parametrize("risk_func", ("max_drawdown", "max_intraday_loss"))
+def test_risk_omitted_type_preserves_the_cash_flag(risk_func):
+    cpp = transpile(
+        '//@version=6\nstrategy("omitted risk type")\n'
+        f"strategy.risk.{risk_func}(21)\n"
+    )
+    assert f"set_pine_risk_{risk_func}((double)(21), false);" in cpp
+
+
+@pytest.mark.parametrize("risk_func", ("max_drawdown", "max_intraday_loss"))
+@pytest.mark.parametrize("type_argument", ("t", "type = t"))
+@pytest.mark.parametrize(
+    ("initial", "assigned", "assigned_value"),
+    (("cash", "percent_of_equity", 1), ("percent_of_equity", "cash", 2)),
+)
+def test_risk_reassigned_type_reads_the_current_value(
+    risk_func, type_argument, initial, assigned, assigned_value,
+):
+    cpp = transpile(
+        '//@version=6\nstrategy("reassigned risk type")\n'
+        f"t = strategy.{initial}\n"
+        f"t := strategy.{assigned}\n"
+        f"strategy.risk.{risk_func}(14, {type_argument})\n"
+    )
+    calls = [
+        line.strip() for line in cpp.splitlines()
+        if line.lstrip().startswith(f"set_pine_risk_{risk_func}(")
+    ]
+    assert len(calls) == 1
+    # The flag must read t after its write, rather than use its initializer.
+    assert re.fullmatch(
+        rf"set_pine_risk_{risk_func}\(\(double\)\(14\), "
+        r"\(\(t(?:\[0\])?\) == static_cast<int>\(QtyType::PERCENT_OF_EQUITY\)\)\);",
+        calls[0],
+    )
+    write = re.search(
+        rf"\bt(?:\.update\({assigned_value}\)| = {assigned_value});", cpp,
+    )
+    assert write is not None
+    assert write.start() < cpp.index(calls[0])
+
+
+@pytest.mark.parametrize("risk_func", ("max_drawdown", "max_intraday_loss"))
+@pytest.mark.parametrize("keyword", ("", "type = "))
+def test_risk_computed_type_emits_the_selection(risk_func, keyword):
+    cpp = transpile(
+        '//@version=6\nstrategy("computed risk type")\n'
+        'use_percent = input.bool(true, "Use percent")\n'
+        f"strategy.risk.{risk_func}(15, {keyword}"
+        "use_percent ? strategy.percent_of_equity : strategy.cash)\n"
+    )
+    calls = [
+        line.strip() for line in cpp.splitlines()
+        if line.lstrip().startswith(f"set_pine_risk_{risk_func}(")
+    ]
+    assert len(calls) == 1
+    assert calls[0].startswith(f"set_pine_risk_{risk_func}((double)(15), ")
+    assert "use_percent" in calls[0]
+    assert "? (1) : (2)" in calls[0]
+    assert calls[0].endswith(
+        " == static_cast<int>(QtyType::PERCENT_OF_EQUITY)));"
+    )
+
+
+@pytest.mark.parametrize("risk_func", ("max_drawdown", "max_intraday_loss"))
+def test_risk_type_alias_uses_its_lexical_declaration(risk_func):
+    cpp = transpile(
+        '//@version=6\nstrategy("shadowed risk type")\n'
+        "t = strategy.cash\n"
+        "if close > open\n"
+        "    t = strategy.percent_of_equity\n"
+        f"    strategy.risk.{risk_func}(16, type = t)\n"
+        f"strategy.risk.{risk_func}(17, type = t)\n"
+    )
+    calls = [
+        line.strip() for line in cpp.splitlines()
+        if line.lstrip().startswith(f"set_pine_risk_{risk_func}(")
+    ]
+    assert calls == [
+        f"set_pine_risk_{risk_func}((double)(16), true);",
+        f"set_pine_risk_{risk_func}((double)(17), false);",
+    ]
+
+
+@pytest.mark.parametrize("argument", ("{depth}", "num = {depth}"))
+@pytest.mark.parametrize(
+    ("declarations", "expected"),
+    (
+        ("const int DEPTH = 800\n", 800),
+        ("const int BASE = 640\nconst int DEPTH = BASE + 160\n", 800),
+        ("const int DEPTH = 1200\n", 1200),
+    ),
+    ids=("constant", "constant-expression", "larger-constant"),
+)
+def test_max_bars_back_const_depth_matches_literal(argument, declarations, expected):
+    # Both forms request the same buffer, including beyond the engine's 500.
+    for prefix, depth in (("", str(expected)), (declarations, "DEPTH")):
+        cpp = transpile(
+            '//@version=6\nstrategy("supplied history depth")\n'
+            + prefix
+            + f"max_bars_back(close, {argument.format(depth=depth)})\n"
+            + "y = close[700]\nplot(y)\n"
+        )
+        assert f"Series<double> _s_close{{{expected}}};" in cpp
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    (
+        (
+            "decoy() =>\n"
+            "    const int DEPTH = 1200\n"
+            "    DEPTH\n"
+            "max_bars_back(close, DEPTH)\n",
+            800,
+        ),
+        (
+            "if close > open\n"
+            "    const int DEPTH = 1200\n"
+            "    max_bars_back(close, DEPTH)\n",
+            1200,
+        ),
+    ),
+    ids=("out-of-scope-decoy", "local-shadow"),
+)
+def test_max_bars_back_const_depth_uses_the_lexical_binding(body, expected):
+    cpp = transpile(
+        '//@version=6\nstrategy("scoped history depth")\n'
+        "const int DEPTH = 800\n"
+        + body
+        + "y = close[700]\nplot(y)\n"
+    )
+    assert f"Series<double> _s_close{{{expected}}};" in cpp
+
+
+@pytest.mark.parametrize("keyword", ("", "num = "))
+@pytest.mark.parametrize(
+    ("prefix", "depth", "indent"),
+    (
+        ("", "0", ""),
+        ("", "-800", ""),
+        ("const int DEPTH = 0\n", "DEPTH", ""),
+        ("const int DEPTH = -800\n", "DEPTH", ""),
+        ('DEPTH = input.int(800, "Depth")\n', "DEPTH", ""),
+        ("DEPTH = 800\nDEPTH := 1200\n", "DEPTH", ""),
+        ("const int DEPTH = 800\n", "bar_index + DEPTH", ""),
+        (
+            "const int DEPTH = 800\n"
+            "if close > open\n"
+            "    int DEPTH = bar_index\n",
+            "DEPTH",
+            "    ",
+        ),
+    ),
+    ids=(
+        "zero", "negative", "const-zero", "const-negative",
+        "input", "reassigned", "series-expression", "dynamic-shadow",
+    ),
+)
+def test_max_bars_back_unsupported_depth_has_a_located_diagnostic(
+    keyword, prefix, depth, indent,
+):
+    call = f"{indent}max_bars_back(close, {keyword}{depth})"
+    source = (
+        '//@version=6\nstrategy("unsupported history depth")\n'
+        + prefix + call + "\ny = close[700]\nplot(y)\n"
+    )
+    with pytest.raises(CompileError) as caught:
+        transpile(source)
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.code == "PF-E5093"
+    assert diagnostic.phase == Phase.CODEGEN
+    assert diagnostic.message == (
+        "max_bars_back(): num must resolve to a positive compile-time integer."
+    )
+    assert diagnostic.args == {}
+    assert (diagnostic.location.line, diagnostic.location.col) == (
+        source.splitlines().index(call) + 1,
+        call.index(depth, call.index(",")) + 1,
+    )
 
 
 _MAGNIFIER_SOURCE = '''//@version=6

@@ -31,6 +31,7 @@ import io
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -151,6 +152,19 @@ def build_strategy_library(cpp: str, workdir: Path, *,
                            + "\n".join(proc.stderr.splitlines()[:40]))
 
 
+def _runner_input_params(params: dict) -> dict:
+    """Use ABI boolean text for scalar inputs, preserving JSON metadata.
+
+    The engine runner forwards inputs with str(value).encode(), which gives
+    Python booleans the spellings "True"/"False". Nested runtime settings
+    are consumed as JSON and must keep their boolean types.
+    """
+    return {
+        key: ("true" if value else "false") if isinstance(value, bool) else value
+        for key, value in params.items()
+    }
+
+
 def run_strategy(engine_root: Path, workdir: Path, feed: Path,
                  overrides: dict | None, tag: str, trace: bool = False
                  ) -> tuple[bytes, list[dict] | None, str]:
@@ -161,7 +175,7 @@ def run_strategy(engine_root: Path, workdir: Path, feed: Path,
            str(workdir), "--ohlcv", str(feed), "--no-trim-output", "-o", str(out)]
     if overrides is not None:
         inputs = workdir / f"inputs_{tag}.json"
-        inputs.write_text(json.dumps(overrides))
+        inputs.write_text(json.dumps(_runner_input_params(overrides)))
         cmd += ["--inputs-json", str(inputs)]
     trace_path = workdir / f"trace_{tag}.json"
     if trace:
@@ -196,7 +210,8 @@ def closed_trades(engine_root: Path, workdir: Path, feed: Path,
         spec.loader.exec_module(module)
         _RUN_STRATEGY_MODULES[engine_root] = module
     return module.Strategy(workdir / "strategy.so").run(
-        feed, params, **run_kwargs)["trades"]
+        feed, _runner_input_params(params) if params is not None else None,
+        **run_kwargs)["trades"]
 
 
 def trade_count(trades_csv: bytes) -> int:
@@ -286,6 +301,27 @@ def ok(outcomes: dict[str, Outcome], key: str) -> Outcome:
         pytest.fail(f"[{key}] {outcome.error}\n--- source ---\n{outcome.build.source}",
                     pytrace=False)
     return outcome
+
+
+# The line the engine runner prints on stderr when a run stops with one of the
+# engine's own failure codes (scripts/run_strategy.py).
+RUN_FAILURE_CODE = re.compile(r"^run failure code: ([a-z][a-z0-9_]*)$", re.MULTILINE)
+
+
+def assert_run_stopped_with(outcomes: dict[str, Outcome], key: str, code: str,
+                            message: str) -> None:
+    """The run of ``key`` stopped with the engine's failure ``code`` and its
+    ``message``.
+
+    A run that crashes prints no ``run failure code`` line, so the code tells
+    a stopped run from a crashed one. The error text embeds the job's work
+    directory, so a substring check on free text (``"-11" not in error``)
+    fails whenever a job id contains ``-11`` and says nothing about a crash."""
+    error = outcomes[key].error
+    assert error is not None, f"[{key}] the run did not stop"
+    assert message in error, f"[{key}] {message!r} is not in the error:\n{error}"
+    assert RUN_FAILURE_CODE.findall(error) == [code], (
+        f"[{key}] expected exactly the failure code {code!r}:\n{error}")
 
 
 def chart_feed_head(engine_root: Path, base: Path, bars: int) -> Path:

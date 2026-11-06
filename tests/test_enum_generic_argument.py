@@ -13,6 +13,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
+from tests._compile import compile_cpp
 
 HEADER = (
     '//@version=6\nstrategy("enum generic", initial_capital = 100000)\n'
@@ -76,3 +77,7 @@ def test_a_user_type_array_keeps_its_udt_identity():
         "ok = cell.value > 0\n" + ENTRY
     )
     assert "cells" in cpp
+    # The field read `cell.value` compiles only when the elements are the user
+    # type's objects; an array typed as scalars would not build. The values are
+    # read natively in test_e2e_array_element_oracles.py.
+    compile_cpp(cpp, label="udt-array-identity")

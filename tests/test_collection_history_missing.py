@@ -8,7 +8,10 @@ from pineforge_codegen import transpile
 from pineforge_codegen.collection_history import NA_ARRAY_MESSAGE, NA_MATRIX_MESSAGE
 from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
-from tests._e2e import Build, chart_feed_head, execute_all, ok, skip_unless_e2e_env, trade_count
+from tests._e2e import (
+    Build, assert_run_stopped_with, chart_feed_head, execute_all, ok,
+    skip_unless_e2e_env, trade_count,
+)
 
 
 HEADER = '//@version=6\nstrategy("missing history", overlay=true)\n'
@@ -179,6 +182,19 @@ ERRORS = {
     "udt_field": (HEADER + "type Cell\n    int value\na = Cell.new(bar_index)\nb = a[20]\nr = b.value\n", "UDT access on na"),
     "legacy_assignment_missing": (HEADER + "a = array.new<float>()\na[20] := 3.0\n", "Array history element index is out of bounds."),
 }
+# The engine failure code each case stops with (read off a run against a built
+# library): the run ends with the engine's own code, it does not crash.
+FAILURE_CODES = {
+    "array_direct_method": "pine_na_reference",
+    "array_bound_method": "pine_na_reference",
+    "array_bound_namespace": "pine_na_reference",
+    "array_bound_far": "pine_na_reference",
+    "array_bound_na_branch": "pine_na_reference",
+    "matrix_direct": "pine_na_reference",
+    "matrix_bound": "pine_na_reference",
+    "udt_field": "pine_na_reference",
+    "legacy_assignment_missing": "pine_array_error",
+}
 
 
 @pytest.mark.parametrize("name", sorted(SUCCESS))
@@ -220,8 +236,11 @@ def test_na_methods_raise_instead_of_signalling(tmp_path):
     builds = {name: Build(source) for name, (source, _) in ERRORS.items()}
     runs = execute_all(engine, feed, tmp_path, builds)
     for name, (_, message) in ERRORS.items():
-        assert runs[name].error is not None and message in runs[name].error, name
-        assert "-11" not in runs[name].error, name
+        assert_run_stopped_with(runs, name, FAILURE_CODES[name], message)
+
+
+def test_every_error_case_names_its_failure_code():
+    assert set(FAILURE_CODES) == set(ERRORS)
 
 
 def test_map_history_remains_refused_before_codegen():

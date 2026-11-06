@@ -71,9 +71,14 @@ def test_placeholder_is_never_declared(body):
     compile_cpp(cpp, label="tuple naming _", extra_flags=_strict_flags())
 
 
-def test_named_tuple_keeps_its_structured_binding():
+def test_named_global_tuple_stores_its_members():
     cpp = transpile(PRELUDE + TRIPLE + '[a, b, c] = f()\nx = a + b + c\n' + TRADE)
-    assert "auto [a, b, c] = f();" in cpp
+    assert "auto [a, b, c] = f();" not in cpp
+    result = re.search(r"auto (_tuple_result_\d+) = f\(\);", cpp)
+    assert result is not None
+    for index, name in enumerate(("a", "b", "c")):
+        assert f"{name} = {result.group(1)}_elem_{index};" in cpp
+    compile_cpp(cpp, label="named global tuple members", extra_flags=_strict_flags())
 
 
 def test_placeholder_tuple_trades_like_its_named_twin(tmp_path_factory):

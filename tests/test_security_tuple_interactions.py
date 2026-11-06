@@ -226,7 +226,7 @@ def test_security_bool_tuple_initial_gap_n2_matrix_runs_all_4_cells():
     assert not failures, "N=2 initial-gap matrix failures:\n" + "\n".join(failures)
 
 
-def test_ordinary_heterogeneous_tuple_keeps_lexical_structured_binding():
+def test_ordinary_heterogeneous_global_tuple_stores_member_values():
     source = '''//@version=6
 strategy("ordinary heterogeneous tuple")
 pair() =>
@@ -235,10 +235,22 @@ pair() =>
 plot(value)
 '''
     cpp = transpile(source)
-    assert "auto [value, tag] = pair();" in cpp
-    assert not re.search(r"value = std::get<0>\(", cpp)
-    assert not re.search(r"tag = std::get<1>\(", cpp)
-    compile_env.compile_cpp(cpp, label="ordinary-heterogeneous-tuple-routing")
+    driver = r'''
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{10.0, 15.0, 9.0, 12.5, 1.0, 1706745600000LL};
+    strategy.run(&bar, 1, "60", "60");
+    if (!strategy.last_error().empty()) {
+        std::cerr << strategy.last_error();
+        return 1;
+    }
+    std::cout << strategy.value << " " << strategy.tag << "\n";
+}
+'''
+    assert compile_env.run_emitted_tu(
+        cpp, driver, opt="-O0", label="ordinary heterogeneous global tuple",
+    ) == "12.5 tag\n"
 
 
 _FOUR_EMA_VARIANTS = '''//@version=6

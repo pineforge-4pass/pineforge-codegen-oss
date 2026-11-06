@@ -67,10 +67,11 @@ log.info("epoch reference {0} {1}", bar_index, time)
         id="epoch-history-local-in-tuple"),
     # The default is the chart's second bar. Anchor the independent epoch to
     # its first timestamp; the overnight gap must not affect this reference.
+    # Exercise a nonzero += contribution even on the first bar.
     _row(
-        "int x = " + CHART_INPUT + '''x += 60000 * (bar_index % 3)
+        "int x = " + CHART_INPUT + '''x += 60000 * ((bar_index % 3) + 1)
 observed = x
-reference = time[bar_index] + 900000 + 60000 * (bar_index % 3)
+reference = time[bar_index] + 900000 + 60000 * ((bar_index % 3) + 1)
 ''', "observed == reference", first_bar_only=True,
         id="typed-time-input-global-add-assign"),
     _row(

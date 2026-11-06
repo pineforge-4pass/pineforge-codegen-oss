@@ -1,0 +1,4 @@
+//@version=6
+strategy("Math variadic keyword")
+pf_value = math.max(number0 = close, number1 = open)
+plot(pf_value)

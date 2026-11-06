@@ -466,7 +466,13 @@ def test_native_timeframe_bool_values_match_pine_reference(
     ("", "str.tostring(ta.sma(close, 5)[1])"),
 ))
 def test_numeric_tostring_keeps_complete_reference_cpp(tmp_path, body, expression):
-    reference = reference_codegen(NUMERIC_REFERENCE)
+    # 493fde6 gives this inline history its checkpointed per-bar marker.
+    revision = (
+        "493fde62b2aa54a052f45c23ed0c8f24f91c96d7"
+        if (body, expression) == ("", "str.tostring(ta.sma(close, 5)[1])")
+        else NUMERIC_REFERENCE
+    )
+    reference = reference_codegen(revision)
     assert reference is not None, "required numeric C++ reference is unavailable"
     pine = tmp_path / "strategy.pine"
     pine.write_text(_source(body, expression), encoding="utf-8")
@@ -612,7 +618,8 @@ def test_omitted_text_sinks_keep_reference_cpp(tmp_path, statement):
     previous = transpile_json(pine, reference)
     assert current["ok"], current.get("diagnostics")
     assert previous["ok"], previous.get("diagnostics")
-    assert current["cpp"] == previous["cpp"]
+    cpp = current["cpp"]
+    assert cpp == previous["cpp"]
 
 
 @pytest.mark.parametrize("body,comment", (
