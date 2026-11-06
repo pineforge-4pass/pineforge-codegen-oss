@@ -316,17 +316,76 @@ plot(current + previous)
     compile_env.compile_cpp(cpp, label="security-helper-bound-history-index")
 
 
-def test_helper_local_varip_remains_rejected():
+def test_helper_local_varip_is_admitted_on_the_historical_protocol():
+    # Since the runtime request contexts lowering, a requested helper's varip
+    # state is admitted: a requested bar is evaluated once, when it completes,
+    # the historical protocol on which varip and var keep the same state.
+    # (The refusal this row replaces came from the build that kept only var.)
     src = """//@version=6
-strategy("varip reject")
+strategy("varip admitted")
 f(float src) =>
     varip float state = src
     state += 1.0
     state
 out = request.security(syminfo.tickerid, "2", f(close))
 """
-    with pytest.raises(CompileError, match="varip"):
-        transpile(src)
+    cpp = transpile(src)
+    assert "_security_helper_series_" in cpp
+    compile_env.compile_cpp(cpp, label="security-helper-varip")
+
+
+# Recorded, not computed (2026-11-05): what the released build (codegen v1.10.0 at
+# 47f0e8a5 on engine v1.10.0 at 59f98ba8) returns after each of the five two-minute bars
+# (closes 3, 6, 9, 12, 15) for four forms of the same running count: a top-level
+# ``var float state = close`` with ``state += 1.0`` and the same with ``varip``
+# (no request.security at all), the requested accumulator ``ta.cum(1.0)`` (1, 2,
+# 3, 4, 5, plus the first close 3.0), and the requested helper below with ``var``
+# (the release refuses a requested helper's ``varip``, PF-E3027). All four
+# returned this list. Three of the forms have no helper state and the fourth is
+# the release's lowering, not the one these rows test, so the list is an oracle
+# the lowering under test did not produce.
+RELEASE_RUNNING_COUNT = [4.0, 5.0, 6.0, 7.0, 8.0]
+
+
+@pytest.mark.parametrize("kind", ["var", "varip"])
+def test_helper_local_persistent_state_counts_requested_bars(kind):
+    """Closes 3,6,9,12,15 on two-minute requested bars. The state starts at the
+    first requested bar's close (3.0) and adds 1.0 once per requested bar, so
+    the requested value is 4,5,6,7,8: a persistent variable evaluated once per
+    requested bar, on historical bars for ``var`` and ``varip`` alike. The
+    expected list is RELEASE_RUNNING_COUNT, recorded from the released build
+    for forms that do not go through this lowering (see above)."""
+    src = f"""//@version=6
+strategy("persistent helper state")
+f(float src) =>
+    {kind} float state = src
+    state += 1.0
+    state
+out = request.security(syminfo.tickerid, "2", f(close))
+"""
+    driver = r"""
+#include <iostream>
+struct TwoMinuteObserver : GeneratedStrategy {
+    void evaluate_security(int sec_id, const Bar& bar, bool complete) override {
+        GeneratedStrategy::evaluate_security(sec_id, bar, complete);
+        if (sec_id == 0 && complete) std::cout << _req_sec_0 << '\n';
+    }
+};
+int main() {
+    TwoMinuteObserver strategy;
+    Bar bars[] = {
+        Bar{3.0, 3.0, 3.0, 3.0, 1.0, 0},
+        Bar{6.0, 6.0, 6.0, 6.0, 1.0, 120000},
+        Bar{9.0, 9.0, 9.0, 9.0, 1.0, 240000},
+        Bar{12.0, 12.0, 12.0, 12.0, 1.0, 360000},
+        Bar{15.0, 15.0, 15.0, 15.0, 1.0, 480000},
+    };
+    strategy.run(bars, 5, "2", "2");
+    return 0;
+}
+"""
+    values = [float(value) for value in _compile_and_run(transpile(src) + driver).split()]
+    assert values == RELEASE_RUNNING_COUNT
 
 
 def test_string_helper_local_var_state_keeps_string_storage():

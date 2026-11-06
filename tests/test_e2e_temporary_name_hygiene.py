@@ -66,7 +66,7 @@ HEAD = '//@version=6\nstrategy("temporary names", overlay = true)\n'
 @pytest.mark.parametrize("name", sorted(CPP_TEMPORARY_NAMES) + [
     "_v0", "_v12", "__switch_val_0", "_tuple_result_1", "_for_end_2", "_pf_str_a0",
     "_pf_every_bar_ta_1", "__pf_array_arg_0", "__pf_raw_index_value",
-    "_pf_collection_hist_x", "_pf_collection_hist_1_x"])
+    "_pf_collection_hist_x", "_pf_collection_hist_1_x", "_pf_slot_open_1"])
 def test_an_authored_temporary_spelling_is_escaped(name):
     cpp = transpile(HEAD + f"{name} = close * 2\nif {name} > close\n"
                            "    strategy.entry(\"L\", strategy.long)\n")

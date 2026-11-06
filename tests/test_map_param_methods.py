@@ -140,7 +140,8 @@ def _function_body(cpp: str, signature: str) -> str:
 def test_typed_map_parameter_methods_route_by_typespec_and_keywords():
     cpp = without_source_rename(transpile(_SOURCE))
 
-    assert "double mutate_int(PineMap<std::string, int> target)" in cpp
+    # a579dae1 types terminal getters and size calls from the bound map.
+    assert "int mutate_int(PineMap<std::string, int> target)" in cpp
     assert "double mutate_float(PineMap<std::string, double> target)" in cpp
     assert "bool probe_bool(PineMap<std::string, bool> target)" in cpp
     assert (
@@ -200,14 +201,14 @@ def test_typed_map_parameter_methods_route_by_typespec_and_keywords():
     assert "PineMap<std::string, int> copied" in inspect
     assert ".copy()" in inspect
     assert ".size()" in inspect
-    assert ".clear()" in _function_body(cpp, "double clear_int(")
+    assert ".clear()" in _function_body(cpp, "int clear_int(")
 
     # Parameter TypeSpecs win over same-named global array/map/matrix entries.
-    assert ".get(" in _function_body(cpp, "double shadow_array_probe(")
+    assert ".get(" in _function_body(cpp, "int shadow_array_probe(")
     assert ".get(" in _function_body(cpp, "bool shadow_map_probe(")
-    assert ".get(" in _function_body(cpp, "double shadow_matrix_probe(")
+    assert ".get(" in _function_body(cpp, "bool shadow_matrix_probe(")
 
-    merge = _function_body(cpp, "double merge_int(")
+    merge = _function_body(cpp, "int merge_int(")
     assert ".put_all(__pf_map_param_arg_" in merge
     assert merge.count("}((source))") == 1
 

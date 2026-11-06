@@ -1450,7 +1450,10 @@ plot(htfScore)
     assert "bar.close - bar.open" in eval_body
     assert "_req_sec_0 = ([&]() -> double" in eval_body
     assert "_sec0_expr_hist_0[_hidx - 1]" in eval_body
-    assert "if (is_complete) _sec0_expr_hist_0.push(_hv);" in eval_body
+    # The slot is committed once per completed requested bar, where the
+    # evaluator closes, whatever number of times the read ran on the bar
+    # (the value rows: tests/test_e2e_requested_loop_history.py).
+    assert "if (_sec0_expr_hist_0_set) _sec0_expr_hist_0.push(_sec0_expr_hist_0_next);" in eval_body
     assert "_hist_call" not in eval_body
     assert "is_first_tick_" not in eval_body
     assert "current_bar_" not in eval_body
@@ -1880,8 +1883,9 @@ if close < open
     # Both members get their own ctor init.
     assert "counter(0)" in cpp and "counter__blk1(0)" in cpp
     # The first (upper) block keeps the raw name; the second (lower) is remapped.
-    assert "counter = (counter + 1)" in cpp
-    assert "counter__blk1 = (counter__blk1 + 1)" in cpp
+    # ea9ad9d proves presence from each declaration and its self-updates.
+    for member in ("counter", "counter__blk1"):
+        assert f"{member} = ({member} + 1);" in cpp
 
 
 def test_block_scoped_var_no_collision_keeps_raw_name():

@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from .lexer import Token, TokenType
 from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from .limits import MAX_NESTING_DEPTH, TimeBudget, limit_error, syntax_children
+from .method_binding import method_receiver_is_used
 from .ast_nodes import (
     HISTORY_MEMBER_ANNOTATION,
     ASTNode, ArgOrder,
@@ -1112,6 +1113,7 @@ class Parser:
         # through the parser's top-level recovery path.
         if self._current().type not in TYPE_KEYWORDS | {TokenType.IDENT}:
             self._consume(TokenType.IDENT)  # raises a located ParseError
+        receiver_loc = self._loc(self._current())
         type_name = self._parse_type_hint_string()
         params = [self._consume(TokenType.IDENT).value]  # 'self' or user's name
         param_type_hints = [type_name]
@@ -1119,10 +1121,12 @@ class Parser:
         # them at the UDT-method call site when a caller omits trailing
         # args. See data/validation/udt-method-probe-04-default-param.
         param_defaults: list = [None]
+        param_qualifiers: list = [None]
         while self._match(TokenType.COMMA):
             # Optional ``series``/``simple``/``const`` qualifiers and type
             # annotation: ``line ln`` / ``float[] arr`` / ``array<float> xs``
             # / ``series float x`` / ``lib.Type t``.
+            param_qualifiers.append(self._param_qualifier_ahead())
             param_type = self._parse_param_type_annotation()
             p = self._consume(TokenType.IDENT).value
             pdefault = None
@@ -1154,7 +1158,15 @@ class Parser:
         node.annotations = {
             "param_type_hints": param_type_hints,
             "param_defaults": param_defaults,
+            "receiver_loc": receiver_loc,
+            # Preserve authored use even if request lowering replaces the
+            # only expression that reads the receiver with na.
+            "receiver_used": method_receiver_is_used(node),
         }
+        if any(param_qualifiers):
+            # Keep method contracts separate from the library linker's
+            # established qualifier-only overload-selection metadata.
+            node.annotations["method_param_qualifiers"] = param_qualifiers
         return self._set_loc(node, start_tok)
 
     # -- Control flow --

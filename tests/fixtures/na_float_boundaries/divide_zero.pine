@@ -1,0 +1,37 @@
+//@version=6
+strategy("Numeric compound carrier", currency=currency.USDT, initial_capital=1000000000, default_qty_type=strategy.fixed, default_qty_value=1)
+qPhase = input.int(0, "phase", options=[0, 1, 2])
+qDepth = input.int(0, "History depth", minval=0, maxval=7)
+qSeed = input.int(0, "Integer seed", minval=-47, maxval=47)
+qChannel = input.int(3, "channel", options=[0, 1, 2, 3, 4, 5, 6])
+int qStamp = bar_index + qSeed
+float qAdd = 17.5
+float qSubtract = 17.5
+float qMultiply = 17.5
+float qDivide = 17.5
+float qModulo = 17.5
+var float qPersistent = 17.5
+float qTracked = 17.5
+qAdd += qStamp[qDepth]
+qSubtract -= qStamp[qDepth]
+qMultiply *= qStamp[qDepth]
+qDivide /= qStamp[qDepth]
+qModulo %= qStamp[qDepth]
+qPersistent += qStamp[qDepth]
+qTracked += qStamp[qDepth]
+float qPrevious = qTracked[1]
+float qV = switch qChannel
+    0 => qAdd
+    1 => qSubtract
+    2 => qMultiply
+    3 => qDivide
+    4 => qModulo
+    5 => qPersistent
+    => qPrevious
+qQty = na(qV) ? 1.0 : 2.0 + qV / 100.0
+if bar_index <= 120 and bar_index % 3 == qPhase
+    strategy.entry("sample", strategy.long, qty=qQty)
+else if strategy.position_size != 0
+    strategy.close_all()
+plot(qV)
+// @pf-trace current=qV

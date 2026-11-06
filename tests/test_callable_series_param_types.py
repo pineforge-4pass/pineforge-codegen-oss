@@ -25,7 +25,7 @@ boolHistory(bool src) => src[1]
 floatHistory(float src) => src[1]
 type Holder
     int seed
-method intHistory(Holder self, int src) => src[1]
+method intHistory(Holder self, int src) => self, src[1]
 method intOuter(Holder self, int src) => self.intHistory(src)
 var Holder holder = Holder.new(0)
 flag = close > open
@@ -120,7 +120,7 @@ floatHistory(float src) => src[1]
 intOuter(int src) => floatHistory(src)
 type Holder
     int seed
-method floatHistory(Holder self, float src) => src[1]
+method floatHistory(Holder self, float src) => self, src[1]
 method intOuter(Holder self, int src) => self.floatHistory(src)
 var Holder holder = Holder.new(0)
 widened = intOuter(time)
@@ -267,7 +267,7 @@ int main() {
 strategy("untyped method {title}")
 type Holder
     int seed
-method history(Holder self, src) => src[1]
+method history(Holder self, src) => self, src[1]
 var Holder holder = Holder.new(0)
 {calls}
 bool boolOut = holder.history(src=close > open)
@@ -328,6 +328,7 @@ wrapper() => captureReassigned()
 type Holder
     int seed
 method captureReassigned(Holder self) =>
+    self
     int value = 0
     value := time[1]
     value

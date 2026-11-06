@@ -5,9 +5,11 @@ pineforge_codegen/
 ├── lexer.py / tokens.py            Token stream
 ├── parser.py / ast_nodes.py        Pine v6 AST
 ├── limits.py                      Located source/complexity/time budgets
-├── builtin_keywords.py             nz / fixnan keyword arguments rewritten
-│                                   to their positions after the support
-│                                   check (TradingView's parameter order)
+├── builtin_keywords.py             nz / fixnan / math / timeframe.* / trade
+│                                   accessor / matrix.new keyword arguments
+│                                   rewritten to their positions after the
+│                                   support check (TradingView's parameter
+│                                   order)
 ├── loop_types.py                   Counted-loop counter-family evidence,
 │                                   shared by analyzer and emitter, with a
 │                                   memo per declaration in each query;

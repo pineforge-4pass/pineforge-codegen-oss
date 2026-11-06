@@ -16,6 +16,7 @@ from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
 from tests import _compile as compile_env
 from tests.test_pinemap_semantics import _compile_and_run
+from tests._numeric_expected import integer_arithmetic, integer_store, require_numeric_hunk
 
 
 @pytest.mark.parametrize(
@@ -63,7 +64,7 @@ observed = 0
 strategy("method map parameter boundary")
 type Payload
     int value
-method unused(Payload self, map<int, float> values) => 0
+method unused(Payload self, map<int, float> values) => self, 0
 observed = 0
 ''',
             "map keys must be string",
@@ -83,7 +84,7 @@ observed = 0
 strategy("method matrix map-bearing boundary")
 type Holder
     map<string, int> values
-method unused(Holder self, matrix<Holder> values) => 0
+method unused(Holder self, matrix<Holder> values) => self, 0
 observed = 0
 ''',
             "matrix<Holder> is not supported when the UDT contains a map field",
@@ -103,7 +104,7 @@ strategy("valid declared primitive maps")
 type Holder
     map<string, int> values
 identity(map<string, int> values) => values
-method read(Holder self, map<string, bool> flags) => flags.size()
+method read(Holder self, map<string, bool> flags) => self, flags.size()
 var map<string, string> names = na
 var Holder holder = Holder.new(map.new<string, int>())
 var map<string, int> alias = identity(holder.values)
@@ -122,7 +123,7 @@ inferred_mutate(target, string key, int value) => target.put(key, value)
 relay(target, string key, int value) => mutate(target, key, value)
 type Holder
     int marker
-method observe_method(Holder self, int first, int second) => 0
+method observe_method(Holder self, int first, int second) => self, 0
 var direct_target = map.new<string, int>()
 var named_target = map.new<string, int>()
 var helper_target = map.new<string, int>()
@@ -213,6 +214,9 @@ observed = combine(left, right)
 '''
     cpp = transpile(source)
     assert "__pf_call_arg_" not in cpp
+    # Integer arithmetic changes only this return; the whole remaining file is frozen.
+    value = integer_store(integer_arithmetic(integer_arithmetic("a", "*", "10"), "+", "b"))
+    cpp = require_numeric_hunk(cpp, "return ((a * 10) + b);", f"return {value};")
     assert sha256(legacy_cpp(cpp).encode()).hexdigest() == (
         "3c67b8679b04e6b38515841884119fb50fe21569aa080d964b225d047dfd7987"
     )

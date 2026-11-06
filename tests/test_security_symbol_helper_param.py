@@ -94,7 +94,7 @@ def test_alternate_symbol_through_a_method_is_deferred():
     # read stopping the run (tests/test_external_requests.py).
     src = PRELUDE + (
         'type P\n    float v\n'
-        'method pull(P self, string s) => request.security(s, "60", close)\n'
+        'method pull(P self, string s) => self, request.security(s, "60", close)\n'
         'p = P.new(1.0)\nb = p.pull(syminfo.tickerid)\n'
         'if b > close\n    strategy.entry("L", strategy.long)\n')
     assert _messages(src, Level.ERROR) == []

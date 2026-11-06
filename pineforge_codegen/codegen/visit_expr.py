@@ -87,7 +87,8 @@ classes from ``..ast_nodes``.
 
 from __future__ import annotations
 
-from .run_stops import request_stop
+from .constant_fold import NON_CONSTANT, fold_constant_expression
+from .run_stops import checked_history_offset, history_offset_guard, request_stop
 
 from ..errors import CodegenInvariantError, Phase
 from ..symbols import TypeSpec
@@ -135,6 +136,7 @@ from .tables import (
     ON_OFF_INHERIT_MAP,
     ORDER_DIRECTION_MAP,
     SKIP_NAMESPACES,
+    STRATEGY_DIRECTION_VALUES,
     SYMINFO_MEMBER_MAP,
     TA_COMPUTE_ARGS,
     TA_IMPLICIT_COMPUTE_FULL,
@@ -296,13 +298,18 @@ class ExprVisitor:
             return self._selection_value_expr(node)
         raise CodegenInvariantError(node)
 
-    def _selection_value_expr(self, node: IfStmt | SwitchStmt) -> str:
+    def _selection_value_expr(
+        self, node: IfStmt | SwitchStmt, target_cpp_type: str | None = None,
+    ) -> str:
         """Materialize an admitted block value with the typed statement emitter.
 
         The lambda preserves branch laziness and evaluates a switch selector
         once. Its target supplies the same typed missing value as a declaration.
         """
         cpp_type, initial = self._selection_expression_slot(node)
+        if target_cpp_type is not None:
+            cpp_type = target_cpp_type
+            initial = self._na_value_for_type(cpp_type)
         target = f"__selection_value_{self._switch_counter}"
         self._switch_counter += 1
         lines = [
@@ -368,6 +375,11 @@ class ExprVisitor:
         if types and set(types) <= {"int", "int64_t", "double"}:
             cpp_type = ("double" if "double" in types else
                         "int64_t" if "int64_t" in types else "int")
+            if cpp_type in ("int", "int64_t") and self._selection_contains_bare_na(node):
+                spec = self._type_spec_from_expr(node)
+                if (spec is not None
+                        and self._selection_result_cpp_type(node, spec) == "double"):
+                    cpp_type = "double"
         else:
             cpp_type = types[0] if types else self._infer_type(node)
         initial = (self._na_value_for_type(cpp_type)
@@ -389,7 +401,10 @@ class ExprVisitor:
         string_na = self._ternary_string_na(links)
         ternary_cpp_type = (
             self._infer_type(node)
-            if self._selection_contains_na(node)
+            if (self._selection_contains_na(node)
+                or any(self._emitted_value_is_double(arm)
+                       for link in links
+                       for arm in (link.true_val, link.false_val)))
             else None
         )
         array_history_type = self._array_history_value_expr_cpp_type(node)
@@ -457,7 +472,10 @@ class ExprVisitor:
             return self._visit_rhs_value(arm, target_cpp_type=target_cpp_type)
         if string_na and self._is_na_expr(arm):
             return "na<std::string>()"
-        return self._visit_expr(arm)
+        rendered = self._visit_expr(arm)
+        if target_cpp_type == "double":
+            return self._coerce_int_slot(rendered, arm, target_cpp_type)
+        return rendered
 
     # ------------------------------------------------------------------
     # Target-typed RHS lowering (drawing handles are C++ structs, not doubles)
@@ -553,6 +571,40 @@ class ExprVisitor:
         ``na<double>()`` and fail to compile (no viable assignment/conversion).
         A nullable numeric ternary keeps its floating NaN.
         """
+        tuple_types = self._tuple_slot_types(target_cpp_type)
+        if (tuple_types and isinstance(value_node, TupleLiteral)
+                and any((cpp_type == "double" and self._integer_na_operand(element))
+                        # An int the emission holds as a double (an int that can
+                        # be na) must not narrow implicitly into an int slot.
+                        or (cpp_type == "int"
+                            and self._emitted_value_is_double(element))
+                        for element, cpp_type in zip(value_node.elements, tuple_types))):
+            elements = [
+                self._coerce_int_slot(
+                    self._visit_expr(element),
+                    element, cpp_type,
+                ) if cpp_type in ("double", "int") else self._visit_expr(element)
+                for element, cpp_type in zip(value_node.elements, tuple_types)
+            ]
+            return f"std::make_tuple({', '.join(elements)})"
+        if tuple_types and isinstance(value_node, FuncCall):
+            func_name, namespace = self._resolve_callee(value_node.callee)
+            info = self._func_info_map.get(func_name) if namespace is None else None
+            if info is not None and info.returns_tuple:
+                source_types = self._infer_tuple_types(info.node, len(tuple_types))
+                if any(target == "double" and source in ("int", "int64_t")
+                       for target, source in zip(tuple_types, source_types)):
+                    elements = [
+                        self._coerce_int_slot(
+                            f"std::get<{index}>(_pf_raw)", None, target,
+                        ) if target == "double" and source in ("int", "int64_t")
+                        else f"std::get<{index}>(_pf_raw)"
+                        for index, (target, source) in enumerate(
+                            zip(tuple_types, source_types))
+                    ]
+                    value = self._visit_expr(value_node)
+                    return (f"([&]() {{ auto _pf_raw = ({value}); "
+                            f"return std::make_tuple({', '.join(elements)}); }}())")
         if (isinstance(value_node, Ternary)
                 and self._selection_contains_na(value_node)):
             scalar_target = target_cpp_type
@@ -655,11 +707,21 @@ class ExprVisitor:
         if name in self._current_func_series_params:
             return True
         if (name in self._current_func_param_types or name in BAR_FIELDS
-                or (name in BAR_BUILTINS
-                    and not (node.annotations or {}).get("tuple_builtin_binding"))):
+                or self._reads_builtin_variable(node)):
             return False
         return self._binding_is_series(
             name, self._call_site_var_name(node, self._safe_name(name)))
+
+    def _reads_builtin_variable(self, node: Identifier) -> bool:
+        """Whether ``node`` reads a builtin variable (``second``, ``hour``,
+        ``bar_index``...) and not a user variable of the same name
+        (``float second = na``). A read the analyzer bound to a user
+        declaration in scope is the user's: it carries the annotation a
+        tuple-destructured name does, or ``builtin_shadow_binding``."""
+        annotations = node.annotations or {}
+        return (node.name in BAR_BUILTINS
+                and not annotations.get("tuple_builtin_binding")
+                and not annotations.get("builtin_shadow_binding"))
 
     def _visit_ident(self, node: Identifier) -> str:
         name = node.name
@@ -677,14 +739,19 @@ class ExprVisitor:
             return self._safe_name(name)
         if name in BAR_FIELDS:
             return BAR_FIELDS[name]
-        if (name in BAR_BUILTINS
-                and not (node.annotations or {}).get("tuple_builtin_binding")):
+        if self._reads_builtin_variable(node):
             return BAR_BUILTINS[name]
+        binding = self.ctx.identifier_decl_bindings.get(id(node))
+        primitive_shadow_read = (
+            binding is not None
+            and binding[0] in self.ctx.primitive_block_shadow_types
+        )
         # Inline known constants (literals). Input-backed names are NOT inlined
         # because strategy_set_input() can override them at runtime; emit the
         # variable name and let get_input_*() produce the current value.
         if (name in self._known_vars
                 and name not in self._input_backed_vars
+                and not primitive_shadow_read
                 and not self._known_var_is_lexically_shadowed(name)):
             val = self._known_vars[name]
             if isinstance(val, bool):
@@ -817,6 +884,12 @@ class ExprVisitor:
         return "syminfo_.currency"
 
     def _visit_member_access(self, node: MemberAccess) -> str:
+        from ..drawing_all import drawing_all_kind, drawing_all_refusal
+        kind = drawing_all_kind(node)
+        if kind is not None:
+            if kind == "polyline":
+                self._codegen_error(node, drawing_all_refusal(kind))
+            return self._emit_drawing_all_snapshot(kind)
         # UDT field whose type was a drawing primitive (label/line/box/
         # linefill/polyline/table/chart.point) — the field is dropped from
         # the emitted struct, so a raw ``recv.field`` would fail to compile.
@@ -1270,12 +1343,9 @@ class ExprVisitor:
                             return "0"
                         return "0"
                     if sub == "direction":
-                        if node.member == "long":
-                            return "1"
-                        if node.member == "short":
-                            return "-1"
-                        if node.member == "all":
-                            return "0"
+                        value = STRATEGY_DIRECTION_VALUES.get(node.member)
+                        if value is not None:
+                            return f'std::string("{self._cpp_string_escape(value)}")'
                         return "0"
                     if sub == "commission":
                         if node.member == "percent":
@@ -1828,7 +1898,8 @@ class ExprVisitor:
             )
         return memo[key]
 
-    def _lower_binop(self, node: BinOp, left: str, right: str, widened: bool = False) -> str:
+    def _lower_binop(self, node: BinOp, left: str, right: str,
+                     widened: bool = False, na_checked: bool = False) -> str:
         """The C++ of ``node`` over its rendered operands; ``widened`` when
         ``_visit_binop`` computes it in 64 bits already (``left`` cast)."""
         cpp_ops = {"and": "&&", "or": "||"}
@@ -1858,6 +1929,15 @@ class ExprVisitor:
                     return f"std::to_string({rendered})"
 
                 return f"({_as_string(left, lt)} + {_as_string(right, rt)})"
+        if (node.op in ("+", "-", "*", "/", "%")
+                and not widened and not na_checked
+                and any(self._integer_na_operand(side)
+                        for side in (node.left, node.right))):
+            return self._na_arithmetic_cpp(
+                node, left, right,
+                lambda a, b: self._lower_binop(
+                    node, a, b, widened=widened, na_checked=True),
+            )
         # PineScript % works on floats — use std::fmod in C++
         if node.op == "%":
             return f"std::fmod((double)({left}), (double)({right}))"
@@ -1945,7 +2025,7 @@ class ExprVisitor:
         operand = self._visit_expr(node.operand)
         if node.op == "not":
             return f"!({self._coerce_bool_expr(operand, node.operand)})"
-        return unary_sign_cpp(node.op, operand)
+        return self._numeric_unary_cpp(node, operand)
 
     def _visit_session_history(self, node: Subscript, series_idx: str) -> str:
         """``session.<flag>[k]``: the value the flag had k bars ago at the top
@@ -1962,9 +2042,9 @@ class ExprVisitor:
         on the requested clock (security.py); one that reaches it through a
         call's argument or a variable has no such history here and is refused
         at the read. So is a read emitted in a function the analyzer lists in
-        ``session_history_unsafe`` (a method, or a function a method, a
-        request.security expression or a UDT field default reaches), and one
-        with no registered Series: never shared state. The refusal waits for
+        ``session_history_unsafe`` (an unresolved method, or a function such a
+        method, a request.security expression or a UDT field default reaches),
+        and one with no registered Series: never shared state. The refusal waits for
         the C++ (``_settle_session_reads``): a read in an argument the codegen
         renders and leaves out refuses nothing. A read in a function this
         analysis did not clone (``session_uncloned``) asks for its clones
@@ -2044,6 +2124,65 @@ class ExprVisitor:
             return safe
         return self._active_var_remap[safe]
 
+    def _checked_history_offset_cpp(
+        self, idx: str, index_node, *, constant: bool | None = None,
+    ) -> str:
+        """Keep constant emission; check runtime values once at the read.
+
+        Inputs have known defaults, but remain runtime offsets. Only bindings
+        that the expression visitor can inline may prove an offset constant.
+        Requested-context callers supply their own binding-aware proof.
+        """
+        if (getattr(index_node, "annotations", None) or {}).get("pf_checked_history_offset"):
+            return idx
+        if constant is None and isinstance(index_node, (NumberLiteral, NaLiteral, BoolLiteral)):
+            return idx
+        if constant is None:
+            known = {
+                name: value for name, value in self._known_vars.items()
+                if name not in self._input_backed_vars
+                and name not in self._current_func_param_types
+                and name not in self._current_func_series_params
+                and name not in BAR_FIELDS and name not in BAR_BUILTINS
+                and not self._known_var_is_lexically_shadowed(name)
+            } if self._security_fallback_frame is None else {}
+            pending = [index_node]
+            while pending:
+                part = pending.pop()
+                if isinstance(part, Identifier) and part.name not in known and (
+                    self.ctx.identifier_binding_nodes.get(id(part)) is not None
+                    or part.name in self._current_func_param_types
+                    or part.name in self._current_func_series_params
+                ):
+                    # A value binding can hide a namespace or a builtin;
+                    # the constant folder must not interpret its spelling.
+                    known[part.name] = NON_CONSTANT
+                pending.extend(_ast_children(part))
+            _, constant = fold_constant_expression(index_node, known, {})
+        if constant:
+            return idx
+        line = getattr(getattr(index_node, "loc", None), "line", 0) or 0
+        return checked_history_offset(idx, line)
+
+    def _history_offset_initializer_cpp(
+        self, idx: str, index_node, slot: str, *,
+        constant: bool | None = None, value_is_int32: bool = False,
+    ) -> tuple[str, str]:
+        """Keep an int-width initializer and check its slot afterwards.
+
+        The input getter's ABI returns int, even when the authored node is
+        a helper parameter whose type query cannot recover that width.
+        Other widths keep the check before narrowing, so neither a negative
+        fraction nor a wide integer can disappear in the conversion.
+        """
+        checked = self._checked_history_offset_cpp(idx, index_node, constant=constant)
+        if checked == idx:
+            return idx, ""
+        if value_is_int32 or idx.startswith("get_input_int("):
+            line = getattr(getattr(index_node, "loc", None), "line", 0) or 0
+            return idx, history_offset_guard(slot, line)
+        return checked, ""
+
     def _history_offset_cpp(self, idx: str, index_node) -> str:
         """The ``int`` offset of a history read, safe right after a ``[``.
 
@@ -2054,6 +2193,7 @@ class ExprVisitor:
         fractional index toward zero (``x[5.5]`` reads ``x[5]``), as the
         cast does.
         """
+        idx = self._checked_history_offset_cpp(idx, index_node)
         idx_int = self._coerce_int_slot(idx, index_node, "int")
         if (idx_int == idx
                 and not self._emitted_value_is_double(index_node)):
@@ -2176,6 +2316,7 @@ class ExprVisitor:
         self._refuse_mutable_chart_point_history(node)
         self._refuse_field_value_history(node)
         idx = self._visit_expr(node.index)
+        checked_idx = self._checked_history_offset_cpp(idx, node.index)
         # Series::operator[] accepts C++ int. A Pine int can be backed by an
         # int64_t timestamp slot; implicitly narrowing its na sentinel to int
         # turns it into zero on arm64 and reads the current bar. Preserve the
@@ -2183,7 +2324,7 @@ class ExprVisitor:
         series_idx = (
             idx if (isinstance(node.index, NumberLiteral)
                     and isinstance(node.index.value, int))
-            else pine_index_int_cast(idx)
+            else pine_index_int_cast(checked_idx)
         )
         if isinstance(node.object, Identifier):
             name = node.object.name
@@ -2223,11 +2364,28 @@ class ExprVisitor:
                 )
                 receiver = self._collection_receiver_expr(name)
                 if spec.kind == "array":
-                    return self._legacy_array_history_element(
-                        receiver, spec, series_idx,
-                        mutable=getattr(self, "_udt_assignment_target", None) is node,
+                    legacy_idx, offset_check = self._history_offset_initializer_cpp(
+                        idx, node.index, "_pf_history_offset",
+                        value_is_int32=(
+                            isinstance(node.index, Identifier)
+                            and self._security_fallback_frame is None
+                            and self._infer_type(node.index) == "int"
+                            and self._slot_scalar_cpp_type(node.index.name) == "int"
+                            and not self._is_int64_builtin_init(node.index.name)
+                            and not self._emitted_value_is_double(node.index)
+                        ),
                     )
-                return f"{receiver}[{idx}]"
+                    legacy_idx = (
+                        idx if (isinstance(node.index, NumberLiteral)
+                                and isinstance(node.index.value, int))
+                        else pine_index_int_cast(legacy_idx)
+                    )
+                    return self._legacy_array_history_element(
+                        receiver, spec, legacy_idx,
+                        mutable=getattr(self, "_udt_assignment_target", None) is node,
+                        offset_check=offset_check,
+                    )
+                return f"{receiver}[{checked_idx}]"
         # Handle strategy.* history access (e.g., strategy.position_size[1])
         if isinstance(node.object, MemberAccess):
             if isinstance(node.object.object, Identifier):
@@ -2247,8 +2405,8 @@ class ExprVisitor:
         # a freshly-computed C++ scalar, and ``scalar[k]`` is not subscriptable.
         # Materialize the result into a checkpoint-owned class-member
         # ``Series<T>`` that pushes (new bar) / updates (intrabar) the value
-        # exactly once per evaluation — same semantics as every other series in
-        # the strategy — and read ``[k]`` off it. The inner call is emitted once
+        # at most once per bar, updating on repeated evaluations, and read
+        # ``[k]`` off it. The inner call is emitted once per evaluation
         # so its own stateful indicator is not double-stepped.  The deterministic
         # member identity includes the emitted UDF variant; separate Pine call
         # sites never share history, and on_bar clears every synthetic member at
@@ -2299,7 +2457,7 @@ class ExprVisitor:
                 return (
                     f"([&]() -> {cpp_t} {{ "
                     f"if (_use_precalc) {{ "
-                    f"auto _pf_hist_offset_raw = ({idx}); "
+                    f"auto _pf_hist_offset_raw = ({checked_idx}); "
                     f"if (is_na(_pf_hist_offset_raw)) return na<{cpp_t}>(); "
                     f"long double _pf_hist_offset_numeric = "
                     f"static_cast<long double>(_pf_hist_offset_raw); "
@@ -2315,22 +2473,20 @@ class ExprVisitor:
                     f"return na<{cpp_t}>(); "
                     f"return {precalc}[(std::size_t)_pf_hist_bar]; }} "
                     f"{cpp_t} _hv = ({inner}); "
-                    f"if (history_advances_new_bar()) {member}.push(_hv); "
-                    f"else {member}.update(_hv); "
+                    f"{self._inline_history_write_cpp(member, '_hv')}"
                     f"return {member}[{idx_int}]; }}())"
                 )
             idx_int = self._history_offset_cpp(idx, node.index)
             return (
                 f"([&]() -> {cpp_t} {{ "
                 f"{cpp_t} _hv = ({inner}); "
-                f"if (history_advances_new_bar()) {member}.push(_hv); "
-                f"else {member}.update(_hv); "
+                f"{self._inline_history_write_cpp(member, '_hv')}"
                 f"return {member}[{idx_int}]; }}())"
             )
         # History on an operator expression (``(a > b)[1]``) reads the value
         # the expression had k bars ago: its prepass-registered synthetic
-        # Series (``_is_compound_history_object``) is pushed once per
-        # evaluation, like the inline call results above.
+        # Series (``_is_compound_history_object``) opens once per chart bar
+        # and updates on later evaluations, like the inline call results above.
         compound_member = (
             self._inline_history_member_by_key.get(
                 ("hist_call", id(node), self._current_instance_name)
@@ -2352,8 +2508,7 @@ class ExprVisitor:
                 return (
                     f"([&]() -> {cpp_t} {{ "
                     f"{cpp_t} _hv = ({inner}); "
-                    f"if (history_advances_new_bar()) {compound_member}.push(_hv); "
-                    f"else {compound_member}.update(_hv); "
+                    f"{self._inline_history_write_cpp(compound_member, '_hv')}"
                     f"return {compound_member}[{idx_int}]; }}())"
                 )
         obj = self._visit_expr(node.object)

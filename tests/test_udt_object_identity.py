@@ -604,6 +604,7 @@ type Item
 var Item item = Item.new(1.0)
 var float observed = item.combine(second=4)
 method combine(Item self, int first = 2, int second = 3) =>
+    self
     first * 10 + second
 '''
     with pytest.raises(CompileError) as caught:
@@ -625,13 +626,16 @@ strategy("forward typed method defaults")
 type Item
     float value
 method combine(Item self, int first = 2, int second = 3) =>
+    self
     first * 10 + second
 var Item item = Item.new(1.0)
 var float observed = item.combine(second=4)
 '''
     cpp = transpile(source)
     # first defaults to 2 and second is 4, so 2*10+4=24.
-    assert "observed = _udt_Item_combine(item, 2, 4);" in cpp
+    from tests._numeric_expected import integer_to_double
+    # The method's integer result crosses the explicitly float destination.
+    assert f"observed = {integer_to_double('_udt_Item_combine(item, 2, 4)')};" in cpp
     driver = r'''
 #include <iostream>
 int main() {
@@ -654,6 +658,7 @@ def test_forward_stateful_typed_method_with_default_length_is_rejected() -> None
 strategy("forward stateful typed method default")
 out = 1.smooth()
 method smooth(int self, int len = 2) =>
+    self
     ta.sma(close, len)
 '''
     with pytest.raises(CompileError) as caught:
@@ -673,6 +678,7 @@ def test_defined_stateful_typed_method_default_sizes_ta_runtime() -> None:
     source = r'''//@version=6
 strategy("forward stateful typed method default")
 method smooth(int self, int len = 2) =>
+    self
     ta.sma(close, len)
 out = 1.smooth()
 '''
@@ -692,6 +698,7 @@ type Holder
 method outer(Holder self) =>
     self.inner()
 method inner(Holder self) =>
+    self
     "ok"
 var Holder holder = Holder.new(1.0)
 result = holder.outer()

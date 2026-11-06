@@ -12,6 +12,7 @@ from pineforge_codegen.codegen.helpers import NamingHelper
 from pineforge_codegen.codegen.security import SecurityEmitter
 from pineforge_codegen.codegen.tables import tz_time_field_lambda
 from pineforge_codegen.codegen.visit_call import _timestamp_calendar_lambda
+from tests._numeric_expected import integer_arithmetic, integer_to_double
 
 
 HEADER = '//@version=6\nstrategy("calendar locals")\n'
@@ -115,9 +116,9 @@ def _assert_calendar_locals(cpp: str) -> None:
     # Offset one reads the prior requested value beside the ordinary lock_guard.
     ("_pf_ts_mu_lock", "_pf_ts_mu_lock[1]", "(_sec0__pf_ts_mu_lock[1] + [&]() -> int64_t { "),
     # The scalar tm is the requested sum operand, separate from the struct type.
-    ("tm", "tm", "(_sec0_tm + [&]()"),
+    ("tm", "tm", "(_sec0_pf_safe_tm + [&]()"),
     # Offset one indexes the requested tm series, leaving the struct type intact.
-    ("tm", "tm[1]", "(_sec0_tm[1] + [&]()"),
+    ("tm", "tm[1]", "(_sec0_pf_safe_tm[1] + [&]()"),
     # The scalar empty is rebound in the sum, never in the timezone's member call.
     ("empty", "empty", "(_sec0_empty + [&]()"),
     # Offset one reads the requested empty series, leaving the member call intact.
@@ -171,14 +172,35 @@ def _assert_calendar_locals(cpp: str) -> None:
     # Offset one indexes the requested c_str series, leaving the member calls intact.
     ("c_str", "c_str[1]", "(_sec0_c_str[1] + [&]()"),
     # The scalar int64_t is rebound in the sum; the fixed body's integer types stay.
-    ("int64_t", "int64_t", "(_sec0_int64_t + [&]()"),
+    ("int64_t", "int64_t", "(_sec0_pf_safe_int64_t + [&]()"),
     # Offset one reads the requested int64_t series; the fixed body's types stay.
-    ("int64_t", "int64_t[1]", "(_sec0_int64_t[1] + [&]()"),
+    ("int64_t", "int64_t[1]", "(_sec0_pf_safe_int64_t[1] + [&]()"),
 ])
 def test_calendar_locals_survive_mutable_request_names(calendar, name, read, sum_prefix):
     body = _evaluator(transpile(_source(name, read, calendar)))
     _assert_calendar_locals(body)
-    assert sum_prefix in body  # A replayed assignment cannot satisfy the payload's sum.
+    # The potentially missing integer is staged before the unchanged calendar lambda.
+    left, calendar_prefix = sum_prefix[1:].split(" + ", 1)
+    operands = f"auto _pna_l = ({left}); auto _pna_r = ({calendar_prefix}"
+    assert operands in body
+    timezone = (
+        'std::string("Asia/Taipei")' if '"Asia/Taipei"' in calendar
+        else "syminfo_.timezone"
+    )
+    calendar_value = (
+        "[&]() -> int64_t { "
+        f"std::string _tz = pineforge::normalize_timezone_for_posix(({timezone})); "
+        "int _yr = (pine_year(bar.timestamp, syminfo_.timezone)); "
+        "int _mo = (pine_month(bar.timestamp, syminfo_.timezone)); "
+        "int _dy = (pine_dayofmonth(bar.timestamp, syminfo_.timezone)); "
+        "int _hr = (8); int _min = (0); int _sc = (0); "
+        + CALENDAR_BODY
+    )
+    # Pin the entire store: ordered captures, unchanged calendar bytes, both
+    # original-type guards, conditional int64 result, pre-operation casts and
+    # the final na-preserving conversion to the request's double result.
+    expected = integer_to_double(integer_arithmetic(left, "+", calendar_value))
+    assert body.count(f"_req_sec_0 = {expected};") == 1
     assert "pine_year(bar.timestamp, syminfo_.timezone)" in body  # Fields use the requested bar.
 
 
@@ -210,6 +232,9 @@ def test_colliding_and_noncolliding_scripts_keep_the_original_calendar_bytes(cal
     "t",  # The helper's integer local cannot replace the calendar's tm.
     "_pf_ts_mu",  # The helper's integer local cannot replace the calendar's mutex.
     "_pf_ts_mu_lock",  # The helper's integer local cannot replace the calendar's lock.
+    "int64_t",  # A renamed helper local must leave the lambda's return type usable.
+    "size_t",  # Native size and time aliases follow the same binding rule.
+    "time_t",
 ])
 def test_calendar_locals_survive_helper_local_bindings(name):
     source = (
@@ -288,6 +313,55 @@ class _RewriteHost(SecurityEmitter, NamingHelper):
         }
         self._security_string_series = set()
         self._security_color_series = set()
+
+
+@pytest.mark.parametrize("return_type", [
+    "ResultType",
+    "const std::pair<ResultType, OtherType*>&",
+    "decltype(auto)",
+])
+@pytest.mark.parametrize("binding", [
+    "mutable-scalar", "mutable-series", "helper-scalar", "helper-series",
+])
+def test_nested_lambda_return_types_keep_value_rebinding(return_type, binding):
+    host = _RewriteHost("ResultType") if binding.startswith("mutable") else _RewriteHost()
+    mutable = {"ResultType"} if binding.startswith("mutable") else set()
+    stack = None
+    if binding == "mutable-scalar":
+        host._global_mutable_infos["ResultType"].is_series = False
+        value = "_sec0_ResultType"
+    elif binding == "mutable-series":
+        value = "_sec0_ResultType[0] + _sec0_ResultType[1]"
+    elif binding == "helper-scalar":
+        stack = ({"ResultType": "_sec0_helper_ResultType"},)
+        value = "_sec0_helper_ResultType"
+    else:
+        stack = ({"ResultType": "@series:helper:ResultType"},)
+        value = (
+            '_security_helper_series_["helper:ResultType"][0]'
+            ' + _security_helper_series_["helper:ResultType"][1]'
+        )
+    read = "ResultType + ResultType[1]" if binding.endswith("series") else "ResultType"
+    # Signature-like strings and comments cannot start a protected C++ scope.
+    suffix = (
+        ' + std::string(") -> ResultType { ResultType[1] }").size()'
+        " + 'R' /* ResultType[1] ) -> OtherType { */"
+        " // ResultType[1] -> OtherType {\n"
+    )
+    original = (
+        f"([&]() -> {return_type} {{ return consume({read}, "
+        f"[&]()->{return_type}{{ return {read}; }}()); }}())"
+        + suffix + read
+    )
+    expected = (
+        f"([&]() -> {return_type} {{ return consume({value}, "
+        f"[&]()->{return_type}{{ return {value}; }}()); }}())"
+        + suffix + value
+    )
+    rendered = host._rewrite_security_cpp(original, 0, mutable, stack)
+    assert rendered == expected
+    # A surrounding fallback may pass the same nested expression through again.
+    assert host._rewrite_security_cpp(rendered, 0, mutable, stack) == expected
 
 
 def test_calendar_body_preserves_mutable_and_helper_bindings():
@@ -422,3 +496,235 @@ int main() {
 }
 '''
     assert run_emitted_tu(cpp, driver, opt=opt, label="calendar history") == expected
+
+
+@pytest.mark.parametrize("timezone,stamp", [
+    ("UTC", 1704096000000),
+    ("Asia/Taipei", 1704067200000),
+])
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+def test_native_calendar_sum_preserves_missing_requested_history(timezone, stamp, opt):
+    """Exercise the guarded sum's consumer; this source has no TradingView tape."""
+    from tests._compile import run_emitted_tu
+
+    source = (
+        HEADER + "var int t = 1\nt := int(close)\n"
+        "if close > open\n    t := int(na)\n"
+        'float out = request.security(syminfo.tickerid, "1", '
+        f't[1] + timestamp("{timezone}", 2024, 1, 1, 8, 0, 0))\n'
+    )
+    cpp = transpile(source)
+    _assert_calendar_locals(_evaluator(cpp))
+    driver = r"""
+#include <cmath>
+#include <cstdio>
+#include <type_traits>
+
+int main() {
+    const double closes[] = {7.0, 101.0, -7.0, 0.0, 11.0, 19.0};
+    constexpr unsigned size = sizeof(closes) / sizeof(closes[0]);
+    pineforge::Bar bars[size];
+    for (unsigned index = 0; index < size; ++index) {
+        bars[index] = pineforge::Bar{
+            100.0, 102.0, closes[index] - 1.0, closes[index], 10.0,
+            1704067200000LL + index * 60000LL,
+        };
+    }
+    for (unsigned count = 1; count <= size; ++count) {
+        GeneratedStrategy strategy;
+        static_assert(std::is_same_v<decltype(strategy.out), double>);
+        strategy.run(bars, count, "1", "1");
+        if (!strategy.last_error().empty()) return 1;
+        const bool missing = count == 1 || closes[count - 2] > 100.0;
+        if (missing) {
+            if (!std::isnan(strategy.out)) return 2;
+        } else {
+            const double expected = CALENDAR_STAMP + closes[count - 2];
+            if (!std::isfinite(strategy.out) || strategy.out != expected) {
+                std::printf("bar=%u expected=%.17g actual=%.17g\n",
+                            count - 1, expected, strategy.out);
+                return 3;
+            }
+        }
+    }
+    std::puts("ok");
+}
+"""
+    assert run_emitted_tu(
+        cpp, driver.replace("CALENDAR_STAMP", str(stamp)), opt=opt,
+        label="calendar-sum-missing-history",
+    ) == "ok\n"
+
+
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+@pytest.mark.parametrize("name", ["counter", "int64_t"])
+@pytest.mark.parametrize("history", [False, True], ids=["current", "history"])
+@pytest.mark.parametrize("timezone,offset", [
+    pytest.param(None, 8 * 3600000, id="exchange-UTC"),
+    pytest.param("Asia/Taipei", 0, id="explicit-Taipei"),
+])
+def test_native_calendar_return_type_and_requested_values(name, history, timezone, offset, opt):
+    """Compile the actual emitted host; the safe-name twin checks the same setup."""
+    from tests._compile import run_emitted_tu
+
+    read = f"{name}[1]" if history else name
+    fields = "year, month, dayofmonth, 8, 0, 0"
+    calendar = f'timestamp("{timezone}", {fields})' if timezone else f"timestamp({fields})"
+    source = (
+        HEADER + f"var int {name} = 1\n{name} := int(close)\n"
+        + f"if close > open\n    {name} := int(na)\n"
+        + 'float out = request.security(syminfo.tickerid, "1", '
+        + f"{read} + {calendar})\n"
+    )
+    cpp = transpile(source)
+    _assert_calendar_locals(_evaluator(cpp))
+    driver = r"""
+#include <cmath>
+#include <cstdio>
+#include <type_traits>
+
+int main() {
+    const double closes[] = {7.0, 101.0, -7.0, 0.0, 11.0, 19.0};
+    constexpr unsigned size = sizeof(closes) / sizeof(closes[0]);
+    pineforge::Bar bars[size];
+    for (unsigned index = 0; index < size; ++index) {
+        // Jan 1 at 23:58 UTC through Jan 2 at 00:03 UTC. The calendar
+        // must follow each requested bar's date, including the midnight.
+        bars[index] = pineforge::Bar{
+            100.0, 102.0, closes[index] - 1.0, closes[index], 10.0,
+            1704153480000LL + index * 60000LL,
+        };
+    }
+    for (unsigned count = 1; count <= size; ++count) {
+        GeneratedStrategy strategy;
+        static_assert(std::is_same_v<decltype(strategy.out), double>);
+        strategy.run(bars, count, "1", "1");
+        if (!strategy.last_error().empty()) return 1;
+        const int input = static_cast<int>(count) - 1 - HISTORY_OFFSET;
+        const bool missing = input < 0 || closes[input] > 100.0;
+        if (missing) {
+            if (!std::isnan(strategy.out)) return 2;
+        } else {
+            // Both overloads take the date from the UTC exchange calendar.
+            // 08:00 UTC is day + 8h; 08:00 Taipei is day + 0h.
+            const auto day = bars[count - 1].timestamp / 86400000LL * 86400000LL;
+            const double expected = day + CALENDAR_OFFSET + closes[input];
+            if (!std::isfinite(strategy.out) || strategy.out != expected) {
+                std::printf("bar=%u expected=%.17g actual=%.17g\n",
+                            count - 1, expected, strategy.out);
+                return 3;
+            }
+        }
+    }
+    std::puts("ok");
+}
+"""
+    driver = driver.replace("HISTORY_OFFSET", str(int(history))).replace(
+        "CALENDAR_OFFSET", str(offset),
+    )
+    assert run_emitted_tu(
+        cpp, driver, opt=opt, label=f"calendar-return-type-{name}",
+    ) == "ok\n"
+
+
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+def test_native_type_names_preserve_distinct_authored_bindings(opt):
+    """Native type aliases and two occupied escape spellings keep their values."""
+    from tests._compile import run_emitted_tu
+
+    names = ("int32_t", "int64_t", "uint32_t", "uint64_t", "size_t", "time_t", "tm")
+    declarations, requests = [], []
+    for index, name in enumerate(names):
+        factor = index + 1
+        declarations.append(
+            f"var int {name} = 1\n"
+            f"var int pf_safe_{name} = 2\n"
+            f"var int pf_safe_{name}_2 = 3\n"
+            f"{name} := int(close * {factor}.0)\n"
+            f"pf_safe_{name} := int(open * {factor}.0)\n"
+            f"pf_safe_{name}_2 := int(high * {factor}.0)\n"
+            f"if close > open\n    {name} := int(na)\n"
+        )
+        requests.append(
+            f'float observed{index} = request.security(syminfo.tickerid, "1", '
+            f'{name}[1] + timestamp("Asia/Taipei", year, month, dayofmonth, 8, 0, 0))\n'
+            f'float escaped{index} = request.security(syminfo.tickerid, "1", '
+            f"pf_safe_{name}[1] + pf_safe_{name}_2[1])\n"
+        )
+    cpp = transpile(HEADER + "".join(declarations + requests))
+    _assert_calendar_locals(cpp)
+    calendar = (
+        "[&]() -> int64_t { "
+        'std::string _tz = pineforge::normalize_timezone_for_posix((std::string("Asia/Taipei"))); '
+        "int _yr = (pine_year(bar.timestamp, syminfo_.timezone)); "
+        "int _mo = (pine_month(bar.timestamp, syminfo_.timezone)); "
+        "int _dy = (pine_dayofmonth(bar.timestamp, syminfo_.timezone)); "
+        "int _hr = (8); int _min = (0); int _sc = (0); "
+        + CALENDAR_BODY
+    )
+    for index, name in enumerate(names):
+        # Both authored escapes are occupied before allocation. All stores,
+        # history reads and requested copies must use the deterministic third.
+        safe = f"pf_safe_{name}_3"
+        state = f"_sec{2 * index}_{safe}"
+        for member in (safe, f"pf_safe_{name}", f"pf_safe_{name}_2", state):
+            assert f"Series<int> {member};" in cpp
+        expected = integer_to_double(integer_arithmetic(f"{state}[1]", "+", calendar))
+        assert cpp.count(f"_req_sec_{2 * index} = {expected};") == 1
+        other = 2 * index + 1
+        expected_escapes = integer_to_double(integer_arithmetic(
+            f"_sec{other}_pf_safe_{name}[1]", "+",
+            f"_sec{other}_pf_safe_{name}_2[1]",
+        ))
+        assert cpp.count(f"_req_sec_{other} = {expected_escapes};") == 1
+
+    driver = r"""
+#include <cmath>
+#include <cstdio>
+
+int main() {
+    const double closes[] = {7.0, 101.0, -7.0, 0.0, 11.0, 19.0};
+    const double opens[] = {10.0, 100.0, 20.0, 5.0, 30.0, 50.0};
+    constexpr unsigned size = sizeof(closes) / sizeof(closes[0]);
+    pineforge::Bar bars[size];
+    for (unsigned index = 0; index < size; ++index) {
+        bars[index] = pineforge::Bar{
+            opens[index], opens[index] + 3.0, closes[index] - 1.0, closes[index], 10.0,
+            1704153480000LL + index * 60000LL,
+        };
+    }
+    GeneratedStrategy strategy;
+    // Reuse the host over different run lengths to check renamed state resets.
+    for (unsigned count = 1; count <= size; ++count) {
+        strategy.run(bars, count, "1", "1");
+        if (!strategy.last_error().empty()) return 1;
+        const double observed[] = {OBSERVED_VALUES};
+        const double escaped[] = {ESCAPED_VALUES};
+        const int input = static_cast<int>(count) - 2;
+        for (unsigned index = 0; index < sizeof(observed) / sizeof(observed[0]); ++index) {
+            if (input < 0 || closes[input] > opens[input]) {
+                if (!std::isnan(observed[index])) return 2;
+            } else {
+                const auto day = bars[count - 1].timestamp / 86400000LL * 86400000LL;
+                const double expected = day + closes[input] * (index + 1);
+                if (!std::isfinite(observed[index]) || observed[index] != expected) return 3;
+            }
+            if (input < 0) {
+                if (!std::isnan(escaped[index])) return 4;
+            } else {
+                const double expected = (opens[input] + bars[input].high) * (index + 1);
+                if (!std::isfinite(escaped[index]) || escaped[index] != expected) return 5;
+            }
+        }
+    }
+    std::puts("ok");
+}
+"""
+    driver = driver.replace(
+        "OBSERVED_VALUES", ", ".join(f"strategy.observed{i}" for i in range(len(names))),
+    ).replace(
+        "ESCAPED_VALUES", ", ".join(f"strategy.escaped{i}" for i in range(len(names))),
+    )
+    assert run_emitted_tu(
+        cpp, driver, opt=opt, label="native-type-name-collisions",
+    ) == "ok\n"

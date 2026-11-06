@@ -140,6 +140,13 @@ class TopLevelEmitter:
             for func_name, namespace in [self._resolve_callee(node.callee)]
         )
         lines.append('#include <pineforge/source/pine_strategy_host.hpp>')
+        if any(item.get("runtime_context") for item in self._security_calls):
+            lines.extend((
+                "#ifndef PINEFORGE_HAS_RUNTIME_CONTEXT_SERVICE_V1",
+                '#error "Runtime request templates require the paired runtime-context engine"',
+                "#endif",
+                "#include <utility>",
+            ))
         lines.append('#include <pineforge/ta.hpp>')
         lines.extend(['#if __has_include(<pineforge/checked_settings.hpp>)',
                       '#include <pineforge/checked_settings.hpp>', '#endif'])
@@ -157,6 +164,8 @@ class TopLevelEmitter:
         lines.append("#include <numeric>")
         lines.append("#include <string>")
         lines.append("#include <vector>")
+        if getattr(self, "_uses_array_slice_views", False):
+            lines.extend(("#include <stdexcept>", "#include <utility>"))
         if getattr(self, "_array_journal_members", {}):
             lines.extend(("#include <functional>", "#include <limits>",
                           "#include <stdexcept>", "#include <utility>"))
@@ -631,6 +640,8 @@ class TopLevelEmitter:
             "        _pf_require_settings_ok();",
             "        _pf_script_state_checkpoint_.reset();",
         ])
+        if any(item.get("runtime_context") for item in self._security_calls):
+            lines.append("        runtime_contexts().enable_history();")
         seen: set[str] = set()
         for declaration in declarations:
             name = self._script_state_member_name(declaration)
@@ -808,6 +819,7 @@ class TopLevelEmitter:
                     "",
                 ])
 
+        vector_traits_start = len(lines)
         lines.extend([
             "template <typename _PFElement, typename _PFAllocator>",
             f"struct {checkpoint_traits}<std::vector<_PFElement, _PFAllocator>> {{",
@@ -838,6 +850,9 @@ class TopLevelEmitter:
             "};",
             "",
         ])
+        if getattr(self, "_uses_array_slice_views", False):
+            from .array_slice import checkpoint_traits as slice_checkpoint_traits
+            lines[vector_traits_start:] = [slice_checkpoint_traits(checkpoint_traits)]
 
         if self._udt_has_array_fields():
             # A UDT array field: its binding, and the contents of an array it
@@ -999,6 +1014,7 @@ class TopLevelEmitter:
             getattr(self, "_uses_map", False)
             or getattr(self, "_uses_matrix", False)
             or getattr(self, "_udt_defs", {})
+            or getattr(self, "_uses_array_slice_views", False)
         )
         journal_members = getattr(self, "_array_journal_members", {})
         journal = (f"this->{self._array_journal_member_name}" if journal_members else None)
@@ -1110,6 +1126,7 @@ class TopLevelEmitter:
                 # A simple or series length is read on the bar
                 # (``_ta_dynamic_plan``): the member is default-constructed.
                 continue
+            refusal = self._ta_dynamic_refusal(site)
             if site.ctor_args:
                 # If a ctor arg is neither a compile-time literal nor expandable
                 # to an input-backed runtime expression, the old code silently
@@ -1123,9 +1140,10 @@ class TopLevelEmitter:
                     # An argument ``_ta_arg_takes_plan`` sends to the lowering
                     # of ``_ta_dynamic_plan`` that it cannot spell is refused
                     # here, as before string literals were spelled.
-                    if (not self._is_compile_time_value(r)
-                            and (self._runtime_ctor_arg_for_reset(a) is None
-                                 or self._ta_arg_takes_plan(site, arg_pos, a))):
+                    if ((refusal is not None and arg_pos in refusal["refused"])
+                            or (not self._is_compile_time_value(r)
+                                and (self._runtime_ctor_arg_for_reset(a) is None
+                                     or self._ta_arg_takes_plan(site, arg_pos, a)))):
                         # A TA source reached through request.security can have
                         # several helper-bound constructor variants. Validate
                         # only variants of this exact source node before the
@@ -1149,12 +1167,23 @@ class TopLevelEmitter:
                                     "arithmetic over those for TA constructor "
                                     "arguments.")
                         else:
-                            message = (
-                                f"Unsupported TA constructor length '{a}' for "
-                                f"{site.class_name}: it is neither a compile-time "
-                                "constant nor derived from an input, so PineForge "
-                                "cannot size the indicator buffer."
-                            )
+                            tv_name = self._ta_tradingview_series_length_name(site)
+                            if tv_name is None:
+                                message = (
+                                    f"Unsupported TA constructor length '{a}' for "
+                                    f"{site.class_name}: it is neither a compile-time "
+                                    "constant nor derived from an input, so PineForge "
+                                    "cannot size the indicator buffer."
+                                )
+                            else:
+                                message = (
+                                    f"Unsupported TA constructor length '{a}' for "
+                                    f"{tv_name}: it is neither a compile-time "
+                                    "constant nor derived from an input, so PineForge "
+                                    "cannot size the indicator buffer. TradingView "
+                                    f"accepts a series length for {tv_name}(); "
+                                    "PineForge does not support it yet."
+                                )
                             hint = ("Use a literal, an input.*() value, or "
                                     "arithmetic over those for TA lengths.")
                         self._codegen_error(getattr(site, "node", None), message, hint=hint)
@@ -1419,8 +1448,14 @@ class TopLevelEmitter:
                 self._emit_foreign_security_lookups(lines)
             lines.append("    void configure_security_evaluators() override {")
             lines.append("        security_eval_states_.clear();")
+            if any(info.get("runtime_context") for info in self._security_eval_info):
+                lines.append("        runtime_contexts().enable_history();")
             lines.extend(self._security_tf_replay_prologue())
             for info in self._security_eval_info:
+                if info.get("runtime_context"):
+                    continue
+                if info.get("series_tf_invalid") is not None:
+                    continue
                 tf = info.get("tf")
                 tf_expr = info.get("tf_expr")
                 if tf:
@@ -1436,7 +1471,8 @@ class TopLevelEmitter:
                         "request.security timeframe was not resolved for registration",
                     )
                 if tf_expr:
-                    la = "true" if info["lookahead_on"] else "false"
+                    la = info.get("lookahead_expr") or (
+                        "true" if info["lookahead_on"] else "false")
                     go = "true" if info.get("gaps_on") else "false"
                     # Heikin-Ashi same-symbol read: emit the 6th arg only when set
                     # so every non-HA strategy's generated code stays byte-identical
@@ -1578,9 +1614,8 @@ class TopLevelEmitter:
         "initial_capital": "initial_capital_",
     }
 
-    @staticmethod
     def _emit_history_series_write(
-            lines: list[str], pad: str, member: str, value: str) -> None:
+            self, lines: list[str], pad: str, member: str, value: str) -> None:
         """Emit one Pine-series write without conflating history with isnew.
 
         Historical fill recalculations keep ``barstate.isnew`` true, but a
@@ -1588,11 +1623,30 @@ class TopLevelEmitter:
         checkpoint must replace that bar's current history slot rather than
         append a duplicate slot.  The engine exposes those independent facts
         as ``is_first_tick_`` and ``history_advances_new_bar()`` respectively.
+
+        The new-bar flag stays true throughout a loop, so a write inside a
+        loop body would open one slot per iteration. TradingView commits one
+        slot per bar, holding the last evaluation: inside a loop the first
+        reach of the bar opens the slot and later reaches update it, told
+        apart by a flag local to the outermost loop's execution
+        (``_loop_scoped_history_flags``).
         """
+        flags = self._loop_history_flags
+        if flags is None:
+            lines.append(
+                f"{pad}if (history_advances_new_bar()) {member}.push({value});"
+            )
+            lines.append(f"{pad}else {member}.update({value});")
+            return
+        flag = flags.get(member)
+        if flag is None:
+            self._loop_history_flag_count += 1
+            flag = flags[member] = f"_pf_slot_open_{self._loop_history_flag_count}"
         lines.append(
-            f"{pad}if (history_advances_new_bar()) {member}.push({value});"
+            f"{pad}if (history_advances_new_bar() && !{flag}) {member}.push({value});"
         )
         lines.append(f"{pad}else {member}.update({value});")
+        lines.append(f"{pad}{flag} = true;")
 
     def _emit_on_bar(self, lines: list[str]) -> None:
         self._lexical_drawing_types = {}
@@ -1640,6 +1694,12 @@ class TopLevelEmitter:
                 "        if (history_advances_new_bar() && bar_index_ == 0) "
                 f"{info['member_name']}.clear();"
             )
+            clock = self._inline_history_bar_members.get(info["member_name"])
+            if clock is not None:
+                lines.append(
+                    "        if (history_advances_new_bar() && bar_index_ == 0) "
+                    f"{clock} = -1;"
+                )
 
         # A history-reading plain-UDF parameter advances on the chart clock,
         # even when lazy control flow skips its written call on this bar.  Seed
@@ -1725,6 +1785,7 @@ class TopLevelEmitter:
                         and stmt.name not in getattr(self, "_map_vars", {})
                         and not stmt.is_var
                         and not stmt.is_varip
+                        and stmt.name not in self._global_mutable_infos
                     )
                     if is_static_global_input:
                         safe = self._safe_name(stmt.name)
@@ -2221,6 +2282,10 @@ class TopLevelEmitter:
         when it was inlined from a v5 library (``library_v5``)."""
         node = fi.node
         previous = self._pine_v5_body
+        # A function is its own C++ scope: a loop flag of the code that
+        # called it does not exist inside it.
+        previous_loop_flags = self._loop_history_flags
+        self._loop_history_flags = None
         self._pine_v5_body = (
             node is not None
             and (getattr(node, "annotations", None) or {}).get("pine_version") == 5
@@ -2229,6 +2294,7 @@ class TopLevelEmitter:
             self._emit_func_def_body(fi, lines, call_site_idx, instance)
         finally:
             self._pine_v5_body = previous
+            self._loop_history_flags = previous_loop_flags
 
     def _emit_func_def_body(self, fi: FuncInfo, lines: list[str],
                             call_site_idx: int | None = None,
@@ -2522,7 +2588,8 @@ class TopLevelEmitter:
               or ret_type in DRAWING_TYPE_TO_CPP.values()
               or (ret_type == "std::vector<int64_t>"
                   and ("return", fi.name) in self._array_widths.wide)
-              or ret_type in ("int", "int64_t")):
+              or ret_type in ("int", "int64_t")
+              or ret_type.startswith("std::tuple<")):
             rhs_return_cpp_type = ret_type
         else:
             rhs_return_cpp_type = None

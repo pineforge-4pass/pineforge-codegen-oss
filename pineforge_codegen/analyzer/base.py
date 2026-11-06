@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..ast_nodes import (
-    ASTNode,
+    ArgOrder, ASTNode,
     Program, StrategyDecl, ImportStmt,
     VarDecl, Assignment, TupleAssign,
     IfStmt, ForStmt, ForInStmt, WhileStmt, SwitchStmt, BreakStmt, ContinueStmt,
@@ -30,7 +30,8 @@ from ..symbols import (
     unify_pine_types,
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
-from ..limits import TimeBudget, iter_ast_nodes
+from ..limits import TimeBudget, iter_ast_nodes, syntax_children
+from ..input_keys import assign_input_keys
 from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
 from ..security_contexts import (
     PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series,
@@ -45,6 +46,7 @@ from ..method_binding import (
     MethodBindError,
     bind_method_call,
     inventory_method_signatures,
+    method_receiver_is_used,
     validate_call_argument_order,
 )
 from .. import signatures as sigs
@@ -178,12 +180,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._method_call_bindings: dict[
             tuple[int, str], BoundMethodArgs
         ] = {}
+        # Candidate owners of receiver calls that lexical analysis could not
+        # resolve. Never use a bare member name as a session-history owner.
+        self._session_unresolved_method_calls: dict[int, set[str]] = {}
         self._symbols = SymbolTable()
         self._ta_call_sites: list[TACallSite] = []
         self._series_vars: set[str] = set()
         self._series_var_members: set[str] = set()
         self._series_decl_nodes: set[int] = set()
         self._series_decl_bindings: set[tuple[int, str]] = set()
+        self._primitive_history_declarations: set[tuple[int, str]] = set()
         self._series_bar_fields: set[str] = set()
         self._var_members: list[tuple[str, PineType, str]] = []
         self._func_infos: list[FuncInfo] = []
@@ -226,13 +232,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             for name in stmt.names
             if name != "_"
         )
-        # Exact declaration typing retained only for lexical-boundary checks.
+        # Exact declaration typing retained for lexical-boundary checks.
         # The legacy symbol/type registries are raw-name keyed and therefore
         # cannot distinguish a direct script binding from a same-spelled local
         # declared inside a top-level control-flow block.
         self._var_decl_types_by_node: dict[
             int, tuple[PineType, TypeSpec | None]
         ] = {}
+        # Only differing primitive shadows admitted by the boundary check,
+        # including their direct script declarations. Codegen must retain
+        # these types after the analyzer's branch scopes have unwound.
+        self._primitive_block_shadow_types: dict[int, PineType] = {}
         self._ordinary_global_binding_info: dict[
             str, tuple[int, PineType, ASTNode | None]
         ] = {}
@@ -350,6 +360,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_var_storage_names: dict[str, dict[str, str]] = {}
         self._func_series_vars: dict[str, set] = {}   # func_name -> set[str]
         self._session_history_unsafe: dict[str, str] = {}
+        self._session_method_reads: dict[str, tuple[str, Subscript]] = {}
         # Plain UDF -> script variables (and ``bar_index``) its body reads
         # through history, in source order; id(Subscript) -> (UDF, name, node)
         # for each such read. See ``_note_function_global_history_read``.
@@ -613,9 +624,29 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         """Run semantic analysis and return the analyzer context."""
         self._ensure_pine_v6()
         validate_call_argument_order(self._ast, filename=self._filename)
+        from ..builtin_keywords import bind_builtin_keywords
+        bind_builtin_keywords(self._ast, filename=self._filename)
+        from ..drawing_all import (
+            drawing_all_kind, drawing_all_refusal, drawing_all_uses,
+        )
+        allowed_drawing_reads, refused_aliases = drawing_all_uses(self._ast)
+        for node, kind in refused_aliases:
+            self._error(drawing_all_refusal(kind), node.loc)
+        # Direct Analyzer clients and check_support=False share the snapshot
+        # types and read-only boundary, including after request/helper copies.
+        for node, _ in iter_ast_nodes(self._ast):
+            kind = drawing_all_kind(node)
+            if kind is not None and id(node) not in allowed_drawing_reads:
+                self._error(drawing_all_refusal(kind), node.loc)
         from .value_bindings import ValueBindings
         self._value_bindings = ValueBindings(self._ast, self._filename, self._budget)
         self._value_bindings.resolve()
+        from .qualifiers import ParameterQualifiers
+        self._parameter_qualifiers = ParameterQualifiers(
+            self._ast, self._value_bindings.declaration_bindings,
+            self._filename, self._budget,
+        )
+        assign_input_keys(self._ast, self._budget)
         self._loop_type_sources = LoopTypeSources(self._ast)
         self._loop_type_sources.widen_reassignments(
             self._value_bindings.declaration_bindings, budget=self._budget,
@@ -641,7 +672,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._check_top_level_block_shadow_boundaries()
         self._qualify_colliding_func_var_members()
         self._check_cross_callable_series_collection_collisions()
-        self._check_declaration_exact_series_storage_boundaries()
+        if self._check_declaration_exact_series_storage_boundaries():
+            # Rebuild every inventory, including call-site clones, with the
+            # newly separated declarations' private storage spellings.
+            return Analyzer(
+                self._ast, filename=self._filename, budget=self._budget,
+                session_clones=self._session_clones,
+            ).analyze()
         self._check_persistent_drawing_member_collisions()
 
         # Propagate call-site counts to sub-functions called within
@@ -692,6 +729,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             global_expr_map=pure_global_expr_map,
             identifier_binding_scopes=dict(self._identifier_binding_scopes),
             identifier_decl_bindings=dict(self._identifier_decl_bindings),
+            primitive_block_shadow_types=dict(self._primitive_block_shadow_types),
             for_counter_types=dict(self._for_counter_types),
             identifier_binding_nodes=dict(self._identifier_binding_nodes),
             var_member_init_exprs=self._var_member_init_exprs,
@@ -720,6 +758,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             func_security_clone_only=self._func_security_clone_only,
             session_history_unsafe=self._session_history_unsafe,
             session_uncloned=self._session_uncloned,
+            session_method_reads=self._session_method_reads,
             func_cs_ta_clone_names=self._func_cs_ta_clone_names,
             udt_defs=self._udt_fields,
             enum_defs=self._enum_defs,
@@ -1521,7 +1560,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 node.loc,
             )
 
-    def _check_declaration_exact_series_storage_boundaries(self) -> None:
+    def _check_declaration_exact_series_storage_boundaries(self) -> bool:
         """Reject raw Series identities that still cross lexical owners.
 
         Non-persistent history locals are currently emitted as class-level
@@ -1532,14 +1571,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         ``series_decl_bindings`` and remain legal: their history buffers are
         routed by the existing callable parameter path.
 
-        Keep this boundary declaration-exact and fail closed until ordinary
-        local Series storage has the same owner-qualified overlay as persistent
-        callable state.  Direct script Series declarations remain supported,
-        including a same-named persistent UDF member that was qualified above.
+        Direct primitive FuncDef locals can be named apart by declaration
+        identity, then analyzed afresh so every clone owns its Series. Other
+        declaration shapes retain this fail-closed boundary. Already-isolated
+        requested evaluators and non-colliding sources keep their spellings.
         """
         exact_series = set(self._series_decl_bindings)
         if not exact_series:
-            return
+            return False
 
         # A helper reached exclusively through a request.security expression
         # does not use the ordinary raw class Series member: the security
@@ -1776,6 +1815,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 getattr(bindings[-1], "loc", None),
             )
 
+        collision_names = {
+            name for name, bindings in callable_nonpersistent.items()
+            if (name in self._ordinary_global_binding_names
+                or name in persistent_raw_names or len(bindings) > 1)
+        }
+        from .callable_history_names import separate_callable_histories
+        if separate_callable_histories(
+            self._ast, self._value_bindings,
+            {key for key in self._primitive_history_declarations
+             if key[1] in collision_names},
+        ):
+            return True
+
         # A direct ordinary global reserves its class-member spelling even when
         # it is scalar.  Persistent declarations reserve their raw spelling in
         # legacy var inventories even after exact owner qualification.  Either
@@ -1792,6 +1844,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 "not supported yet.",
                 getattr(bindings[-1][1], "loc", None),
             )
+        return False
 
     def _check_cross_callable_series_collection_collisions(self) -> None:
         """Fail closed when legacy raw member names cannot preserve scoping.
@@ -1860,12 +1913,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _check_top_level_block_shadow_boundaries(self) -> None:
         """Fail closed for block shadows whose storage is not node-exact yet.
 
-        Same-typed primitive non-history declarations can use an ordinary C++
-        lexical local once the analyzer preserves the outer symbol (see the
-        scoped control-flow visitors below). Aggregate/UDT registries, local
-        history Series storage, and cross-type codegen typing remain raw-name
-        keyed, so allowing those shapes to shadow a direct script binding could
-        silently retarget the class member or emit invalid C++.
+        Same-typed primitive non-history declarations retain their lexical
+        locals, and float-outer/int-inner retains its existing widening route.
+        Ordinary scalar tuple elements already have lexical C++ storage and
+        declaration-exact consumer types, so their distinct bindings need
+        not share the direct binding's primitive type. Among other primitive
+        declaration shadows, the only proven cross-type pair admitted with
+        distinct types is a script-level float shadowed by a plain block-local
+        string, with declared or literal types on both sides. Other cross-type
+        declaration pairs remain refused. Aggregate/UDT registries, persistent
+        members and local history Series storage remain raw-name keyed, so
+        allowing those shapes could silently retarget the member.
         """
         def tuple_binding_type(
             stmt: TupleAssign, name: str
@@ -1874,6 +1932,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 index = stmt.names.index(name)
             except ValueError:
                 index = -1
+            declared_types = self._tuple_element_types_by_node.get(id(stmt), ())
+            if 0 <= index < len(declared_types):
+                pine_type = declared_types[index]
+                return pine_type, TypeSpec.primitive(pine_type.value)
             element_types = self._tuple_element_types_by_node.get(
                 id(stmt.value), ()
             )
@@ -1889,16 +1951,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             )
             return pine_type, TypeSpec.primitive(pine_type.value)
 
-        direct: dict[str, tuple[PineType, TypeSpec | None]] = {}
+        direct: dict[str, tuple[ASTNode, PineType, TypeSpec | None]] = {}
         for stmt in self._ast.body:
             if isinstance(stmt, VarDecl):
-                direct[stmt.name] = self._var_decl_types_by_node.get(
-                    id(stmt), (PineType.UNKNOWN, None)
+                direct[stmt.name] = (
+                    stmt, *self._var_decl_types_by_node.get(
+                        id(stmt), (PineType.UNKNOWN, None)
+                    ),
                 )
             elif isinstance(stmt, TupleAssign):
                 for name in stmt.names:
                     if name != "_":
-                        direct[name] = tuple_binding_type(stmt, name)
+                        direct[name] = (stmt, *tuple_binding_type(stmt, name))
 
         def nested_bindings(
             stmts: list[ASTNode], primitive_mismatch_unsafe: bool
@@ -2015,6 +2079,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         exact_series = set(self._series_decl_bindings)
         exact_series_nodes = {node_id for node_id, _name in exact_series}
         aggregate_kinds = {"array", "map", "matrix", "udt"}
+        # Constructor spellings lose lexical identity before codegen's
+        # _resolve_ta_ctor_arg -> _resolve_known raw-name constant lookup.
+        # Inspect every retained constructor slot, not just length slots.
+        # Keyword binding and overload remapping already selected ctor_nodes.
+        constant_argument_bindings: set[tuple[int, str]] = set()
+        for site in self._ta_call_sites:
+            for arg in site.ctor_nodes:
+                for use, _depth in iter_ast_nodes(arg):
+                    if isinstance(use, Identifier):
+                        binding = self._value_bindings.declaration_bindings.get(
+                            id(use)
+                        )
+                        if binding is not None:
+                            constant_argument_bindings.add(binding)
         candidate_bindings = list(embedded_top_level_bindings)
         for block, primitive_mismatch_unsafe in top_level_blocks:
             candidate_bindings.extend(
@@ -2033,7 +2111,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 nested_type, nested_spec = self._var_decl_types_by_node.get(
                     id(node), (PineType.FLOAT, None)
                 )
-            direct_type, direct_spec = direct[name]
+            direct_node, direct_type, direct_spec = direct[name]
+            is_lexical_tuple = (
+                isinstance(node, TupleAssign) and node is not direct_node
+            )
             is_exact_series = (
                 (id(node), name) in exact_series
                 or (
@@ -2046,16 +2127,57 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 for spec in (direct_spec, nested_spec)
             )
             has_incompatible_primitive = (
-                mismatch_unsafe and nested_type != direct_type
-                # The standard corpus uses a loop-local inferred int under
-                # a direct float binding (Hexatrades ``base``).  C++ widens
-                # that RHS safely.  The reverse direction and all other
-                # cross-type shadows can truncate or fail compilation.
+                mismatch_unsafe and not is_lexical_tuple
+                and nested_type != direct_type
+                # Keep the established C++ widening route for an inferred
+                # int under a direct float binding. Only the proven
+                # float-outer/string-inner declaration pair is lifted below;
+                # all other declaration mismatches remain refused.
                 and not (
                     direct_type == PineType.FLOAT
                     and nested_type == PineType.INT
                 )
             )
+            if has_incompatible_primitive:
+                outer = direct_node
+                plain_primitive_shadow = (
+                    isinstance(node, VarDecl)
+                    and isinstance(outer, VarDecl)
+                    and not (node.is_var or node.is_varip
+                             or outer.is_var or outer.is_varip)
+                    and name not in self._series_vars
+                    and direct_type == PineType.FLOAT
+                    and nested_type == PineType.STRING
+                    and (
+                        outer.type_hint == "float"
+                        or (
+                            outer.type_hint is None
+                            and isinstance(outer.value, NumberLiteral)
+                            and isinstance(outer.value.value, float)
+                        )
+                    )
+                    and (
+                        node.type_hint == "string"
+                        or (
+                            node.type_hint is None
+                            and isinstance(node.value, StringLiteral)
+                        )
+                    )
+                    and all(
+                        spec == TypeSpec.primitive(type_name)
+                        for spec, type_name in (
+                            (direct_spec, "float"),
+                            (nested_spec, "string"),
+                            (self._operator_types_by_node.get(id(outer)), "float"),
+                            (self._operator_types_by_node.get(id(node)), "string"),
+                        )
+                    )
+                    and (id(node), name) not in constant_argument_bindings
+                )
+                if plain_primitive_shadow:
+                    self._primitive_block_shadow_types[id(outer)] = direct_type
+                    self._primitive_block_shadow_types[id(node)] = nested_type
+                    has_incompatible_primitive = False
             if (not is_exact_series
                     and not has_aggregate
                     and not has_incompatible_primitive):
@@ -2351,40 +2473,27 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 out |= self._collect_security_mutable_globals(defval, resolving)
             return out
 
-        def walk(value: Any) -> None:
-            nonlocal out
-            if value is None:
-                return
-            if hasattr(value, "__dict__"):
-                out |= self._collect_security_mutable_globals(value, resolving)
-                return
-            if isinstance(value, (list, tuple)):
-                for item in value:
-                    walk(item)
-                return
-            if isinstance(value, dict):
-                for item in value.values():
-                    walk(item)
-
-        for child in vars(node).values():
-            walk(child)
+        # Dependencies live in syntax, not the binding/type metadata retained
+        # on it. In particular tuple element types contain enum objects whose
+        # dictionaries lead back to their enum class. Keep those annotations
+        # for value/type consumers without following them as authored reads.
+        for child in syntax_children(node):
+            out |= self._collect_security_mutable_globals(child, resolving)
 
         return out
 
     def _session_history_unsafe_functions(
             self, func_defs: dict, find_calls, known_func_names: set[str],
-            calls_by_parent: dict) -> dict[str, str]:
+            calls_by_parent: dict, call_edges: list) -> dict[str, str]:
         """The functions and methods that cannot keep a ``session.*`` flag's
         history per call site, each with the reason (name -> why).
 
         A read in a function keeps its call site's history: the function is
-        emitted once per call site (``_session_call_*``, codegen). Four kinds
-        of callable do not get that:
+        emitted once per call site (``_session_call_*``, codegen). A typed
+        method uses the same graph, keyed by its exact ``Type.method``. These
+        callables cannot use it:
 
-        * a method: a call on a receiver the analyzer cannot type
-          (``mk().m()``, a loop variable) is not told apart from the method's
-          other calls;
-        * a function a method calls, once in the method's one body;
+        * a method with an unresolved or ambiguous call, and its callees;
         * a function a request.security expression evaluates: the evaluator
           inlines it or calls its chart variant, on the requested clock. The
           functions reached are those the expression calls, those they call,
@@ -2415,9 +2524,27 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return found
 
         methods = {name for name in func_defs if "." in name}
-        mark(methods, "a method, whose calls PineForge cannot always tell apart")
-        mark(closure(callee for m in methods for callee, _call in calls_by_parent.get(m, [])),
-             "which a method calls")
+        bound_methods: dict[int, set[str]] = {}
+        for call_id, key in self._method_call_bindings:
+            bound_methods.setdefault(call_id, set()).add(key)
+        unsafe_methods: set[str] = set()
+        for candidates in self._session_unresolved_method_calls.values():
+            unsafe_methods.update(candidates & methods)
+        for candidates in bound_methods.values():
+            if len(candidates) != 1:
+                unsafe_methods.update(candidates & methods)
+        for _owner, callee, call in call_edges:
+            if callee in methods and not bound_methods.get(id(call)):
+                unsafe_methods.add(callee)
+        # The signature inventory intentionally preserves first-declaration
+        # lookup. It does not prove a duplicate Type.method is one definition.
+        declarations: set[str] = set()
+        for stmt in self._ast.body:
+            if isinstance(stmt, MethodDef):
+                key = f"{stmt.type_name}.{stmt.name}"
+                if key in declarations:
+                    unsafe_methods.add(key)
+                declarations.add(key)
 
         # A request.security expression's reach.
         pending: list[tuple[Any, str | None]] = [
@@ -2450,18 +2577,28 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 elif name in self._global_expr_map:
                     followed.add(name)
                     pending.append((self._global_expr_map[name], None))
-        mark(reached, "which a request.security expression evaluates on the requested clock")
-
         # A UDT field default's call, for the types a script builds.
         built = {node.callee.object.name for node, _depth in iter_ast_nodes(self._ast)
                  if isinstance(node, FuncCall) and isinstance(node.callee, MemberAccess)
                  and node.callee.member == "new" and isinstance(node.callee.object, Identifier)}
-        mark(closure(callee
-                     for stmt in self._ast.body
-                     if isinstance(stmt, TypeDecl) and stmt.name in built
-                     for field in stmt.fields if field.default is not None
-                     for callee, _call in find_calls(field.default, known_func_names, None)),
-             "which a UDT field default calls once for every new()")
+        defaults = closure(callee
+                           for stmt in self._ast.body
+                           if isinstance(stmt, TypeDecl) and stmt.name in built
+                           for field in stmt.fields if field.default is not None
+                           for callee, _call in find_calls(field.default, known_func_names, None))
+        # Preserve the existing reason precedence for methods reached on the
+        # requested clock or from a field default, and for their callees.
+        unsafe_methods |= (reached | defaults) & methods
+        unsafe_methods |= closure(unsafe_methods) & methods
+        mark(unsafe_methods, "a method, whose calls PineForge cannot always tell apart")
+        method_callees = closure(callee for m in methods
+                                 for callee, _call in calls_by_parent.get(m, []))
+        mark(closure(callee for m in unsafe_methods
+                     for callee, _call in calls_by_parent.get(m, []))
+             | (method_callees & (reached | defaults)),
+             "which a method calls")
+        mark(reached, "which a request.security expression evaluates on the requested clock")
+        mark(defaults, "which a UDT field default calls once for every new()")
         return unsafe
 
     def _propagate_call_site_counts(self) -> None:
@@ -2490,6 +2627,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if getattr(fi, "is_udt_method", False) and fi.node is not None:
                 func_defs.setdefault(fi.name, fi.node)
 
+        session_method_bindings: dict[int, str] = {}
         # Preserve call-node identity as well as the callee name: late clone
         # materialization needs the textual call's argument mapping to resolve
         # parameterized TA constructor lengths.
@@ -2498,6 +2636,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return call.callee.name if call.callee.name in func_defs else None
             if not isinstance(call.callee, MemberAccess):
                 return None
+            if id(call) in session_method_bindings:
+                return session_method_bindings[id(call)]
 
             recv = call.callee.object
             method = call.callee.member
@@ -2571,7 +2711,53 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 calls.extend(_find_calls(attr_val, known_funcs, owner, seen))
             return calls
 
-        known_func_names = set(func_defs.keys())
+        # A lexical typed binding survives scopes that the late raw-name
+        # resolver cannot reconstruct. Prefer that exact declaration only on
+        # the new session-method path, after the C++ actually requested clones.
+        # A syntactic read in a dropped argument must keep the old graph too.
+        known_func_names = set(func_defs)
+        requested_reads = {
+            id(child)
+            for sec in (getattr(self, "_security_calls", []) or [])
+            if sec.expression is not None
+            for child, _depth in iter_ast_nodes(sec.expression)
+        }
+        session_reach = {
+            name for name, definition in func_defs.items()
+            if (self._session_clones is None or name in self._session_clones)
+            and emitted_session_reads(definition, requested_reads)
+        }
+        exact_bindings: dict[int, set[str]] = {}
+        for call_id, key in self._method_call_bindings:
+            exact_bindings.setdefault(call_id, set()).add(key)
+        session_method_bindings = {
+            call_id: next(iter(keys))
+            for call_id, keys in exact_bindings.items()
+            if len(keys) == 1
+            and call_id not in self._session_unresolved_method_calls
+        }
+        if session_reach and session_method_bindings:
+            # First determine reach with exact bindings, including wrappers
+            # whose old receiver-name fallback selected the wrong overload.
+            typed_calls = {
+                name: _find_calls(definition, known_func_names, name)
+                for name, definition in func_defs.items()
+            }
+            changed = True
+            while changed:
+                if self._budget is not None:
+                    self._budget.check(phase=Phase.ANALYZER)
+                changed = False
+                for name, calls in typed_calls.items():
+                    if (name not in session_reach
+                            and any(sub in session_reach for sub, _ in calls)):
+                        session_reach.add(name)
+                        changed = True
+        session_method_bindings = {
+            call_id: key for call_id, key in session_method_bindings.items()
+            if key in session_reach
+        }
+
         calls_by_parent = {
             name: _find_calls(func_def, known_func_names, name)
             for name, func_def in func_defs.items()
@@ -2788,7 +2974,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Codegen synthesizes a Series buffer for three expression shapes that
         # do not appear in ``_func_series_vars`` themselves:
         #
-        #   * a call result read through history, e.g. ``f()[1]``;
+        #   * a call result or operator expression read through history,
+        #     e.g. ``f()[1]`` or ``(close * multiplier)[1]``;
         #   * a scalar expression bridged into a UDF series parameter, e.g.
         #     ``history(close + open)`` where ``history(src) => src[1]``;
         #   * a session.* flag read at an offset, e.g. ``session.ismarket[1]``,
@@ -2865,7 +3052,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if not hasattr(node, "__dict__"):
                 return False
             if (isinstance(node, Subscript)
-                    and isinstance(node.object, FuncCall)):
+                    and isinstance(node.object, (FuncCall, BinOp, UnaryOp, Ternary))):
                 return True
             if isinstance(node, FuncCall) and _needs_scalar_series_bridge(node):
                 return True
@@ -2878,12 +3065,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             name for name, func_def in func_defs.items()
             if _has_synthetic_history_state(func_def)
         }
-        # A plain function that reads a flag at an offset is emitted once per
+        # A resolved callable that reads a flag at an offset is emitted once per
         # call site, if this analysis may clone it. A callable that cannot
         # keep its call sites apart gets no clone for it (codegen refuses such
         # a read where it emits one).
         self._session_history_unsafe = self._session_history_unsafe_functions(
-            func_defs, _find_calls, known_func_names, calls_by_parent)
+            func_defs, _find_calls, known_func_names, calls_by_parent, call_edges)
         session_readers = frozenset(
             name for name, func_def in func_defs.items()
             if name not in self._session_history_unsafe
@@ -2893,6 +3080,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                   else session_readers & self._session_clones)
         self._session_uncloned = session_readers - cloned
         synthetic_history_stateful |= cloned
+        self._session_method_reads = {}
 
         # request.security owns a separate evaluator context and already
         # materializes/remaps its embedded TA state per SecurityCallInfo.  Do
@@ -2941,6 +3129,29 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         closed.add(fname)
                         changed = True
             return closed
+
+        # A call rendered later (e.g. a trace expression, outside the analyzed
+        # AST) has no typed call-site identity. Codegen must refuse it rather
+        # than fall back to a shared method body or a nonexistent base name.
+        # Only actual clone requests participate: a dropped read still costs
+        # nothing, even if a trace calls the method that contains it.
+        for name in sorted(close_over_callers(set(cloned))):
+            info = func_info_by_name.get(name)
+            if info is None or not info.is_udt_method:
+                continue
+            pending, seen = [name], set()
+            while pending:
+                if self._budget is not None:
+                    self._budget.check(phase=Phase.ANALYZER)
+                reader = pending.pop()
+                if reader in seen:
+                    continue
+                seen.add(reader)
+                if reader in cloned:
+                    read = emitted_session_reads(func_defs[reader], requested_node_ids)[0]
+                    self._session_method_reads[name] = (reader, read)
+                    break
+                pending.extend(sub for sub, _call in calls_by_parent.get(reader, []))
 
         # A function whose untyped parameter receives two primitive families
         # at its written calls is TradingView's once per family: one variant
@@ -3747,7 +3958,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             fdef = func_defs.get(containing) if containing else None
             tf_node = getattr(sec, "timeframe", None)
             symbol_node = getattr(sec, "symbol", None)
-            if fdef is None or sec.context_resolved or sec.is_lower_tf_array:
+            if fdef is None or sec.dead or sec.context_resolved or sec.is_lower_tf_array:
                 new_calls.append(sec)
                 continue
             tf_param = (tf_node.name if isinstance(tf_node, Identifier)
@@ -4543,7 +4754,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         values: list[ASTNode | None],
         function_name: str,
     ) -> None:
-        """Refuse only a proven float passed to a declared int parameter."""
+        """Check proven qualifier and base-type mismatches after binding."""
         if (self._pine_version != 6
                 or self._in_v5_library_definition(definition)):
             return
@@ -4552,6 +4763,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # An unresolved overload keeps its established lookup; checking
             # only that declaration would discard the other candidates.
             return
+        self._parameter_qualifiers.check(definition, values, function_name)
         specs = self._param_type_specs_from_def(definition)
         # A default needs a float proof in both scopes; a declaration proof
         # only limits the existing refusal.
@@ -4631,6 +4843,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         type_spec = self._type_spec_from_hint(node.type_hint) if node.type_hint else None
         if type_spec is None:
             type_spec = self._type_spec_from_expr(node.value)
+        if (type_spec is None and not node.type_hint
+                and not node.is_var and not node.is_varip
+                and isinstance(node.value, Ternary)):
+            # A non-persistent selection already emits a vector. Preserve an
+            # exact common array type so aliases inherit it through the scoped
+            # symbol, rather than declaring their storage as double. Keep
+            # persistent selection inference/checkpoint policy unchanged.
+            true_spec = self._type_spec_from_expr(node.value.true_val)
+            false_spec = self._type_spec_from_expr(node.value.false_val)
+            if (true_spec is not None and true_spec.kind == "array"
+                    and true_spec == false_spec):
+                type_spec = true_spec
         if self._collection_scope_stack:
             self._callable_collection_bindings[id(node)] = (
                 type_spec
@@ -4921,7 +5145,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     node.loc or node.target.loc,
                 )
             else:
-                if (node.op == ":="
+                if (node.op in (":=", "+=", "-=", "*=", "/=", "%=")
                         and self._pine_version == 6
                         and not self._in_v5_library_definition(node)
                         and self._enclosing_func_names
@@ -5067,6 +5291,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _visit_TupleAssign(self, node: TupleAssign) -> PineType:
         val_type = self._visit(node.value)
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
+        is_program_global = (
+            self._global_scope and self._symbols.current_scope.name == "global"
+        )
         element_types = self._tuple_element_types_by_node.get(id(node.value), ())
         if not element_types and isinstance(node.value, (IfStmt, SwitchStmt)):
             shape = self._selection_tuple_shape(node.value)
@@ -5074,39 +5301,71 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 element_types = shape[1]
         if (not element_types
                 and isinstance(node.value, FuncCall)
+                and isinstance(node.value.callee, MemberAccess)):
+            # Typed receiver methods keep their exact call binding. Their
+            # supported tuple tail was visited while the method scope was
+            # active, so reuse those element types rather than the scalar
+            # return type of the call.
+            for call_id, method_key in self._method_call_bindings:
+                if call_id != id(node.value):
+                    continue
+                info = next(
+                    (item for item in self._func_infos
+                     if item.name == method_key and item.returns_tuple),
+                    None,
+                )
+                if info is not None and info.node is not None and info.node.body:
+                    tail = info.node.body[-1]
+                    tail = tail.expr if isinstance(tail, ExprStmt) else tail
+                    element_types = self._tuple_element_types_by_node.get(id(tail), ())
+                break
+        binding_element_types = element_types
+        if (not element_types
+                and isinstance(node.value, FuncCall)
                 and isinstance(node.value.callee, Identifier)
                 and self._func_returns_tuple.get(node.value.callee.name, False)):
-            # A user function's string elements bind as strings. Its other
-            # families keep the historical double storage of a call tuple.
-            element_types = tuple(
-                PineType.STRING if item == PineType.STRING else PineType.FLOAT
-                for item in self._func_tuple_element_types.get(
-                    node.value.callee.name, ()
+            helper_types = self._func_tuple_element_types.get(
+                node.value.callee.name, ()
+            )
+            binding_element_types = helper_types
+            # Program globals retain each returned family. Lexical tuples
+            # keep their existing inference policy.
+            element_types = (
+                helper_types if is_program_global else tuple(
+                    PineType.STRING if item == PineType.STRING else PineType.FLOAT
+                    for item in helper_types
                 )
             )
 
         is_val_static = self._is_static_expression(node.value)
+        declared_types: list[PineType] = []
 
         for idx, name in enumerate(node.names):
-            if name == "_":
-                continue
-            outer_symbol = self._symbols.resolve(name)
-
             inferred_element_type = (
                 element_types[idx]
                 if idx < len(element_types)
                 else PineType.FLOAT
             )
-            # Tuple bindings historically use double storage for every
-            # numeric element, including integer literals. Preserve that
-            # contract while retaining the bool and string families: a string
-            # element read as a double compared by value (``a == b``) through
-            # a static_cast of a std::string.
+            # The member storing a Program-global element must agree with its
+            # Pine consumers. Codegen retains the corresponding integer width.
+            # Lexical numeric tuples keep their established inference.
             element_type = (
                 inferred_element_type
-                if inferred_element_type in (PineType.BOOL, PineType.STRING)
+                if (is_program_global
+                    or inferred_element_type in (PineType.BOOL, PineType.STRING))
                 else PineType.FLOAT
             )
+            # The shadow-boundary check compares the actual tuple families.
+            # In particular a lexical int tuple remains compatible with a
+            # global int tuple despite its legacy float analysis policy.
+            declared_types.append(
+                binding_element_types[idx]
+                if idx < len(binding_element_types)
+                else element_type
+            )
+            if name == "_":
+                continue
+            outer_symbol = self._symbols.resolve(name)
 
             if self._global_scope and is_val_static:
                 self._static_vars.add(name)
@@ -5144,9 +5403,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # functions / later references resolve — mirroring _visit_VarDecl.
             # Without this the names are never declared and the C++ errors with
             # "use of undeclared identifier".
-            if (self._global_scope
-                    and self._symbols.current_scope.name == "global"
-                    ):
+            if is_program_global:
                 self._ordinary_global_binding_info[name] = (
                     id(node), element_type, node.value,
                 )
@@ -5157,6 +5414,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     name, element_type, False, decl_node=node,
                 )
 
+        self._tuple_element_types_by_node[id(node)] = tuple(declared_types)
         return val_type
 
     # ------------------------------------------------------------------
@@ -5671,6 +5929,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 sym._pf_certain_declared = True
             setattr(sym, "_pf_parameter_owner", method_key)
             self._symbols.define(sym)
+        receiver_used = (node.annotations or {}).get("receiver_used")
+        if receiver_used is None:
+            receiver_used = method_receiver_is_used(node)
+        if node.params and not receiver_used:
+            name = node.params[0]
+            raise CompileError([Diagnostic(
+                level=Level.ERROR,
+                phase=Phase.ANALYZER,
+                location=(node.annotations or {}).get("receiver_loc") or loc,
+                message=f'The first method parameter "{name}" is never used in the method body.',
+                hint="Use the first parameter or declare a function instead.",
+            )])
         ret_type = PineType.VOID
         ta_start = len(self._ta_call_sites)
         old_global = self._global_scope
@@ -5717,6 +5987,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 ):
                     return_type_spec = terminal_spec
                 if terminal_spec is not None and terminal_spec.kind in ("map", "matrix"):
+                    return_type_spec = terminal_spec
+                if terminal_spec is not None and terminal_spec.kind == "array":
+                    # An array the method returns is its return type, as a
+                    # function's is (``FuncInfo.return_type_spec``): without
+                    # it the method was emitted returning ``double``.
                     return_type_spec = terminal_spec
                 if terminal_spec is not None and terminal_spec.kind == "udt":
                     # Methods may return ``self`` or another UDT-typed
@@ -6845,12 +7120,32 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return result_type
 
     def _visit_FuncCall(self, node: FuncCall) -> PineType:
+        if self._pine_version == 6 and not self._in_v5_library_definition(node):
+            self._parameter_qualifiers.check_builtin(node)
+        from ..drawing_all import drawing_all_call, DRAWING_ALL_READS
+        live_read = drawing_all_call(node)
+        if (live_read is not None and live_read[0] != "polyline"
+                and live_read[1] in DRAWING_ALL_READS):
+            for argument in (*live_read[3].args, *live_read[3].kwargs.values()):
+                self._visit(argument)
+            return PineType.INT if live_read[1] == "size" else PineType.FLOAT
         # Determine what is being called
         callee = node.callee
 
         if isinstance(callee, MemberAccess):
             obj = callee.object
             member = callee.member
+            if (self._pine_version == 6
+                    and not self._in_v5_library_definition(node)
+                    and isinstance(obj, Identifier) and obj.name == "array"
+                    and self._value_bindings.declaration_bindings.get(id(obj)) is None
+                    and member == "from" and node.kwargs):
+                from ..pine_spelling import expr_start
+                self._error(
+                    "Functions that accept a variable number of arguments "
+                    "cannot accept keyword arguments.",
+                    expr_start(next(iter(node.kwargs.values()))).loc or node.loc,
+                )
             self._check_udt_constructor_bool_na(node)
 
             # ta.* calls
@@ -6960,6 +7255,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # codegen can emit the parameter as a scalar double.
             receiver_spec = self._type_spec_from_expr(obj)
             receiver_type_name = method_receiver_type_name(receiver_spec)
+            primitive_type = PineType.UNKNOWN
             if receiver_spec is None and self._method_signatures:
                 # Record exact scalar expression bindings for request payload
                 # substitution without changing ordinary method return/state
@@ -6983,6 +7279,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     method_key = f"{primitive_type.value}.{member}"
                     if method_key in self._method_signatures:
                         self._bind_typed_method_call(method_key, node)
+            if (receiver_type_name is None and primitive_type == PineType.UNKNOWN
+                    and not (isinstance(obj, Identifier)
+                             and obj.name in _BUILTIN_NAMESPACE_NAMES
+                             and self._symbols.resolve(obj.name) is None)):
+                candidates = {key for key in self._method_signatures
+                              if key.rsplit(".", 1)[-1] == member}
+                if candidates:
+                    self._session_unresolved_method_calls.setdefault(
+                        id(node), set()).update(candidates)
             if receiver_type_name is not None:
                 method_key = f"{receiver_type_name}.{member}"
                 signature = self._method_signatures.get(method_key)
@@ -7278,6 +7583,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     )
                 return self._handle_user_func_call(func_name, node)
 
+            # A typed user method called in function syntax is the member
+            # call: ``pair(holder, x)`` is ``holder.pair(x)``.
+            if (self._method_signatures
+                    and self._rewrite_function_syntax_method_call(node)):
+                return self._visit_FuncCall(node)
+
             # Built-in functions we don't specifically handle
             # Visit args for side effects
             for arg in node.args:
@@ -7475,6 +7786,96 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             raise AssertionError("unreachable") from exc
         self._method_call_bindings[cache_key] = bound
         return bound
+
+    def _receiver_method_key(self, receiver: ASTNode, name: str) -> str | None:
+        """The key of the typed method ``name`` of ``receiver``'s type, if any.
+
+        Resolves the receiver the way the member call does, without visiting
+        it: a user type, a collection, or a primitive family.
+        """
+        spec = self._type_spec_from_expr(receiver)
+        type_name = method_receiver_type_name(spec)
+        if type_name is None and spec is None:
+            receiver_types: dict[str, PineType] = {}
+            for child, _depth in iter_ast_nodes(receiver):
+                if isinstance(child, Identifier):
+                    sym = self._symbols.resolve(child.name)
+                    if sym is not None and (
+                        sym.type_spec is None or sym.type_spec.kind == "primitive"
+                    ):
+                        receiver_types[child.name] = sym.pine_type
+            primitive = self._callsite_primitive_expr_type(receiver, receiver_types)
+            if primitive in {
+                PineType.INT, PineType.FLOAT, PineType.BOOL,
+                PineType.STRING, PineType.COLOR,
+            }:
+                type_name = primitive.value
+        if type_name is None:
+            return None
+        key = f"{type_name}.{name}"
+        return key if key in self._method_signatures else None
+
+    def _rewrite_function_syntax_method_call(self, node: FuncCall) -> bool:
+        """Rewrite ``m(recv, ...)`` / ``m(self=recv, ...)`` to ``recv.m(...)``.
+
+        Pine calls a typed method in function syntax too. The receiver is the
+        first positional argument, or the argument named like the first
+        parameter the method declares. The call is rewritten once, here,
+        where the receiver's type is known, so every later stage (the method
+        binding, the call and tuple emitters) sees the one member form. A
+        name that no typed method of the receiver's type bears is left alone.
+
+        The member form evaluates its receiver first. A receiver written
+        after other arguments is therefore rewritten only when no argument
+        of the call calls a function, where the order cannot be seen.
+        """
+        callee = node.callee
+        name = callee.name
+        if self._symbols.resolve(name) is not None:
+            return False
+        receiver: ASTNode | None = None
+        rest_args = list(node.args)
+        rest_kwargs = dict(node.kwargs)
+        receiver_first = True
+        if node.args:
+            receiver = rest_args.pop(0)
+            if self._receiver_method_key(receiver, name) is None:
+                return False
+        else:
+            for key, signature in self._method_signatures.items():
+                declaration = signature.declaration
+                if (key.rsplit(".", 1)[-1] != name or declaration is None
+                        or not declaration.params):
+                    continue
+                keyword = declaration.params[0]
+                candidate = node.kwargs.get(keyword)
+                if candidate is None or self._receiver_method_key(
+                        candidate, name) != key:
+                    continue
+                receiver = candidate
+                receiver_first = next(iter(node.kwargs)) == keyword
+                del rest_kwargs[keyword]
+                break
+            if receiver is None:
+                return False
+        if not receiver_first and any(
+            isinstance(child, FuncCall)
+            for actual in (receiver, *rest_args, *rest_kwargs.values())
+            for child, _depth in iter_ast_nodes(actual)
+        ):
+            return False
+        member = MemberAccess(object=receiver, member=name)
+        member.loc = callee.loc
+        node.callee = member
+        node.args = rest_args
+        node.kwargs = rest_kwargs
+        notes = node.annotations or {}
+        order = notes.get("call_arg_order")
+        if isinstance(order, ArgOrder):
+            node.annotations = dict(notes, call_arg_order=ArgOrder(
+                actual for actual in order if actual is not receiver
+            ))
+        return True
 
     def _record_deferred_param_call_edge(
         self,
@@ -7899,6 +8300,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             self._series_decl_bindings.add(
                                 (decl_node_id, binding_name)
                             )
+                            # Arithmetic and scalar builtin initializers can
+                            # leave Symbol.type_spec unset. The receiver query
+                            # also resolves their inferred scalar PineType.
+                            if (object_spec is not None
+                                    and object_spec.kind == "primitive"):
+                                self._primitive_history_declarations.add(
+                                    (decl_node_id, binding_name)
+                                )
                         global_sym = self._symbols.global_scope.symbols.get(name)
                         shadows_map_state = (
                             sym.scope != "global"
@@ -8144,6 +8553,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             node.annotations = {
                 **(node.annotations or {}), "tuple_builtin_binding": True,
             }
+        elif (id(node) not in self._identifier_binding_scopes
+                and node.name in BUILTIN_VARS
+                and node.name not in BAR_FIELDS
+                and getattr(sym, "_pf_decl_node_id", None) is not None
+                and (block_owner is None or any(
+                    id(body) == block_owner for body in self._block_node_stack
+                ))):
+            # A script variable named like a builtin variable (``float second
+            # = na``): this read, while its declaration is in scope, is the
+            # user's, not the builtin's. Retained like the tuple form above.
+            node.annotations = {
+                **(node.annotations or {}), "builtin_shadow_binding": True,
+            }
         # Later type queries can revisit a read after its source scope ended.
         # Validate only its first visit, while lexical ownership is live.
         if (self._pine_version == 6
@@ -8178,6 +8600,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.FLOAT
 
     def _visit_MemberAccess(self, node: MemberAccess) -> PineType:
+        from ..drawing_all import drawing_all_kind
+        if drawing_all_kind(node) not in {None, "polyline"}:
+            # Collections use TypeSpec for their shape; PineType stays scalar.
+            return PineType.FLOAT
         # Handle specific namespaces
         if isinstance(node.object, Identifier):
             ns = node.object.name
@@ -8430,6 +8856,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     return PineType.FLOAT  # profit, entry_price, etc.
                 if sub == "commission":
                     return PineType.INT  # strategy.commission.percent, etc.
+                if sub == "direction":
+                    direction_type = sigs.get_variable_type("strategy.direction", node.member)
+                    if direction_type != PineType.UNKNOWN:
+                        return direction_type
                 if sub in ("oca", "direction", "risk"):
                     return PineType.INT
             return PineType.INT
@@ -8463,7 +8893,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.COLOR
 
     def _visit_TupleLiteral(self, node: TupleLiteral) -> PineType:
-        self._tuple_element_types_by_node[id(node)] = tuple(
+        element_types = tuple(
             self._visit(elem) for elem in node.elements
         )
+        self._tuple_element_types_by_node[id(node)] = element_types
+        node.annotations = {
+            **(node.annotations or {}),
+            "pf_tuple_element_types": element_types,
+        }
         return PineType.FLOAT

@@ -100,6 +100,8 @@ def test_epoch_storage_matches_control_on_every_bar(outcomes, name):
     # A stored/returned timestamp equals its source exactly, so every traced ok is 1.
     subject = ok(outcomes, name)
     control = ok(outcomes, name + "_control")
+    assert subject.traces, f"{name}: subject produced no trace runs"
+    assert control.traces, f"{name}: control produced no trace runs"
     assert_same_runs(subject, control)
     for records in subject.traces.values():
         values = [record["value"] for record in records if record["name"] == "ok"]

@@ -28,6 +28,9 @@ from tests._e2e import (
     transpile_json,
 )
 from tests._security_tapes import END_MS, START_MS, mismatches, source, tape_exits, tape_feed
+from tests._numeric_expected import (
+    integer_arithmetic, integer_store, integer_to_double, require_numeric_hunk,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "security_ltf_tv"
 NAME = "w9sec_ltf_computed_tf"
@@ -130,7 +133,12 @@ sec := 60
 plot(array.size(a))
 '''
     legacy = reference_codegen(PRE_LANE)
-    for i, pine in enumerate((helper, after)):
+    cases = (
+        (helper, (("((double)(sec) / (double)(60))",
+                   integer_arithmetic("sec", "/", "60")),)),
+        (after, ()),
+    )
+    for i, (pine, replacements) in enumerate(cases):
         result = transpile_full(pine)
         configure = _configure(result["cpp"])
         assert "decltype(this->sec)" not in configure
@@ -143,7 +151,12 @@ plot(array.size(a))
         path = tmp_path / f"s{i}.pine"
         path.write_text(pine, encoding="utf-8")
         # Registered as every earlier build registered it.
-        assert configure == _configure(transpile_json(path, legacy)["cpp"])
+        # The helper leaves an integer member read; the later literal write
+        # is already expanded to a non-missing constant in both builds.
+        pinned = configure
+        for previous, expected in replacements:
+            pinned = require_numeric_hunk(pinned, previous, expected)
+        assert pinned == _configure(transpile_json(path, legacy)["cpp"])
 
 
 def test_a_global_built_from_a_reassigned_one_is_computed_at_its_declaration():
@@ -160,7 +173,10 @@ v = request.security(syminfo.tickerid, str.tostring(snap), close)
 plot(v)
 ''')
     configure = _configure(result["cpp"])
-    assert configure.index("snap = (mins * 2);") < configure.index("mins = (mins * 4);")
+    # The inferred snapshot member is double; the reassigned member is int.
+    snap = integer_to_double(integer_arithmetic("mins", "*", "2"))
+    later = integer_store(integer_arithmetic("mins", "*", "4"))
+    assert configure.index(f"snap = {snap};") < configure.index(f"mins = {later};")
     assert "pine_str_tostring_tv(snap," in configure
 
 
@@ -180,7 +196,7 @@ plot(v + w + close.htf())
     configure = _configure(result["cpp"])
     assert 'tf = std::string("240");' in configure
     assert 'mins = get_input_int("Minutes", 60);' in configure
-    assert "mins = (mins * 2);" in configure
+    assert f"mins = {integer_store(integer_arithmetic('mins', '*', '2'))};" in configure
     assert not any("reassigns" in d.message for d in result["diagnostics"])
 
 

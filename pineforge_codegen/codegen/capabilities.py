@@ -183,6 +183,10 @@ def capabilities_documents(emitter) -> tuple[str, str]:
     confirmed_requests = []
     lowering_sites = {site["sec_id"]: site for site in emitter._security_eval_info}
     for site in emitter._security_calls:
+        if site.get("dead"):
+            # An unreached request keeps its inert registration, but nothing ever evaluates it:
+            # it is not an execution requirement, and its formal sym/tf/expr are not unresolved facts.
+            continue
         lowering = lowering_sites[site["sec_id"]]
         symbol_node = site.get("symbol_node")
         if site.get("is_lower_tf_array"):

@@ -144,6 +144,135 @@ def test_uncatalogued_text_keeps_a_code():
     assert diagnostic.args == {"message": "boom"}
 
 
+@pytest.mark.parametrize("source, source_sha256, line", [
+    pytest.param(
+        '//@version=6\n'
+        'strategy("Series selected lookahead boundary", initial_capital=100000000, currency=currency.NONE, pyramiding=0, process_orders_on_close=true)\n'
+        'selectedMode = close > open ? barmerge.lookahead_on : barmerge.lookahead_off\n'
+        'requestedValue = request.security(syminfo.tickerid, "D", close[1], lookahead=selectedMode)\n'
+        'plot(requestedValue, "Requested")\n'
+        '\n'
+        'captureValue = requestedValue\n'
+        'if strategy.position_size != 0\n'
+        '    strategy.close("V")\n'
+        'if not na(captureValue) and captureValue > 0 and (na(captureValue[1]) or captureValue != captureValue[1])\n'
+        '    strategy.entry("V", strategy.long, qty=captureValue)\n',
+        "4ce4c3d034ef4f8fb8bd64c23fbe1e4a5e131b5288cf100f5280c8b3451e87bc",
+        4, id="series"),
+    pytest.param(
+        '//@version=6\n'
+        'strategy("Mutable selected lookahead boundary", initial_capital=100000000, currency=currency.NONE, pyramiding=0, process_orders_on_close=true)\n'
+        'var chooseOn = false\n'
+        'chooseOn := not chooseOn\n'
+        'selectedMode = chooseOn ? barmerge.lookahead_on : barmerge.lookahead_off\n'
+        'requestedValue = request.security(syminfo.tickerid, "D", close[1], lookahead=selectedMode)\n'
+        'plot(requestedValue, "Requested")\n'
+        '\n'
+        'captureValue = requestedValue\n'
+        'if strategy.position_size != 0\n'
+        '    strategy.close("V")\n'
+        'if not na(captureValue) and captureValue > 0 and (na(captureValue[1]) or captureValue != captureValue[1])\n'
+        '    strategy.entry("V", strategy.long, qty=captureValue)\n',
+        "78bdd0a75819dc94ab627c31a7bd044a4f2ac81810710b24270a3708b01c9b2b",
+        6, id="mutable"),
+])
+def test_lookahead_refusals_have_catalog_code_and_location(source, source_sha256, line):
+    assert hashlib.sha256(source.encode("utf-8")).hexdigest() == source_sha256
+    with pytest.raises(CompileError) as refused:
+        transpile(source, filename="lookahead.pine")
+    errors = [d for d in refused.value.diagnostics if d.level == Level.ERROR]
+    assert len(errors) == 1
+    diagnostic = errors[0]
+    assert diagnostic.code == "PF-E1085"
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.message == (
+        "request.security lookahead must be barmerge.lookahead_on or barmerge.lookahead_off.")
+    assert diagnostic.hint == (
+        "Use barmerge.lookahead_* constants selected by values fixed before the first bar.")
+    assert isinstance(diagnostic.location, SourceLocation)
+    assert diagnostic.location.file == "lookahead.pine"
+    assert (diagnostic.location.line, diagnostic.location.col) == (line, 78)
+    assert diagnostic.args == {}
+    _assert_coded(diagnostic, "lookahead.pine")
+
+
+def test_lookahead_switch_arm_warning_renders_from_catalog():
+    from pineforge_codegen.lexer import Lexer
+    from pineforge_codegen.parser import Parser
+    from pineforge_codegen.support_checker import check_support
+
+    source = (
+        '//@version=6\nstrategy("Lookahead warning")\n'
+        'selectedMode = close > open ? barmerge.lookahead_on : barmerge.lookahead_off\n'
+        'requestedValue = switch 1\n'
+        '    0 => request.security(syminfo.tickerid, "D", close[1], lookahead=selectedMode)\n'
+        '    => close\n')
+    tokens = Lexer(source, filename="lookahead.pine").tokenize()
+    program = Parser(tokens, source=source, filename="lookahead.pine").parse()
+    diagnostics = check_support(program, filename="lookahead.pine")
+    message = "request.security lookahead must be barmerge.lookahead_on or barmerge.lookahead_off."
+    selected = [d for d in diagnostics if d.message == message]
+    assert len(selected) == 1
+    diagnostic = selected[0]
+    assert diagnostic.code == "PF-W1085"
+    assert diagnostic.level == Level.WARNING
+    assert diagnostic.hint == (
+        "Use barmerge.lookahead_* constants selected by values fixed before the first bar.")
+    assert diagnostic.args == {}
+    assert isinstance(diagnostic.location, SourceLocation)
+    loc = diagnostic.location
+    assert source.splitlines()[loc.line - 1][loc.col - 1:].startswith("selectedMode")
+    assert diagnostic.user_message == (
+        "request.security lookahead needs an immutable simple or input-selected enum. "
+        "In a switch arm PineForge only warns and keeps the arm''s lowering.")
+    _assert_coded(diagnostic, "lookahead.pine")
+
+
+@pytest.mark.parametrize("declarations, lookahead, warns", [
+    pytest.param("", "barmerge.lookahead_off", False, id="literal-off"),
+    pytest.param("", "barmerge.lookahead_on", True, id="literal-on"),
+    pytest.param("selectedMode = barmerge.lookahead_off\n", "selectedMode", False,
+                 id="immutable-alias"),
+    pytest.param(
+        'selectedMode = syminfo.currency == "USD" ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+        "selectedMode", True, id="simple-selection"),
+    pytest.param(
+        'chooseOn = input.bool(true, "Look ahead")\n'
+        'selectedMode = chooseOn ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+        "selectedMode", True, id="input-true"),
+    pytest.param(
+        'chooseOn = input.bool(false, "Look ahead")\n'
+        'selectedMode = chooseOn ? barmerge.lookahead_on : barmerge.lookahead_off\n',
+        "selectedMode", True, id="input-false"),
+])
+def test_fixed_lookahead_values_keep_timing_diagnostic(declarations, lookahead, warns):
+    source = (
+        '//@version=6\nstrategy("Fixed lookahead")\n' + declarations
+        + 'requestedValue = request.security(syminfo.tickerid, "D", close[1], lookahead='
+        + lookahead + ')\n'
+        + 'if requestedValue > close\n    strategy.entry("L", strategy.long)\n')
+    out = transpile_full(source, filename="lookahead.pine")
+    assert out["cpp"]
+    diagnostics = out["diagnostics"]
+    assert not any(d.level == Level.ERROR for d in diagnostics)
+    assert not any(d.code in {"PF-E1085", "PF-W1085"} for d in diagnostics)
+    timing = [d for d in diagnostics if d.code == "PF-W1524"]
+    assert len(timing) == int(warns)
+    for diagnostic in timing:
+        assert diagnostic.level == Level.WARNING
+        assert diagnostic.message == (
+            "request.security lookahead_on changes HTF timing: the completed "
+            "higher-timeframe value is exposed from the bucket's first chart "
+            "bar. PineForge emits this (engine-supported) but results differ "
+            "from lookahead_off and, with a 0-offset HTF expression, repaint "
+            "future data.")
+        assert diagnostic.hint == (
+            "The safe non-repainting form pairs lookahead_on with a [1] offset "
+            "(e.g. close[1]) to read only completed prior HTF bars.")
+    for diagnostic in diagnostics:
+        _assert_coded(diagnostic, "lookahead.pine")
+
+
 def test_number_arguments_are_numbers():
     with pytest.raises(CompileError) as err:
         transpile("//@version=6\nstrategy('t')\nplot(close)\n" + "x = " + "(" * 600 + "1" + ")" * 600)
