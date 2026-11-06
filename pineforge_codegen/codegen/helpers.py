@@ -282,6 +282,7 @@ CPP_STANDARD_MACROS = frozenset("""
     M_E M_PI M_LOG2E M_LOG10E M_LN2 M_LN10 M_PI_2 M_PI_4
     M_1_PI M_2_PI M_2_SQRTPI M_SQRT2 M_SQRT1_2
     PINEFORGE_HAS_NATIVE_LOWERING_V1 PINEFORGE_HAS_NATIVE_LIVE_V1
+    PINEFORGE_HAS_PINE_METRICS_PLAIN_ADAPTER_V1
     PINEFORGE_HAS_AUX_SECURITY_FEED_V1 PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1
     PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1
     PINEFORGE_HAS_RUN_FAILURE_CODES_V1
@@ -389,7 +390,10 @@ CPP_EMITTER_NAMES = frozenset("""
     PineGenericMatrix PineStrategyConfig PineStrategyHost StrategyOverrides
     SymInfo ReportC MagnifierDistribution ChartPoint Line Box Label Linefill
     std pineforge ta math report report_sink report_sequence
-    source native_calendar RunFailureCode
+    source native_calendar native_module RunFailureCode
+    MetricsPlainDeclarationV1 MetricsPlainInputsV1 MetricsPlainHostV1
+    metrics_plain_declaration_v1 metrics_only_capability_v1
+    _pf_metrics_plain_manifest_v1 pf_bar_t pf_report_t
     pine_color QtyType CommissionType XLoc YLoc RunFailureInfo
     normalize_timezone_for_posix
     on_bar on_source_bar prepare_script_run configure_pine_strategy
@@ -400,6 +404,7 @@ CPP_EMITTER_NAMES = frozenset("""
     strategy_confirmed_bar_api_version strategy_confirmed_bar_receipt
     strategy_order_shapes_api_version strategy_order_shapes_receipt
     strategy_id_sites_api_version strategy_id_sites_receipt
+    strategy_metrics_only_capability_v1
     strategy_settings_api_version strategy_get_effective_settings
     strategy_create strategy_create_checked strategy_free report_free
     run_backtest run_backtest_full run_backtest_full_checked
