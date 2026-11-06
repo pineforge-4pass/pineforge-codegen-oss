@@ -5736,7 +5736,9 @@ class TypeInferer:
         every value arm is emitted as an integer (``int64_t`` when one is wide,
         else ``int``), or ``double`` when an arm is emitted as a double or is not
         numeric (a bare ``na`` among them). The type inference is not the
-        emission here: ``int(na)`` is inferred ``double`` and emitted ``int``."""
+        emission here: a selection with an ``int(na)`` arm is inferred ``double``
+        (a nullable selection keeps a floating na) while its conditional is
+        emitted as an integer."""
         arms = []
         pending = [node]
         while pending:

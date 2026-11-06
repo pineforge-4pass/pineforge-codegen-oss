@@ -33,7 +33,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
   holds the result of such an expression is `int64_t`, and a function
   parameter that receives one follows. A 32-bit integer `na` (`int(na)`,
   `bar_index`, a narrow input) that meets one of them in a selection arm, a
-  store or a `request.security` payload stays `na` instead of becoming the
+  position of a tuple-valued selection, a store or a `request.security`
+  payload stays `na` instead of becoming the
   number -2147483648. This changes generated C++ for scripts that use these
   forms: regenerate and relink affected strategies.
 - Repeated explicit input titles now have separate override keys: the first
