@@ -118,9 +118,10 @@ class TaSiteHelper:
         "valuewhen": frozenset({2}),
     }
 
-    def _ta_compute_arg_cpp(self, ta_name: str, position: int, node) -> str:
+    def _ta_compute_arg_cpp(self, ta_name: str, position: int, node,
+                            render=None) -> str:
         """Render a TA value in its numeric or boolean destination family."""
-        rendered = self._visit_expr(node)
+        rendered = (render or self._visit_expr)(node)
         if position in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()):
             return self._coerce_bool_expr(rendered, node)
         if position in self._TA_INT_COMPUTE_ARGS.get(ta_name, ()):
@@ -1433,6 +1434,9 @@ class TaSiteHelper:
     # * series, for ta.highest / ta.lowest / ta.highestbars / ta.lowestbars:
     #   re-windowed on every call -- ``pineforge::source::Series*``, the length
     #   passed per call.
+    # * series, for ta.percentile_nearest_rank: each call appends to its own
+    #   buffer and passes source, length and percentage to
+    #   ``pineforge::source::SeriesPercentileNearestRank``.
     # * ta.supertrend: the factor (series or simple) of the first execution is
     #   the run's -- ``pineforge::source::PineSupertrend``.
     #
@@ -1446,20 +1450,21 @@ class TaSiteHelper:
     # arguments those literals bring to the constructor stay here
     # (``_ta_arg_takes_plan``).
 
-    # The ta.* functions with a RECORDED TradingView result that a series
-    # length compiles: their refusal names the Pine function and says that
-    # TradingView accepts the call. Every other function keeps the plain
-    # wording, which makes no claim about TradingView -- the functions in the
-    # list above, where TradingView refuses a series length as well, and the
-    # ones with no recorded result. Recorded results:
+    # The ta.* functions with a RECORDED TradingView result that still reach a
+    # refusal name the Pine function and say that TradingView accepts the call.
+    # Every other function keeps the plain wording, which makes no claim about
+    # TradingView -- the functions in the list above, where TradingView
+    # refuses a series length as well, and the ones with no recorded result.
+    # Recorded results:
     # * ta.sma: pine_ta_length.hpp, the engine's note on its TradingView
     #   compile probes, names it among the functions that declare a series
     #   length;
     # * ta.percentile_nearest_rank: issue #295 reports that a script with a
-    #   loop-counter length compiles on TradingView.
+    #   loop-counter length compiles on TradingView; it is lowered by the
+    #   dynamic plan below and therefore does not reach this refusal set.
     # A function joins this set only with its own recorded result.
     _TA_TV_ACCEPTS_SERIES_LENGTH = frozenset({
-        "sma", "percentile_nearest_rank",
+        "sma",
     })
 
     def _ta_tradingview_series_length_name(self, site: "TACallSite") -> str | None:
@@ -1484,6 +1489,9 @@ class TaSiteHelper:
         "highestbars": "pineforge::source::SeriesHighestBars",
         "lowestbars": "pineforge::source::SeriesLowestBars",
     }
+    _TA_SERIES_PERCENTILE_CLASS = (
+        "pineforge::source::SeriesPercentileNearestRank"
+    )
     # Pure str.* functions of simple arguments (a simple result).
     _SIMPLE_STR_FUNCS = frozenset({
         "upper", "lower", "contains", "startswith", "endswith", "length",
@@ -1503,8 +1511,9 @@ class TaSiteHelper:
     def _ta_dynamic_plan(self, site: "TACallSite") -> dict | None:
         """The lowering of a site with a constructor argument the constructor
         cannot take, or None (the ordinary constructor / runtime-reset path).
-        ``kind`` is ``first_call`` / ``series_extreme`` / ``supertrend``, or
-        ``refused`` (the constructor guard reports it)."""
+        ``kind`` is ``first_call`` / ``series_extreme`` /
+        ``series_percentile`` / ``supertrend``, or ``refused`` (the
+        constructor guard reports it)."""
         cache = self.__dict__.setdefault("_ta_dynamic_plan_cache", {})
         key = id(site)
         if key not in cache:
@@ -1638,7 +1647,9 @@ class TaSiteHelper:
         """The plan of a site whose ``refused`` constructor arguments have the
         context-free C++ ``simple`` (None: series)."""
         family = self._ta_site_function(site)
-        if family in self._TA_SERIES_EXTREME_CLASSES:
+        if family == "percentile_nearest_rank":
+            kind = "series_percentile" if simple[refused[0]] is None else "first_call"
+        elif family in self._TA_SERIES_EXTREME_CLASSES:
             kind = "first_call" if simple[refused[0]] is not None else "series_extreme"
         elif family == "supertrend":
             kind = "supertrend"
@@ -1833,6 +1844,8 @@ class TaSiteHelper:
             return site.class_name
         if plan["kind"] == "series_extreme":
             return self._TA_SERIES_EXTREME_CLASSES[plan["family"]]
+        if plan["kind"] == "series_percentile":
+            return self._TA_SERIES_PERCENTILE_CLASS
         if plan["kind"] == "supertrend":
             return "pineforge::source::PineSupertrend"
         return f"pineforge::source::FirstCallBound<{site.class_name}>"
@@ -1932,6 +1945,22 @@ class TaSiteHelper:
         if kind == "series_extreme":
             length = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
             return f"{base_args}, pineforge::source::ta_number({length})"
+        if kind == "series_percentile":
+            if len(site.compute_args) != 2:
+                raise AssertionError(
+                    "percentile_nearest_rank series site must have source and percentage"
+                )
+            length = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
+            source = self._ta_compute_arg_cpp(
+                "percentile_nearest_rank", 0, site.compute_args[0], render_node
+            )
+            percentage = self._ta_compute_arg_cpp(
+                "percentile_nearest_rank", 2, site.compute_args[1], render_node
+            )
+            return (
+                f"{source}, pineforge::source::ta_number({length}), "
+                f"{percentage}"
+            )
         if kind == "supertrend":
             factor = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
             period = self._ta_dynamic_ctor_arg(site, plan, 1, render_node)
