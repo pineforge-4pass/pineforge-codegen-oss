@@ -98,12 +98,16 @@ def test_a_product_that_can_leave_int32_is_computed_in_64_bits():
     assert "(static_cast<int64_t>(pine_bar_index()) * 7200000)" in cpp
     # The int slot holding such a value is 64-bit, and so is the result.
     # A parameter can be na, and so is the product then: a double the
-    # 64-bit slot narrows na-preserving.
+    # 64-bit slot narrows na-preserving (and range-checked, like the 32-bit
+    # form: a double outside int64_t reads na, not an undefined conversion).
     assert ("int64_t span = [&](){ auto _pf_v = ([&]() -> double { "
             "auto _pf_wide_l = (n); auto _pf_wide_r = (86400000); "
             "return (is_na(_pf_wide_l) || is_na(_pf_wide_r)) ? na<double>() : "
             "static_cast<double>((static_cast<int64_t>(_pf_wide_l) * _pf_wide_r)); "
-            "}()); return is_na(_pf_v) ? na<int64_t>() : (int64_t)_pf_v; }();") in cpp
+            "}()); if constexpr (std::is_floating_point_v<decltype(_pf_v)>) "
+            "return (_pf_v >= -9223372036854775808.0 && _pf_v < 9223372036854775808.0) "
+            "? (int64_t)_pf_v : na<int64_t>(); "
+            "else return is_na(_pf_v) ? na<int64_t>() : (int64_t)_pf_v; }();") in cpp
     assert "int64_t g(int n)" in cpp
     compile_cpp(cpp)
 

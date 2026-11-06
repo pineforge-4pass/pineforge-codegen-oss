@@ -211,8 +211,12 @@ def test_string_cast_bool():
 
 
 def test_int_cast_propagates_na():
+    # close is a float, so int(close) is the 64-bit cast (Pine's int is
+    # 64-bit); both branches of it keep na: a NaN (or a value outside int64_t)
+    # reads the integer na, and so does an integer na.
     cpp = _gen("i = int(close)\nplot(close)\n")
-    assert "is_na(_pf_v) ? na<int>() : (int)_pf_v" in cpp
+    assert "? (int64_t)_pf_v : na<int64_t>()" in cpp
+    assert "is_na(_pf_v) ? na<int64_t>() : (int64_t)_pf_v" in cpp
 
 
 # ---------------------------------------------------------------------------
