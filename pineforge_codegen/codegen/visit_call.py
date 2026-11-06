@@ -269,12 +269,35 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
     # below can read. Peel it off and fold it into an explicit offset (UTC/GMT
     # with an optional ±H[:MM] suffix; the bare word is +00:00).
     tzoff = None
-    m = re.search(r"\s+(?:UTC|GMT)([+-]\d{1,2})?(?::?(\d{2}))?$", txt, re.I)
+    word = r"\s+(?:UTC|GMT)(?:([+-])(\d{1,2})(?::?(\d{2}))?|\d{1,2})?$"
+    numeric = r"\s+[+-]\d{2}:?\d{2}$"
+    m = re.search(word, txt, re.I)
     if m:
         txt = txt[: m.start()].strip()
-        h = int(m.group(1) or 0)
-        mm = int(m.group(2) or 0)
-        tzoff = timedelta(hours=h, minutes=(mm if h >= 0 else -mm))
+        # A numeric offset written before the word is overridden by it: the
+        # last zone token decides.
+        n = re.search(numeric, txt)
+        if n:
+            txt = txt[: n.start()].strip()
+        sign, hours, minutes = m.groups()
+        if sign:
+            # A signed offset keeps its sign even with a zero hour
+            # (GMT-00:30); minutes of 60 or more are dropped and the hours
+            # kept (UTC+01:60). A number without a sign after the word is
+            # ignored (UTC30), as is no number at all.
+            mm = int(minutes or 0)
+            tzoff = timedelta(hours=int(hours), minutes=(mm if mm < 60 else 0))
+            if sign == "-":
+                tzoff = -tzoff
+        else:
+            tzoff = timedelta(0)
+    else:
+        # A zone word written before a trailing numeric offset ("UTC+2
+        # +0000") is overridden by it: the last zone token decides.
+        n = re.search(numeric, txt)
+        w = re.search(word, txt[: n.start()], re.I) if n else None
+        if w:
+            txt = txt[: w.start()] + txt[n.start():]
     dt = None
     try:
         dt = datetime.fromisoformat(txt)
