@@ -1,9 +1,9 @@
 """``int(x)`` of a floating value is a 64-bit integer, whatever its magnitude.
 
 TradingView's ``int`` is 64-bit: ``int(1.7e12)`` and ``int(math.floor(1.7e12))`` are
-1700000000000 (exported by a probe whose entry and close comments print the
-values), and a trade list built on ``int(math.floor(stamp / base)) % 1000`` with
-``stamp = 1706655600000.0`` encodes the digit chunks 1 | 706 | 655 | 600 | 0.
+1700000000000 (exported trade lists), and a trade list built on
+``int(math.floor(stamp / base)) % 1000`` with ``stamp = 1706655600000.0`` encodes the
+digit chunks 1 | 706 | 655 | 600 | 0.
 The generated C++ used to narrow a floating value outside the 32-bit range to the
 integer ``na`` (``-2147483648``), which then flowed into arithmetic as that number.
 
@@ -15,9 +15,12 @@ meaningful when it pins more than one level and runs on more than one architectu
 
 Where each expected number comes from is stated per group:
 
-* MEASURED  - exported by TradingView (the integer witness, the UTC+25 trade list and a
-  stored math.floor / ceil / round of +-1005000000000.75).
-* ARITHMETIC - what a 64-bit integer gives; no TradingView capture exists yet.
+* MEASURED  - exported by TradingView (the integer witness, the UTC+25 trade list, a
+  stored math.floor / ceil / round of +-1005000000000.75, and int() of a history read,
+  of builtin members and of a record field of a float beyond 32 bits).
+* ARITHMETIC - what a 64-bit integer gives; no TradingView capture covers the row itself
+  (a row that puts a measured value into a slot, or that reads a history offset, is
+  arithmetic about the slot or the offset, not a measurement of it).
 * DEFINED   - this implementation's choice for an input that does not fit 64 bits
   (``na``); not a TradingView measurement.
 """
@@ -90,26 +93,26 @@ ROWS = {
     ),
     # The receiving slot: a value held by an array, a function result, a parameter and a record field.
     "slot_array_element": (
-        "MEASURED",
+        "ARITHMETIC",
         "a = array.new<int>()\n"
         "array.push(a, int(1.7e12))\n"
         "o0 = array.get(a, 0)\n",
         [("o0", 1700000000000)],
     ),
     "slot_function_result": (
-        "MEASURED",
+        "ARITHMETIC",
         "big() => int(1.7e12)\n"
         "o0 = big()\n",
         [("o0", 1700000000000)],
     ),
     "slot_function_parameter": (
-        "MEASURED",
+        "ARITHMETIC",
         "twice(x) => x * 2\n"
         "o0 = twice(int(1.7e12))\n",
         [("o0", 3400000000000)],
     ),
     "slot_record_field": (
-        "MEASURED",
+        "ARITHMETIC",
         "type Box\n"
         "    int n\n"
         "b = Box.new(int(1.7e12))\n"
@@ -174,7 +177,7 @@ ROWS = {
         [("o0", 3), ("o1", -3), ("o2", 0), ("o3", 100), ("o4", 1005)],
     ),
     "na_stays_na": (
-        "MEASURED",
+        "ARITHMETIC",
         "z = 0.0 * bar_index\n"
         "o0 = na(int(na)) ? 1 : 0\n"
         "o1 = na(int(0.0 / (0.0 + z))) ? 1 : 0\n"
@@ -231,3 +234,94 @@ def test_a_variable_halved_through_int_translates_and_stays_32_bit():
     cpp = transpile(HEAD + "var x = 1000\nx := int(x / 2)\no0 = x\n")
     assert "? (int)_pf_v : na<int>()" in cpp
     assert "int64_t x" not in cpp
+
+
+# Shapes that carry a floating value without being a literal, an operator or a call: a history
+# read, a builtin member and a record field. A second bar is run for the history reads.
+# name -> (kind, Pine header, Pine body, [(output member, expected integer)], bars to run)
+SHAPE_HEAD = '//@version=6\nstrategy("int cast shapes", initial_capital = 3000000000)\n'
+
+SHAPE_ROWS = {
+    # MEASURED: the second bar reads the first bar's value of a float series (TradingView export: bar 1 of
+    # a comments-only probe prints hist = 1005000000000 and hist_expr = 2010000000001, and NaN on bar 0).
+    "history_read_user_series": (
+        "MEASURED",
+        HEAD,
+        "x = 1005000000000.75 + 0.0 * bar_index\n"
+        "o0 = int(x[1])\n"
+        "o1 = int(x[1] * 2)\n",
+        [("o0", 1005000000000), ("o1", 2010000000001)],
+        2,
+    ),
+    # ARITHMETIC: the driver's volume is 5.0e9 on both bars (a TradingView chart's volume cannot be set to it).
+    "history_read_builtin_series": (
+        "ARITHMETIC",
+        HEAD,
+        "o0 = int(volume[1])\n"
+        "o1 = int(volume[1] * 2)\n",
+        [("o0", 5000000000), ("o1", 10000000000)],
+        2,
+    ),
+    # MEASURED: builtin float members; the declared capital is 3.0e9 and no order has been placed on the first
+    # bar (TradingView export, bar 0: 3000000000, 6000000000 and 3000000000).
+    "member_initial_capital_and_equity": (
+        "MEASURED",
+        SHAPE_HEAD,
+        "o0 = int(strategy.initial_capital)\n"
+        "o1 = int(strategy.initial_capital * 2)\n"
+        "o2 = int(strategy.equity)\n",
+        [("o0", 3000000000), ("o1", 6000000000), ("o2", 3000000000)],
+        1,
+    ),
+    # MEASURED: a float field of a record (TradingView export: 1005000000000 and 2010000000001).
+    "record_field_float": (
+        "MEASURED",
+        HEAD,
+        "type Box\n"
+        "    float v\n"
+        "b = Box.new(1005000000000.75 + 0.0 * bar_index)\n"
+        "o0 = int(b.v)\n"
+        "o1 = int(b.v * 2)\n",
+        [("o0", 1005000000000), ("o1", 2010000000001)],
+        1,
+    ),
+}
+
+
+def _shape_driver(outputs, bars):
+    prints = " << \" \" ".join(f"<< static_cast<double>(strategy.{name})" for name, _ in outputs)
+    return rf"""
+#include <iomanip>
+#include <iostream>
+int main() {{
+    GeneratedStrategy strategy;
+    Bar series[2] = {{Bar{{100.0, 101.0, 99.0, 100.5, 5.0e9, 1700000000000LL}},
+                     Bar{{100.0, 101.0, 99.0, 100.5, 5.0e9, 1700000900000LL}}}};
+    strategy.run(series, {bars});
+    std::cout << std::fixed << std::setprecision(0) {prints} << "\n";
+}}
+"""
+
+
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+@pytest.mark.parametrize("row", sorted(SHAPE_ROWS))
+def test_int_of_a_float_shape_is_a_64_bit_integer(row: str, opt: str):
+    kind, head, body, expected, bars = SHAPE_ROWS[row]
+    cpp = transpile(head + body)
+    out = run_emitted_tu(cpp, _shape_driver(expected, bars), opt=opt,
+                         label=f"int cast shape {row} ({kind})")
+    assert out == " ".join(str(value) for _, value in expected) + "\n"
+
+
+@pytest.mark.parametrize("body", [
+    # An integer builtin member, an integer record field and a history read of an
+    # integer series are not floating: their casts keep the 32-bit form and slot.
+    "o0 = int(strategy.opentrades * 2)\n",
+    "type Box\n    int n\nb = Box.new(7)\no0 = int(b.n * 2)\n",
+    "n = input.int(7)\no0 = int(n[1] / 2)\n",
+    "o0 = int(bar_index[1] / 2)\n",
+])
+def test_integer_members_fields_and_history_keep_the_32_bit_cast(body):
+    cpp = transpile(HEAD + body)
+    assert "? (int)_pf_v : na<int>()" in cpp
+    assert "int64_t o0" not in cpp
