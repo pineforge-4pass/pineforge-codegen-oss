@@ -22,6 +22,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- `timestamp("...")` with a UTC or GMT zone word of 24 hours or more, for
+  example `UTC+24`, `GMT-24` or `UTC+25`, now translates instead of stopping
+  with an internal `ValueError`. As in TradingView, the zone word is plain
+  arithmetic on the date fields: the value is the fields read as UTC minus the
+  signed offset.
 - An affine chart loop proved endless is stopped with the loop-time error when
   its result reaches an effect. Omission is limited to an unused loop statement
   with no calls, whose writes have no readers except self-updates, a break
