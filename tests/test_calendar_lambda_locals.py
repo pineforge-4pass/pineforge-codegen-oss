@@ -220,7 +220,8 @@ def test_calendar_locals_survive_helper_local_bindings(name):
     )
     body = _evaluator(transpile(source))
     _assert_calendar_locals(body)  # Helper substitutions leave the calendar's own bindings intact.
-    assert "int _sec0_calendar_" in body  # The helper still has its requested-context local.
+    # The helper still has its requested-context local; int(close) is a 64-bit int.
+    assert "int64_t _sec0_calendar_" in body
 
 
 def test_calendar_locals_survive_helper_loop_counter_binding():
@@ -275,10 +276,21 @@ out = request.security(syminfo.tickerid, "60", timestamp(1970, 1, 2, t[1], _pf_t
     body = _evaluator(transpile(source))
     _assert_calendar_locals(body)
     # Hour, minute and second evaluate their distinct requested series before the local tm exists.
-    assert (
-        "int _hr = (_sec0_t[1]); int _min = (_sec0__pf_ts_mu[1]); "
-        "int _sc = (_sec0__pf_ts_mu_lock[1]); "
-    ) in body
+    # The three series hold int(float) values, which are int64_t, so each int argument reads its
+    # series through the na-preserving narrowing into the calendar's 32-bit int.
+    def read(series: str) -> str:
+        series = re.escape(series)
+        return (
+            rf"\((?:{series}"
+            rf"|\[&\]\(\)\{{ auto _pf_v = \({series}\); .*?\}}\(\))\)"
+        )
+
+    assert re.search(
+        "int _hr = " + read("_sec0_t[1]") + "; "
+        "int _min = " + read("_sec0__pf_ts_mu[1]") + "; "
+        "int _sc = " + read("_sec0__pf_ts_mu_lock[1]") + "; ",
+        body,
+    ), body
 
 
 class _RewriteHost(SecurityEmitter, NamingHelper):
