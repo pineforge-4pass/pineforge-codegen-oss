@@ -2772,9 +2772,7 @@ class SupportChecker:
             return (0, len(missing)), f"is missing its {noun} {listed}", None
         return None
 
-    def _check_builtin_arguments(
-        self, node: FuncCall, name: str, *, func=None, allow_switch_warning: bool = True,
-    ) -> bool:
+    def _check_builtin_arguments(self, node: FuncCall, name: str, *, func=None) -> bool:
         """Bind an ordinary builtin to its TradingView signatures.
 
         Registered bare builtins and unary math calls that bind are
