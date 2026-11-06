@@ -88,8 +88,18 @@ def test_invalid_dates_keep_the_located_parse_diagnostic(literal):
 
 
 @pytest.mark.parametrize("word", ["UTC", "GMT"])
-@pytest.mark.parametrize("suffix", ["+24:00", "-24:00"])
-def test_out_of_range_word_offsets_keep_the_existing_exception(word, suffix):
-    # Preserve the helper's timezone-construction failure, without a new bound.
-    with pytest.raises(ValueError):
-        _parse_pine_datestring_ms(f"2024-01-01 00:00 {word}{suffix}")
+@pytest.mark.parametrize("suffix, utc_fields", [
+    # UTC = written local time minus its signed offset, as for every row above.
+    ("+24:00", (2023, 12, 31, 0, 0, 0)),
+    ("-24:00", (2024, 1, 2, 0, 0, 0)),
+])
+def test_word_offsets_of_24_hours_are_plain_arithmetic(word, suffix, utc_fields):
+    # A zone word of 24 hours or more is plain arithmetic on the date fields, as
+    # in TradingView (its exported trade lists for UTC+24, GMT-24 and UTC+25;
+    # tests/test_timestamp_zone_offsets.py): the fields read as UTC minus the
+    # signed offset. The offset used to be built as a datetime.timezone, which
+    # refuses 24 hours or more, so these strings stopped the translator with a
+    # ValueError. The +-24:00 spelling is the same rule applied; the exported
+    # lists cover the spellings UTC+24 and GMT-24.
+    literal = f"2024-01-01 00:00 {word}{suffix}"
+    assert _parse_pine_datestring_ms(literal) == _utc_ms(utc_fields)
