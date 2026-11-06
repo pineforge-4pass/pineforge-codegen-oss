@@ -59,7 +59,8 @@ jobs:
   workflow-lint:
     needs: [admit]
     if: ${{ needs.admit.outputs.allowed == 'true' }}
-    runs-on: gke-8cpu-16gb-amd64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions: {contents: read}
     steps:
       - name: Check out the admitted head
@@ -75,7 +76,8 @@ jobs:
   package-files:
     needs: [admit]
     if: ${{ needs.admit.outputs.allowed == 'true' }}
-    runs-on: gke-8cpu-16gb-amd64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions: {contents: read}
     steps:
       - name: Check out the admitted head
@@ -100,14 +102,15 @@ jobs:
   pytest:
     needs: [admit]
     if: ${{ needs.admit.outputs.allowed == 'true' }}
-    runs-on: gke-8cpu-16gb-amd64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     permissions: {contents: read}
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     env:
-      PF_CI_LABELS: '["self-hosted","pf-ci","pf-ci-x64"]'
+      PF_CI_LABELS: '["ubuntu-24.04"]'
       PYTHONHASHSEED: "0"
     steps:
       - name: Check out the admitted head
@@ -128,10 +131,11 @@ jobs:
   differential:
     needs: [admit]
     if: ${{ needs.admit.outputs.allowed == 'true' }}
-    runs-on: gke-8cpu-16gb-amd64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions: {contents: read}
     env:
-      PF_CI_LABELS: '["self-hosted","pf-ci","pf-ci-x64"]'
+      PF_CI_LABELS: '["ubuntu-24.04"]'
       PYTHONHASHSEED: "0"
     steps:
       - name: Check out the admitted head
