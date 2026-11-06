@@ -2875,13 +2875,16 @@ class CallVisitor:
             # Pine int(na) → na (int form). Evaluate once, propagate na via
             # the engine's int sentinel instead of collapsing NaN to 0. Pine
             # int is 64-bit: int(time) keeps the epoch, so a wide argument
-            # (``_wide_int_provenance``) casts to int64_t.
+            # (``_wide_int_provenance``) casts to int64_t, and so does a
+            # floating value (``_int_cast_arg_is_floating``), whatever its
+            # magnitude: int(1.7e12) is 1700000000000.
             x = self._visit_expr(node.args[0])
             owner = self._func_info_map.get(
                 getattr(self, "_active_func_name", "") or "")
-            if self._expr_returns_wide_int(
-                    node.args[0], owner, set(),
-                    getattr(self, "_active_call_site_idx", None)):
+            if (self._int_cast_arg_is_floating(node.args[0], owner)
+                    or self._expr_returns_wide_int(
+                        node.args[0], owner, set(),
+                        getattr(self, "_active_call_site_idx", None))):
                 return na_preserving_int_cast(x, "int64_t")
             return na_preserving_int_cast(x)
         if func_name == "float" and namespace is None and node.args:

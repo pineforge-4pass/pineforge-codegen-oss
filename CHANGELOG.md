@@ -22,6 +22,17 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- `int(x)` of a floating value, and a stored `math.floor(x)`, `math.ceil(x)`
+  or `math.round(x)`, is a 64-bit integer whatever its magnitude, as in
+  TradingView: `int(1.7e12)`, `int(math.floor(1.7e12))` and
+  `v = math.floor(1.7e12)` are all 1700000000000. The generated C++ used to
+  read such a value outside the 32-bit range as the integer `na`
+  (-2147483648), which then flowed into arithmetic as that number. A value
+  that does not fit 64 bits, and a NaN, read `na` on every compiler and
+  architecture. A variable, function result, record field or int array that
+  holds the result of such an expression is `int64_t`, and a function
+  parameter that receives one follows. This changes generated C++ for scripts
+  that use these forms: regenerate and relink affected strategies.
 - `timestamp("...")` date strings with a `UTC` or `GMT` zone word now give
   TradingView's value for four forms that differed. A negative zone with a
   zero hour keeps its sign (`GMT-00:30`, `UTC-0:30`). Minutes of 60 or more

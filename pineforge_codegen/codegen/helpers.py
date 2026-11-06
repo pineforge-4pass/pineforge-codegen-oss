@@ -54,12 +54,25 @@ def na_preserving_int_cast(value_cpp: str, int_cpp_type: str = "int") -> str:
     (``fcvtzs``: saturation) disagreed on an epoch a missed provenance
     narrowed (W9-CG-EPOCH-INT64); ``na<int>()`` is the x86-64 answer, so
     Linux runs keep their bits.
+
+    The 64-bit form has the same guard: a floating value outside the range
+    of ``int64_t`` (and a NaN) reads ``na<int64_t>()`` instead of reaching the
+    undefined conversion, which resolves differently on x86-64 (the minimum
+    integer, the ``na`` sentinel) and on arm64 (saturation: a valid-looking
+    maximum). Pine's ``int`` is 64-bit, so ``int(1.7e12)`` is 1700000000000.
     """
     # Integer literals are proven non-``na``. Keep the historical explicit
     # cast for these tiny paths so a helper does not churn every matrix/color
     # call that passes a literal index or channel.
     if _INT_LITERAL_TEXT.fullmatch(value_cpp):
         return f"({int_cpp_type})({value_cpp})"
+    if int_cpp_type == "int64_t":
+        return (f"[&](){{ auto _pf_v = ({value_cpp}); "
+                f"if constexpr (std::is_floating_point_v<decltype(_pf_v)>) "
+                f"return (_pf_v >= -9223372036854775808.0 "
+                f"&& _pf_v < 9223372036854775808.0) "
+                f"? (int64_t)_pf_v : na<int64_t>(); "
+                f"else return is_na(_pf_v) ? na<int64_t>() : (int64_t)_pf_v; }}()")
     if int_cpp_type == "int":
         return (f"[&](){{ auto _pf_v = ({value_cpp}); "
                 f"if constexpr (std::is_floating_point_v<decltype(_pf_v)>) "

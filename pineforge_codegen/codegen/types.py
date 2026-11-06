@@ -3442,6 +3442,15 @@ class TypeInferer:
                         and (plan is None or id(receiver) not in plan.nodes)
                         and receiver.name in self._wide_int_array_names()):
                     return True
+            if self._is_int_valued_math_call(expr):
+                return True
+            if (namespace is None and func_name == "int" and expr.args
+                    and self._int_cast_arg_is_floating(expr.args[0], owner_info, seen)):
+                # The cast of a floating value is itself a 64-bit source
+                # (Pine's int is 64-bit whatever the magnitude), in the
+                # epoch-only mode too: an int array that stores one is
+                # ``std::vector<int64_t>``, like an array of timestamps.
+                return True
             if namespace is None and func_name in {
                 "int",
                 "float",
@@ -3862,6 +3871,115 @@ class TypeInferer:
     _DOUBLE_EMITTING_INT_CALLS = {
         ("math", "round"), ("math", "floor"), ("math", "ceil"),
     }
+
+    # What the argument of an explicit ``int(...)`` is made of when it is a
+    # floating value that can leave the 32-bit range. Pine's ``int`` is
+    # 64-bit (``int(1.7e12)`` is 1700000000000), so the cast of such a value
+    # is an ``int64_t`` and every slot it feeds follows (``_int_cast_arg_is_floating``).
+    _FLOAT_SERIES_BUILTINS = frozenset({
+        "open", "high", "low", "close", "volume", "hl2", "hlc3", "ohlc4", "hlcc4",
+    })
+    _FLOAT_RESULT_MATH = frozenset({
+        "floor", "ceil", "round", "sqrt", "pow", "exp", "log", "log10", "sin",
+        "cos", "tan", "asin", "acos", "atan", "avg", "sum", "random",
+        "round_to_mintick", "todegrees", "toradians",
+    })
+
+    def _is_int_valued_math_call(self, node) -> bool:
+        """``math.floor`` / ``ceil`` / ``round`` of one value: Pine types the
+        result ``int`` (64-bit), the lowering computes it as a ``double`` and
+        narrows it where it is stored (``_DOUBLE_EMITTING_INT_CALLS``). The
+        two-argument ``math.round(x, precision)`` is a float and is not one."""
+        if not isinstance(node, FuncCall):
+            return False
+        func_name, namespace = self._resolve_callee(node.callee)
+        return (namespace == "math" and func_name in ("floor", "ceil", "round")
+                and len(node.args) == 1 and not node.kwargs)
+
+    _FLOAT_RESULT_TA = frozenset({
+        "sma", "ema", "rma", "wma", "vwma", "swma", "alma", "hma", "linreg",
+        "rsi", "stdev", "variance", "dev", "atr", "tr", "highest", "lowest",
+        "mom", "roc", "cci", "mfi", "cmo", "wpr", "median", "vwap",
+    })
+
+    def _int_cast_arg_is_floating(self, node, owner_info=None, seen=None) -> bool:
+        """Whether ``node``, the argument of an explicit ``int(...)``, is a
+        floating value by its own shape or by the writes of the variable it
+        names.
+
+        Independent of the width analysis and of the declared slots (which
+        are decided from the cast's type), so the inference of the cast's
+        type and the emission of the cast agree: a float literal, a ``math``
+        function that returns a float (``floor`` / ``ceil`` / ``round`` are
+        ``int`` in Pine and ``double`` in the lowering), a float series
+        built-in, a float ``input``, a float ``ta`` function, ``float(...)``,
+        arithmetic, ternaries, unary signs, ``nz`` / ``fixnan`` /
+        ``math.abs`` / ``math.min`` / ``math.max`` that carry one of those,
+        and a user variable one of whose writes is such an expression (the
+        same declaration-and-writes lookup the width analysis uses; ``seen``
+        stops a variable that feeds itself). A ``/`` or ``%`` is floating
+        when an operand is, or is a wide integer (``time / 1``): the quotient
+        or remainder of two 32-bit integers fits 32 bits and keeps the 32-bit
+        cast. A function parameter is not resolved: it keeps the 32-bit cast.
+        """
+        # One visited set serves this query and the wide-integer queries it
+        # makes (their keys are disjoint), so a variable that feeds itself
+        # through ``int(x[1] / 2)`` ends the walk.
+        seen = set() if seen is None else seen
+        if isinstance(node, NumberLiteral):
+            return isinstance(node.value, float)
+        if isinstance(node, UnaryOp):
+            return (node.op in ("-", "+")
+                    and self._int_cast_arg_is_floating(node.operand, owner_info, seen))
+        if isinstance(node, BinOp):
+            if node.op in _BOOL_RESULT_BINOPS:
+                return False
+            if (self._int_cast_arg_is_floating(node.left, owner_info, seen)
+                    or self._int_cast_arg_is_floating(node.right, owner_info, seen)):
+                return True
+            # The provenance trail stops at ``/`` and ``%``, so a wide
+            # operand is asked about directly.
+            return (node.op in ("/", "%")
+                    and (self._expr_returns_wide_int(node.left, owner_info, seen)
+                         or self._expr_returns_wide_int(node.right, owner_info, seen)))
+        if isinstance(node, Ternary):
+            return (self._int_cast_arg_is_floating(node.true_val, owner_info, seen)
+                    or self._int_cast_arg_is_floating(node.false_val, owner_info, seen))
+        if isinstance(node, Identifier):
+            if (node.name in self._FLOAT_SERIES_BUILTINS
+                    and node.name not in self._known_vars
+                    and node.name not in getattr(self, "_current_func_param_types", {})):
+                return True
+            binding = self._int_value_binding(node, owner_info)
+            if binding is None:
+                return False
+            declaration, values = binding
+            seen = set() if seen is None else seen
+            key = ("float-cast", declaration)
+            if key in seen:
+                return False
+            seen.add(key)
+            return any(self._int_cast_arg_is_floating(value, lexical_owner, seen)
+                       for value, lexical_owner in values)
+        if isinstance(node, FuncCall):
+            func_name, namespace = self._resolve_callee(node.callee)
+            if namespace == "math":
+                if func_name in self._FLOAT_RESULT_MATH:
+                    return True
+                if func_name in ("abs", "min", "max"):
+                    return any(self._int_cast_arg_is_floating(arg, owner_info, seen)
+                               for arg in node.args)
+                return False
+            if namespace == "ta":
+                return func_name in self._FLOAT_RESULT_TA
+            if namespace == "input":
+                return func_name in ("float", "price", "source")
+            if namespace is None and func_name == "float":
+                return True
+            if namespace is None and func_name in ("nz", "fixnan"):
+                return any(self._int_cast_arg_is_floating(arg, owner_info, seen)
+                           for arg in node.args)
+        return False
 
     # Built-ins whose lowering is an integer-valued engine expression, in
     # either the bare-variable or the call form: ``pine_bar_index()`` and the
@@ -4957,6 +5075,20 @@ class TypeInferer:
             if func_name in ("time", "time_close") and namespace is None and node.args:
                 return "int64_t"
             if func_name == "timestamp" and namespace is None:
+                return "int64_t"
+            if self._is_int_valued_math_call(node):
+                # ``math.floor(x)`` and its kin are 64-bit ints in Pine: the
+                # slot that stores one is ``int64_t``, narrowed from the
+                # ``double`` the lowering computes with the range-checked cast.
+                return "int64_t"
+            if (func_name == "int" and namespace is None and node.args
+                    and self._int_cast_arg_is_floating(
+                        node.args[0],
+                        self._func_info_map.get(
+                            getattr(self, "_active_func_name", "") or ""))):
+                # Pine's int is 64-bit: the cast of a floating value is
+                # emitted as ``int64_t`` (visit_call), so the slots it feeds
+                # are inferred ``int64_t`` and never narrow it again.
                 return "int64_t"
             if func_name == "na":
                 return "bool"

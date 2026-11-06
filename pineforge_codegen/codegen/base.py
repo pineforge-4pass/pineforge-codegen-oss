@@ -5877,8 +5877,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     if cpp_type == "int" and self._is_int64_builtin_init(name):
                         cpp_type = "int64_t"
                     # An int that can hold TradingView's infinity
-                    # (``_nonfinite_int_names``) keeps its double.
-                    elif cpp_type == "int" and name in self._nonfinite_int_names():
+                    # (``_nonfinite_int_names``) keeps its double, whether the
+                    # integer family inferred for it is 32 or 64 bits: a stored
+                    # ``math.floor`` is ``int64_t`` and a 64-bit slot would turn
+                    # the infinity into na, which orders as na.
+                    elif (cpp_type in ("int", "int64_t")
+                          and name in self._nonfinite_int_names()):
                         cpp_type = "double"
                 default = self._default_for_type(cpp_type)
                 lines.append(f"    {cpp_type} {safe} = {default};")
