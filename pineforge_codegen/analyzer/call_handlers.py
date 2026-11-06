@@ -1060,6 +1060,8 @@ class CallHandlers:
             self._visit(arg)
         for val in node.kwargs.values():
             self._visit(val)
+        if func_name == "default_entry_qty":
+            self._check_default_entry_qty_price(node)
         if func_name in ("convert_to_account", "convert_to_symbol", "default_entry_qty"):
             return PineType.FLOAT
         return PineType.VOID

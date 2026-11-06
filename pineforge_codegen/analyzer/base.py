@@ -4605,6 +4605,56 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             node.args[0].loc,
         )
 
+    @staticmethod
+    def _is_certainly_color(node: ASTNode) -> bool:
+        """A color literal, a ``color.*`` constant or a ``color.new`` /
+        ``color.rgb`` / ``color.from_gradient`` call."""
+        if isinstance(node, ColorLiteral):
+            return True
+        if isinstance(node, MemberAccess):
+            return isinstance(node.object, Identifier) and node.object.name == "color"
+        if isinstance(node, FuncCall) and isinstance(node.callee, MemberAccess):
+            callee = node.callee
+            return (isinstance(callee.object, Identifier) and callee.object.name == "color"
+                    and callee.member in ("new", "rgb", "from_gradient"))
+        return False
+
+    def _check_default_entry_qty_price(self, node: FuncCall) -> None:
+        """``strategy.default_entry_qty`` takes a numeric price; v6 refuses a
+        string, bool, color or collection. Only a type the syntax proves is
+        refused, never one the analyzer merely inferred."""
+        if self._pine_version != 6 or self._in_v5_library_definition(node):
+            return
+        price = node.args[0] if node.args else node.kwargs.get("fill_price")
+        if price is None:
+            return
+        if self._is_certainly_string(price):
+            self._error(
+                "Cannot call 'strategy.default_entry_qty' with a string argument: "
+                "its fill_price must be a numeric series.",
+                price.loc,
+            )
+        elif self._certain_scalar_type(price) == PineType.BOOL:
+            self._error(
+                "Cannot call 'strategy.default_entry_qty' with a bool argument: "
+                "its fill_price must be a numeric series.",
+                price.loc,
+            )
+        elif self._is_certainly_color(price):
+            self._error(
+                "Cannot call 'strategy.default_entry_qty' with a color argument: "
+                "its fill_price must be a numeric series.",
+                price.loc,
+            )
+        else:
+            spec = self._type_spec_from_expr(price)
+            if spec is not None and spec.kind in ("array", "map", "matrix"):
+                self._error(
+                    "Cannot call 'strategy.default_entry_qty' with a collection argument: "
+                    "its fill_price must be a numeric series.",
+                    price.loc,
+                )
+
     def _check_reserved_definition_name(
         self, node: MethodDef,
     ) -> None:

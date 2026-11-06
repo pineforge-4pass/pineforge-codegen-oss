@@ -1860,6 +1860,17 @@ class SupportChecker:
             self._visit_children(node)
             return
 
+        if ns == "strategy" and name == "default_entry_qty":
+            # One numeric price, as TradingView binds it: a call that binds
+            # to nothing (no price, a second price, an unknown or repeated
+            # argument name) has no value to lower. A registered namespace
+            # signature must bind even in a non-default switch arm
+            # (``_check_builtin_arguments``), so the refusal stays an error there.
+            if not self._check_builtin_arguments(
+                    node, full, func=sigs.STRATEGY_FUNCTIONS[name]):
+                self._visit_children(node)
+                return
+
         if ns == "strategy" and name == "exit":
             has_price_param = any(
                 self._param_is_provided(node, "strategy", "exit", param)

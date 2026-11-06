@@ -3760,13 +3760,13 @@ class CallVisitor:
             v = self._visit_float_arg(p.get("value"), "0.0")
             return f"({v})"
         if func_name == "default_entry_qty":
-            self._codegen_error(
-                node,
-                "TradingView accepts strategy.default_entry_qty(); PineForge "
-                "does not support it yet: it requires a default-quantity "
-                "query on the engine strategy host.",
-                hint="Use the default quantity of strategy.entry() by omitting qty.",
-            )
+            # The host's query of the default order size at a price. The support
+            # checker has bound exactly one price, so none is invented here.
+            p = self._resolve_func_args(node, "strategy.default_entry_qty")
+            price = p.get("fill_price")
+            if price is None:
+                raise AssertionError("strategy.default_entry_qty reached the emitter without its price")
+            return f"default_entry_qty({self._visit_expr(price)})"
 
         if func_name == "entry":
             p = self._resolve_func_args(node, "strategy.entry")
