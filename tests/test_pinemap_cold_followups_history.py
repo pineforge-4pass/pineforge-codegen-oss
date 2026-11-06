@@ -34,7 +34,7 @@ observed = wrapper(values=map.new<string, int>())
 strategy("UDT method map history")
 type Holder
     int marker
-method previous(Holder self, values) => values[1]
+method previous(Holder self, values) => self, values[1]
 var Holder holder = Holder.new(0)
 observed = holder.previous(map.new<string, int>())
 ''',

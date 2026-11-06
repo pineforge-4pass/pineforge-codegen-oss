@@ -21,6 +21,9 @@ from pineforge_codegen.symbols import TypeSpec
 from tests import _compile as compile_env
 from tests._e2e import reference_codegen, transpile_json
 from tests._for_float_step import assert_float_step_refused
+from tests._numeric_expected import (
+    integer_arithmetic, integer_store, require_numeric_hunk,
+)
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "for_counter_headers"
@@ -505,7 +508,32 @@ def test_integer_and_unmeasured_controls_keep_complete_frozen_cpp(name, tmp_path
     path.write_text(pine, encoding="utf-8")
     before = transpile_json(path, root=reference)
     assert before["ok"], before["diagnostics"]
-    assert transpile(pine) == before["cpp"]
+    cpp = transpile(pine)
+    # a925fb3a guards nullable integer operands; 2b13f9f keeps the
+    # intermediate sum wide until the existing integer storage boundary.
+    if name in {
+        "inferred_integer_write", "hinted_integer_write",
+        "literal_integer_write", "persistent_integer_write",
+        "local_integer_write", "callable_var_integer_write",
+        "callable_varip_integer_write", "loop_body_integer_write",
+    }:
+        cpp = require_numeric_hunk(
+            cpp, "s = (s + 1);",
+            f"s = {integer_store(integer_arithmetic('s', '+', '1'))};",
+        )
+        if name == "loop_body_integer_write":
+            cpp = require_numeric_hunk(
+                cpp, "total += s;",
+                f"total = {integer_arithmetic('total', '+', 's')};",
+            )
+    elif name in {"shadowed_callable_var", "shadowed_storage"}:
+        slot = "_pfv_1_s__measure" if name == "shadowed_callable_var" else "s"
+        cpp = require_numeric_hunk(
+            cpp,
+            f"{slot} = {integer_store(f'((double)({slot}) / (double)(2))')};",
+            f"{slot} = {integer_store(integer_arithmetic(slot, '/', '2'))};",
+        )
+    assert cpp == before["cpp"]
 
 
 def _parameter_loop_source(parameter: str) -> str:

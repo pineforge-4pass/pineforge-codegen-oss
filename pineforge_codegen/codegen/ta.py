@@ -113,13 +113,19 @@ class TaSiteHelper:
         "vwap_anchored": frozenset({1}),
         "vwap_anchored_bands": frozenset({1}),
     }
+    _TA_INT_COMPUTE_ARGS = {
+        "change": frozenset({1}),
+        "valuewhen": frozenset({2}),
+    }
 
     def _ta_compute_arg_cpp(self, ta_name: str, position: int, node) -> str:
-        """Render one TA compute argument with Pine bool truthiness."""
+        """Render a TA value in its numeric or boolean destination family."""
         rendered = self._visit_expr(node)
         if position in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()):
             return self._coerce_bool_expr(rendered, node)
-        return rendered
+        if position in self._TA_INT_COMPUTE_ARGS.get(ta_name, ()):
+            return rendered
+        return self._coerce_int_slot(rendered, node, "double")
 
     def _ta_compute_args_for_site(self, site: "TACallSite") -> str:
         """``_ta_compute_args_for_site_base`` plus, for a site whose length the
@@ -1344,23 +1350,22 @@ class TaSiteHelper:
         mutable globals get rebound to the security-context shadows."""
         ta_name = self._ta_name_from_site(site)
 
+        def visit_compute(arg, position):
+            rendered = self._build_security_expr(
+                sec_id, arg, None, ta_results,
+                security_mutable_names=security_mutable_names,
+                helper_binding_stack=helper_binding_stack,
+                emitted_lines=emitted_lines,
+            )
+            if position in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()):
+                return self._coerce_bool_expr(rendered, arg)
+            if position in self._TA_INT_COMPUTE_ARGS.get(ta_name, ()):
+                return rendered
+            return self._security_float_cpp(rendered, arg, helper_binding_stack)
+
         if site.class_name in ("_PFAnchoredVWAP", "_PFAnchoredVWAPBands"):
             explicit = [
-                self._coerce_bool_expr(
-                    self._build_security_expr(
-                        sec_id, a, None, ta_results,
-                        security_mutable_names=security_mutable_names,
-                        helper_binding_stack=helper_binding_stack,
-                        emitted_lines=emitted_lines,
-                    ),
-                    a,
-                ) if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()) else
-                self._build_security_expr(
-                    sec_id, a, None, ta_results,
-                    security_mutable_names=security_mutable_names,
-                    helper_binding_stack=helper_binding_stack,
-                    emitted_lines=emitted_lines,
-                )
+                visit_compute(a, i)
                 for i, a in enumerate(site.compute_args)
             ]
             if len(explicit) < 2:
@@ -1372,21 +1377,7 @@ class TaSiteHelper:
 
         if site.class_name == "_PFPivotPointLevels":
             explicit = [
-                self._coerce_bool_expr(
-                    self._build_security_expr(
-                        sec_id, a, None, ta_results,
-                        security_mutable_names=security_mutable_names,
-                        helper_binding_stack=helper_binding_stack,
-                        emitted_lines=emitted_lines,
-                    ),
-                    a,
-                ) if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()) else
-                self._build_security_expr(
-                    sec_id, a, None, ta_results,
-                    security_mutable_names=security_mutable_names,
-                    helper_binding_stack=helper_binding_stack,
-                    emitted_lines=emitted_lines,
-                )
+                visit_compute(a, i)
                 for i, a in enumerate(site.compute_args)
             ]
             if len(explicit) < 3:
@@ -1400,30 +1391,7 @@ class TaSiteHelper:
             implicit = TA_IMPLICIT_COMPUTE_FULL[ta_name].replace("current_bar_.", "bar.")
             if site.compute_args:
                 explicit = ", ".join(
-                    (
-                        self._coerce_bool_expr(
-                            self._build_security_expr(
-                                sec_id,
-                                a,
-                                None,
-                                ta_results,
-                                security_mutable_names=security_mutable_names,
-                                helper_binding_stack=helper_binding_stack,
-                                emitted_lines=emitted_lines,
-                            ),
-                            a,
-                        )
-                        if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ())
-                        else self._build_security_expr(
-                            sec_id,
-                            a,
-                            None,
-                            ta_results,
-                            security_mutable_names=security_mutable_names,
-                            helper_binding_stack=helper_binding_stack,
-                            emitted_lines=emitted_lines,
-                        )
-                    )
+                    visit_compute(a, i)
                     for i, a in enumerate(site.compute_args)
                 )
                 if ta_name in self._TA_IMPLICIT_REPLACE:
@@ -1433,30 +1401,7 @@ class TaSiteHelper:
 
         if site.compute_args:
             explicit = ", ".join(
-                (
-                    self._coerce_bool_expr(
-                        self._build_security_expr(
-                            sec_id,
-                            a,
-                            None,
-                            ta_results,
-                            security_mutable_names=security_mutable_names,
-                            helper_binding_stack=helper_binding_stack,
-                            emitted_lines=emitted_lines,
-                        ),
-                        a,
-                    )
-                    if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ())
-                    else self._build_security_expr(
-                        sec_id,
-                        a,
-                        None,
-                        ta_results,
-                        security_mutable_names=security_mutable_names,
-                        helper_binding_stack=helper_binding_stack,
-                        emitted_lines=emitted_lines,
-                    )
-                )
+                visit_compute(a, i)
                 for i, a in enumerate(site.compute_args)
             )
             if ta_name in TA_IMPLICIT_APPEND:
@@ -1500,6 +1445,38 @@ class TaSiteHelper:
     # is an input length since CG-SECURITY-2 spells string literals; the other
     # arguments those literals bring to the constructor stay here
     # (``_ta_arg_takes_plan``).
+
+    # The ta.* functions with a RECORDED TradingView result that a series
+    # length compiles: their refusal names the Pine function and says that
+    # TradingView accepts the call. Every other function keeps the plain
+    # wording, which makes no claim about TradingView -- the functions in the
+    # list above, where TradingView refuses a series length as well, and the
+    # ones with no recorded result. Recorded results:
+    # * ta.sma: pine_ta_length.hpp, the engine's note on its TradingView
+    #   compile probes, names it among the functions that declare a series
+    #   length;
+    # * ta.percentile_nearest_rank: issue #295 reports that a script with a
+    #   loop-counter length compiles on TradingView.
+    # A function joins this set only with its own recorded result.
+    _TA_TV_ACCEPTS_SERIES_LENGTH = frozenset({
+        "sma", "percentile_nearest_rank",
+    })
+
+    def _ta_tradingview_series_length_name(self, site: "TACallSite") -> str | None:
+        """``ta.<name>`` of a ta.* site whose series length TradingView is
+        recorded to compile but PineForge cannot size (the refusal says so),
+        or None for every other site: a function with no recorded result, one
+        where TradingView refuses a series length as well, or a site that is
+        not a ta.* call."""
+        node = getattr(site, "node", None)
+        if not isinstance(node, FuncCall):
+            return None
+        func_name, namespace = self._resolve_callee(node.callee)
+        if namespace != "ta" or not func_name:
+            return None
+        if func_name not in self._TA_TV_ACCEPTS_SERIES_LENGTH:
+            return None
+        return f"ta.{func_name}"
 
     _TA_SERIES_EXTREME_CLASSES = {
         "highest": "pineforge::source::SeriesHighest",
@@ -1623,15 +1600,27 @@ class TaSiteHelper:
     def _build_ta_dynamic_plan(self, site: "TACallSite") -> dict | None:
         if not site.ctor_args:
             return None
+        nodes = list(getattr(site, "ctor_nodes", None) or [])
+        # Constructor spellings do not carry scope. Before substituting a
+        # global input/constant, check the authored argument's exact binding;
+        # a loop counter or block local can have the same spelling.
+        shadowed = {
+            pos for pos, node in enumerate(nodes)
+            if site.owner_func is None
+            and any(isinstance(read, Identifier)
+                    and read.name in self._known_vars
+                    and not self._ta_identifier_reads_top_level(read, scoped=True)
+                    for read in self._walk_ast(node))
+        }
         refused = [
             pos for pos, arg in enumerate(site.ctor_args)
-            if not self._is_compile_time_value(self._resolve_ta_ctor_arg(arg))
-            and (self._runtime_ctor_arg_for_reset(arg) is None
-                 or self._ta_arg_takes_plan(site, pos, arg))
+            if pos in shadowed
+            or (not self._is_compile_time_value(self._resolve_ta_ctor_arg(arg))
+                and (self._runtime_ctor_arg_for_reset(arg) is None
+                     or self._ta_arg_takes_plan(site, pos, arg)))
         ]
         if not refused:
             return None
-        nodes = list(getattr(site, "ctor_nodes", None) or [])
         if len(nodes) != len(site.ctor_args):
             return {"kind": "refused", "refused": refused}
         # A call outside every callable is spelled from its own nodes, whose

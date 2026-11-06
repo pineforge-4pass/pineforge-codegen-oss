@@ -153,8 +153,9 @@ from ..ast_nodes import (
 )
 from ..collection_history import history_annotation, literal_offset
 from ..array_binding import bind_array_constructor_arguments
+from ..diagnostic_codes import render_diagnostic
 from ..external_requests import RECORDED_KEY_ANNOTATION, request_stop_marker
-from ..intrinsic_binding import validate_intrinsic_keywords
+from ..intrinsic_binding import bind_intrinsic_arguments, validate_intrinsic_keywords
 from ..limits import iter_ast_nodes
 from ..security_contexts import ticker_symbol_arg
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
@@ -175,6 +176,7 @@ from .id_sites import BUILTIN_NAMESPACES
 from .run_stops import request_stop
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
+    ARRAY_NEW_CTORS,
     ARRAY_METHODS,
     ARRAY_OPTIONAL_PARAMS,
     BAR_BUILTINS,
@@ -202,6 +204,7 @@ from .tables import (
     _math_minmax_na_expr,
     _math_round_digits_expr,
     _matrix_functional_receiver,
+    _bind_kwargs_aligned,
     _merge_kwargs,
 )
 
@@ -255,10 +258,10 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
 
     Pine v6 accepts ISO-8601 strings ("2025-01-01", "2011-10-10T14:48:00",
     with optional offset) and the "DD MMM YYYY hh:mm:ss ±HHMM" /
-    "MMM DD YYYY ..." forms. A dateString without a time zone is GMT+0 per
-    the Pine reference. A UTC/GMT zone word of any size (``UTC+25``) is
-    subtracted from the fields as plain arithmetic. Returns None when the
-    string cannot be parsed.
+    "MMM DD YYYY ..." forms, with abbreviated or full month names. A dateString
+    without a time zone is GMT+0 per the Pine reference. A UTC/GMT zone word of
+    any size (``UTC+25``) is subtracted from the fields as plain arithmetic.
+    Returns None when the string cannot be parsed.
     """
     import re
     from datetime import datetime, timezone, timedelta
@@ -307,6 +310,10 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
             "%d %b %Y %H:%M:%S", "%d %b %Y %H:%M", "%d %b %Y",
             "%b %d %Y %H:%M:%S %z", "%b %d %Y %H:%M %z",
             "%b %d %Y %H:%M:%S", "%b %d %Y %H:%M", "%b %d %Y",
+            "%d %B %Y %H:%M:%S %z", "%d %B %Y %H:%M %z",
+            "%d %B %Y %H:%M:%S", "%d %B %Y %H:%M", "%d %B %Y",
+            "%B %d %Y %H:%M:%S %z", "%B %d %Y %H:%M %z",
+            "%B %d %Y %H:%M:%S", "%B %d %Y %H:%M", "%B %d %Y",
             "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
         ):
             try:
@@ -358,6 +365,15 @@ def _whole_transparency(node) -> bool:
             and 0 <= node.value <= 100)
 
 
+# The `why` argument of PF-E5048 for a session flag read reached through a method
+# call: keyed by whether the owner is a method itself (`Type.method`) or a
+# function a method calls. The same two values the pinned catalog entry lists.
+_SESSION_METHOD_REFUSAL_WHY = {
+    True: "a method, whose calls PineForge cannot always tell apart",
+    False: "which a method calls",
+}
+
+
 class CallVisitor:
     """Function-call dispatch visitor methods shared across the codegen.
 
@@ -389,6 +405,19 @@ class CallVisitor:
 
     def _udt_method_call_emit_name(self, fi, node: FuncCall) -> str:
         """Resolve a UDT method call through the ordinary UDF clone graph."""
+        reader = self.ctx.session_method_reads.get(fi.name)
+        if reader is not None and (id(node), fi.name) not in self.ctx.method_call_bindings:
+            owner, read = reader
+            flag = read.object.member
+            why = _SESSION_METHOD_REFUSAL_WHY.get("." in owner)
+            # The same text and argument names as the read refusal in visit_expr.py
+            # (PF-E5048): one code, its two `why` values spelled here.
+            return self._refused_session_read(
+                read, read,
+                f"session.{flag}[...] cannot be read in {owner.split('.')[-1]}(), "
+                f"{why}: PineForge keeps a session flag's history in a function by "
+                "each of its call sites, and cannot tell this one apart.",
+            )
         base = self._emit_udt_method_cpp_name(fi)
         dispatch = self._instance_dispatch.get(
             (self._current_instance_name, id(node))
@@ -774,23 +803,24 @@ class CallVisitor:
             else self._visit_expr(value_node)
         )
         if (elem_spec is not None and elem_spec.kind == "primitive"
-                and elem_spec.name == "float"
-                and ((isinstance(value_node, Ternary)
-                      and self._selection_contains_na(value_node))
-                     or self._infer_type(value_node) == "int64_t")):
-            rendered = self._coerce_double_slot(rendered, value_node)
+                and elem_spec.name == "float"):
+            if ((isinstance(value_node, Ternary)
+                 and self._selection_contains_na(value_node))
+                    or self._infer_type(value_node) == "int64_t"):
+                rendered = self._coerce_double_slot(rendered, value_node)
+            else:
+                rendered = self._coerce_int_slot(rendered, value_node, "double")
         if (elem_spec is not None and elem_spec.kind == "primitive"
                 and elem_spec.name == "bool"):
             return self._coerce_bool_expr(rendered, value_node)
         if (store and elem_spec is not None and elem_spec.kind == "primitive"
-                and elem_spec.name == "int"
-                and (self._holds_wide_int_constant(value_node)
-                     or self._expr_returns_wide_int(value_node, None, set(), None))):
+                and elem_spec.name == "int"):
             # A 64-bit value stored in a 32-bit element (an int array only an
-            # epoch widens, ``_wide_int_array_names``; a matrix<int>): the
+            # epoch widens, ``_wide_int_array_names``; a matrix<int>), or an
+            # int the emission holds as a double (an int that can be na): the
             # crossing keeps na (quirk 9), and a braced initializer does not
             # narrow implicitly.
-            return na_preserving_int_cast(rendered, "int")
+            return self._narrow_int_store(rendered, value_node)
         if (store and elem_spec is not None and elem_spec.kind == "primitive"
                 and elem_spec.name == "int64"):
             # int(na) carries the narrow integer sentinel; a timestamp array
@@ -855,6 +885,11 @@ class CallVisitor:
             optional = MATRIX_OPTIONAL_PARAMS.get(method, {})
             aliases = MATRIX_METHOD_KWARG_ALIASES.get(method, {})
             receiver = MATRIX_RECEIVER_KEYWORD.get(method, "id")
+        elif namespace == "array" and method in ARRAY_NEW_CTORS | {"new"}:
+            slots = ["size", "initial_value"]
+            optional = {"size": 0, "initial_value": None}
+            aliases = {}
+            receiver = "id"
         elif (method in CHECKED_ARRAY_METHOD_KWARGS
               or (functional and method == "push")):
             slots = (["value"] if method == "push"
@@ -913,18 +948,23 @@ class CallVisitor:
         if value_at is not None and value_at < len(arg_nodes):
             self._warn_narrow_int_element(arg_nodes[value_at], spec,
                                           arg_nodes[value_at])
+            if (spec is not None and spec.element is not None
+                    and spec.element.kind == "primitive"
+                    and spec.element.name == "float"
+                    and value_at < len(args)):
+                args[value_at] = self._coerce_int_slot(
+                    args[value_at], arg_nodes[value_at], "double")
             if (spec is not None and spec.kind == "matrix"
                     and spec.element is not None
                     and spec.element.kind == "primitive"
                     and spec.element.name == "int"
-                    and value_at < len(args)
-                    and (self._holds_wide_int_constant(arg_nodes[value_at])
-                         or self._expr_returns_wide_int(
-                             arg_nodes[value_at], None, set(), None))):
+                    and value_at < len(args)):
                 # A 64-bit value (a double where an operand can be na,
-                # ``_wide_int_arith_cpp``) narrows na-preserving into the int
-                # element (quirk 9), as an int array's element does.
-                args[value_at] = na_preserving_int_cast(args[value_at], "int")
+                # ``_wide_int_arith_cpp``) or an int held as a double narrows
+                # na-preserving into the int element (quirk 9), as an int
+                # array's element does.
+                args[value_at] = self._narrow_int_store(
+                    args[value_at], arg_nodes[value_at])
         if (spec is None or spec.kind != "matrix"
                 or spec.element is None
                 or spec.element.kind != "primitive"
@@ -1162,14 +1202,17 @@ class CallVisitor:
         """
         args = [self._visit_expr(arg) for arg in arg_nodes]
         if (method == "put" and arg_nodes and spec is not None
+                and spec.value is not None and spec.value.kind == "primitive"
+                and spec.value.name == "float"):
+            args[-1] = self._coerce_int_slot(args[-1], arg_nodes[-1], "double")
+        if (method == "put" and arg_nodes and spec is not None
                 and spec.kind == "map" and spec.value is not None
-                and spec.value.kind == "primitive" and spec.value.name == "int"
-                and (self._holds_wide_int_constant(arg_nodes[-1])
-                     or self._expr_returns_wide_int(arg_nodes[-1], None, set(), None))):
+                and spec.value.kind == "primitive" and spec.value.name == "int"):
             # A 64-bit value (a double where an operand can be na,
-            # ``_wide_int_arith_cpp``) narrows na-preserving into the int
-            # value (quirk 9), as an int array's element does.
-            args[-1] = na_preserving_int_cast(args[-1], "int")
+            # ``_wide_int_arith_cpp``) or an int held as a double narrows
+            # na-preserving into the int value (quirk 9), as an int array's
+            # element does.
+            args[-1] = self._narrow_int_store(args[-1], arg_nodes[-1])
         map_expr = graph_journal.receiver(self, map_expr, "map", method, node)
         occupied = "\n".join((map_expr, *args))
         counter = getattr(self, "_map_param_arg_counter", 0)
@@ -1402,7 +1445,8 @@ class CallVisitor:
 
     def _array_arg_kind(self, node, depth: int = 0) -> str:
         """``"fresh"`` for an argument that is an array no variable holds (a
-        new or copied array, a matrix row, a user function's new array),
+        new or copied array, a matrix row, a user function's new array), or
+        a lifetime-owning slice window that can safely be staged by value,
         ``"alias"`` for a user function's array that a variable may hold (it
         returns its argument or a global) or a selection of a held and a
         fresh array, and ``"keep"`` for every other argument, which keeps the
@@ -1426,6 +1470,12 @@ class CallVisitor:
         callee = node.callee
         if isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier):
             key = (callee.object.name, callee.member)
+            if (key == ("array", "slice")
+                    and getattr(self, "_uses_array_slice_views", False)
+                    and self._typed_user_method_info(callee.object, "slice")[1] is None):
+                # A returned view owns its backing lifetime. It can safely
+                # bind to a staged array parameter while retaining sharing.
+                return "fresh"
             if key in self._FRESH_ARRAY_CALLS or (
                     key[0] == "array" and key[1].startswith("new")):
                 return "fresh"
@@ -1434,6 +1484,11 @@ class CallVisitor:
             info = self._func_info_map.get(callee.name)
         elif isinstance(callee, MemberAccess):
             spec = self._type_spec_from_expr(callee.object)
+            if (callee.member == "slice" and spec is not None
+                    and spec.kind == "array"
+                    and getattr(self, "_uses_array_slice_views", False)
+                    and self._typed_user_method_info(callee.object, "slice")[1] is None):
+                return "fresh"
             fresh = self._FRESH_ARRAY_METHODS.get(spec.kind if spec is not None else "")
             if fresh is not None:
                 return "fresh" if callee.member in fresh else "keep"
@@ -1568,6 +1623,19 @@ class CallVisitor:
                 return True
         return False
 
+    def _expr_contains_user_call(self, node) -> bool:
+        """Whether an expression calls a user function or method, which may
+        have effects: C++ leaves the order of sibling call arguments
+        unspecified (g++ evaluates the right one first), where Pine evaluates
+        them as written."""
+        if node is None:
+            return False
+        return any(
+            isinstance(part, FuncCall)
+            and self._map_effect_callable_info(part, {})[1] is not None
+            for part in self._walk_ast(node)
+        )
+
     def _ordered_user_call_expr(
         self,
         call_head: str,
@@ -1668,6 +1736,8 @@ class CallVisitor:
             int_cpp = self._func_param_int_cpp_type(
                 func_info, param_index,
                 self._callable_target_callsite_idx(func_info, call_node))
+            if int_cpp == "double":
+                return self._coerce_int_slot(cpp, arg_node, int_cpp)
             if int_cpp == "int64_t":
                 cpp = self._coerce_int_slot(cpp, arg_node, int_cpp)
             elif (int_cpp is not None
@@ -1679,6 +1749,11 @@ class CallVisitor:
                 # Same-width integer reads and direct numeric selections
                 # retain their existing argument expression.
                 cpp = na_preserving_int_cast(cpp, int_cpp)
+            elif int_cpp == "int" and isinstance(arg_node, MemberAccess):
+                # A UDT ``int`` field is ``int64_t`` storage: its na
+                # (INT64_MIN) passed into an ``int`` parameter would truncate
+                # to 0. ``_coerce_int_slot`` narrows exactly such a field read.
+                cpp = self._coerce_int_slot(cpp, arg_node, int_cpp)
             return cpp
         expected_cpp_type = self._series_param_element_cpp_type(
             func_info,
@@ -1743,6 +1818,9 @@ class CallVisitor:
         )
 
     def _visit_func_call(self, node: FuncCall) -> str:
+        live_read = self._emit_drawing_all_read(node)
+        if live_read is not None:
+            return live_read
         callee = node.callee
         if isinstance(callee, MemberAccess):
             recv_spec, method_info = self._typed_user_method_info(
@@ -2139,6 +2217,10 @@ class CallVisitor:
                 )
                 return f"({self._visit_expr(node.args[0])}).empty()"
             if len(node.args) == 1:
+                if self._udt_array_field_target(node.args[0]) is not None:
+                    # Observe the field's ID without dereferencing its array.
+                    field = self._visit_mutable_expr(node.args[0])
+                    return f"({field}).is_na()"
                 drawing = self._drawing_na_expr(node.args[0])
                 if drawing is not None:
                     return drawing
@@ -2337,7 +2419,15 @@ class CallVisitor:
                 cpp_type = self._type_spec_to_cpp(spec)
                 elem_spec = spec.element if spec.element is not None else TypeSpec.primitive("float")
                 self._reject_unknown_element_type(node, elem_spec)
-                init_default = self._default_for_spec(elem_spec)
+                # Pine's omitted numeric fill is typed na, like an explicit na:
+                # float and int arrays alike (the elements of array.new<int>(size)
+                # and array.new_int(size) are na, not 0), and a color array's.
+                init_default = (
+                    self._array_init_value_expr(elem_spec, NaLiteral())
+                    if elem_spec.kind == "primitive"
+                    and elem_spec.name in ("float", "int", "int64", "color")
+                    else self._default_for_spec(elem_spec)
+                )
                 size_node, value_node = bind_array_constructor_arguments(node, func_name)
                 if size_node is not None or value_node is not None:
                     size_arg = (
@@ -2353,11 +2443,20 @@ class CallVisitor:
                     else:
                         init_val = init_default
                     bindings = ""
-                    if node.kwargs and any(
+                    if any(
                         not cpp_is_plain_read(value) for value in (size_arg, init_val)
+                    ) and (
+                        node.kwargs
+                        or self._expr_contains_user_call(size_node)
+                        or self._expr_contains_user_call(value_node)
                     ):
-                        # C++ function operands have no left-to-right guarantee.
-                        # Stage supplied slots once, in registered formal order.
+                        # C++ function operands have no left-to-right guarantee
+                        # (g++ runs the right one first), and Pine evaluates the
+                        # arguments of a call in its parameter order even when the
+                        # keywords are written reversed. A keyword call, or one
+                        # that calls a user function, stages the supplied slots
+                        # once, in registered formal order, so a call that may
+                        # have effects runs when Pine runs it.
                         # Allocate against authored names without renaming them.
                         occupied = set(getattr(self, "_safe_name_occupied", ()))
                         values = [size_arg, init_val]
@@ -2376,12 +2475,15 @@ class CallVisitor:
                             bindings += f"auto {temporary} = ({values[index]}); "
                             values[index] = temporary
                         size_arg, init_val = values
-                    constructor = (
-                        "[&](auto _pf_array_new_size, auto _pf_array_new_value){ "
+                    # A missing size builds an empty array and the run goes on
+                    # (TradingView's tape of ``array.new<float>(size=n, ...)``
+                    # with ``int n = na`` is an empty array on every bar); a
+                    # size that is present but invalid (not finite, negative,
+                    # beyond size_t, beyond max_size) keeps its coded stop.
+                    construct = (
                         "using _pf_array_new_size_type=decltype(_pf_array_new_size); "
                         "if constexpr(!std::is_same_v<_pf_array_new_size_type,bool>) { "
-                        "if(is_na(_pf_array_new_size)) "
-                        '_PF_ARRAY_STOP("size_invalid", "new", "cannot create std::vector larger than max_size()"); '
+                        f"if(is_na(_pf_array_new_size)) return {cpp_type}(); "
                         "} if(!std::isfinite((double)_pf_array_new_size)||"
                         "_pf_array_new_size<0||"
                         "(long double)_pf_array_new_size>(long double)std::numeric_limits<size_t>::max()) "
@@ -2390,7 +2492,11 @@ class CallVisitor:
                         "} catch (const std::length_error& _pf_array_new_error) { "
                         '_PF_ARRAY_STOP("size_invalid", "new", _pf_array_new_error.what()); '
                         f"return {cpp_type}(); }} "
-                        f"}}(({size_arg}), ({init_val}))"
+                    )
+                    constructor = (
+                        "[&](auto _pf_array_new_size, auto _pf_array_new_value){ "
+                        + construct
+                        + f"}}(({size_arg}), ({init_val}))"
                     )
                     if bindings:
                         return f"([&](){{ {bindings}return {constructor}; }}())"
@@ -2732,13 +2838,7 @@ class CallVisitor:
                 return lowered
             node = self._check_time_bars_back(func_name, node)
         if func_name == "time" and namespace is None and (node.args or node.kwargs):
-            args = _merge_kwargs(
-                node.args, node.kwargs, sigs.get_param_names(None, "time"),
-                self._visit_expr, intrinsic=sigs.get_intrinsic(None, "time"),
-            )
-            tf_e = args[0] if len(args) > 0 else 'script_tf_'
-            sess = args[1] if len(args) > 1 else 'std::string("")'
-            tz_e = args[2] if len(args) > 2 else 'std::string("")'
+            tf_e, sess, tz_e = self._time_call_arguments(node, "time")
             return (
                 f"pine_time(current_bar_.timestamp, {tf_e}, {sess}, {tz_e}, script_tf_"
                 " PF_PINE_TIME_SESSION_DAY_ARGS(syminfo_.timezone, syminfo_.session))"
@@ -2746,13 +2846,7 @@ class CallVisitor:
         # time_close(timeframe) or time_close(tf, session, tz) — same
         # session-tz default as time() above.
         if func_name == "time_close" and namespace is None and (node.args or node.kwargs):
-            args = _merge_kwargs(
-                node.args, node.kwargs, sigs.get_param_names(None, "time_close"),
-                self._visit_expr, intrinsic=sigs.get_intrinsic(None, "time_close"),
-            )
-            tf_e = args[0] if len(args) > 0 else 'script_tf_'
-            sess = args[1] if len(args) > 1 else 'std::string("")'
-            tz_e = args[2] if len(args) > 2 else 'std::string("")'
+            tf_e, sess, tz_e = self._time_call_arguments(node, "time_close")
             return (
                 f"pine_time_close(current_bar_.timestamp, {tf_e}, {sess}, {tz_e}, script_tf_"
                 " PF_PINE_TIME_SESSION_DAY_ARGS(syminfo_.timezone, syminfo_.session))"
@@ -2760,8 +2854,30 @@ class CallVisitor:
 
         # timestamp(year, month, day, hour, minute) → Unix ms
         if func_name == "timestamp" and namespace is None:
-            is_tz_first = False
-            if node.args:
+            # Each argument binds at the slot of its parameter, whichever way
+            # it is written: the numeric overload is (year, month, day, hour,
+            # minute, second) and the timezone-first one puts ``timezone`` in
+            # front. A keyword used to be read from the compressed list (a
+            # skipped ``hour`` moved ``minute`` into its slot) or, for
+            # ``timezone`` on the numeric overload, dropped with no
+            # diagnostic. A keyword no overload has is refused first.
+            timestamp_record = sigs.get_intrinsic(None, "timestamp")
+            numeric_params = ("year", "month", "day", "hour", "minute", "second")
+            zoned_params = ("timezone", *numeric_params)
+            is_tz_first = "timezone" in node.kwargs
+            date_string_node = None
+            if "dateString" in node.kwargs:
+                # dateString is the only parameter of its overload: a positional
+                # argument is no part of it, and neither is any other keyword.
+                if node.args:
+                    self._codegen_error(node, *render_diagnostic(
+                        "PF-E2027", {"key": "timestamp", "name": "dateString"}))
+                for other in node.kwargs:
+                    if other != "dateString":
+                        self._codegen_error(node, *render_diagnostic(
+                            "PF-E2027", {"key": "timestamp", "name": other}))
+                date_string_node = node.kwargs["dateString"]
+            elif node.args:
                 first_arg_spec = self._type_spec_from_expr(node.args[0])
                 if first_arg_spec is not None and first_arg_spec.kind == "primitive" and first_arg_spec.name == "string":
                     is_tz_first = True
@@ -2769,38 +2885,42 @@ class CallVisitor:
                     is_tz_first = True
                 elif self._infer_type(node.args[0]) == "std::string":
                     is_tz_first = True
-
-            if is_tz_first:
+                if node.kwargs and "timezone" in node.kwargs:
+                    # The first parameter is ``timezone``: a positional first
+                    # argument already fills it.
+                    self._codegen_error(node, *render_diagnostic(
+                        "PF-E2024", {"key": "timestamp", "name": "timezone"}))
                 # A single string argument is the timestamp(dateString)
-                # overload, NOT the timezone-first form. It used to fall
-                # through with year=1970 defaults — silently wrong. Pine
-                # dateString is a const string, so parse it at transpile
-                # time (common as the input.time defval); reject loudly when
-                # it is not a literal or does not parse.
-                if len(node.args) == 1:
-                    if isinstance(node.args[0], StringLiteral):
-                        ms = _parse_pine_datestring_ms(node.args[0].value)
-                        if ms is None:
-                            self._codegen_error(
-                                node,
-                                f"timestamp(dateString): could not parse "
-                                f"'{node.args[0].value}'.",
-                                hint="Supported forms: ISO-8601 "
-                                     "(\"2025-01-01[THH:MM:SS][±HH:MM]\") and "
-                                     "\"DD MMM YYYY [hh:mm[:ss]] [±HHMM]\" / "
-                                     "\"MMM DD YYYY ...\"; no time zone = "
-                                     "GMT+0.",
-                            )
-                        return f"{ms}LL"
-                    self._codegen_error(
-                        node,
-                        "timestamp(dateString) requires a literal string in "
-                        "PineForge (Pine v6 dateString is a const string).",
-                        hint="Use a string literal, or timestamp(year, month, "
-                             "day[, hour, minute, second]).",
-                    )
+                # overload, NOT the timezone-first form.
+                if is_tz_first and len(node.args) == 1 and not node.kwargs:
+                    date_string_node = node.args[0]
+
+            if date_string_node is not None:
+                # It used to fall through with year=1970 defaults — silently
+                # wrong. Pine dateString is a const string, so parse it at
+                # transpile time (common as the input.time defval); reject
+                # loudly when it is not a literal or does not parse.
+                if isinstance(date_string_node, StringLiteral):
+                    ms = _parse_pine_datestring_ms(date_string_node.value)
+                    if ms is None:
+                        # PF-E5027, rendered from the catalog: the string is the
+                        # call's first argument or its dateString keyword.
+                        self._codegen_error(node, *render_diagnostic(
+                            "PF-E5027", {"args": date_string_node.value}))
+                    return f"{ms}LL"
+                self._codegen_error(
+                    node,
+                    "timestamp(dateString) requires a literal string in "
+                    "PineForge (Pine v6 dateString is a const string).",
+                    hint="Use a string literal, or timestamp(year, month, "
+                         "day[, hour, minute, second]).",
+                )
+            if is_tz_first:
+                bound = _bind_kwargs_aligned(
+                    node.args, node.kwargs, zoned_params, intrinsic=timestamp_record,
+                )
                 # timezone-first form requires year, month, and day.
-                if len(node.args) < 4:
+                if len(bound) < 4 or any(a is None for a in bound[:4]):
                     self._codegen_error(
                         node,
                         "timestamp(timezone, ...) requires year, month, and "
@@ -2808,28 +2928,25 @@ class CallVisitor:
                         hint="Pine v6 signature: timestamp(timezone, year, "
                              "month, day[, hour, minute, second]).",
                     )
-                args = [self._visit_expr(a) for a in node.args]
+                args = [self._visit_expr(a) if a is not None else None for a in bound]
                 # Every calendar field lands in an ``int`` inside the lambda.
                 fields = [
-                    self._coerce_int_slot(a, node.args[i], "int")
+                    self._coerce_int_slot(a, bound[i], "int") if a is not None else None
                     for i, a in enumerate(args)
                 ]
                 tz = args[0]
-                yr = fields[1] if len(fields) > 1 else "1970"
-                mo = fields[2] if len(fields) > 2 else "1"
-                dy = fields[3] if len(fields) > 3 else "1"
-                hr = fields[4] if len(fields) > 4 else "0"
-                mn = fields[5] if len(fields) > 5 else "0"
-                sc = fields[6] if len(fields) > 6 else "0"
+                yr = fields[1]
+                mo = fields[2]
+                dy = fields[3]
+                hr = fields[4] if len(fields) > 4 and fields[4] is not None else "0"
+                mn = fields[5] if len(fields) > 5 and fields[5] is not None else "0"
+                sc = fields[6] if len(fields) > 6 and fields[6] is not None else "0"
                 return _timestamp_calendar_lambda(tz, yr, mo, dy, hr, mn, sc)
             else:
                 # Numeric form requires year, month, and day (hour/minute/
                 # second default to 0). Anything shorter used to emit "0".
-                merged = _merge_kwargs(
-                    node.args, node.kwargs,
-                    sigs.get_param_names(None, "timestamp"),
-                    lambda a: a,
-                    intrinsic=sigs.get_intrinsic(None, "timestamp"),
+                merged = _bind_kwargs_aligned(
+                    node.args, node.kwargs, numeric_params, intrinsic=timestamp_record,
                 )
                 if len(merged) < 3 or any(a is None for a in merged[:3]):
                     self._codegen_error(
@@ -2842,14 +2959,15 @@ class CallVisitor:
                     )
                 args = [
                     self._coerce_int_slot(self._visit_expr(a), a, "int")
+                    if a is not None else None
                     for a in merged
                 ]
                 yr = args[0]
-                mo = args[1] if len(args) > 1 else "1"
-                dy = args[2] if len(args) > 2 else "1"
-                hr = args[3] if len(args) > 3 else "0"
-                mn = args[4] if len(args) > 4 else "0"
-                sc = args[5] if len(args) > 5 else "0"
+                mo = args[1]
+                dy = args[2]
+                hr = args[3] if len(args) > 3 and args[3] is not None else "0"
+                mn = args[4] if len(args) > 4 and args[4] is not None else "0"
+                sc = args[5] if len(args) > 5 and args[5] is not None else "0"
                 # No timezone argument: Pine resolves the calendar fields in
                 # syminfo.timezone (the EXCHANGE tz), not UTC. This used to be
                 # a bare timegm(), which put e.g. timestamp(y, m, d, 8, 0, 0)
@@ -2870,6 +2988,12 @@ class CallVisitor:
                 "have rejected. Use ta.barssince(...)."
             )
 
+        # Drawing casts of na use the same missing handle as a typed binding.
+        if (namespace is None and func_name in ("line", "box")
+                and len(node.args) == 1 and not node.kwargs
+                and self._is_na_expr(node.args[0])):
+            return f"{DRAWING_TYPE_TO_CPP[func_name]}{{}}"
+
         # Type cast functions: int(x), float(x), bool(x), string(x)
         if func_name == "int" and namespace is None and node.args:
             # Pine int(na) → na (int form). Evaluate once, propagate na via
@@ -2889,9 +3013,7 @@ class CallVisitor:
             return na_preserving_int_cast(x)
         if func_name == "float" and namespace is None and node.args:
             value = self._visit_expr(node.args[0])
-            if (isinstance(node.args[0], Ternary)
-                    and self._selection_contains_na(node.args[0])):
-                value = self._coerce_double_slot(value, node.args[0])
+            value = self._coerce_int_slot(value, node.args[0], "double")
             return f"(double)({value})"
         if func_name == "bool" and namespace is None and node.args:
             # Pine v6 bools are two-state. Explicit bool(int/float) treats na
@@ -3161,7 +3283,11 @@ class CallVisitor:
                                         and ("field", namespace, f.name)
                                             in self._array_widths.wide)
                                     or f_cpp_type in self._udt_defs
-                                    or f_cpp_type in DRAWING_TYPE_TO_CPP.values())
+                                    or f_cpp_type in DRAWING_TYPE_TO_CPP.values()
+                                    # A bare na for a string field is the typed
+                                    # string na, not the numeric ``na<double>()``.
+                                    or (f_cpp_type == "std::string"
+                                        and self._is_na_expr(value_node)))
                                 else None
                             ),
                         )
@@ -3511,7 +3637,7 @@ class CallVisitor:
 
     def _coerce_int_param_args(self, func_name, arg_nodes, all_args,
                                call_site_idx) -> None:
-        """In-place narrow every argument bound to an integer parameter.
+        """Convert each bound numeric argument without losing missingness.
 
         Pine ``color`` parameters are integers in the emitted signature too, so
         a ``na`` colour argument (``na<double>()``) is a NaN crossing into an
@@ -3623,20 +3749,28 @@ class CallVisitor:
         )
         return f"{token}ULL"
 
+    def _strategy_string_arg(self, node) -> str:
+        """A missing Pine string uses the host's empty-string sentinel."""
+        return '""' if node is None or isinstance(node, NaLiteral) else self._visit_expr(node)
+
     def _visit_strategy_call(self, func_name: str, node: FuncCall) -> str:
         from .order_shapes import record_order_call
         if func_name in ("convert_to_account", "convert_to_symbol"):
             p = self._resolve_func_args(node, f"strategy.{func_name}")
-            v = self._visit_expr(p.get("value")) if p.get("value") is not None else "0.0"
+            v = self._visit_float_arg(p.get("value"), "0.0")
             return f"({v})"
         if func_name == "default_entry_qty":
-            p = self._resolve_func_args(node, "strategy.default_entry_qty")
-            fp = self._visit_expr(p.get("fill_price")) if p.get("fill_price") is not None else "0.0"
-            return f"calc_qty({fp})"
+            self._codegen_error(
+                node,
+                "TradingView accepts strategy.default_entry_qty(); PineForge "
+                "does not support it yet: it requires a default-quantity "
+                "query on the engine strategy host.",
+                hint="Use the default quantity of strategy.entry() by omitting qty.",
+            )
 
         if func_name == "entry":
             p = self._resolve_func_args(node, "strategy.entry")
-            entry_id = self._visit_expr(p.get("id")) if "id" in p else '""'
+            entry_id = self._strategy_string_arg(p.get("id"))
             direction_node = p.get("direction")
             direction = (
                 self._coerce_bool_expr(
@@ -3651,14 +3785,14 @@ class CallVisitor:
             oca_name = p.get("oca_name")
             oca_type = p.get("oca_type")
             qty_type = p.get("qty_type")
-            comment_val = self._visit_expr(comment) if comment else '""'
-            oca_name_val = self._visit_expr(oca_name) if oca_name else '""'
+            comment_val = self._strategy_string_arg(comment)
+            oca_name_val = self._strategy_string_arg(oca_name)
             oca_type_val = self._visit_expr(oca_type) if oca_type else "0"
             qty_type_val = self._visit_expr(qty_type) if qty_type else "-1"
-            qty_val = self._visit_expr(qty) if qty else "na<double>()"
+            qty_val = self._visit_float_arg(qty)
             if stop is not None or limit is not None or qty is not None or oca_name is not None or oca_type is not None or qty_type is not None:
-                limit_val = self._visit_expr(limit) if limit else "na<double>()"
-                stop_val = self._visit_expr(stop) if stop else "na<double>()"
+                limit_val = self._visit_float_arg(limit)
+                stop_val = self._visit_float_arg(stop)
                 record_order_call(self, node, "entry", {
                     "id": (entry_id, p.get("id")), "direction": (direction, direction_node),
                     "limit": (limit_val, limit, "na<double>()"),
@@ -3689,10 +3823,10 @@ class CallVisitor:
 
         if func_name == "close":
             p = self._resolve_func_args(node, "strategy.close")
-            close_id = self._visit_expr(p.get("id")) if "id" in p else '""'
-            comment = self._visit_expr(p.get("comment")) if p.get("comment") is not None else '""'
-            qty = self._visit_expr(p.get("qty")) if p.get("qty") is not None else "na<double>()"
-            qty_pct = self._visit_expr(p.get("qty_percent")) if p.get("qty_percent") is not None else "na<double>()"
+            close_id = self._strategy_string_arg(p.get("id"))
+            comment = self._strategy_string_arg(p.get("comment"))
+            qty = self._visit_float_arg(p.get("qty"))
+            qty_pct = self._visit_float_arg(p.get("qty_percent"))
             immediately_node = p.get("immediately")
             immediately = (
                 self._coerce_bool_expr(
@@ -3711,7 +3845,7 @@ class CallVisitor:
 
         if func_name == "close_all":
             p = self._resolve_func_args(node, "strategy.close_all")
-            comment = self._visit_expr(p.get("comment")) if p.get("comment") is not None else '""'
+            comment = self._strategy_string_arg(p.get("comment"))
             immediately_node = p.get("immediately")
             immediately = (
                 self._coerce_bool_expr(
@@ -3732,8 +3866,8 @@ class CallVisitor:
 
         if func_name == "exit":
             p = self._resolve_func_args(node, "strategy.exit")
-            exit_id = self._visit_expr(p.get("id")) if "id" in p else '""'
-            from_id = self._visit_expr(p.get("from_entry")) if "from_entry" in p else '""'
+            exit_id = self._strategy_string_arg(p.get("id"))
+            from_id = self._strategy_string_arg(p.get("from_entry"))
 
             limit_n = p.get("limit")
             stop_n = p.get("stop")
@@ -3751,22 +3885,22 @@ class CallVisitor:
                                 [limit_n, stop_n, profit_n, loss_n,
                                  trail_pts_n, trail_off_n, trail_pr_n])
             if has_price_exit:
-                limit_val = self._visit_expr(limit_n) if limit_n else "na<double>()"
-                stop_val = self._visit_expr(stop_n) if stop_n else "na<double>()"
-                trail_pts = self._visit_expr(trail_pts_n) if trail_pts_n else "na<double>()"
-                trail_off = self._visit_expr(trail_off_n) if trail_off_n else "na<double>()"
-                trail_pr = self._visit_expr(trail_pr_n) if trail_pr_n else "na<double>()"
-                qty_pct = self._visit_expr(qty_pct_n) if qty_pct_n else "100.0"
-                qty_val = self._visit_expr(qty_n) if qty_n else "na<double>()"
-                comment = self._visit_expr(comment_n) if comment_n is not None else '""'
-                oca_val = self._visit_expr(oca_name_n) if oca_name_n is not None else '""'
+                limit_val = self._visit_float_arg(limit_n)
+                stop_val = self._visit_float_arg(stop_n)
+                trail_pts = self._visit_float_arg(trail_pts_n)
+                trail_off = self._visit_float_arg(trail_off_n)
+                trail_pr = self._visit_float_arg(trail_pr_n)
+                qty_pct = self._visit_float_arg(qty_pct_n, "100.0")
+                qty_val = self._visit_float_arg(qty_n)
+                comment = self._strategy_string_arg(comment_n)
+                oca_val = self._strategy_string_arg(oca_name_n)
                 profit_ticks = "na<double>()"
                 loss_ticks = "na<double>()"
 
                 if profit_n and not limit_n:
-                    profit_ticks = self._visit_expr(profit_n)
+                    profit_ticks = self._visit_float_arg(profit_n)
                 if loss_n and not stop_n:
-                    loss_ticks = self._visit_expr(loss_n)
+                    loss_ticks = self._visit_float_arg(loss_n)
 
                 record_order_call(self, node, "exit", {
                     "id": (exit_id, p.get("id")), "from_entry": (from_id, p.get("from_entry")),
@@ -3785,7 +3919,7 @@ class CallVisitor:
                 return (f"strategy_exit({exit_id}, {from_id}, {limit_val}, {stop_val}, "
                         f"{trail_pts}, {trail_off}, {trail_pr}, {qty_pct}, {comment}, "
                         f"{qty_val}, {oca_val}, {profit_ticks}, {loss_ticks})")
-            comment = self._visit_expr(comment_n) if comment_n is not None else '""'
+            comment = self._strategy_string_arg(comment_n)
             record_order_call(self, node, "exit", {
                 "id": (exit_id, p.get("id")), "from_entry": (from_id, p.get("from_entry")),
                 "comment": (comment, comment_n, '""'),
@@ -3793,18 +3927,19 @@ class CallVisitor:
             return f"strategy_exit_cancel_bracket({exit_id}, {from_id}, {comment})"
 
         if func_name == "cancel":
-            p = self._resolve_func_args(node, "strategy.close")  # same shape: id first
-            cancel_id = self._visit_expr(p.get("id")) if "id" in p else '""'
+            p = self._resolve_func_args(node, "strategy.cancel")
+            cancel_id = self._strategy_string_arg(p.get("id"))
             record_order_call(self, node, "cancel", {"id": (cancel_id, p.get("id"))})
             return f"strategy_cancel({cancel_id})"
 
         if func_name == "cancel_all":
+            self._resolve_func_args(node, "strategy.cancel_all")
             record_order_call(self, node, "cancel_all", {})
             return "strategy_cancel_all()"
 
         if func_name == "order":
             p = self._resolve_func_args(node, "strategy.order")
-            order_id = self._visit_expr(p.get("id")) if "id" in p else '""'
+            order_id = self._strategy_string_arg(p.get("id"))
             direction_node = p.get("direction")
             direction = (
                 self._coerce_bool_expr(
@@ -3812,14 +3947,14 @@ class CallVisitor:
                 )
                 if direction_node is not None else "true"
             )
-            qty = self._visit_expr(p.get("qty")) if "qty" in p else "0"
-            limit_arg = self._visit_expr(p.get("limit")) if "limit" in p else "na<double>()"
-            stop_arg = self._visit_expr(p.get("stop")) if "stop" in p else "na<double>()"
-            oca_name = self._visit_expr(p.get("oca_name")) if "oca_name" in p else '""'
+            qty = self._visit_float_arg(p.get("qty"))
+            limit_arg = self._visit_float_arg(p.get("limit"))
+            stop_arg = self._visit_float_arg(p.get("stop"))
+            oca_name = self._strategy_string_arg(p.get("oca_name"))
             oca_type = self._visit_expr(p.get("oca_type")) if "oca_type" in p else "0"
             record_order_call(self, node, "order", {
                 "id": (order_id, p.get("id")), "direction": (direction, direction_node),
-                "qty": (qty, p.get("qty"), "0"),
+                "qty": (qty, p.get("qty"), "na<double>()"),
                 "limit": (limit_arg, p.get("limit"), "na<double>()"),
                 "stop": (stop_arg, p.get("stop"), "na<double>()"),
                 "oca_name": (oca_name, p.get("oca_name"), '""'),
@@ -4021,7 +4156,61 @@ class CallVisitor:
         vec = "{" + ", ".join(rest) + "}"
         return f'pine_str_format_tv({fmt_arg}, {vec})'
 
+    def _time_call_arguments(self, node, func_name: str) -> tuple[str, str, str]:
+        """The timeframe, session and timezone of ``time(...)`` / ``time_close(...)``.
+
+        Each argument is read at the slot of its parameter and visited once, in
+        parameter order. A skipped ``session`` (``time("60", timezone = "UTC")``)
+        used to move the timezone into the session slot, because the compressed
+        argument list leaves a skipped parameter no slot; it now takes the
+        empty default an omitted argument has."""
+        bound = _bind_kwargs_aligned(
+            node.args, node.kwargs, sigs.get_param_names(None, func_name),
+            intrinsic=sigs.get_intrinsic(None, func_name),
+        )
+
+        def lowered(index: int, default: str) -> str:
+            if index < len(bound) and bound[index] is not None:
+                return self._visit_expr(bound[index])
+            return default
+
+        timeframe = lowered(0, 'script_tf_')
+        session = lowered(1, 'std::string("")')
+        timezone = lowered(2, 'std::string("")')
+        return timeframe, session, timezone
+
+    def _visit_format_time_call(self, node) -> str:
+        """``str.format_time(time, format, timezone)``, each argument at its own slot.
+
+        ``format`` and ``timezone`` are optional, so a keyword can skip one:
+        ``str.format_time(time, timezone = "Asia/Tokyo")``. The compressed
+        argument list moved that timezone into the format slot (the call
+        formatted the time with the pattern "Asia/Tokyo" and ignored the
+        zone). A skipped slot now takes the omitted-argument default below,
+        the same one ``str.format_time(time)`` has."""
+        bound = _bind_kwargs_aligned(
+            node.args, node.kwargs, sigs.get_param_names("str", "format_time"),
+            intrinsic=sigs.get_intrinsic("str", "format_time"),
+        )
+
+        def slot(index: int):
+            return bound[index] if index < len(bound) else None
+
+        # Visit in parameter order, once each.
+        ts_node, fmt_node, tz_node = slot(0), slot(1), slot(2)
+        ts = self._visit_expr(ts_node) if ts_node is not None else "0"
+        fmt = self._visit_expr(fmt_node) if fmt_node is not None else '"yyyy-MM-dd"'
+        tz = self._visit_expr(tz_node) if tz_node is not None else '"UTC"'
+        if (ts_node is not None and self._holds_na_aware_wide_double(ts_node)
+                and self._emitted_value_is_double(ts_node)):
+            # A double-valued 64-bit product (``_wide_int_arith_cpp``)
+            # narrows na-preserving into the int64_t timestamp (quirk 9).
+            ts = na_preserving_int_cast(ts, "int64_t")
+        return f'pine_str_format_time({ts}, {fmt}, {tz})'
+
     def _visit_str_call(self, func_name: str, node) -> str:
+        if func_name == "format_time":
+            return self._visit_format_time_call(node)
         args = _merge_kwargs(node.args, node.kwargs,
                              sigs.get_param_names("str", func_name), self._visit_expr,
                              intrinsic=sigs.get_intrinsic("str", func_name))
@@ -4113,18 +4302,6 @@ class CallVisitor:
                 return self._str_format_expr(format_node, node.args[1:])
             return 'std::string("")'
 
-        if func_name == "format_time":
-            ts = args[0] if args else "0"
-            ts_node = node.args[0] if node.args else node.kwargs.get("time")
-            if (ts_node is not None and self._holds_na_aware_wide_double(ts_node)
-                    and self._emitted_value_is_double(ts_node)):
-                # A double-valued 64-bit product (``_wide_int_arith_cpp``)
-                # narrows na-preserving into the int64_t timestamp (quirk 9).
-                ts = na_preserving_int_cast(ts, "int64_t")
-            fmt = args[1] if len(args) > 1 else '"yyyy-MM-dd"'
-            tz = args[2] if len(args) > 2 else '"UTC"'
-            return f'pine_str_format_time({ts}, {fmt}, {tz})'
-
         if func_name == "replace":
             if len(args) >= 4:
                 # 4-arg form: replace the Nth occurrence (0-based, per Pine
@@ -4156,10 +4333,23 @@ class CallVisitor:
         return f'std::string("") /* unsupported: str.{comment_name} */'
 
     def _visit_math_call(self, func_name: str, node: FuncCall) -> str:
-        args = _merge_kwargs(
+        intrinsic = sigs.get_intrinsic("math", func_name)
+        if intrinsic is not None and (intrinsic.keyword_names_verified or intrinsic.variadic):
+            bind_intrinsic_arguments(node, intrinsic, filename=self.ctx.filename)
+        arg_nodes = _merge_kwargs(
             node.args, node.kwargs, sigs.get_param_names("math", func_name),
-            self._visit_expr, intrinsic=sigs.get_intrinsic("math", func_name),
+            lambda arg: arg,
+            intrinsic=intrinsic,
         )
+        intrinsic = sigs.MATH_FUNCTIONS.get(func_name)
+        params = (max(intrinsic.signatures, key=lambda sig: len(sig.params)).params
+                  if intrinsic is not None else [])
+        args = [
+            self._visit_float_arg(arg)
+            if index < len(params) and params[index].pine_type == PineType.FLOAT
+            else self._visit_expr(arg)
+            for index, arg in enumerate(arg_nodes)
+        ]
         # Handle special cases first
         if func_name == "round" and len(args) == 2:
             return _math_round_digits_expr(args)
@@ -4198,6 +4388,12 @@ class CallVisitor:
     # ------------------------------------------------------------------
     # Arg/kwarg resolution (PineScript parameter signatures)
     # ------------------------------------------------------------------
+
+    def _visit_float_arg(self, node, default: str = "na<double>()") -> str:
+        """Render an actual double argument through the numeric destination rule."""
+        if node is None:
+            return default
+        return self._coerce_int_slot(self._visit_expr(node), node, "double")
 
     def _resolve_func_args(self, node: FuncCall, sig_key: str) -> dict:
         """Merge positional args and kwargs into a dict keyed by parameter name.

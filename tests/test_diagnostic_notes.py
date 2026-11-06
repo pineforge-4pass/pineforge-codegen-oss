@@ -18,10 +18,58 @@ from tests._legacy_cpp import without_trade_history_policy
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diagnostic_notes"
 CASES = json.loads((FIXTURES / "interfaces.json").read_text())["cases"]
+MATH_CASES = json.loads((FIXTURES / "interfaces.json").read_text())["math_keyword_cases"]
 DELTA = json.loads((FIXTURES / "delta.json").read_text())
 NOTE_CODES = set(DELTA["severity_changes"])
 BEFORE = json.loads((FIXTURES / "catalog.before.json").read_text())["codes"]
 PRODUCT_BEFORE = json.loads((FIXTURES / "product.before.json").read_text())
+CATALOG_ENTRY_ADDITIONS = {
+    "PF-E5084": {
+        "severity": "error",
+        "area": "codegen",
+        "message": "TradingView accepts strategy.default_entry_qty(); PineForge does not support it yet: it requires a default-quantity query on the engine strategy host.",
+        "hint": "Use the default quantity of strategy.entry() by omitting qty.",
+        "explanation": "The generated strategy host does not expose the quantity calculation previously emitted as calc_qty. A host query is needed to implement default_entry_qty; omit qty on strategy.entry to use the engine's default sizing.",
+        "args": {},
+        "user_message": "The engine strategy host needs a query for the default entry quantity.",
+    },
+    "PF-E5085": {
+        "severity": "error",
+        "area": "codegen",
+        "message": "polyline.all requires an engine polyline handle and live drawing arena.",
+        "hint": None,
+        "explanation": "The paired engine has no Polyline handle or DrawingArena<PolylineRec>. A live polyline collection cannot be represented by a numeric placeholder.",
+        "args": {},
+        "user_message": "The engine needs a polyline handle and live drawing arena.",
+    },
+    "PF-E5086": {
+        "severity": "error",
+        "area": "codegen",
+        "message": "Drawing collection ''{kind}.all'' only supports direct size(), first(), last() and get() reads.",
+        "hint": None,
+        "explanation": "Drawing collections are read-only views of live handles. Only direct reads are lowered; aliases, mutations and other uses are refused instead of exposing a stale mutable copy.",
+        "args": {"kind": {"kind": "identifier"}},
+        "user_message": "Use direct size(), first(), last() or get() reads on ''{kind}.all''.",
+    },
+    "PF-E5091": {
+        "severity": "error",
+        "area": "codegen",
+        "message": "Unsupported TA constructor length ''{a}'' for ta.{func_name}: it is neither a compile-time constant nor derived from an input, so PineForge cannot size the indicator buffer. TradingView accepts a series length for ta.{func_name}(); PineForge does not support it yet.",
+        "hint": "Use a literal, an input.*() value, or arithmetic over those for TA constructor arguments.",
+        "explanation": "A TA indicator's length is neither a constant nor derived from an input, so PineForge cannot size its buffer. TradingView compiles a series length for this function, so this is a limit of PineForge, not an error in the script; use a literal, an input or arithmetic on those.",
+        "args": {"a": {"kind": "identifier"}, "func_name": {"kind": "identifier"}},
+        "user_message": "PineForge cannot size ta.{func_name} from a series length, which TradingView accepts.",
+    },
+    "PF-E5092": {
+        "severity": "error",
+        "area": "codegen",
+        "message": "Unsupported TA constructor length ''{a}'' for ta.{func_name}: it is neither a compile-time constant nor derived from an input, so PineForge cannot size the indicator buffer. TradingView accepts a series length for ta.{func_name}(); PineForge does not support it yet.",
+        "hint": "Use a literal, an input.*() value, or arithmetic over those for TA lengths.",
+        "explanation": "A TA indicator's length is not a literal and not derived from an input, so PineForge cannot size its buffer. TradingView compiles a series length for this function, so this is a limit of PineForge, not an error in the script; use a literal, an input or arithmetic on those.",
+        "args": {"a": {"kind": "identifier"}, "func_name": {"kind": "identifier"}},
+        "user_message": "PineForge cannot size ta.{func_name} from a series length, which TradingView accepts.",
+    },
+}
 # Codes added after this snapshot: the continuation and indentation errors
 # (PF-E0038, PF-E0039), the trailing comma and mixed indentation errors
 # (PF-E0040 to PF-E0042), the import refusals with a hint (PF-E2040,
@@ -31,10 +79,12 @@ PRODUCT_BEFORE = json.loads((FIXTURES / "product.before.json").read_text())
 # source of nz and fixnan (PF-E2047), the operator errors (PF-E2048 to
 # PF-E2052), the function definition scope errors (PF-E2053 to PF-E2060), the
 # untyped na declaration error (PF-E2061), the bool and type mismatch errors
-# (PF-E2066 to PF-E2079) and the strategy() declaration errors (PF-E5080 to
+# (PF-E2066 to PF-E2079), the parameter qualifier and variadic keyword errors
+# (PF-E2080, PF-E2082) and the strategy() declaration errors (PF-E5080 to
 # PF-E5082), the missing value lowering error (PF-E5083) and the requested
 # selection errors (PF-E3102 to PF-E3105 and PF-E3110), including an unmeasured empty
-# requested-timeframe arm.
+# requested-timeframe arm, the two math keyword refusals (PF-E5089, PF-E5090)
+# and the max_bars_back refusal (PF-E5093).
 CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2040", "PF-E2041", "PF-E2042", "PF-E2043", "PF-E2044",
                      "PF-E2045", "PF-E2046", "PF-E2047", "PF-E2048", "PF-E2049",
@@ -48,17 +98,53 @@ CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2075",  # A name read where its declaration is not visible.
                      "PF-E2076", "PF-E2077", "PF-E2078",
                      "PF-E2079",  # A float step against a loop counter with int start evidence.
+                     "PF-E2080",  # An argument qualifier exceeds its parameter's contract.
+                     "PF-E2082",  # Keyword elements in array.from.
                      "PF-E3102", "PF-E3103", "PF-E3104", "PF-E3105", "PF-E3110",
                      "PF-E3111",
-                     "PF-E5080", "PF-E5081", "PF-E5082", "PF-E5083", "PF-W1553"}
+                     "PF-E5093",  # max_bars_back(): num must resolve to a positive compile-time integer.
+                     "PF-E5080", "PF-E5081", "PF-E5082", "PF-E5083", "PF-W1553"} | set(CATALOG_ENTRY_ADDITIONS)
+CATALOG_ADDITIONS.update(DELTA.get("added_codes", ()))
+CATALOG_ADDITIONS |= set(DELTA["catalog_additions"])
 # The support checker warns, inside a switch arm, what it refuses elsewhere:
 # PF-W1nnn is PF-E1nnn there. Read off the live catalog, so a twin added later
 # is covered by the sentence tests below without an edit here.
 TWINS = sorted("PF-W" + code[4:] for code in diagnostics_catalog()["codes"] if code.startswith("PF-E1"))
 
+# Only these two existing identities change presentation after the snapshot.
+# Keep both historical files intact and verify each old and new field exactly.
+LOOKAHEAD_MIGRATION = {
+    "PF-E1085": {
+        "hint": (
+            "Codegen only recognizes the barmerge.lookahead_* literal; other values are silently treated as lookahead_off.",
+            "Use barmerge.lookahead_* constants selected by values fixed before the first bar."),
+        "explanation": (
+            "The lookahead argument of request.security must be written literally as barmerge.lookahead_on or barmerge.lookahead_off, the only forms PineForge reads.",
+            "request.security accepts barmerge.lookahead_on or barmerge.lookahead_off directly or through immutable simple or input-selected values fixed before the first bar; series-dependent or mutable selections are unsupported."),
+        "user_message": (
+            "request.security lookahead requires barmerge.lookahead_on or barmerge.lookahead_off "
+            "selected by immutable simple or input values fixed before the first bar."),
+    },
+    "PF-W1085": {
+        "hint": (
+            "Codegen only recognizes the barmerge.lookahead_* literal; other values are silently treated as lookahead_off.",
+            "Use barmerge.lookahead_* constants selected by values fixed before the first bar."),
+        "explanation": (
+            "The lookahead argument of request.security must be written literally as barmerge.lookahead_on or barmerge.lookahead_off, the only forms PineForge reads; inside a switch arm PineForge warns instead and keeps the arm's lowering.",
+            "request.security accepts barmerge.lookahead_on or barmerge.lookahead_off directly or through immutable simple or input-selected values fixed before the first bar; inside a switch arm PineForge warns instead and keeps the arm's lowering."),
+        "user_message": (
+            "request.security lookahead needs an immutable simple or input-selected enum. "
+            "In a switch arm PineForge only warns and keeps the arm''s lowering."),
+    },
+}
+
 
 def _assert_catalog_delta(catalog):
     assert set(catalog) == set(BEFORE) | CATALOG_ADDITIONS
+    for code, expected in CATALOG_ENTRY_ADDITIONS.items():
+        assert catalog[code] == expected, code
+    assert set(DELTA["catalog_additions"]) == {"PF-E5088", "PF-E5089", "PF-E5090"}
+    assert {code: catalog[code] for code in DELTA["catalog_additions"]} == DELTA["catalog_additions"]
     changed = set()
     for code, old in BEFORE.items():
         entry = dict(catalog[code])
@@ -76,6 +162,14 @@ def _assert_catalog_delta(catalog):
             assert (old["severity"], entry["severity"]) == (expected["before"], expected["after"])
             assert template == expected["user_message"]
             entry["severity"] = old["severity"]
+        if code in LOOKAHEAD_MIGRATION:
+            migration = LOOKAHEAD_MIGRATION[code]
+            assert template == migration["user_message"], code
+            for field in ("hint", "explanation"):
+                before, after = migration[field]
+                assert old[field] == before, (code, field)
+                assert entry[field] == after, (code, field)
+                entry[field] = before
         assert entry == old, code
     assert changed == NOTE_CODES
 
@@ -88,7 +182,9 @@ def test_exact_catalog_delta_and_legacy_pin():
     assert set(legacy) == set(BEFORE)
     assert set(current) == set(catalog)
     assert set(current) - set(legacy) == CATALOG_ADDITIONS
-    assert {code for code in legacy if legacy[code] != current[code]} == NOTE_CODES
+    assert set(LOOKAHEAD_MIGRATION) == {"PF-E1085", "PF-W1085"}
+    assert {code for code in legacy if legacy[code] != current[code]} == (
+        NOTE_CODES | set(LOOKAHEAD_MIGRATION))
     for code, entry in BEFORE.items():
         meaning = json.dumps([entry["severity"], entry["message"], entry.get("hint"),
                               sorted(entry["args"])], ensure_ascii=False)
@@ -98,6 +194,7 @@ def test_exact_catalog_delta_and_legacy_pin():
 def test_catalog_legacy_bytes_only_have_the_declared_delta():
     path = Path(__file__).resolve().parents[1] / "pineforge_codegen" / "diagnostics_catalog.json"
     catalog = diagnostics_catalog()["codes"]
+    _assert_catalog_delta(catalog)
     restored = []
     for line in path.read_text().splitlines(keepends=True):
         match = re.match(r'  "(PF-[EW][0-9]{4})": ', line)
@@ -110,6 +207,13 @@ def test_catalog_legacy_bytes_only_have_the_declared_delta():
             line = line.replace(field, "")
             if code in NOTE_CODES:
                 line = line.replace('"severity": "note"', '"severity": "warning"', 1)
+            if code in LOOKAHEAD_MIGRATION:
+                for name in ("hint", "explanation"):
+                    before, after = LOOKAHEAD_MIGRATION[code][name]
+                    old_field = json.dumps(name) + ": " + json.dumps(before, ensure_ascii=False)
+                    new_field = json.dumps(name) + ": " + json.dumps(after, ensure_ascii=False)
+                    assert line.count(new_field) == 1, (code, name)
+                    line = line.replace(new_field, old_field, 1)
         restored.append(line)
     assert "".join(restored).encode() == (FIXTURES / "catalog.before.json").read_bytes()
 
@@ -124,6 +228,29 @@ def test_catalog_delta_rejects_malformed_candidate(mutation):
                        else "An invented {argument}." if mutation == "user_message"
                        else "changed")
     with pytest.raises((AssertionError, KeyError)):
+        _assert_catalog_delta(bad)
+
+
+@pytest.mark.parametrize("code", ["PF-E1085", "PF-W1085"])
+@pytest.mark.parametrize("field", [
+    "message", "hint", "explanation", "args", "severity", "area", "user_message",
+])
+def test_lookahead_migration_rejects_undeclared_changes(code, field):
+    bad = copy.deepcopy(diagnostics_catalog()["codes"])
+    bad[code][field] = ({"invented": {"kind": "text"}} if field == "args"
+                        else "note" if field == "severity" else "changed")
+    with pytest.raises((AssertionError, KeyError)):
+        _assert_catalog_delta(bad)
+
+
+@pytest.mark.parametrize("code", ("PF-E5089", "PF-E5090"))
+@pytest.mark.parametrize("mutation", [
+    "message", "hint", "explanation", "args", "severity", "user_message",
+])
+def test_math_catalog_delta_rejects_malformed_candidate(code, mutation):
+    bad = copy.deepcopy(diagnostics_catalog()["codes"])
+    bad[code][mutation] = ({"invented": {"kind": "text"}} if mutation == "args" else "changed")
+    with pytest.raises(AssertionError):
         _assert_catalog_delta(bad)
 
 
@@ -217,6 +344,38 @@ def test_note_enum_and_catalog_short_sentences():
     assert catalog
     for code, entry in catalog.items():
         assert entry.get("user_message"), f"missing user_message: {code}"
+
+
+@pytest.mark.parametrize("case", MATH_CASES, ids=lambda case: case["name"])
+def test_math_keyword_interfaces_keep_exact_diagnostics(case):
+    assert {row["diagnostic"]["code"] for row in MATH_CASES} == {"PF-E5089", "PF-E5090"}
+    source = (FIXTURES / case["fixture"]).read_text()
+    assert source == case["source"]
+    expected = case["diagnostic"]
+    with pytest.raises(CompileError) as caught:
+        transpile_full(source, filename=case["fixture"])
+    diagnostic, = caught.value.diagnostics
+    assert {
+        "severity": diagnostic.level.value, "phase": diagnostic.phase.value,
+        "location": asdict(diagnostic.location),
+        "message": diagnostic.message, "hint": diagnostic.hint,
+        "code": diagnostic.code, "args": diagnostic.args,
+        "user_message": diagnostic.user_message,
+    } == expected
+    assert (diagnostic.message, diagnostic.hint) == render_diagnostic(
+        expected["code"], expected["args"],
+    )
+    location = expected["location"]
+    assert json.loads(_glue()(source)) == {
+        "ok": False,
+        "error": f"<input>:{location['line']}:{location['col']}: {expected['message']}",
+        "diagnostics": [{
+            "line": location["line"], "col": location["col"], "endCol": location["end_col"],
+            "message": expected["message"] + " — " + expected["hint"],
+            "severity": expected["severity"], "code": expected["code"],
+            "args": expected["args"], "user_message": expected["user_message"],
+        }],
+    }
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])

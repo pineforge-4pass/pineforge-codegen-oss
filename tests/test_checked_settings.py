@@ -123,7 +123,7 @@ int main() {
     assert {entry["name"]: entry for entry in receipt["overrides"]}["default_qty_type"]["effective_value"] == "cash"
 
 
-def test_duplicate_input_key_is_only_refused_by_checked_setter():
+def test_duplicate_input_titles_have_independent_checked_keys():
     source = '''//@version=6
 strategy("duplicate settings")
 first = input.int(3, "Shared")
@@ -134,12 +134,21 @@ second = input.int(7, "Shared")
 int main() {
     void* strategy = strategy_create(nullptr);
     char error[128]{};
-    assert(strategy_set_input_checked(strategy, "Shared", "9", error, sizeof(error)) == PF_SETTINGS_UNSUPPORTED);
+    assert(strategy_set_input_checked(strategy, "Shared", "9", error, sizeof(error)) == PF_SETTINGS_OK);
+    assert(strategy_set_input_checked(strategy, "Shared#2", "11", error, sizeof(error)) == PF_SETTINGS_OK);
+    assert(strategy_set_input_checked(strategy, "Shared#3", "13", error, sizeof(error)) == PF_SETTINGS_INVALID_ARGUMENT);
+    assert(std::string(error) == "unknown input key");
     strategy_set_input(strategy, "Shared", "9");
+    Bar bars[]{{100, 101, 99, 100, 1000, 1577836800000LL}};
+    ReportC report{};
+    run_backtest(strategy, bars, 1, &report);
+    assert(static_cast<GeneratedStrategy*>(strategy)->first == 9);
+    assert(static_cast<GeneratedStrategy*>(strategy)->second == 11);
+    report_free(&report);
     strategy_free(strategy);
 }
 '''
-    run_emitted_tu(transpile(source), driver, opt="-O0", label="ambiguous checked input")
+    run_emitted_tu(transpile(source), driver, opt="-O0", label="independent checked inputs")
 
 
 def test_enum_options_supply_type_for_nonliteral_default():
@@ -302,14 +311,19 @@ def test_generated_tu_compiles_without_settings_header(tmp_path, monkeypatch):
     compile_cpp(transpile(SOURCE), label="legacy engine without checked settings header")
 
 
-@pytest.mark.parametrize("options", ["Side.long, alternate", "Side.long, Other.short"])
-def test_enum_options_require_literal_members_of_one_enum(options):
+@pytest.mark.parametrize("options,supported", [
+    ("Side.long, alternate", True), ("Side.long, Other.short", False),
+])
+def test_enum_options_require_immutable_members_of_one_enum(options, supported):
     source = SOURCE.replace('const int FLOOR = 1',
                             'enum Other\n    short\nalternate = Side.short\nconst int FLOOR = 1')
     source = source.replace('options=[Side.long, Side.short]', f'options=[{options}]')
     cpp = transpile(source)
     row = next(line for line in cpp.splitlines() if '{"Side", "enum"' in line)
-    assert ', false,' in row
+    assert f', {str(supported).lower()},' in row
+    if supported:
+        assert '{"Side.long", "Side.short"}' in row
+        assert '{"1", "2"}' in row
 
 
 def test_unresolved_enum_default_does_not_read_script_member_in_receipt():

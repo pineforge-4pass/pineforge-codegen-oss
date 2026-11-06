@@ -218,7 +218,8 @@ class CollectionHistoryEmitter:
         return None
 
     def _legacy_array_history_element(self, receiver: str, spec: TypeSpec,
-                                      offset: str, mutable: bool = False) -> str:
+                                      offset: str, mutable: bool = False,
+                                      offset_check: str = "") -> str:
         element_cpp = self._type_spec_to_cpp(spec.element)
         capture = ""
         if mutable and receiver in getattr(self, "_array_journal_members", {}):
@@ -233,6 +234,7 @@ class CollectionHistoryEmitter:
                 f"([&]() -> decltype(auto) {{ "
                 f"auto& _pf_history_array = {receiver}; "
                 f"const int _pf_history_offset = {offset}; "
+                f"{offset_check}"
                 f"if (_pf_history_offset < 0 || "
                 f"static_cast<size_t>(_pf_history_offset) >= _pf_history_array.size()) "
                 f'_PF_ARRAY_STOP("index_out_of_bounds", nullptr, '
@@ -244,6 +246,7 @@ class CollectionHistoryEmitter:
             f"([&]() -> {element_cpp} {{ "
             f"const auto& _pf_history_array = {receiver}; "
             f"const int _pf_history_offset = {offset}; "
+            f"{offset_check}"
             f"if (_pf_history_offset < 0 || "
             f"static_cast<size_t>(_pf_history_offset) >= _pf_history_array.size()) "
             f"return na<{element_cpp}>(); "
@@ -285,7 +288,17 @@ class CollectionHistoryEmitter:
             return
         float_spec = TypeSpec.primitive("float")
         matrices = [v.spec for v in variables if v.kind == "matrix"]
-        lines.append(COLLECTION_HISTORY_CPP.strip("\n"))
+        array_traits = COLLECTION_HISTORY_CPP
+        if getattr(self, "_uses_array_slice_views", False):
+            # History freezes contents, not live slice bindings.
+            array_traits = array_traits.replace(
+                "std::make_shared<const std::vector<E, A>>(value)",
+                "std::make_shared<const std::vector<E, A>>(value.detached_copy())",
+            ).replace(
+                "copy(const std::vector<E, A>& value) { return value; }",
+                "copy(const std::vector<E, A>& value) { return value.detached_copy(); }",
+            )
+        lines.append(array_traits.strip("\n"))
         lines.append(COLLECTION_HISTORY_ARRAY_VALUE_CPP.strip("\n"))
         if any(spec.element == float_spec for spec in matrices):
             lines.append(COLLECTION_HISTORY_MATRIX_CPP.strip("\n"))

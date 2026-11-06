@@ -389,9 +389,18 @@ def test_constant_and_input_lengths_keep_their_cpp(tmp_path: Path) -> None:
     before = transpile_json(pine, parent)
     assert ours["ok"] and before["ok"]
 
+    # d2e5855 writes direct Program tuple results into their existing members.
+    # Require both exact replacements, preserving the complete reference
+    # comparison and its existing rollback/trade-history normalisation.
+    expected = before["cpp"]
+    for name, field in (("st", "value"), ("dir", "direction")):
+        assignment = f"{name} = _result__ta_supertrend_6.{field};"
+        previous = "double " + assignment
+        assert expected.count(previous) == 1
+        expected = expected.replace(previous, assignment, 1)
     # The rollback hook leaves requested-evaluation state alone since the
     # fill-restore fix; everything else must stay identical.
     assert without_restore_script_state(
         without_trade_history_policy(ours["cpp"])
-    ) == without_restore_script_state(without_trade_history_policy(before["cpp"]))
+    ) == without_restore_script_state(without_trade_history_policy(expected))
     assert "pine_ta_length.hpp" not in ours["cpp"]

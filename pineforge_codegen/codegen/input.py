@@ -102,6 +102,12 @@ class InputHelper:
         func_name, namespace = self._resolve_callee(node.callee)
         if namespace != "input" or func_name != "enum" or not isinstance(default, Identifier):
             return default
+        return self._fold_enum_input_member(node, default)
+
+    def _fold_enum_input_member(self, node: FuncCall, member):
+        """Resolve a default or option through immutable declarations before the call."""
+        if not isinstance(member, Identifier):
+            return member
         declarations = {}
         reassigned = self._find_reassigned_vars()
         for statement in self.ctx.ast.body:
@@ -109,28 +115,29 @@ class InputHelper:
                 break
             if isinstance(statement, VarDecl):
                 declarations.setdefault(statement.name, []).append(statement)
-        candidate = default
+        candidate = member
         visited = set()
         while isinstance(candidate, Identifier) and candidate.name not in visited:
             visited.add(candidate.name)
             bindings = declarations.get(candidate.name, [])
             if len(bindings) != 1 or candidate.name in reassigned:
-                return default
+                return member
             declaration = bindings[0]
             if declaration.is_var or declaration.is_varip:
-                return default
+                return member
             candidate = declaration.value
         if isinstance(candidate, MemberAccess) and isinstance(candidate.object, Identifier):
             members = self._enum_defs.get(candidate.object.name, [])
             if candidate.member in members:
                 return candidate
-        return default
+        return member
 
     def _input_default_value(self, node: FuncCall) -> tuple[bool, object]:
         """``(True, value)`` when the defval is the constant a ``v = input...``
         binding records as ``v``'s known value -- a number, bool or string
-        literal, or a declared enum member (its index) -- else ``(False, None)``.
-        Only such an input is a stable scalar the TA reset can re-read."""
+        literal, a proven constant expression, or a declared enum member (its
+        index) -- else ``(False, None)``. Only such an input is a stable scalar
+        the TA reset can re-read."""
         default = self._get_input_default(node)
         if isinstance(default, (NumberLiteral, BoolLiteral, StringLiteral)):
             return True, default.value
@@ -138,6 +145,14 @@ class InputHelper:
             members = self._enum_defs.get(default.object.name)
             if members is not None and default.member in members:
                 return True, members.index(default.member)
+        resolver = getattr(self, "_constant_default_resolver", None)
+        if resolver is None:
+            resolver = self._constant_default_resolver = ConstantResolver(
+                self.ctx.ast, getattr(self, "_budget", None))
+        proof = resolver.expression(default)
+        if proof is not None and proof.pine_type in (
+                PineType.INT, PineType.FLOAT, PineType.BOOL, PineType.STRING):
+            return True, proof.value
         return False, None
 
     def _input_title_node(self, node: FuncCall):
@@ -171,8 +186,8 @@ class InputHelper:
         return names
 
     def _get_input_title(self, node: FuncCall, var_name: str | None = None) -> str:
-        """The key an ``input(...)`` call is read and listed by: its title's
-        string value, else the name of the declaration binding it, else
+        """The key an ``input(...)`` call is read and listed by: its normalized
+        title (``input_keys.assign_input_keys``), else its declaration name, else
         ``var_name``, else "".
 
         The binding name comes from the call node itself, so every getter of
@@ -244,16 +259,12 @@ class InputHelper:
     def _check_input_keys(self) -> None:
         """Warn about inputs of the script that share an override key.
 
-        An override reaches every input keyed by its title, else by the name of
-        the declaration holding the call (``_get_input_title``, the manifest's
-        ``title``), so inputs that share one cannot be overridden apart: two
-        untitled calls in one declaration (``n = input.int(9) +
-        input.int(3)``), two outside any declaration (keyed ""), an untitled
-        call and another input titled with its name, or one title repeated
-        across input groups (TradingView tells them apart; PineForge's
-        override protocol does not). The script still transpiles unchanged --
-        at its defaults every input reads its own default -- and one warning
-        per shared key names every input that key reaches.
+        Explicit duplicate titles already have declaration keys. Remaining
+        collisions include two untitled calls in one declaration (``n =
+        input.int(9) + input.int(3)``), two outside any declaration (keyed ""),
+        an untitled call and a title matching its binding name, or an assigned
+        suffix matching an authored title. These keep their existing defaults
+        and override behavior; one warning per shared key names all its calls.
         """
         calls_by_key: dict[str, list[FuncCall]] = {}
         for node, name in self._global_input_calls_with_names():
@@ -438,9 +449,10 @@ class InputHelper:
         return self._GETTER_CPP_TYPE[self._input_getter_for_call(node, "input", None)]
 
     def _input_key_literal(self, title: str) -> str:
-        """``title`` as the C++ string literal the input getters key it by.
+        """An assigned key (or option value) as a C++ string literal.
 
-        A title is arbitrary Pine string text; pasted verbatim, a quote in it
+        Key assignment happens once before lowering, never during escaping.
+        A key is arbitrary Pine string text; pasted verbatim, a quote in it
         ends the literal early and a backslash escapes the next character, so
         the TU no longer compiles."""
         return f'"{self._cpp_string_escape(title)}"'
@@ -548,7 +560,7 @@ class InputHelper:
         emitted only when the corresponding signature argument is a const
         literal; a bound/option referencing a non-literal is omitted (never
         crashes). ``title`` is
-        the key the emitted C++ reads the input by: the title argument, else
+        the key the emitted C++ reads the input by: the assigned title key, else
         the name of the declaration holding the call
         (``pine_spelling.input_binding_names``), else "".
         """
@@ -619,6 +631,8 @@ class InputHelper:
                 opts_node = merged[oi]
                 elems = getattr(opts_node, "elements", None)
                 if elems is not None:
+                    if namespace == "input" and func_name == "enum":
+                        elems = [self._fold_enum_input_member(node, e) for e in elems]
                     vals = [self._literal_or_none(e) for e in elems]
                     # any non-const element -> omit the whole options list
                     if vals and all(isinstance(v, str) for v in vals):

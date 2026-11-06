@@ -215,9 +215,10 @@ def test_a_bool_in_a_float_field_is_never_na(tmp_path):
 
 
 def test_a_bool_converts_without_an_na_test():
-    # The conversion's na test would read a false as na wherever is_na()
-    # of a bool resolves to the integer sentinel test; the engine's na.hpp
-    # leaves bool out of that template today, so it is spelled out.
+    # ea9ad9d converts a bool directly: neither field store tests it for na.
     cpp = transpile(_script("even = bar_index % 2 == 0\nc = Cell.new(even)\nc.w := even\n"))
-    assert cpp.count("std::is_same_v<decltype(_pf_w), bool>") == 2
+    assert cpp.count("(double)(even)") == 2
+    assert "_PFUdtRecord_Cell{.v = (double)(even), .w = 0.0}" in cpp
+    assert "_pf_udt_Cell.get(c).w = (double)(even);" in cpp
+    assert "std::is_same_v<decltype(_pf_w), bool>" not in cpp
     compile_cpp(cpp, label="bool float fields")

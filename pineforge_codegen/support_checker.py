@@ -26,8 +26,13 @@ Buckets:
   call sites), or the value must reach display and alert sinks only.
 * Declarations - only ``strategy(...)`` accepted; ``indicator(...)`` and
   ``library(...)`` rejected.
+* Method receiver use is checked by the analyzer (PF-E5087), including when
+  this support pass is disabled.
 * Unknown ``ta.X`` / ``math.X`` / ``str.X`` / ``input.X`` calls (codegen would
   silently emit ``na`` / ``0`` / ``""`` stubs).
+* Consumed if/switch values - mixed value and void arms are refused by
+  ``check_selection_value_arms`` after analysis, using codegen's shared
+  requested-value classifier; statement selections keep their existing policy.
 """
 
 from __future__ import annotations
@@ -50,8 +55,9 @@ from .ast_nodes import (
 )
 from .errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from .array_binding import bind_array_constructor_arguments
-from .builtin_keywords import POSITIONAL_BUILTINS
+from .builtin_keywords import positional_builtin
 from .intrinsic_binding import intrinsic_keyword_diagnostics
+from .limits import iter_ast_nodes
 from .pine_spelling import expr_start
 from .external_requests import (
     ABSENT_LOWERING, CHART_FALLBACK_ANNOTATION, FEED_LOWERING, FEED_WARNING_ANNOTATION,
@@ -81,6 +87,9 @@ from .codegen.constant_values import ConstantResolver
 # ---------------------------------------------------------------------------
 # Rule tables
 # ---------------------------------------------------------------------------
+
+# Shared with the per-bar request-timeframe validator emitted by codegen.
+PINE_TF_SUFFIXES = ("S", "H", "D", "W", "M")
 
 # `ta.sum` is exposed by TA_CLASS_MAP only as a backing implementation for
 # `math.sum`; it is not a real Pine identifier. Strip from supported set.
@@ -261,26 +270,13 @@ STRATEGY_UNSUPPORTED_PARAMS: dict[str, set[str]] = {
 # a follow-up must plumb alert events before codegen may claim support.
 
 # strategy.closedtrades / strategy.opentrades accessor surfaces are NOT
-# symmetric in Pine v6. opentrades has no exit_* fields (a trade has not
-# closed yet). Both lack ``direction`` (Pine has ``size`` whose sign carries
-# the direction). Splitting the whitelist makes the support checker reject
-# typos like ``strategy.opentrades.exit_price(0)`` that previously slipped
-# through into codegen and produced trade-accessor calls the runtime does
-# not implement on the open-trades side.
-CLOSED_TRADE_ACCESSOR_METHODS: frozenset[str] = frozenset({
-    "profit", "profit_percent", "commission",
-    "entry_bar_index", "exit_bar_index", "entry_comment", "exit_comment",
-    "entry_id", "exit_id", "entry_price", "exit_price", "entry_time",
-    "exit_time", "size", "max_runup", "max_runup_percent",
-    "max_drawdown", "max_drawdown_percent",
-})
-OPEN_TRADE_ACCESSOR_METHODS: frozenset[str] = frozenset({
-    "profit", "profit_percent", "commission",
-    "entry_bar_index", "entry_comment", "entry_id",
-    "entry_price", "entry_time",
-    "size", "max_runup", "max_runup_percent",
-    "max_drawdown", "max_drawdown_percent",
-})
+# symmetric in Pine v6 (the sets and the reason live in ``signatures``, beside
+# the keyword records of the same accessors). Splitting the whitelist makes the
+# support checker reject typos like ``strategy.opentrades.exit_price(0)`` that
+# previously slipped through into codegen and produced trade-accessor calls the
+# runtime does not implement on the open-trades side.
+CLOSED_TRADE_ACCESSOR_METHODS: frozenset[str] = sigs.CLOSED_TRADE_ACCESSOR_METHODS
+OPEN_TRADE_ACCESSOR_METHODS: frozenset[str] = sigs.OPEN_TRADE_ACCESSOR_METHODS
 # Back-compat alias for any external consumer still importing the union set
 # (kept as the union of the two new sets so a stale import never silently
 # narrows). New code should prefer the side-specific constant above.
@@ -718,6 +714,27 @@ class SupportChecker:
     # -- Public API --
 
     def check(self) -> list[Diagnostic]:
+        # Refuse invalid math keywords before declaration folding or unrelated
+        # request/visual diagnostics. Keep check() a diagnostic-returning API,
+        # and check unused bodies and unselected arms as well.
+        keyword_diagnostics = []
+        for node, _depth in iter_ast_nodes(self._ast):
+            if not isinstance(node, FuncCall) or not node.kwargs:
+                continue
+            namespace, name = _qualified_name(node.callee)
+            if namespace == "math":
+                keyword_diagnostics.extend(intrinsic_keyword_diagnostics(
+                    sigs.get_intrinsic(namespace, name), node.kwargs,
+                    filename=self._filename,
+                ))
+        if keyword_diagnostics:
+            return keyword_diagnostics
+        from .drawing_all import drawing_all_uses, drawing_all_refusal
+        self._drawing_all_read_members, refused = drawing_all_uses(
+            self._ast,
+        )
+        for node, kind in refused:
+            self._err(node, drawing_all_refusal(kind), allow_switch_warning=False)
         self._collect_user_definitions(self._ast)
         self._collect_user_calls()
         self._collect_scalar_rebinds(self._ast)
@@ -1643,9 +1660,14 @@ class SupportChecker:
             return
 
         full = f"{ns}.{name}" if ns else name
-        self._diagnostics.extend(intrinsic_keyword_diagnostics(
+        keyword_diagnostics = intrinsic_keyword_diagnostics(
             sigs.get_intrinsic(ns, name), node.kwargs,
-        ))
+            filename=self._filename,
+        )
+        self._diagnostics.extend(keyword_diagnostics)
+        if keyword_diagnostics:
+            self._visit_children(node)
+            return
 
         # The footprint another symbol's feed carries: the column of the
         # request.security whose whole expression this is.
@@ -1734,8 +1756,19 @@ class SupportChecker:
             )
             self._visit_children(node)
             return
-        if (ns is None and name in POSITIONAL_BUILTINS
-                and not self._check_builtin_arguments(node, name)):
+        positional_func = positional_builtin(full)
+        # Bare builtins and unary math overload families share signature
+        # validation. Other math records retain their existing arity policy.
+        # A name the script binds anywhere (a variable, a parameter, a loop
+        # variable, a tuple element) spelled like a namespace, as in
+        # ``float math = ...`` with ``math.abs()``, can make the call a method
+        # call on that value; only a namespace no binding shares is checked
+        # as the namespace's function.
+        if (positional_func is not None
+                and (ns is None
+                     or (len(positional_func.primary.params) == 1
+                         and not self._binding_counts.get(ns)))
+                and not self._check_builtin_arguments(node, full, func=positional_func)):
             self._visit_children(node)
             return
 
@@ -2164,6 +2197,11 @@ class SupportChecker:
         self._visit(node.false_val)
 
     def _visit_MemberAccess(self, node: MemberAccess) -> None:
+        from .drawing_all import drawing_all_kind, drawing_all_refusal
+        kind = drawing_all_kind(node)
+        if kind is not None and id(node) not in self._drawing_all_read_members:
+            self._err(node, drawing_all_refusal(kind), allow_switch_warning=False)
+            return
         if (node.annotations or {}).get(HISTORY_MEMBER_ANNOTATION):
             self._refuse_history_member(node)
         chain = _resolve_member_chain(node)
@@ -2285,8 +2323,8 @@ class SupportChecker:
 
         Rejects ignore_invalid_symbol/currency (codegen drops silently).
         Symbol must reference current chart symbol.
-        gaps/lookahead must be barmerge.{gaps,lookahead}_{on,off} member access
-        (codegen only recognizes that shape; anything else silently dropped).
+        gaps must be a barmerge.gaps_* constant; lookahead also accepts fixed
+        selections of barmerge.lookahead_* constants, evaluated at registration.
         """
         allowed_hint = (
             "Only symbol, timeframe, expression, gaps, and lookahead are accepted."
@@ -2353,15 +2391,15 @@ class SupportChecker:
                 hint="Codegen only recognizes the barmerge.gaps_* literal; other values are silently treated as gaps_off.",
             )
 
-        if reads_data and lookahead_node is not None and not self._is_barmerge_member(
-            lookahead_node, "lookahead_on", "lookahead_off"
+        if reads_data and lookahead_node is not None and not self._is_lookahead_value(
+            lookahead_node
         ):
             self._err(
                 lookahead_node,
                 "request.security lookahead must be barmerge.lookahead_on or barmerge.lookahead_off.",
-                hint="Codegen only recognizes the barmerge.lookahead_* literal; other values are silently treated as lookahead_off.",
+                hint="Use barmerge.lookahead_* constants selected by values fixed before the first bar.",
             )
-        if self._is_barmerge_member(lookahead_node, "lookahead_on"):
+        if self._lookahead_can_be_on(lookahead_node):
             # lookahead_on is supported by codegen + engine: base.py forwards
             # the flag into _security_eval_info, emit_top.py registers it via
             # register_security_eval(..., lookahead_on=true), and the engine
@@ -2583,8 +2621,8 @@ class SupportChecker:
         gaps, lookahead = _security_gaps_lookahead(node)
         if not (gaps is None or self._is_barmerge_member(gaps, "gaps_on", "gaps_off")) or not (
                 lookahead is None
-                or self._is_barmerge_member(lookahead, "lookahead_on", "lookahead_off")):
-            # Registration reads them as the constants they are written as.
+                or self._is_lookahead_value(lookahead)):
+            # Registration must compute both flags before the first bar.
             return "its gaps and lookahead are barmerge constants"
         payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
         if isinstance(payload, FuncCall) and _qualified_name(payload.callee) == (
@@ -2726,9 +2764,10 @@ class SupportChecker:
     def _check_builtin_arguments(self, node: FuncCall, name: str, *, func=None) -> bool:
         """Bind an ordinary builtin to its TradingView signatures.
 
-        ``nz`` / ``fixnan`` calls that bind are rewritten positionally by
-        ``builtin_keywords``; request.currency_rate uses the same validation
-        before its evaluation-time stop. Returns True when the arguments bind.
+        Registered bare builtins and unary math calls that bind are
+        rewritten positionally by ``builtin_keywords``; request.currency_rate
+        uses the same validation before its evaluation-time stop.
+        Returns True when the arguments bind.
         """
         if func is None:
             func = sigs.BUILTIN_FUNCTIONS[name]
@@ -2745,6 +2784,9 @@ class SupportChecker:
             expr_start(at if at is not None else node),
             f"{name} {message} (TradingView: {spelled}).",
             hint="Use the parameters of TradingView's signature.",
+            # Preserve the legacy bare-builtin switch policy. Registered
+            # namespace signatures must bind even in a non-default arm.
+            allow_switch_warning=func.name in sigs.BUILTIN_FUNCTIONS,
         )
         return False
 
@@ -2862,6 +2904,37 @@ class SupportChecker:
         if not isinstance(node.object, Identifier) or node.object.name != "barmerge":
             return False
         return node.member in allowed
+
+    def _is_lookahead_value(self, node: ASTNode) -> bool:
+        if self._is_barmerge_member(node, "lookahead_on", "lookahead_off"):
+            return True
+        return self._resolve_lookahead_value(node) is not None
+
+    def _resolve_lookahead_value(self, node: ASTNode | None):
+        if node is None:
+            return None
+        from .security_contexts import ScriptIndex, resolve_barmerge_value
+
+        index = getattr(self, "_barmerge_index", None)
+        if index is None:
+            index = self._barmerge_index = ScriptIndex(self._ast)
+        return resolve_barmerge_value(index, node, "lookahead_on", "lookahead_off")
+
+    def _lookahead_can_be_on(self, node: ASTNode | None) -> bool:
+        """Inspect result arms of the same immutable value used at registration."""
+        pending = [self._resolve_lookahead_value(node)]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, Ternary):
+                if self._is_constant_bool(value.condition, True):
+                    pending.append(value.true_val)
+                elif self._is_constant_bool(value.condition, False):
+                    pending.append(value.false_val)
+                else:
+                    pending.extend((value.true_val, value.false_val))
+            elif self._is_barmerge_member(value, "lookahead_on"):
+                return True
+        return False
 
     def _is_current_symbol_expr(
         self, node: ASTNode, _seen: frozenset[object] = frozenset(),
@@ -2989,7 +3062,7 @@ class SupportChecker:
         if tf_str[-1].isalpha():
             suffix = tf_str[-1]
             digits = tf_str[:-1]
-            if suffix not in ("S", "H", "D", "W", "M"):
+            if suffix not in PINE_TF_SUFFIXES:
                 return f"unknown timeframe suffix '{suffix}'"
         if digits == "":
             # Bare suffix shorthand — Pine treats "D"/"W"/"M"/"S" as 1<suffix>.
@@ -3011,6 +3084,10 @@ class SupportChecker:
         if tf_node is None:
             return
         if not isinstance(tf_node, StringLiteral):
+            return
+        # In a request, an empty timeframe names the chart's timeframe.
+        # It is not a timeframe token, so keep the token validator separate.
+        if tf_node.value == "":
             return
         refusal = invalid_tf_literal(tf_node.value, fn_label)
         if refusal is None:
@@ -3076,6 +3153,102 @@ def invalid_tf_literal(tf_str: str, fn_label: str) -> tuple[str, str] | None:
 # ---------------------------------------------------------------------------
 # Convenience entry point
 # ---------------------------------------------------------------------------
+
+def check_selection_value_arms(
+    ast: Program, *, is_void: Callable, function_node: Callable,
+    error: Callable, budget=None,
+) -> None:
+    """Refuse mixed value/void arms only where a selection supplies a value.
+
+    This part of support checking runs after analysis so it can reuse the
+    request emitter's binding-aware void decision and resolved user callables.
+    A callable's terminal value is consumed only through a consumed call.
+    Declarations and reassignments always consume their right-hand side.
+    """
+    from .diagnostic_codes import render_diagnostic
+
+    checked_functions = set()
+
+    def function(definition, consumed):
+        key = (id(definition), consumed)
+        if key in checked_functions:
+            return
+        checked_functions.add(key)
+        block(definition.body, consumed, dict.fromkeys(definition.params))
+
+    def block(body, consumed, bindings):
+        local = dict(bindings)
+        for index, stmt in enumerate(body):
+            walk(stmt, consumed and index == len(body) - 1, local)
+            if isinstance(stmt, VarDecl):
+                local[stmt.name] = stmt.value
+            elif isinstance(stmt, Assignment) and isinstance(stmt.target, Identifier):
+                local[stmt.target.name] = stmt.value
+            elif isinstance(stmt, TupleAssign):
+                local.update(dict.fromkeys(stmt.names))
+
+    def walk(node, consumed, bindings):
+        if isinstance(node, ASTNode) and budget is not None:
+            budget.check(node.loc, Phase.CODEGEN)
+        if isinstance(node, (FuncDef, MethodDef)):
+            function(node, False)
+        elif isinstance(node, ExprStmt):
+            walk(node.expr, consumed, bindings)
+        elif isinstance(node, (VarDecl, Assignment, TupleAssign)):
+            walk(node.value, True, bindings)
+            if isinstance(node, Assignment):
+                walk(node.target, True, bindings)
+        elif isinstance(node, (IfStmt, SwitchStmt)):
+            if isinstance(node, IfStmt):
+                walk(node.condition, True, bindings)
+                arms = [node.body, node.else_body]
+                kind = "if"
+            else:
+                walk(node.expr, True, bindings)
+                for condition, _ in node.cases:
+                    walk(condition, True, bindings)
+                arms = [body for _, body in node.cases] + [node.default_body]
+                kind = "switch"
+            for body in arms:
+                block(body, consumed, bindings)
+            if consumed:
+                kinds = {is_void(body, bindings) for body in arms if body}
+                if kinds == {False, True}:
+                    message, hint = render_diagnostic("PF-E5088", {"kind": kind})
+                    error(node, message, hint=hint)
+        elif isinstance(node, (ForStmt, ForInStmt, WhileStmt)):
+            local = dict(bindings)
+            if isinstance(node, ForStmt):
+                walk(node.start, True, bindings)
+                local[node.var] = None
+                walk(node.end, True, local)
+                walk(node.step, True, local)
+            elif isinstance(node, ForInStmt):
+                walk(node.iterable, True, bindings)
+                local.update(dict.fromkeys(node.vars or [node.var]))
+            else:
+                walk(node.condition, True, bindings)
+            block(node.body, consumed, local)
+        elif isinstance(node, FuncCall):
+            walk(node.callee, True, bindings)
+            walk(node.args, True, bindings)
+            walk(node.kwargs, True, bindings)
+            definition = function_node(node)
+            if definition is not None:
+                function(definition, consumed)
+        elif isinstance(node, ASTNode):
+            for name, child in vars(node).items():
+                if name not in ("loc", "annotations"):
+                    walk(child, True, bindings)
+        elif isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child, consumed, bindings)
+        elif isinstance(node, dict):
+            for child in node.values():
+                walk(child, consumed, bindings)
+
+    block(ast.body, False, {})
+
 
 def check_support(ast: Program, filename: str = "<input>") -> list[Diagnostic]:
     return SupportChecker(ast, filename=filename).check()

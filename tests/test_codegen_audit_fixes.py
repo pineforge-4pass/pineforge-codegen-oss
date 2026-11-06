@@ -323,9 +323,10 @@ def test_array_slice_string_elements():
         "sb = array.slice(sa, 0, 1)\nplot(close)\n"
     )
     # The slice keeps the receiver's ELEMENT type (std::string, not double).
-    # Iterators come from the bounds-checked lambda's ``__pf_array`` binding.
-    assert "std::vector<std::string>(__pf_array.begin()" in cpp
-    assert "}((sa))" in cpp
+    # The bounds-checked lambda returns a typed window of its receiver.
+    assert "_pf_slice_view<_PFSliceArray<std::string>>(__pf_array," in cpp
+    assignment = next(line for line in cpp.splitlines() if line.strip().startswith("sb ="))
+    assert assignment.count("(sa)") == 1
 
 
 # ---------------------------------------------------------------------------

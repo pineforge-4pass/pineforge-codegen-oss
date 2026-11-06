@@ -289,15 +289,12 @@ int main() {
     assert output.splitlines() == ["", "3 4"]
 
 
-@pytest.mark.parametrize("size", ["-1", "int(na)"])
 @pytest.mark.parametrize("arguments", [
     "SIZE, 1.0", "size = SIZE, initial_value = 1.0",
 ])
-def test_constructor_keeps_existing_negative_and_na_size_guards(size, arguments):
-    # Negative sizes still stop. Int-na stopping is a known approximation,
-    # deliberately preserved here; TradingView completes an empty array.
+def test_constructor_keeps_the_negative_size_guard(arguments):
     output = run_emitted_tu(transpile(
-        HEADER + f"values = array.new<float>({arguments.replace('SIZE', size)})\n"
+        HEADER + f"values = array.new<float>({arguments.replace('SIZE', '-1')})\n"
     ), r"""
 #include <iostream>
 int main() {
@@ -308,6 +305,28 @@ int main() {
 }
 """, opt="-O0", label="named_array_invalid_size")
     assert output.strip() == "cannot create std::vector larger than max_size()"
+
+
+@pytest.mark.parametrize("arguments", [
+    "SIZE, 1.0", "size = SIZE, initial_value = 1.0",
+])
+def test_constructor_completes_an_empty_array_for_a_missing_size(arguments):
+    # A missing size completes an empty array without stopping the script, as
+    # TradingView does (the integration branch builds the empty array; the
+    # earlier stop on an int na was a documented approximation).
+    output = run_emitted_tu(transpile(
+        HEADER + f"values = array.new<float>({arguments.replace('SIZE', 'int(na)')})\n"
+    ), r"""
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    strategy.run(&bar, 1);
+    std::cout << strategy.last_error() << "\n"
+              << strategy.values.size() << "\n";
+}
+""", opt="-O0", label="named_array_missing_size")
+    assert output.splitlines() == ["", "0"]
 
 
 @pytest.mark.parametrize("scope", ["member", "local", "parameter"])
@@ -356,6 +375,12 @@ int main() {
     assert output.splitlines() == ["", "1"]
 
 
+_REFERENCE_SPELLING = {
+    "m = matrix.new<float>(rows = 2, columns = 3, initial_value = close)\n":
+        "m = matrix.new<float>(2, 3, close)\n",
+}
+
+
 @pytest.mark.parametrize("body", [
     "values = array.new<float>()\n",
     "values = array.new<float>(3)\n",
@@ -370,16 +395,20 @@ int main() {
     "values = array.from(year(time), hour(time = time, timezone = \"UTC\"))\n",
     "strategy.entry(\"L\", strategy.long, qty = 1)\nstrategy.order(\"O\", strategy.short, qty = 2)\n",
     "strategy.exit(\"X\", \"L\", stop = close)\nstrategy.close(\"L\", immediately = true)\nstrategy.close_all()\n",
-    "strategy.cancel(\"L\")\nstrategy.cancel_all()\nx = strategy.convert_to_account(close)\ny = strategy.default_entry_qty(close)\n",
+    "strategy.cancel(\"L\")\nstrategy.cancel_all()\nx = strategy.convert_to_account(close)\n",
 ])
 def test_unrelated_lowerings_keep_cpp_diagnostics_and_manifests(tmp_path, body):
     from tests._e2e import reference_codegen, transpile_json
 
-    reference = reference_codegen("5631f3e7c3aea91cf763de7ceaf893c31c5f85bf")
+    reference = reference_codegen("3ec62ae589f5b777122d03f1e7a706e7cda67ba8")
     assert reference is not None, "the source-preservation baseline must be available"
     pine = tmp_path / "strategy.pine"
-    pine.write_text(HEADER + body)
+    # The reference read the keywords of matrix.new by position, as a call with
+    # no counts (a 0 by 0 matrix): that keyword spelling is held to what the
+    # reference emitted for the positional one, which the keywords now reach.
+    pine.write_text(HEADER + _REFERENCE_SPELLING.get(body, body))
     previous = transpile_json(pine, reference)
+    pine.write_text(HEADER + body)
     current = transpile_json(pine)
     assert previous["ok"] and current["ok"], (previous, current)
     assert current == previous

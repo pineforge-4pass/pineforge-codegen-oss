@@ -3,6 +3,7 @@
 import pytest
 
 from pineforge_codegen import transpile
+from tests._numeric_expected import integer_arithmetic
 
 
 HEADER = '//@version=6\nstrategy("Existing storage emission")\n'
@@ -81,7 +82,11 @@ if close > open
     saved := time
 plot(age(saved))
 ''',
-        "double elapsed = ((double)((current_bar_.timestamp - stamp)) / (double)(60000.0));",
+        "double elapsed = "
+        + integer_arithmetic(
+            integer_arithmetic("current_bar_.timestamp", "-", "stamp"),
+            "/", "60000.0",
+        ) + ";",  # a925fb3a guards stamp; 2b13f9f preserves the integer width.
         id="existing-wide-scalar-parameter",
     ),
     pytest.param(

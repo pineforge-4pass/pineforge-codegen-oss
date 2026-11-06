@@ -51,7 +51,7 @@ def _expressions(cpp, intrinsic):
 def intrinsic_case(request, monkeypatch):
     """Synthetic parameters use existing dispatch without a visitor change."""
     original = signatures.MATH_FUNCTIONS[request.param]
-    assert original.keyword_names_verified is False
+    original_verified = original.keyword_names_verified
     existing_names = {
         param.name
         for registry in vars(signatures).values()
@@ -61,13 +61,14 @@ def intrinsic_case(request, monkeypatch):
         for signature in record.signatures
         for param in signature.params
     }
-    intrinsic = replace(original, signatures=[
+    intrinsic = replace(original, keyword_names_verified=False, signatures=[
         replace(signature, params=[
             replace(param, name=f"pf_synthetic_argument_{index}")
             for index, param in enumerate(signature.params)
         ])
         for signature in original.signatures
     ])
+    assert intrinsic.keyword_names_verified is False
     assert not existing_names.intersection(intrinsic.param_names)
 
     @contextmanager
@@ -81,7 +82,7 @@ def intrinsic_case(request, monkeypatch):
         patch.setitem(signatures.MATH_FUNCTIONS, request.param, intrinsic)
         yield intrinsic, with_verified_names
     assert signatures.MATH_FUNCTIONS[request.param] is original
-    assert original.keyword_names_verified is False
+    assert original.keyword_names_verified is original_verified
 
 
 @pytest.mark.parametrize("context", (
@@ -137,8 +138,9 @@ def test_verified_names_refuse_an_unknown_keyword_at_its_computed_span(
     start = source.index(f"{unknown} =")
     line = source.count("\n", 0, start) + 1
     col = start - source.rfind("\n", 0, start)
-    expected_args = {"key": intrinsic.name, "name": unknown}
-    expected_text = render_diagnostic("PF-E2027", expected_args)
+    expected_args = {"function": intrinsic.name, "name": unknown,
+                     "accepted": ", ".join(intrinsic.param_names)}
+    expected_text = render_diagnostic("PF-E5090", expected_args)
     with with_verified_names():
         with pytest.raises(CompileError) as caught:
             transpile(
@@ -151,7 +153,7 @@ def test_verified_names_refuse_an_unknown_keyword_at_its_computed_span(
     ]
     assert len(diagnostics) == 1
     diagnostic = diagnostics[0]
-    assert diagnostic.code == "PF-E2027"
+    assert diagnostic.code == "PF-E5090"
     assert diagnostic.args == expected_args
     assert (diagnostic.message, diagnostic.hint) == expected_text
     assert diagnostic.location.file == "generic_keywords.pine"
@@ -246,11 +248,12 @@ def test_shared_parameter_names_resolve_each_callable_record(
                     diagnostic for diagnostic in caught.value.diagnostics
                     if diagnostic.level == Level.ERROR
                 ]
-                expected_args = {"key": record.name, "name": unknown}
-                assert diagnostic.code == "PF-E2027"
+                expected_args = {"function": record.name, "name": unknown,
+                                 "accepted": shared_name}
+                assert diagnostic.code == "PF-E5090"
                 assert diagnostic.args == expected_args
                 assert (diagnostic.message, diagnostic.hint) == render_diagnostic(
-                    "PF-E2027", expected_args,
+                    "PF-E5090", expected_args,
                 )
                 start = source.index(f"{unknown} =")
                 line = source.count("\n", 0, start) + 1

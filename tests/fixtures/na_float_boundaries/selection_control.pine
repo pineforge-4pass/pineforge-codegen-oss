@@ -1,0 +1,31 @@
+//@version=6
+strategy("Typed missing selection", currency=currency.USDT, initial_capital=1000000000, default_qty_type=strategy.fixed)
+phase = input.int(0, "phase", options=[0, 1, 2])
+channel = input.int(0, "channel", options=[0, 1])
+int n = bar_index
+float a = na
+if bar_index > 0 and bar_index % 3 == 0
+    a := float(bar_index - 1)
+else
+    a := na
+float b = na
+if bar_index > 0 and bar_index % 3 == 0
+    b := float(bar_index - 1)
+else
+    b := na
+value = channel == 0 ? a : b
+encoded = na(value) ? 1.0 : 2.0 + value / 1000.0
+if bar_index <= 1437 and bar_index % 3 == phase
+    strategy.entry("sample", strategy.long, qty=encoded)
+else if strategy.position_size != 0
+    strategy.close_all()
+plot(a[1] + b[1])
+auditHistory0 = na(a[0]) ? 1.0 : 2.0 + float(a[0]) / 1000.0
+auditHistory1 = na(a[1]) ? 1.0 : 2.0 + float(a[1]) / 1000.0
+auditHistory2 = na(a[2]) ? 1.0 : 2.0 + float(a[2]) / 1000.0
+auditother = na(b) ? 1.0 : 2.0 + b / 1000.0
+// @pf-trace current=encoded
+// @pf-trace history0=auditHistory0
+// @pf-trace history1=auditHistory1
+// @pf-trace history2=auditHistory2
+// @pf-trace other=auditother

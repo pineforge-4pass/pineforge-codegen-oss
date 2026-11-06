@@ -123,7 +123,7 @@ you delete or weaken the special case, the test will tell you.
    in Pine v6; both lack `direction`. `TRADE_ACCESSOR_METHODS` is kept
    as the union for back-compat but new code should prefer the side-
    specific constant.
-9. **Preserve `na` at integer width boundaries.** A `double`
+9. **Preserve `na` at numeric boundaries.** A `double`
   expression reaching an `int` / `int64_t` slot, or an integer crossing
    between those widths, must go through
    `helpers.na_preserving_int_cast` (`is_na(_pf_v) ? na<int>() :
@@ -181,6 +181,12 @@ you delete or weaken the special case, the test will tell you.
    field converts the same way: it compiled, but an int na became
    -2147483648 where TradingView's field is na (tape
    `fixtures/array_history_tv/uassign_float`).
+   Float destinations share the same original-type check: an integer `na`
+   becomes floating `na` before a write, numeric branch join or float argument.
+   Explicit float declarations retain double storage, including integer
+   initializers followed by fractional writes. Integer arithmetic checks
+   missing operands before computing; integer destinations retain their type.
+   `tests/test_e2e_na_float_boundaries.py` checks native values and quantities.
 10. **An inline `input.*()` call is one leaf of a TA length.** TA ctor
    args (and derived / user-function lengths) reach the codegen as Pine
    source spellings. `pine_spelling.py` keeps an inline input call whole
@@ -247,8 +253,13 @@ you delete or weaken the special case, the test will tell you.
    request.security timeframe and an alias's read (`b = a`) agree; a call
    re-spelled for a derived length carries it as `title=`, since the
    re-parsed node has no declaration. `_input_key_literal` spells the key
-   as a C++ literal (a title holding `"` or `\` used to break the TU). Inputs
-   sharing a key cannot be overridden apart, so `_check_input_keys` warns
+   as a C++ literal (a title holding `"` or `\` used to break the TU).
+   `input_keys.assign_input_keys` normalizes later explicit duplicate titles
+   to `<title>#<n>` before helper copying and TA spelling, starting at 2 and
+   taking the next ordinal whose key is neither a provable authored title
+   anywhere in the script nor already assigned by the pass;
+   the first title and all untitled keys retain their previous spelling.
+   Remaining shared keys cannot be overridden apart, so `_check_input_keys` warns
    (see "Input keys" above; an untitled call nested in a plain declaration
    used to be keyed `""`).
    `tests/test_e2e_untitled_input_keys.py`,
@@ -377,7 +388,18 @@ you delete or weaken the special case, the test will tell you.
     whatever order they are written in: the support checker binds `nz` and
     `fixnan` to their signatures (`_check_builtin_arguments`, refusing what
     TradingView refuses) and `builtin_keywords` rewrites them positionally
-    (`tests/test_e2e_builtin_keyword_names.py`).
+    (`tests/test_e2e_builtin_keyword_names.py`). The same holds for the other
+    built-ins whose lowering reads its arguments by position
+    (`timeframe.change`, `timeframe.in_seconds`, the trade accessors of
+    `strategy.closedtrades` and `strategy.opentrades`, `matrix.new`, and
+    `math.random`) and for those that bind by parameter slot
+    (`str.format_time`, `timestamp`, `time`, `time_close`): a keyword that
+    skips a parameter keeps the later arguments in their own slots, a skipped
+    parameter takes its declared default, and a keyword the call does not have
+    is refused with `PF-E2027` (`PF-E5090` for math)
+    (`tests/test_e2e_keyword_arguments.py`,
+    `tests/test_e2e_keyword_arguments_construct.py`,
+    `tests/test_e2e_keyword_hole_binding.py`).
 17. **A function's last statement is its value.** TradingView returns the
     value of a function's (or an if/switch arm's) last statement, whatever
     the statement: `x := e` and every `x op= e` yield x's new value (typed as
