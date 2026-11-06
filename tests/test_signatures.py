@@ -7,6 +7,7 @@ for every registered intrinsic function.
 """
 
 import pytest
+from tests._emitted_member_assertions import assert_int_member
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from pineforge_codegen.analyzer import Analyzer
@@ -989,34 +990,33 @@ class TestG2CodegenHelpers:
         return transpile(f'//@version=6\nstrategy("T")\n{body}\n')
 
     def test_backadjustment_on_emits_int(self):
-        # backadjustment.* emit as integer constants (analyzer types as INT;
-        # engine ignores them — codegen drops them from request.security kwargs)
-        cpp = self._generate('x = backadjustment.on\n')
-        assert cpp  # just verify it compiles
+        # The analyzer's setting-namespace rows define INT member storage.
+        cpp = self._generate('back_on = backadjustment.on\n')
+        assert_int_member(cpp, "back_on")
 
     def test_backadjustment_off_emits_int(self):
-        cpp = self._generate('x = backadjustment.off\n')
-        assert cpp
+        cpp = self._generate('back_off = backadjustment.off\n')
+        assert_int_member(cpp, "back_off")
 
     def test_backadjustment_inherit_emits_int(self):
-        cpp = self._generate('x = backadjustment.inherit\n')
-        assert cpp
+        cpp = self._generate('back_inherit = backadjustment.inherit\n')
+        assert_int_member(cpp, "back_inherit")
 
     def test_settlement_as_close_on_emits_int(self):
-        cpp = self._generate('x = settlement_as_close.on\n')
-        assert cpp
+        cpp = self._generate('settlement_on = settlement_as_close.on\n')
+        assert_int_member(cpp, "settlement_on")
 
     def test_settlement_as_close_off_emits_int(self):
-        cpp = self._generate('x = settlement_as_close.off\n')
-        assert cpp
+        cpp = self._generate('settlement_off = settlement_as_close.off\n')
+        assert_int_member(cpp, "settlement_off")
 
     def test_adjustment_dividends_emits_int(self):
-        cpp = self._generate('x = adjustment.dividends\n')
-        assert cpp
+        cpp = self._generate('adjust_dividends = adjustment.dividends\n')
+        assert_int_member(cpp, "adjust_dividends")
 
     def test_adjustment_splits_emits_int(self):
-        cpp = self._generate('x = adjustment.splits\n')
-        assert cpp
+        cpp = self._generate('adjust_splits = adjustment.splits\n')
+        assert_int_member(cpp, "adjust_splits")
 
     def test_syminfo_prefix_emits_na(self):
         cpp = self._generate('x = syminfo.prefix\n')

@@ -5065,6 +5065,9 @@ class TypeInferer:
                 return "int64_t"
             if ename in self._enum_defs and node.member in self._enum_defs[ename]:
                 return "int"
+            # Data-adjustment setting constants have INT storage in the analyzer.
+            if ename in ("backadjustment", "settlement_as_close", "adjustment"):
+                return "int"
             if ename == "strategy" and node.member == "account_currency":
                 return "std::string"
             # format.* constants emit std::string literals (consumed by
