@@ -31,8 +31,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
   that does not fit 64 bits, and a NaN, read `na` on every compiler and
   architecture. A variable, function result, record field or int array that
   holds the result of such an expression is `int64_t`, and a function
-  parameter that receives one follows. This changes generated C++ for scripts
-  that use these forms: regenerate and relink affected strategies.
+  parameter that receives one follows. A 32-bit integer `na` (`int(na)`,
+  `bar_index`, a narrow input) that meets one of them in a selection arm, a
+  store or a `request.security` payload stays `na` instead of becoming the
+  number -2147483648. This changes generated C++ for scripts that use these
+  forms: regenerate and relink affected strategies.
 - Repeated explicit input titles now have separate override keys: the first
   keeps the bare title, and later inputs use `<title>#<n>`, starting at 2 and
   skipping authored titles and keys already assigned. The manifest, effective

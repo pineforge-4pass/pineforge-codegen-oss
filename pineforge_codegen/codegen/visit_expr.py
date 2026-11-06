@@ -408,6 +408,7 @@ class ExprVisitor:
             else None
         )
         array_history_type = self._array_history_value_expr_cpp_type(node)
+        widen = self._ternary_wide_arm_ids(links)
         if len(links) < self._FLAT_TERNARY_CHAIN:
             c = self._coerce_bool_expr(
                 self._visit_expr(node.condition), node.condition
@@ -418,6 +419,10 @@ class ExprVisitor:
             f = self._ternary_arm(
                 node.false_val, string_na, ternary_cpp_type
             )
+            if id(node.true_val) in widen:
+                t = self._coerce_int_slot(t, node.true_val, "int64_t")
+            if id(node.false_val) in widen:
+                f = self._coerce_int_slot(f, node.false_val, "int64_t")
             if array_history_type is not None:
                 t = (f"{array_history_type}{{}}" if self._is_na_expr(node.true_val)
                      else f"{array_history_type}({t})")
@@ -432,6 +437,8 @@ class ExprVisitor:
             t = self._ternary_arm(
                 link.true_val, string_na, ternary_cpp_type
             )
+            if id(link.true_val) in widen:
+                t = self._coerce_int_slot(t, link.true_val, "int64_t")
             if array_history_type is not None:
                 t = (f"{array_history_type}{{}}" if self._is_na_expr(link.true_val)
                      else f"{array_history_type}({t})")
@@ -439,10 +446,31 @@ class ExprVisitor:
         tail = self._ternary_arm(
             links[-1].false_val, string_na, ternary_cpp_type
         )
+        if id(links[-1].false_val) in widen:
+            tail = self._coerce_int_slot(tail, links[-1].false_val, "int64_t")
         if array_history_type is not None:
             tail = (f"{array_history_type}{{}}" if self._is_na_expr(links[-1].false_val)
                     else f"{array_history_type}({tail})")
         return f"({''.join(arms)}({tail}))"
+
+    def _ternary_wide_arm_ids(self, links: list[Ternary]) -> set[int]:
+        """The ``int``-typed value arms of a ``?:`` whose other arms are
+        ``int64_t``. C++ gives the conditional the wider type and converts the
+        narrow arm implicitly, so its 32-bit na pattern (INT32_MIN) becomes the
+        finite number -2147483648 in 64 bits; ``(c ? int(na) : int(close))``
+        is the case, now that ``int(<floating value>)`` is an ``int64_t``.
+        Those arms take the na-preserving widening of an integer store."""
+        if len(links) < self._FLAT_TERNARY_CHAIN:
+            arms = [links[0].true_val, links[0].false_val]
+        else:
+            arms = [link.true_val for link in links] + [links[-1].false_val]
+        types = {self._infer_type(arm) for arm in arms}
+        if types != {"int", "int64_t"}:
+            # Exactly these two: a floating or other arm already makes the
+            # chain's own common type (``ternary_cpp_type``), and a cast of a
+            # double that may be NaN to int64_t would be undefined.
+            return set()
+        return {id(arm) for arm in arms if self._infer_type(arm) == "int"}
 
     def _ternary_string_na(self, links: list[Ternary]) -> bool:
         """A ``?:`` chain whose every value arm but a bare ``na`` is a
