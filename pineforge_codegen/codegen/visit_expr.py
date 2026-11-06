@@ -120,7 +120,7 @@ from ..ast_nodes import (
 )
 from .strategy_declaration import DECLARATION_CONSTANTS, NamedConstant
 from .color_constants import color_literal_to_int64 as _color_literal_to_int64
-from .helpers import pine_index_int_cast, unary_sign_cpp
+from .helpers import na_preserving_int_cast, pine_index_int_cast, unary_sign_cpp
 from .types import COLLECTION_MUTATING_METHODS
 from .tables import (
     ADJUSTMENT_MAP,
@@ -278,21 +278,8 @@ class ExprVisitor:
         if isinstance(node, Subscript):
             return self._visit_subscript(node)
         if isinstance(node, TupleLiteral):
-            elems = []
-            for element in node.elements:
-                element_spec = self._type_spec_from_expr(element)
-                element_target = None
-                if (element_spec is not None
-                        and element_spec.kind == "udt"
-                        and element_spec.name in DRAWING_TYPE_TO_CPP):
-                    element_target = self._type_spec_to_cpp(element_spec)
-                elems.append(
-                    self._visit_rhs_value(
-                        element,
-                        target_cpp_type=element_target,
-                    )
-                )
-            elems = ", ".join(elems)
+            elems = ", ".join(
+                self._tuple_literal_element(element) for element in node.elements)
             return f"std::make_tuple({elems})"
         if isinstance(node, (IfStmt, SwitchStmt)):
             return self._selection_value_expr(node)
@@ -408,6 +395,7 @@ class ExprVisitor:
             else None
         )
         array_history_type = self._array_history_value_expr_cpp_type(node)
+        widen = self._ternary_wide_arm_ids(links)
         if len(links) < self._FLAT_TERNARY_CHAIN:
             c = self._coerce_bool_expr(
                 self._visit_expr(node.condition), node.condition
@@ -418,6 +406,10 @@ class ExprVisitor:
             f = self._ternary_arm(
                 node.false_val, string_na, ternary_cpp_type
             )
+            if id(node.true_val) in widen:
+                t = self._coerce_int_slot(t, node.true_val, "int64_t")
+            if id(node.false_val) in widen:
+                f = self._coerce_int_slot(f, node.false_val, "int64_t")
             if array_history_type is not None:
                 t = (f"{array_history_type}{{}}" if self._is_na_expr(node.true_val)
                      else f"{array_history_type}({t})")
@@ -432,6 +424,8 @@ class ExprVisitor:
             t = self._ternary_arm(
                 link.true_val, string_na, ternary_cpp_type
             )
+            if id(link.true_val) in widen:
+                t = self._coerce_int_slot(t, link.true_val, "int64_t")
             if array_history_type is not None:
                 t = (f"{array_history_type}{{}}" if self._is_na_expr(link.true_val)
                      else f"{array_history_type}({t})")
@@ -439,10 +433,31 @@ class ExprVisitor:
         tail = self._ternary_arm(
             links[-1].false_val, string_na, ternary_cpp_type
         )
+        if id(links[-1].false_val) in widen:
+            tail = self._coerce_int_slot(tail, links[-1].false_val, "int64_t")
         if array_history_type is not None:
             tail = (f"{array_history_type}{{}}" if self._is_na_expr(links[-1].false_val)
                     else f"{array_history_type}({tail})")
         return f"({''.join(arms)}({tail}))"
+
+    def _ternary_wide_arm_ids(self, links: list[Ternary]) -> set[int]:
+        """The ``int``-typed value arms of a ``?:`` whose other arms are
+        ``int64_t``. C++ gives the conditional the wider type and converts the
+        narrow arm implicitly, so its 32-bit na pattern (INT32_MIN) becomes the
+        finite number -2147483648 in 64 bits; ``(c ? int(na) : int(close))``
+        is the case, now that ``int(<floating value>)`` is an ``int64_t``.
+        Those arms take the na-preserving widening of an integer store."""
+        if len(links) < self._FLAT_TERNARY_CHAIN:
+            arms = [links[0].true_val, links[0].false_val]
+        else:
+            arms = [link.true_val for link in links] + [links[-1].false_val]
+        types = {self._infer_type(arm) for arm in arms}
+        if types != {"int", "int64_t"}:
+            # Exactly these two: a floating or other arm already makes the
+            # chain's own common type (``ternary_cpp_type``), and a cast of a
+            # double that may be NaN to int64_t would be undefined.
+            return set()
+        return {id(arm) for arm in arms if self._infer_type(arm) == "int"}
 
     def _ternary_string_na(self, links: list[Ternary]) -> bool:
         """A ``?:`` chain whose every value arm but a bare ``na`` is a
@@ -559,6 +574,28 @@ class ExprVisitor:
         udt_name = self._identifier_udt_type(target_name)
         return self._safe_name(udt_name) if udt_name in self._udt_defs else None
 
+    def _tuple_literal_element(self, element) -> str:
+        """One element of a tuple literal, as ``std::make_tuple`` takes it: a
+        drawing handle element is lowered against its own handle type."""
+        element_spec = self._type_spec_from_expr(element)
+        element_target = None
+        if (element_spec is not None
+                and element_spec.kind == "udt"
+                and element_spec.name in DRAWING_TYPE_TO_CPP):
+            element_target = self._type_spec_to_cpp(element_spec)
+        return self._visit_rhs_value(element, target_cpp_type=element_target)
+
+    def _tuple_position_widens_narrow_na(self, element, cpp_type: str) -> bool:
+        """Whether ``element`` of a tuple literal is a 32-bit integer that can be
+        na, written into a position the arms of a tuple-valued selection joined
+        to ``int64_t`` (``_infer_selection_tuple_types``). ``std::make_tuple``
+        keeps the element ``int`` and C++ converts the tuple to the joined type
+        element by element, which turns INT32_MIN, the 32-bit na, into the
+        finite number -2147483648: the element widens na-preservingly."""
+        return (cpp_type == "int64_t"
+                and self._infer_type(element) == "int"
+                and self._integer_na_operand(element))
+
     def _visit_rhs_value(self, value_node, target_name: str | None = None,
                          target_cpp_type: str | None = None) -> str:
         """Visit an assignment / declaration RHS.
@@ -572,6 +609,23 @@ class ExprVisitor:
         A nullable numeric ternary keeps its floating NaN.
         """
         tuple_types = self._tuple_slot_types(target_cpp_type)
+        if (tuple_types and isinstance(value_node, TupleLiteral)
+                and any(self._tuple_position_widens_narrow_na(element, cpp_type)
+                        for element, cpp_type in zip(value_node.elements, tuple_types))):
+            # A position joined to int64_t from a 32-bit integer element that can
+            # be na: that element widens na-preservingly, and the elements of the
+            # other positions keep the conversions they get below.
+            elements = []
+            for element, cpp_type in zip(value_node.elements, tuple_types):
+                if self._tuple_position_widens_narrow_na(element, cpp_type):
+                    elements.append(self._coerce_int_slot(
+                        self._visit_expr(element), element, "int64_t"))
+                elif cpp_type in ("double", "int"):
+                    elements.append(self._coerce_int_slot(
+                        self._visit_expr(element), element, cpp_type))
+                else:
+                    elements.append(self._tuple_literal_element(element))
+            return f"std::make_tuple({', '.join(elements)})"
         if (tuple_types and isinstance(value_node, TupleLiteral)
                 and any((cpp_type == "double" and self._integer_na_operand(element))
                         # An int the emission holds as a double (an int that can
@@ -592,12 +646,18 @@ class ExprVisitor:
             info = self._func_info_map.get(func_name) if namespace is None else None
             if info is not None and info.returns_tuple:
                 source_types = self._infer_tuple_types(info.node, len(tuple_types))
-                if any(target == "double" and source in ("int", "int64_t")
+                # A position joined to int64_t from a callee's int element widens
+                # na-preservingly too: the tuple converts element by element.
+                if any((target == "double" and source in ("int", "int64_t"))
+                       or (target == "int64_t" and source == "int")
                        for target, source in zip(tuple_types, source_types)):
                     elements = [
                         self._coerce_int_slot(
                             f"std::get<{index}>(_pf_raw)", None, target,
                         ) if target == "double" and source in ("int", "int64_t")
+                        else na_preserving_int_cast(
+                            f"std::get<{index}>(_pf_raw)", "int64_t",
+                        ) if target == "int64_t" and source == "int"
                         else f"std::get<{index}>(_pf_raw)"
                         for index, (target, source) in enumerate(
                             zip(tuple_types, source_types))

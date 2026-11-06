@@ -1,6 +1,25 @@
 """Exact numeric emission fragments for preservation assertions."""
 
 
+INT64_STORE_BRANCHES = (
+    "if constexpr (std::is_floating_point_v<decltype(_pf_v)>) "
+    "return (_pf_v >= -9223372036854775808.0 && _pf_v < 9223372036854775808.0) "
+    "? (int64_t)_pf_v : na<int64_t>(); "
+    "else return is_na(_pf_v) ? na<int64_t>() : (int64_t)_pf_v; }()"
+)
+
+
+def int64_store(value: str) -> str:
+    """The na-preserving store of ``value`` into an ``int64_t`` slot, spelled out.
+
+    A floating value is range-checked against the 64-bit range (a NaN or an
+    out-of-range value reads the integer na); an integral value keeps its na
+    through the width change. This is the contract's text, written here by hand;
+    it is never produced by a call of the code under test.
+    """
+    return f"[&](){{ auto _pf_v = ({value}); " + INT64_STORE_BRANCHES
+
+
 def integer_to_double(value: str) -> str:
     return (
         f"[&](){{ auto _pf_w = ({value}); "

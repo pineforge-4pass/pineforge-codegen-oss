@@ -63,10 +63,12 @@ plot(v)
 """
     cpp = transpile(src)
     body = _eval_bodies(cpp)
+    # math.round is a 64-bit int in Pine: the helper's local is int64_t and
+    # narrows na-preserving into the 64-bit slot.
     assert re.search(
-        r"int _sec0_f_\d+_k = \[&\]\(\)\{ auto _pf_v = \(std::round\(.*\)\); "
+        r"int64_t _sec0_f_\d+_k = \[&\]\(\)\{ auto _pf_v = \(std::round\(.*\)\); "
         r"if constexpr \(std::is_floating_point_v<decltype\(_pf_v\)>\) .*? "
-        r"else return is_na\(_pf_v\) \? na<int>\(\) : \(int\)_pf_v; \}\(\);",
+        r"else return is_na\(_pf_v\) \? na<int64_t>\(\) : \(int64_t\)_pf_v; \}\(\);",
         body,
     ), body
     compile_env.compile_cpp(cpp, label="security-helper-int-narrowing")

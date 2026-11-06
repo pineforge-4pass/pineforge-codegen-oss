@@ -109,7 +109,7 @@ int main() {
         for (unsigned count = 1; count <= bars.size(); ++count) {
             GeneratedStrategy strategy;
             static_assert(std::is_same_v<decltype(strategy.c), bool>);
-            static_assert(std::is_same_v<decltype(strategy.actual), int>);
+            static_assert(std::is_same_v<decltype(strategy.actual), int64_t>);  // int(<float series>)
             static_assert(std::is_same_v<decltype(strategy.selected), double>);
             static_assert(std::is_same_v<decltype(strategy.y), double>);
             strategy.run(bars.data(), count, "1", "1");
@@ -167,7 +167,8 @@ def _reference(payload):
             "prefix": prefix,
             "timestamp": bar["timestamp"],
             "c": selected_parameter,
-            "actual": -(2**31) if actual is None else actual,
+            # int(<float series>) is a 64-bit int: its na is the int64 minimum.
+            "actual": -(2**63) if actual is None else actual,
             "actual_na": actual is None,
             "selected": selected,
             "y": None if selected is None else selected + 1,
