@@ -108,7 +108,11 @@ def test_int_cast_preserves_wide_integer_na_before_narrowing() -> None:
     # int(stamp) of an epoch slot is itself an epoch (Pine int is 64-bit), so
     # ``narrowed`` is int64_t too and holds the wide na sentinel.
     assert "int64_t narrowed;" in cpp
-    assert "auto _pf_v = (stamp); return is_na(_pf_v)" in cpp
+    # The na test reads the original integer (an int64_t is never converted to
+    # double first, which would erase the sentinel): the integer branch of the
+    # 64-bit cast, behind the floating branch's range check.
+    assert "auto _pf_v = (stamp); if constexpr (std::is_floating_point_v<decltype(_pf_v)>)" in cpp
+    assert "else return is_na(_pf_v) ? na<int64_t>() : (int64_t)_pf_v;" in cpp
     assert "auto _pf_idx_v = (stamp)" in cpp
     driver = r"""
 #include <cmath>

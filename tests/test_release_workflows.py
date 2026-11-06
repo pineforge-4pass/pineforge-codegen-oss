@@ -115,7 +115,10 @@ def test_no_workflow_uses_retired_runner_labels():
                 "\n".join(value_lines),
             )
             labels = re.findall(r"[a-z0-9_-]+", value.lower())
-            assert not any(label == "self-hosted" or label.startswith("pf-ci") for label in labels), (
+            assert not any(
+                label == "self-hosted" or label.startswith(("pf-ci", "gke-", "gkp-"))
+                for label in labels
+            ), (
                 f"{path.name}:{index + 1}: runs-on names a retired runner label: {value}"
             )
             checked += 1
@@ -123,13 +126,16 @@ def test_no_workflow_uses_retired_runner_labels():
 
 
 @pytest.mark.parametrize("suffix", [".yml", ".yaml"])
-def test_retired_runner_guard_rejects_workflow_mutations(tmp_path, monkeypatch, suffix):
+@pytest.mark.parametrize("runner", [
+    "self-hosted", "pf-ci", "pf-ci-x64", "gke-8cpu-16gb-amd64", "gkp-8cpu-16gb-amd64",
+])
+def test_retired_runner_guard_rejects_workflow_mutations(tmp_path, monkeypatch, suffix, runner):
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
     path = tmp_path / f"release{suffix}"
     path.write_text(RELEASE, encoding="utf-8")
     test_no_workflow_uses_retired_runner_labels()
     mutant = mutate_once(
-        RELEASE, "    runs-on: ubuntu-latest\n", "    runs-on: self-hosted\n",
+        RELEASE, "    runs-on: ubuntu-latest\n", f"    runs-on: {runner}\n",
     )
     path.write_text(mutant, encoding="utf-8")
     with pytest.raises(

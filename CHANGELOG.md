@@ -23,6 +23,23 @@ supported as exact pairs; on the 0.x line they are independent. See the
 ## Unreleased (next release)
 
 - Typed `array.from()` initializers now match their declared element type, including function-local `var` and `varip` arrays of timestamps.
+- Variables initialized from `backadjustment.*`, `settlement_as_close.*` and
+  `adjustment.*` constants now use integer storage in emitted C++.
+- `int(x)` of a floating value, and a stored `math.floor(x)`, `math.ceil(x)`
+  or `math.round(x)`, is a 64-bit integer whatever its magnitude, as in
+  TradingView: `int(1.7e12)`, `int(math.floor(1.7e12))` and
+  `v = math.floor(1.7e12)` are all 1700000000000. The generated C++ used to
+  read such a value outside the 32-bit range as the integer `na`
+  (-2147483648), which then flowed into arithmetic as that number. A value
+  that does not fit 64 bits, and a NaN, read `na` on every compiler and
+  architecture. A variable, function result, record field or int array that
+  holds the result of such an expression is `int64_t`, and a function
+  parameter that receives one follows. A 32-bit integer `na` (`int(na)`,
+  `bar_index`, a narrow input) that meets one of them in a selection arm, a
+  position of a tuple-valued selection, a store or a `request.security`
+  payload stays `na` instead of becoming the
+  number -2147483648. This changes generated C++ for scripts that use these
+  forms: regenerate and relink affected strategies.
 - Repeated explicit input titles now have separate override keys: the first
   keeps the bare title, and later inputs use `<title>#<n>`, starting at 2 and
   skipping authored titles and keys already assigned. The manifest, effective

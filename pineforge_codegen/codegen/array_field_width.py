@@ -386,6 +386,7 @@ def prepare_array_widths(gen):
             # Scalar reads/returns can now obtain width from an array element.
             for attr in ("_wide_int_provenance_cache",
                          "_wide_int_epoch_provenance_cache",
+                         "_wide_int_epoch_arith_provenance_cache",
                          "_wide_udt_int_field_cache"):
                 gen.__dict__.pop(attr, None)
     # Captured declarations are used directly for persistent member layout,
@@ -423,6 +424,7 @@ def prepare_array_widths(gen):
                 result.specs[id(decl)], storage)
     for attr in ("_wide_int_provenance_cache",
                  "_wide_int_epoch_provenance_cache",
+                 "_wide_int_epoch_arith_provenance_cache",
                  "_wide_udt_int_field_cache"):
         gen.__dict__.pop(attr, None)
     return result

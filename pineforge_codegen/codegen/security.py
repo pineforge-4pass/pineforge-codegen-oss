@@ -2455,7 +2455,11 @@ class SecurityEmitter:
         earlier build emitted."""
         if name not in self._wide_int_provenance()[0]:
             return False
-        with self._int_width_scan(epoch_only=True):
+        # ``int(<floating value>)`` and a stored ``math.floor`` / ``ceil`` /
+        # ``round`` are 64-bit sources the epoch-only scan counts for the
+        # arrays; they are products of arithmetic, not epochs, so the copy of
+        # a name they make wide is ``int64_t`` too (it truncated otherwise).
+        with self._int_width_scan(epoch_only=True, float_origins=False):
             return name not in self._wide_int_provenance()[0]
 
     def _security_copy_store_cpp(self, name: str, info, value_node, value_cpp: str) -> str:
@@ -2470,6 +2474,12 @@ class SecurityEmitter:
                 and (self._holds_na_aware_wide_double(value_node)
                      or "_pf_wide_l" in value_cpp)):
             return na_preserving_int_cast(value_cpp, cpp_type)
+        if (cpp_type == "int64_t" and value_node is not None
+                and self._infer_type(value_node) == "int"):
+            # A 32-bit integer (``int(na)``, a narrow global) stored into a
+            # 64-bit copy: its na pattern widens to a finite number unless it
+            # goes through the na-preserving store the chart's own slot uses.
+            return self._coerce_int_slot(value_cpp, value_node, "int64_t")
         if cpp_type == "std::string" and self._selection_node_is_na(value_node):
             # A bare na stored into a string copy is the string na, as it is
             # in a helper's string series and in the chart's own declaration:
@@ -9932,6 +9942,17 @@ class SecurityEmitter:
                     or self._security_emits_double(expr_node.false_val, helper_binding_stack)):
                 tv = self._security_float_cpp(tv, expr_node.true_val, helper_binding_stack)
                 fv = self._security_float_cpp(fv, expr_node.false_val, helper_binding_stack)
+            else:
+                # A 32-bit integer arm beside a 64-bit one (``c ? int(na) :
+                # int(close)``): C++ widens the narrow arm, and its na pattern
+                # would become a finite number (``_ternary_wide_arm_ids``).
+                arm_types = (self._infer_type(expr_node.true_val),
+                             self._infer_type(expr_node.false_val))
+                if set(arm_types) == {"int", "int64_t"}:
+                    if arm_types[0] == "int":
+                        tv = self._coerce_int_slot(tv, expr_node.true_val, "int64_t")
+                    else:
+                        fv = self._coerce_int_slot(fv, expr_node.false_val, "int64_t")
             cond = self._coerce_bool_expr(cond, expr_node.condition)
             return f"(({cond}) ? ({tv}) : ({fv}))"
 

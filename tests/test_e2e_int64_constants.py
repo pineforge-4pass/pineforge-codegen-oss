@@ -147,20 +147,22 @@ def test_a_reassigned_top_level_constant_keeps_64_bits():
     compile_cpp(cpp)
 
 
-def test_a_local_named_like_a_wide_constant_keeps_its_int_na():
-    # ``g`` in f is the function's int local: its slot, and the na a
-    # math.round of na narrows to, are int's, not the global g's int64_t.
+def test_a_local_named_like_a_wide_constant_keeps_its_own_int_slot():
+    # ``g`` in f is the function's int local and only ever holds 1 or 2: its
+    # slot, and the function's result, are int's, not the global g's int64_t.
+    # (A local fed by math.round is int64_t whatever its name: Pine's
+    # math.round is a 64-bit int, tests/test_int_cast_wide.py.)
     cpp = transpile(
         "//@version=6\n"
         'strategy("local shadow")\n'
         "g = 3000000000\n"
         "f(float src) =>\n"
         "    int g = 0\n"
-        "    g := math.round(src)\n"
+        "    g := src > 0 ? 1 : 2\n"
         "    g\n"
-        "plot(na(f(close[5000])) ? 1 : 0)\n"
+        "plot(f(close[5000]))\n"
     )
     body = cpp[cpp.index("int f(double src)"):]
     body = body[:body.index("\n    }\n")]
-    assert "na<int64_t>()" not in body and "na<int>()" in body
+    assert "int64_t" not in body
     compile_cpp(cpp)
