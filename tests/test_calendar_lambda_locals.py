@@ -680,7 +680,8 @@ def test_native_type_names_preserve_distinct_authored_bindings(opt):
         safe = f"pf_safe_{name}_3"
         state = f"_sec{2 * index}_{safe}"
         for member in (safe, f"pf_safe_{name}", f"pf_safe_{name}_2", state):
-            assert f"Series<int> {member};" in cpp
+            # Every one of them holds int(<float series>), which is a 64-bit int.
+            assert f"Series<int64_t> {member};" in cpp
         expected = integer_to_double(integer_arithmetic(f"{state}[1]", "+", calendar))
         assert cpp.count(f"_req_sec_{2 * index} = {expected};") == 1
         other = 2 * index + 1

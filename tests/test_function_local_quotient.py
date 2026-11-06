@@ -7,7 +7,7 @@ import pytest
 from pineforge_codegen import transpile
 from tests._e2e import reference_codegen, transpile_json
 from tests._numeric_expected import (
-    integer_arithmetic, integer_store, require_numeric_hunk,
+    int64_store, integer_arithmetic, integer_store, require_numeric_hunk,
 )
 from tests.test_bool_string_inference import _messages, _run_native, native_env
 
@@ -141,13 +141,22 @@ def test_integer_callable_controls_keep_complete_reference_cpp(tmp_path, body):
             f"s = {integer_store(integer_arithmetic('s', '+', '2'))};",
         )
     elif "s := math.floor(seed / 2)" in body:
+        # math.floor(x) is a Pine int, a 64-bit one: the local it is stored in, the
+        # callable that returns it and the global that holds the result are int64_t,
+        # and the local's first value (the 32-bit seed) is widened na-preservingly.
         quotient = integer_arithmetic("seed", "/", "2")
         floor_value = f"std::floor({quotient})"
         cpp = require_numeric_hunk(
             cpp,
             f"s = {integer_store('std::floor(((double)(seed) / (double)(2)))')};",
-            f"s = {integer_store(floor_value)};",
+            f"s = {int64_store(floor_value)};",
         )
+        cpp = require_numeric_hunk(
+            cpp, "int s = seed;", f"int64_t s = {int64_store('seed')};")
+        cpp = require_numeric_hunk(
+            cpp, "int measure(int seed) {", "int64_t measure(int seed) {")
+        cpp = require_numeric_hunk(
+            cpp, "int observed = 0;", "int64_t observed = 0;")
     elif "for counter =" in body:
         argument = f"measure({integer_store('counter')})"
         cpp = require_numeric_hunk(
