@@ -13,8 +13,8 @@ checks, not additional TV observations.
 
 The observed top-level int(na) operand pattern is retained, with a native
 integral-type assertion. Floating NaN indices intentionally retain their error.
-These are input-derived native reproducers for the supervisor's Spark2 proof,
-not a measured parity sweep or acceptance of the original JOAT strategy.
+These are input-derived native reproducers, not a measured parity sweep of the
+original strategy.
 """
 
 from __future__ import annotations
