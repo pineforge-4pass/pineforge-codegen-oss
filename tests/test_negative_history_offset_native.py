@@ -342,10 +342,6 @@ UNCHANGED_SOURCES = {
         'observed = request.security(syminfo.tickerid, "60", close[1])\nplot(observed)\n'
     ),
     "missing_constant": "observed = close[na]\nplot(observed)\n",
-    "ordinary_array_index": (
-        'lag = input.int(0, "Lag")\n'
-        "values = array.from(close)\nobserved = values.get(lag)\nplot(observed)\n"
-    ),
     "discarded_iteration_offset": (
         'lag = input.int(1, "Lag")\n'
         "values = array.from(close)\nfloat total = 0.0\n"
