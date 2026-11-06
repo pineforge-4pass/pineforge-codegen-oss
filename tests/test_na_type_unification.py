@@ -998,6 +998,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         "y = ((",
         "? (1) : (na<double>())",
         # The bear bar takes na; the bull bar takes the integer value 1.
+        0,
         id="float-na-second",
     ),
     pytest.param(
@@ -1005,6 +1006,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         "y = ((",
         "? (na<double>()) : (1)",
         # The bear bar takes the first-arm na; the bull bar takes 1.
+        0,
         id="float-na-first",
     ),
     pytest.param(
@@ -1015,6 +1017,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         "double local = ((",
         "? (1) : (na<double>())",
         # The function's float local holds na on the bear bar and 1 on the bull bar.
+        0,
         id="function-local-float",
     ),
     pytest.param(
@@ -1027,6 +1030,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         "_func_ret = ((",
         "? (1) : (na<double>())",
         # The float function return keeps the bear branch's missing arm as NaN.
+        0,
         id="float-function-return",
     ),
     pytest.param(
@@ -1035,6 +1039,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         "accept_float(((",
         "? (k) : (na<double>())",
         # The declared int and the float argument both select NaN or 1.
+        0,
         id="int-sink-and-float-argument",
     ),
     pytest.param(
@@ -1042,6 +1047,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         "(double)(((",
         "? (1) : (na<double>())",
         # An explicit float cast keeps the selected NaN or 1.
+        0,
         id="explicit-float-cast",
     ),
     pytest.param(
@@ -1050,6 +1056,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         "y = ((",
         "? (1) : (na<double>())",
         # Reassignment to a float slot preserves na and the bull bar's value 1.
+        0,
         id="float-reassignment",
     ),
     pytest.param(
@@ -1057,6 +1064,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         "y = ((",
         "? (1) : (na<double>())",
         # Each fresh strategy first reaches the persistent float on its only bar.
+        0,
         id="persistent-float",
     ),
     pytest.param(
@@ -1068,6 +1076,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         "selected.push(((",
         "? (1) : (na<double>())",
         # The current float slot is na or 1; its first previous slot is always na.
+        0,
         id="float-history-slot",
     ),
     pytest.param(
@@ -1076,6 +1085,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         "std::vector<double>",
         "? (1) : (na<double>())",
         # The sole float array element is na on the bear bar and 1 on the bull bar.
+        0,
         id="float-array-element",
     ),
     pytest.param(
@@ -1083,6 +1093,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         "(0.0 + ((",
         "? (1) : (na<double>())",
         # Adding zero to the promoted selection preserves NaN or the value 1.
+        0,
         id="float-binary-operand",
     ),
     pytest.param(
@@ -1090,6 +1101,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         ": (((",
         "? (1) : (na<double>())",
         # Both unequal-price bars take the inner int selection in a float ternary.
+        0,
         id="nested-float-selection",
     ),
     pytest.param(
@@ -1100,6 +1112,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         ".value = ((",
         "? (1) : (na<double>())",
         # A float record field selects NaN or 1 without integer conversion.
+        0,
         id="float-record-field",
     ),
     pytest.param(
@@ -1108,6 +1121,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         "selected_time = ((",
         "? (current_bar_.timestamp) : (na<double>())",
         # The exact timestamp divided by itself is 1; the missing arm is NaN.
+        0,
         id="wide-integer-selection",
     ),
     pytest.param(
@@ -1118,6 +1132,7 @@ _FLOAT_NA_TERNARY_ROWS = [
         "y = ((",
         ": (na<double>())",
         # Bear keeps the single element; bull shifts it once and returns 1.
+        1,
         id="selected-arm-evaluated-once",
     ),
 ]
@@ -1132,16 +1147,19 @@ def _float_na_ternary_source(body: str) -> str:
     )
 
 
-@pytest.mark.parametrize("body,conversion,arms", _FLOAT_NA_TERNARY_ROWS)
+@pytest.mark.parametrize("body,conversion,arms,adapters", _FLOAT_NA_TERNARY_ROWS)
 def test_float_na_ternary_preserves_nan_in_both_targets(
-    body: str, conversion: str, arms: str,
+    body: str, conversion: str, arms: str, adapters: int,
 ) -> None:
     cpp = transpile(_float_na_ternary_source(body))
     # A float sink stores double, including a hoisted initializer inferred as int.
     assert "double y =" in cpp
-    # The selected expression already has a NaN arm and needs no repair wrapper.
+    # An integer element converts in its selected arm before the double join.
     assert conversion in cpp
-    assert "auto _pf_w = (" not in cpp
+    assert cpp.count("auto _pf_w = (") == adapters
+    assert cpp.count(
+        "else return is_na(_pf_w) ? na<double>() : (double)_pf_w; }()"
+    ) == adapters
     assert arms in cpp
     # The companion declared int also uses double storage and a NaN missing arm.
     assert "double k = 0.0;" in cpp
@@ -1180,9 +1198,9 @@ int main() {
 
 
 @pytest.mark.parametrize("opt", ["-O0", "-O2"])
-@pytest.mark.parametrize("body,conversion,arms", _FLOAT_NA_TERNARY_ROWS)
+@pytest.mark.parametrize("body,conversion,arms,adapters", _FLOAT_NA_TERNARY_ROWS)
 def test_float_na_ternary_is_nan_on_a_bear_bar(
-    body: str, conversion: str, arms: str, opt: str,
+    body: str, conversion: str, arms: str, adapters: int, opt: str,
 ) -> None:
     output = run_emitted_tu(
         transpile(_float_na_ternary_source(body)),

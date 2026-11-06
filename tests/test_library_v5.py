@@ -72,8 +72,11 @@ def test_int_division_follows_v5_qualifiers(expr, lowered):
             f'export f(int n) =>\n    k = 9\n    var m = 7\n    m += 2\n    {expr}\n')
     cpp = _cpp(body, 'x = F.f(3)\n')
     ret = [line for line in _body(cpp, "Five_v1__f").splitlines() if "return" in line][-1]
-    # int(a / b): the quotient narrowed back to an int (quirk 9's na-preserving cast).
-    assert ("(int)_pf_v" in ret) == (lowered == "int"), ret
+    # int(a / b): the quotient narrowed back to an int (quirk 9's na-preserving
+    # cast): the 32-bit one, or the 64-bit one when an operand is itself a
+    # 64-bit int (``int(7.9)``, an int() of a float).
+    narrowed = "(int)_pf_v" in ret or "(int64_t)_pf_v" in ret
+    assert narrowed == (lowered == "int"), ret
 
 
 def test_and_or_evaluate_both_operands_in_a_v5_body_only():

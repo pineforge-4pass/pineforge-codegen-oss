@@ -113,9 +113,12 @@ def test_every_security_epoch_slot_is_int64():
 # Census: no epoch a request.security (or the bar) supplies is narrowed to int.
 # ---------------------------------------------------------------------------
 
+# The 32-bit narrowing only: the 64-bit form opens with the same
+# ``if constexpr`` and is the cast an epoch is meant to take.
 _INT_NARROWING = re.compile(
     r"auto _pf_v = \((?P<op>.*?)\); "
-    r"(?:if constexpr \(std::is_floating_point_v<decltype\(_pf_v\)>\)"
+    r"(?:if constexpr \(std::is_floating_point_v<decltype\(_pf_v\)>\) "
+    r"return \(_pf_v >= -2147483648\.0"
     r"|return is_na\(_pf_v\) \? na<int>\(\) : \(int\)_pf_v;)"
 )
 _EPOCH_CPP = ("bar.timestamp", "current_bar_.timestamp", "_hist_time[")

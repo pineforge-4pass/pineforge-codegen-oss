@@ -519,31 +519,36 @@ REFUSED = {
     "a method called on a receiver PineForge cannot type": (
         "type Foo\n    float v = 1\n"
         "method m(Foo self) => session.ismarket[1] and self.v > 0\n"
-        "mk() => Foo.new()\n"
-        "a = mk().m()\n"
-        "x = bar_index % 2 == 0 ? mk().m() : a\n", (5, 39), "a method"),
-    "a method called on a loop variable": (
+        "read(receiver) => receiver.m()\n"
+        "foo = Foo.new()\n"
+        "x = read(foo)\n", (5, 39), "a method"),
+    "a method called through an untyped loop wrapper": (
         "type Foo\n    float v = 1\n"
         "method m(Foo self) => session.ismarket[1] and self.v > 0\n"
+        "read(receiver) => receiver.m()\n"
         "foos = array.from(Foo.new())\n"
         "x = false\n"
-        "for f in foos\n    x := f.m()\n", (5, 39), "a method"),
+        "for f in foos\n    x := read(f)\n", (5, 39), "a method"),
     "a function a mutable global's statements call, the global's name shadowed": (
         "f() => session.ismarket[3] ? 1.0 : 0.0\n"
         "var float g = 0.0\n"
         "g := nz(f())\n"
         "h(float g) => g > open\n"
         'x = request.security(syminfo.tickerid, "60", h(close)) or g > 0\n', (3, 24), "request.security"),
-    "a function a method calls": (
+    "a function an unresolved method calls": (
         "type Foo\n    float v = 1\n"
         "f() => session.ismarket[1]\n"
         "method m(Foo self) => f() and self.v > 0\n"
-        "mk() => Foo.new()\n"
-        "x = mk().m()\n", (5, 24), "which a method calls"),
+        "read(receiver) => receiver.m()\n"
+        "foo = Foo.new()\n"
+        "x = read(foo)\n", (5, 24), "which a method calls"),
     "a function a UDT field default calls": (
         "f() => session.ismarket[1]\n"
         "type Foo\n    bool v = f()\n"
         "x = Foo.new().v\n", (3, 24), "field default"),
+    # allow_entry_in(session.ismarket[1] ? ... : ...) is refused first for
+    # its series direction (TV CE10123), at the argument rather than the
+    # history read. test_allow_entry_in_qualifier.py retains that regression.
 }
 
 
@@ -660,13 +665,6 @@ STILL_COMPILE = {
         "    label.set_xloc(lb, bar_index, session.ispremarket[1] ? xloc.bar_index : xloc.bar_time)\n"
         "    ln.set_xloc(bar_index - 1, bar_index, session.ispostmarket[1] ? xloc.bar_index : xloc.bar_time)\n"
         "    box.set_xloc(bx, bar_index - 1, bar_index, session.isfirstbar[1] ? xloc.bar_index : xloc.bar_time)\n"
-        "    self.v > 0\n"
-        "foo = Foo.new()\n"
-        "x = foo.m()\n"),
-    "a read in strategy.risk.allow_entry_in in a method": (
-        "type Foo\n    float v = 1\n"
-        "method m(Foo self) =>\n"
-        "    strategy.risk.allow_entry_in(session.ismarket[1] ? strategy.direction.long : strategy.direction.all)\n"
         "    self.v > 0\n"
         "foo = Foo.new()\n"
         "x = foo.m()\n"),

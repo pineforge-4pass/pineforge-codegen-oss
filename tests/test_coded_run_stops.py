@@ -351,7 +351,6 @@ int main() {
 
 @pytest.mark.parametrize("body, english", [
     ('items = array.new_float(-1)', "cannot create std::vector larger than max_size()"),
-    ('items = array.new_float(int(na))', "cannot create std::vector larger than max_size()"),
     ('text = str.substring("abc", 5)', "basic_string::substr"),
 ])
 def test_invalid_sizes_and_substring_stop(body, english):
@@ -367,6 +366,24 @@ int main() {
 }
 '''
     assert english in run_emitted_tu(cpp, driver, opt="-O2", label="checked invalid size or substring")
+
+
+def test_a_missing_array_size_builds_the_empty_array_and_the_run_goes_on():
+    # 7f2cdbd1: TradingView builds an empty array for a size that is na and the
+    # script goes on; a size that is present and invalid (-1, above) keeps its stop.
+    cpp = transpile(PRELUDE + "items = array.new_float(int(na))\n")
+    driver = r'''
+#include <cassert>
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    strategy.on_source_bar(bar);
+    assert(strategy.items.empty());
+    std::cout << "empty array, run went on";
+}
+'''
+    assert run_emitted_tu(cpp, driver, opt="-O2", label="missing array size") == "empty array, run went on"
 
 
 @pytest.mark.parametrize("legacy", [False, True])

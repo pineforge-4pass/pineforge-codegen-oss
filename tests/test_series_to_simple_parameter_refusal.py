@@ -1,0 +1,492 @@
+"""Located qualifier/variadic errors and complete-C++ controls."""
+
+from __future__ import annotations
+
+from textwrap import dedent
+
+import pytest
+
+from pineforge_codegen import transpile
+from pineforge_codegen.diagnostic_codes import render_diagnostic
+from pineforge_codegen.errors import CompileError, Level, Phase
+from tests._e2e import reference_codegen, transpile_json
+from tests._numeric_expected import (
+    INT64_STORE_BRANCHES, int64_store, integer_arithmetic, integer_store,
+    require_numeric_hunk,
+)
+
+
+CPP_REFERENCE = "290fdf7ae39eb786082fd11b8187ae6b640ab66e"
+ARRAY_FIELD_REFERENCE = "a4dea950f4f3c3ba64bb2461ea95eb4bab8b8d52"
+HEADER = '//@version=6\nstrategy("Parameter qualifiers")\n'
+
+# The two array-field controls compile from a4dea950 on (64-bit timestamps in an
+# int array, array fields no longer refused). Three intended changes of the batch
+# since then show in their complete C++; each one is replaced exactly once, as
+# (what a4dea950 emits, what the tree emits now), and the rest of the translation
+# unit stays equal to a4dea950's.
+_ARRAY_FIELD_HUNKS = (
+    # 1e2e72e: an omitted or na array field of a record is na, and a record copy
+    # shares its array fields (the default field is empty-handed, and reading
+    # through a na field stops with the typed na message).
+    ("    _PFArrayField()\n"
+     "        : owned_(std::make_shared<std::vector<T>>()), data_(owned_.get()) {}\n",
+     "    _PFArrayField() = default;\n"),
+    ("    std::vector<T>& operator*() const { return *data_; }\n",
+     "    bool is_na() const { return data_ == nullptr; }\n"
+     "    std::vector<T>& operator*() const {\n"
+     "        if (is_na())\n"
+     "            _PF_NA_STOP(\"array\", \"Cannot call array methods when ID of array is 'na'.\");\n"
+     "        return *data_;\n"
+     "    }\n"),
+    # 7f2cdbd1: a missing array size builds the empty array and the script goes on;
+    # a size that is present but invalid keeps its coded stop.
+    ("if(is_na(_pf_array_new_size)) _PF_ARRAY_STOP(\"size_invalid\", \"new\", "
+     "\"cannot create std::vector larger than max_size()\");",
+     "if(is_na(_pf_array_new_size)) return std::vector<int64_t>();"),
+)
+_ARRAY_FIELD_CONTROLS = {
+    "array_field_element_to_simple_function": _ARRAY_FIELD_HUNKS,
+    # a925fb3a and 2b13f9f: integer arithmetic checks a missing operand before it
+    # computes (here the integer parameter plus the array size).
+    "array_field_element_to_simple_method": _ARRAY_FIELD_HUNKS + ((
+        "return (amount + (double)(*_pf_udt_Ledger.get(receiver).values).size());",
+        "return " + integer_arithmetic(
+            "amount", "+", "(double)(*_pf_udt_Ledger.get(receiver).values).size()") + ";",
+    ),),
+}
+
+# The 64-bit int() change spells the na-preserving store of an int into an int64_t slot (a
+# record's int field) with the range check of a floating value. An integer operand takes
+# the last branch, which is the store the reference emits, so only the spelling of the
+# store differs, by one line per case; nothing else of the translation unit moves. Each
+# fragment is replaced exactly once, as (what the reference emits, what the tree emits now).
+_INT64_STORE_HUNKS = {
+    "series_to_simple_int_method": (
+        (integer_store("amount", "int64_t"), int64_store("amount")),
+    ),
+    # The sum before the store is the same text in both; "}())); " ends it.
+    "named_method_series_argument": (
+        ("}())); return is_na(_pf_v) ? na<int64_t>() : (int64_t)_pf_v; }()",
+         "}())); " + INT64_STORE_BRANCHES),
+    ),
+}
+
+
+def _pair(name, body, refused_text, accepted_text, token, *, at=None, code="PF-E2080"):
+    source = HEADER + dedent(body).lstrip()
+    assert refused_text in source
+    control = source.replace(refused_text, accepted_text)
+    statement = at or refused_text
+    lines = source.splitlines()
+    line = next(index for index, text in enumerate(lines, 1) if statement in text)
+    column = lines[line - 1].rindex(token) + 1
+    return pytest.param(source, control, code, (line, column), id=name)
+
+
+_CASES = [
+    _pair(
+        "series_builtin_to_simple_function",
+        """
+        keep(simple int value) => value
+        result = keep(time)
+        """,
+        "keep(time)", "keep(input.int(7))", "time",
+    ),
+    _pair(
+        "series_to_simple_int_method",
+        """
+        type Counter
+            int total = 0
+        method record(Counter receiver, simple int amount) =>
+            receiver.total := amount
+        counter = Counter.new()
+        counter.record(time)
+        """,
+        "counter.record(time)", "counter.record(input.int(7))", "time",
+    ),
+    _pair(
+        "array_field_element_to_simple_function",
+        """
+        type Ledger
+            array<int> values
+        keep(simple int amount) => amount
+        ledger = Ledger.new(array.new<int>(1, time))
+        result = keep(ledger.values.get(0))
+        """,
+        "keep(ledger.values.get(0))", "keep(input.int(7))", "ledger",
+    ),
+    _pair(
+        "array_field_element_to_simple_method",
+        """
+        type Ledger
+            array<int> values
+        method measure(Ledger receiver, simple int amount) =>
+            amount + receiver.values.size()
+        ledger = Ledger.new(array.new<int>(1, time))
+        result = ledger.measure(ledger.values.get(0))
+        """,
+        "ledger.measure(ledger.values.get(0))",
+        "ledger.measure(input.int(7))", "ledger",
+    ),
+    _pair(
+        "derived_series_to_simple_array_helper",
+        """
+        first(simple int amount) =>
+            values = array.from(amount)
+            values.get(0)
+        base = input.int(7)
+        int shifted = base + bar_index
+        result = first(shifted)
+        """,
+        "base + bar_index", "base + 1", "shifted", at="result = first(shifted)",
+    ),
+    _pair(
+        "named_series_argument",
+        """
+        keep(simple int amount, int offset = 0) => amount + offset
+        result = keep(offset=1, amount=time)
+        """,
+        "keep(offset=1, amount=time)", "keep(offset=1, amount=input.int(7))", "time",
+    ),
+    _pair(
+        "named_method_series_argument",
+        """
+        type Counter
+            int total = 0
+        method record(Counter receiver, simple int amount, int offset = 0) =>
+            receiver.total := amount + offset
+        counter = Counter.new()
+        counter.record(offset=1, amount=time)
+        """,
+        "counter.record(offset=1, amount=time)",
+        "counter.record(offset=1, amount=input.int(7))", "time",
+    ),
+    _pair(
+        "explicit_series_literal",
+        """
+        keep(simple int amount) => amount
+        series int amount = 7
+        result = keep(amount)
+        """,
+        "series int amount = 7", "simple int amount = 7", "amount",
+        at="result = keep(amount)",
+    ),
+    _pair(
+        "series_alias_reassignment",
+        """
+        keep(simple int amount) => amount
+        int amount = 7
+        amount := bar_index
+        result = keep(amount)
+        """,
+        "amount := bar_index", "amount := 8", "amount", at="result = keep(amount)",
+    ),
+    _pair(
+        "series_float_argument",
+        """
+        keep(simple float amount) => amount
+        result = keep(close)
+        """,
+        "keep(close)", "keep(input.float(7.0))", "close",
+    ),
+    _pair(
+        "series_bool_argument",
+        """
+        keep(simple bool enabled) => enabled
+        result = keep(close > open)
+        """,
+        "keep(close > open)", "keep(input.bool(true))", "close",
+    ),
+    _pair(
+        "session_flag_to_simple_function",
+        """
+        keep(simple bool enabled) => enabled
+        result = keep(session.ismarket)
+        """,
+        "keep(session.ismarket)", "keep(input.bool(true))", "session.ismarket",
+    ),
+    _pair(
+        "series_string_argument",
+        """
+        keep(simple string label) => label
+        result = keep(str.tostring(time))
+        """,
+        "keep(str.tostring(time))", 'keep(input.string("value"))', "str.tostring",
+    ),
+    _pair(
+        "series_to_const_parameter",
+        """
+        keep(const int amount) => amount
+        result = keep(time)
+        """,
+        "keep(time)", "keep(7)", "time",
+    ),
+    _pair(
+        "series_helper_result",
+        """
+        echo(int amount) => amount
+        keep(simple int amount) => amount
+        result = keep(echo(time))
+        """,
+        "keep(echo(time))", "keep(echo(input.int(7)))", "echo",
+    ),
+    _pair(
+        "forwarded_series_to_simple",
+        """
+        keep(simple int amount) => amount
+        relay(int value) => keep(value)
+        result = relay(time)
+        """,
+        "relay(time)", "relay(input.int(7))", "value",
+        at="relay(int value) => keep(value)",
+    ),
+    _pair(
+        "primitive_receiver_simple_parameter",
+        """
+        method offset(int receiver, simple int amount) => receiver + amount
+        int anchor = 1
+        result = anchor.offset(time)
+        """,
+        "anchor.offset(time)", "anchor.offset(input.int(7))", "time",
+    ),
+    _pair(
+        "tuple_return_qualifier",
+        """
+        pair(int amount) => [amount, amount + 2]
+        keep(simple int amount) => amount
+        [first, second] = pair(time)
+        result = keep(first)
+        """,
+        "pair(time)", "pair(input.int(7))", "first", at="result = keep(first)",
+    ),
+    _pair(
+        "switch_result_qualifier",
+        """
+        choose(int amount) =>
+            switch amount % 2
+                0 => amount
+                => amount + 1
+        keep(simple int amount) => amount
+        result = keep(choose(time))
+        """,
+        "keep(choose(time))", "keep(choose(input.int(7)))", "choose",
+    ),
+    _pair(
+        "loop_tail_qualifier",
+        """
+        last(int amount) =>
+            for offset = 1 to 3
+                amount + offset
+        keep(simple int amount) => amount
+        result = keep(last(time))
+        """,
+        "keep(last(time))", "keep(last(input.int(7)))", "last",
+    ),
+    _pair(
+        "declaration_tail_qualifier",
+        """
+        echo(int amount) =>
+            int returned = amount
+        keep(simple int amount) => amount
+        result = keep(echo(time))
+        """,
+        "keep(echo(time))", "keep(echo(input.int(7)))", "echo",
+    ),
+    _pair(
+        "assignment_tail_qualifier",
+        """
+        echo(int amount) =>
+            int returned = 0
+            if amount > 0
+                returned := amount
+            else
+                returned := amount + 1
+        keep(simple int amount) => amount
+        result = keep(echo(time))
+        """,
+        "keep(echo(time))", "keep(echo(input.int(7)))", "echo",
+    ),
+    _pair(
+        "request_payload_to_simple",
+        """
+        keep(simple float amount) => amount
+        requested = request.security(syminfo.tickerid, "60", close)
+        result = keep(requested)
+        """,
+        "keep(requested)", "keep(input.float(7.0))", "requested",
+    ),
+    _pair(
+        "simple_call_inside_request",
+        """
+        keep(simple int amount) => amount
+        requested = request.security(syminfo.tickerid, "60", keep(time))
+        """,
+        "keep(time)", "keep(input.int(7))", "time",
+    ),
+    _pair(
+        "variadic_array_from_keyword",
+        """
+        values = array.from(arg0=7)
+        result = values.get(0)
+        """,
+        "array.from(arg0=7)", "array.from(7)", "7", code="PF-E2082",
+    ),
+]
+
+
+# Callable, parameter, argument rank, and required rank from each authored case.
+_QUALIFIER_ARGUMENTS = {
+    "series_builtin_to_simple_function": ("keep", "value", "series", "simple"),
+    "series_to_simple_int_method": ("Counter.record", "amount", "series", "simple"),
+    "array_field_element_to_simple_function": ("keep", "amount", "series", "simple"),
+    "array_field_element_to_simple_method": ("Ledger.measure", "amount", "series", "simple"),
+    "derived_series_to_simple_array_helper": ("first", "amount", "series", "simple"),
+    "named_series_argument": ("keep", "amount", "series", "simple"),
+    "named_method_series_argument": ("Counter.record", "amount", "series", "simple"),
+    "explicit_series_literal": ("keep", "amount", "series", "simple"),
+    "series_alias_reassignment": ("keep", "amount", "series", "simple"),
+    "series_float_argument": ("keep", "amount", "series", "simple"),
+    "series_bool_argument": ("keep", "enabled", "series", "simple"),
+    "session_flag_to_simple_function": ("keep", "enabled", "series", "simple"),
+    "series_string_argument": ("keep", "label", "series", "simple"),
+    "series_to_const_parameter": ("keep", "amount", "series", "const"),
+    "series_helper_result": ("keep", "amount", "series", "simple"),
+    "forwarded_series_to_simple": ("keep", "amount", "series", "simple"),
+    "primitive_receiver_simple_parameter": ("int.offset", "amount", "series", "simple"),
+    "tuple_return_qualifier": ("keep", "amount", "series", "simple"),
+    "switch_result_qualifier": ("keep", "amount", "series", "simple"),
+    "loop_tail_qualifier": ("keep", "amount", "series", "simple"),
+    "declaration_tail_qualifier": ("keep", "amount", "series", "simple"),
+    "assignment_tail_qualifier": ("keep", "amount", "series", "simple"),
+    "request_payload_to_simple": ("keep", "amount", "series", "simple"),
+    "simple_call_inside_request": ("keep", "amount", "series", "simple"),
+}
+
+
+@pytest.mark.parametrize("source,control,code,position", _CASES)
+def test_refusals_are_coded_and_located(source, control, code, position, request):
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="strategy.pine")
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == code
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.location.file == "strategy.pine"
+    assert (diagnostic.location.line, diagnostic.location.col) == position
+    if code == "PF-E2080":
+        function_name, name, argument_qualifier, parameter_qualifier = (
+            _QUALIFIER_ARGUMENTS[request.node.callspec.id]
+        )
+        assert diagnostic.args == {
+            "function_name": function_name,
+            "name": name,
+            "argument_qualifier": argument_qualifier,
+            "parameter_qualifier": parameter_qualifier,
+        }
+    elif code == "PF-E2082":
+        assert diagnostic.args == {}
+        assert diagnostic.message == (
+            "Functions that accept a variable number of arguments "
+            "cannot accept keyword arguments."
+        )
+    assert render_diagnostic(code, diagnostic.args) == (
+        diagnostic.message, diagnostic.hint,
+    )
+
+
+@pytest.fixture(scope="module")
+def reference():
+    tree = reference_codegen(CPP_REFERENCE)
+    if tree is None:
+        pytest.skip("The C++ reference commit is unavailable")
+    return tree
+
+
+def _assert_unchanged(source, reference, tmp_path, hunks=()):
+    pine = tmp_path / "strategy.pine"
+    pine.write_text(source, encoding="utf-8")
+    before = transpile_json(pine, root=reference)
+    assert before["ok"], before
+    cpp = transpile(source)
+    for previous, expected in hunks:
+        # The new fragment must appear exactly once; it is put back to what the
+        # reference emits and the whole translation unit is compared.
+        cpp = require_numeric_hunk(cpp, previous, expected)
+    assert cpp == before["cpp"]
+
+
+@pytest.mark.parametrize("source,control,code,position", _CASES)
+def test_refused_sources_were_accepted_by_reference(
+    source, control, code, position, reference, tmp_path,
+):
+    pine = tmp_path / "strategy.pine"
+    pine.write_text(source, encoding="utf-8")
+    before = transpile_json(pine, root=reference)
+    assert before["ok"], before
+
+
+@pytest.mark.parametrize("source,control,code,position", _CASES)
+def test_paired_controls_keep_complete_cpp(
+        source, control, code, position, reference, tmp_path, request):
+    hunks = ()
+    if request.node.callspec.id in _ARRAY_FIELD_CONTROLS:
+        reference = reference_codegen(ARRAY_FIELD_REFERENCE)
+        if reference is None:
+            pytest.skip("the timestamp array-field reference is unavailable")
+        hunks = _ARRAY_FIELD_CONTROLS[request.node.callspec.id]
+    hunks += _INT64_STORE_HUNKS.get(request.node.callspec.id, ())
+    _assert_unchanged(control, reference, tmp_path, hunks)
+
+
+@pytest.mark.parametrize("body", [
+    "keep(simple int value) => value\nresult = keep(input.int(7))\n",
+    "keep(simple int value) => value\nconst int fixed = 7\nresult = keep(fixed)\n",
+    "keep(simple string value) => value\nresult = keep(syminfo.tickerid)\n",
+    "keep(simple string value) => value\nresult = keep(session.regular)\n",
+    "keep(simple string value) => value\nresult = keep(session.extended)\n",
+    "keep(simple int value) => value\nsimple int fixed = 7\nresult = keep(fixed)\n",
+    "keep(simple int value) => value\nresult = keep(dayofweek.monday)\n",
+    "keep(simple float value) => value\nresult = keep(math.pi)\n",
+    "keep(simple bool value) => value\nresult = keep(chart.is_standard)\n",
+    "keep(series int value) => value\nresult = keep(time)\n",
+    "keep(int value) => value\nresult = keep(time)\n",
+    "keep(value) => value\nresult = keep(time)\n",
+    "keep(series int value) => value\nsimple int fixed = 7\nresult = keep(fixed)\n",
+    """
+    type Ledger
+        array<int> values
+    ledger = Ledger.new(values=na)
+    result = bar_index > 3 ? ledger.values.get(0) : 0
+    """,
+    """
+    keep(simple int value) => value
+    int amount = time
+    echo(simple int amount) => keep(amount)
+    result = echo(input.int(7))
+    """,
+    """
+    keep(simple int value) => value
+    int amount = 7
+    if close > open
+        int amount = time
+    result = keep(amount)
+    """,
+    """
+    method measure(array<int> receiver, simple int amount) => receiver.size() + amount
+    method measure(array<float> receiver, int amount) => receiver.size() + amount
+    values = array.from<float>(1)
+    read() => values.measure(time)
+    result = read()
+    """,
+    """
+    method measure(array<int> receiver, simple int amount) => receiver.size() + amount
+    method measure(array<float> receiver, int amount) => receiver.size() + amount
+    values = array.from(1, 2.0)
+    read() => values.measure(time)
+    result = read()
+    """,
+])
+def test_qualifier_controls_keep_complete_cpp(body, reference, tmp_path):
+    _assert_unchanged(HEADER + dedent(body).lstrip(), reference, tmp_path)

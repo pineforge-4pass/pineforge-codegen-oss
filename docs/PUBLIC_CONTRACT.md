@@ -7,6 +7,13 @@ Text marked **since 1.5.0** describes diagnostic additions that 1.4.0 and
 earlier releases do not have: the `note` severity, the `user_message` template
 and the eleven codes that became notes.
 
+## Numeric conversions
+
+Supported numeric conversions preserve missingness in the original type:
+an integer `na` becomes floating `na` when a float destination consumes it.
+Integer arithmetic propagates missing operands before a numeric conversion.
+Consumed `if`/`switch` selections with both a value arm and a void arm report `PF-E5088` at the selection; statement selections, implicit missing arms and uniformly value or void arms retain their policy, and requested void selections keep `PF-E3102`.
+
 ## Identifiers in generated C++
 
 Legal Pine identifiers that collide with C++ keywords, engine names or emitter
@@ -15,6 +22,10 @@ existing `pineforge_codegen.codegen.CPP_RESERVED` export contains the explicit
 reserved names. `_safe_name` also escapes emitter temporary patterns and
 allocates a distinct name when the script already uses the preferred escape.
 An identifier that does not collide keeps its spelling.
+
+`bar` and `HUGE` use the existing C++ escape; unique input titles keep their
+Pine spellings. Repeated input titles use the ordinal override keys described
+under "Input manifest and override keys".
 
 The imported engine names `report`, `report_sink`, `report_sequence`, `source`,
 `native_calendar`, `pine_color`, `RunFailureCode`, `RunFailureInfo`, `QtyType`,
@@ -50,6 +61,21 @@ alone does not require those rows. For a non-reader, the constructor calls
 The order-shapes receipt's `host_reads` therefore includes the setter only for
 non-readers. Older generated libraries can lack the export; its absence does
 not establish that the script is a non-reader.
+
+## Value lowering (unreleased)
+
+Translation also preserves these value contracts:
+
+- A chart TA constructor argument that shadows a global constant or input follows its lexical binding; an unsized percentile loop length raises `PF-E5092` with either counter name. `PF-E5092` is the refusal of a series length for `ta.sma` and `ta.percentile_nearest_rank`, the two `ta.*` functions with a recorded TradingView result that a series length compiles; its message names the function and says that TradingView accepts the call. `PF-E5009` keeps the plain wording, which makes no claim about TradingView, for every other `ta.*` function: the ones where TradingView refuses a series length too (`ta.rma`, `ta.ema`, `ta.rsi`, `ta.atr`, `ta.dmi`, `ta.macd`, `ta.kc`, `ta.hma`, `ta.tsi`, `ta.rci` and the `atrPeriod` of `ta.supertrend`) and the ones with no recorded result.
+- A constant-expression input default can size a TA constructor; runtime resets still read the input getter.
+- `line(na)` and `box(na)` produce the same missing handles as typed declarations initialized with `na`.
+- Literal `na` in emitted strategy string slots uses the host's empty-string sentinel, including `from_entry`, `id`, `comment` and `oca_name`.
+- Array bindings from helper tuple destructuring retain their element type for built-in method lowering.
+- `strategy.default_entry_qty()` is valid in TradingView; PineForge refuses it with `PF-E5084` until the engine strategy host exposes a default-quantity query. The message reads "TradingView accepts strategy.default_entry_qty(); PineForge does not support it yet: it requires a default-quantity query on the engine strategy host." An entry with omitted `qty` keeps engine default sizing.
+- An `if` or `switch` value reassigned to a Series updates the current slot in each selected branch.
+- Colliding direct nonpersistent scalar history declarations in ordinary functions have separate Series storage, including call-site clones, locals of different scalar families and a computed local initializer reading a same-named global with its own history. Embedded block, tuple and loop declaration collisions retain their existing storage gates.
+- Direct `size`, `first`, `last` and `get` reads of `line.all`, `box.all`, `label.all` and `linefill.all` borrow live handles in oldest-first order, with the normal array bounds checks. Non-var declaration aliases and `for h in …` iteration take snapshots of those handles at the collection read; element setters and deletion still affect the live drawings. Whether a later creation in the same bar is visible through the alias is not yet measured against TradingView. `var`/`varip` aliases retain `PF-E5086` until a TradingView capture establishes their lifetime semantics. Declarations that yield a collection as a callable or selection-arm value, structural array mutations, collection reassignment, collection arguments/returns, history, pair iteration, user array-method overrides and other collection uses retain `PF-E5086`; `polyline.all` raises `PF-E5085` pending an engine handle and arena.
+- Authored identifiers that collide with macros defined by the audited math, limits, C++ wrapper and paired engine headers use the existing C++ name allocator; authored input keys remain unchanged.
 
 ## Optional compiled execution capabilities
 
@@ -331,8 +357,12 @@ unchanged. All generated factory, setter and batch entry points contain both
 standard and non-standard exceptions; checked variants return a status and an
 optional caller-buffer error instead of silently substituting defaults.
 
-Checked inputs are keyed exactly as the generated getters: title, fallback
-binding name, or the empty key. Metadata lists every declared input (including
+Checked inputs are keyed exactly as the generated getters. The first explicit
+title keeps that title as its key; later inputs of the exact same title use
+`<title>#2`, `<title>#3`, etc., in declaration order, across groups and input
+types. Untitled inputs keep their binding-name fallback (or the empty key).
+The manifest's `title` and receipt's `name` publish these opaque override keys;
+consumers must use them verbatim. Metadata lists every declared input (including
 inline inputs), its storage type, default, options, declared numeric limits and
 UI step. Unknown/ambiguous keys, invalid booleans/enums/options, numeric suffixes,
 integer overflow, non-finite numeric strings and limit violations are refused
@@ -368,7 +398,11 @@ member instead of reading an uninitialized script member (the old default was
 incorrectly member zero). Both the getter and deterministic receipt use that
 literal. Unfoldable defaults remain unsupported by checked setters and their
 receipt uses `na` without reading script state; the legacy getter is unchanged.
-Every enum option must be a literal member of one enum for checked support.
+Enum options use the same immutable initializer resolution as defaults:
+an identifier must have one non-reassigned declaration before the input call,
+and every declaration in its chain must be neither `var` nor `varip`.
+Every resolved option and the default must be members of the same enum for
+checked support. Choices retain their written order and member-index encoding.
 Stream begin fails on any script-preparation exception with its message and
 NOT_COMPLETED; ordinary batch preparation failures keep their historical empty
 report, diagnostic and completed status. Legacy exception text is standard-
@@ -519,8 +553,9 @@ them identically.
 - `supported` is `false` for an input the compiled strategy cannot honour: a
   string input whose default or a choice is neither a string literal nor a known
   built-in constant (`size.small`, `position.top_right`, `na`, a reassigned
-  name), or an `input.enum` whose default or choices are not literal members of
-  one enum. Hide such inputs, exclude them from sweeps and optimization, and
+  name), or an `input.enum` whose default or choices do not resolve to members
+  of one enum through direct members or immutable declarations before the call.
+  Hide such inputs, exclude them from sweeps and optimization, and
   do not send a value: the strategy uses its compiled default, and the paired
   engine rejects a supplied value with `setting_unsupported`. Use `supported`
   to determine eligibility rather than `options` emptiness: every unsupported
@@ -543,9 +578,10 @@ them identically.
   series as `default` and the nine native sources (`close`, `high`, `hl2`,
   `hlc3`, `hlcc4`, `low`, `ohlc4`, `open`, `volume`) as `options`; a plain
   `input(close)` keeps its `string` type.
-- An enum input publishes its `Enum.member` choices in declaration order as
-  `options` and keeps its `Enum.member` `default`, which the receipt encodes as
-  the member's index (map it through the receipt's `option_values`).
+- An enum input publishes its `Enum.member` choices as `options` in written
+  option order, or enum declaration order when options are omitted. It keeps
+  its `Enum.member` `default`, which the receipt encodes as the member's index
+  (map it through the receipt's `option_values`).
 - A color input (`input.color`) has `type: "color"`. Its literal-foldable
   `default` is an unsigned packed `0xAARRGGBB` integer (0 through 4294967295),
   where `AA` is opacity: 255 is opaque and 0 is transparent. Named Pine v6
@@ -583,26 +619,39 @@ them identically.
   above, a plain `input(...)` whose default is not a literal is typed
   `string` with a `None` default.
 
-No key is renamed or removed and the override keys are unchanged; the values
-above are new or corrected values of existing keys, listed in the changelog.
+For a script whose explicit input titles are all different, no key is renamed
+or removed; a later input of a repeated title gets `<title>#<n>` as described
+in rule 1 below.
 The `title` is the **actual override key read by the emitted C++**:
 
-1. The value of an explicit compile-time constant `title`, if supplied.
+1. The value of an explicit compile-time constant `title`, if supplied. The
+   first occurrence keeps that value. Later occurrences of that exact title
+   append `#<n>` in declaration order, starting at 2 and taking the next
+   ordinal whose key is neither an authored explicit title anywhere in the
+   script nor a key already assigned. Groups and input types do not restart
+   the count.
 2. Otherwise, the name of the declaration containing the input call.
 3. Otherwise, the empty string `""`.
 
 For example, `length = input.int(14)` has key `"length"`, and
 `ta.ema(close, input.int(9, "Fast"))` has key `"Fast"`. The manifest includes
-both declared and inline global-scope calls, one row per call. If several
-calls share a title or fallback key, those rows retain the same `title` and
-their per-input `supported` flags do not reflect the collision. The translator
-warns about the colliding inputs. The legacy setters apply a shared override
-to all matching inputs; the checked setters refuse the key as ambiguous.
+both declared and inline global-scope calls, one row per call. Two inputs
+titled `"Length"` publish `"Length"` and `"Length#2"` when no input authors
+`"Length#2"`; a `"Length"` override sets only the first, and `"Length#2"` sets
+only the second. If another input authors `"Length#2"`, it keeps that key and
+the repeated `"Length"` gets `"Length#3"`, whether the authored `"Length#2"`
+comes before or after it.
+If several calls still share a key because of unchanged untitled fallbacks
+(including a fallback matching an explicit or assigned key), those rows retain
+the same `title` and their per-input `supported` flags do not reflect the
+collision. The translator warns about the colliding inputs. The legacy setters
+apply a shared override to all matching inputs; the checked setters refuse the
+key as ambiguous.
 On the paired 1.4.0 engine's normal checked path, a supplied shared key fails
 with `setting_rejected`, reason `ambiguous_key`; a completed run with no such
 override still reports the whole `fingerprint` as `null`. This differs from
 legacy-path unresolved provenance rows, which may remain inside a fingerprint.
-Give each input a unique title. Different `group=` labels do not separate keys.
+Give those remaining colliding inputs different explicit titles.
 An explicit title that is not a compile-time string constant raises
 `CompileError`.
 
@@ -637,6 +686,8 @@ producing an envelope. The JSON entry point does not accept a `filename`
 argument.
 
 ## Diagnostic codes
+
+Methods whose first parameter is never referenced in their body report the fatal analyzer diagnostic `PF-E5087` at that parameter, with a hint to use it or declare a function instead; later unused parameters and ordinary functions remain accepted.
 
 Pine v6 call arguments must put all positional arguments before named
 arguments. `PF-E2074` is a fatal analyzer diagnostic at the first positional

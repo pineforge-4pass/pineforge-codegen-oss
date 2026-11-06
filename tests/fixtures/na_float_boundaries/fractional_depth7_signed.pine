@@ -1,0 +1,16 @@
+//@version=6
+strategy("Numeric declaration fractional write carrier", currency=currency.USDT, initial_capital=1000000000, default_qty_type=strategy.fixed)
+qPhase = input.int(1, "phase", options=[0, 1, 2])
+qDepth = input.int(7, "History depth", minval=0, maxval=7)
+qSeed = input.int(-7, "Integer seed", minval=-47, maxval=47)
+int qStamp = bar_index + qSeed
+float qV = qStamp[qDepth]
+if not na(qV)
+    qV := qV + 0.25
+qQty = na(qV) ? 1.0 : 2.0 + qV / 100.0
+if bar_index <= 1437 and bar_index % 3 == qPhase
+    strategy.entry("sample", strategy.long, qty=qQty)
+else if strategy.position_size != 0
+    strategy.close_all()
+plot(qV)
+// @pf-trace current=qV

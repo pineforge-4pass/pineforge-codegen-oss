@@ -24,7 +24,7 @@ def _error(body):
     '"abc"',
     '"abcdefg"',
     'bar_index % 2 == 0 ? "abcd" : "abcdefg"',
-    'str.tostring(math.sqrt(x = 4.0))',
+    'str.tostring(math.sqrt(number = 4.0))',
 ])
 def test_type_keyword_label_lowers_like_positional(value):
     expected = _transpile(f"pf_value = str.length({value})")
@@ -60,7 +60,7 @@ def test_duplicate_type_keyword_label_keeps_the_label_location(name):
 @pytest.mark.parametrize("named,positional", [
     ("ta.sma(source = close, length = 5)", "ta.sma(close, 5)"),
     ('input.int(defval = 3, title = "x")', 'input.int(3, "x")'),
-    ("math.sqrt(x = 4.0)", "math.sqrt(4.0)"),
+    ("math.sqrt(number = 4.0)", "math.sqrt(4.0)"),
 ])
 def test_identifier_keyword_controls_keep_their_emission(named, positional):
     expected = _transpile(f"pf_value = {positional}")

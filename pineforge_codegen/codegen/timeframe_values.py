@@ -2,6 +2,7 @@
 
 Selections contribute every arm unless a literal-only boolean proves which
 arm is taken. Chart and setup-input conditions retain their full union.
+Storage contributes its seed and every write until its inventory is closed.
 Unknown values and unsupported semantics invalidate the entire proof.
 """
 
@@ -20,8 +21,8 @@ from ..limits import (
     MAX_NESTING_DEPTH, MAX_SECURITY_TIMEFRAME_VALUES,
     MAX_SECURITY_TIMEFRAME_WORK, MAX_SOURCE_CHARS, iter_ast_nodes,
 )
-from ..security_contexts import ScriptIndex
-from ..symbols import PineType
+from ..security_contexts import ScriptIndex, TIMEFRAME_SOURCES_ANNOTATION
+from ..symbols import PineType, TypeSpec
 from .constant_fold import _constant_arguments, fold_constant_expression
 
 
@@ -30,7 +31,7 @@ class OpenTimeframeSet(Exception):
 
 
 class TimeframeValues:
-    """Interpret scalar pure expressions without rendering or running Pine."""
+    """Inventory scalar values without rendering or running Pine."""
 
     # Stay within every emitted scalar integer route, excluding its na sentinel.
     _INTEGER_MAX = (1 << 31) - 1
@@ -43,13 +44,33 @@ class TimeframeValues:
                              for decl in self.index.decls.values()}
         self.unstable = {key for key, decl in self.declarations.items()
                          if decl.is_var or decl.is_varip}
+        self.writes = {}
         for node, _depth in iter_ast_nodes(emitter.ctx.ast):
             if isinstance(node, Assignment) and isinstance(node.target, Identifier):
-                self.unstable.add(self._binding(node.target))
+                binding = self._binding(node.target)
+                self.unstable.add(binding)
+                self.writes.setdefault(binding, []).append(node)
         self.work = 0
         self.cache = {}
         self.active = set()
         self.functions = set()
+        self.numeric = None
+
+    def mutable(self, node):
+        return isinstance(node, Identifier) and self._binding(node) in self.unstable
+
+    def _integer(self, node):
+        # Slot inference deliberately reports double for integer builtins
+        # such as bar_index. Use the shared numeric value proof, which also
+        # retains fractional division and widened reassignment storage.
+        if self.numeric is None:
+            from ..loop_types import LoopTypeSources, _CounterQuery
+
+            self.numeric = _CounterQuery(
+                LoopTypeSources(self.emitter.ctx.ast),
+                self.emitter.ctx.identifier_decl_bindings,
+                self.emitter.ctx.identifier_binding_scopes)
+        return self.numeric.value_spec(node) == TypeSpec.primitive("int")
 
     def _binding(self, node):
         # Prefer declaration-position-aware analyzer provenance. ScriptIndex's
@@ -166,6 +187,10 @@ class TimeframeValues:
     def _evaluate(self, node, env):
         if (node.annotations or {}).get("pine_version") == 5:
             raise OpenTimeframeSet
+        sources = (node.annotations or {}).get(TIMEFRAME_SOURCES_ANNOTATION)
+        if sources is not None:
+            return self._bounded(value for source in sources
+                                 for value in self._values(source, env))
         if isinstance(node, (StringLiteral, NumberLiteral, BoolLiteral)):
             return (node.value,)
         if isinstance(node, Identifier):
@@ -173,8 +198,10 @@ class TimeframeValues:
             if binding in env:
                 return env[binding]
             decl = self.declarations.get(binding)
-            if decl is None or binding in self.unstable:
+            if decl is None:
                 raise OpenTimeframeSet
+            if binding in self.unstable:
+                return self._storage(binding, decl, env)
             # A caller's locals cannot capture names in a global initializer.
             values = self._values(decl.value, {})
             return self._typed(values, decl.type_hint)
@@ -213,13 +240,61 @@ class TimeframeValues:
             if node.op not in ("+", "-", "*", "/", "%", "==", "!=", "<", "<=",
                                ">", ">=", "and", "or"):
                 raise OpenTimeframeSet
-            operands = (self._values(node.left, env), self._values(node.right, env))
+            try:
+                left = self._values(node.left, env)
+            except OpenTimeframeSet:
+                if node.op != "%" or not self._integer(node.left):
+                    raise
+                # An integer remainder has a finite range even when its
+                # dividend does not. Pine/C++ truncates the quotient toward
+                # zero, so a dividend of unknown sign needs both signs.
+                nonnegative = (
+                    isinstance(node.left, Identifier)
+                    and node.left.name == "bar_index"
+                    and self._binding(node.left) is None)
+                residues = []
+                for divisor in self._values(node.right, env):
+                    if type(divisor) is not int or divisor == 0:
+                        raise OpenTimeframeSet
+                    magnitude = abs(divisor)
+                    if magnitude > MAX_SECURITY_TIMEFRAME_VALUES:
+                        raise OpenTimeframeSet
+                    residues.extend(range(0 if nonnegative else 1 - magnitude,
+                                          magnitude))
+                return self._bounded(residues)
+            operands = (left, self._values(node.right, env))
             return (self._fold(BinOp(left=self._literal(left), op=node.op,
                                      right=self._literal(right)))
                     for left, right in product(*operands))
         if isinstance(node, FuncCall):
             return self._call(node, env)
         raise OpenTimeframeSet
+
+    def _storage(self, binding, decl, outer):
+        """A closed invariant of the initializer and every write to a cell.
+
+        Iterate from the seed, binding self-reads to the preceding inventory.
+        A counter or a growing string fails the ordinary inventory/work
+        bounds; a cell assigned a finite choice reaches a fixed point.
+        Source order and branch conditions still execute in the chart code.
+        """
+        values = self._typed(self._values(decl.value, outer), decl.type_hint)
+        while True:
+            env = {**outer, binding: values}
+            candidates = list(values)
+            for write in self.writes.get(binding, ()):
+                written = self._values(write.value, env)
+                if write.op != ":=":
+                    operator = write.op.removesuffix("=")
+                    written = self._bounded(
+                        self._fold(BinOp(left=self._literal(left), op=operator,
+                                         right=self._literal(right)))
+                        for left, right in product(values, written))
+                candidates.extend(self._typed(written, decl.type_hint))
+            expanded = self._bounded(candidates)
+            if expanded == values:
+                return expanded
+            values = expanded
 
     def _typed(self, values, hint):
         if not hint:
@@ -243,15 +318,34 @@ class TimeframeValues:
         env = dict(outer)
         result = None
         for stmt in body:
-            if isinstance(stmt, VarDecl) and not (stmt.is_var or stmt.is_varip):
-                result = self._typed(self._values(stmt.value, env), stmt.type_hint)
-                env[(id(stmt), stmt.name)] = result
+            if isinstance(stmt, VarDecl):
+                binding = (id(stmt), stmt.name)
+                if binding in self.unstable:
+                    # A condition can inspect an open counter while both
+                    # returned string arms are closed. Do not demand that
+                    # counter's concrete values until a value arm reads it.
+                    result = (self._storage(binding, stmt, env)
+                              if stmt is body[-1] else None)
+                else:
+                    result = self._typed(self._values(stmt.value, env), stmt.type_hint)
+                    env[binding] = result
+            elif isinstance(stmt, Assignment) and isinstance(stmt.target, Identifier):
+                binding = self._binding(stmt.target)
+                declaration = self.declarations.get(binding)
+                if declaration is None:
+                    raise OpenTimeframeSet
+                env.pop(binding, None)
+                result = (self._storage(binding, declaration, env)
+                          if stmt is body[-1] else None)
             elif isinstance(stmt, ExprStmt):
                 result = self._values(stmt.expr, env)
-            elif isinstance(stmt, (IfStmt, SwitchStmt)) and stmt is body[-1]:
-                result = self._values(stmt, env)
+            elif isinstance(stmt, (IfStmt, SwitchStmt)):
+                # Writes in a prefix branch already belong to each cell's
+                # invariant. The branch and its effects still run in the
+                # authored helper, never in this inventory.
+                result = self._values(stmt, env) if stmt is body[-1] else None
             else:
-                # Loops, persistent storage and writes are not pure lets.
+                # Loops and other statements need a separate value proof.
                 raise OpenTimeframeSet
         if result is None:
             raise OpenTimeframeSet

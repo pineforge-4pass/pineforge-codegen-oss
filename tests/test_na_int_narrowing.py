@@ -56,12 +56,15 @@ def _assignment_line(cpp: str, target: str) -> str:
 def test_int_var_from_math_round_uses_na_preserving_cast():
     """``int`` <- ``math.round(<na-able>)`` goes through the na-preserving cast.
 
+    Pine's ``int`` is 64-bit and ``math.round`` returns one, so the slot is
+    ``int64_t`` and the cast is the 64-bit form: a value outside 32 bits is the
+    number, not ``na`` (``test_int_cast_wide.py``), and ``na`` stays ``na``.
     Fails before the fix with the raw ``naInt = std::round(naSrc);``.
     """
     cpp = transpile(NA_INT_PINE)
-    assert "    int naInt = 0;" in cpp, "naInt must still be an int-typed slot"
+    assert "    int64_t naInt = 0;" in cpp, "naInt must be a 64-bit int-typed slot"
     line = _assignment_line(cpp, "naInt")
-    assert "is_na(" in line and "na<int>()" in line, (
+    assert "is_na(" in line and "na<int64_t>()" in line, (
         "int-typed assignment of a double expression must preserve na:\n" + line
     )
     assert not re.search(r"naInt = std::round\(", line), (
@@ -77,8 +80,9 @@ value = math.floor(close)
 plot(f(value))
 """
     cpp = transpile(source)
-    # math.floor returns Pine int, so the declared int parameter remains int.
-    assert "int f(" in cpp
+    # math.floor returns Pine int (64-bit), so the declared int parameter is
+    # the same 64-bit integer type the argument has: no narrowing at the call.
+    assert "int64_t f(int64_t n)" in cpp
 
 
 # One Pine snippet per emission site that can put a double-valued expression
@@ -275,8 +279,10 @@ def test_no_implicit_double_to_int_narrowing(site):
 
 
 # Reads the int back out of the emitted class after one bar. ``ta.sma(close,
-# 20)`` is na on bar 1, so the engine contract says the int reads na<int>().
+# 20)`` is na on bar 1, so the engine contract says the int reads
+# na<int64_t>(): the slot of a ``math.round`` is 64-bit, like Pine's int.
 _NA_INT_DRIVER = """
+#include <cstdint>
 #include <cstdio>
 #include <limits>
 
@@ -284,8 +290,8 @@ int main() {
     GeneratedStrategy s;
     pineforge::Bar bar{100.0, 101.0, 99.0, 100.5, 10.0, 1700000000000LL};
     s.on_source_bar(bar);
-    std::printf("naInt=%d expected=%d\\n", s.naInt,
-                std::numeric_limits<int>::min());
+    std::printf("naInt=%lld expected=%lld\\n", (long long)s.naInt,
+                (long long)std::numeric_limits<std::int64_t>::min());
     return 0;
 }
 """
@@ -293,7 +299,7 @@ int main() {
 
 @pytest.mark.parametrize("opt", ["-O0", "-O2"])
 def test_emitted_tu_reads_na_int_at_every_optimisation_level(opt):
-    """The *running* TU yields ``na<int>()`` for an na-fed int, at every -O.
+    """The *running* TU yields ``na<int64_t>()`` for an na-fed int, at every -O.
 
     Fails before the fix: the implicit narrowing reads 0 on AppleClang arm64 at
     every level and on g++ x86-64 at -O2/-O3, which is the wrong value at every
@@ -302,6 +308,6 @@ def test_emitted_tu_reads_na_int_at_every_optimisation_level(opt):
     out = run_emitted_tu(
         transpile(NA_INT_PINE), _NA_INT_DRIVER, opt=opt, label="na-int"
     )
-    assert out.strip() == "naInt=-2147483648 expected=-2147483648", (
+    assert out.strip() == "naInt=-9223372036854775808 expected=-9223372036854775808", (
         f"emitted TU at {opt} did not preserve na through the int slot: {out!r}"
     )

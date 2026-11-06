@@ -101,8 +101,7 @@ UDT_ARRAY_FIELD_CPP = r"""
 template <typename T>
 class _PFArrayField {
 public:
-    _PFArrayField()
-        : owned_(std::make_shared<std::vector<T>>()), data_(owned_.get()) {}
+    _PFArrayField() = default;
     _PFArrayField(const std::vector<T>& value)
         : owned_(std::make_shared<std::vector<T>>(value)), data_(owned_.get()) {}
     _PFArrayField(std::vector<T>&& value)
@@ -111,7 +110,12 @@ public:
     static _PFArrayField alias(std::vector<T>& value) {
         return _PFArrayField(&value);
     }
-    std::vector<T>& operator*() const { return *data_; }
+    bool is_na() const { return data_ == nullptr; }
+    std::vector<T>& operator*() const {
+        if (is_na())
+            _PF_NA_STOP("array", "Cannot call array methods when ID of array is 'na'.");
+        return *data_;
+    }
     const std::shared_ptr<std::vector<T>>& owned() const { return owned_; }
     std::vector<T>* data() const { return data_; }
     void rebind(std::shared_ptr<std::vector<T>> owned, std::vector<T>* data) {
@@ -402,6 +406,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._budget = budget
         self._budget_visit_count = 0
         self._initialise_safe_names(ctx.ast)
+        self._private_callable_history_names = {
+            node.name for node in self._walk_ast(ctx.ast)
+            if isinstance(node, VarDecl)
+            and (node.annotations or {}).get("authored_history_name")
+        }
         # Lexical Pine names remain in ``ctx.func_var_members``.  This overlay
         # carries exact class-member identities only for collision-qualified
         # ordinary FuncDefs (identity mappings for every other ordinary UDF).
@@ -448,10 +457,27 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for stmt in ctx.ast.body
             if isinstance(stmt, VarDecl)
         }
+        self._primitive_block_shadow_globals: dict[str, VarDecl] = {
+            stmt.name: stmt
+            for stmt in ctx.ast.body
+            if isinstance(stmt, VarDecl)
+            and id(stmt) in ctx.primitive_block_shadow_types
+        }
         self._direct_program_tuple_decl_nodes: set[int] = {
             id(stmt)
             for stmt in ctx.ast.body
             if isinstance(stmt, TupleAssign)
+        }
+        self._tuple_decl_nodes: dict[int, TupleAssign] = {
+            id(node): node for node in self._walk_ast(ctx.ast)
+            if isinstance(node, TupleAssign)
+        }
+        self._direct_program_tuple_bindings: dict[str, tuple[TupleAssign, int]] = {
+            name: (stmt, index)
+            for stmt in ctx.ast.body
+            if isinstance(stmt, TupleAssign)
+            for index, name in enumerate(stmt.names)
+            if name != "_"
         }
         self._direct_program_tuple_binding_names: set[str] = {
             name
@@ -459,6 +485,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if isinstance(stmt, TupleAssign)
             for name in stmt.names
             if name != "_"
+        }
+        # Callable global reads use the class member of a Program tuple
+        # binding. Resolved scopes exclude same-named parameters and locals.
+        self._callable_global_tuple_names: set[str] = {
+            part.name
+            for fi in ctx.func_infos
+            if fi.node is not None
+            for part, _depth in iter_ast_nodes(fi.node)
+            if isinstance(part, Identifier)
+            and part.name in self._direct_program_tuple_binding_names
+            and ctx.identifier_binding_scopes.get(id(part)) == "global"
         }
         self._direct_program_binding_names: set[str] = {
             stmt.name
@@ -791,6 +828,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._security_arg_history_sec: int | None = None
         self._security_arg_history_discovering = False
         self._security_arg_call_values: dict[tuple, str] = {}
+        self._security_arg_globals: dict[str, Any] = {}
+        self._security_arg_global_values: dict[str, str] = {}
         self._random_call_counter = 0
         self._for_counter = 0
         self._uses_tv_float_step_end = False
@@ -805,6 +844,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # the declaration-derived checkpoint inventory.
         self._inline_history_members: list[dict] = []
         self._inline_history_member_by_key: dict[tuple, str] = {}
+        # While the outermost loop of a body is being emitted: the series
+        # written inside it (member -> the local flag that says the bar's
+        # slot is open). None outside any loop (emit_top._emit_history_series_write).
+        self._loop_history_flags: dict[str, str] | None = None
+        self._loop_history_flag_count = 0
         # request.security/request.security_lower_tf inline their Pine helper
         # expressions on the requested clock instead of calling the ordinary
         # emitted UDF methods.  The chart-clocked plain-UDF history factor must
@@ -1130,6 +1174,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._current_loop_var_specs: dict[str, "TypeSpec"] = {}
         # The counted loops' binders among them (``for (int i = ...)``).
         self._current_counted_loop_vars: set[str] = set()
+        # The position binders of ``for [index, value] in <array>`` among them:
+        # an array position is a present int (never an element or a map key).
+        self._current_loop_index_vars: set[str] = set()
         # Track array variables for codegen
         self._array_vars: set[str] = set()
         # Track map variables for codegen
@@ -1193,7 +1240,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # evaluator is a class method, so the param is not in scope there).
             # A lower-timeframe request has no chart-timeframe fallback.
             self._security_tf_lower = bool(item.get("is_lower_tf_array"))
-            if item.get("dead"):
+            if item.get("runtime_context"):
+                tf_str, tf_expr = None, "_pf_state.cursor.timeframe"
+            elif item.get("series_tf_invalid") is not None:
+                # A closed computed arm may be invalid. It has a typed result
+                # slot for emission, but no registration; selecting it stops
+                # the run at the authored request.
+                tf_str, tf_expr = tf_node.value, None
+            elif item.get("dead"):
                 # A helper no top-level statement reaches: its evaluator is
                 # never read, registered on the chart timeframe.
                 tf_str, tf_expr = None, "input_tf_"
@@ -1205,13 +1259,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if lookahead_node is not None:
                 if isinstance(lookahead_node, MemberAccess) and lookahead_node.member == "lookahead_on":
                     is_lookahead_on = True
+            lookahead_value = (
+                None if item.get("dead") else self._security_lookahead_value(lookahead_node))
 
             is_gaps_on = False
             if gaps_node is not None:
                 if isinstance(gaps_node, MemberAccess) and gaps_node.member == "gaps_on":
                     is_gaps_on = True
 
-            expr_node = item["expr_node"]
+            # A request in an unreachable helper has no payload arguments to
+            # bind and needs no requested-context TA buffers or constructors.
+            expr_node = None if item.get("dead") else item["expr_node"]
             inline_helper_ta_indices: set[tuple] = set()
             ta_binding_stacks = self._collect_security_ta_binding_stacks(
                 expr_node,
@@ -1257,6 +1315,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "tf_node": tf_node,
                 "gaps_on": is_gaps_on,
                 "lookahead_on": is_lookahead_on,
+                "lookahead_expr": self._security_lookahead_expr(lookahead_value),
+                "lookahead_value": lookahead_value,
                 "heikinashi": bool(item.get("heikinashi", False)),
                 "ta_range": ta_range,
                 "ta_indices": sorted(ta_indices),
@@ -1266,14 +1326,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 # (index, _SECURITY_THROUGH_GLOBAL) of a global's site a
                 # multi-statement helper reads, which the prologue computes.
                 "inline_helper_ta_indices": inline_helper_ta_indices,
-                "depends_on_mutable_globals": item.get("depends_on_mutable_globals", False),
-                "mutable_globals": list(item.get("mutable_globals", [])),
+                "depends_on_mutable_globals": (
+                    not item.get("dead") and item.get("depends_on_mutable_globals", False)),
+                "mutable_globals": (
+                    [] if item.get("dead") else list(item.get("mutable_globals", []))),
                 "is_lower_tf_array": bool(item.get("is_lower_tf_array", False)),
                 # Another symbol's feed (``_emit_foreign_security_registration``);
                 # a helper nothing reaches keeps the chart registration.
                 "foreign": bool(item.get("foreign")) and not item.get("dead"),
                 "symbol_node": item.get("symbol_node"),
                 "ignore_invalid_node": item.get("ignore_invalid_node"),
+                "series_tf_invalid": item.get("series_tf_invalid"),
+                "runtime_context": bool(item.get("runtime_context")),
             })
         self._security_selection_local_members = self._security_selection_local_member_names()
         self._global_member_vars.difference_update(self._security_selection_local_members)
@@ -1383,6 +1447,20 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return True
         return self._is_compile_time_value(self._resolve_known(init_str))
 
+    def _is_default_drawing_initializer(self, node) -> bool:
+        """Whether a drawing RHS is the constant missing handle."""
+        return (
+            self._is_na_expr(node)
+            or (
+                isinstance(node, FuncCall)
+                and isinstance(node.callee, Identifier)
+                and node.callee.name in ("line", "box")
+                and len(node.args) == 1
+                and not node.kwargs
+                and self._is_na_expr(node.args[0])
+            )
+        )
+
     def _is_runtime_scalar_var_initializer(
             self, name: str, ptype, init_str: str, init_ast,
             drawing_cpp: str | None = None,
@@ -1405,11 +1483,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if drawing_cpp is not None:
             # A nontrivial drawing-handle initializer may depend on preceding
             # source-order state. Default construction already represents a
-            # bare ``na``, so only real expressions need a declaration-site
-            # once guard.
+            # bare ``na`` or its drawing cast, so only real expressions need
+            # a declaration-site once guard.
             return (
                 is_series
-                or not self._is_na_expr(init_ast)
+                or not self._is_default_drawing_initializer(init_ast)
             )
         if is_series and self._series_var_init_keeps_preamble(init_str, init_ast, top_level):
             return False
@@ -1566,7 +1644,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 continue
             if (not nested and isinstance(decl.value, FuncCall)
                     and self._is_input_call(decl.value)
-                    and not self._is_source_input(decl.value)):
+                    and not self._is_source_input(decl.value)
+                    # An input the script reassigns is read at its declaration:
+                    # the preamble cannot build a ``var`` aggregate from it.
+                    and decl.name not in self._global_mutable_infos):
                 continue
             statement_values.add(decl.name)
 
@@ -1671,15 +1752,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # direct declaration can depend on ordinary statements immediately
             # before it; a function-entry preamble violates both Pine rules.
             # Exact-node once flags also preserve independent call-site clones.
-            # A bare UDT/drawing ``na`` already has the correct default member
-            # state and needs no assignment guard.
+            # A bare UDT/drawing ``na`` or a drawing cast of it already has
+            # the correct default member state and needs no assignment guard.
             callable_decl_site = (
                 is_callable_scoped
                 and stmt.value is not None
                 and not (
                     stmt_spec is not None
                     and stmt_spec.kind == "udt"
-                    and self._is_na_expr(stmt.value)
+                    and (
+                        self._is_na_expr(stmt.value)
+                        or (
+                            drawing_cpp is not None
+                            and self._is_default_drawing_initializer(stmt.value)
+                        )
+                    )
                 )
             )
             nullable_collection_selection_decl_site = (
@@ -1699,7 +1786,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     stmt_spec.kind in {"array", "map", "matrix"}
                     or (stmt_spec.kind == "udt" and stmt_spec.name in self._udt_defs)
                 )
-                and reads_statement_value(stmt)
+                # A ``var`` aggregate declared inside a block of the script is
+                # built where the block first reaches it, never in the
+                # first-bar preamble (which does not emit it at all).
+                and (reads_statement_value(stmt)
+                     or node_id not in top_level_node_ids)
             )
             established_decl_site = (
                 (not is_callable_scoped or drawing_cpp is not None)
@@ -2372,7 +2463,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return None
 
     def _compute_max_bars_back_cap(self) -> int | None:
-        """Combine the resolved declaration with literal max_bars_back calls."""
+        """Combine the declaration with proven constant max_bars_back depths."""
+        from .constant_values import ConstantResolver
+
         ast = getattr(self.ctx, "ast", None)
         if ast is None:
             return None
@@ -2395,8 +2488,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 elif "num" in node.kwargs:
                     num_node = node.kwargs["num"]
                 val = self._int_literal_value(num_node)
-                if val is not None and val > 0:
-                    caps.append(val)
+                if val is None:
+                    resolver = getattr(self, "_constant_default_resolver", None)
+                    if resolver is None:
+                        resolver = self._constant_default_resolver = ConstantResolver(
+                            ast, self._budget,
+                        )
+                    proof = resolver.expression(num_node)
+                    if proof is not None and proof.pine_type == PineType.INT:
+                        val = proof.value
+                if val is None or val <= 0:
+                    self._codegen_error(
+                        num_node if num_node is not None else node,
+                        "max_bars_back(): num must resolve to a positive compile-time integer.",
+                    )
+                caps.append(val)
         return max(caps) if caps else None
 
     def _series_decl_suffix(self) -> str:
@@ -2424,10 +2530,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         ):
             if not isinstance(stmt, VarDecl):
                 continue
+            from_selection = False
             if stmt.type_hint:
                 declared_spec = self._type_spec_from_hint_name(stmt.type_hint)
             elif isinstance(stmt.value, (Ternary, IfStmt, SwitchStmt)):
                 declared_spec = self._type_spec_from_expr(stmt.value)
+                if declared_spec is None:
+                    declared_spec = self._array_selection_spec(stmt.value)
+                from_selection = True
             elif self._roots_at_collection_history(stmt.value):
                 # A copy of an array's or a matrix's history, or a built-in's
                 # result on one (``pm = m[1]``, ``c = (m[1]).copy()``).
@@ -2437,6 +2547,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     self._collection_types.setdefault(stmt.name, declared_spec)
                     continue
             else:
+                continue
+            if (from_selection and declared_spec is not None
+                    and declared_spec.kind == "array"):
+                # ``a = switch mode ...`` whose every arm is an array of one
+                # type is an array variable, as the same declaration with one
+                # constructor is: ``a.get(0)`` takes the array lowering and
+                # not a raw member call on the vector.
+                self._array_vars.add(stmt.name)
+                self._collection_types.setdefault(stmt.name, declared_spec)
                 continue
             if declared_spec is None or declared_spec.kind != "matrix":
                 continue
@@ -3154,6 +3273,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         inits: dict[str, object] = {}
         for stmt in body:
             if (isinstance(stmt, VarDecl) and stmt.name in reassigned
+                    and id(stmt) not in self.ctx.primitive_block_shadow_types
                     and not stmt.is_var and not stmt.is_varip):
                 # Only consider vars whose initial value is itself stable;
                 # an unstable init cannot become a stable scalar via later
@@ -3866,6 +3986,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """
         self._inline_history_members = []
         self._inline_history_member_by_key = {}
+        self._inline_history_bar_members: dict[str, str] = {}
         # session.* flags a function reads at an offset (owner -> flags) and
         # the owner of each such read: one Series per flag and emitted call
         # site, pushed at the function's entry (emit_top.py).
@@ -3982,6 +4103,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 counters[kind] += 1
                 member_name = f"_{kind}_{counters[kind]}"
             self._inline_history_member_by_key[key] = member_name
+            if kind == "hist_call":
+                self._inline_history_bar_members[member_name] = (
+                    self._allocate_generated_cpp_name(
+                        f"_pf_hist_bar{member_name}", authored_names
+                    )
+                )
             self._inline_history_members.append({
                 "kind": kind,
                 "member_name": member_name,
@@ -4551,6 +4678,22 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             )
         return member
 
+    def _inline_history_write_cpp(self, member: str, value: str) -> str:
+        """Open at most one slot per chart bar; later evaluations update it.
+
+        The execution's new-bar flag stays true throughout a loop. Each
+        written expression and emitted callable variant therefore owns its
+        own bar marker, checkpointed alongside its Series. Intrabar execution
+        still updates the current value, including the last loop iteration.
+        Requested-clock histories use the security evaluator's own writes.
+        """
+        clock = self._inline_history_bar_members[member]
+        return (
+            f"if (history_advances_new_bar() && {clock} != bar_index_) "
+            f"{member}.push({value}); else {member}.update({value}); "
+            f"{clock} = bar_index_; "
+        )
+
     @staticmethod
     def _allocate_generated_cpp_name(preferred: str, used: set[str]) -> str:
         """Reserve one deterministic generated C++ identifier.
@@ -4628,6 +4771,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         class_used.update(
             info["member_name"] for info in self._inline_history_members
         )
+        class_used.update(self._inline_history_bar_members.values())
         class_used.update(
             variant["member_name"]
             for info in self._security_eval_info
@@ -4702,6 +4846,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 member.setdefault(decl.name, self._declared_cpp_type(decl))
         needing: set = set()
         for decl, nested in decls:
+            if nested and id(decl) in self.ctx.primitive_block_shadow_types:
+                # This declaration has ordinary lexical C++ storage already.
+                continue
             cpp = self._declared_cpp_type(decl)
             first = member.setdefault(decl.name, cpp)
             if (nested and first is not None and cpp is not None and first != cpp
@@ -4734,6 +4881,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if sharing is None:
             self._array_journal_members: dict[str, VarDecl] = {}
             self._array_journal_calls: dict[int, str] = {}
+        if getattr(self, "_uses_array_slice_views", False):
+            # A view's writes can reach a different variable's storage. The
+            # old per-variable mutation proof cannot establish uniqueness.
+            return
         if self._uses_map or self._uses_matrix or self._udt_defs:
             return
         enabled = self.ctx.strategy_params.get("calc_on_order_fills") is True
@@ -4963,6 +5114,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._all_member_names.add(self._array_journal_member_name)
 
     def _array_journal_initializer(self, member: str, value: str) -> str:
+        if member == getattr(self, "_selection_series_target", None):
+            return f"{member}.update({value});"
         if member in getattr(self, "_array_journal_members", {}):
             return f"this->{self._array_journal_member_name}.replace({member}, {value});"
         writer = self._history_sharing_writer(member)
@@ -5048,8 +5201,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
     def _generate_cpp(self) -> str:
         self._uses_enum_string_lookup = False
-        # Every input is keyed by its title: refuse a non-constant one first,
-        # then flag inputs one override key would reach together.
+        # Titles already carry assigned declaration keys. Refuse an unproved
+        # title first, then flag any remaining shared fallback/suffix keys.
         self._check_input_titles()
         self._check_input_keys()
         # Context-sensitive instance pre-pass (needs the naming helpers populated
@@ -5066,6 +5219,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Pre-scan for strategy series vars
         self._prescan_strategy_series()
         self._prescan_session_history()
+        from .array_slice import prepare_names as prepare_slice_names, uses_slice
+        self._uses_array_slice_views = uses_slice(self)
+        if self._uses_array_slice_views:
+            prepare_slice_names(self)
         self._prepare_array_journal()
         self._prepare_history_sharing()
         graph_journal.prepare(self)
@@ -5099,6 +5256,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 1. Includes
         self._emit_includes(lines)
+        if self._uses_array_slice_views:
+            from .array_slice import SUPPORT_MARKER
+            lines.append(SUPPORT_MARKER)
         tv_float_step_end_at = len(lines)
         if self._array_journal_members:
             lines.append(graph_journal.runtime(self, ARRAY_JOURNAL_CPP).replace(
@@ -5334,7 +5494,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.append("};")
             lines.append("")
 
-        if self._uses_map or self._uses_matrix or self._udt_defs:
+        if (self._uses_map or self._uses_matrix or self._udt_defs
+                or self._uses_array_slice_views):
             self._emit_handle_checkpoint_traits(lines)
 
         # 1c. Enum constants + string tables for str.tostring(enumVar)
@@ -5397,10 +5558,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for item in self._security_calls:
             sec_id = item["sec_id"]
             expr_node = item["expr_node"]
-            self._security_arg_inventory[sec_id] = self._security_argument_inventory(item)
+            # Keep the result's declared shape for the emitted helper method,
+            # but an unreachable evaluator has no payload state to allocate.
+            state_item = (item if not item.get("dead") else
+                          {**item, "expr_node": None, "mutable_globals": []})
+            state_expr = state_item["expr_node"]
+            self._security_arg_inventory[sec_id] = self._security_argument_inventory(state_item)
             self._security_arg_history_sec = sec_id
             self._security_arg_history_discovering = True
-            self._validate_security_persistent_var_control_flow(expr_node)
+            self._validate_security_persistent_var_control_flow(state_expr)
             returns_tuple = item.get("returns_tuple", False)
             tuple_size = item.get("tuple_size", 0)
             if item.get("is_lower_tf_array"):
@@ -5416,7 +5582,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     # well-defined if a future path slips through.
                     ctype = "double"
                 self._security_ohlc_hist_fields_by_sec[sec_id] = (
-                    self._collect_security_ohlc_hist_fields(expr_node)
+                    self._collect_security_ohlc_hist_fields(state_expr)
                 )
                 lines.append(
                     f"    std::vector<{ctype}> _req_sec_lower_tf_{sec_id}{{}};"
@@ -5429,17 +5595,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         f"    Series<{ctype}> {self._security_ohlc_hist_series_cpp(sec_id, field)}{_mbb};"
                     )
                 self._security_ta_hist_idx_by_sec[sec_id] = (
-                    self._collect_security_ta_hist_indices(expr_node)
+                    self._collect_security_ta_hist_indices(state_expr)
                 )
                 for name in self._security_ta_hist_series_names(sec_id):
                     lines.append(f"    Series<double> {name}{_mbb};")
-                self._emit_security_expr_hist_members(sec_id, expr_node, lines, _mbb)
+                self._emit_security_expr_hist_members(sec_id, state_expr, lines, _mbb)
                 continue
             if returns_tuple and tuple_size and tuple_size > 0 and isinstance(expr_node, TupleLiteral):
                 hist_fields: set[str] = set()
-                for el in expr_node.elements:
-                    hist_fields |= self._collect_security_ohlc_hist_fields(el)
-                for name in item.get("mutable_globals", []) or []:
+                if state_expr is not None:
+                    for el in expr_node.elements:
+                        hist_fields |= self._collect_security_ohlc_hist_fields(el)
+                for name in state_item.get("mutable_globals", []) or []:
                     info = self._global_mutable_infos.get(name)
                     if info is not None:
                         for stmt in getattr(info, "source_stmts", []) or []:
@@ -5467,7 +5634,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         )
             elif returns_tuple and tuple_size and tuple_size > 0:
                 self._security_ohlc_hist_fields_by_sec[sec_id] = (
-                    self._collect_security_ohlc_hist_fields_for_call(item)
+                    self._collect_security_ohlc_hist_fields_for_call(state_item)
                 )
                 site = self._get_ta_site(expr_node)
                 ta_name = self._ta_name_from_site(site) if site is not None else ""
@@ -5486,7 +5653,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 lines.append(f"    {ctype} _req_sec_{sec_id} = {default};")
             else:
                 self._security_ohlc_hist_fields_by_sec[sec_id] = (
-                    self._collect_security_ohlc_hist_fields_for_call(item)
+                    self._collect_security_ohlc_hist_fields_for_call(state_item)
                 )
                 if item.get("string_result"):
                     lines.append(f"    std::string _req_sec_{sec_id} = na<std::string>();")
@@ -5498,11 +5665,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     f"    Series<{ctype}> {self._security_ohlc_hist_series_cpp(sec_id, field)}{_mbb};"
                 )
             self._security_ta_hist_idx_by_sec[sec_id] = (
-                self._collect_security_ta_hist_indices(expr_node)
+                self._collect_security_ta_hist_indices(state_expr)
             )
             for name in self._security_ta_hist_series_names(sec_id):
                 lines.append(f"    Series<double> {name}{_mbb};")
-            self._emit_security_expr_hist_members(sec_id, expr_node, lines, _mbb)
+            self._emit_security_expr_hist_members(sec_id, state_expr, lines, _mbb)
             # Inside the declaration-derived snapshot/reset inventory. A new
             # run reuses the explicit constructor capacity, never Series' 500.
             for cell in self._security_arg_histories.get(sec_id, {}).values():
@@ -5519,11 +5686,20 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for n in range(len(self._recorded_sites())):
             lines.append(f"    bool _pf_rec_missing_{n} = true;")
         if self._security_calls:
-            lines.append('    std::unordered_map<std::string, Series<double>> _security_helper_series_;')
+            # Runtime instances must observe real bucket/node allocations.
+            # Static-only scripts retain their existing container declaration.
+            helper_map = (
+                "pineforge::OwnedUnorderedMap"
+                if any(item.get("runtime_context") for item in self._security_calls)
+                else "std::unordered_map"
+            )
+            lines.append(
+                f'    {helper_map}<std::string, Series<double>> _security_helper_series_;'
+            )
             self._security_string_series_declared = self._security_needs_string_series()
             if self._security_string_series_declared:
                 lines.append(
-                    '    std::unordered_map<std::string, Series<std::string>> '
+                    f'    {helper_map}<std::string, Series<std::string>> '
                     '_security_helper_series_str_;'
                 )
 
@@ -5788,6 +5964,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.append(
                 f"    Series<{info['cpp_type']}> {info['member_name']}{_mbb};"
             )
+            clock = self._inline_history_bar_members.get(info["member_name"])
+            if clock is not None:
+                lines.append(f"    int {clock} = -1;")
 
         # 8b. Global-scope non-var declarations as class members
         #     (so user-defined functions can reference them)
@@ -5836,10 +6015,20 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     lines.append(f"    {udt_cpp} {safe} = {udt_cpp}{{}};")
             else:
                 expr = self.ctx.global_expr_map.get(name) if hasattr(self.ctx, "global_expr_map") else None
-                if self._global_color_hint(name):
+                if name in self._primitive_block_shadow_globals:
+                    cpp_type = self._type_for_decl(
+                        self._primitive_block_shadow_globals[name]
+                    )
+                elif (
+                    tuple_cpp_type := self._ordinary_global_tuple_cpp_type(name)
+                ) is not None:
+                    cpp_type = tuple_cpp_type
+                elif self._global_color_hint(name):
                     cpp_type = "int64_t"
                 elif self._global_bool_hint(name):
                     cpp_type = "bool"
+                elif self._global_string_hint(name):
+                    cpp_type = "std::string"
                 elif self._global_float_na_selection(name, ptype):
                     cpp_type = "double"
                 elif (
@@ -5877,8 +6066,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     if cpp_type == "int" and self._is_int64_builtin_init(name):
                         cpp_type = "int64_t"
                     # An int that can hold TradingView's infinity
-                    # (``_nonfinite_int_names``) keeps its double.
-                    elif cpp_type == "int" and name in self._nonfinite_int_names():
+                    # (``_nonfinite_int_names``) keeps its double, whether the
+                    # integer family inferred for it is 32 or 64 bits: a stored
+                    # ``math.floor`` is ``int64_t`` and a 64-bit slot would turn
+                    # the infinity into na, which orders as na.
+                    elif (cpp_type in ("int", "int64_t")
+                          and name in self._nonfinite_int_names()):
                         cpp_type = "double"
                 default = self._default_for_type(cpp_type)
                 lines.append(f"    {cpp_type} {safe} = {default};")
@@ -6014,6 +6207,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # state category is captured automatically (or generation fails loudly
         # if it introduces an unfamiliar declaration form).
         _script_state_declarations = lines[_script_state_decl_start:-1]
+        self._runtime_security_declarations = _script_state_declarations
         _script_state_members = self._collect_script_state_members(
             _script_state_declarations
         )
@@ -6086,8 +6280,31 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 11b. security evaluators
         self._emit_security_evaluators(lines)
 
+        # Keep requested void results on their existing PF-E3102 path before
+        # checking selections consumed by ordinary expressions.
+        from ..support_checker import check_selection_value_arms
+
+        def function_node(call):
+            if isinstance(call.callee, Identifier):
+                info = self._func_info_map.get(call.callee.name)
+            elif isinstance(call.callee, MemberAccess):
+                _, info = self._typed_user_method_info(
+                    call.callee.object, call.callee.member)
+            else:
+                info = None
+            return info.node if info is not None else None
+
+        check_selection_value_arms(
+            self.ctx.ast, is_void=self._value_is_void,
+            function_node=function_node, error=self._codegen_error,
+            budget=self._budget,
+        )
+
+        _runtime_templates: list[str] = []
+        self._emit_runtime_security_templates(_runtime_templates)
         _script_state_hooks: list[str] = []
         self._emit_script_state_hooks(_script_state_hooks, _script_state_members)
+        _script_state_hooks = _runtime_templates + _script_state_hooks
         lines[_script_state_hooks_at:_script_state_hooks_at] = _script_state_hooks
         _session_market_member_at += len(_script_state_hooks)
 
@@ -6121,6 +6338,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if self._uses_enum_string_lookup:
             lines.insert(0, ENUM_STRING_INCLUDE)
         cpp = "\n".join(lines)
+        if self._uses_array_slice_views:
+            from .array_slice import lower_storage
+            cpp = lower_storage(cpp, self)
         self._settle_session_reads(cpp)
         return cpp
 

@@ -44,11 +44,13 @@
     },
     "int_tuple_call": {
       "source_sha256": "db428c15e9eb0046e1c6f8dad191e922f3a270eef43fbcfa9674718a3af16812",
-      "cpp_sha256": "4538ff522fad481128dd53139e00126d8cda443a08518ae43a7d68f47110cde2"
+      "cpp_revision": "dea403bf6b86a7a5089c28b09b062d67d42d61e0",
+      "cpp_sha256": "b4c1d735f0edde38c107a64138d0fa959b7025048daa7f5a3ce28eb0d40d2462"
     },
     "int_tuple_literal": {
       "source_sha256": "2733f1246d118ff0f3aa1a5855c44c605f8e959d08c2202d56f4cf55b047c7a2",
-      "cpp_sha256": "7ca589f3d600e2aeff1ae643c7088e741f389ab649631f8fc7556c454b817217"
+      "cpp_revision": "dea403bf6b86a7a5089c28b09b062d67d42d61e0",
+      "cpp_sha256": "3a010d24073b87e0cc41ae5c4e1951fe8cd34aaccb2a3534e61186f9a73affac"
     },
     "string_global": {
       "source_sha256": "9621859e19f24528b3415bc636fceebf1e9d17a6820d1913eef76e0f5a9f477c",

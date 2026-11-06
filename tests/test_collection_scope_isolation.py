@@ -216,6 +216,7 @@ def _udf_method_source(reverse: bool) -> str:
     slot.get(0, 0)
 '''
     method = '''method read_float(Holder self) =>
+    self
     slot = map.new<string, float>()
     slot.put("k", 2.5)
     slot.get("k")
@@ -646,6 +647,7 @@ strategy("scope method persistent collection")
 type Holder
     int seed
 method use(Holder self) =>
+    self
     var slot = array.from("x")
     slot.push("y")
     slot.size()

@@ -121,7 +121,9 @@ def discover_requests(gen, ctx, sites: list[FuncCall]) -> list[dict]:
             entry = {
                 "symbol": _guarded(_symbol, gen, info["symbol_node"], expand=expand),
                 "timeframe": _guarded(_registered_timeframe, gen, info, expand=expand),
-                "lookahead": bool(info.get("lookahead_on")),
+                "lookahead": (_guarded(
+                    _flag, gen, info.get("lookahead_value"), expand=expand)
+                    if info.get("lookahead_expr") else bool(info.get("lookahead_on"))),
                 "gaps": bool(info.get("gaps_on")),
                 "ignore_invalid_symbol": _guarded(
                     _flag, gen, info.get("ignore_invalid_node"), expand=expand),
@@ -343,6 +345,10 @@ def _fold(state: _Fold, node, depth: int = 0):
         return node.value
     if _is_timeframe_period(node):
         return _CHART
+    if (isinstance(node, MemberAccess) and isinstance(node.object, Identifier)
+            and node.object.name == "barmerge"
+            and node.member in ("lookahead_on", "lookahead_off")):
+        return node.member == "lookahead_on"
     if isinstance(node, Identifier):
         # A name registration expands (a switch's subject: the expansion
         # leaves a switch as written); one it keeps has no value here.

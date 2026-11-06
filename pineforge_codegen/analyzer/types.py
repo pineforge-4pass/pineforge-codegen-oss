@@ -46,6 +46,7 @@ from ..ast_nodes import (
     SwitchStmt, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..errors import Phase
+from ..limits import iter_ast_nodes
 from ..matrix_overloads import matrix_sum_has_rhs
 from ..symbols import (
     PineType,
@@ -355,6 +356,10 @@ class TypeHelper:
     ) -> TypeSpec | None:
         if value is None:
             return None
+        from ..drawing_all import drawing_all_result_spec
+        drawing_spec = drawing_all_result_spec(value)
+        if drawing_spec is not None:
+            return drawing_spec
         budget = getattr(self, "_budget", None)
         if budget is not None:
             # A method chain re-infers each receiver more than once, so this
@@ -518,6 +523,10 @@ class TypeHelper:
             return self._selection_type_spec(branches)
         if isinstance(value, FuncCall):
             cal = value.callee
+            if (isinstance(cal, Identifier) and cal.name in ("line", "box")
+                    and len(value.args) == 1 and not value.kwargs
+                    and isinstance(value.args[0], NaLiteral)):
+                return TypeSpec.udt(cal.name)
             func = cal.member if isinstance(cal, MemberAccess) else None
             ns = cal.object.name if isinstance(cal, MemberAccess) and isinstance(cal.object, Identifier) else None
             targs = self._template_args_from_call(value)
@@ -805,6 +814,60 @@ class TypeHelper:
         if not isinstance(last_stmt, TupleLiteral) and hasattr(last_stmt, "loc"):
             return last_stmt
         return None
+
+    def _terminal_reads_shadowed_global(self, func_def, terminal) -> bool:
+        """Whether a terminal expression reads a callee local that hides a global.
+
+        The call-site query resolves names in the callee's definition scope,
+        which holds the globals and, through the caller's parameter specs, the
+        parameters, but not the locals the body declares. A local that has the
+        name of a global would be read as that global, whatever its own value
+        type, so the query cannot answer for it. A read the body's first visit
+        bound to a global, to a parameter or to nothing (a namespace), and a
+        local whose name no global has, stay answerable.
+        """
+        parameters = set(func_def.params)
+        definition = self._operator_definition_scopes.get(
+            id(func_def), self._symbols.global_scope,
+        )
+        for node, _depth in iter_ast_nodes(terminal):
+            if not isinstance(node, Identifier) or node.name in parameters:
+                continue
+            scope = self._identifier_binding_scopes.get(id(node))
+            if (scope is not None and scope != "global"
+                    and definition.resolve(node.name) is not None):
+                return True
+        return False
+
+    def _callsite_terminal_return_spec(
+        self,
+        func_def,
+        parameter_specs: dict[str, TypeSpec | None],
+    ) -> TypeSpec | None:
+        """Query a terminal result with callee parameters and lexical globals.
+
+        Arguments have already been typed in the caller. Reuse the read-only
+        operator query to carry their specs through nested collection calls
+        without visiting arguments or allocating TA/request state again. A
+        terminal that reads a callee local hiding a global is not answered
+        here: the callee's cached return type was read in its body's scope.
+        """
+        if self._terminal_reads_shadowed_global(
+                func_def, self._direct_terminal_return_expr(func_def)):
+            return None
+        previous_owner = self._current_top_level_stmt
+        previous_scope = self._symbols.current_scope
+        self._symbols.current_scope = self._operator_definition_scopes.get(
+            id(func_def), self._symbols.global_scope,
+        )
+        self._current_top_level_stmt = func_def
+        try:
+            return OperatorTypeQuery(
+                self, parameter_specs,
+            )._type_spec_from_expr(self._direct_terminal_return_expr(func_def))
+        finally:
+            self._current_top_level_stmt = previous_owner
+            self._symbols.current_scope = previous_scope
 
     def _terminal_map_selection_return_spec(
         self,
