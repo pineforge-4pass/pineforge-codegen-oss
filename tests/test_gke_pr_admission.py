@@ -17,7 +17,7 @@ import textwrap
 
 POD_JOBS = {"workflow-lint", "package-files", "pytest", "differential"}
 TEST_POD_JOBS = {"workflow-lint", "package-files", "pytest"}
-POD_RUNNER = "gke-8cpu-16gb-amd64"
+POD_RUNNER = "ubuntu-24.04"
 BOTS = {"dependabot[bot]", "pineforge-app[bot]"}
 CHECKER = "python3 -I tests/test_gke_pr_admission.py"
 TRIGGER = """on:
@@ -453,7 +453,7 @@ def check_workflows(sources):
             require(not re.search(r"github\s*(?:\[\s*['\"]token|[.]\s*token)", body)
                     and "GH_TOKEN:" not in body, f"{name}: credential refused")
             expected_env = ({
-                "PF_CI_LABELS": "'[\"self-hosted\",\"pf-ci\",\"pf-ci-x64\"]'",
+                "PF_CI_LABELS": "'[\"ubuntu-24.04\"]'",
                 "PYTHONHASHSEED": '"0"',
             } if name in {"pytest", "differential"} else {})
             require(mapping_at(body, "env", 4) == expected_env, f"{name}: pod environment differs")
@@ -892,7 +892,7 @@ def test_real_workflow_mutations():
     for before, after, message in [
         ("pull_request_target:", "pull_request:", "trigger"),
         ("permissions: {}", "permissions: {contents: write}", "permissions"),
-        ("runs-on: gke-8cpu-16gb-amd64", "runs-on: ubuntu-24.04", "runner"),
+        ("runs-on: ubuntu-24.04", "runs-on: gke-8cpu-16gb-amd64", "runner"),
         ("persist-credentials: false", "persist-credentials: true", "checkout"),
         ("ref: ${{ github.sha }}", "ref: ${{ github.event.pull_request.head.sha }}", "checkout"),
         ("--identity", "--workflows", "identity"),
@@ -900,7 +900,7 @@ def test_real_workflow_mutations():
         ("\n    if: always()\n", "\n    if: success()\n", "always"),
         ("npm ci", "npm ci\n          echo '${{ github.event.pull_request.title }}'", "interpolation"),
         ("permissions: {contents: read}", "permissions: {contents: read, id-token: write}", "id-token"),
-        ("    runs-on: gke-8cpu-16gb-amd64", "    environment: release\n    runs-on: gke-8cpu-16gb-amd64", "environment"),
+        ("    runs-on: ubuntu-24.04", "    environment: release\n    runs-on: ubuntu-24.04", "environment"),
         ("        run: npm run gate:full", "        run: echo '${{ secrets.TOKEN }}'", "secret"),
         ("        run: npm run gate:full", "        run: echo \"${{ secrets['TOKEN'] }}\"", "secret"),
         ("        run: npm run gate:full", "        run: echo '${{ toJSON(secrets) }}'", "secret"),
@@ -913,6 +913,7 @@ def test_real_workflow_mutations():
          "    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]\n  workflow_dispatch:",
          "extra events"),
         ("        run: npm run gate:full", "        run: timeout 30 npm run gate:full", "time limit"),
+        ("    runs-on: ubuntu-24.04", "    runs-on: ubuntu-24.04\n    timeout-minutes: 15", "time limit"),
         ("        run: npm run gate:full", "        run: true", "proof commands"),
         ("        run: python -m pytest -q -n auto\n", "        run: echo pytest\n", "proof commands"),
         ('      PYTHONHASHSEED: "0"', '      PYTHONHASHSEED: ${{ toJSON(github) }}', "pod environment"),
@@ -988,7 +989,7 @@ def test_test_workflow_pull_request_trigger_mutation_is_refused():
         check_workflows({**sources, path: mutant})
 
 
-def test_test_workflow_pod_runner_admission_and_mutations():
+def test_test_workflow_hosted_runner_admission_and_mutations():
     import pytest
 
     root = Path(__file__).resolve().parents[1]
@@ -1004,14 +1005,12 @@ def test_test_workflow_pod_runner_admission_and_mutations():
         return workflow.replace(body, changed, 1)
 
     candidate = sources[path]
-    for name in ("workflow-lint", "package-files", "pytest"):
-        candidate = with_runner(candidate, name, "gke-8cpu-16gb-amd64")
     assert {name: value_at(body, 4, "runs-on") for name, body in jobs(candidate).items()} == {
         "authz": "ubuntu-24.04",
         "changes": "ubuntu-24.04",
-        "workflow-lint": "gke-8cpu-16gb-amd64",
-        "package-files": "gke-8cpu-16gb-amd64",
-        "pytest": "gke-8cpu-16gb-amd64",
+        "workflow-lint": "ubuntu-24.04",
+        "package-files": "ubuntu-24.04",
+        "pytest": "ubuntu-24.04",
         "test-check": "ubuntu-24.04",
     }
     check_workflows({**sources, path: candidate})
@@ -1020,9 +1019,9 @@ def test_test_workflow_pod_runner_admission_and_mutations():
         ("authz", "gke-8cpu-16gb-amd64"),
         ("changes", "gke-8cpu-16gb-amd64"),
         ("test-check", "gke-8cpu-16gb-amd64"),
-        ("workflow-lint", "ubuntu-24.04"),
-        ("package-files", "ubuntu-24.04"),
-        ("pytest", "ubuntu-24.04"),
+        ("workflow-lint", "gke-8cpu-16gb-amd64"),
+        ("package-files", "gke-8cpu-16gb-amd64"),
+        ("pytest", "gke-8cpu-16gb-amd64"),
         ("pytest", "gke-4cpu-8gb-amd64"),
     ):
         mutant = with_runner(candidate, name, runner)
@@ -1034,11 +1033,9 @@ def test_test_workflow_pod_runner_admission_and_mutations():
     marker = "  workflow_dispatch:\n"
     assert candidate.count(marker) == 1
     pr_workflow = candidate.replace(marker, "  pull_request:\n" + marker, 1)
-    for name in ("workflow-lint", "package-files", "pytest"):
-        pr_workflow = with_runner(pr_workflow, name, "ubuntu-24.04")
     for name in ("authz", "changes", "workflow-lint", "package-files", "pytest", "test-check"):
         mutant = with_runner(pr_workflow, name, "gke-8cpu-16gb-amd64")
-        assert mutant != candidate
+        assert mutant != pr_workflow
         with pytest.raises(ValueError) as error:
             check_workflows({**sources, path: mutant})
         assert str(error.value) == "test.yml must not have a pull_request trigger"

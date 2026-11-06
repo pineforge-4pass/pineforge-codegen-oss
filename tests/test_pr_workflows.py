@@ -128,26 +128,26 @@ def assert_test_workflow_runner_routing(workflow):
     assert runners == {
         "authz": ["    runs-on: ubuntu-24.04"],
         "changes": ["    runs-on: ubuntu-24.04"],
-        "workflow-lint": ["    runs-on: gke-8cpu-16gb-amd64"],
-        "package-files": ["    runs-on: gke-8cpu-16gb-amd64"],
-        "pytest": ["    runs-on: gke-8cpu-16gb-amd64"],
+        "workflow-lint": ["    runs-on: ubuntu-24.04"],
+        "package-files": ["    runs-on: ubuntu-24.04"],
+        "pytest": ["    runs-on: ubuntu-24.04"],
         "test-check": ["    runs-on: ubuntu-24.04"],
     }, "test.yml runner routing differs"
 
 
-def test_test_workflow_routes_only_push_dispatch_heavy_jobs_to_pods():
+def test_test_workflow_routes_push_dispatch_jobs_to_hosted_runners():
     workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
     assert_test_workflow_runner_routing(workflow)
 
 
 @pytest.mark.parametrize("name,before,after", [
-    ("workflow-lint", "gke-8cpu-16gb-amd64", "ubuntu-24.04"),
-    ("package-files", "gke-8cpu-16gb-amd64", "ubuntu-24.04"),
-    ("pytest", "gke-8cpu-16gb-amd64", "ubuntu-24.04"),
+    ("workflow-lint", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
+    ("package-files", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
+    ("pytest", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
     ("authz", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
     ("changes", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
     ("test-check", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
-    ("pytest", "gke-8cpu-16gb-amd64", "gke-4cpu-8gb-amd64"),
+    ("pytest", "ubuntu-24.04", "gke-4cpu-8gb-amd64"),
 ])
 def test_test_workflow_runner_mutations_are_rejected(name, before, after):
     workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
@@ -255,7 +255,7 @@ def assert_package_file_checks(workflow):
     package = jobs["package-files"]
     assert re.search(r"^    needs: \[authz\]$", package, re.M)
     assert [line for line in package.splitlines() if line.startswith("    runs-on:")] == [
-        "    runs-on: gke-8cpu-16gb-amd64",
+        "    runs-on: ubuntu-24.04",
     ]
     assert not re.search(r"^    if:", package, re.M), (
         "package-files must not carry a job-level pull_request guard"
@@ -1679,11 +1679,11 @@ def test_canonical_light_job_pr_guard_mutations_are_rejected(name):
         assert_test_workflow_is_canonical(mutant, gate_workflow)
 
 
-def assert_pod_head_checkout(body):
+def assert_hosted_head_checkout(body):
     assert "    needs: [admit]" in body, "PR payload must depend on admission"
     assert "needs.admit.outputs.allowed == 'true'" in body, "PR payload must require allowed"
-    assert re.search(r"^    runs-on: gke-8cpu-16gb-amd64$", body, re.M), (
-        "PR payload must use the bare GKE scalar"
+    assert re.search(r"^    runs-on: ubuntu-24.04$", body, re.M), (
+        "PR payload must use the bare hosted scalar"
     )
     assert "    permissions: {contents: read}" in body
     assert "          repository: ${{ github.repository }}" in body
@@ -1698,28 +1698,29 @@ def assert_pod_head_checkout(body):
     assert not re.search(r"^\s+cache:", body, re.M)
 
 
-def test_pr_payloads_use_only_admitted_bare_scalar_pods():
+def test_pr_payloads_use_only_admitted_bare_scalar_hosted_runners():
     # Inspect the old PR gate on main so the regression is an admission
     # failure, rather than a missing-file error.
     path = WORKFLOWS / "gke-pr.yml"
     workflow = (path if path.exists() else WORKFLOWS / "gate.yml").read_text(encoding="utf-8")
     jobs = job_blocks(workflow)
     for name in ("differential", "pytest", "workflow-lint", "package-files"):
-        assert_pod_head_checkout(jobs[name])
+        assert_hosted_head_checkout(jobs[name])
 
 
 @pytest.mark.parametrize("before,after,message", [
     ("needs: [admit]", "needs: []", "depend on admission"),
     ("outputs.allowed == 'true'", "outputs.allowed != 'false'", "require allowed"),
-    ("runs-on: gke-8cpu-16gb-amd64", "runs-on: [self-hosted, gke-8cpu-16gb-amd64]", "bare GKE"),
+    ("runs-on: ubuntu-24.04", "runs-on: gke-8cpu-16gb-amd64", "bare hosted"),
+    ("runs-on: ubuntu-24.04", "runs-on: [self-hosted, gke-8cpu-16gb-amd64]", "bare hosted"),
     ("ref: ${{ needs.admit.outputs.head_sha }}", "ref: ${{ github.event.pull_request.head.sha }}", "immutable admission"),
     ("persist-credentials: false", "persist-credentials: true", "persist-credentials"),
 ])
-def test_pod_checkout_mutations_are_rejected(before, after, message):
+def test_hosted_checkout_mutations_are_rejected(before, after, message):
     body = job_blocks((WORKFLOWS / "gke-pr.yml").read_text(encoding="utf-8"))["pytest"]
     assert body.count(before) == 1
     with pytest.raises(AssertionError, match=message):
-        assert_pod_head_checkout(body.replace(before, after, 1))
+        assert_hosted_head_checkout(body.replace(before, after, 1))
 
 
 def test_pr_node_setup_explicitly_disables_automatic_cache():
