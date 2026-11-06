@@ -256,7 +256,9 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
     Pine v6 accepts ISO-8601 strings ("2025-01-01", "2011-10-10T14:48:00",
     with optional offset) and the "DD MMM YYYY hh:mm:ss ±HHMM" /
     "MMM DD YYYY ..." forms. A dateString without a time zone is GMT+0 per
-    the Pine reference. Returns None when the string cannot be parsed.
+    the Pine reference. A UTC/GMT zone word of any size (``UTC+25``) is
+    subtracted from the fields as plain arithmetic. Returns None when the
+    string cannot be parsed.
     """
     import re
     from datetime import datetime, timezone, timedelta
@@ -272,7 +274,7 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
         txt = txt[: m.start()].strip()
         h = int(m.group(1) or 0)
         mm = int(m.group(2) or 0)
-        tzoff = timezone(timedelta(hours=h, minutes=(mm if h >= 0 else -mm)))
+        tzoff = timedelta(hours=h, minutes=(mm if h >= 0 else -mm))
     dt = None
     try:
         dt = datetime.fromisoformat(txt)
@@ -291,9 +293,16 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
                 continue
     if dt is None:
         return None
+    shift_ms = 0
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=(tzoff or timezone.utc))
-    return int(dt.timestamp() * 1000)
+        # A zone word is plain arithmetic on the wall-clock fields, whatever its
+        # size (TradingView shifts by the exact hours at 24 h and 25 h too): the
+        # fields are read as UTC and the offset is subtracted. A datetime.timezone
+        # would refuse an offset of 24 hours or more.
+        dt = dt.replace(tzinfo=timezone.utc)
+        if tzoff is not None:
+            shift_ms = tzoff // timedelta(milliseconds=1)
+    return int(dt.timestamp() * 1000) - shift_ms
 
 
 def _timestamp_calendar_lambda(tz: str, yr: str, mo: str, dy: str,
