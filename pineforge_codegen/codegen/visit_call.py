@@ -256,7 +256,9 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
     Pine v6 accepts ISO-8601 strings ("2025-01-01", "2011-10-10T14:48:00",
     with optional offset) and the "DD MMM YYYY hh:mm:ss ±HHMM" /
     "MMM DD YYYY ..." forms. A dateString without a time zone is GMT+0 per
-    the Pine reference. Returns None when the string cannot be parsed.
+    the Pine reference. A UTC/GMT zone word of any size (``UTC+25``) is
+    subtracted from the fields as plain arithmetic. Returns None when the
+    string cannot be parsed.
     """
     import re
     from datetime import datetime, timezone, timedelta
@@ -267,12 +269,35 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
     # below can read. Peel it off and fold it into an explicit offset (UTC/GMT
     # with an optional ±H[:MM] suffix; the bare word is +00:00).
     tzoff = None
-    m = re.search(r"\s+(?:UTC|GMT)([+-]\d{1,2})?(?::?(\d{2}))?$", txt, re.I)
+    word = r"\s+(?:UTC|GMT)(?:([+-])(\d{1,2})(?::?(\d{2}))?|\d{1,2})?$"
+    numeric = r"\s+[+-]\d{2}:?\d{2}$"
+    m = re.search(word, txt, re.I)
     if m:
         txt = txt[: m.start()].strip()
-        h = int(m.group(1) or 0)
-        mm = int(m.group(2) or 0)
-        tzoff = timezone(timedelta(hours=h, minutes=(mm if h >= 0 else -mm)))
+        # A numeric offset written before the word is overridden by it: the
+        # last zone token decides.
+        n = re.search(numeric, txt)
+        if n:
+            txt = txt[: n.start()].strip()
+        sign, hours, minutes = m.groups()
+        if sign:
+            # A signed offset keeps its sign even with a zero hour
+            # (GMT-00:30); minutes of 60 or more are dropped and the hours
+            # kept (UTC+01:60). A number without a sign after the word is
+            # ignored (UTC30), as is no number at all.
+            mm = int(minutes or 0)
+            tzoff = timedelta(hours=int(hours), minutes=(mm if mm < 60 else 0))
+            if sign == "-":
+                tzoff = -tzoff
+        else:
+            tzoff = timedelta(0)
+    else:
+        # A zone word written before a trailing numeric offset ("UTC+2
+        # +0000") is overridden by it: the last zone token decides.
+        n = re.search(numeric, txt)
+        w = re.search(word, txt[: n.start()], re.I) if n else None
+        if w:
+            txt = txt[: w.start()] + txt[n.start():]
     dt = None
     try:
         dt = datetime.fromisoformat(txt)
@@ -291,9 +316,16 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
                 continue
     if dt is None:
         return None
+    shift_ms = 0
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=(tzoff or timezone.utc))
-    return int(dt.timestamp() * 1000)
+        # A zone word is plain arithmetic on the wall-clock fields, whatever its
+        # size (TradingView shifts by the exact hours at 24 h and 25 h too): the
+        # fields are read as UTC and the offset is subtracted. A datetime.timezone
+        # would refuse an offset of 24 hours or more.
+        dt = dt.replace(tzinfo=timezone.utc)
+        if tzoff is not None:
+            shift_ms = tzoff // timedelta(milliseconds=1)
+    return int(dt.timestamp() * 1000) - shift_ms
 
 
 def _timestamp_calendar_lambda(tz: str, yr: str, mo: str, dy: str,

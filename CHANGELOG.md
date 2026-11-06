@@ -22,6 +22,18 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- `timestamp("...")` date strings with a `UTC` or `GMT` zone word now give
+  TradingView's value for four forms that differed. A negative zone with a
+  zero hour keeps its sign (`GMT-00:30`, `UTC-0:30`). Minutes of 60 or more
+  are dropped and the hours kept (`UTC+01:60`, `UTC+00:90`). A number without
+  a sign after the word is ignored (`UTC30`, `UTC5`). With a numeric offset
+  and a word in one string the last one decides (`+0000 UTC+2`,
+  `UTC+2 +0000`). `UTC5` and `UTC+2 +0000` are no longer refused.
+- `timestamp("...")` with a UTC or GMT zone word of 24 hours or more, for
+  example `UTC+24`, `GMT-24` or `UTC+25`, now translates instead of stopping
+  with an internal `ValueError`. As in TradingView, the zone word is plain
+  arithmetic on the date fields: the value is the fields read as UTC minus the
+  signed offset.
 - An affine chart loop proved endless is stopped with the loop-time error when
   its result reaches an effect. Omission is limited to an unused loop statement
   with no calls, whose writes have no readers except self-updates, a break
