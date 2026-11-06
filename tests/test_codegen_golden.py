@@ -6,7 +6,7 @@ scaffold and exception wrappers. test_checked_settings exercises actual output.
 import os
 from pathlib import Path
 import pytest
-from tests._emitted_member_assertions import assert_int_member
+from tests._emitted_member_assertions import assert_int_member, assert_member_type
 from tests._legacy_cpp import legacy_cpp
 from pineforge_codegen import transpile
 
@@ -124,6 +124,23 @@ def test_g2_backadjustment_on_wrong_decl_type_control():
     assert mutated.count(wrong_declaration) == 1
     with pytest.raises(AssertionError, match="Expected int x, got double x"):
         assert_int_member(mutated, "x")
+
+
+@pytest.mark.parametrize(
+    "name", ["backadjustment", "settlement_as_close", "adjustment"])
+def test_g2_authored_instance_named_like_an_adjustment_namespace(name):
+    """A record instance bound to a name that spells a data-adjustment namespace
+    is an authored receiver, not the namespace: reading its float field keeps
+    floating storage instead of the namespace constants' integer storage."""
+    cpp = _gen(
+        "type Holder\n"
+        "    float factor = 0.0\n"
+        "pair() =>\n"
+        "    [Holder.new(1.5), 1]\n"
+        f"[{name}, k] = pair()\n"
+        f"v = {name}.factor\n"
+    )
+    assert_member_type(cpp, "v", "double")
 
 
 def test_g2_adjustment_dividends_no_string():

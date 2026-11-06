@@ -5,6 +5,12 @@ import re
 
 def assert_int_member(cpp: str, name: str) -> str:
     """Require one exact int member declaration and return its full line."""
+    return assert_member_type(cpp, name, "int")
+
+
+def assert_member_type(cpp: str, name: str, expected_type: str) -> str:
+    """Require one exact member declaration of ``expected_type`` and return its
+    full line."""
     members = re.search(
         r"(?ms)^class GeneratedStrategy : public pineforge::source::PineStrategyHost \{\n"
         r"public:\n(.*?)(?=^    (?:struct\b|explicit GeneratedStrategy\())",
@@ -23,7 +29,8 @@ def assert_int_member(cpp: str, name: str) -> str:
     )
     declaration = declarations[0]
     actual_type = declaration.group("type")
-    assert actual_type == "int", (
-        f"Expected int {name}, got {actual_type} {name} in GeneratedStrategy"
+    assert actual_type == expected_type, (
+        f"Expected {expected_type} {name}, got {actual_type} {name} "
+        "in GeneratedStrategy"
     )
     return declaration.group(0)
