@@ -20,7 +20,6 @@ from tests._e2e import (
     skip_unless_e2e_env, transpile_json,
 )
 from tests._pine_libraries import Layout
-from tests._numeric_expected import require_numeric_hunk
 
 
 HEADER = '//@version=6\nstrategy("Bool text", overlay=true)\n'
@@ -620,24 +619,6 @@ def test_omitted_text_sinks_keep_reference_cpp(tmp_path, statement):
     assert current["ok"], current.get("diagnostics")
     assert previous["ok"], previous.get("diagnostics")
     cpp = current["cpp"]
-    if statement == (
-        "label.new(bar_index, close, tooltip = str.tostring(session.isfirstbar_regular))"
-    ):
-        # 63035915 bounds every drawing arena and its run-start reset.
-        for record, member in (
-            ("LineRec", "_pf_lines_"), ("BoxRec", "_pf_boxes_"),
-            ("LabelRec", "_pf_labels_"),
-        ):
-            bound = f"::pineforge::drawing_bound_from_declared_count<{record}>(50)"
-            cpp = require_numeric_hunk(
-                cpp, f"DrawingArena<{record}> {member}{{_PF_DRAWING_UNBOUNDED}};",
-                f"DrawingArena<{record}> {member}{{{bound}}};",
-            )
-            cpp = require_numeric_hunk(
-                cpp,
-                f"this->{member} = decltype(this->{member}){{_PF_DRAWING_UNBOUNDED}};",
-                f"this->{member} = decltype(this->{member}){{{bound}}};",
-            )
     assert cpp == previous["cpp"]
 
 
