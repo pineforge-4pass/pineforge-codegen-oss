@@ -22,6 +22,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Variables initialized from `backadjustment.*`, `settlement_as_close.*` and
+  `adjustment.*` constants now use integer storage in emitted C++.
 - `int(x)` of a floating value, and a stored `math.floor(x)`, `math.ceil(x)`
   or `math.round(x)`, is a 64-bit integer whatever its magnitude, as in
   TradingView: `int(1.7e12)`, `int(math.floor(1.7e12))` and
