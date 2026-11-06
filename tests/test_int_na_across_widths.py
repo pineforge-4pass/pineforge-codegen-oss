@@ -58,6 +58,48 @@ PICK_IF_RESULT = (
     "        int(close)\n"
 )
 PICK_TERNARY = "pick() => close > open ? int(na) : int(close)\n"
+# A tuple-valued selection joins each position of its arms: an arm that gives a 32-bit ``int``
+# (a local typed int, here na on the bars that select it) and an arm that gives an ``int64_t``
+# (``int(close)``) make the position ``int64_t``. A literal ``[int(na), 1]`` is NOT this shape:
+# its position joins to ``double``, which the translator already converts na-preservingly. The
+# arms end in tuple literals (if, and switch with the wide arm first) or in a call of a
+# tuple-returning function.
+PICK_TUPLE_IF = (
+    "pick() =>\n"
+    "    int held = int(na)\n"
+    "    if close > open\n"
+    "        [held, 1]\n"
+    "    else\n"
+    "        [int(close), 2]\n"
+)
+# The narrow local is na on the up bars and a present 32-bit value (the bar index) on the others,
+# and the arm is chosen by the bar index, so the bars cover a narrow na, a narrow value and a
+# value beyond 32 bits.
+PICK_TUPLE_IF_MIXED = (
+    "pick() =>\n"
+    "    int held = close > open ? int(na) : bar_index\n"
+    "    if bar_index % 2 == 0\n"
+    "        [held, 1]\n"
+    "    else\n"
+    "        [int(close), 2]\n"
+)
+PICK_TUPLE_SWITCH = (
+    "pick() =>\n"
+    "    int held = int(na)\n"
+    "    switch\n"
+    "        close <= open => [int(close), 2]\n"
+    "        => [held, 1]\n"
+)
+PICK_TUPLE_CALL = (
+    "narrow() =>\n"
+    "    int held = int(na)\n"
+    "    [held, 1]\n"
+    "pick() =>\n"
+    "    if close > open\n"
+    "        narrow()\n"
+    "    else\n"
+    "        [int(close), 2]\n"
+)
 SECURITY = 'request.security(syminfo.tickerid, "1", {})'
 
 # name -> (Pine body defining ``outv`` (and ``twin`` where the kind needs it), kind of expectation)
@@ -111,6 +153,20 @@ ROWS = {
         PICK_IF_RESULT + "int outv = pick()\n", "select"),
     "function_ternary_result": (
         PICK_TERNARY + "int outv = pick()\n", "select"),
+    # The joined position of a tuple-valued selection: ``outv`` is the first element, which is
+    # na on the up bars (the narrow local's arm) and ``int(close)`` on the others.
+    "tuple_function_if": (
+        PICK_TUPLE_IF + "[outv, other] = pick()\n", "select"),
+    "tuple_function_if_mixed": (
+        PICK_TUPLE_IF_MIXED + "[outv, other] = pick()\n", "tuple_mixed"),
+    "tuple_function_switch": (
+        PICK_TUPLE_SWITCH + "[outv, other] = pick()\n", "select"),
+    "tuple_function_call_arm": (
+        PICK_TUPLE_CALL + "[outv, other] = pick()\n", "select"),
+    "tuple_top_level_if": (
+        "int held = int(na)\n"
+        "[outv, other] = if close > open\n    [held, 1]\nelse\n    [int(close), 2]\n",
+        "select"),
     "security_ternary": (
         "float outv = " + SECURITY.format("close > open ? int(na) : int(close)") + "\n",
         "select"),
@@ -189,6 +245,10 @@ def _expected(kind, twin_missing):
             expected = None if _missing(bar) else value
         elif kind == "narrow_select":
             expected = None if _missing(bar) else index
+        elif kind == "tuple_mixed":
+            # even bars take the narrow local (na on an up bar, the bar index otherwise),
+            # odd bars take int(close)
+            expected = (None if _missing(bar) else index) if index % 2 == 0 else value
         elif kind == "nz_seven":
             expected = 7 if _missing(bar) else value
         elif kind == "nz_narrow_first":
