@@ -735,7 +735,8 @@ Every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
   declares each code's severity and the diagnostic carries it; read it, never
   infer it from the `E` / `W` prefix or from the words of a message ("visual
   only", "display"). A note is a classification, not a statement that results
-  are unaffected: PF-W1505, a note, still describes a warmup approximation.
+  are unaffected: PF-W1505, a note, describes EMA seeding that can differ from
+  TradingView at the start of a run.
 - `args`: an object of named values, raw: identifiers, types, keywords and
   Pine spellings as strings, counts as JSON numbers; never quoting, backticks
   or a formatted number.
@@ -780,11 +781,14 @@ specify this compatibility rule; they are not evidence of an app deployment.
 Since 1.5.0 the reviewed warning-to-note migration is exactly PF-W1505,
 PF-W1508, PF-W1509, PF-W1525, PF-W1526, PF-W1527, PF-W1528, PF-W1529,
 PF-W1530, PF-W1531 and PF-W1532, each a warning in 1.4.0. All other
-severities, all stable codes and every existing message, hint, explanation and
-argument definition are unchanged, and no existing key of a `Diagnostic`, a
-JSON diagnostic, the catalog or the envelopes is renamed or removed: `severity`
-gains the value `note` and `user_message` is added, while `code`, `args`,
-`message`, `hint`, `line`, `col` and `endCol` keep their values.
+severities and all stable codes are unchanged. At that migration, every existing
+message, hint, explanation and argument definition was unchanged, and no
+existing key of a `Diagnostic`, a JSON diagnostic, the catalog or the envelopes
+was renamed or removed: `severity` gained the value `note` and `user_message`
+was added, while `code`, `args`,
+`message`, `hint`, `line`, `col` and `endCol` kept their values. PF-W1505's
+message, hint and explanation describe both EMA seeding modes and the
+`series_origin_ms` run option (a text change only).
 The prior catalog and pin remain explicit legacy fixtures beside the exact
 delta in `tests/fixtures/diagnostic_notes/`. PF-W1509 remains a legacy
 template alias: the existing text classifier selects PF-W1508 when those
@@ -796,7 +800,7 @@ PF-W1509 describe a call PineForge skips as visual only (`plot(...)`,
 `table.new(...)`). PF-W1525 to PF-W1532 describe an earnings, dividends,
 splits, financial, footprint or other-symbol request whose value reaches only
 display and alert sinks and is lowered to `na`. PF-W1505 describes the
-`ta.ema` warmup approximation, a note by the explicit acceptance of the
+`ta.ema` seeding caveat, a note by the explicit acceptance of the
 initialization-note foundation. Five diagnostics that also speak of
 visual-only or display-only handling remain warnings: PF-W1502 (a `color(...)`
 cast), PF-W1506 (`color.from_gradient`), PF-W1507 (a drawing setter that drops
@@ -809,16 +813,49 @@ invalid arguments stay warnings or errors.
 
 PF-W1505 is a static note: the support checker emits it at each `ta.ema` call
 it visits, with no condition on the run, an input or the timeframe, and nothing
-in this revision suppresses or qualifies it per call. It still carries its
-original compile-time EMA caveat. This foundation does not establish startup
-adequacy or change seeding. The selected-window consumer may show its startup
-sentence only for a known finite shortfall in bars of that site's
-evaluation-context timeframe; absence is not parity. No sidecar exists yet, at
+in this revision suppresses or qualifies it per call. Its text describes
+both run modes; changing this text does not change generated C++ or seeding.
+
+By default, `ta.ema` seeds from the first value of the data PineForge runs and
+is finite from bar 0. The same holds for `ta.macd` and `ta.tsi`, which embed
+EMA. This seed matches TradingView when its chart had history before
+your range, as a normal chart does: the seed difference has decayed by then.
+When the TradingView reference run starts where your range starts, TradingView
+instead returns `na` for the first `length-1` bars, seeds from the SMA of the
+first `length` bars at bar `length-1`, and then applies the EMA recursion.
+`ta.kc` and `ta.kcw` already start that way in every run: the generated code
+applies the warm-up to their EMA basis, so their middle band is `na` until the
+Pine length is warm, including bar 0 (`tests/test_kc_middle_band.py` pins this
+against a standalone `ta.ema`).
+
+An engine that has the run option `series_origin_ms` takes it through the run's
+`syminfo`: epoch milliseconds of the open time of the first bar of the series the
+TradingView reference ran on; an engine without it ignores the key. When that
+origin is your range start, declaring it gives `ta.ema`, `ta.macd` and `ta.tsi`
+the same `na` interval, SMA seed and subsequent recursion. It also starts
+`request.security` series at the first whole
+higher-timeframe bucket at or after the origin; plain security expressions
+stay `na` until the first completed higher-timeframe bar. A wrong declared
+origin gives wrong values. The option has no defined meaning in a live run
+and must not be set there. `ta.rsi`, `ta.rma` and `ta.atr` already seed from
+the SMA; this note does not apply to them. No migration step is required;
+undeclared runs are unchanged.
+
+For a measured TradingView reference that starts at the range start, 37 of
+336 exit comments differ by default, including 5 finite values where
+TradingView is `na`; none differ with the origin declared. Across six corpus
+cases, default runs add, drop or shift 1 to 3 trades in the first days; all six
+are exact with the declared origin.
+
+This static note does not establish startup adequacy. The selected-window
+consumer may show its startup sentence only for a known finite shortfall in
+bars of that site's evaluation-context timeframe; absence is not parity.
+No sidecar exists yet, at
 compile time or at run time: this revision emits no `call_site_id` and no
 startup fact. The subsequent startup inventory and extraction must bind a
 versioned sidecar to Pine/generated identities, and share `call_site_id` and
 the exact source range with the diagnostic rather than joining by text; until
-that work lands, the static notes stay as they are. Input-bound lengths retain
+that work lands, the static notes remain unconditional. Input-bound lengths retain
 the input name or expression; runs/trials resolve submitted values and studies
 retain searched ranges. Recursive adequacy and seeding facts remain separate
 and may be unknown. The typed consumer fixtures (`warmup_consumer.py` and
