@@ -663,13 +663,23 @@ class StmtVisitor:
                 )
                 previous_input_name = self._current_input_var_name
                 self._current_input_var_name = node.name
-                # A ``var`` int array that stores epoch milliseconds is declared
-                # ``std::vector<int64_t>``; its one-shot constructor here must
+                # A typed array declaration, including a ``var`` int array that
+                # stores epoch milliseconds, must make its one-shot constructor
                 # spell the same type (visit_call array.new_* / array.from).
                 previous_ctor_target = getattr(self, "_array_ctor_target_name", None)
+                previous_ctor_expected = getattr(self, "_array_ctor_expected", None)
                 self._array_ctor_target_name = node.name
                 try:
                     type_spec = info.get("type_spec")
+                    if (
+                        node.type_hint
+                        and type_spec is not None
+                        and type_spec.kind == "array"
+                    ):
+                        self._array_ctor_expected = (
+                            node.value,
+                            self._widen_array_spec_for_name(node.name, type_spec),
+                        )
                     target_cpp_type = info.get("drawing_cpp")
                     if (
                         target_cpp_type is None
@@ -751,6 +761,7 @@ class StmtVisitor:
                 finally:
                     self._current_input_var_name = previous_input_name
                     self._array_ctor_target_name = previous_ctor_target
+                    self._array_ctor_expected = previous_ctor_expected
                 if (info.get("drawing_cpp") is None
                         and not info.get("statement_ordered_aggregate")):
                     init_cpp = self._typed_na_init(
@@ -841,12 +852,20 @@ class StmtVisitor:
             func_name, namespace = self._resolve_callee(node.value.callee)
             if namespace == "array" and func_name in ARRAY_NEW_CTORS | {"new", "from", "copy", "slice"}:
                 captured = self._callable_collection_bindings.get(id(node))
+                hinted = self._type_spec_from_hint_name(node.type_hint)
+                inferred = self._type_spec_from_expr(node.value)
+                declared = (
+                    hinted
+                    if hinted is not None and hinted.kind == "array"
+                    else (
+                        captured
+                        if captured is not None and captured.kind == "array"
+                        else inferred
+                    )
+                )
                 spec = self._widen_array_spec_for_name(
                     node.name,
-                    captured
-                    if captured is not None and captured.kind == "array"
-                    else self._type_spec_from_expr(node.value)
-                        or self._array_spec_for_name(node.name),
+                    declared or self._array_spec_for_name(node.name),
                 )
                 storage = self._array_widths.nodes.get(id(node), ())
                 if not self._array_widths.wide.isdisjoint(storage):
@@ -855,7 +874,11 @@ class StmtVisitor:
                 previous_target = getattr(self, "_array_ctor_target_name", None)
                 previous_expected = getattr(self, "_array_ctor_expected", None)
                 self._array_ctor_target_name = node.name
-                if not self._array_widths.wide.isdisjoint(storage):
+                if (
+                    (hinted is not None and hinted.kind == "array")
+                    or (captured is not None and captured.kind == "array")
+                    or not self._array_widths.wide.isdisjoint(storage)
+                ):
                     self._array_ctor_expected = (node.value, spec)
                 try:
                     init = self._visit_expr(node.value)
