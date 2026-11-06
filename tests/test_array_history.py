@@ -903,7 +903,13 @@ def _assert_many_binding_work_is_linear(visits_by_checker, binding_count: int) -
 
 @pytest.mark.parametrize("binding_count", [32, 4000])
 def test_many_bindings_are_walked_once_each(monkeypatch, binding_count):
-    visits = _many_binding_work(monkeypatch, binding_count)
+    from pineforge_codegen import limits
+
+    # This test measures work rather than host speed. Restore the production
+    # deadline after the real collection-history queries have been counted.
+    with monkeypatch.context() as patch:
+        patch.setattr(limits, "MAX_TRANSPILE_SECONDS", float("inf"))
+        visits = _many_binding_work(patch, binding_count)
     _assert_many_binding_work_is_linear(visits, binding_count)
 
 
