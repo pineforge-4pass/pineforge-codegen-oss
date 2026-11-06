@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.codegen import tables
 from tests import _compile as compile_env
 from tests._legacy_cpp import without_source_rename
 
@@ -130,6 +131,81 @@ def test_checked_index_rejects_na_nonfinite_and_range_before_integer_cast():
     assert assignment.index("std::isfinite(__pf_raw_index_value)") < integer_cast
     assert assignment.index("std::numeric_limits<int64_t>::min()") < integer_cast
     assert assignment.index("std::numeric_limits<int64_t>::max()") < integer_cast
+
+
+@pytest.mark.parametrize(
+    ("index", "proven_finite"),
+    [
+        pytest.param("( + (2) )", True, id="grouped-positive"),
+        pytest.param("-(-2)", True, id="grouped-signs"),
+        pytest.param("((1 + 2) - (2 * 2))", True, id="safe-negative-arithmetic"),
+        pytest.param(
+            "(46340 * 46340) - 2147395600", True, id="safe-large-product",
+        ),
+        pytest.param("-4", True, id="finite-negative-oob"),
+        pytest.param("3", True, id="finite-positive-oob"),
+        pytest.param("2147483647", True, id="int-max"),
+        pytest.param("-2147483647", True, id="int-min-plus-one"),
+        pytest.param("-2147483648", False, id="int-min-sentinel"),
+        pytest.param(
+            "(-2147483647 - 1)", False, id="int-min-expression",
+        ),
+        pytest.param("2147483648", False, id="beyond-int-max"),
+        pytest.param(
+            "(2147483647 + 1) - 2147483647", False, id="overflow-add-cancels",
+        ),
+        pytest.param(
+            "(-2147483647 - 2) + 2147483647", False, id="overflow-sub-cancels",
+        ),
+        pytest.param(
+            "(65536 * 65536) * 0", False, id="overflow-product-zero",
+        ),
+        pytest.param("(-1.5)", True, id="negative-decimal"),
+        pytest.param("1e20", True, id="finite-large-double"),
+        pytest.param(
+            "1.7976931348623155e308", True, id="below-double-max",
+        ),
+        pytest.param(
+            "1.7976931348623157e308", False, id="rounded-double-max",
+        ),
+        pytest.param("1e309", False, id="positive-nonfinite-double"),
+        pytest.param("-1e309", False, id="negative-nonfinite-double"),
+        pytest.param("1.0 + 1.0", False, id="unknown-floating-arithmetic"),
+        pytest.param("raw_index", False, id="unknown-name"),
+        pytest.param("next_index()", False, id="unknown-call"),
+        pytest.param("int(-2147483648)", False, id="unknown-functional-cast"),
+        pytest.param(
+            "static_cast<int>(next_index())", False, id="unknown-static-cast",
+        ),
+    ],
+)
+def test_array_index_finite_selection_keeps_checked_get_set(
+    index: str, proven_finite: bool,
+):
+    assert tables._array_index_is_proven_finite(index) is proven_finite
+    getter = tables.ARRAY_METHODS["get"]("values", [index])
+    setter = tables.ARRAY_METHODS["set"]("values", [index, "next_value()"])
+    assert (
+        "if(is_na(__pf_raw_index_value)) return na<__pf_array_value_type>();"
+        in getter
+    ) is (not proven_finite)
+    assert (
+        "if(is_na(__pf_raw_index_value)) return;" in setter
+    ) is (not proven_finite)
+    for emitted in (getter, setter):
+        # A proof removes only the missing-integral-index value/no-write path.
+        assert "if(is_na(__pf_raw_index_value)) _PF_ARRAY_STOP" in emitted
+        assert "std::isfinite(__pf_raw_index_value)" in emitted
+        assert "std::numeric_limits<int64_t>::min()" in emitted
+        assert "std::numeric_limits<int64_t>::max()" in emitted
+        assert (
+            "int64_t __pf_array_index=__pf_raw_index<0?"
+            "__pf_raw_index+__pf_array_size:__pf_raw_index;"
+        ) in emitted
+        assert (
+            "if(__pf_array_index<0||__pf_array_index>=__pf_array_size)"
+        ) in emitted
+    assert setter.count("next_value()") == 1
 
 
 def test_percentrank_checks_bounds_without_normalizing_negative_indices():
@@ -521,7 +597,7 @@ def _find_engine_library() -> Path | None:
     return candidates[0].resolve() if candidates else None
 
 
-def _compile_and_run(cpp_source: str) -> str:
+def _compile_and_run(cpp_source: str, *, opt: str = "-O0") -> str:
     compile_env.skip_if_no_compile_env()
     engine_lib = _find_engine_library()
     if engine_lib is None:
@@ -538,7 +614,7 @@ def _compile_and_run(cpp_source: str) -> str:
         command = [
             compiler,
             "-std=c++17",
-            "-O0",
+            opt,
             *compile_env.STRATEGY_FP_FLAGS,
             "-I",
             str(engine_inc),
@@ -563,6 +639,134 @@ def _compile_and_run(cpp_source: str) -> str:
                 f"stdout:\n{ran.stdout}\nstderr:\n{ran.stderr}"
             )
         return ran.stdout
+
+
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+def test_array_index_finite_selection_native_boundaries_and_evaluation(opt: str):
+    # Feed C++ operands directly to the actual emitters so Pine's literal/cast
+    # lowering cannot accidentally hide the selector boundary being exercised.
+    driver = r"""
+#include <cassert>
+#include <cmath>
+#include <string>
+#include <vector>
+int main() {
+    for (double price : {82483.49, 105.25}) {
+        const std::vector<double> original{price, price + 4.0, price + 9.0};
+        std::vector<double> values = original;
+        std::vector<int> order;
+        int raw_index = -1;
+        const auto receiver = [&]() -> std::vector<double>& {
+            order.push_back(1);
+            return values;
+        };
+        const auto next_index = [&]() {
+            order.push_back(2);
+            return raw_index;
+        };
+        const auto next_value = [&]() {
+            order.push_back(3);
+            return price + 37.0;
+        };
+        const auto check_valid = [&](auto fetch, auto store,
+                                     const std::vector<int>& get_order,
+                                     const std::vector<int>& set_order) {
+            values = original;
+            order.clear();
+            assert(fetch() == price + 9.0);
+            assert(order == get_order);
+            order.clear();
+            store();
+            assert(order == set_order);
+            assert((values == std::vector<double>{
+                price, price + 4.0, price + 37.0}));
+        };
+        const auto check_missing = [&](auto fetch, auto store,
+                                       const std::vector<int>& get_order,
+                                       const std::vector<int>& set_order) {
+            values = original;
+            order.clear();
+            assert(std::isnan(fetch()));
+            assert(order == get_order);
+            assert(values == original);
+            order.clear();
+            store();
+            assert(order == set_order);
+            assert(values == original);
+        };
+        const auto expect_error = [](auto operation, const std::string& message) {
+            try {
+                operation();
+            } catch (const std::exception& error) {
+                assert(std::string(error.what()) == message);
+                return;
+            }
+            assert(false && "expected the checked-array error");
+        };
+        const auto check_error = [&](auto fetch, auto store,
+                                     const std::string& message,
+                                     const std::vector<int>& get_order,
+                                     const std::vector<int>& set_order) {
+            values = original;
+            order.clear();
+            expect_error(fetch, message);
+            assert(order == get_order);
+            assert(values == original);
+            order.clear();
+            expect_error(store, message);
+            assert(order == set_order);
+            assert(values == original);
+        };
+        check_valid(@GROUPED@, {1}, {1, 3});
+        check_valid(@ARITHMETIC@, {1}, {1, 3});
+        check_valid(@DECIMAL@, {1}, {1, 3});
+        check_valid(@NAME@, {1}, {1, 3});
+        check_valid(@CALL@, {1, 2}, {1, 2, 3});
+        check_valid(@CAST@, {1, 2}, {1, 2, 3});
+        check_missing(@SENTINEL_CAST@, {1}, {1, 3});
+        check_missing(@SENTINEL_EXPRESSION@, {1}, {1, 3});
+        raw_index = na<int>();
+        check_missing(@NAME@, {1}, {1, 3});
+        check_missing(@CALL@, {1, 2}, {1, 2, 3});
+        check_missing(@CAST@, {1, 2}, {1, 2, 3});
+        check_error(@POSITIVE_OOB@,
+                    "Index 3 is out of bounds. Array size is 3", {1}, {1, 3});
+        check_error(@NEGATIVE_OOB@,
+                    "Index -4 is out of bounds. Array size is 3", {1}, {1, 3});
+        raw_index = 3;
+        check_error(@CALL@, "Index 3 is out of bounds. Array size is 3",
+                    {1, 2}, {1, 2, 3});
+        check_error(@LARGE_DOUBLE@,
+                    "Index 100000000000000000000.000000 is out of bounds. Array size is 3",
+                    {1}, {1, 3});
+        check_error(@POSITIVE_NONFINITE@,
+                    "Index inf is out of bounds. Array size is 3", {1}, {1, 3});
+        check_error(@NEGATIVE_NONFINITE@,
+                    "Index -inf is out of bounds. Array size is 3", {1}, {1, 3});
+    }
+}
+"""
+    for marker, index in (
+        ("@GROUPED@", "( + (2) )"),
+        ("@ARITHMETIC@", "((1 + 2) - (2 * 2))"),
+        ("@DECIMAL@", "(-1.5)"),
+        ("@NAME@", "raw_index"),
+        ("@CALL@", "next_index()"),
+        ("@CAST@", "static_cast<int>(next_index())"),
+        ("@SENTINEL_CAST@", "int(-2147483648)"),
+        ("@SENTINEL_EXPRESSION@", "(-2147483647 - 1)"),
+        ("@POSITIVE_OOB@", "3"),
+        ("@NEGATIVE_OOB@", "-4"),
+        ("@LARGE_DOUBLE@", "1e20"),
+        ("@POSITIVE_NONFINITE@", "1e309"),
+        ("@NEGATIVE_NONFINITE@", "-1e309"),
+    ):
+        getter = tables.ARRAY_METHODS["get"]("receiver()", [index])
+        setter = tables.ARRAY_METHODS["set"]("receiver()", [index, "next_value()"])
+        driver = driver.replace(
+            marker, f"[&] {{ return {getter}; }}, [&] {{ {setter}; }}",
+        )
+    assert _compile_and_run(_generate("seed = close") + driver, opt=opt) == ""
 
 
 def test_percentrank_valid_and_degenerate_indices_runtime():

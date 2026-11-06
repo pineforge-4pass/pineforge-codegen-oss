@@ -793,17 +793,97 @@ def checked_array_slice(
     )
 
 
+_ARRAY_INDEX_CONSTANT_CPP = re.compile(r"[\s()0-9.eE+*-]+")
+
+
+def _array_index_is_proven_finite(index: str) -> bool:
+    """Prove a bounded class of numeric C++ constants finite and non-NA.
+
+    Recognize decimal int literals with grouping, unary signs and ``+ - *``
+    only when every literal and intermediate lies strictly between INT_MIN
+    and INT_MAX + 1. This guarantees ordinary C++ int arithmetic without
+    overflow or the integer NA sentinel. Also recognize decimal double
+    literals with grouping/unary signs whose parsed magnitude is below the
+    largest double, but no floating arithmetic. Exclude the rounded overflow
+    boundary rather than assuming the C++ compiler rounds it the same way.
+
+    The syntax common to Python and C++ is parsed, never executed. Names,
+    calls, casts, suffixed/wide integers and all other forms remain unknown;
+    a numeric type alone cannot exclude an NA sentinel. This proves neither
+    an in-bounds address nor a nonempty array: keep every runtime check.
+    """
+    if (not _ARRAY_INDEX_CONSTANT_CPP.fullmatch(index)
+            or "++" in index or "--" in index):
+        return False
+
+    import ast as _ast
+    import sys
+
+    def value(node):
+        if isinstance(node, _ast.Constant) and type(node.value) in (int, float):
+            result = node.value
+        elif isinstance(node, _ast.UnaryOp) and isinstance(
+                node.op, (_ast.UAdd, _ast.USub)):
+            inner = value(node.operand)
+            if inner is None:
+                return None
+            result = -inner if isinstance(node.op, _ast.USub) else inner
+        elif isinstance(node, _ast.BinOp) and isinstance(
+                node.op, (_ast.Add, _ast.Sub, _ast.Mult)):
+            left, right = value(node.left), value(node.right)
+            if type(left) is not int or type(right) is not int:
+                return None
+            result = (left + right if isinstance(node.op, _ast.Add)
+                      else left - right if isinstance(node.op, _ast.Sub)
+                      else left * right)
+        else:
+            return None
+        if type(result) is int:
+            return result if -(1 << 31) < result < (1 << 31) else None
+        return result if abs(result) < sys.float_info.max else None
+
+    try:
+        tree = _ast.parse(index.strip(), mode="eval")
+        return value(tree.body) is not None
+    except (SyntaxError, ValueError, RecursionError):
+        return False
+
+
 def _checked_array_get(a: str, args: list[str], normalize_negative: bool = True) -> str:
     check = _checked_array_index_prelude(method="get", normalize_negative=normalize_negative)
+    if _array_index_is_proven_finite(args[0]):
+        # Keep the original checked getter, including its reference/value
+        # lifetime split, when no missing-index value return is needed.
+        return (
+            "[&](auto&& __pf_array)->decltype(auto){ "
+            "return [&](auto&& __pf_raw_index_value)->decltype(auto){ "
+            f"{check}"
+            "if constexpr(std::is_lvalue_reference_v<decltype(__pf_array)>) "
+            "return (__pf_array[(size_t)__pf_array_index]); "
+            "else { using __pf_array_value_type=typename "
+            "std::decay_t<decltype(__pf_array)>::value_type; "
+            "return __pf_array_value_type(__pf_array[(size_t)__pf_array_index]); } "
+            f"}}(({args[0]})); }}(({a}))"
+        )
     return (
         "[&](auto&& __pf_array)->decltype(auto){ "
         "return [&](auto&& __pf_raw_index_value)->decltype(auto){ "
-        f"{check}"
-        "if constexpr(std::is_lvalue_reference_v<decltype(__pf_array)>) "
-        "return (__pf_array[(size_t)__pf_array_index]); "
-        "else { using __pf_array_value_type=typename "
+        "using __pf_array_value_type=typename "
         "std::decay_t<decltype(__pf_array)>::value_type; "
-        "return __pf_array_value_type(__pf_array[(size_t)__pf_array_index]); } "
+        "using _pf_array_index_type=std::decay_t<decltype(__pf_raw_index_value)>; "
+        "if constexpr(std::is_floating_point_v<__pf_array_value_type> && "
+        "std::is_integral_v<_pf_array_index_type> && "
+        "!std::is_same_v<_pf_array_index_type,bool>) { "
+        "if(is_na(__pf_raw_index_value)) return na<__pf_array_value_type>(); } "
+        f"{check}"
+        # Both floating returns are values; decltype(auto) must never mix a
+        # temporary NA with an element reference. Other element families keep
+        # the existing lvalue/temporary lifetime rules.
+        "if constexpr(std::is_floating_point_v<__pf_array_value_type>) "
+        "return __pf_array_value_type(__pf_array[(size_t)__pf_array_index]); "
+        "else if constexpr(std::is_lvalue_reference_v<decltype(__pf_array)>) "
+        "return (__pf_array[(size_t)__pf_array_index]); "
+        "else return __pf_array_value_type(__pf_array[(size_t)__pf_array_index]); "
         f"}}(({args[0]})); }}(({a}))"
     )
 
@@ -812,10 +892,24 @@ def _checked_array_set(a: str, args: list[str], normalize_negative: bool = True,
                        journal: str | None = None) -> str:
     check = _checked_array_index_prelude(method="set", normalize_negative=normalize_negative)
     capture = f"{journal}.save_set(__pf_array, (size_t)__pf_array_index); " if journal else ""
+    missing = ""
+    if not _array_index_is_proven_finite(args[0]):
+        # The value has already run, including a nested get. A missing
+        # integral index into a floating array has no address to journal/write.
+        missing = (
+            "using __pf_array_value_type=typename "
+            "std::decay_t<decltype(__pf_array)>::value_type; "
+            "using _pf_array_index_type=std::decay_t<decltype(__pf_raw_index_value)>; "
+            "if constexpr(std::is_floating_point_v<__pf_array_value_type> && "
+            "std::is_integral_v<_pf_array_index_type> && "
+            "!std::is_same_v<_pf_array_index_type,bool>) { "
+            "if(is_na(__pf_raw_index_value)) return; } "
+        )
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_value){ "
         "return [&](auto&& __pf_array_value){ "
+        f"{missing}"
         f"{check}"
         f"{capture}"
         "__pf_array[(size_t)__pf_array_index]=__pf_array_value; "
