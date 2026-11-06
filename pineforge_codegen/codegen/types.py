@@ -6420,7 +6420,16 @@ class TypeInferer:
                 return "int"
             # Data-adjustment setting constants have INT storage in the analyzer.
             if ename in ("backadjustment", "settlement_as_close", "adjustment"):
-                return "int"
+                # Keep authored receivers ahead of the builtin namespace, as the
+                # member emitter does: an instance bound to one of these names
+                # keeps the type of the field it reads. A tuple declaration binds
+                # such a name without the refusal a plain declaration gets, and
+                # its record type is not recorded where a global's member type is
+                # chosen, so a name the symbol table holds is authored too.
+                owner = self._type_spec_from_expr(node.object)
+                if ((owner is None or owner.kind != "udt")
+                        and self.ctx.symbols.resolve(ename) is None):
+                    return "int"
             if ename == "strategy" and node.member == "account_currency":
                 return "std::string"
             # format.* constants emit std::string literals (consumed by
