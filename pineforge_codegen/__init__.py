@@ -7,6 +7,7 @@ from .parser import Parser
 from .analyzer import Analyzer
 from .analyzer.value_bindings import ValueBindings
 from .codegen import CodeGen
+from .codegen.capacities import validate_capacity_options as _validate_capacity_options
 from .cpp_allowlist import REASONS, check_generated_cpp
 from .diagnostic_codes import diagnostics_catalog, render_diagnostic
 from .errors import (
@@ -53,7 +54,9 @@ def _parse_bounded(pine_source: str, filename: str, budget: TimeBudget | None = 
 
 
 def _generate(pine_source: str, check_support: bool, filename: str,
-              libraries: Mapping[str, str] | None = None):
+              libraries: Mapping[str, str] | None = None, *,
+              history_capacity: int | None = None,
+              drawing_capacity: int | None = None):
     """The pipeline, first without the per-call clones of functions that read
     a ``session.<flag>[k]``, as scripts compiled before such reads were
     supported; then again with the functions whose reads that C++ holds
@@ -71,6 +74,7 @@ def _generate(pine_source: str, check_support: bool, filename: str,
     Returns ``(codegen, ctx, cpp, support_diagnostics, sites)``: ``sites``
     are the requests of another symbol's data the support checker lowered
     (``request_discovery.request_sites``)."""
+    _validate_capacity_options(history_capacity, drawing_capacity, filename)
     budget = None
     clones: frozenset[str] = frozenset()
     renamed: frozenset = frozenset()
@@ -114,7 +118,12 @@ def _generate(pine_source: str, check_support: bool, filename: str,
         # ``if (trace_enabled_) { trace(...); ... }`` block.
         ctx.pf_trace_pragmas = pragmas
         try:
-            gen = CodeGen(ctx, budget=budget)
+            capacity_options = {}
+            if history_capacity is not None:
+                capacity_options["history_capacity"] = history_capacity
+            if drawing_capacity is not None:
+                capacity_options["drawing_capacity"] = drawing_capacity
+            gen = CodeGen(ctx, budget=budget, **capacity_options)
             cpp = gen.generate()
         except CodegenInvariantError as error:
             node_kind = error.node_kind
@@ -160,7 +169,9 @@ def _generate(pine_source: str, check_support: bool, filename: str,
 
 
 def transpile(pine_source: str, *, check_support: bool = True, filename: str = "<input>",
-              libraries: Mapping[str, str] | None = None) -> str:
+              libraries: Mapping[str, str] | None = None,
+              history_capacity: int | None = None,
+              drawing_capacity: int | None = None) -> str:
     """Transpile PineScript v6 source code to C++ code.
 
     Semantic rules enforced in :class:`Analyzer` (before codegen), including:
@@ -195,18 +206,28 @@ def transpile(pine_source: str, *, check_support: bool = True, filename: str = "
             script's own requests manifest under ``$PINEFORGE_REQUESTS_ROOT``
             (see :mod:`pineforge_codegen.pine_libraries`); with neither, an
             import is refused as before.
+        history_capacity: Optional integer retention capacity (at least 2).
+            Pine directives and literal constructor requirements keep priority.
+            Dynamic reads use the existing coded runtime limit; see PUBLIC_CONTRACT.md.
+        drawing_capacity: Optional live drawing bound (at least 1), separate
+            from Pine collection counts, checked per collected type after
+            collection. Typed stops require the paired engine catalog value.
 
     Returns:
         Generated C++ source string.
     """
-    _gen, _ctx, cpp, _support, _sites = _generate(pine_source, check_support, filename,
-                                                  libraries)
+    _gen, _ctx, cpp, _support, _sites = _generate(
+        pine_source, check_support, filename, libraries,
+        history_capacity=history_capacity, drawing_capacity=drawing_capacity,
+    )
     return cpp
 
 
 def transpile_full(pine_source: str, *, check_support: bool = True,
                    filename: str = "<input>",
-                   libraries: Mapping[str, str] | None = None) -> dict:
+                   libraries: Mapping[str, str] | None = None,
+                   history_capacity: int | None = None,
+                   drawing_capacity: int | None = None) -> dict:
     """Transpile like :func:`transpile`, plus the host-UI input manifest.
 
     Runs the pipeline (Lexer -> Parser -> support check -> Analyzer ->
@@ -248,7 +269,9 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
         "diagnostics": list[Diagnostic], "requests": list[dict]}``.
     """
     gen, ctx, cpp, support_diagnostics, sites = _generate(
-        pine_source, check_support, filename, libraries)
+        pine_source, check_support, filename, libraries,
+        history_capacity=history_capacity, drawing_capacity=drawing_capacity,
+    )
     return {
         "cpp": cpp,
         "inputs": gen.extract_input_manifest(),
@@ -262,7 +285,9 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
 def transpile_with_request_inventory(pine_source: str, *, check_support: bool = True,
                                      filename: str = "<input>",
                                      libraries: Mapping[str, str] | None = None,
-                                     primary_chart_timeframe: str | None = None) -> dict:
+                                     primary_chart_timeframe: str | None = None,
+                                     history_capacity: int | None = None,
+                                     drawing_capacity: int | None = None) -> dict:
     """Transpile like :func:`transpile_full`, plus the request-feed inventory
     bound to the C++ it returns (``pineforge_codegen.request_feed_inventory``).
 
@@ -301,7 +326,9 @@ def transpile_with_request_inventory(pine_source: str, *, check_support: bool = 
         "request_feed_inventory": dict}``.
     """
     gen, ctx, cpp, support_diagnostics, sites = _generate(
-        pine_source, check_support, filename, libraries)
+        pine_source, check_support, filename, libraries,
+        history_capacity=history_capacity, drawing_capacity=drawing_capacity,
+    )
     return {
         "cpp": cpp,
         "inputs": gen.extract_input_manifest(),

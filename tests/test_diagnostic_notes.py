@@ -85,8 +85,9 @@ CATALOG_ENTRY_ADDITIONS = {
 # (PF-E2083 to PF-E2086) and the strategy() declaration errors (PF-E5080 to
 # PF-E5082), the missing value lowering error (PF-E5083) and the requested
 # selection errors (PF-E3102 to PF-E3105 and PF-E3110), including an unmeasured empty
-# requested-timeframe arm, the two math keyword refusals (PF-E5089, PF-E5090)
-# and the max_bars_back refusal (PF-E5093).
+# requested-timeframe arm, the two math keyword refusals (PF-E5089, PF-E5090),
+# the max_bars_back refusal (PF-E5093) and the capacity option errors
+# (PF-E5094, PF-E5095, PF-E5097, PF-E5098).
 CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2040", "PF-E2041", "PF-E2042", "PF-E2043", "PF-E2044",
                      "PF-E2045", "PF-E2046", "PF-E2047", "PF-E2048", "PF-E2049",
@@ -106,6 +107,10 @@ CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E3102", "PF-E3103", "PF-E3104", "PF-E3105", "PF-E3110",
                      "PF-E3111",
                      "PF-E5093",  # max_bars_back(): num must resolve to a positive compile-time integer.
+                     "PF-E5094",  # A capacity option must be an integer of at least its minimum, or None.
+                     "PF-E5095",  # A constant history offset cannot fit history_capacity.
+                     "PF-E5097",  # history_capacity is outside the native Series constructor's range.
+                     "PF-E5098",  # drawing_capacity is outside the native int64 limit argument's range.
                      "PF-E5080", "PF-E5081", "PF-E5082", "PF-E5083", "PF-W1553"} | set(CATALOG_ENTRY_ADDITIONS)
 CATALOG_ADDITIONS.update(DELTA.get("added_codes", ()))
 CATALOG_ADDITIONS |= set(DELTA["catalog_additions"])

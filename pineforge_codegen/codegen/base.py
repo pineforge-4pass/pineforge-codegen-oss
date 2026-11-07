@@ -33,6 +33,7 @@ from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from ..limits import TimeBudget, iter_ast_nodes, syntax_children
 from ..matrix_overloads import matrix_sum_has_rhs
 from . import graph_journal
+from .capacities import CapacityPolicy, validate_capacity_options
 from ..session_reads import emitted_session_reads
 from ..block_locals import block_declarations, decl_key
 from ..pine_spelling import (
@@ -355,7 +356,7 @@ from .drawing import DrawingVisitor
 # CodeGen class
 # ---------------------------------------------------------------------------
 
-class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEmitter, TaSiteHelper, TypeInferer, InputHelper, DrawingVisitor, CollectionHistoryEmitter, NamingHelper):
+class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEmitter, TaSiteHelper, TypeInferer, InputHelper, DrawingVisitor, CollectionHistoryEmitter, CapacityPolicy, NamingHelper):
     """Generate C++ from an AnalyzerContext (visitor pattern).
 
     Mixin chain (Python MRO is left-to-right; method names are
@@ -398,8 +399,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     _pine_v5_body = False
 
     def __init__(self, ctx: AnalyzerContext,
-                 budget: TimeBudget | None = None) -> None:
+                 budget: TimeBudget | None = None, *,
+                 history_capacity: int | None = None,
+                 drawing_capacity: int | None = None) -> None:
+        validate_capacity_options(history_capacity, drawing_capacity, ctx.filename)
         self.ctx = ctx
+        self._history_capacity = history_capacity
+        self._drawing_capacity = drawing_capacity
+        self._max_bars_back_cap = None
+        self._inferred_history_capacity = None
         self._order_shape_calls = {}
         self._order_shape_host_reads: set[str] = set()
         self._order_shape_constructor: list[str] = []
@@ -1354,27 +1362,19 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._uses_drawing = self._detect_drawing_usage()
         self._drawing_caps = self._compute_drawing_caps() if self._uses_drawing else {}
 
-        # max_bars_back: the per-variable history depth the engine's Series<T>
-        # ring buffer should retain. Pine exposes this two ways — the
-        # ``strategy(..., max_bars_back=N)`` kwarg (global) and the
-        # ``max_bars_back(var, N)`` function (per-var). The engine's
-        # ``Series<T>(int max_len)`` ctor (default 500, include/pineforge/
-        # series.hpp) is the wiring point: reads past the retained depth return
-        # na, so honoring the directive means constructing each Series with a
-        # capacity >= the requested depth. We take the MAX requested N and apply
-        # it (via ``_series_decl_suffix`` -> ``{N}``) to the directly-declared
-        # ``Series<T>`` members — a safe superset of Pine's per-var semantics
-        # (it never retains LESS than Pine, so any history access that succeeds
-        # in Pine succeeds here). ``None`` => no directive => keep the engine
-        # default 500 (emit a bare ``Series<T>`` with no ctor arg, so
-        # directive-free output is byte-identical to before).
+        # Pine history directives retain their existing global-maximum rule.
+        # CapacityPolicy combines that explicit depth with the operator
+        # fallback, or infers a larger default from source-visible reads.
+        # Helper-map entries keep their legacy construction without an option
+        # or an inferred increase; an explicit capacity constructs them in place.
         #
-        # KNOWN LIMITATION: the lazily-constructed security-helper map series
-        # (``_security_helper_series_``, the ``std::unordered_map<std::string,
-        # Series<double>>`` ~line 971) do NOT pick up the cap. Their entries are
-        # default-constructed on first ``operator[]`` access, so they always use
-        # the engine default 500 regardless of the requested ``N``. A
-        # max_bars_back directive larger than 500 is therefore not honored for
+        # KNOWN LIMITATION (unchanged): with a max_bars_back directive and
+        # neither an option nor an inferred increase (inference runs only when
+        # there is no directive), the lazily-constructed security-helper map
+        # series (``_security_helper_series_``, the ``std::unordered_map<
+        # std::string, Series<double>>``) are still default-constructed on
+        # first ``operator[]`` access and use the engine default 500 whatever
+        # the directive says, so a directive above 500 is not honored for
         # history reads off security-helper series.
         self._max_bars_back_cap: int | None = self._compute_max_bars_back_cap()
 
@@ -2506,9 +2506,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return max(caps) if caps else None
 
     def _series_decl_suffix(self) -> str:
-        """C++ constructor-arg suffix for Series<T> member declarations. Empty
-        (engine default 500) unless a max_bars_back directive raised the cap."""
-        return f"{{{self._max_bars_back_cap}}}" if self._max_bars_back_cap else ""
+        """Constructor spelling stays bare when the legacy capacity suffices."""
+        capacity = self._resolved_history_capacity()
+        return f"{{{capacity}}}" if capacity is not None else ""
 
     def _register_global_aggregate_member_types(self) -> None:
         """Infer matrix/array/map class members for global non-var declarations from RHS AST.
@@ -5245,13 +5245,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # request.security ids whose payload reads the requested bar_index.
         self._security_bar_index_secs: set[int] = set()
         self._prepare_lazy_source_clock_sites()
+        self._prepare_history_capacities()
         self.block_locals_needing_names = self._block_locals_needing_names()
 
         from .order_shapes import HostReadLines
         lines: list[str] = HostReadLines(self._order_shape_host_reads)
 
-        # Series<T> ctor-arg suffix from any max_bars_back directive (empty when
-        # absent, so directive-free output is byte-identical to before).
+        # One source-selected fallback reaches every bare Series constructor.
         _mbb = self._series_decl_suffix()
 
         # 1. Includes
@@ -5742,7 +5742,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # are ordinary copyable script state and join the automatic COOF
             # checkpoint below.
             literal = info["length_literal"]
-            capacity = f"{{{literal + 1}}}" if literal is not None and literal >= 1 else ""
+            capacity = (
+                f"{{{literal + 1}}}" if literal is not None and literal >= 1
+                else (self._series_decl_suffix() if self._history_capacity is not None else "")
+            )
             lines.append(f"    Series<double> {info['hist']}{capacity};")
 
         # Security evaluator TA members (cloned from expression dependencies)
