@@ -23,7 +23,8 @@ On the final candidate, once, before opening a PR, marking a task complete, or t
 
 These CI requirements describe this source candidate after staged adoption.
 Source, unit results and documentation do not establish installation or hosted
-proof; ROOT/CORE retain publication and verification ownership.
+proof; activation requires the checks, exact-source hosted evidence and review
+described in `docs/engine-main-ci.md`.
 
 If the corpus gate newly fails, fix it before doing anything else. Adding a strategy to `KNOWN_TRANSPILE_FAILURES` / `KNOWN_COMPILE_FAILURES` to silence a corpus failure is only acceptable when the failure represents an intentional, documented support drop — and even then, only with a matching one-line rationale next to the entry.
 
@@ -112,8 +113,8 @@ They need the native inputs from "Build and environment". Without them they skip
 | Non-public inputs: files calling `private_fixture`, `tests/test_e2e_series_timeframe_values.py` (`PINEFORGE_BTCUSDT_1H_FEED`), the population test of `tests/test_string_settings_constants.py` (`PINEFORGE_STRING_SETTINGS_SOURCES`) | inputs outside this repository (`private fixtures not present:`) | cannot run here: they skip; say so in the PR |
 
 Full-main verification is automated once per main push by the shared native job,
-using at most eight numeric build/pytest workers. For targeted iteration on an
-approved worker with native inputs exported:
+using at most eight numeric build/pytest workers. For targeted iteration, use a
+runner with native inputs configured and their paths exported:
 
 ```bash
 python -m pytest -ra tests/test_compile_corpus.py   # subset for iteration, not full-main proof

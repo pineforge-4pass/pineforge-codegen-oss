@@ -109,8 +109,15 @@ fetched `origin/main`, and records engine SHA/tree separately from codegen and
 the workflow definition. This forward integration is separate from exact
 release pairing.
 
-The driver installs only pytest/xdist and performs a fresh Release/source-layer
-build:
+Native PR checks build the engine main resolved for that run. A broken or
+unavailable engine main can block the required codegen `gate`; full mode also
+depends on reachable public corpus/LFS inputs. There is no pinned fallback.
+
+The driver installs pytest/xdist with minimum versions `pytest>=7.0` and
+`pytest-xdist>=3.5`; these are not fully pinned tool identities. Full mode may
+install clang from the system package index when it is absent. The job therefore
+depends on runtime package-index availability and version resolution. It
+performs a fresh Release/source-layer build:
 
 ```sh
 cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Release \
@@ -141,6 +148,13 @@ native parameter, zero collection, missing phase, skip/xfail, setup/teardown
 failure or unsuccessful collection prevents full success. A real failing call
 remains a failure even if pytest were to return zero. No count is supplied as
 an expected result.
+
+Audit, identity and output production run in the Python process that imports
+the tested source through `pytest.main`. The threat model assumes admitted
+same-repository authors and write-authorized dispatchers; malicious test or
+`conftest.py` code could forge that process's outputs. The audit provides no
+isolation from adversarial test code. Candidate execution has only
+`contents: read`; only the isolated `publish` job receives `checks: write`.
 
 `execution.json` binds this inventory and its digest to the definition, engine
 and codegen identities and records actual exits, omissions and input NEEDS.
@@ -177,8 +191,8 @@ these may become native success or claimed assertion RED.
 The check `engine-main-native-source` is created on the tested codegen SHA and
 read back to verify `head_sha`, conclusion and details URL. Details link the
 actual native job. Summaries report observed outcomes; no input supplies an
-expected result and no literal SHA selects one. ROOT must still read raw
-build/audit logs to establish the required two-assertion RED.
+expected result and no literal SHA selects one. Read the raw build/audit logs
+to establish the required two-assertion RED.
 
 ## Staged source adoption
 
@@ -187,8 +201,8 @@ pins the entire reusable workflow and native driver to the installed base
 source. It rejects omission of `engine-main`, a different call route, callee or
 implementation. This final tree deliberately contains no legacy fallback.
 
-CORE/ROOT must first install a separately reviewed bootstrap policy on `main`
-before activating the caller shape. The source-only bootstrap delta is:
+Install a separately reviewed bootstrap policy on `main` before activating the
+caller shape. The source-only bootstrap delta is:
 
 1. Install the final driver/checker/publisher body, but stage the shared workflow
    without its exact two-line main `push` trigger. Main-push activation waits.
@@ -205,20 +219,20 @@ before activating the caller shape. The source-only bootstrap delta is:
    unchanged inactive-push header with the old caller, or the exact main-only
    push header with the new caller. No path filters, cancellation group, altered
    body or mixed caller/push activation is admitted.
-   Test both complete shapes and mutations on approved workers.
+   Test both complete shapes and mutations on a runner with configured test
+   dependencies.
 3. Run original touched PR RED, merged-main **full** RED, restored-main **full**
    GREEN and docs PR SKIP using one
    immutable published branch definition with this native implementation.
-   Obtain genuine review. Then activate the final canonical and main-push
-   workflows and replace the bootstrap checker/controls with
-   this final strict source together. The old inventory/report predicate must
-   disappear in this activation change. Publication remains CORE-controlled.
+   Obtain independent review of the exact source proposed for activation.
+   Then activate the final canonical and main-push workflows and replace the
+   bootstrap checker/controls with this final strict source together. The old
+   inventory/report predicate must disappear in this activation change.
 
 The bootstrap source must preserve its original six-leg reporter only while
 the old caller is installed; otherwise it would strand old PR runs. It cannot
 be left installed after activation. This description prepares source; it
-authorizes no push, merge, bypass or branch-protection change. The scratch
-source report names the exact checkpoint paths for constructing these deltas.
+authorizes no push, merge, bypass or branch-protection change.
 
 ## Hosted proof requests
 
@@ -265,17 +279,20 @@ ordinary cases from the independently restored head. A private/platform NEEDS,
 missing call, setup failure or public-only pass does not satisfy full GREEN.
 SKIP needs a genuine docs diff and a visible
 native job-level skip. Compare definition/codegen/engine identities for each
-run; engine main may advance between them. All proof requests here are UNRUN
-by the source author. Source, unit controls and prechecks establish no hosted
-outcome or process acceptance.
+run; engine main may advance between them. All proof requests here remain UNRUN.
+Source, unit controls and prechecks establish no hosted outcome or process
+acceptance.
 
-CORE must additionally read the GitHub check-run API record on
-`8d1b254e4868a7869dd9da8b4fee2d922445b414`: completed failure with details linked
-to the real completed native job. A definition-commit check or the old PR-head
-check cannot replace it. After activation, verify genuine main pushes,
-including docs-only pushes, execute full mode on their own event SHAs without
-cancelling earlier pushes. No protected-main rewind or synthetic push is used.
-Focused mode/inventory/missing-input controls run on Spark2, followed by the
-same hosted definition's actual outcomes, source check API readback and a
-genuine final Claude REV. All remain UNRUN here; source GO and G01 closure
-require that execution and review evidence.
+Also read the GitHub check-run API record on
+`8d1b254e4868a7869dd9da8b4fee2d922445b414`: it must show completed failure,
+with details linked to the real completed native job. A definition-commit check
+or the old PR-head check cannot replace it. After activation, verify genuine
+main pushes, including docs-only pushes, execute full mode on their own event
+SHAs without cancelling earlier pushes. No protected-main rewind or synthetic
+push is used.
+Focused mode/inventory/missing-input controls must run on a runner with
+configured native inputs, followed by the same immutable hosted definition's
+actual outcomes, source check API readback and independent review of the exact
+source proposed for publication. All remain UNRUN here. Source preparation
+alone does not establish activation; that execution and review evidence remain
+required.

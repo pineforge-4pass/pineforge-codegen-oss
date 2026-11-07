@@ -169,19 +169,23 @@ while the old caller and an inactive main-push trigger remain installed.
 The temporary rule permits only the exact main-only push header together with
 the new caller; it cannot permit body changes, filters or cancellation.
 Register dispatch and its isolated checks permission. Run original touched PR
-RED, merged-main full RED with an own-SHA check-run API record, restored-main
-full GREEN and docs PR
-SKIP with one definition, then activate both routes and the strict checker
-together. Final policy admits only the new graph and pins
-the full callee/driver to base; it refuses removal of the native prerequisite.
+RED, merged-main full RED with a check-run API record on the tested source SHA,
+restored-main full GREEN and docs PR SKIP with one immutable hosted definition,
+then activate both routes and the strict checker together. Final policy admits
+only the new graph and pins the full callee/driver to base; it refuses removal
+of the native prerequisite.
 Remove the temporary old-inventory reporter at activation. The exact source
-route and proof inputs are in `docs/engine-main-ci.md`; publication is CORE-owned.
-Source preparation does not establish G01 closure: focused controls on Spark2,
-the same hosted definition's actual RED/full GREEN/SKIP, exact-source API
-readback and genuine final Claude REV remain required.
+route and proof inputs are in `docs/engine-main-ci.md`.
+Focused mode/inventory/missing-input controls must run on a runner with
+configured native inputs. Activation also requires the same immutable hosted
+definition's actual RED/full GREEN/docs SKIP and exact-source check-run API
+readback. Independent review must bind the exact source proposed for
+publication. Source preparation establishes neither hosted outcomes nor
+activation.
 
 The checker and its mutation controls use only Python's standard library plus
 pytest for the tests. File-reading modes list their inputs, refuse credential
 paths and `*.env`, and reject symlinks before opening files. Full tests,
 engine-enabled corpus compilation and the Pyodide gate must run in CI or on
-the designated build box; a source inspection is not an execution verdict.
+a runner with configured native inputs; a source inspection is not an
+execution verdict.
