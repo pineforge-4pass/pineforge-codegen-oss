@@ -140,6 +140,8 @@ class TopLevelEmitter:
             for func_name, namespace in [self._resolve_callee(node.callee)]
         )
         lines.append('#include <pineforge/source/pine_strategy_host.hpp>')
+        if getattr(self, "_metrics_plain_certified", False):
+            lines.append("#include <pineforge/native_module.hpp>")
         if any(item.get("runtime_context") for item in self._security_calls):
             lines.extend((
                 "#ifndef PINEFORGE_HAS_RUNTIME_CONTEXT_SERVICE_V1",
@@ -632,11 +634,13 @@ class TopLevelEmitter:
         if self._udt_defs:
             udt_state.add(self._udt_undo_coordinator_member_name)
 
+        prepare_qualifier = " final" if getattr(self, "_metrics_plain_certified", False) else ""
         lines.extend([
             "#ifndef PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1",
             '#error "Generated lifecycle reset requires a matching PineForge engine; rebuild with script-run preparation support"',
             "#endif",
-            "    void prepare_script_run(const Bar* bars, int n, bool allow_precalculation) override {",
+            "    void prepare_script_run(const Bar* bars, int n, bool allow_precalculation)"
+            f"{prepare_qualifier} override {{",
             "        _pf_require_settings_ok();",
             "        _pf_script_state_checkpoint_.reset();",
         ])
@@ -2111,6 +2115,9 @@ class TopLevelEmitter:
         ]
 
     def _emit_extern_c(self, lines: list[str]) -> None:
+        if getattr(self, "_metrics_plain_certified", False):
+            from .capabilities import emit_metrics_plain_manifest
+            emit_metrics_plain_manifest(self, lines)
         lines.append('extern "C" {')
         lines.append("#if defined(PINEFORGE_HAS_RUN_FAILURE_CODES_V1) && defined(PF_SETTINGS_API_VERSION)")
         lines.append("    int strategy_create_checked(const char* params_json, void** out, char* error, size_t error_capacity);")
@@ -2121,7 +2128,12 @@ class TopLevelEmitter:
         lines.append("        strategy_create_checked(nullptr, &out, nullptr, 0);")
         lines.append("        return out;")
         lines.append("#else")
-        lines.append("        try { return new GeneratedStrategy(); } catch (...) { return nullptr; }")
+        if getattr(self, "_metrics_plain_certified", False):
+            lines.append(
+                "        return ::pineforge::native_module::create<GeneratedStrategy>();"
+            )
+        else:
+            lines.append("        try { return new GeneratedStrategy(); } catch (...) { return nullptr; }")
         lines.append("#endif")
         lines.append("    }")
         lines.append("    void run_backtest(void* s, Bar* bars, int n, ReportC* out) {")
@@ -2130,13 +2142,24 @@ class TopLevelEmitter:
         lines.append("#ifndef PF_SETTINGS_API_VERSION")
         lines.append("        if (strat->_pf_refuse_failed_setting(out)) return;")
         lines.append("#endif")
-        if self._security_calls:
+        if getattr(self, "_metrics_plain_certified", False):
+            lines.append(
+                "        ::pineforge::native_module::run_backtest<GeneratedStrategy>("
+            )
+            lines.append(
+                "            s, static_cast<pf_bar_t*>(static_cast<void*>(bars)), n,"
+            )
+            lines.append(
+                "            static_cast<pf_report_t*>(static_cast<void*>(out)));"
+            )
+        elif self._security_calls:
             # If there are security calls, use the full run path. Pass empty strings
             # so the C++ runtime auto-detects input_tf from bar timestamps.
             lines.append('        strat->run(bars, n, "", "", false, 4, MagnifierDistribution::ENDPOINTS);')
         else:
             lines.append("        strat->run(bars, n);")
-        lines.append("        if (!strat->_pf_refuse_failed_setting(out)) strat->fill_report(out);")
+        if not getattr(self, "_metrics_plain_certified", False):
+            lines.append("        if (!strat->_pf_refuse_failed_setting(out)) strat->fill_report(out);")
         lines.append('        } catch (const std::exception& _pf_error) {')
         lines.append('            if (out) *out = ReportC{};')
         lines.append('            if (s) static_cast<GeneratedStrategy*>(s)->_pf_record_failure("run_backtest", _pf_error);')
@@ -2156,7 +2179,23 @@ class TopLevelEmitter:
         lines.append("#endif")
         lines.append('        std::string itf = input_tf ? input_tf : "";')
         lines.append('        std::string stf = script_tf ? script_tf : "";')
-        if self._security_calls:
+        if getattr(self, "_metrics_plain_certified", False):
+            lines.append(
+                "        ::pineforge::native_module::run_backtest_full<GeneratedStrategy>("
+            )
+            lines.append(
+                "            s, static_cast<pf_bar_t*>(static_cast<void*>(bars)), n, input_tf, script_tf,"
+            )
+            lines.append(
+                "            bar_magnifier, magnifier_samples,"
+            )
+            lines.append(
+                "            static_cast<pf_magnifier_distribution_t>(magnifier_dist),"
+            )
+            lines.append(
+                "            static_cast<pf_report_t*>(static_cast<void*>(out)));"
+            )
+        elif self._security_calls:
             # Pass empty strings through — the C++ runtime auto-detects input_tf from bar timestamps.
             # script_tf defaults to input_tf in the runtime if empty.
             lines.append("        strat->run(bars, n, itf, stf, bar_magnifier != 0, magnifier_samples,")
@@ -2190,7 +2229,8 @@ class TopLevelEmitter:
             lines.append("            strat->run(bars, n, itf, stf, bar_magnifier != 0, magnifier_samples,")
             lines.append("                       static_cast<MagnifierDistribution>(magnifier_dist));")
             lines.append("        }")
-        lines.append("        if (!strat->_pf_refuse_failed_setting(out)) strat->fill_report(out);")
+        if not getattr(self, "_metrics_plain_certified", False):
+            lines.append("        if (!strat->_pf_refuse_failed_setting(out)) strat->fill_report(out);")
         lines.append("    }")
         lines.extend([
             "    void run_backtest_full(void* s, Bar* bars, int n, const char* input_tf, const char* script_tf,",
@@ -2201,7 +2241,10 @@ class TopLevelEmitter:
             "    }",
         ])
         lines.append("    void strategy_free(void* s) {")
-        lines.append("        try { delete static_cast<GeneratedStrategy*>(s); } catch (...) {}")
+        if getattr(self, "_metrics_plain_certified", False):
+            lines.append("        ::pineforge::native_module::destroy(s);")
+        else:
+            lines.append("        try { delete static_cast<GeneratedStrategy*>(s); } catch (...) {}")
         lines.append("    }")
         lines.append("    void report_free(ReportC* report) {")
         lines.append("        try { BacktestEngine::free_report(report); } catch (...) {}")
@@ -2229,7 +2272,9 @@ class TopLevelEmitter:
         lines.append('        catch (...) { _PF_SETTING_FAILURE(static_cast<GeneratedStrategy*>(s), "strategy_set_magnifier_volume_weighted", "unknown C++ exception", nullptr); }')
         lines.append("    }")
         from .checked_settings import emit_settings_exports
-        emit_settings_exports(lines)
+        emit_settings_exports(
+            lines, metrics_plain=getattr(self, "_metrics_plain_certified", False)
+        )
         self._capabilities_export_at = len(lines)
         lines.append("    int strategy_reads_trade_history(void) {")
         lines.append(f"        return {1 if self._reads_trade_history else 0};")
