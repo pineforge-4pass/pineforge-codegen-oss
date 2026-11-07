@@ -239,6 +239,59 @@ def test_class_tests_and_public_replay_harness_are_discovered(tmp_path):
     assert "tests/test_replay.py::TestReplay::test_replay" in result["selected"]
 
 
+@pytest.mark.parametrize("executable_path,output_path", [
+    ("bin/python3.11", "native-output"),
+    ("venv with spaces/bin/python3.14", "nested output/native"),
+])
+@pytest.mark.parametrize("exit_code", [0, 23])
+def test_python_tool_installer_uses_exact_requirements_and_preserves_transport_results(
+    tmp_path, monkeypatch, executable_path, output_path, exit_code,
+):
+    executable = str(tmp_path / executable_path)
+    out = tmp_path / output_path
+    out.mkdir(parents=True)
+    calls = []
+
+    class Process:
+        stdout = ["installer transport output\n"]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def wait(self):
+            return exit_code
+
+    def popen(command, **kwargs):
+        calls.append((command, kwargs))
+        return Process()
+
+    monkeypatch.setattr(ci.sys, "executable", executable)
+    monkeypatch.setattr(ci.subprocess, "Popen", popen)
+    expected = [
+        executable, "-m", "pip", "install",
+        "pytest==9.2.0", "pytest-xdist==3.8.0", "execnet==2.1.2",
+        "iniconfig==2.3.1", "packaging==26.3", "pluggy==1.7.0",
+        "pygments==2.21.0",
+    ]
+    if exit_code:
+        with pytest.raises(subprocess.CalledProcessError) as error:
+            ci.install_python_test_tools(out)
+        assert error.value.returncode == exit_code
+        assert error.value.cmd == expected
+    else:
+        ci.install_python_test_tools(out)
+    assert calls == [(expected, {
+        "cwd": None, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
+        "text": True, "bufsize": 1,
+    })]
+    log = (out / "install.log").read_text(encoding="utf-8")
+    assert "installer transport output\n" in log
+    assert log.endswith(f"\nexit={exit_code}\n")
+
+
 @pytest.mark.parametrize("missing", [
     "include/pineforge/engine.hpp", "include/pineforge/checked_settings.hpp",
     "build/include/pineforge/version.h", "build/lib/libpineforge.a",

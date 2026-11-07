@@ -22,6 +22,15 @@ import subprocess
 import sys
 
 
+PYTHON_TEST_REQUIREMENTS = (
+    "pytest==9.2.0",
+    "pytest-xdist==3.8.0",
+    "execnet==2.1.2",
+    "iniconfig==2.3.1",
+    "packaging==26.3",
+    "pluggy==1.7.0",
+    "pygments==2.21.0",
+)
 CONSTRUCTION = (
     "tests/test_coded_run_stops.py"
     "::test_checked_construction_exposes_the_original_error"
@@ -544,6 +553,12 @@ def logged(command: list[str], log: Path, *, cwd: Path | None = None) -> None:
         raise subprocess.CalledProcessError(code, command)
 
 
+def install_python_test_tools(out: Path) -> None:
+    logged([
+        sys.executable, "-m", "pip", "install", *PYTHON_TEST_REQUIREMENTS,
+    ], out / "install.log")
+
+
 def native_environment(engine: Path, build: Path, compiler: str) -> dict[str, str]:
     resolved = shutil.which(compiler)
     if resolved is None:
@@ -829,9 +844,7 @@ def run_native(repo: Path, engine: Path, out: Path, selection: dict) -> int:
     }
     write_json(out / "native-identity.json", identity)
     summary("Native checkout identity:\n\n```json\n" + json.dumps(identity, indent=2) + "\n```")
-    logged([
-        sys.executable, "-m", "pip", "install", "pytest>=7.0", "pytest-xdist>=3.5",
-    ], out / "install.log")
+    install_python_test_tools(out)
     if mode == "full" and shutil.which("clang++") is None:
         # Standard hosted images normally include clang. Install the real
         # public tool when absent; no stub or alternative AST output is used.

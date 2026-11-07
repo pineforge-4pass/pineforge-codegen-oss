@@ -100,6 +100,10 @@ matching base/head/definition, a valid tree/digest and native job-level `skipped
 Missing outputs, wrong identities, failure, cancellation, unexpected skip or a
 native result with an unexecuted plan cannot produce a successful `gate`.
 
+The PR `native_success` predicate has a narrower engine-output check than the
+historical publisher's engine SHA/tree validation. The Python tool pins do not
+change either predicate.
+
 ## Native bootstrap
 
 All jobs use standard `ubuntu-24.04`. Native execution gets no secrets, OIDC,
@@ -113,11 +117,15 @@ Native PR checks build the engine main resolved for that run. A broken or
 unavailable engine main can block the required codegen `gate`; full mode also
 depends on reachable public corpus/LFS inputs. There is no pinned fallback.
 
-The driver installs pytest/xdist with minimum versions `pytest>=7.0` and
-`pytest-xdist>=3.5`; these are not fully pinned tool identities. Full mode may
-install clang from the system package index when it is absent. The job therefore
-depends on runtime package-index availability and version resolution. It
-performs a fresh Release/source-layer build:
+The driver installs exact Python test-tool versions with the current Python
+executable: `pytest==9.2.0`, `pytest-xdist==3.8.0`, `execnet==2.1.2`,
+`iniconfig==2.3.1`, `packaging==26.3`, `pluggy==1.7.0` and `pygments==2.21.0`.
+The package index remains a runtime dependency; version pins do not establish
+artifact provenance or make the environment hermetic. Full mode still runs
+`apt-get update` and `apt-get install -y clang` when `clang++` is absent.
+That compiler bootstrap remains unpinned pending qualified package identity
+and a separate compiler pin decision; Python pins do not pin the compiler.
+The driver performs a fresh Release/source-layer build:
 
 ```sh
 cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Release \
@@ -233,6 +241,12 @@ The bootstrap source must preserve its original six-leg reporter only while
 the old caller is installed; otherwise it would strand old PR runs. It cannot
 be left installed after activation. This description prepares source; it
 authorizes no push, merge, bypass or branch-protection change.
+
+Focused jobs cover their selected controls, not the full repository or hosted
+matrix. The bootstrap (A) PR retains the old caller. The activation (B)
+adoption PR runs under that base and cannot establish its new native prerequisite
+through its own PR run. The immutable-definition hosted proofs below and
+independent review of the final source remain required.
 
 ## Hosted proof requests
 
