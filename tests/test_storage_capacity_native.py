@@ -41,15 +41,7 @@ int main() {
     assert tuple(map(float, result.split())) == expected
 
 
-@pytest.mark.parametrize("offset, code, args", [
-    (100, "pine_runtime_limit", {"limit": "max_bars_back", "max": 100}),
-    (150, "pine_runtime_limit", {"limit": "max_bars_back", "max": 100}),
-    (10001, "strategy_runtime_error", {}),
-    (-1, "strategy_runtime_error", {}),
-])
-def test_operator_history_failure_keeps_its_code_and_guard_priority(offset, code, args):
-    source = HEADER + f'lag = input.int({offset}, "Lag")\nobserved = close[lag]\n'
-    driver = r'''
+_ONE_BAR_STOP_DRIVER = r'''
 #include <iostream>
 int main() {
     GeneratedStrategy strategy;
@@ -61,8 +53,34 @@ int main() {
               << strategy.last_error();
 }
 '''
+
+
+def test_operator_history_bound_holds_below_a_larger_pine_retention():
+    # The Pine directive keeps 500 slots in the store; the operator's capacity
+    # alone bounds the read, so an offset of 300 stops with max 100.
+    source = (
+        '//@version=6\nstrategy("storage capacity values", max_bars_back=500)\n'
+        'lag = input.int(300, "Lag")\nobserved = close[lag]\n'
+    )
     result = run_emitted_tu(
-        transpile(source, history_capacity=100), driver,
+        transpile(source, history_capacity=100), _ONE_BAR_STOP_DRIVER,
+        opt="-O2", label="operator bound below a larger directive",
+    ).splitlines()
+    assert result[0] == "pine_runtime_limit"
+    assert json.loads(result[1]) == {"limit": "max_bars_back", "max": 100}
+    assert "The historical buffer's limit is 100 bars." in "\n".join(result[2:])
+
+
+@pytest.mark.parametrize("offset, code, args", [
+    (100, "pine_runtime_limit", {"limit": "max_bars_back", "max": 100}),
+    (150, "pine_runtime_limit", {"limit": "max_bars_back", "max": 100}),
+    (10001, "strategy_runtime_error", {}),
+    (-1, "strategy_runtime_error", {}),
+])
+def test_operator_history_failure_keeps_its_code_and_guard_priority(offset, code, args):
+    source = HEADER + f'lag = input.int({offset}, "Lag")\nobserved = close[lag]\n'
+    result = run_emitted_tu(
+        transpile(source, history_capacity=100), _ONE_BAR_STOP_DRIVER,
         opt="-O2", label="typed history capacity",
     ).splitlines()
     assert result[0] == code

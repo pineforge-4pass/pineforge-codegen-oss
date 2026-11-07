@@ -30,9 +30,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
   5000-slot retention default. Static operator overflow and invalid capacities
   have typed diagnostics. Explicit runtime history bounds
   stop with `pine_runtime_limit` and arguments `limit=max_bars_back`, `max=N`;
-  in-capacity warmup reads retain their missing-value behavior. Requested-helper
-  history references preserve their C++ members when a Pine binding uses the
-  same word. Regenerate C++ and relink affected strategies.
+  in-capacity warmup reads retain their missing-value behavior. A Pine
+  `max_bars_back` larger than `history_capacity` keeps its slots in the
+  stores, but the offset checks use `history_capacity` alone. Requested-helper
+  history references preserve their C++ members when a helper local or a
+  mutable global that the request reads has the same name as one of them.
+  Regenerate C++ and relink affected strategies.
 - `drawing_capacity`, accepted by `transpile()`, `transpile_full()`,
   `transpile_with_request_inventory()` and `gate/glue.py::transpile_json()`,
   bounds live lines, boxes and labels independently after

@@ -20,6 +20,7 @@ _REFERENCE = re.compile(
     r'\(_security_helper_series_(?:str_)?\.[A-Za-z_][A-Za-z_0-9]*\('
     r'"(?:\\.|[^"\\])*", [0-9]+\)[^()\n;]*\)'
 )
+_STORE_CALL = re.compile(r"_security_helper_series_(?:str_)?\.try_emplace\(")
 
 
 def helper_source(first="aa", second="bb", *, string=False, timeframe="60"):
@@ -38,8 +39,12 @@ def helper_source(first="aa", second="bb", *, string=False, timeframe="60"):
 def _references(cpp):
     references = _REFERENCE.findall(cpp)
     assert references, cpp
-    assert cpp.count("try_emplace(") == cpp.count(").first->second)")
-    assert len(references) == cpp.count("try_emplace(")
+    # Every call on a store is one complete reference with an intact tail. Other
+    # text may hold the word `try_emplace` before a bracket, for example the
+    # constructor initializer of a script variable of that name, so only calls
+    # on a store are counted.
+    assert len(_STORE_CALL.findall(cpp)) == len(references)
+    assert cpp.count(").first->second)") == len(references)
     assert ".(" not in cpp
     assert "->(" not in cpp
     # Local names affect key values, but neither store selection nor capacity.
@@ -110,6 +115,30 @@ def test_every_reference_word_can_be_a_requested_helper_local(name, string, capa
         assert re.search(rf"\b{re.escape(spelling)}\b", cpp), spelling
         assert not re.search(rf"\b{re.escape(name)}\s*=", cpp)
     control = transpile(helper_source(string=string), history_capacity=capacity)
+    assert _references(cpp) == _references(control)
+
+
+def mutable_global_source(name, *, var=True):
+    """A global that a requested helper reads next to a local with history."""
+    declaration = f"var float {name} = 0.0\n" if var else f"float {name} = 0.0\n"
+    return (
+        '//@version=6\nstrategy("mutable global words")\n'
+        "n = input.int(3)\nz = close[n]\n"
+        f"{declaration}{name} := {name} + 1.0\n"
+        "h() =>\n    a = close\n    b = nz(a[1])\n"
+        f"    a + b + {name}\n"
+        'v = request.security(syminfo.tickerid, "60", h())\nplot(v)\n'
+    )
+
+
+@pytest.mark.parametrize("name", _INTRODUCED_WORDS)
+@pytest.mark.parametrize("var", [True, False], ids=["var", "reassigned"])
+@pytest.mark.parametrize("capacity", [None, 100])
+def test_every_introduced_word_can_be_a_security_payload_mutable_global(name, var, capacity):
+    # The payload's mutable globals are rebound to script-state members by the
+    # same pass; the reference's own words must stay out of that rebinding.
+    cpp = transpile(mutable_global_source(name, var=var), history_capacity=capacity)
+    control = transpile(mutable_global_source("aa", var=var), history_capacity=capacity)
     assert _references(cpp) == _references(control)
 
 
