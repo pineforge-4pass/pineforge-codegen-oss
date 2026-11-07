@@ -428,7 +428,12 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
     lines.extend(['        return _pf_document + "]}";', "    }", "#endif"])
 
 
-def emit_settings_exports(lines: list[str]) -> None:
+def emit_settings_exports(lines: list[str], *, metrics_plain: bool = False) -> None:
+    factory = (
+        "            *out = ::pineforge::native_module::create<GeneratedStrategy>();"
+        if metrics_plain
+        else "            *out = new GeneratedStrategy();"
+    )
     lines.extend([
         "#ifdef PF_SETTINGS_API_VERSION",
         "    uint32_t strategy_settings_api_version(void) { return PF_SETTINGS_API_VERSION; }",
@@ -437,7 +442,7 @@ def emit_settings_exports(lines: list[str]) -> None:
         "        return ::pineforge::checked_settings::boundary(error, error_capacity, [&] {",
         '            ::pineforge::checked_settings::require(out != nullptr, "strategy output pointer is null");',
         '            ::pineforge::checked_settings::require(!params_json || !*params_json, "params_json is reserved; use checked setters", PF_SETTINGS_UNSUPPORTED);',
-        "            *out = new GeneratedStrategy();",
+        factory,
         "        });",
         "    }",
     ])
