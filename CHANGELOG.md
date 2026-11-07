@@ -63,17 +63,46 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - Direct `size`, `first`, `last` and `get` reads of `line.all`, `box.all`, `label.all` and `linefill.all` use live arena order; aliases and mutations raise `PF-E5086`, and `polyline.all` requires engine support (`PF-E5085`) (#295).
 - C++ name escaping covers the macros defined by the audited math, limits, C++ wrapper and paired engine headers, retaining authored input keys (#295).
 - A keyword argument of a built-in call reaches its own parameter. `timeframe.in_seconds(timeframe = ...)` and `timeframe.change(timeframe = ...)` used the chart's timeframe instead of the named one, `strategy.closedtrades.*(trade_num = ...)` and `strategy.opentrades.*(trade_num = ...)` read trade 0 instead of the named trade, `str.format_time(time, timezone = ...)` read the timezone as the format, `timestamp(timezone = ..., year = ..., ...)` dropped the timezone and a skipped `hour` moved `minute` into its slot, `matrix.new<float>(rows = 2, columns = 3)` built a matrix with no rows and no columns, `time("60", timezone = ...)` and `time_close` read the timezone as the session, and `math.random(seed = 3)` read the seed as the minimum; none of them raised a diagnostic. A keyword none of these calls declares is now refused with the unknown-keyword diagnostic, as TradingView refuses it. Regenerate C++ and relink strategies.
+- Strategy order calls report unknown keyword arguments, including `when`,
+  at the keyword with `PF-E2027` (#286;
+  [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
 - Strategy orders with omitted `qty` use the default size; integer `switch` and
   `if` results with an explicit `na` arm preserve NaN, and
   `strategy.risk.allow_entry_in` retains input-dependent directions (#292).
 - Methods whose first parameter is never referenced in their body now report `PF-E5087` at that parameter, with a hint to use it or declare a function instead.
 - Consumed `if`/`switch` selections mixing value and void arms now report located `PF-E5088`; requested void selections keep `PF-E3102`.
-- A `request.security` payload that reads the history of an expression inside a loop, or at several reads of one helper parameter, commits one history slot per requested bar holding the last evaluation of that bar, as TradingView does; every read of the bar sees the history before this bar. Regenerate C++ and relink strategies.
+- A `request.security` payload that reads the history of an expression inside a loop, or at several reads of one helper parameter, commits one history slot per requested bar holding the last evaluation of that bar, as TradingView does; every read of the bar sees the history before this bar. Regenerate C++ and relink strategies (#287; [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
+- `request.security` registers input-derived `lookahead` selections using the
+  selected input values, including overrides; choices that depend on bar data
+  still report `PF-E1085`. A scalar empty timeframe uses the chart timeframe;
+  an `if`/`switch` timeframe arm known to be empty still reports `PF-E3105`.
+  History reads of requested values now compile inside another request's TA
+  expression, including aliases and repeated reads. Uncalled request wrappers
+  no longer interfere with compiling unrelated direct requests (#294;
+  [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
 - `input.enum` options named through immutable enum-member declarations now retain their choices and checked-settings support.
 - Array fields in records that stay within one bar preserve omitted and explicit `na` IDs, distinct from empty arrays.
 - Copying a record that stays within one bar shares its array fields while keeping scalar fields independent.
 - A block-local `string` declaration at top level may now shadow a script-level `float` binding with declared or literal types without sharing storage; every other cross-type shadow keeps its existing refusal.
-- A series variable declared or written inside a loop opens its bar's history slot at the first reach and updates it afterwards, so `y[i]` in the loop reads the slot committed `i` bars back, as TradingView does; every iteration used to open a slot of its own. Regenerate C++ and relink strategies.
+- A series variable declared or written inside a loop opens its bar's history
+  slot at the first reach and updates it afterwards, so `y[i]` reads prior bars
+  rather than prior iterations. Expression histories in loops also keep one
+  slot per bar, holding its last evaluation. Functions read current globals
+  produced by tuple declarations; ordinary `string` declarations initialized
+  with `na` reset on each execution; named array-constructor arguments bind to
+  `size` and `initial_value`. Reassigned ordinary inputs restart from the
+  selected input value at their declaration on each bar; `var` and `varip`
+  inputs retain their accumulated state. Regenerate C++ and relink strategies
+  (#291; [#324](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/324),
+  [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
+- Runtime history offsets below 0 or above 10000 stop at the read with an
+  error naming the Pine line and offset, before integer narrowing. Constant
+  offsets keep their existing behavior (#311;
+  [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
+- `timestamp("...")` accepts full English month names, including
+  `"01 February 2024 00:00"`, and preserves the 64-bit timestamp through
+  `input.time` and function or tuple results (#293;
+  [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
 - `timestamp("...")` date strings with a `UTC` or `GMT` zone word now give
   TradingView's value for four forms that differed. A negative zone with a
   zero hour keeps its sign (`GMT-00:30`, `UTC-0:30`). Minutes of 60 or more
