@@ -1,7 +1,10 @@
 """Unit targets for the new selector and its native execution accounting."""
 
 from pathlib import Path
+import json
+import os
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -107,13 +110,39 @@ def test_non_native_changes_have_an_explicit_empty_selection(path):
     assert result["native"] is False and result["selected"] == []
 
 
-def test_docs_main_push_runs_the_same_smoke_that_docs_pr_skips():
-    changes = _change("docs/PUBLIC_CONTRACT.md")
+@pytest.mark.parametrize("path", [
+    "docs/PUBLIC_CONTRACT.md", "pineforge_codegen/request_feed_inventory.py",
+    "tests/test_license_entity.py",
+])
+def test_main_always_selects_full_repository_while_non_native_pr_skips(path):
+    changes = _change(path)
     pr = ci.select_tests(changes, _inventory(), "pull_request")
     main = ci.select_tests(changes, _inventory(), "push_main")
     assert pr["native"] is False and pr["selected"] == []
-    assert main["native"] is True and set(ci.SMOKE) <= set(main["selected"])
-    assert main["triggers"] == [] and main["needs_corpus"] is False
+    assert pr["mode"] == "skip"
+    assert main["native"] is True and main["mode"] == "full"
+    assert main["selected"] == ["tests"] and main["excluded"] == []
+    assert main["needs_corpus"] is True
+    assert main["required_tests"] == sorted(
+        f"{file}::{name}" for file, entry in _inventory().items()
+        for name in entry["cases"]
+    )
+
+
+def test_full_mode_inventory_tracks_unchanged_private_and_new_cases():
+    inventory = _inventory()
+    before = ci.select_tests(_change("README.md"), inventory, "push_main")
+    inventory["tests/test_unrelated.py"] = {
+        "imports": set(),
+        "cases": {"test_private": {"native": True, "corpus": False,
+                                   "private": ["private_fixture"]}},
+    }
+    after = ci.select_tests(_change("README.md"), inventory, "push_main")
+    node = "tests/test_unrelated.py::test_private"
+    assert set(after["required_tests"]) - set(before["required_tests"]) == {node}
+    assert after["selected"] == before["selected"] == ["tests"]
+    assert after["input_needs"] == [{"nodeid": node, "inputs": ["private_fixture"]}]
+    assert after["excluded"] == []
 
 
 def test_candidate_cannot_erase_native_calls_or_authorize_a_private_exemption():
@@ -248,13 +277,15 @@ def _audit(outcome="passed", phase="call", xfail=False):
     ids = [f"{ci.CONSTRUCTION}[{legacy}]" for legacy in ("False", "True")]
     audit.pytest_xdist_node_collection_finished(None, ids)
     for node in ids:
-        report = SimpleNamespace(
-            nodeid=node, when=phase, outcome=outcome, longrepr="actual report",
-            failed=outcome == "failed", skipped=outcome == "skipped",
-        )
-        if xfail:
-            report.wasxfail = "unexpected expected failure"
-        audit.pytest_runtest_logreport(report)
+        for when in (("setup", "call", "teardown") if phase == "call" else (phase,)):
+            state = outcome if when == phase else "passed"
+            report = SimpleNamespace(
+                nodeid=node, when=when, outcome=state, longrepr="actual report",
+                failed=state == "failed", skipped=state == "skipped",
+            )
+            if xfail and when == phase:
+                report.wasxfail = "unexpected expected failure"
+            audit.pytest_runtest_logreport(report)
     return audit
 
 
@@ -284,6 +315,109 @@ def test_empty_or_partial_collection_cannot_claim_smoke():
     audit.collected.remove(f"{ci.CONSTRUCTION}[True]")
     assert any("parameter missing" in text
                for text in audit.result([ci.CONSTRUCTION], 0)["audit_errors"])
+
+
+@pytest.mark.parametrize("content", [None, b"", b"version https://git-lfs.github.com/spec/v1\n"])
+def test_full_public_feed_must_exist_and_be_real_before_import(tmp_path, content):
+    feed = tmp_path / "feed.csv"
+    if content is not None:
+        feed.write_bytes(content)
+    with pytest.raises(ValueError, match="NEEDS"):
+        ci.require_public_feed(feed)
+
+
+@pytest.mark.parametrize("disposition", [
+    "execute", "additional", "module-skip", "deselect", "missing-call", "no-call",
+    "xfail", "setup-error",
+])
+def test_full_audit_uses_real_worker_collection_and_phases(tmp_path, disposition):
+    """Run the actual trusted hooks on small suites; these are unit fixtures."""
+    directory = tmp_path / "tests"
+    directory.mkdir()
+    (directory / "test_coded_run_stops.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('legacy', [False, True])\n"
+        "def test_checked_construction_exposes_the_original_error(legacy):\n"
+        "    assert isinstance(legacy, bool)\n", encoding="utf-8",
+    )
+    topic = (
+        "import pytest\n"
+        "@pytest.mark.parametrize('value', [3, 7])\n"
+        "def test_native(value):\n"
+        "    assert value > 0\n"
+    )
+    if disposition == "module-skip":
+        topic = "import pytest\npytest.skip('NEEDS private fixture', allow_module_level=True)\n" + topic
+    elif disposition == "xfail":
+        topic = topic.replace("    assert value > 0", "    pytest.xfail('unexecuted native case')")
+    elif disposition == "setup-error":
+        topic += (
+            "@pytest.fixture(autouse=True)\n"
+            "def missing_input():\n"
+            "    raise RuntimeError('NEEDS real native input')\n"
+        )
+    elif disposition == "additional":
+        topic += "def test_new_case(request):\n    assert request.node.name == 'test_new_case'\n"
+    (directory / "test_topic.py").write_text(topic, encoding="utf-8")
+    if disposition in {"deselect", "missing-call"}:
+        # A real collection hook removes one parameterized native row. Explicit
+        # deselection and silent disappearance must both fail the audit.
+        hook = (
+            "def pytest_collection_modifyitems(config, items):\n"
+            "    removed = [item for item in items if item.nodeid.endswith('test_native[7]')]\n"
+            "    items[:] = [item for item in items if item not in removed]\n"
+        )
+        if disposition == "deselect":
+            hook += "    config.hook.pytest_deselected(items=removed)\n"
+        (tmp_path / "conftest.py").write_text(hook, encoding="utf-8")
+    elif disposition == "no-call":
+        (tmp_path / "conftest.py").write_text(
+            "def pytest_runtest_protocol(item, nextitem):\n"
+            "    if item.nodeid.endswith('test_native[7]'):\n"
+            "        return True\n", encoding="utf-8",
+        )
+    trusted = Path(ci.__file__).resolve().parent
+    program = tmp_path / "audit-runner.py"
+    program.write_text(
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(trusted)!r})\n"
+        "import ci_engine_main_touched as ci\n"
+        "import pytest\n"
+        "audit = ci.ExecutionAudit()\n"
+        "inventory = ci.test_inventory(Path.cwd())\n"
+        "required = [f'{path}::{name}' for path, entry in inventory.items() for name in entry['cases']]\n"
+        "code = int(pytest.main(['-o', 'addopts=', '-n', '1', '-p', 'ci_engine_main_touched', 'tests'], plugins=[audit]))\n"
+        "result = audit.result(['tests'], code, mode='full', required=required,\n"
+        "    suite_files=sorted(inventory), count=1, plan_digest=os.environ['PF_ENGINE_MAIN_PLAN'])\n"
+        "Path('audit.json').write_text(json.dumps(result))\n"
+        "raise SystemExit(code)\n", encoding="utf-8",
+    )
+    env = dict(os.environ, PYTHONPATH=str(trusted), PF_ENGINE_MAIN_PLAN="f" * 64)
+    env.pop("PYTEST_ADDOPTS", None)
+    env.pop("PYTEST_PLUGINS", None)
+    process = subprocess.run([sys.executable, str(program)], cwd=tmp_path, env=env,
+                             capture_output=True, text=True)
+    assert (tmp_path / "audit.json").is_file(), process.stdout + process.stderr
+    result = json.loads((tmp_path / "audit.json").read_text(encoding="utf-8"))
+    assert process.returncode == result["pytest_exit"], process.stdout + process.stderr
+    if disposition in {"execute", "additional"}:
+        assert result["full_success"] is True, result["audit_errors"]
+        assert result["collected_count"] == result["executed_count"]
+        native = {row for row in result["collected_nodeids"] if "test_topic" in row}
+        assert native == {
+            "tests/test_topic.py::test_native[3]", "tests/test_topic.py::test_native[7]",
+            *({"tests/test_topic.py::test_new_case"} if disposition == "additional" else set()),
+        }
+    else:
+        assert result["full_success"] is False and result["audit_errors"]
+        if disposition == "no-call":
+            assert result["unexecuted_nodeids"] == ["tests/test_topic.py::test_native[7]"]
+        if disposition == "module-skip":
+            assert any(row["nodeid"] == "tests/test_topic.py" and row["outcome"] == "skipped"
+                       for row in result["collection_omissions"])
+        if disposition == "deselect":
+            assert result["deselected_nodeids"] == ["tests/test_topic.py::test_native[7]"]
 
 
 def test_git_read_failure_propagates_instead_of_returning_an_empty_diff(monkeypatch):
@@ -333,6 +467,7 @@ def test_plan_uses_real_base_head_diffs_and_keeps_the_definition_separate(tmp_pa
     assert docs["native"] is False and docs["selected"] == []
     docs_push = ci.plan(repo, base, docs_head, docs_head, 2, tmp_path / "docs-push", "push_main")
     assert docs_push["native"] and docs_push["source_event"] == "push_main"
+    assert docs_push["mode"] == "full" and docs_push["selected"] == ["tests"]
     assert docs_push["codegen_sha"] == docs_head and docs_push["codegen_base_sha"] == base
     assert docs_push["diff_kind"] == "before_after"
     assert docs_push["plan_sha256"] != docs["plan_sha256"]

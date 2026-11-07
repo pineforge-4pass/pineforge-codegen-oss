@@ -41,10 +41,13 @@ admitted base/head diff and inventories; only a successful, identity-bound
 non-native decision permits the native job to skip. Emitter/generated-C++ and
 native harness/test changes build public ENGINE MAIN fresh and execute touched
 tests plus unchanged smoke. See [engine-main-ci.md](engine-main-ci.md).
-The same native workflow also runs on every main push, including docs changes,
-without path filters or cancellation groups. It checks out the immutable event
-`after` SHA, binds `before` independently and never substitutes a later main tip.
-Normal native job check runs attach to the pushed SHA.
+The same native workflow runs the **full repository suite once on every main
+push**, including docs changes, without path filters or cancellation groups.
+Main targets do not come from the PR diff selector. It checks out the immutable
+event `after` SHA, binds `before` independently and never substitutes a later
+main tip. The real engine MAIN build, compiler, Eigen, generated header,
+archive, public corpus/LFS feed, clang and codegen history are provisioned
+before collection/imports. Normal native job check runs attach to the pushed SHA.
 
 The hosted result requires all seven prerequisites to succeed, consumes actual
 changes/native results and the bound plan digest, rechecks live PR and
@@ -106,11 +109,19 @@ and the exact checkout head.
 legs. Those trusted routes require a separate runner admission entry before
 they can move. PyPI/npm publication and baseline promotion remain hosted.
 The old pytest matrix still lacks native inputs; PR native work is touched+smoke.
-Full engine-enabled verification, including corpus compilation, remains an
-operator obligation once on the merged main tree on an approved worker. This
-change does not turn old push/dispatch jobs into native whole-suite jobs.
-The new main-push native route runs touched+smoke for every event; the full-main
-suite remains once, separately.
+The shared main-push native route automates full engine-enabled verification,
+including corpus compilation, emitted runtime and history cases, once on each
+exact pushed tree. It runs the existing suite without a second smoke pass.
+It retains actual per-worker discovery/final inventories, module collection
+reports, deselections and all setup/call/teardown outcomes. Missing calls,
+skip/xfail, setup failures and collection omissions prevent full success.
+Known private/platform limitations remain named unexecuted NEEDS, never a full
+GREEN from a narrower public subset. No constant test count establishes proof.
+Full mode, inventory digest and successful full completion are bound to the
+same plan/source and are required by the historical source-check publisher.
+The actual dependency-outcome bridge remains in place for pinned actionlint.
+Old push/dispatch jobs retain their existing scope; no later manual full-main
+run replaces this job's exact-SHA proof.
 
 The only `pull_request_target` workflow is `gke-pr.yml`.
 `promote-baseline.yml` runs on pushes to `main` and manual dispatch from `main`.
@@ -155,13 +166,17 @@ temporary policy admitting only the complete old and new canonical graphs,
 while the old caller and an inactive main-push trigger remain installed.
 The temporary rule permits only the exact main-only push header together with
 the new caller; it cannot permit body changes, filters or cancellation.
-Register dispatch and its isolated checks permission. Run original PR RED,
-merged-main RED with an own-SHA check-run API record, fixed GREEN and docs PR
+Register dispatch and its isolated checks permission. Run original touched PR
+RED, merged-main full RED with an own-SHA check-run API record, restored-main
+full GREEN and docs PR
 SKIP with one definition, then activate both routes and the strict checker
 together. Final policy admits only the new graph and pins
 the full callee/driver to base; it refuses removal of the native prerequisite.
 Remove the temporary old-inventory reporter at activation. The exact source
 route and proof inputs are in `docs/engine-main-ci.md`; publication is CORE-owned.
+Source preparation does not establish G01 closure: focused controls on Spark2,
+the same hosted definition's actual RED/full GREEN/SKIP, exact-source API
+readback and genuine final Claude REV remain required.
 
 The checker and its mutation controls use only Python's standard library plus
 pytest for the tests. File-reading modes list their inputs, refuse credential

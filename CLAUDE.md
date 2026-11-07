@@ -16,8 +16,8 @@ On the final candidate, once, before opening a PR, marking a task complete, or t
 
 1. **Every diff:** the tests that touch your change pass and the PR's CI is green. The required check is `gate`.
 2. **Native PR changes:** the required `engine-main` prerequisite runs engine-enabled touched tests plus unchanged construction/compile/checked-settings smoke against freshly built ENGINE MAIN. The trusted base selector decides native work; only a successful identity-bound non-native decision permits its visible job-level skip. See `docs/engine-main-ci.md`.
-3. **A merged diff under `pineforge_codegen/`:** run the full engine-enabled suite once on the final `main` tree, corpus gate (`tests/test_compile_corpus.py`) included. Inspect skip reasons: no compile or end-to-end test may skip for want of a public native input. Non-public inputs may skip. This full-main run is an operator obligation on an approved worker; the PR touched run and existing pure-Python matrix do not replace it.
-4. **Every main push:** `engine-main-touched.yml` always builds ENGINE MAIN and runs native touched+smoke, even for docs changes, on the exact event after SHA with before/after binding. No path filter or cancellation group may drop a main event. Its normal job check belongs to that pushed SHA. Historical dispatch uses the isolated native check-run publisher; a definition-commit check is not evidence on the historical source.
+3. **Every main push:** `engine-main-touched.yml` automatically builds ENGINE MAIN and runs the full repository suite once on the exact event after SHA, corpus gate (`tests/test_compile_corpus.py`), native compile/runtime and historical targets included. This applies to docs pushes too; main selection never uses the PR changed-file subset. The PR touched run and existing pure-Python matrix do not replace it.
+4. **Full execution proof:** actual collection, per-worker inventories, setup/call/teardown reports, omissions and exits must bind the tested SHA/tree and trusted full-mode plan. Missing public inputs, skips, xfail, deselection or missing calls prevent full success. Non-public/platform limitations stay named as unexecuted NEEDS; a public-only subset is not whole-repository coverage. No path filter or cancellation group may drop a main event. The normal job check belongs to that pushed SHA. Historical `source_event=push_main` uses the same full runner and isolated source check publisher; a definition-commit check is not evidence on the historical source.
 
 These CI requirements describe this source candidate after staged adoption.
 Source, unit results and documentation do not establish installation or hosted
@@ -85,14 +85,14 @@ Sources of truth: `.github/workflows/` and `docs/ci.md` for CI; `tests/_compile.
 | --- | --- | --- |
 | Pull request to `main` | `GKE PR` (`gke-pr.yml`) | `admit` (identity and workflow admission), `workflow-lint`, `package-files` (`python -m pytest -q tests/test_license_entity.py`), `pytest` (`python -m pytest -q -n auto`, Python 3.11 to 3.14), `differential` (Pyodide parity: selftest, audit, full gate), `engine-main` (trusted changes decision and conditional engine-enabled touched+smoke via `engine-main-touched.yml`), `test-check`, `result` |
 | Push to `main`, manual dispatch | `Test` (`test.yml`) | `authz`, `changes`, `workflow-lint`, `package-files`, `pytest` (same command and versions), `test-check` |
-| Every push to `main`, authorized proof dispatch | `Engine main touched` (`engine-main-touched.yml`) | `changes`, `native` (always on main; touched+smoke), `publish` (dispatch-only historical check on tested SHA; no `gate` status) |
+| Every push to `main`, authorized proof dispatch | `Engine main full / PR touched` (`engine-main-touched.yml`) | `changes`, `native` (full repository suite on main; PR touched+smoke), `outcomes` (actual dependency results), `publish` (dispatch-only historical check on tested SHA; no `gate` status) |
 | Push to `main`, manual dispatch | `promote-baseline` (`promote-baseline.yml`) | `promote-guard`, `promote`: baseline promotion after a merge; runs no tests |
 | Schedule `27 5 * * *`, manual dispatch | `Pyodide Gate` (`gate.yml`) | `preflight-docs`, `differential`, `pytest` (`python -m pytest -q`, serial), `gate` |
 | Manual dispatch only | `Release` (`release.yml`), `Publish codegen-pyodide` (`publish-pyodide.yml`) | the Pyodide gate before anything is built or published (jobs `release`, `publish`); no pytest. A tag push alone runs nothing |
 
 **Required check: `gate`.** The existing `result` job of `gke-pr.yml` is its sole status writer. It needs all seven prerequisites, including `engine-main`; all must succeed. It also checks the reusable workflow's actual changes/native results and bound identities/digest: native changes require execution success, while a genuine non-native decision requires a visible native job-level skip. All previous checks still run on docs-only diffs. Fork/draft PRs remain unadmitted. The scheduled `Pyodide Gate` is not this PR status. Workflow/checker changes require matching admission controls and staged base adoption (`docs/ci.md`).
 
-The existing pytest matrix still exports no native inputs, so its engine-dependent tests skip. The new PR prerequisite and every-main-push native route supply real headers, generated header, archive, Eigen and compiler before importing selected tests; skip/xfail there fails. Candidate execution has only read permission. Only the isolated dispatch publisher gets checks-write permission and binds the actual completed job before publishing on its tested SHA. ENGINE MAIN integration does not establish release pairing. The full engine-enabled suite/corpus still runs once on main on an approved worker. Read actual pytest summaries for skips. Run the local Pyodide gate only for `gate/` changes; CI retains it on every PR.
+The existing pytest matrix still exports no native inputs, so its engine-dependent tests skip. The PR prerequisite supplies real headers, generated header, archive, Eigen and compiler before importing selected tests. Every-main-push full mode additionally provisions the public corpus/LFS feed, clang and real codegen history before collection. Skip/xfail or incomplete inventories prevent success. Candidate execution has only read permission. Only the isolated dispatch publisher gets checks-write permission and binds the actual completed job, full-mode completion and inventory before publishing on its tested SHA. ENGINE MAIN integration does not establish release pairing. Read actual pytest summaries and retained omissions. Run the local Pyodide gate only for `gate/` changes; CI retains it on every PR.
 
 ### Engine-enabled tests (selected cases now run in native PR CI)
 
@@ -109,19 +109,20 @@ They need the native inputs from "Build and environment". Without them they skip
 | `tests/test_host_member_names.py` | `clang++` (`needs clang's AST dump`) | a lowering starts reading a host member, or the engine's host header changes |
 | Non-public inputs: files calling `private_fixture`, `tests/test_e2e_series_timeframe_values.py` (`PINEFORGE_BTCUSDT_1H_FEED`), the population test of `tests/test_string_settings_constants.py` (`PINEFORGE_STRING_SETTINGS_SOURCES`) | inputs outside this repository (`private fixtures not present:`) | cannot run here: they skip; say so in the PR |
 
-Full-main verification, once per final merged product tree on an approved worker (native inputs exported):
+Full-main verification is automated once per main push by the shared native job,
+using at most eight numeric build/pytest workers. For targeted iteration on an
+approved worker with native inputs exported:
 
 ```bash
-python -m pytest -q -ra -n auto                     # the whole suite, with skip reasons
-python -m pytest -ra tests/test_compile_corpus.py   # the corpus gate alone, a subset: for iterating, not a rerun
+python -m pytest -ra tests/test_compile_corpus.py   # subset for iteration, not full-main proof
 ```
 
-PRs run the tests touching the change plus required native touched+smoke when selected. The full-main obligation is separate; do not silently turn unrelated old CI jobs into native full-suite jobs.
+PRs run the tests touching the change plus required native touched+smoke when selected. The same shared job uses full mode on every main push; no later manual run substitutes for automatic exact-SHA proof. Unrelated old CI jobs retain their existing scope.
 
 ### Rules that keep verification short
 
 - While you work, run only the tests that touch your change: `python -m pytest -q <file>::<test>` or `-k <pattern>`; find them by searching `tests/` for the symbol you changed.
-- The existing PR matrix covers the whole pure-Python suite; native PR CI is touched+smoke. The full engine-enabled suite runs once on the final main tree. Do not rerun a suite already green on the same tree.
+- The existing PR matrix covers the whole pure-Python suite; native PR CI is touched+smoke. The shared native workflow runs the full engine-enabled repository suite once on each pushed main SHA. Do not add a second smoke pass or rerun a suite already green on the same tree.
 - Every test has one specific target (one behaviour or defect). Tests must not duplicate each other: tests with the same target are merged in a separate reviewed change. Add a new test only for a target no existing test covers. Never delete or skip a test whose target is unique.
 - No extra verification layers on top of the repo's gates: no home-made kits, receipt packs, second reads of the same suite, or reruns.
 - `python -m pytest --collect-only -q` gives today's collection size; never quote a fixed count.
@@ -242,7 +243,7 @@ matching entry in the per-namespace official set in
 - **Never delete a `test_regression_*` case** without first
 understanding which once-broken codepath it pins. The xfail->pass
 history is intentional.
-- **Native PR changes and every main push require engine-enabled touched+smoke; product changes also require full engine-enabled verification once on main**, including the corpus gate. A corpus or compile-smoke failure is a regression; inspect skips to confirm the C++ paths ran.
+- **Native PR changes require engine-enabled touched+smoke; every main push requires the automated full engine-enabled repository suite**, including the corpus gate. A corpus or compile-smoke failure is a regression; any unexecuted row prevents a whole-suite success claim.
 - **Don't update `VERSION`** (from 1.0.0 on) without confirming the exact
   matching engine tag and its generated headers and static library are
   available.

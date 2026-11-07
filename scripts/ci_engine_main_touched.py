@@ -1,4 +1,4 @@
-"""Diff-selected, public-input integration with engine main (CI, not a release pair).
+"""Full-main / touched-PR integration with engine main (not a release pair).
 
 The trusted base definition supplies this driver and selection policy. Git
 objects at admitted base/head are data; only the native job imports the tested
@@ -147,6 +147,34 @@ def identifiers(node: ast.AST) -> set[str]:
     return names
 
 
+def historical_refs(tree: ast.AST) -> list[str]:
+    """Resolve literal/constant reference arguments without importing tests."""
+    bindings = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    bindings.setdefault(target.id, []).append(node.value)
+
+    def literals(node, seen):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return {node.value} if re.fullmatch(r"[0-9a-f]{7,40}", node.value) else set()
+        if isinstance(node, ast.Name) and node.id not in seen:
+            return set().union(*(literals(value, seen | {node.id})
+                                 for value in bindings.get(node.id, [])))
+        return set()
+
+    refs = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and node.args and (
+            isinstance(node.func, ast.Name) and node.func.id == "reference_codegen"
+            or isinstance(node.func, ast.Attribute) and node.func.attr == "reference_codegen"
+        ):
+            refs.update(literals(node.args[0], set()))
+    return sorted(refs)
+
+
 def test_inventory(repo: Path, ref: str | None = None) -> dict[str, dict]:
     """Static discovery; CI reads regular Git blobs, never candidate modules."""
     inventory = {}
@@ -255,6 +283,10 @@ def test_inventory(repo: Path, ref: str | None = None) -> dict[str, dict]:
             }
         inventory[path] = {
             "imports": imports, "cases": cases,
+            # Resolve real historical objects before pytest imports. Full
+            # history normally supplies abbreviated refs; a missing full ref
+            # can be fetched by its immutable ID, never replaced with HEAD.
+            "history_refs": historical_refs(tree),
         }
     return inventory
 
@@ -276,7 +308,11 @@ def merge_inventory(trusted: dict, head: dict) -> dict:
                 "private": (base_case or {}).get("private", []),
                 "historical": (base_case or {}).get("historical", False),
             }
-        result[path] = {"imports": old["imports"] | new["imports"], "cases": cases}
+        result[path] = {
+            "imports": old["imports"] | new["imports"], "cases": cases,
+            "history_refs": sorted(set(old.get("history_refs", []))
+                                   | set(new.get("history_refs", []))),
+        }
     return result
 
 
@@ -293,9 +329,36 @@ def select_tests(changes: list[dict], inventory: dict[str, dict],
     triggers = [
         path for path in paths if native_path(path) or path in native_tests
     ]
+    if source_event == "push_main":
+        # The changed paths are provenance only. Never use PR impact selection
+        # or its private-input exclusions to narrow the main suite.
+        required = sorted(
+            f"{path}::{name}" for path, entry in inventory.items()
+            for name in entry["cases"]
+        )
+        if not required:
+            raise ValueError("full main suite has no test inventory")
+        return {
+            "native": True, "mode": "full",
+            "reason": "Every main push requires the full repository suite",
+            "changes": changes, "triggers": triggers,
+            "selected": ["tests"], "required_tests": required,
+            "suite_files": sorted(inventory),
+            "selection_reasons": {"tests": ["full repository suite on exact main SHA"]},
+            "excluded": [], "needs_corpus": True,
+            "history_refs": sorted({
+                ref for entry in inventory.values() for ref in entry.get("history_refs", [])
+            }),
+            "input_needs": [
+                {"nodeid": f"{path}::{name}", "inputs": case["private"]}
+                for path, entry in sorted(inventory.items())
+                for name, case in sorted(entry["cases"].items()) if case["private"]
+            ],
+        }
     if not triggers and source_event == "pull_request":
         return {
-            "native": False, "reason": "No emitter, generated C++, native harness/test or CI driver changes",
+            "native": False, "mode": "skip",
+            "reason": "No emitter, generated C++, native harness/test or CI driver changes",
             "changes": changes, "triggers": [], "selected": [], "excluded": [],
             "needs_corpus": False,
         }
@@ -345,13 +408,15 @@ def select_tests(changes: list[dict], inventory: dict[str, dict],
         if name not in inventory.get(path, {}).get("cases", {}):
             raise ValueError(f"mandatory smoke missing from tested checkout: {node}")
     return {
-        "native": True, "reason": (
-            "Every main push requires native touched tests and smoke"
-            if source_event == "push_main" else "Actual diff touches native integration inputs"
-        ),
+        "native": True, "mode": "touched",
+        "reason": "Actual diff touches native integration inputs",
         "changes": changes, "triggers": triggers,
         "selected": sorted(selected), "selection_reasons": selected,
         "excluded": excluded, "needs_corpus": needs_corpus,
+        "history_refs": sorted({
+            ref for node in selected
+            for ref in inventory.get(node.split("::", 1)[0], {}).get("history_refs", [])
+        }),
     }
 
 
@@ -409,8 +474,10 @@ def plan(repo: Path, base: str, head: str, definition: str, count: int, out: Pat
         merge_base = base if source_event == "push_main" else git(repo, "merge-base", base, head)
     # This baseline survives deletes/renames and changes to native calls; only
     # its metadata can supply non-public exclusions, not candidate code.
-    baseline = {} if initial_push else test_inventory(repo, merge_base)
-    inventory = merge_inventory(baseline, test_inventory(repo, head))
+    baseline = {} if source_event == "push_main" else test_inventory(repo, merge_base)
+    head_inventory = test_inventory(repo, head)
+    inventory = (head_inventory if source_event == "push_main"
+                 else merge_inventory(baseline, head_inventory))
     result = select_tests(parse_diff(raw), inventory, source_event)
     result.update({
         "source_event": source_event,
@@ -436,6 +503,7 @@ def plan(repo: Path, base: str, head: str, definition: str, count: int, out: Pat
                 "base": base, "head": head, "definition": definition, "workers": count,
                 "tree": result["codegen_tree"], "plan": result["plan_sha256"],
                 "source_event": source_event,
+                "mode": result["mode"],
             }.items():
                 stream.write(f"{key}={value}\n")
     summary(
@@ -444,7 +512,7 @@ def plan(repo: Path, base: str, head: str, definition: str, count: int, out: Pat
         f"(tree `{result['codegen_tree']}`); base `{base}`; "
         f"diff baseline `{result['diff_merge_base']}`; source event `{source_event}`.\n\n"
         f"Triggers: `{json.dumps(result['triggers'])}`. "
-        f"Selected function selectors: {len(result['selected'])}; "
+        f"Mode: `{result['mode']}`; pytest targets: `{json.dumps(result['selected'])}`; "
         f"public corpus required: {result['needs_corpus']}. "
         f"Excluded input-dependent cases: `{json.dumps(result['excluded'])}`."
     )
@@ -509,15 +577,123 @@ def native_environment(engine: Path, build: Path, compiler: str) -> dict[str, st
     return env
 
 
+def require_public_feed(feed: Path) -> None:
+    if not feed.is_file() or not feed.stat().st_size:
+        raise ValueError(f"NEEDS real public replay feed: {feed}")
+    with feed.open("rb") as stream:
+        if stream.read(128).startswith(b"version https://git-lfs.github.com/spec/"):
+            raise ValueError(f"NEEDS smudged public replay feed, got LFS pointer: {feed}")
+
+
+def provision_history(repo: Path, refs: list[str], out: Path) -> dict:
+    if git(repo, "rev-parse", "--is-shallow-repository") != "false":
+        raise ValueError("NEEDS full codegen history before collection")
+    resolved = {}
+    for ref in refs:
+        if not re.fullmatch(r"[0-9a-f]{7,40}", ref):
+            raise ValueError("invalid historical reference")
+        found = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+            capture_output=True, text=True,
+        )
+        if found.returncode:
+            if len(ref) != 40:
+                raise ValueError(f"NEEDS genuine historical object for abbreviated ref: {ref}")
+            logged(["git", "-C", str(repo), "fetch", "--no-tags", "origin", ref],
+                   out / "history.log")
+        sha = git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")
+        resolved[ref] = {"sha": commit_ref(sha), "tree": git(repo, "rev-parse", f"{sha}^{{tree}}")}
+    return resolved
+
+
+def collected_selectors(nodeids: set[str]) -> set[str]:
+    """Index once rather than scan the full suite for each static target."""
+    covered = set(nodeids)
+    for node in nodeids:
+        parts = node.split("[", 1)[0].split("::")
+        covered.update("::".join(parts[:index]) for index in range(1, len(parts) + 1))
+        path = PurePosixPath(parts[0])
+        covered.update(parent.as_posix() for parent in path.parents if parent.as_posix() != ".")
+    return covered
+
+
+def collection_row(report) -> dict:
+    return {
+        "nodeid": report.nodeid, "outcome": report.outcome,
+        "detail": str(report.longrepr) if report.failed or report.skipped else "",
+    }
+
+
+class WorkerCollectionAudit:
+    """Capture before/after selection inside each real xdist worker.
+
+    xdist only forwards unsuccessful collection reports to its controller.
+    Worker output supplies the successful reports, pre-deselection item list,
+    and explicit deselections as well, without a second pytest invocation.
+    """
+
+    def __init__(self, config) -> None:
+        self.config = config
+        self.items: list[str] = []
+        self.final: list[str] = []
+        self.deselected: list[str] = []
+        self.collection: list[dict] = []
+
+    def pytest_itemcollected(self, item) -> None:
+        self.items.append(item.nodeid)
+
+    def pytest_deselected(self, items) -> None:
+        self.deselected.extend(item.nodeid for item in items)
+
+    def pytest_collectreport(self, report) -> None:
+        self.collection.append(collection_row(report))
+
+    def pytest_collection_finish(self, session) -> None:
+        self.final = [item.nodeid for item in session.items]
+
+    def pytest_sessionfinish(self, session, exitstatus) -> None:
+        self.config.workeroutput["engine_main_collection"] = {
+            "plan": os.environ["PF_ENGINE_MAIN_PLAN"],
+            "items": self.items, "final": self.final,
+            "deselected": self.deselected, "collection": self.collection,
+            "exit": int(exitstatus),
+        }
+
+
+def pytest_configure(config) -> None:
+    # Loaded by -p in both controller and workers; the controller's instance is
+    # supplied explicitly to pytest.main. Keep plan selection stdlib-only.
+    if hasattr(config, "workerinput"):
+        config.pluginmanager.register(WorkerCollectionAudit(config), "engine-main-worker-audit")
+
+
 class ExecutionAudit:
-    """Controller-side hooks also receive xdist's collection and test reports."""
+    """Actual collection and phase reports, never an expected count."""
 
     def __init__(self) -> None:
         self.collected: set[str] = set()
         self.reports: list[dict] = []
+        self.collections: dict[str, list[str]] = {}
+        self.worker_inventory: dict[str, dict] = {}
+        self.worker_errors: list[str] = []
+        self.collection_reports: list[dict] = []
 
     def pytest_xdist_node_collection_finished(self, node, ids) -> None:
         self.collected.update(ids)
+        self.collections[node.gateway.id if node is not None else "fixture"] = list(ids)
+
+    def pytest_collectreport(self, report) -> None:
+        self.collection_reports.append(collection_row(report))
+
+    def pytest_testnodedown(self, node, error) -> None:
+        worker = node.gateway.id
+        if error is not None:
+            self.worker_errors.append(f"{worker}: {error}")
+        payload = getattr(node, "workeroutput", {}).get("engine_main_collection")
+        if not isinstance(payload, dict):
+            self.worker_errors.append(f"{worker}: missing worker collection audit")
+        else:
+            self.worker_inventory[worker] = payload
 
     def pytest_runtest_logreport(self, report) -> None:
         self.reports.append({
@@ -526,17 +702,61 @@ class ExecutionAudit:
             "detail": str(report.longrepr) if report.failed or report.skipped else "",
         })
 
-    def result(self, selected: list[str], exit_code: int) -> dict:
-        errors = []
+    def result(self, selected: list[str], exit_code: int, *, mode: str = "touched",
+               required: list[str] | None = None, suite_files: list[str] | None = None,
+               count: int | None = None, plan_digest: str | None = None) -> dict:
+        errors = list(self.worker_errors)
+        if mode not in {"full", "touched"}:
+            errors.append("invalid execution mode")
         if not self.collected:
             errors.append("zero tests collected")
-        for selector in selected:
-            if not any(node == selector or node.startswith(selector + "[")
-                       or node.startswith(selector + "::") for node in self.collected):
+        missing_targets = []
+        covered = collected_selectors(self.collected)
+        for selector in (required if mode == "full" and required is not None else selected):
+            if selector not in covered:
                 errors.append(f"selected target did not collect: {selector}")
+                missing_targets.append(selector)
         for legacy in ("False", "True"):
             if f"{CONSTRUCTION}[{legacy}]" not in self.collected:
                 errors.append(f"checked-construction smoke parameter missing: {legacy}")
+        if count is not None:
+            if len(self.collections) != count or set(self.worker_inventory) != set(self.collections):
+                errors.append("worker collection inventory is incomplete")
+        collection = list(self.collection_reports)
+        deselected = set()
+        discovered = set()
+        ordered = next(iter(self.collections.values()), [])
+        for worker, ids in self.collections.items():
+            if ids != ordered or len(ids) != len(set(ids)):
+                errors.append(f"{worker}: inconsistent or duplicate collected nodeids")
+        for worker, payload in self.worker_inventory.items():
+            if payload.get("plan") != plan_digest:
+                errors.append(f"{worker}: collection plan binding differs")
+            items, final = payload.get("items", []), payload.get("final", [])
+            if (final != self.collections.get(worker) or set(items) != set(final)
+                    or len(items) != len(final)):
+                errors.append(f"{worker}: items omitted or changed during collection")
+            worker_exit = payload.get("exit")
+            if (type(worker_exit) is not int or worker_exit not in {0, 1}
+                    or (exit_code == 0 and worker_exit != 0)):
+                errors.append(f"{worker}: unsuccessful or inconsistent worker exit: {worker_exit}")
+            discovered.update(items)
+            deselected.update(payload.get("deselected", []))
+            collection.extend({**row, "worker": worker} for row in payload.get("collection", []))
+        if deselected:
+            errors.append("tests were deselected")
+        collection_omissions = [row for row in collection if row["outcome"] != "passed"]
+        if collection_omissions:
+            errors.append("collection failed or skipped, including module-level omissions")
+        if mode == "full":
+            if not required or not suite_files:
+                errors.append("full mode lacks bound repository inventory")
+            if not self.worker_inventory or discovered != self.collected:
+                errors.append("full mode lacks complete worker discovery")
+            seen_modules = {row["nodeid"] for row in collection if row["outcome"] == "passed"}
+            for path in suite_files or []:
+                if path not in seen_modules:
+                    errors.append(f"repository test module not collected successfully: {path}")
         executed = {
             row["nodeid"] for row in self.reports
             if row["when"] == "call" and row["outcome"] in {"passed", "failed"}
@@ -544,9 +764,21 @@ class ExecutionAudit:
         }
         for node in sorted(self.collected - executed):
             errors.append(f"selected case did not execute an ordinary test call: {node}")
+        phases = {}
+        for row in self.reports:
+            phases.setdefault(row["nodeid"], {}).setdefault(row["when"], []).append(row)
+            if row["nodeid"] not in self.collected:
+                errors.append(f"phase report outside collection: {row['nodeid']}")
+        for node in sorted(self.collected):
+            for phase in ("setup", "call", "teardown"):
+                rows = phases.get(node, {}).get(phase, [])
+                if len(rows) != 1:
+                    errors.append(f"missing or duplicate {phase} phase: {node}")
+                elif phase != "call" and rows[0]["outcome"] != "passed":
+                    errors.append(f"{phase} did not pass: {node}")
         skips = [row for row in self.reports if row["outcome"] == "skipped" or row["xfail"]]
         if skips:
-            errors.append("selected public tests skipped or xfailed")
+            errors.append("tests skipped or xfailed; these rows remain unexecuted")
         if exit_code == 0 and any(row["outcome"] == "failed" for row in self.reports):
             errors.append("pytest returned zero despite a failed phase")
         return {
@@ -556,13 +788,28 @@ class ExecutionAudit:
                 row["outcome"] for row in self.reports if row["when"] == "call"
             )),
             "skips": skips, "collected_nodeids": sorted(self.collected),
-            "reports": self.reports,
+            "reports": self.reports, "mode": mode,
+            "collection_reports": collection, "worker_inventories": self.worker_inventory,
+            "deselected_nodeids": sorted(deselected), "missing_targets": missing_targets,
+            "unexecuted_nodeids": sorted(self.collected - executed),
+            "collection_omissions": collection_omissions,
+            # An ordinary assertion failure may have complete execution
+            # coverage, but can never establish successful full execution.
+            "coverage_complete": not errors,
+            "full_success": mode == "full" and not errors and exit_code == 0
+            and all(row["outcome"] == "passed" for row in self.reports),
         }
 
 
 def run_native(repo: Path, engine: Path, out: Path, selection: dict) -> int:
     if not selection["native"] or not selection["selected"]:
         raise ValueError("native job requires a nonempty native selection")
+    mode = selection["mode"]
+    if ((selection["source_event"] == "push_main" and mode != "full")
+            or (selection["source_event"] == "pull_request" and mode != "touched")
+            or (mode == "full" and (selection["selected"] != ["tests"]
+                                    or selection["excluded"]))):
+        raise ValueError("source event and execution mode/whole-suite scope differ")
     if git(repo, "rev-parse", "HEAD") != selection["codegen_sha"]:
         raise ValueError("codegen checkout changed after selection")
     engine_sha = git(engine, "rev-parse", "HEAD")
@@ -575,6 +822,7 @@ def run_native(repo: Path, engine: Path, out: Path, selection: dict) -> int:
         "plan_sha256": selection["plan_sha256"],
         "codegen_base_sha": selection["codegen_base_sha"],
         "source_event": selection["source_event"],
+        "mode": mode,
         "codegen_sha": selection["codegen_sha"], "codegen_tree": selection["codegen_tree"],
         "engine_ref": "refs/heads/main", "engine_sha": engine_sha,
         "engine_tree": git(engine, "rev-parse", "HEAD^{tree}"),
@@ -584,6 +832,16 @@ def run_native(repo: Path, engine: Path, out: Path, selection: dict) -> int:
     logged([
         sys.executable, "-m", "pip", "install", "pytest>=7.0", "pytest-xdist>=3.5",
     ], out / "install.log")
+    if mode == "full" and shutil.which("clang++") is None:
+        # Standard hosted images normally include clang. Install the real
+        # public tool when absent; no stub or alternative AST output is used.
+        logged(["sudo", "apt-get", "update"], out / "install.log")
+        logged(["sudo", "apt-get", "install", "-y", "clang"], out / "install.log")
+        if shutil.which("clang++") is None:
+            raise ValueError("NEEDS real clang++ for the full host-member inventory")
+    identity["historical_codegen"] = provision_history(
+        repo, selection.get("history_refs", []), out,
+    )
     build = engine / "build"
     if build.exists():
         raise ValueError("fresh engine build directory already exists")
@@ -606,14 +864,15 @@ def run_native(repo: Path, engine: Path, out: Path, selection: dict) -> int:
         if not list(corpus.glob("*/*/strategy.pine")):
             raise ValueError("selected corpus tests require public strategies")
         feed = corpus / "data/ohlcv_ETH-USDT-USDT_1m.csv"
-        if not feed.is_file():
-            raise ValueError("selected public replay inputs missing")
-        with feed.open("rb") as stream:
-            if stream.read(128).startswith(b"version https://git-lfs.github.com/spec/"):
-                raise ValueError("public replay feed is an unsmudged LFS pointer")
+        require_public_feed(feed)
         if not (engine / "scripts/run_strategy.py").is_file():
             raise ValueError("public engine replay driver missing")
         env["PINEFORGE_ENGINE_CORPUS"] = str(corpus)
+        identity["public_corpus"] = {
+            "sha": git(corpus, "rev-parse", "HEAD"),
+            "tree": git(corpus, "rev-parse", "HEAD^{tree}"),
+            "feed": str(feed), "feed_bytes": feed.stat().st_size,
+        }
     os.environ.update(env)
     identity["native_environment"] = env
     identity["generated_header_sha256"] = hashlib.sha256(
@@ -645,8 +904,14 @@ def run_native(repo: Path, engine: Path, out: Path, selection: dict) -> int:
     audit = ExecutionAudit()
     # Disable environment-supplied options that could deselect or xfail smoke.
     os.environ.pop("PYTEST_ADDOPTS", None)
+    os.environ.pop("PYTEST_PLUGINS", None)
+    os.environ["PF_ENGINE_MAIN_PLAN"] = selection["plan_sha256"]
+    driver_dir = str(Path(__file__).resolve().parent)
+    sys.path.insert(0, driver_dir)
+    os.environ["PYTHONPATH"] = os.pathsep.join((driver_dir, str(repo)))
     args = [
         "-o", "addopts=", "-v", "-ra", "-n", count,
+        "-p", "ci_engine_main_touched",
         "--junitxml", str(out / "junit.xml"), *selection["selected"],
     ]
     with (out / "pytest.log").open("w", encoding="utf-8") as stream:
@@ -673,18 +938,35 @@ def run_native(repo: Path, engine: Path, out: Path, selection: dict) -> int:
             code = int(pytest.main(args, plugins=[audit]))
         finally:
             sys.stdout, sys.stderr = stdout, stderr
-    result = audit.result(selection["selected"], code)
+    result = audit.result(
+        selection["selected"], code, mode=mode, required=selection.get("required_tests"),
+        suite_files=selection.get("suite_files"), count=int(count),
+        plan_digest=selection["plan_sha256"],
+    )
+    result["identity"] = identity
+    result["input_needs"] = selection.get("input_needs", [])
+    result["inventory_sha256"] = hashlib.sha256(
+        json.dumps(result, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     write_json(out / "execution.json", result)
     summary(
+        f"mode={mode}; full success={result['full_success']}; "
         f"pytest exit={code}; collected={result['collected_count']}; "
         f"executed={result['executed_count']}; call outcomes={result['call_outcomes']}; "
         f"skips={len(result['skips'])}; audit errors={json.dumps(result['audit_errors'])}"
     )
-    status = code if code else (1 if result["audit_errors"] else 0)
+    status = code if code else (
+        1 if result["audit_errors"] or (mode == "full" and not result["full_success"]) else 0
+    )
     if output := os.environ.get("GITHUB_OUTPUT"):
         values = {
             "completed_plan": selection["plan_sha256"],
             "pytest_exit": code, "audit_errors": len(result["audit_errors"]),
+            "execution_mode": mode,
+            "inventory": result["inventory_sha256"],
+            "coverage_complete": str(result["coverage_complete"]).lower(),
+            "full_success": str(result["full_success"]).lower(),
+            "engine_sha": engine_sha, "engine_tree": identity["engine_tree"],
         }
         for legacy in ("False", "True"):
             rows = [row for row in audit.reports
@@ -695,6 +977,8 @@ def run_native(repo: Path, engine: Path, out: Path, selection: dict) -> int:
             )
         if status == 0:
             values["executed_plan"] = selection["plan_sha256"]
+        if result["full_success"]:
+            values["full_executed_plan"] = selection["plan_sha256"]
         with open(output, "a", encoding="utf-8") as stream:
             for key, value in values.items():
                 stream.write(f"{key}={value}\n")

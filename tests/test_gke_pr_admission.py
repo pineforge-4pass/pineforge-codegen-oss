@@ -151,6 +151,9 @@ def report_native_check(env, api=gh_json, create=create_native_check):
             and outputs.get("base") == env["BASE_SHA"] and outputs.get("head") == env["HEAD_SHA"]
             and outputs.get("definition") == env["DEFINITION_SHA"]
             and outputs.get("source_event") == env["SOURCE_EVENT"]
+            and outputs.get("mode") == (
+                "full" if env["SOURCE_EVENT"] == "push_main" else "touched"
+            )
             and isinstance(outputs.get("tree"), str) and SHA.fullmatch(outputs["tree"])
             and isinstance(outputs.get("plan"), str)
             and re.fullmatch(r"[0-9a-f]{64}", outputs["plan"]),
@@ -198,16 +201,28 @@ def report_native_check(env, api=gh_json, create=create_native_check):
             "native job result differs from completed GitHub job")
     execution = native.get("outputs", {})
     require(isinstance(execution, dict), "malformed native execution outputs")
+    expected_mode = outputs["mode"]
     ordinary = (
         execution.get("completed_plan") == outputs["plan"]
         and execution.get("audit_errors") == "0"
+        and execution.get("execution_mode") == expected_mode
+        and isinstance(execution.get("inventory"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", execution["inventory"]) is not None
+        and all(isinstance(execution.get(key), str) and SHA.fullmatch(execution[key])
+                for key in ("engine_sha", "engine_tree"))
         and execution.get("pytest_exit") in {"0", "1", "2", "3", "4", "5"}
         and all(execution.get(f"construction_{legacy}") in {"passed", "failed"}
                 for legacy in ("false", "true"))
     )
     if state == "success":
         require(ordinary and execution.get("pytest_exit") == "0"
+                and execution.get("audit_errors") == "0"
+                and execution.get("coverage_complete") == "true"
                 and execution.get("executed_plan") == outputs["plan"]
+                and (expected_mode != "full" or (
+                    execution.get("full_success") == "true"
+                    and execution.get("full_executed_plan") == outputs["plan"]
+                ))
                 and all(execution[f"construction_{legacy}"] == "passed"
                         for legacy in ("false", "true")),
                 "successful native job lacks bound ordinary execution")
@@ -222,6 +237,12 @@ def report_native_check(env, api=gh_json, create=create_native_check):
         "definition_sha": env["DEFINITION_SHA"], "source_event": env["SOURCE_EVENT"],
         "codegen_before": env["BASE_SHA"], "codegen_sha": env["HEAD_SHA"],
         "codegen_tree": outputs["tree"], "plan": outputs["plan"],
+        "mode": expected_mode, "inventory": execution.get("inventory"),
+        "engine_sha": execution.get("engine_sha"), "engine_tree": execution.get("engine_tree"),
+        "coverage_complete": execution.get("coverage_complete"),
+        "full_success": execution.get("full_success"),
+        "full_executed_plan": execution.get("full_executed_plan"),
+        "audit_errors": execution.get("audit_errors"),
         "native_job_result": actual, "ordinary_execution": ordinary,
         "pytest_exit": execution.get("pytest_exit"),
         "construction_false": execution.get("construction_false"),
@@ -894,9 +915,16 @@ def native_success(outputs, env):
         return False
     return (
         outputs.get("native") == "true" and outputs.get("native_result") == "success"
+        and outputs.get("mode") == outputs.get("execution_mode") == "touched"
+        and outputs.get("coverage_complete") == "true"
+        and re.fullmatch(r"[0-9a-f]{64}", outputs.get("inventory", ""))
         and outputs.get("executed_plan") == outputs["plan"]
     ) or (
         outputs.get("native") == "false" and outputs.get("native_result") == "skipped"
+        and outputs.get("mode") == "skip"
+        and outputs.get("execution_mode", "") == ""
+        and outputs.get("inventory", "") == ""
+        and outputs.get("coverage_complete", "") == ""
         and outputs.get("executed_plan", "") == ""
     )
 
@@ -1453,6 +1481,8 @@ def test_result_refuses_every_incomplete_leg_and_stale_head(monkeypatch):
     needs["engine-main"]["outputs"] = {
         "source_event": "pull_request",
         "decision_result": "success", "native_result": "success", "native": "true",
+        "mode": "touched", "execution_mode": "touched", "inventory": "a" * 64,
+        "coverage_complete": "true",
         "base": env["BASE_SHA"], "head": env["HEAD_SHA"], "definition": env["DEFINITION_SHA"],
         "tree": "e" * 40, "plan": "f" * 64, "executed_plan": "f" * 64,
     }
@@ -1493,6 +1523,8 @@ def test_result_refuses_every_incomplete_leg_and_stale_head(monkeypatch):
         ("base", "c" * 40), ("head", "c" * 40), ("definition", "c" * 40),
         ("tree", ""), ("plan", ""), ("executed_plan", "a" * 64),
         ("executed_plan", None),
+        ("mode", "full"), ("execution_mode", "full"), ("inventory", ""),
+        ("coverage_complete", "false"),
     ]:
         changed = copy.deepcopy(needs)
         changed["engine-main"]["outputs"][output] = value
@@ -1503,6 +1535,7 @@ def test_result_refuses_every_incomplete_leg_and_stale_head(monkeypatch):
     docs = copy.deepcopy(needs)
     docs["engine-main"]["outputs"].update(
         native="false", native_result="skipped", executed_plan="",
+        mode="skip", execution_mode="", inventory="", coverage_complete="",
     )
     env["NEEDS"] = json.dumps(docs)
     report_result(env, lambda endpoint: responses[endpoint])
@@ -1513,6 +1546,7 @@ def test_result_refuses_every_incomplete_leg_and_stale_head(monkeypatch):
         ("decision_result", "skipped"), ("head", "c" * 40),
         ("base", "c" * 40), ("definition", "c" * 40),
         ("native_result", "success"), ("executed_plan", "f" * 64),
+        ("mode", "full"), ("execution_mode", "touched"), ("inventory", "a" * 64),
     ]:
         changed = copy.deepcopy(docs)
         changed["engine-main"]["outputs"][output] = value
@@ -1586,12 +1620,16 @@ def native_publication_fixture():
     needs = {
         "changes": {"result": "success", "outputs": {
             "native": "true", "source_event": "push_main", "base": env["BASE_SHA"],
+            "mode": "full",
             "head": env["HEAD_SHA"], "definition": env["DEFINITION_SHA"],
             "tree": "e" * 40, "plan": "f" * 64,
         }},
         "native": {"result": "success", "outputs": {
             "completed_plan": "f" * 64, "executed_plan": "f" * 64,
             "pytest_exit": "0", "audit_errors": "0",
+            "execution_mode": "full", "inventory": "a" * 64, "coverage_complete": "true",
+            "full_success": "true", "full_executed_plan": "f" * 64,
+            "engine_sha": "b" * 40, "engine_tree": "c" * 40,
             "construction_false": "passed", "construction_true": "passed",
         }},
     }
@@ -1612,6 +1650,8 @@ def test_historical_check_uses_source_sha_actual_job_and_observed_outcomes():
         ("success", needs["native"]["outputs"].copy(), "success"),
         ("failure", {
             "completed_plan": "f" * 64, "pytest_exit": "1", "audit_errors": "0",
+            "execution_mode": "full", "inventory": "a" * 64, "coverage_complete": "true",
+            "full_success": "false", "engine_sha": "b" * 40, "engine_tree": "c" * 40,
             "construction_false": "failed", "construction_true": "failed",
         }, "failure"),
         ("failure", {}, "action_required"),
@@ -1681,6 +1721,25 @@ def test_historical_check_refuses_missing_or_wrong_run_source_execution_binding(
 
     with pytest.raises(ValueError, match="does not bind"):
         report_native_check(env, lambda endpoint: responses[endpoint], wrong_association)
+
+
+def test_main_publication_requires_full_completion_beyond_passing_construction():
+    import pytest
+
+    for key, value in [
+        ("execution_mode", "touched"), ("inventory", ""),
+        ("coverage_complete", "false"), ("audit_errors", "1"),
+        ("full_success", "false"), ("full_executed_plan", ""),
+        ("full_executed_plan", "b" * 64), ("engine_sha", ""),
+    ]:
+        env, responses, needs, job = native_publication_fixture()
+        needs["native"]["outputs"][key] = value
+        env["NEEDS"] = json.dumps(needs)
+        creates = []
+        with pytest.raises(ValueError, match="lacks bound ordinary execution"):
+            report_native_check(env, lambda endpoint: responses[endpoint],
+                                lambda repo, payload: creates.append(payload))
+        assert creates == [], key
 
 
 def test_test_check_executes_real_workflow_script(tmp_path):

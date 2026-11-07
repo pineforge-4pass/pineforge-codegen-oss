@@ -1747,6 +1747,12 @@ def test_native_pr_route_is_required_and_dispatch_shares_the_same_jobs():
     assert "    runs-on: ubuntu-24.04\n" in execution
     assert "ref: main\n" in execution
     assert "--expected-plan" in execution and "ci_engine_main_touched.py run" in execution
+    assert "      mode: ${{ steps.plan.outputs.mode }}\n" in job_blocks(native)["changes"]
+    for output in (
+        "execution_mode", "inventory", "coverage_complete", "full_success",
+        "full_executed_plan", "engine_sha", "engine_tree",
+    ):
+        assert f"      {output}: ${{{{ steps.execute.outputs.{output} }}}}\n" in execution
     assert "secrets" not in execution and "GH_TOKEN" not in execution
     assert "statuses: write" not in native and "timeout-minutes:" not in native
     assert "engine-main-touched" not in blocks["test-check"]

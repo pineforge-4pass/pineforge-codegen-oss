@@ -1,4 +1,4 @@
-name: Engine main touched
+name: Engine main full / PR touched
 
 # PRs enter only through gke-pr.yml's base-owned admission. Dispatch is a
 # write-authorized public-input proof route and never publishes a gate status.
@@ -31,6 +31,8 @@ on:
         value: ${{ jobs.outcomes.outputs.native_result }}
       native:
         value: ${{ jobs.changes.outputs.native }}
+      mode:
+        value: ${{ jobs.changes.outputs.mode }}
       base:
         value: ${{ jobs.changes.outputs.base }}
       head:
@@ -43,10 +45,16 @@ on:
         value: ${{ jobs.changes.outputs.plan }}
       executed_plan:
         value: ${{ jobs.native.outputs.executed_plan }}
+      execution_mode:
+        value: ${{ jobs.native.outputs.execution_mode }}
+      inventory:
+        value: ${{ jobs.native.outputs.inventory }}
+      coverage_complete:
+        value: ${{ jobs.native.outputs.coverage_complete }}
   workflow_dispatch:
     inputs:
       source_event:
-        description: "Source event being replayed; main pushes always execute native"
+        description: "Source event being replayed; main pushes execute the full suite"
         type: choice
         default: "pull_request"
         options: ["pull_request", "push_main"]
@@ -75,6 +83,7 @@ jobs:
     outputs:
       source_event: ${{ steps.plan.outputs.source_event }}
       native: ${{ steps.plan.outputs.native }}
+      mode: ${{ steps.plan.outputs.mode }}
       base: ${{ steps.plan.outputs.base }}
       head: ${{ steps.plan.outputs.head }}
       definition: ${{ steps.plan.outputs.definition }}
@@ -155,6 +164,13 @@ jobs:
       completed_plan: ${{ steps.execute.outputs.completed_plan }}
       pytest_exit: ${{ steps.execute.outputs.pytest_exit }}
       audit_errors: ${{ steps.execute.outputs.audit_errors }}
+      execution_mode: ${{ steps.execute.outputs.execution_mode }}
+      inventory: ${{ steps.execute.outputs.inventory }}
+      coverage_complete: ${{ steps.execute.outputs.coverage_complete }}
+      full_success: ${{ steps.execute.outputs.full_success }}
+      full_executed_plan: ${{ steps.execute.outputs.full_executed_plan }}
+      engine_sha: ${{ steps.execute.outputs.engine_sha }}
+      engine_tree: ${{ steps.execute.outputs.engine_tree }}
       construction_false: ${{ steps.execute.outputs.construction_false }}
       construction_true: ${{ steps.execute.outputs.construction_true }}
     env:
@@ -187,7 +203,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Build fresh engine main and execute the bound touched selection
+      - name: Build fresh engine main and execute the bound full or PR touched suite
         id: execute
         env:
           CODEGEN_BASE: ${{ needs.changes.outputs.base }}
