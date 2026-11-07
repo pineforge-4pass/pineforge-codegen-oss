@@ -23,19 +23,27 @@ supported as exact pairs; on the 0.x line they are independent. See the
 ## Unreleased (next release)
 
 - History retention can be selected with keyword-only `history_capacity`
-  across all translation entry points and the Pyodide glue. Without a Pine
-  directive, large constant offsets infer sufficient bare history and dynamic
-  offsets select a documented 5000-slot default. Static operator overflow and
-  invalid capacities have typed diagnostics. Explicit runtime history bounds
+  in `transpile()`, `transpile_full()`, `transpile_with_request_inventory()`
+  and `gate/glue.py::transpile_json()`. The JavaScript worker template does
+  not pass this option. Without a Pine directive, large constant offsets
+  infer sufficient bare history and dynamic offsets select this package's
+  5000-slot retention default. Static operator overflow and invalid capacities
+  have typed diagnostics. Explicit runtime history bounds
   stop with `pine_runtime_limit` and arguments `limit=max_bars_back`, `max=N`;
-  in-capacity warmup reads retain their missing-value behavior.
-- `drawing_capacity` bounds live lines, boxes and labels independently after
+  in-capacity warmup reads retain their missing-value behavior. Requested-helper
+  history references preserve their C++ members when a Pine binding uses the
+  same word. Regenerate C++ and relink affected strategies.
+- `drawing_capacity`, accepted by `transpile()`, `transpile_full()`,
+  `transpile_with_request_inventory()` and `gate/glue.py::transpile_json()`,
+  bounds live lines, boxes and labels independently after
   Pine's existing collection step. Creating or copying beyond the selected
   bound stops with `pine_runtime_limit` and arguments `limit=live_drawings`,
   `max=N`. Pine declaration counts keep their ordinary TradingView collection
   behavior; linefills are outside the bound. Typed stops require the paired
   engine catalog's `live_drawings` value. Omitting the option preserves drawing
-  emission and collection.
+  emission and collection. The JavaScript worker template does not pass this
+  option. Capacities outside the native int64 domain are refused even for
+  scripts without drawings. Regenerate C++ and relink affected strategies.
 - Typed `array.from()` initializers now match their declared element type, including function-local `var` and `varip` arrays of timestamps.
 - Variables initialized from `backadjustment.*`, `settlement_as_close.*` and
   `adjustment.*` constants now use integer storage in emitted C++.

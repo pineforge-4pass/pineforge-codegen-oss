@@ -762,11 +762,6 @@ class DrawingVisitor:
         pins = getattr(self, "_drawing_pins", None) or {}
         caps = self._drawing_caps or {}
         capacity = self._drawing_capacity
-        if capacity is not None and capacity > 2**63 - 1:
-            self._codegen_error(
-                None,
-                f"drawing_capacity={capacity} cannot be represented by the native int64 limit argument.",
-            )
         for dtype, collector in DRAWING_COLLECTED.items():
             handle = DRAWING_TYPE_TO_CPP[dtype]
             arena = DRAWING_ARENA[dtype]

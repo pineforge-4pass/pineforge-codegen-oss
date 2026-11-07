@@ -102,6 +102,26 @@ from .tables import (
 )
 
 
+_SECURITY_HELPER_SERIES_STORES = (
+    "_security_helper_series_", "_security_helper_series_str_",
+)
+_SECURITY_HELPER_SERIES_REF = '({store}.try_emplace("{key}", {capacity}).first->second)'
+# Derive the protected region from the emitted form, including the escaped
+# key literal. The following history subscript still contains Pine reads.
+_SECURITY_HELPER_SERIES_REGIONS = re.compile(
+    _SECURITY_CPP_LITERALS.pattern
+    + "|(?P<reference>"
+    + re.escape(_SECURITY_HELPER_SERIES_REF)
+    .replace(re.escape("{store}"), "(?:" + "|".join(
+        re.escape(store) for store in _SECURITY_HELPER_SERIES_STORES
+    ) + ")")
+    .replace(re.escape("{key}"), r'(?:\\.|[^"\\\n])*')
+    .replace(re.escape("{capacity}"), r"[0-9]+")
+    + ")",
+    re.S,
+)
+
+
 _SECURITY_CPP_SCOPES = re.compile(
     _SECURITY_CPP_LITERALS.pattern
     + r"|(?P<return_type>\)\s*->\s*[\w:\s<>,*&()]+(?=\{))"
@@ -2525,6 +2545,25 @@ class SecurityEmitter:
             last = match.end()
         parts.append((result[last:], False))
 
+        def protect_references() -> None:
+            regions: list[tuple[str, bool]] = []
+            for text, protected in parts:
+                if protected:
+                    regions.append((text, True))
+                    continue
+                last = 0
+                for match in _SECURITY_HELPER_SERIES_REGIONS.finditer(text):
+                    if match.group("reference") is None:
+                        continue
+                    regions.append((text[last:match.start()], False))
+                    regions.append((match.group(0), True))
+                    last = match.end()
+                regions.append((text[last:], False))
+            parts[:] = regions
+
+        # The expression visitor may have rendered storage before this pass.
+        protect_references()
+
         def sub(pattern: str, repl: str) -> None:
             for index, (text, protected) in enumerate(parts):
                 if protected:
@@ -2536,6 +2575,9 @@ class SecurityEmitter:
                     last = match.end()
                 out.append(re.sub(pattern, repl, text[last:]))
                 parts[index] = ("".join(out), protected)
+            # This substitution can introduce storage that later names must
+            # not reinterpret as Pine value reads.
+            protect_references()
 
         for name in sorted(security_mutable_names, key=len, reverse=True):
             info = self._global_mutable_infos.get(name)
@@ -5021,16 +5063,16 @@ class SecurityEmitter:
     def _security_helper_series_ref(self, series_name: str) -> str:
         """The map entry holding one helper series (string values in their
         own map, every other scalar in the historical double map)."""
-        store = (
-            "_security_helper_series_str_"
-            if series_name in self._security_string_series
-            else "_security_helper_series_"
-        )
+        store = _SECURITY_HELPER_SERIES_STORES[
+            series_name in self._security_string_series
+        ]
         key = self._cpp_string_escape(series_name)
         if (getattr(self, "_history_capacity", None) is not None
                 or getattr(self, "_inferred_history_capacity", None) is not None):
             capacity = self._resolved_history_capacity()
-            return f'({store}.try_emplace("{key}", {capacity}).first->second)'
+            return _SECURITY_HELPER_SERIES_REF.format(
+                store=store, key=key, capacity=capacity,
+            )
         return f'{store}["{key}"]'
 
     def _security_helper_series_value(self, series_name: str, index_cpp: str) -> str:

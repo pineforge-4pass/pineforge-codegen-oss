@@ -6,6 +6,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from tests._compile import run_emitted_tu
+from tests.test_helper_series_words import helper_source
 
 
 HEADER = '//@version=6\nstrategy("storage capacity values")\n'
@@ -35,13 +36,13 @@ int main() {
     values = [float(i + 1) for i in range(701)]
     user = [value * 2 + 3 for value in values]
     # At index 700, lag 600 selects index 100: close=101 and user=205.
-    expected = (101.0, 205.0)
-    assert (values[-601], user[-601]) == expected
+    expected = (values[-601], user[-601])
     result = run_emitted_tu(transpile(source), driver, opt="-O2", label="history capacity")
     assert tuple(map(float, result.split())) == expected
 
 
 @pytest.mark.parametrize("offset, code, args", [
+    (100, "pine_runtime_limit", {"limit": "max_bars_back", "max": 100}),
     (150, "pine_runtime_limit", {"limit": "max_bars_back", "max": 100}),
     (10001, "strategy_runtime_error", {}),
     (-1, "strategy_runtime_error", {}),
@@ -67,8 +68,9 @@ int main() {
     assert result[0] == code
     assert json.loads(result[1]) == args
     # The operator stop and the pre-existing invalid-offset stop are distinct.
-    if offset == 150:
+    if offset in (100, 150):
         assert "The historical buffer's limit is 100 bars." in "\n".join(result[2:])
+        assert "Error on bar" not in "\n".join(result[2:])
 
 
 def test_operator_history_last_retained_offset_returns_the_older_value():
@@ -89,14 +91,62 @@ int main() {
 '''
     values = [float(i + 1) for i in range(201)]
     # Final index 200 minus lag 99 selects index 101, whose price is 102.
-    expected = 102.0
-    assert values[-100] == expected
+    expected = values[-100]
     result = run_emitted_tu(
         transpile(source, history_capacity=100), driver,
         opt="-O2", label="last retained history value",
     ).splitlines()
     assert result[0] == ""
     assert float(result[1]) == expected
+
+
+_HELPER_WORD_DRIVER = r'''
+#include <iostream>
+struct HelperObserver : GeneratedStrategy {
+    void evaluate_security(int sec_id, const Bar& bar, bool complete) override {
+        GeneratedStrategy::evaluate_security(sec_id, bar, complete);
+        if (sec_id == 0 && complete) std::cout << _req_sec_0 << "\n";
+    }
+};
+int main() {
+    HelperObserver strategy;
+    std::vector<Bar> bars;
+    for (int i = 0; i < 10; ++i) {
+        double price = i + 1.0;
+        bars.push_back(Bar{price, price, price, price, 1.0, i * int64_t{60000}});
+    }
+    strategy.run(bars.data(), bars.size(), "1", "1");
+}
+'''
+
+
+@pytest.fixture(scope="module", params=[None, 100], ids=["inferred", "selected"])
+def helper_word_control(request):
+    capacity = request.param
+    cpp = transpile(helper_source(timeframe="1"), history_capacity=capacity)
+    values = run_emitted_tu(
+        cpp, _HELPER_WORD_DRIVER, opt="-O2", label="helper word control",
+    )
+    return capacity, list(map(float, values.split()))
+
+
+@pytest.mark.parametrize("names", [("first", "second"), ("try_emplace", "aa"), ("aa", "bb")])
+def test_requested_helper_member_words_match_control_and_bar_values(names, helper_word_control):
+    capacity, control = helper_word_control
+    prices = [float(i + 1) for i in range(10)]
+    # first is this close, second is nz(first[1]); the first prior close is na.
+    expected = [price + (prices[i - 1] if i else 0.0) for i, price in enumerate(prices)]
+    assert control == expected
+    if names == ("aa", "bb"):
+        observed = control
+    else:
+        cpp = transpile(helper_source(*names, timeframe="1"), history_capacity=capacity)
+        values = run_emitted_tu(
+            cpp, _HELPER_WORD_DRIVER, opt="-O2", label="helper member words",
+        )
+        observed = list(map(float, values.split()))
+    assert observed == control
+    assert observed == expected
 
 
 def test_overflowing_history_offset_is_evaluated_once():
@@ -191,8 +241,7 @@ int main() {
         if len(live) >= 56:
             live = live[-50:]
     # Creation 56 collects six; four more leave IDs 6..59, 54 alive.
-    expected = (54, 6, 59, 1)
-    assert (len(live), live[0], live[-1], int(0 not in live)) == expected
+    expected = (len(live), live[0], live[-1], int(0 not in live))
     result = run_emitted_tu(transpile(source), driver, opt="-O2", label="label collection")
     assert tuple(map(int, result.split())) == expected
 
@@ -264,8 +313,7 @@ int main() {
         published = list(range(40))
         pending = published + [40]
         # Forty handles were published; creation 41 exists before its collector stops.
-        expected = (40, 40, 40, 41)
-        assert (len(published), len(published), len(published), len(pending)) == expected
+        expected = (len(published), len(published), len(published), len(pending))
         assert tuple(map(int, result[2].split())) == expected
         assert "The script keeps more than 40 live drawings of one type;" in "\n".join(result[3:])
     else:
@@ -279,11 +327,10 @@ int main() {
                 live = live[-50:]
             published.append(identity)
         # Creation 56 collects six before checking the bound; IDs 6..59 survive.
-        expected = (53, 60, 60, 54, 6, 59, 1)
-        assert (
+        expected = (
             before_count, len(published), len(published), len(live),
             live[0], live[-1], int(0 not in live),
-        ) == expected
+        )
         assert tuple(map(int, result[2].split())) == expected
 
 
@@ -322,11 +369,7 @@ int main() {
         opt="-O2", label="independent live drawing capacities",
     ).splitlines()
     assert result[0] == ""
-    labels = list(range(40))
-    lines = list(range(40, 80)) if create_lines else []
-    boxes = []
     # Forty label creations, optionally forty line creations, and no box creations.
-    assert (len(labels), len(lines), len(boxes)) == expected
     assert tuple(map(int, result[1].split())) == expected
 
 
@@ -386,8 +429,7 @@ int main() {
     eligible = [identity for identity in live if identity not in protected]
     survivors = [identity for identity in live if identity not in eligible[:6]]
     # At trigger 1+6, all six older IDs and the new ID are protected; none can collect.
-    expected = (6, 6, 7, 1)
-    assert (len(published), len(published), len(survivors), int(0 in survivors)) == expected
+    expected = (len(published), len(published), len(survivors), int(0 in survivors))
     assert tuple(map(int, result[2].split())) == expected
 
 
@@ -417,8 +459,5 @@ int main() {
         opt="-O2", label="linefills outside collected drawing capacity",
     ).splitlines()
     assert result[0] == ""
-    lines = [0, 1]
-    fills = list(range(60))
     # Two persistent lines and sixty uncollected linefill creations stay live.
-    assert (len(lines), len(fills)) == (2, 60)
     assert tuple(map(int, result[1].split())) == (2, 60)

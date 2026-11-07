@@ -135,6 +135,53 @@ def test_nonliteral_offset_selects_the_named_default():
     assert "_pf_idx_v > 10000" in cpp
 
 
+@pytest.mark.parametrize("index, declaration", [
+    ("lag", "Series<double> _s_close{5000};"),
+    ("1", "Series<double> _s_close;"),
+])
+def test_collection_snapshot_offset_also_selects_bare_history_retention(index, declaration):
+    source = HEADER + (
+        "lag = bar_index % 3 + 1\n"
+        "a = array.from(close)\n"
+        f"observed = na(a[{index}])\n"
+        "prev = close[1]\n"
+    )
+    cpp = transpile(source)
+    assert declaration in cpp
+    if index == "1":
+        assert "Series<double> _s_close{5000};" not in cpp
+
+
+def test_operator_offset_bound_is_independent_of_larger_pine_retention():
+    source = '//@version=6\nstrategy("t", max_bars_back=500)\n'
+    with pytest.raises(CompileError) as error:
+        transpile(source + "observed = close[300]\n", history_capacity=100)
+    diagnostic = error.value.diagnostics[0]
+    assert diagnostic.code == OFFSET_CODE
+    assert diagnostic.args == {"offset": 300, "capacity": 100}
+    cpp = transpile(source + "observed = close[1]\n", history_capacity=100)
+    assert "Series<double> _s_close{500};" in cpp
+    cpp = transpile(source + "lag = input.int(300)\nobserved = close[lag]\n", history_capacity=100)
+    assert "Series<double> _s_close{500};" in cpp
+    assert '_PF_LIMIT_STOP("max_bars_back", 100LL,' in cpp
+
+
+@pytest.mark.parametrize("offset", [99, 100])
+def test_operator_slot_count_is_the_exclusive_literal_offset_bound(offset):
+    source = HEADER + f"observed = close[{offset}]\n"
+    if offset == 100:
+        with pytest.raises(CompileError) as error:
+            transpile(source, history_capacity=100)
+        assert error.value.diagnostics[0].code == OFFSET_CODE
+        assert error.value.diagnostics[0].args == {"offset": offset, "capacity": 100}
+    else:
+        cpp = transpile(source, history_capacity=100)
+        assert "Series<double> _s_close{100};" in cpp
+    dynamic = HEADER + f"lag = input.int({offset})\nobserved = close[lag]\n"
+    cpp = transpile(dynamic, history_capacity=100)
+    assert '_PF_LIMIT_STOP("max_bars_back", 100LL,' in cpp
+
+
 @pytest.mark.parametrize("declaration", [
     'strategy("storage capacity", max_bars_back=32)',
     'strategy("storage capacity")\nmax_bars_back(close, 32)',
@@ -287,12 +334,16 @@ def test_drawing_copy_forms_share_the_bounded_collector(kind, collector, ctor):
     assert cpp.count(f"{collector}(pf_{kind}_copy(") >= 2
 
 
-def test_native_drawing_limit_argument_domain_has_a_typed_diagnostic():
+@pytest.mark.parametrize("body", ["", "label.new(0, 1)\n"])
+def test_native_drawing_limit_argument_domain_has_a_typed_diagnostic(body):
     with pytest.raises(CompileError) as error:
-        transpile(HEADER + "label.new(0, 1)\n", drawing_capacity=9223372036854775808)
+        transpile(HEADER + body, drawing_capacity=2**63)
     assert error.value.diagnostics[0].code == "PF-E5098"
     # This is the first integer outside the helper's signed int64 max argument.
     assert error.value.diagnostics[0].args == {"capacity": 9223372036854775808}
+    assert error.value.diagnostics[0].message == (
+        "drawing_capacity=9223372036854775808 cannot be represented by the native int64 limit argument."
+    )
 
 
 @pytest.mark.parametrize("body", [

@@ -117,6 +117,12 @@ class CapacityPolicy:
                 None,
                 f"history_capacity={capacity} cannot be represented by the native Series constructor.",
             )
+        if self._drawing_capacity is not None and self._drawing_capacity > 2**63 - 1:
+            capacity = self._drawing_capacity
+            self._codegen_error(
+                None,
+                f"drawing_capacity={capacity} cannot be represented by the native int64 limit argument.",
+            )
 
     def _check_history_capacity_offset(self, offset, node):
         capacity = self._history_capacity
