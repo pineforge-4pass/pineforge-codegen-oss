@@ -9,6 +9,8 @@ rules and their tapes are in the engine header
 
 * series length, ta.highest / ta.lowest / ta.highestbars / ta.lowestbars:
   ``pineforge::source::Series*``, the length passed on every call;
+* series length, ta.percentile_nearest_rank:
+  ``pineforge::source::SeriesPercentileNearestRank`` appends on every call;
 * ta.supertrend: ``pineforge::source::PineSupertrend``, factor and atrPeriod
   passed on the call and read on its first execution;
 * simple length (fixed for the run) of any family:
@@ -47,6 +49,84 @@ def _member_type(cpp: str, member: str) -> str:
 
 def _members(cpp: str, cpp_type: str) -> list[str]:
     return re.findall(rf"^\s*{re.escape(cpp_type)}\s+(\w+);$", cpp, re.M)
+
+
+def _percentile_compute_line(cpp: str) -> str:
+    return next(
+        line for line in cpp.splitlines()
+        if "_ta_percentile_nearest_rank_" in line and ".compute(" in line
+    )
+
+
+def test_series_percentile_loop_length_uses_the_engine_series_class() -> None:
+    src = """//@version=6
+strategy("repro")
+length = input.int(20, "Length")
+float acc = 0.0
+for len = 2 to 4
+    acc += ta.percentile_nearest_rank(close, len, 50)
+plot(acc)
+"""
+    cpp = transpile(src)
+    assert _members(cpp, "pineforge::source::SeriesPercentileNearestRank")
+    line = _percentile_compute_line(cpp)
+    assert re.search(r"\.compute\([^,\n]+,\s*[^,\n]+,\s*[^)\n]+\)", line), line
+    assert "pineforge::source::ta_number(len)" in line
+
+
+def test_series_percentile_loop_counter_shadows_same_named_input() -> None:
+    src = """//@version=6
+strategy("shadowed percentile")
+length = input.int(20, "Length")
+float acc = 0.0
+for length = 2 to 4
+    acc += ta.percentile_nearest_rank(close, length, 50)
+plot(acc)
+"""
+    cpp = transpile(src)
+    line = _percentile_compute_line(cpp)
+    assert "pineforge::source::ta_number(length)" in line
+    assert 'get_input_int("Length"' not in line
+
+
+def test_series_percentile_keeps_sma_and_ema_refusals() -> None:
+    cases = (
+        (
+            "ta.sma(close, length)",
+            "PF-E5092",
+            "ta.sma",
+            "TradingView accepts a series length for ta.sma(); "
+            "PineForge does not support it yet.",
+        ),
+        (
+            "ta.ema(close, length)",
+            "PF-E5009",
+            "ta::EMA",
+            "",
+        ),
+    )
+    reason = (
+        "it is neither a compile-time constant nor derived from an input, so "
+        "PineForge cannot size the indicator buffer."
+    )
+    for call, code, name, suffix in cases:
+        src = (
+            '//@version=6\nstrategy("refused loop length")\n'
+            "float out = 0.0\n"
+            "for length = 2 to 4\n"
+            f"    out += {call}\n"
+            "plot(out)\n"
+        )
+        with pytest.raises(CompileError) as caught:
+            transpile(src)
+        diagnostic = caught.value.diagnostics[0]
+        assert diagnostic.code == code
+        expected = (
+            f"Unsupported TA constructor length 'length' for {name}: {reason}"
+        )
+        if suffix:
+            expected += f" {suffix}"
+        assert diagnostic.message == expected
 
 
 def test_series_length_extremes_take_the_series_classes() -> None:
@@ -372,9 +452,11 @@ hi = ta.highest(high, len)
 r = ta.rsi(close, fast)
 [st, dir] = ta.supertrend(3.0, len)
 e = request.security(syminfo.tickerid, "60", ta.ema(close, len))
+p_const = ta.percentile_nearest_rank(close, 9, 50)
+p_input = ta.percentile_nearest_rank(close, len, 50)
 if up and close > lo
     strategy.entry("L", strategy.long)
-plot(hi + r + st + dir + e)
+plot(hi + r + st + dir + e + p_const + p_input)
 """
 
 
