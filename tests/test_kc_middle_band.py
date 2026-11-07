@@ -60,5 +60,5 @@ def test_kc_middle_warms_without_changing_standalone_ema() -> None:
 def test_standalone_ema_warmup_gap_is_a_note() -> None:
     diagnostics = transpile_full(_PINE)["diagnostics"]
     assert any(d.code == "PF-W1505" and d.level == Level.NOTE
-               and "ta.ema initial warmup is approximated" in d.message
+               and "first value" in d.message
                for d in diagnostics)
