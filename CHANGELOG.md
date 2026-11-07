@@ -66,6 +66,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - Strategy orders with omitted `qty` use the default size; integer `switch` and
   `if` results with an explicit `na` arm preserve NaN, and
   `strategy.risk.allow_entry_in` retains input-dependent directions (#292).
+- `strategy.risk.max_drawdown()` and `strategy.risk.max_intraday_loss()` called with `type = strategy.percent_of_equity`, or with `strategy.percent_of_equity` held in a variable, apply the percentage limit as the positional form does. The keyword and variable forms were read as an amount of account currency, so a limit of 10 halted trading early (#325, #326, #327). Regenerate C++ and relink strategies.
+- `max_bars_back(series, DEPTH)` with a `const int` `DEPTH` keeps that many bars of history for the series, as the literal depth does. The named constant was ignored, so history reads beyond the default depth returned `na` (#326, #327). Regenerate C++ and relink strategies.
+- A `var` array with a non-empty initializer declared inside an `if` block is initialized when the declaration is first reached, as in TradingView. The generated code reset it to empty and did not apply the initializer, so `array.size` and element reads differed (#333, #327). Regenerate C++ and relink strategies.
 - Methods whose first parameter is never referenced in their body now report `PF-E5087` at that parameter, with a hint to use it or declare a function instead.
 - Consumed `if`/`switch` selections mixing value and void arms now report located `PF-E5088`; requested void selections keep `PF-E3102`.
 - A `request.security` payload that reads the history of an expression inside a loop, or at several reads of one helper parameter, commits one history slot per requested bar holding the last evaluation of that bar, as TradingView does; every read of the bar sees the history before this bar. Regenerate C++ and relink strategies.
