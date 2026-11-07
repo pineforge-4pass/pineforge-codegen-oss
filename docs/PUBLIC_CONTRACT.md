@@ -476,12 +476,106 @@ are for advanced inspection and are not part of this 1.0 stability promise.
 ```python
 transpile(pine_source: str, *, check_support: bool = True,
           filename: str = "<input>",
-          libraries: Mapping[str, str] | None = None) -> str
+          libraries: Mapping[str, str] | None = None,
+          history_capacity: int | None = None,
+          drawing_capacity: int | None = None) -> str
 
 transpile_full(pine_source: str, *, check_support: bool = True,
                filename: str = "<input>",
-               libraries: Mapping[str, str] | None = None) -> dict
+               libraries: Mapping[str, str] | None = None,
+               history_capacity: int | None = None,
+               drawing_capacity: int | None = None) -> dict
 ```
+
+The same keyword-only capacity options are accepted by
+`transpile_with_request_inventory()` and root `gate/glue.py`.
+The JavaScript worker template in `scripts/worker-template.mjs` passes only
+the source and does not forward either option.
+`history_capacity` is an exact integer of at least 2 or `None`;
+`drawing_capacity` is an exact integer of at least 1 or `None`.
+Booleans, floating values, strings and smaller integers raise `PF-E5094`
+with `option` and `minimum` arguments.
+
+History retention depends on the source and these parameters, never the
+number of bars or trades. With `history_capacity=None`, existing Pine
+`max_bars_back` directives and literal-sized stores keep their capacities.
+Without a directive, a bare history with a statically proven offset exceeding
+its former 500-slot capacity retains offset plus one slots, within the existing
+evaluated-offset range. A nonconstant offset without a directive selects
+`DEFAULT_DYNAMIC_HISTORY_CAPACITY`, defined once in `codegen/capacities.py`,
+whose value is **5000**, this package's default retention for a script that
+reads history at an offset it does not state as a constant.
+This is a retention default, not a new refusal threshold: at default settings,
+reads beyond the retained capacity preserve their existing missing-value
+behavior, including scalar `na`. The inferred sizes apply to bare series and to
+requested-helper map entries. Collection snapshots and lazy held-source
+histories keep the size they had before: a collection snapshot its largest
+literal offset plus one (at least 2) or, for a nonconstant offset, the depth of
+a `max_bars_back` directive or the engine's 500-slot default; a lazy held-source
+history its literal length plus one or, for a runtime length, the 500-slot
+default. A lazily evaluated call with a literal length, such as the
+`ta.roc(close, 200)` of `close > open and ta.roc(close, 200) > 0`, keeps the
+201-slot store its own length requires: `history_capacity` neither shrinks nor
+refuses it.
+
+A collection-snapshot read at a nonconstant offset also counts as a
+nonconstant offset for this inference, although snapshots have their own
+rings: without a Pine directive, bare series then retain 5000 slots instead
+of 500, increasing their retained sample storage tenfold. A constant
+collection-snapshot read does not raise bare-series retention.
+
+An explicit `history_capacity=N` replaces fallback retention in bare series,
+collection snapshots and numeric/string requested-helper histories. Existing
+Pine directives and literal-sized stores are never reduced by a smaller
+fallback. With no larger Pine directive, every collection-snapshot ring has
+N slots under the option even when its reads use small literal offsets.
+A statically proven offset at or above N raises `PF-E5095` with
+`offset` and `capacity` arguments. A nonconstant offset is evaluated once,
+checked by the existing 0..10000 guard before narrowing, then compared with N
+before the history read. An offset at or above N stops the run with the
+existing engine code `pine_runtime_limit` and typed arguments
+`{"limit":"max_bars_back","max":N}`. Its English text reports the evaluated
+offset and selected capacity; the code and arguments identify the failure.
+The stop's `max` is the operator's slot count N, so a read at offset k fits
+when k < N, and its text has no `Error on bar` prefix.
+The same rule covers collection snapshots, requested histories, numeric/string
+helper-map reads and the `length-1` address of runtime held-source histories.
+An in-capacity read during warmup retains its existing missing-value behavior.
+Generated code uses the existing `_PF_LIMIT_STOP` compatibility shim; older
+engines without coded failures retain its `std::length_error` fallback.
+An integer outside the native Series constructor's signed-int domain raises
+`PF-E5097` with a `capacity` argument instead of emitting a narrowing conversion.
+There is no additional upper bound on `history_capacity` within that native
+integer range; memory grows with N times the number of retained series.
+
+When a Pine `max_bars_back=D` directive exceeds the operator's N, stores keep
+D slots, but both offset checks still use N alone: a constant offset at or
+above N raises `PF-E5095`, and a nonconstant offset at or above N stops at
+runtime with `max=N`, even if it is smaller than D.
+
+Capacity inference scans the whole script, including functions that are never
+called, so a subscript in an uncalled function can raise inferred retention
+or, with an option, cause the constant-offset refusal.
+
+Pine's `max_lines_count`, `max_boxes_count` and `max_labels_count` remain
+collection targets, defaulting to 50. Their existing collection timing and
+held-handle rules are unchanged. `drawing_capacity` denotes an operator bound
+on live drawings per collected type, after that collection, including the new
+drawing. When a line, box or label creation or copy leaves its kind's live count
+greater than N, the run stops with `pine_runtime_limit` and typed arguments
+`{"limit":"live_drawings","max":N}`. Each kind has its own count; linefills
+are outside the bound. Reaching a Pine declaration's count remains ordinary
+TradingView collection, not an error. Pinned drawings retain their existing
+protection and still contribute to the live count.
+
+Typed drawing overflow requires the paired engine release whose runtime-limit
+catalog includes `live_drawings`; on an older engine the drawing overflow is
+not typed as this limit. `None` preserves existing arenas and collection.
+An integer outside the helper's signed int64 maximum argument domain raises
+`PF-E5098` with a `capacity` argument before C++ is emitted. Those arenas
+currently use the signed 32-bit ID-domain maximum as their legacy storage
+argument; this is not a true unlimited arena policy. Replacing it requires
+an explicit engine policy, including physical reclamation of deleted records.
 
 `transpile()` returns one complete C++ source string. It raises
 `pineforge_codegen.errors.CompileError` for a located parse, support, analysis,
@@ -657,7 +751,9 @@ An explicit title that is not a compile-time string constant raises
 
 ## Pyodide and gate/glue JSON
 
-`gate/glue.py` defines `transpile_json(source: str) -> str`. It returns a
+`gate/glue.py` defines
+`transpile_json(source: str, *, history_capacity: int | None = None, drawing_capacity: int | None = None) -> str`.
+It returns a
 serialized JSON **string**. The shipped Pyodide worker runs that glue. Its
 success and compile-error envelopes are:
 

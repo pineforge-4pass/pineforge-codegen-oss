@@ -460,8 +460,8 @@ def test_max_bars_back_takes_max_across_directives():
 
 
 def test_no_max_bars_back_leaves_series_at_engine_default():
-    """Absent the directive, Series declarations keep the bare form (engine
-    default 500) so directive-free output is byte-identical to before."""
+    """Without a directive or option, small constant offsets keep bare Series
+    declarations (engine default 500); larger or nonconstant offsets infer retention."""
     cpp = transpile('//@version=6\nstrategy("T")\nx = close[10]\nplot(x)\n')
     assert "Series<double> _s_close;" in cpp
     assert "_s_close{" not in cpp
