@@ -278,8 +278,14 @@ class CollectionHistoryEmitter:
     def _collection_history_capacity(self, variable) -> str:
         """The ring's size: the largest literal offset read plus one, or the
         Series default (a ``max_bars_back`` cap) for a dynamic offset."""
+        if self._history_capacity is not None:
+            capacity = max(self._resolved_history_capacity(), variable.capacity or 0)
+            return f"{{{capacity}}}"
         if variable.capacity is None:
-            return self._series_decl_suffix()
+            # Existing collection constructors retain their own default;
+            # inference for bare scalar rings does not resize snapshots.
+            cap = self._max_bars_back_cap
+            return f"{{{cap}}}" if cap else ""
         return f"{{{max(2, variable.capacity)}}}"
 
     def _emit_collection_history_helper(self, lines: list[str]) -> None:
@@ -377,6 +383,7 @@ class CollectionHistoryEmitter:
     def _collection_history_offset_cpp(self, node) -> str:
         offset = literal_offset(node)
         if offset is not None:
+            self._check_history_capacity_offset(offset, node.index)
             return str(offset)
         return self._history_offset_cpp(self._visit_expr(node.index), node.index)
 
