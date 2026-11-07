@@ -1,0 +1,222 @@
+name: Engine main touched
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+  workflow_dispatch:
+    inputs:
+      codegen_base_ref:
+        description: "Full public codegen base commit SHA (diff uses merge-base...head)"
+        required: true
+        type: string
+      codegen_head_ref:
+        description: "Full public codegen commit SHA to test, independently of this workflow definition"
+        required: true
+        type: string
+      workers:
+        description: "Numeric build and pytest parallelism, at most 8"
+        type: choice
+        default: "8"
+        options: ["1", "2", "4", "8"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-main-touched-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: Native changes decision
+    runs-on: ubuntu-24.04
+    outputs:
+      native: ${{ steps.plan.outputs.native }}
+      base: ${{ steps.plan.outputs.base }}
+      head: ${{ steps.plan.outputs.head }}
+      definition: ${{ steps.plan.outputs.definition }}
+      workers: ${{ steps.plan.outputs.workers }}
+    steps:
+      - name: Check out the workflow definition independently of tested codegen
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          persist-credentials: false
+      - name: Check out the existing base admission policy
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: policy
+          persist-credentials: false
+      - name: Bind the live same-repository PR and write-authorized actors
+        if: github.event_name == 'pull_request'
+        env:
+          REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || '' }}
+          HEAD_IS_FORK: ${{ toJSON(github.event.pull_request.head.repo.fork) }}
+          DRAFT: ${{ toJSON(github.event.pull_request.draft) }}
+          BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login || '' }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor || '' }}
+          ACTOR: ${{ github.actor || '' }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I policy/tests/test_gke_pr_admission.py --identity
+      - name: Authorize controlled proof dispatch and immutable inputs
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          BASE: ${{ inputs.codegen_base_ref }}
+          HEAD: ${{ inputs.codegen_head_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$BASE" =~ ^[0-9a-f]{40}$ && "$HEAD" =~ ^[0-9a-f]{40}$ ]]
+          for identity in "$ACTOR" "$TRIGGERING_ACTOR"; do
+            [[ -n "$identity" ]]
+            case "$identity" in
+              'dependabot[bot]'|'pineforge-app[bot]') ;;
+              *)
+                permission=$(gh api "repos/$REPO/collaborators/$identity/permission" --jq .permission)
+                case "$permission" in admin|maintain|write) ;; *) exit 1 ;; esac
+                ;;
+            esac
+          done
+      - name: Check out actual PR head or explicit proof head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || inputs.codegen_head_ref }}
+          fetch-depth: 0
+          path: candidate
+          persist-credentials: false
+      - name: Decide native work from the actual Git diff
+        id: plan
+        env:
+          CODEGEN_BASE: ${{ github.event.pull_request.base.sha || inputs.codegen_base_ref }}
+          CODEGEN_HEAD: ${{ github.event.pull_request.head.sha || inputs.codegen_head_ref }}
+          DEFINITION_SHA: ${{ github.workflow_sha }}
+          WORKERS: ${{ inputs.workers || '8' }}
+        run: |
+          set -euo pipefail
+          python3 workflow/scripts/ci_engine_main_touched.py plan \
+            --repo candidate --base "$CODEGEN_BASE" --head "$CODEGEN_HEAD" \
+            --definition "$DEFINITION_SHA" --workers "$WORKERS" \
+            --out "$RUNNER_TEMP/engine-main-decision"
+      - name: Retain diff, selection and skip explanation
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: engine-main-decision-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/engine-main-decision
+          if-no-files-found: warn
+
+  native:
+    name: Engine main native touched tests and smoke
+    needs: [changes]
+    if: needs.changes.outputs.native == 'true'
+    runs-on: ubuntu-24.04
+    env:
+      PYTHONHASHSEED: "0"
+      CXX: /usr/bin/g++
+      PF_CI_LABELS: '["ubuntu-24.04"]'
+    steps:
+      - name: Check out the exact workflow definition
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.changes.outputs.definition }}
+          path: workflow
+          persist-credentials: false
+      - name: Check out the exact tested codegen head with its existing tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.changes.outputs.head }}
+          fetch-depth: 0
+          path: candidate
+          persist-credentials: false
+      - name: Resolve public engine MAIN at job runtime
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pineforge-4pass/pineforge-engine
+          ref: main
+          path: engine
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Retain the immutable selection before dependency installation
+        env:
+          CODEGEN_BASE: ${{ needs.changes.outputs.base }}
+          CODEGEN_HEAD: ${{ needs.changes.outputs.head }}
+          DEFINITION_SHA: ${{ needs.changes.outputs.definition }}
+          WORKERS: ${{ needs.changes.outputs.workers }}
+        run: |
+          set -euo pipefail
+          python workflow/scripts/ci_engine_main_touched.py plan \
+            --repo candidate --base "$CODEGEN_BASE" --head "$CODEGEN_HEAD" \
+            --definition "$DEFINITION_SHA" --workers "$WORKERS" \
+            --out "$RUNNER_TEMP/engine-main-native"
+      - name: Install the tested checkout and its test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install -e "./candidate[dev]" \
+            2>&1 | tee "$RUNNER_TEMP/engine-main-native/install.log"
+      - name: Build fresh engine main, require native inputs, execute selected tests
+        env:
+          CODEGEN_BASE: ${{ needs.changes.outputs.base }}
+          CODEGEN_HEAD: ${{ needs.changes.outputs.head }}
+          DEFINITION_SHA: ${{ needs.changes.outputs.definition }}
+          WORKERS: ${{ needs.changes.outputs.workers }}
+        run: |
+          set -euo pipefail
+          python workflow/scripts/ci_engine_main_touched.py run \
+            --repo candidate --base "$CODEGEN_BASE" --head "$CODEGEN_HEAD" \
+            --definition "$DEFINITION_SHA" --workers "$WORKERS" --engine engine \
+            --out "$RUNNER_TEMP/engine-main-native"
+      - name: Retain native identity, build and pytest logs, nodeids and JUnit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: engine-main-native-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/engine-main-native
+          if-no-files-found: warn
+
+  result:
+    name: engine-main-touched
+    needs: [changes, native]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Require native execution or the explicit diff-based skip
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        shell: python3 {0}
+        run: |
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS"])
+          decision = needs["changes"]
+          native = decision.get("outputs", {}).get("native")
+          allowed = decision["result"] == "success" and (
+              (native == "true" and needs["native"]["result"] == "success")
+              or (native == "false" and needs["native"]["result"] == "skipped")
+          )
+          message = (
+              "Native touched tests and smoke completed"
+              if allowed and native == "true"
+              else "SKIP native: actual diff has no native integration inputs"
+              if allowed else "Native integration or changes decision failed/refused"
+          )
+          print(message)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
+              stream.write(message + "\n")
+          sys.exit(0 if allowed else 1)
