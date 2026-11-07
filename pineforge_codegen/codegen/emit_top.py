@@ -690,17 +690,6 @@ class TopLevelEmitter:
         else:
             lines.append("        (void)bars; (void)n; (void)allow_precalculation;")
         lines.append("    }")
-        if getattr(self, "_metrics_plain_certified", False):
-            lines.extend([
-                "",
-                "    void present_report(ReportC* out) const final override {",
-                "        pineforge::source::PineStrategyHost::present_report(out);",
-                "    }",
-                "    bool report_presenter_supports_non_full() const noexcept"
-                " final override {",
-                "        return false;",
-                "    }",
-            ])
 
     def _emit_handle_checkpoint_traits(self, lines: list[str]) -> None:
         """Emit recursive rollback adapters for shared-ID collection state.

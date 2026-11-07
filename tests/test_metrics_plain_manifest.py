@@ -34,8 +34,12 @@ def test_close_only_stateless_source_emits_the_versioned_plain_contract():
         "void prepare_script_run(const Bar* bars, int n, "
         "bool allow_precalculation) final override"
     ) in cpp
-    assert "void present_report(ReportC* out) const final override" in cpp
-    assert "bool report_presenter_supports_non_full() const noexcept final override" in cpp
+    strategy_start = cpp.index("class GeneratedStrategy :")
+    strategy_end = cpp.index('\nextern "C" {', strategy_start)
+    strategy = cpp[strategy_start:strategy_end]
+    assert "void present_report(ReportC* out) const final override" not in strategy
+    assert "report_presenter_supports_non_full() const noexcept" not in strategy
+    assert "PineStrategyHost::present_report" not in strategy
     assert re.search(
         r"std::int32_t strategy_metrics_only_capability_v1\(void\) noexcept",
         cpp,
@@ -78,7 +82,7 @@ def test_plain_contract_guard_is_outside_the_c_abi_block_and_ordered():
         ("value = timenow\n", "timenow"),
     ],
 )
-def test_each_excluded_family_keeps_the_legacy_emitter_and_reports_reason(
+def test_each_excluded_family_keeps_the_legacy_emitter_and_keeps_reason_internal(
     mutation: str, reason: str
 ):
     if reason == "runtime calculation overrides":
@@ -96,7 +100,16 @@ def test_each_excluded_family_keeps_the_legacy_emitter_and_reports_reason(
     cpp = transpile(source)
     assert "strategy_metrics_only_capability_v1" not in cpp
     assert "_pf_metrics_plain_manifest_v1" not in cpp
-    assert reason in diagnostics(source)
+    diagnostic_text = diagnostics(source)
+    if reason == "timenow":
+        assert (
+            diagnostic_text.count(
+                "timenow diverges from TradingView semantics in PineForge."
+            ) == 1
+        )
+        assert "metrics-only subset S rejects timenow" not in diagnostic_text
+    else:
+        assert f"metrics-only subset S rejects {reason}" not in diagnostic_text
 
 
 @pytest.mark.parametrize(

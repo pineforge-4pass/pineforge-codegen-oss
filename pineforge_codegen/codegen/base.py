@@ -5251,19 +5251,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._metrics_plain_certified,
             self._metrics_plain_rejection_reasons,
         ) = _capabilities.metrics_plain_predicate(self)
-        if self._metrics_plain_rejection_reasons:
-            location = getattr(self.ctx.ast, "loc", None) or SourceLocation(
-                file=self.ctx.filename, line=1, col=1, end_col=1
-            )
-            self.ctx.diagnostics.extend(
-                Diagnostic(
-                    level=Level.NOTE,
-                    phase=Phase.CODEGEN,
-                    location=location,
-                    message=reason,
-                )
-                for reason in self._metrics_plain_rejection_reasons
-            )
 
         from .order_shapes import HostReadLines
         lines: list[str] = HostReadLines(self._order_shape_host_reads)

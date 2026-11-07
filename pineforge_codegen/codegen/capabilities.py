@@ -78,6 +78,19 @@ _METRICS_PLAIN_DEFAULTS = {
 }
 
 
+def _ast_inventory(emitter):
+    """Share one ordered inventory of node references and depths per emitter.
+
+    Receipt construction still reads the final emitter facts; only the
+    lowered AST walk is cached.
+    """
+    inventory = getattr(emitter, "_capabilities_ast_inventory", None)
+    if inventory is None:
+        inventory = tuple(iter_ast_nodes(emitter.ctx.ast))
+        emitter._capabilities_ast_inventory = inventory
+    return inventory
+
+
 def _metrics_plain_call_kind(emitter, node):
     name, namespace = emitter._resolve_callee(node.callee)
     return namespace, name
@@ -92,12 +105,13 @@ def _metrics_plain_order_has_price_term(node) -> bool:
 
 
 def metrics_plain_predicate(emitter) -> tuple[bool, tuple[str, ...]]:
-    """Return the pure, fail-closed decision for the metrics-only subset S.
+    """Return the fail-closed decision for the metrics-only subset S.
 
     This deliberately consumes the analyzer/codegen inventories that are
-    already frozen before C++ emission.  It does not inspect generated text
-    and it never changes the emitter.  A missing inventory is an unknown
-    fact, so it is a rejection rather than an empty capability.
+    already frozen before C++ emission, sharing the per-emitter AST inventory
+    with late capability receipts.  It does not inspect generated text or
+    alter lowered facts.  A missing inventory is an unknown fact, so it is
+    a rejection rather than an empty capability.
     """
     reasons: list[str] = []
     seen: set[str] = set()
@@ -229,7 +243,7 @@ def metrics_plain_predicate(emitter) -> tuple[bool, tuple[str, ...]]:
         reject("metrics-only subset S rejects stateful lowered members")
 
     order_nodes = []
-    for node, _depth in iter_ast_nodes(ast):
+    for node, _depth in _ast_inventory(emitter):
         if isinstance(node, (VarDecl, Assignment, TupleAssign)):
             reject("metrics-only subset S rejects authored variables")
         if isinstance(node, (FuncDef, MethodDef, TypeDecl, EnumDecl)):
@@ -377,7 +391,7 @@ def capabilities_documents(emitter) -> tuple[str, str]:
     recorded = False
     order_nodes = []
     order_settings = {}
-    for node, _depth in iter_ast_nodes(emitter.ctx.ast):
+    for node, _depth in _ast_inventory(emitter):
         if isinstance(node, StrategyDecl):
             arguments = strategy_arguments(node)
             resolved = (node.annotations or {}).get(DECLARATION_VALUES, {})
