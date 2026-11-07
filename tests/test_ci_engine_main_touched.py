@@ -82,10 +82,57 @@ def test_malformed_diff_cannot_become_a_cheap_skip(raw):
         ci.parse_diff(raw)
 
 
-def test_deleted_test_keeps_smoke_and_records_why_it_cannot_collect():
-    result = ci.select_tests(_change("tests/test_removed.py", "D"), _inventory())
-    assert result["native"] and set(ci.SMOKE) <= set(result["selected"])
-    assert result["excluded"][0]["nodeid"] == "tests/test_removed.py"
+def test_removed_native_target_survives_but_removed_pure_test_does_not_trigger():
+    baseline = _inventory()
+    baseline["tests/test_pure.py"] = {
+        "imports": {"pineforge_codegen.timeframe_token_cli"},
+        "cases": {"test_json": {"native": False, "private": [], "corpus": False}},
+    }
+    remaining = {path: entry for path, entry in baseline.items()
+                 if path not in {"tests/test_drawing.py", "tests/test_pure.py"}}
+    inventory = ci.merge_inventory(baseline, remaining)
+    native = ci.select_tests(_change("tests/test_drawing.py", "D"), inventory)
+    pure = ci.select_tests(_change("tests/test_pure.py", "D"), inventory)
+    assert native["native"] and "tests/test_drawing.py::test_handles" in native["selected"]
+    assert pure["native"] is False and pure["selected"] == []
+
+
+@pytest.mark.parametrize("path", [
+    "docs/usage.md", "README.md", "tests/test_license_entity.py",
+    "pineforge_codegen/request_feed_inventory.py",
+    "pineforge_codegen/timeframe_token_cli.py",
+])
+def test_non_native_changes_have_an_explicit_empty_selection(path):
+    result = ci.select_tests(_change(path), _inventory())
+    assert result["native"] is False and result["selected"] == []
+
+
+def test_docs_main_push_runs_the_same_smoke_that_docs_pr_skips():
+    changes = _change("docs/PUBLIC_CONTRACT.md")
+    pr = ci.select_tests(changes, _inventory(), "pull_request")
+    main = ci.select_tests(changes, _inventory(), "push_main")
+    assert pr["native"] is False and pr["selected"] == []
+    assert main["native"] is True and set(ci.SMOKE) <= set(main["selected"])
+    assert main["triggers"] == [] and main["needs_corpus"] is False
+
+
+def test_candidate_cannot_erase_native_calls_or_authorize_a_private_exemption():
+    baseline = _inventory()
+    candidate = {
+        "tests/test_drawing.py": {
+            "imports": set(),
+            "cases": {
+                "test_handles": {
+                    "native": False, "private": ["private_fixture"], "corpus": False,
+                    "historical": True,
+                },
+            },
+        },
+    }
+    merged = ci.merge_inventory(baseline, candidate)
+    result = ci.select_tests(_change("tests/test_drawing.py"), merged)
+    assert result["native"] and "tests/test_drawing.py::test_handles" in result["selected"]
+    assert result["excluded"] == []
 
 
 def test_touched_native_test_is_selected_without_a_product_module_change():
@@ -227,6 +274,7 @@ def test_audit_records_actual_assertion_failures_without_turning_them_green():
     assert result["call_outcomes"] == {"failed": 2}
     assert result["collected_count"] == result["executed_count"] == 2
     assert result["audit_errors"] == []
+    assert _audit("failed").result([ci.CONSTRUCTION], 0)["audit_errors"]
 
 
 def test_empty_or_partial_collection_cannot_claim_smoke():
@@ -245,3 +293,77 @@ def test_git_read_failure_propagates_instead_of_returning_an_empty_diff(monkeypa
     with pytest.raises(subprocess.CalledProcessError) as error:
         ci.git(Path("."), "rev-parse", "HEAD")
     assert error.value.returncode == 128
+
+
+def test_plan_uses_real_base_head_diffs_and_keeps_the_definition_separate(tmp_path, monkeypatch):
+    """A docs head and an emitter head produce different plans from one base."""
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    repo = tmp_path / "candidate"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(repo), *args], text=True,
+        ).strip()
+
+    git("init", "--quiet")
+    git("config", "user.name", "selector unit")
+    git("config", "user.email", "selector@example.invalid")
+    for node in ci.SMOKE:
+        path, name = node.split("::")
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as stream:
+            stream.write(
+                f"def {name}():\n"
+                "    raise AssertionError('selection data must never execute')\n"
+            )
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "base fixture")
+    base = git("rev-parse", "HEAD")
+    # Only driver identity is relocated; no candidate code is imported.
+    monkeypatch.setattr(ci, "__file__", str(repo / "scripts/ci_engine_main_touched.py"))
+    (repo / "README.md").write_text("real docs diff\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "docs fixture")
+    docs_head = git("rev-parse", "HEAD")
+    docs = ci.plan(repo, base, docs_head, docs_head, 2, tmp_path / "docs")
+    assert docs["native"] is False and docs["selected"] == []
+    docs_push = ci.plan(repo, base, docs_head, docs_head, 2, tmp_path / "docs-push", "push_main")
+    assert docs_push["native"] and docs_push["source_event"] == "push_main"
+    assert docs_push["codegen_sha"] == docs_head and docs_push["codegen_base_sha"] == base
+    assert docs_push["diff_kind"] == "before_after"
+    assert docs_push["plan_sha256"] != docs["plan_sha256"]
+    emitter = repo / "pineforge_codegen/codegen/factory.py"
+    emitter.parent.mkdir(parents=True)
+    emitter.write_text("# emitter diff data, never imported\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "--quiet", "-m", "emitter fixture")
+    native_head = git("rev-parse", "HEAD")
+    advanced_branch = git("symbolic-ref", "--short", "HEAD")
+    # Native candidates do not choose the trusted definition identity.
+    definition_repo = tmp_path / "definition"
+    subprocess.run(["git", "clone", "--quiet", str(repo), str(definition_repo)], check=True)
+    subprocess.run(["git", "-C", str(definition_repo), "checkout", "--quiet", docs_head], check=True)
+    monkeypatch.setattr(ci, "__file__", str(definition_repo / "scripts/ci_engine_main_touched.py"))
+    native = ci.plan(repo, base, native_head, docs_head, 2, tmp_path / "native")
+    assert native["native"] and set(ci.SMOKE) <= set(native["selected"])
+    assert native["workflow_definition_sha"] == docs_head
+    assert native["codegen_sha"] == native_head
+    assert native["plan_sha256"] != docs["plan_sha256"]
+    assert native["changes"] != docs["changes"]
+    # The branch can move after the event; the already computed pushed head
+    # remains a separate immutable input rather than a fresh main lookup.
+    assert docs_push["codegen_sha"] != native_head
+    git("checkout", "--quiet", "--detach", docs_head)
+    retained = ci.plan(repo, base, docs_head, docs_head, 2,
+                       tmp_path / "retained-event", "push_main")
+    assert retained["codegen_sha"] == docs_head
+    assert git("rev-parse", advanced_branch) == native_head
+    git("checkout", "--quiet", "--detach", native_head)
+    initial = ci.plan(repo, "0" * 40, native_head, docs_head, 2,
+                      tmp_path / "initial", "push_main")
+    assert initial["native"] and initial["codegen_base_tree"] is None
+    assert all(change["status"] == "A" for change in initial["changes"])

@@ -1,70 +1,97 @@
-# Engine main touched integration
+# Required engine main touched integration
 
-`.github/workflows/engine-main-touched.yml` adds an ordinary
-`engine-main-touched` job check. Every PR to `main` gets a visible changes
-decision, without an event path filter. A documentation-only diff records its
-base/head and reason, visibly skips the native job, and completes the result
-job as an explicit native skip.
+This describes the source candidate after staged adoption, not installation,
+hosted proof or review acceptance.
 
-PR admission reuses `tests/test_gke_pr_admission.py --identity` from the PR's
-base commit: an open, non-draft, same-repository, non-fork PR and authorized
-author, actor and rerunner are required. Manual proof dispatch checks actor and
-rerunner write permission and requires two immutable, full 40-hex public
-codegen commit refs. Neither route uses secrets, OIDC, cached builds or
-persisted checkout credentials. All jobs use standard `ubuntu-24.04`.
+The canonical PR entry remains `gke-pr.yml` / `pull_request_target`. Its trusted
+base admission binds the live same-repository, non-fork, non-draft PR, author,
+actor, rerunner and immutable base/head. The new `engine-main` prerequisite calls
+`engine-main-touched.yml` from that same trusted commit. Only the existing
+`result` job writes `gate`; it still requires all previous prerequisites and
+rechecks live identity before publishing to the event head.
 
-## Selection contract
+The shared workflow contains `changes`, `native` and a dispatch-only `publish`.
+`workflow_dispatch` supplies a write-authorized public-input proof route through
+those same jobs and the same driver. It can test a draft/test branch's immutable
+public commits, but grants no PR admission or status-writing authority.
+There is no separate advisory aggregate to configure as required.
 
-The definition checkout supplies `scripts/ci_engine_main_touched.py`; the
-separate candidate checkout supplies product code and existing tests. The
-driver verifies both checkout HEADs. Normal PRs test `pull_request.head.sha`,
-never the synthetic merge checkout. The definition SHA and tree are recorded
-separately from the tested codegen SHA and tree.
+It also handles **every push to main**, with no path filter or concurrency
+group. Each event tests its exact `after` SHA against its `before` tree even
+after main advances again. Push admission binds
+`github.sha == event.after == workflow_sha` without querying a later main tip.
+Docs-only main pushes still build ENGINE MAIN and execute smoke. Normal native
+job check runs therefore attach to the actual pushed SHA, including a merge.
 
-The driver reads `git diff --name-status -z --find-renames BASE...HEAD`.
-Deleted paths and both sides of renames participate. Diff/read/parse errors
-fail the decision. Native triggers are:
+## Selection and identity
 
-- `pineforge_codegen/**`, including all `codegen/emit_*`, checked settings,
-  constructors and future factory modules;
-- C/C++ headers, sources and template suffixes anywhere, including the existing
-  `tests/golden/matrix_eigen_pca.cpp`;
-- `tests/_compile.py`, `tests/_e2e.py`, `scripts/gen_host_members.py`, the new
-  workflow/driver/unit test, and changed tests calling a native harness;
-- removed test files, conservatively, since the head cannot classify their
-  former native dependencies.
+The trusted definition supplies `scripts/ci_engine_main_touched.py`. The
+candidate checkout supplies Git objects as data during selection; its Python,
+actions and scripts are never executed by `changes`. The driver verifies its
+own definition SHA and the tested checkout SHA independently.
 
-Selected targets are explicit function or class-method selectors, rather than
-the whole suite: changed test files, tests importing a changed module, test
-filenames matching its underscore-delimited topic, the golden tests for changed
-golden C++, and lifecycle tests for constructor emitter changes. Static AST
-discovery follows local helpers and fixtures to identify native and input
-requirements. This is a reviewable mapping, not a complete impact graph.
-Unmatched emitter modules still get the mandatory smoke.
+For PRs, `git diff --name-status -z --find-renames BASE...HEAD` retains additions,
+deletions and both rename paths. The diff's merge-base inventory is merged with
+head data: head data can add targets or requirements, but cannot erase native
+calls, remove base targets, or invent non-public exclusions. A removed native
+test stays selected and fails collection rather than silently losing coverage.
+A removed pure unit test alone does not require native work.
 
-Every native run includes these existing, unchanged seams:
+Native paths include:
 
-- checked construction's original error, both `legacy=False` and `legacy=True`;
-- minimal strategy compilation;
-- checked-settings metadata/exception wrapper emission;
-- checked-settings values and receipt at runtime, with its existing optimization
-  parameters.
+- `pineforge_codegen/codegen/**` and `analyzer/**`, including every `emit_*`,
+  checked-settings, factory and creation path;
+- explicitly listed shared grammar, typing, binding, diagnostic and emission
+  stages, plus unknown product modules conservatively;
+- C/C++ sources, headers and templates, including generated golden C++;
+- the native compile/replay/legacy-C++ harnesses, host-member generator, native
+  CI controls, and touched tests with native dependencies at base or head.
 
-Known non-public fixture/feed/population requirements are excluded by target
-and listed with their input names. Historical `reference_codegen` comparisons
-are listed as outside this touched integration scope. Public corpus/replay
-inputs are initialized only when selected cases require them. An unrecognized
-input requirement that causes a selected test to skip fails the run; it cannot
-be counted as native coverage.
+`request_feed_inventory.py` (metadata computed after generation) and
+`timeframe_token_cli.py` (JSON transport) are the two documented product exceptions.
+Docs and ordinary pure unit **PR** changes visibly report `SKIP native`. Missing,
+malformed or unreadable input fails selection instead of producing a skip.
+Main uses a direct before/after diff and always selects smoke, regardless of
+triggers. A zero before SHA is an initial push; a missing nonzero before object
+is fetched by that immutable SHA rather than a moving branch name.
 
-## Native bootstrap and evidence
+Selection uses explicit function or class-method selectors: changed test
+files, tests importing changed modules/harnesses, matching module topics,
+generated-golden tests and constructor/lifecycle tests. This static mapping is
+reviewable but is not a complete impact graph. Every native selection includes
+the unchanged checked-construction regression (both legacy parameters), minimal
+compile smoke, checked-settings metadata/wrappers, and checked-settings runtime
+values/receipt (both optimization parameters). No expected-outcome or old-head
+SHA is an input to the implementation.
 
-The native job checks out the public `pineforge-engine` **main branch at
-runtime**. It logs that checkout's commit/tree and resolution time and verifies
-HEAD equals its freshly fetched `origin/main`. No engine SHA or release tag is
-an authored pin.
+Known non-public cases identified at the diff baseline are excluded and listed
+by nodeid and input name. A new/unrecognized missing input causes a selected
+case to skip and fails the audit. Public historical comparison targets remain
+selected; both codegen checkouts fetch full history. Public corpus and LFS feed
+bootstrap happens only if a selected case requires it.
 
-The fresh build follows CONTRIBUTING's source-layer recipe:
+The decision records definition SHA/tree, codegen base, head SHA/tree, diff
+baseline, changed paths, targets and reasons. Its digest binds all of these plus
+worker count. The native job recomputes that plan with the same trusted driver,
+requires the digest to match, and emits `executed_plan` only after successful
+ordinary execution. The canonical result consumes the actual reusable job,
+changes and native results. An emitter diff requires native success and the
+matching executed digest. A non-native decision requires changes success,
+matching base/head/definition, a valid tree/digest and native job-level `skipped`.
+Missing outputs, wrong identities, failure, cancellation, unexpected skip or a
+native result with an unexecuted plan cannot produce a successful `gate`.
+
+## Native bootstrap
+
+All jobs use standard `ubuntu-24.04`. Native execution gets no secrets, OIDC,
+environment, Actions cache or persisted checkout credentials. It checks out
+public `pineforge-engine` **main at runtime**, verifies HEAD against the freshly
+fetched `origin/main`, and records engine SHA/tree separately from codegen and
+the workflow definition. This forward integration is separate from exact
+release pairing.
+
+The driver installs only pytest/xdist and performs a fresh Release/source-layer
+build:
 
 ```sh
 cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Release \
@@ -73,74 +100,138 @@ cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Release \
 cmake --build engine/build --parallel 8
 ```
 
-The same numeric worker parameter drives build and pytest, restricted to 1–8;
-dispatch offers 1, 2, 4 and 8, and PRs use 8. No authored job time limit exists.
-Preflight requires public engine and checked-settings headers, the real
-`build/include/pineforge/version.h`, a nonempty static runtime archive, Eigen
-and a native compiler. A compiler check also requires the settings API macro,
-so the existing regression's guarded assertions cannot silently disappear.
+One numeric worker parameter, restricted to 1–8, drives both build and pytest.
+PRs use 8; dispatch offers 1, 2, 4 and 8. There is no authored job timeout.
+Before importing product code or a harness, the driver requires the real engine
+headers, generated version header, nonempty static archive, Eigen and compiler,
+then exports explicit native paths. A real compiler preflight requires the
+checked-settings API macro, keeping the regression's guarded assertions active.
 
-Before importing any tested product/harness, the driver sets
-`PINEFORGE_ENGINE_INCLUDE`, `PINEFORGE_GENERATED_INCLUDE`,
-`PINEFORGE_ENGINE_LIB`, `PINEFORGE_EIGEN_INCLUDE` and `CXX`. It verifies the
-imported codegen comes from the candidate directory. A selected corpus case
-also gets `PINEFORGE_ENGINE_CORPUS`, public strategies and a smudged public
-1m feed; missing required inputs fail.
+pytest runs the selected targets once. The audit retains nodeids and phase/call
+outcomes. Zero collection, any missing target or construction parameter, a case
+without an ordinary call, skip/xfail, or a failed phase with a zero pytest exit
+fails closed. Real build/compiler/pytest exits remain failures. Logs carry the
+three independent identities; artifacts retain selection, install/build/
+preflight/pytest logs, execution details and JUnit when execution reaches it.
+Setup failure or absent JUnit is never assertion evidence.
 
-pytest runs once for the selected targets with numeric xdist workers. The
-controller records collected nodeids, call outcomes, phases, skip/xfail
-details and its actual exit. Zero collection, a missing selected target, a
-missing construction parameter, any selected case without an ordinary call,
-or any skip/xfail fails even if pytest returns zero. A nonzero build/compiler/
-pytest exit remains nonzero; assertion failures retain pytest's exit.
+PR scope is touched+smoke. Full engine-enabled pytest, including the corpus
+gate, remains required once on the final merged `main` tree on an approved
+worker. That full-main execution is an operator obligation, not a new behavior
+silently added to `test.yml` or the old Python/Pyodide jobs.
+Every main push additionally runs this native touched+smoke job; it does not
+add another broad full-suite run.
 
-Always-uploaded decision/native artifacts contain selection reasons, excluded
-targets, selected selectors, build/preflight/pytest logs, native identity,
-actual collected nodeids and JUnit when pytest reaches execution. Setup
-failures retain the evidence produced up to that point; absence of JUnit is
-not test evidence. There are no cleanup or removal steps.
+## Historical source checks
 
-## Hosted proof requests for ROOT
+A dispatch's normal job checks belong to the newer definition commit. For
+native dispatches only, the isolated `publish` job has `contents: read`,
+`actions: read` and `checks: write` and checks out only that trusted definition.
+The reusable caller declares this permission ceiling, while the callee's
+`changes` and `native` explicitly reduce to `contents: read`. No write token
+reaches candidate Python/build/tests. PR execution never invokes publication,
+and no job here writes the `gate` status.
 
-Publish and register this workflow through the authorized CI publication path
-first. GitHub requires a dispatchable workflow to exist on the default branch;
-an unregistered branch-only file cannot provide manual proof. Once registered,
-use the same published definition ref for all three runs. These are operator
-requests, not commands executed by the source author:
+The publisher reauthorizes public inputs and reads the exact run attempt and
+completed `Engine main native` job from GitHub's API. Definition SHA, run ID,
+branch, job result and job details URL must match. Trusted changes identities,
+source event and plan must bind actual native outputs. Success additionally
+requires matching completed/executed plans, zero audit errors/pytest exit and
+both ordinary construction rows passed. An ordinary failed execution produces
+failure; setup/incomplete execution produces `action_required`; cancellation
+produces `cancelled`; missing/mismatched state refuses publication. None of
+these may become native success or claimed assertion RED.
+
+The check `engine-main-native-source` is created on the tested codegen SHA and
+read back to verify `head_sha`, conclusion and details URL. Details link the
+actual native job. Summaries report observed outcomes; no input supplies an
+expected result and no literal SHA selects one. ROOT must still read raw
+build/audit logs to establish the required two-assertion RED.
+
+## Staged source adoption
+
+Main owns admission. The final checker admits exactly the new inventory and
+pins the entire reusable workflow and native driver to the installed base
+source. It rejects omission of `engine-main`, a different call route, callee or
+implementation. This final tree deliberately contains no legacy fallback.
+
+CORE/ROOT must first install a separately reviewed bootstrap policy on `main`
+before activating the caller shape. The source-only bootstrap delta is:
+
+1. Install the final driver/checker/publisher body, but stage the shared workflow
+   without its exact two-line main `push` trigger. Main-push activation waits.
+   Keep `gke-pr.yml` byte-for-byte at the pre-integration shape. Register the
+   dispatch workflow on the default branch; verify operator routing and isolated
+   checks-write permission separately.
+2. Temporarily admit exactly two canonical inventories: the old six
+   prerequisites/result graph and the final graph including `engine-main`.
+   For the old inventory keep every original command, checkout count/ref,
+   identity env, six `result.needs`, and old reporter predicate exact.
+   For the new inventory use every final strict call/dependency/output rule.
+   No mixed graph, arbitrary job set or generic local-action exemption is valid.
+   Pin the workflow/driver body in both branches. Temporarily allow only the
+   unchanged inactive-push header with the old caller, or the exact main-only
+   push header with the new caller. No path filters, cancellation group, altered
+   body or mixed caller/push activation is admitted.
+   Test both complete shapes and mutations on approved workers.
+3. Run original PR RED, merged-main RED, fixed GREEN and docs PR SKIP using one
+   immutable published branch definition with this native implementation.
+   Obtain genuine review. Then activate the final canonical and main-push
+   workflows and replace the bootstrap checker/controls with
+   this final strict source together. The old inventory/report predicate must
+   disappear in this activation change. Publication remains CORE-controlled.
+
+The bootstrap source must preserve its original six-leg reporter only while
+the old caller is installed; otherwise it would strand old PR runs. It cannot
+be left installed after activation. This description prepares source; it
+authorizes no push, merge, bypass or branch-protection change. The scratch
+source report names the exact checkpoint paths for constructing these deltas.
+
+## Hosted proof requests
+
+GitHub must register the dispatchable workflow on the default branch first.
+A branch-only YAML file does not prove that its definition executed.
+Use the same published branch `DEFINITION_REF`, held at one immutable commit,
+for all requests:
 
 ```sh
 gh workflow run engine-main-touched.yml \
   --repo pineforge-4pass/pineforge-codegen-oss --ref DEFINITION_REF \
-  -f codegen_base_ref=099a12b622ec8e9179695c60dd191b5cb6228dc3 \
+  -f source_event=pull_request \
+  -f codegen_base_ref=8d615dd27b31acd4fe92b57be7c1811cc42ecbda \
   -f codegen_head_ref=106817c2d3838c94f19f0e1a851dfd217711c806 -f workers=8
 gh workflow run engine-main-touched.yml \
   --repo pineforge-4pass/pineforge-codegen-oss --ref DEFINITION_REF \
+  -f source_event=push_main \
+  -f codegen_base_ref=8d615dd27b31acd4fe92b57be7c1811cc42ecbda \
+  -f codegen_head_ref=8d1b254e4868a7869dd9da8b4fee2d922445b414 -f workers=8
+gh workflow run engine-main-touched.yml \
+  --repo pineforge-4pass/pineforge-codegen-oss --ref DEFINITION_REF \
+  -f source_event=push_main \
   -f codegen_base_ref=FIX_BASE_SHA -f codegen_head_ref=FIXED_HEAD_SHA -f workers=8
 gh workflow run engine-main-touched.yml \
   --repo pineforge-4pass/pineforge-codegen-oss --ref DEFINITION_REF \
-  -f codegen_base_ref=DOCS_BASE_SHA -f codegen_head_ref=DOCS_HEAD_SHA -f workers=8
+  -f source_event=pull_request \
+  -f codegen_base_ref=74fe4cd31f704178dc9a8461710970f82929e363 \
+  -f codegen_head_ref=df2b7c057b5a31edf76bd918515f339f2fa93aa4 -f workers=8
 ```
 
-All placeholders are actual published refs/commit IDs, not expected-result
-inputs. RED must show the two existing checked-construction assertion failures
-after successful build/preflight, not setup or collection failure. GREEN must
-show ordinary execution of those same cases from the separately fixed head.
-SKIP must use a real documentation-only Git diff and visibly skip the native
-job. Compare the independently recorded definition/codegen/engine identities;
-engine main can advance between runs. Source inspection, unit tests and
-metadata alone establish none of these hosted outcomes.
+PR343's full original base is `8d615dd27b31acd4fe92b57be7c1811cc42ecbda`;
+its old head's parent is a narrower delta and must not replace it. The fixed
+head remains external. The supplied docs-only pair is provenance, not a SKIP
+result. Local Git identifies the merge's parent as that same base and its tree
+as `a98167c3c33176b4e131a9125204c48ac44b819f`; neither establishes runtime behavior.
+RED must show **both existing construction assertion failures after a successful
+real build and preflight**. GREEN must execute those same ordinary cases from
+the independently fixed head. SKIP needs a genuine docs diff and a visible
+native job-level skip. Compare definition/codegen/engine identities for each
+run; engine main may advance between them. All proof requests here are UNRUN
+by the source author. Source, unit controls and prechecks establish no hosted
+outcome or process acceptance.
 
-## Integration owned by ROOT / CI coordination
-
-This additive workflow writes no `gate` status and changes no existing
-aggregate. The current required `gate` does not depend on it. ROOT must arrange
-required-check/merge-consumer integration for `engine-main-touched`, binding
-the current PR head, with CI-CX owning any changes to existing workflow/checker
-files. The existing parity campaign and publication gates remain binding.
-
-ROOT also owns reconciling AGENTS/CLAUDE and docs/ci.md's statements that native
-tests are absent from CI, and the newer CORE policy of PR touched+smoke with
-full runs on main. This workflow adds no main-push full run. Existing policy
-tests and pinned workflow lint must be run by ROOT before publication; no
-policy relaxation is assumed. The new selector tests are unit coverage only;
-they do not replace the hosted RED/GREEN/SKIP evidence or the engine's tests.
+CORE must additionally read the GitHub check-run API record on
+`8d1b254e4868a7869dd9da8b4fee2d922445b414`: completed failure with details linked
+to the real completed native job. A definition-commit check or the old PR-head
+check cannot replace it. After activation, verify genuine main pushes,
+including docs-only pushes, execute native on their own event SHAs without
+cancelling earlier pushes. No protected-main rewind or synthetic push is used.

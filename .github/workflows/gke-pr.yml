@@ -166,6 +166,19 @@ jobs:
           path: release.json
           if-no-files-found: ignore
 
+  engine-main:
+    needs: [admit]
+    if: ${{ needs.admit.outputs.allowed == 'true' }}
+    # Permission ceiling for the shared workflow's dispatch-only publisher.
+    # Its changes/native execution jobs explicitly reduce to contents: read.
+    permissions: {contents: read, actions: read, checks: write}
+    uses: ./.github/workflows/engine-main-touched.yml
+    with:
+      codegen_base_ref: ${{ needs.admit.outputs.base_sha }}
+      codegen_head_ref: ${{ needs.admit.outputs.head_sha }}
+      definition: ${{ github.sha }}
+      workers: "8"
+
   test-check:
     needs: [admit, workflow-lint, package-files, pytest]
     if: always()
@@ -195,7 +208,7 @@ jobs:
 
   result:
     name: gate
-    needs: [admit, workflow-lint, package-files, pytest, differential, test-check]
+    needs: [admit, workflow-lint, package-files, pytest, differential, test-check, engine-main]
     if: always()
     runs-on: ubuntu-24.04
     permissions: {contents: read, statuses: write}
@@ -209,6 +222,7 @@ jobs:
       - name: Report the exact event head after a live identity recheck
         env:
           NEEDS: ${{ toJSON(needs) }}
+          DEFINITION_SHA: ${{ github.sha }}
           REPO: ${{ github.repository }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || '' }}
           HEAD_IS_FORK: ${{ toJSON(github.event.pull_request.head.repo.fork) }}

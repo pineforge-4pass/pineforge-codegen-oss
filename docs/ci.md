@@ -1,10 +1,15 @@
 # Pull request CI
 
-`gke-pr.yml` runs pull request tests on GKE runner pods after a hosted admission
-job accepts the exact head. It uses `pull_request_target` against `main`, so
+This document describes the source candidate after staged adoption; it does
+not record installation or successful hosted validation.
+
+`gke-pr.yml` runs pull request tests on standard `ubuntu-24.04` after trusted
+admission accepts the exact head. It uses `pull_request_target` against `main`, so
 GitHub executes the workflow definition from the base repository. Candidate
 workflow files are fetched as data and checked by the base tree's
-`tests/test_gke_pr_admission.py`; the hosted jobs never check out candidate code.
+`tests/test_gke_pr_admission.py`. Admission and result check out only the trusted
+base. Payload jobs execute the admitted head; native changes selection reads
+candidate Git objects as data with the trusted base driver.
 
 Admission requires an open, non-draft PR from this repository, with a non-fork
 head and `main` as its base. The author, original actor and rerunning actor each
@@ -18,7 +23,8 @@ Before setting `allowed=true`, admission reads the immutable head's recursive
 Git tree, refuses truncation, symlinks, submodules, unsafe names and oversized
 inputs, then runs pinned actionlint with the base configuration and the base
 security rules. Only workflow/action files, the actionlint configuration and
-`package.json` cache metadata are fetched. Directory entries are skipped;
+`package.json` cache metadata and native driver source are fetched. The entire
+native callee and driver must equal the installed base source. Directory entries are skipped;
 regular blobs are limited to 100 files, 1 MiB each and 4 MiB total, with decoded
 lengths checked against the tree.
 The scanner bounds lines at 4,096 characters, files at 20,000 lines and
@@ -28,38 +34,57 @@ mappings, unsupported flow values and control characters. Ordinary quoted text,
 GitHub expressions in environment values, and script block contents are kept
 separate from routing structure.
 
-Every admitted PR, including a documentation or workflow change, runs the full
-matrix and differential checks. There is no cheap-skip classifier to trust.
-The hosted result requires each prerequisite to succeed, rechecks live PR and
+Every admitted PR, including docs changes, retains the full existing matrix and
+differential checks. The added `engine-main` prerequisite calls the exact
+base-owned `engine-main-touched.yml` route. Its trusted `changes` job reads the
+admitted base/head diff and inventories; only a successful, identity-bound
+non-native decision permits the native job to skip. Emitter/generated-C++ and
+native harness/test changes build public ENGINE MAIN fresh and execute touched
+tests plus unchanged smoke. See [engine-main-ci.md](engine-main-ci.md).
+The same native workflow also runs on every main push, including docs changes,
+without path filters or cancellation groups. It checks out the immutable event
+`after` SHA, binds `before` independently and never substitutes a later main tip.
+Normal native job check runs attach to the pushed SHA.
+
+The hosted result requires all seven prerequisites to succeed, consumes actual
+changes/native results and the bound plan digest, rechecks live PR and
 actor identity, and posts the `gate` status to the immutable event head. A
 failure, skip, cancellation, missing output, stale head or refusal fails the
-result. Status publication failure also fails the job.
+result. The sole intended skip is the reusable native job after a genuine
+non-native decision; the reusable prerequisite itself must succeed. Status
+publication failure also fails the job.
 
 | Previous PR context | Current context |
 | --- | --- |
 | Test / authz | Test / authz stays on `ubuntu-24.04` for push and dispatch |
 | Test / changes | GKE PR / admit; Test / changes stays on `ubuntu-24.04` for push and dispatch |
-| Test / workflow-lint | Test / workflow-lint uses `gke-8cpu-16gb-amd64` on push and dispatch; GKE PR / workflow-lint checks the candidate |
-| Test / package-files | GKE PR / package-files; Test / package-files uses `gke-8cpu-16gb-amd64` on push and dispatch |
-| Test / pytest (3.11, 3.12, 3.13, 3.14) | GKE PR / pytest, with the same versions; Test / pytest uses `gke-8cpu-16gb-amd64` on push and dispatch |
+| Test / workflow-lint | Test / workflow-lint stays hosted on push and dispatch; GKE PR / workflow-lint checks the candidate |
+| Test / package-files | GKE PR / package-files; Test / package-files stays hosted on push and dispatch |
+| Test / pytest (3.11, 3.12, 3.13, 3.14) | GKE PR / pytest, with the same versions; Test / pytest stays hosted on push and dispatch |
 | Test / test-check | GKE PR / test-check stays hosted; Test / test-check stays on `ubuntu-24.04` for push and dispatch |
 | Pyodide Gate / preflight-docs | GKE PR / admit |
 | Pyodide Gate / differential | GKE PR / differential |
 | Pyodide Gate / pytest (3.11, 3.12, 3.13, 3.14) | The shared GKE PR / pytest matrix |
 | Pyodide Gate / gate and the `gate` commit status | GKE PR / gate and the same `gate` commit status, hosted |
+| Native tests absent from the matrix | GKE PR / engine-main calls shared changes/native jobs; consumed by the same `gate` writer |
 
 The shared pytest matrix runs the same command as both former PR matrices.
 The differential leg retains Python 3.14, Node 22, the Pyodide selftest,
 dependency audit and full gate. Package metadata and entity checks run on every
 admitted diff, as does the workflow/App-environment guard.
 
-All pod jobs use the bare scalar `gke-8cpu-16gb-amd64`. The image supplies the
-engine toolchain, Python 3.12 with venv, git, git-lfs, jq, curl, actionlint,
-shellcheck and gh. Pinned setup actions supply the other Python versions and
-Node/npm 22. The pod jobs have only `contents: read`, persist no checkout
+All current PR jobs use the bare scalar `ubuntu-24.04`. Pinned setup actions
+supply Python versions and Node/npm 22. Payload jobs have only `contents: read`, persist no checkout
 credentials, receive no secret, OIDC permission or environment, and use no
-Actions cache. Hosted admission has read-only contents permission; only the
-hosted result can write statuses.
+Actions cache. Admission has read-only contents permission; only the result
+can write `gate` statuses. The reusable native execution has the same restrictions.
+Its proof dispatch checks actor/rerunner write access and actual public
+base/head commits and executes the same native implementation. Only its isolated
+trusted historical publisher has `checks: write` and `actions: read`; the
+callee's candidate execution jobs explicitly keep only `contents: read`.
+The caller declares that permission ceiling for the dispatch-only publisher.
+It creates a distinct native source check from the real completed job on the
+tested SHA and verifies the created record. No second `gate` writer is added.
 
 An Actions runtime/cache token is still available to PR code on a runner.
 Consequently the policy also refuses Actions cache restore/save steps and
@@ -72,15 +97,20 @@ only while `package.json` has no `packageManager` or
 `devEngines.packageManager` opt-in. Adding such metadata requires disabling
 that remaining setup default in a separate base change first.
 
-`test.yml` has only push-to-main and dispatch triggers: `workflow-lint`,
-`package-files` and `pytest` use `gke-8cpu-16gb-amd64`; `authz`, `changes` and
-`test-check` use `ubuntu-24.04`. Pull-request checks use `gke-pr.yml` admission.
+`test.yml` has only push-to-main and dispatch triggers; its current jobs stay
+on `ubuntu-24.04`. Pull-request checks use `gke-pr.yml` admission.
 The existing App-environment guard keeps its authorization dependency and
 blocking step. Workflow lint uses the checked-in actionlint configuration
 and the exact checkout head.
 `gate.yml` retains only its hosted schedule and dispatch
 legs. Those trusted routes require a separate runner admission entry before
 they can move. PyPI/npm publication and baseline promotion remain hosted.
+The old pytest matrix still lacks native inputs; PR native work is touched+smoke.
+Full engine-enabled verification, including corpus compilation, remains an
+operator obligation once on the merged main tree on an approved worker. This
+change does not turn old push/dispatch jobs into native whole-suite jobs.
+The new main-push native route runs touched+smoke for every event; the full-main
+suite remains once, separately.
 
 The only `pull_request_target` workflow is `gke-pr.yml`.
 `promote-baseline.yml` runs on pushes to `main` and manual dispatch from `main`.
@@ -101,7 +131,7 @@ release environment and WIF workflow-path/main-ref binding remain in place;
 the workflow checks out and runs no PR code.
 
 Runner-group and merge-authority configuration are operator work outside this
-repository change. Enable only
+repository change. Any future PR pod routing must enable only
 `pineforge-4pass/pineforge-codegen-oss/.github/workflows/gke-pr.yml@refs/heads/main`
 for PR pods; do not enable a caller-controlled reusable workflow or a
 `pull_request` workflow. Update consumers of the context mapping above before
@@ -118,6 +148,20 @@ without using the relaxation in a workflow, then change the workflow.
 Tightening a workflow must satisfy the base rules too. Bootstrap this workflow
 on `main` and configure the runner entry before expecting it to run for later
 PRs; its first adoption PR still needs independent CI evidence.
+
+Native integration likewise needs main-owned policy adoption before activating
+the caller. First install the shared implementation and a separately reviewed
+temporary policy admitting only the complete old and new canonical graphs,
+while the old caller and an inactive main-push trigger remain installed.
+The temporary rule permits only the exact main-only push header together with
+the new caller; it cannot permit body changes, filters or cancellation.
+Register dispatch and its isolated checks permission. Run original PR RED,
+merged-main RED with an own-SHA check-run API record, fixed GREEN and docs PR
+SKIP with one definition, then activate both routes and the strict checker
+together. Final policy admits only the new graph and pins
+the full callee/driver to base; it refuses removal of the native prerequisite.
+Remove the temporary old-inventory reporter at activation. The exact source
+route and proof inputs are in `docs/engine-main-ci.md`; publication is CORE-owned.
 
 The checker and its mutation controls use only Python's standard library plus
 pytest for the tests. File-reading modes list their inputs, refuse credential

@@ -1708,6 +1708,49 @@ def test_pr_payloads_use_only_admitted_bare_scalar_hosted_runners():
         assert_hosted_head_checkout(jobs[name])
 
 
+def test_native_pr_route_is_required_and_dispatch_shares_the_same_jobs():
+    workflow = (WORKFLOWS / "gke-pr.yml").read_text(encoding="utf-8")
+    blocks = job_blocks(workflow)
+    assert set(blocks) == {
+        "admit", "workflow-lint", "package-files", "pytest", "differential",
+        "engine-main", "test-check", "result",
+    }
+    call = blocks["engine-main"]
+    assert "    needs: [admit]\n" in call
+    assert "    if: ${{ needs.admit.outputs.allowed == 'true' }}\n" in call
+    assert "    uses: ./.github/workflows/engine-main-touched.yml\n" in call
+    assert "      codegen_base_ref: ${{ needs.admit.outputs.base_sha }}\n" in call
+    assert "      codegen_head_ref: ${{ needs.admit.outputs.head_sha }}\n" in call
+    assert "      definition: ${{ github.sha }}\n" in call
+    assert "    needs: [admit, workflow-lint, package-files, pytest, differential, test-check, engine-main]\n" in blocks["result"]
+    native = (WORKFLOWS / "engine-main-touched.yml").read_text(encoding="utf-8")
+    trigger = native.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+    assert "  workflow_call:\n" in trigger and "  workflow_dispatch:\n" in trigger
+    assert "pull_request:" not in trigger and "pull_request_target:" not in trigger
+    assert set(job_blocks(native)) == {"changes", "native", "publish"}
+    execution = job_blocks(native)["native"]
+    assert "    runs-on: ubuntu-24.04\n" in execution
+    assert "ref: main\n" in execution
+    assert "--expected-plan" in execution and "ci_engine_main_touched.py run" in execution
+    assert "secrets" not in execution and "GH_TOKEN" not in execution
+    assert "statuses: write" not in native and "timeout-minutes:" not in native
+    assert "engine-main-touched" not in blocks["test-check"]
+    assert "  push:\n    branches: [main]\n" in trigger
+    assert "paths:" not in trigger and "paths-ignore:" not in trigger
+    assert "\nconcurrency:" not in native and "cancel-in-progress:" not in native
+    assert "ref: ${{ inputs.codegen_head_ref || github.event.after }}" in native
+    assert "CODEGEN_BASE: ${{ inputs.codegen_base_ref || github.event.before }}" in native
+    assert "CODEGEN_HEAD: ${{ inputs.codegen_head_ref || github.event.after }}" in native
+    assert "run: python3 -I workflow/tests/test_gke_pr_admission.py --push-identity" in native
+    assert "    permissions: {contents: read}\n" in execution
+    publisher = job_blocks(native)["publish"]
+    assert "needs: [changes, native]" in publisher and "always()" in publisher
+    assert "github.event_name == 'workflow_dispatch'" in publisher
+    assert "permissions: {contents: read, actions: read, checks: write}" in publisher
+    assert "ref: ${{ github.workflow_sha }}" in publisher
+    assert "--native-check" in publisher and "candidate" not in publisher
+
+
 @pytest.mark.parametrize("before,after,message", [
     ("needs: [admit]", "needs: []", "depend on admission"),
     ("outputs.allowed == 'true'", "outputs.allowed != 'false'", "require allowed"),

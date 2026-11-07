@@ -1,7 +1,8 @@
 """Diff-selected, public-input integration with engine main (CI, not a release pair).
 
-The workflow definition supplies this driver; the separate candidate checkout
-supplies *all* product code and existing tests, including in dispatch proof mode.
+The trusted base definition supplies this driver and selection policy. Git
+objects at admitted base/head are data; only the native job imports the tested
+head's product and tests. Dispatch uses the identical implementation.
 """
 
 from __future__ import annotations
@@ -32,10 +33,35 @@ SMOKE = (
     "tests/test_checked_settings.py::test_checked_values_and_receipt_at_runtime",
 )
 CONTROL_PATHS = {
+    ".github/workflows/gke-pr.yml",
     ".github/workflows/engine-main-touched.yml",
     "scripts/ci_engine_main_touched.py",
     "tests/test_ci_engine_main_touched.py",
     "scripts/gen_host_members.py",
+}
+# These stages can change emitted C++, its refusal/diagnostic path, or factory
+# inputs. Metadata-only request inventory and the timeframe CLI are outside this
+# list; an unknown product module fails closed to native work below.
+SHARED_EMITTER_MODULES = {
+    "__init__", "array_binding", "ast_nodes", "block_locals", "builtin_keywords",
+    "collection_history", "cpp_allowlist", "cpp_names", "diagnostic_codes",
+    "drawing_all", "errors", "external_requests", "finite_ta_length",
+    "function_overloads", "input_keys", "intrinsic_binding", "lexer",
+    "library_inline", "library_modules", "library_v5", "limits", "loop_types",
+    "matrix_overloads", "method_binding", "parser", "pine_libraries",
+    "pine_spelling", "pragmas", "request_discovery", "security_contexts", "session_reads",
+    "signatures", "support_checker", "symbols", "tokens", "tv_input_choices",
+}
+NON_NATIVE_PRODUCT_PATHS = {
+    "pineforge_codegen/request_feed_inventory.py",  # metadata after generation
+    "pineforge_codegen/timeframe_token_cli.py",  # CLI around timeframe validation
+}
+NATIVE_TEST_PATHS = {
+    "tests/test_compile_corpus.py", "tests/test_host_member_names.py",
+}
+NATIVE_HARNESSES = {
+    "tests/_compile.py", "tests/_e2e.py", "tests/_legacy_cpp.py",
+    "tests/_cpp_tokens.py", "tests/_emitted_member_assertions.py",
 }
 NATIVE_CALLS = {
     "compile_cpp", "run_emitted_tu", "narrowing_diagnostics",
@@ -95,10 +121,18 @@ def parse_diff(raw: bytes) -> list[dict]:
 
 
 def native_path(path: str) -> bool:
+    product = PurePosixPath(path)
     return (
-        path.startswith("pineforge_codegen/")
+        path.startswith(("pineforge_codegen/codegen/", "pineforge_codegen/analyzer/"))
+        or (path.startswith("pineforge_codegen/") and (
+            product.stem in SHARED_EMITTER_MODULES
+            or product.name.startswith("emit_")
+            or any(word in product.stem for word in ("factory", "creation", "checked_settings"))
+            or path not in NON_NATIVE_PRODUCT_PATHS
+        ))
         or path in CONTROL_PATHS
-        or path in {"tests/_compile.py", "tests/_e2e.py"}
+        or path in NATIVE_HARNESSES
+        or path in NATIVE_TEST_PATHS
         or path.lower().endswith(CPP_SUFFIXES)
     )
 
@@ -113,11 +147,36 @@ def identifiers(node: ast.AST) -> set[str]:
     return names
 
 
-def test_inventory(repo: Path) -> dict[str, dict]:
-    """Static discovery only: never import a candidate while deciding changes."""
+def test_inventory(repo: Path, ref: str | None = None) -> dict[str, dict]:
+    """Static discovery; CI reads regular Git blobs, never candidate modules."""
     inventory = {}
-    for path in sorted((repo / "tests").glob("test_*.py")):
-        source = path.read_text(encoding="utf-8")
+    if ref is None:  # unit fixtures; production always supplies an immutable ref
+        sources = {
+            path.relative_to(repo).as_posix(): path.read_text(encoding="utf-8")
+            for path in sorted((repo / "tests").rglob("test_*.py"))
+        }
+    else:
+        commit_ref(ref)
+        entries = subprocess.check_output([
+            "git", "-C", str(repo), "ls-tree", "-rz", ref, "--", "tests",
+        ]).decode("utf-8", errors="strict")
+        sources = {}
+        for record in entries.split("\0"):
+            if not record:
+                continue
+            metadata, path = record.split("\t", 1)
+            if not re.fullmatch(r"tests/(?:[A-Za-z0-9_.-]+/)*test_[A-Za-z0-9_]+\.py", path):
+                continue
+            mode, kind, _ = metadata.split()
+            if mode not in {"100644", "100755"} or kind != "blob":
+                raise ValueError(f"test source is not a regular Git blob: {path}")
+            source = subprocess.check_output([
+                "git", "-C", str(repo), "show", f"{ref}:{path}",
+            ])
+            if len(source) > 1024 * 1024:
+                raise ValueError(f"test source exceeds 1 MiB: {path}")
+            sources[path] = source.decode("utf-8", errors="strict")
+    for path, source in sources.items():
         tree = ast.parse(source, filename=str(path))
         functions = {
             node.name: node for node in tree.body
@@ -134,6 +193,12 @@ def test_inventory(repo: Path) -> dict[str, dict]:
             node.module for node in ast.walk(tree)
             if isinstance(node, ast.ImportFrom) and node.module
         }
+        imports.update(
+            f"{node.module}.{alias.name}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+            for alias in node.names if alias.name != "*"
+        )
         imports.update(
             alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
             for alias in node.names
@@ -180,32 +245,55 @@ def test_inventory(repo: Path) -> dict[str, dict]:
                 or any(module.startswith("tests._e2e") for module in imports)
             )
             cases[name] = {
-                "native": bool(names & NATIVE_CALLS or "tests._e2e" in imports),
+                "native": bool(
+                    names & NATIVE_CALLS or imports & {"tests._compile", "tests._e2e"}
+                    or path in NATIVE_TEST_PATHS or path.startswith("tests/test_e2e_")
+                ),
                 "private": sorted(set(private)),
                 "corpus": corpus,
                 "historical": "reference_codegen" in names,
             }
-        inventory[path.relative_to(repo).as_posix()] = {
+        inventory[path] = {
             "imports": imports, "cases": cases,
         }
     return inventory
 
 
-def select_tests(changes: list[dict], inventory: dict[str, dict]) -> dict:
+def merge_inventory(trusted: dict, head: dict) -> dict:
+    """Head data may add requirements/targets, never erase or exempt base ones."""
+    result = {}
+    for path in sorted(trusted.keys() | head.keys()):
+        old = trusted.get(path, {"imports": set(), "cases": {}})
+        new = head.get(path, {"imports": set(), "cases": {}})
+        cases = {}
+        for name in sorted(old["cases"].keys() | new["cases"].keys()):
+            base_case = old["cases"].get(name)
+            head_case = new["cases"].get(name, {})
+            cases[name] = {
+                "native": bool((base_case or {}).get("native") or head_case.get("native")),
+                "corpus": bool((base_case or {}).get("corpus") or head_case.get("corpus")),
+                # Only installed/base case metadata can authorize exclusions.
+                "private": (base_case or {}).get("private", []),
+                "historical": (base_case or {}).get("historical", False),
+            }
+        result[path] = {"imports": old["imports"] | new["imports"], "cases": cases}
+    return result
+
+
+def select_tests(changes: list[dict], inventory: dict[str, dict],
+                 source_event: str = "pull_request") -> dict:
+    if source_event not in {"pull_request", "push_main"}:
+        raise ValueError("unknown source event")
     paths = sorted({path for change in changes for path in change["paths"]})
     changed_tests = {path for path in paths if path in inventory}
     native_tests = {
         path for path in changed_tests
         if any(case["native"] for case in inventory[path]["cases"].values())
     }
-    removed_tests = {
-        path for path in paths
-        if path.startswith("tests/test_") and path.endswith(".py") and path not in inventory
-    }
     triggers = [
-        path for path in paths if native_path(path) or path in native_tests or path in removed_tests
+        path for path in paths if native_path(path) or path in native_tests
     ]
-    if not triggers:
+    if not triggers and source_event == "pull_request":
         return {
             "native": False, "reason": "No emitter, generated C++, native harness/test or CI driver changes",
             "changes": changes, "triggers": [], "selected": [], "excluded": [],
@@ -214,17 +302,16 @@ def select_tests(changes: list[dict], inventory: dict[str, dict]) -> dict:
 
     modules = {
         path[:-3].replace("/", ".") for path in paths
-        if path.startswith("pineforge_codegen/") and path.endswith(".py")
+        if path.endswith(".py") and (
+            path.startswith("pineforge_codegen/") or path in NATIVE_HARNESSES
+        )
     }
     topics = {
         re.sub(r"^(emit_|visit_|test_)", "", PurePosixPath(path).stem)
         for path in paths if path.startswith("pineforge_codegen/")
     } - {"__init__", "base", "types", "helpers", "tables"}
     selected = {node: ["mandatory public integration smoke"] for node in SMOKE}
-    excluded = [
-        {"nodeid": path, "reason": "test file absent at tested head; native smoke retained"}
-        for path in sorted(removed_tests)
-    ]
+    excluded = []
     needs_corpus = False
     for path, entry in inventory.items():
         reasons = []
@@ -251,9 +338,6 @@ def select_tests(changes: list[dict], inventory: dict[str, dict]) -> dict:
                 excluded.append({"nodeid": node, "reason": "non-public inputs",
                                  "inputs": case["private"]})
                 continue
-            if case.get("historical"):
-                excluded.append({"nodeid": node, "reason": "historical comparison outside touched scope"})
-                continue
             selected.setdefault(node, []).extend(reasons)
             needs_corpus |= case["corpus"]
     for node in SMOKE:
@@ -261,7 +345,10 @@ def select_tests(changes: list[dict], inventory: dict[str, dict]) -> dict:
         if name not in inventory.get(path, {}).get("cases", {}):
             raise ValueError(f"mandatory smoke missing from tested checkout: {node}")
     return {
-        "native": True, "reason": "Actual diff touches native integration inputs",
+        "native": True, "reason": (
+            "Every main push requires native touched tests and smoke"
+            if source_event == "push_main" else "Actual diff touches native integration inputs"
+        ),
         "changes": changes, "triggers": triggers,
         "selected": sorted(selected), "selection_reasons": selected,
         "excluded": excluded, "needs_corpus": needs_corpus,
@@ -280,29 +367,64 @@ def summary(message: str) -> None:
             stream.write(message + "\n\n")
 
 
-def plan(repo: Path, base: str, head: str, definition: str, count: int, out: Path) -> dict:
+def plan(repo: Path, base: str, head: str, definition: str, count: int, out: Path,
+         source_event: str = "pull_request") -> dict:
+    count = workers(str(count))
     base, head, definition = map(commit_ref, (base, head, definition))
     definition_repo = Path(__file__).resolve().parents[1]
     if git(definition_repo, "rev-parse", "HEAD") != definition:
         raise ValueError("workflow driver checkout differs from workflow definition SHA")
     if git(repo, "rev-parse", "HEAD") != head:
         raise ValueError("tested checkout HEAD differs from requested codegen head")
-    for sha in (base, head):
+    if source_event not in {"pull_request", "push_main"}:
+        raise ValueError("unknown source event")
+    initial_push = source_event == "push_main" and base == "0" * 40
+    if source_event == "push_main" and not initial_push:
+        present = subprocess.run([
+            "git", "-C", str(repo), "cat-file", "-e", f"{base}^{{commit}}",
+        ], capture_output=True).returncode == 0
+        if not present:
+            # Fetch only the immutable event-before commit, never today's main.
+            subprocess.run([
+                "git", "-C", str(repo), "fetch", "--no-tags", "origin", base,
+            ], check=True)
+    for sha in ((head,) if initial_push else (base, head)):
         if git(repo, "rev-parse", "--verify", f"{sha}^{{commit}}") != sha:
             raise ValueError("unresolvable codegen input")
-    raw = subprocess.check_output([
-        "git", "-C", str(repo), "diff", "--no-ext-diff", "--no-textconv",
-        "--find-renames", "--ignore-submodules=none", "--name-status", "-z",
-        f"{base}...{head}", "--",
-    ])
-    result = select_tests(parse_diff(raw), test_inventory(repo))
+    if initial_push:
+        paths = subprocess.check_output([
+            "git", "-C", str(repo), "ls-tree", "-rz", "--name-only", head,
+        ]).split(b"\0")
+        raw = b"".join(b"A\0" + path + b"\0" for path in paths if path)
+        merge_base = None
+    else:
+        # PRs use their merge base; pushes compare the exact before/after trees,
+        # including a non-fast-forward event's before commit.
+        refs = [base, head] if source_event == "push_main" else [f"{base}...{head}"]
+        raw = subprocess.check_output([
+            "git", "-C", str(repo), "diff", "--no-ext-diff", "--no-textconv",
+            "--find-renames", "--ignore-submodules=none", "--name-status", "-z",
+            *refs, "--",
+        ])
+        merge_base = base if source_event == "push_main" else git(repo, "merge-base", base, head)
+    # This baseline survives deletes/renames and changes to native calls; only
+    # its metadata can supply non-public exclusions, not candidate code.
+    baseline = {} if initial_push else test_inventory(repo, merge_base)
+    inventory = merge_inventory(baseline, test_inventory(repo, head))
+    result = select_tests(parse_diff(raw), inventory, source_event)
     result.update({
+        "source_event": source_event,
+        "diff_kind": "before_after" if source_event == "push_main" else "merge_base",
         "codegen_base_sha": base, "codegen_sha": head,
+        "codegen_base_tree": None if initial_push else git(repo, "rev-parse", f"{base}^{{tree}}"),
         "codegen_tree": git(repo, "rev-parse", "HEAD^{tree}"),
-        "diff_merge_base": git(repo, "merge-base", base, head),
+        "diff_merge_base": merge_base,
         "workflow_definition_sha": definition, "workers": count,
         "workflow_definition_tree": git(definition_repo, "rev-parse", "HEAD^{tree}"),
     })
+    result["plan_sha256"] = hashlib.sha256(
+        json.dumps(result, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     write_json(out / "selection.json", result)
     (out / "selected-tests.txt").write_text(
         "".join(node + "\n" for node in result["selected"]), encoding="utf-8",
@@ -312,13 +434,15 @@ def plan(repo: Path, base: str, head: str, definition: str, count: int, out: Pat
             for key, value in {
                 "native": str(result["native"]).lower(),
                 "base": base, "head": head, "definition": definition, "workers": count,
+                "tree": result["codegen_tree"], "plan": result["plan_sha256"],
+                "source_event": source_event,
             }.items():
                 stream.write(f"{key}={value}\n")
     summary(
         f"{'RUN' if result['native'] else 'SKIP native'}: {result['reason']}\n\n"
         f"Workflow definition `{definition}`; tested codegen `{head}` "
         f"(tree `{result['codegen_tree']}`); base `{base}`; "
-        f"merge base `{result['diff_merge_base']}`.\n\n"
+        f"diff baseline `{result['diff_merge_base']}`; source event `{source_event}`.\n\n"
         f"Triggers: `{json.dumps(result['triggers'])}`. "
         f"Selected function selectors: {len(result['selected'])}; "
         f"public corpus required: {result['needs_corpus']}. "
@@ -330,6 +454,10 @@ def plan(repo: Path, base: str, head: str, definition: str, count: int, out: Pat
 def logged(command: list[str], log: Path, *, cwd: Path | None = None) -> None:
     """Stream the real command and retain its exit; never use a shell pipeline."""
     with log.open("a", encoding="utf-8") as stream:
+        if stream.tell() == 0:
+            identity = log.parent / "native-identity.json"
+            if identity.is_file():
+                stream.write("Native identity:\n" + identity.read_text(encoding="utf-8") + "\n")
         line = "$ " + shlex.join(command)
         print(line, flush=True)
         stream.write(line + "\n")
@@ -419,6 +547,8 @@ class ExecutionAudit:
         skips = [row for row in self.reports if row["outcome"] == "skipped" or row["xfail"]]
         if skips:
             errors.append("selected public tests skipped or xfailed")
+        if exit_code == 0 and any(row["outcome"] == "failed" for row in self.reports):
+            errors.append("pytest returned zero despite a failed phase")
         return {
             "pytest_exit": exit_code, "audit_errors": errors,
             "collected_count": len(self.collected), "executed_count": len(executed),
@@ -442,12 +572,18 @@ def run_native(repo: Path, engine: Path, out: Path, selection: dict) -> int:
         "resolved_at": datetime.now(timezone.utc).isoformat(),
         "workflow_definition_sha": selection["workflow_definition_sha"],
         "workflow_definition_tree": selection["workflow_definition_tree"],
+        "plan_sha256": selection["plan_sha256"],
+        "codegen_base_sha": selection["codegen_base_sha"],
+        "source_event": selection["source_event"],
         "codegen_sha": selection["codegen_sha"], "codegen_tree": selection["codegen_tree"],
         "engine_ref": "refs/heads/main", "engine_sha": engine_sha,
         "engine_tree": git(engine, "rev-parse", "HEAD^{tree}"),
     }
     write_json(out / "native-identity.json", identity)
     summary("Native checkout identity:\n\n```json\n" + json.dumps(identity, indent=2) + "\n```")
+    logged([
+        sys.executable, "-m", "pip", "install", "pytest>=7.0", "pytest-xdist>=3.5",
+    ], out / "install.log")
     build = engine / "build"
     if build.exists():
         raise ValueError("fresh engine build directory already exists")
@@ -532,6 +668,7 @@ def run_native(repo: Path, engine: Path, out: Path, selection: dict) -> int:
         stdout, stderr = sys.stdout, sys.stderr
         try:
             sys.stdout, sys.stderr = Tee(stdout), Tee(stderr)
+            print("Native identity: " + json.dumps(identity, sort_keys=True), flush=True)
             print("pytest arguments: " + shlex.join(args), flush=True)
             code = int(pytest.main(args, plugins=[audit]))
         finally:
@@ -543,7 +680,25 @@ def run_native(repo: Path, engine: Path, out: Path, selection: dict) -> int:
         f"executed={result['executed_count']}; call outcomes={result['call_outcomes']}; "
         f"skips={len(result['skips'])}; audit errors={json.dumps(result['audit_errors'])}"
     )
-    return code if code else (1 if result["audit_errors"] else 0)
+    status = code if code else (1 if result["audit_errors"] else 0)
+    if output := os.environ.get("GITHUB_OUTPUT"):
+        values = {
+            "completed_plan": selection["plan_sha256"],
+            "pytest_exit": code, "audit_errors": len(result["audit_errors"]),
+        }
+        for legacy in ("False", "True"):
+            rows = [row for row in audit.reports
+                    if row["nodeid"] == f"{CONSTRUCTION}[{legacy}]"
+                    and row["when"] == "call" and not row["xfail"]]
+            values[f"construction_{legacy.lower()}"] = (
+                rows[0]["outcome"] if len(rows) == 1 else "missing"
+            )
+        if status == 0:
+            values["executed_plan"] = selection["plan_sha256"]
+        with open(output, "a", encoding="utf-8") as stream:
+            for key, value in values.items():
+                stream.write(f"{key}={value}\n")
+    return status
 
 
 def main() -> int:
@@ -556,16 +711,23 @@ def main() -> int:
     parser.add_argument("--workers", default="8")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--engine", type=Path)
+    parser.add_argument("--expected-plan")
+    parser.add_argument("--source-event", choices=("pull_request", "push_main"), default="pull_request")
     args = parser.parse_args()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     try:
         repo = args.repo.resolve()
-        selection = plan(repo, args.base, args.head, args.definition, workers(args.workers), out)
+        selection = plan(repo, args.base, args.head, args.definition, workers(args.workers), out,
+                         args.source_event)
         if args.mode == "plan":
             return 0
         if args.engine is None:
             raise ValueError("--engine is required for run")
+        if not re.fullmatch(r"[0-9a-f]{64}", args.expected_plan or ""):
+            raise ValueError("run requires the trusted changes job's plan digest")
+        if args.expected_plan != selection["plan_sha256"]:
+            raise ValueError("native selection differs from the changes job")
         return run_native(repo, args.engine.resolve(), out, selection)
     except (OSError, ValueError, SyntaxError, subprocess.CalledProcessError) as error:
         code = error.returncode if isinstance(error, subprocess.CalledProcessError) else 1
