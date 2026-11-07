@@ -5247,11 +5247,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._prepare_lazy_source_clock_sites()
         self._prepare_history_capacities()
         self.block_locals_needing_names = self._block_locals_needing_names()
-        from . import capabilities as _capabilities
-        (
-            self._metrics_plain_certified,
-            self._metrics_plain_rejection_reasons,
-        ) = _capabilities.metrics_plain_predicate(self)
 
         from .order_shapes import HostReadLines
         lines: list[str] = HostReadLines(self._order_shape_host_reads)
