@@ -89,6 +89,7 @@ from __future__ import annotations
 
 from .constant_fold import NON_CONSTANT, fold_constant_expression
 from .run_stops import checked_history_offset, history_offset_guard, request_stop
+from .capacities import literal_history_offset
 
 from ..errors import CodegenInvariantError, Phase
 from ..symbols import TypeSpec
@@ -2193,9 +2194,15 @@ class ExprVisitor:
         that the expression visitor can inline may prove an offset constant.
         Requested-context callers supply their own binding-aware proof.
         """
+        capacity = getattr(self, "_history_capacity", None)
+        line = getattr(getattr(index_node, "loc", None), "line", 0) or 0
         if (getattr(index_node, "annotations", None) or {}).get("pf_checked_history_offset"):
-            return idx
+            return (idx if capacity is None else checked_history_offset(
+                idx, line, capacity, check_range=False,
+            ))
         if constant is None and isinstance(index_node, (NumberLiteral, NaLiteral, BoolLiteral)):
+            if capacity is not None:
+                self._check_history_capacity_offset(literal_history_offset(index_node), index_node)
             return idx
         if constant is None:
             known = {
@@ -2218,11 +2225,13 @@ class ExprVisitor:
                     # the constant folder must not interpret its spelling.
                     known[part.name] = NON_CONSTANT
                 pending.extend(_ast_children(part))
-            _, constant = fold_constant_expression(index_node, known, {})
-        if constant:
+            value, constant = fold_constant_expression(index_node, known, {})
+            if (capacity is not None and constant and type(value) in (int, float, bool)
+                    and value == value and abs(value) != float("inf")):
+                self._check_history_capacity_offset(int(value), index_node)
+        if constant and capacity is None:
             return idx
-        line = getattr(getattr(index_node, "loc", None), "line", 0) or 0
-        return checked_history_offset(idx, line)
+        return checked_history_offset(idx, line, capacity, check_range=not constant)
 
     def _history_offset_initializer_cpp(
         self, idx: str, index_node, slot: str, *,
@@ -2236,6 +2245,10 @@ class ExprVisitor:
         fraction nor a wide integer can disappear in the conversion.
         """
         checked = self._checked_history_offset_cpp(idx, index_node, constant=constant)
+        if getattr(self, "_history_capacity", None) is not None:
+            # The lambda owns the raw value and runs both checks before any
+            # initializer or integer coercion can narrow it.
+            return checked, ""
         if checked == idx:
             return idx, ""
         if value_is_int32 or idx.startswith("get_input_int("):

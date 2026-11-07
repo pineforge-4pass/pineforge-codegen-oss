@@ -761,6 +761,12 @@ class DrawingVisitor:
         (``_drawing_pin_members``) holds."""
         pins = getattr(self, "_drawing_pins", None) or {}
         caps = self._drawing_caps or {}
+        capacity = self._drawing_capacity
+        if capacity is not None and capacity > 2**63 - 1:
+            self._codegen_error(
+                None,
+                f"drawing_capacity={capacity} cannot be represented by the native int64 limit argument.",
+            )
         for dtype, collector in DRAWING_COLLECTED.items():
             handle = DRAWING_TYPE_TO_CPP[dtype]
             arena = DRAWING_ARENA[dtype]
@@ -773,6 +779,17 @@ class DrawingVisitor:
                 f"            _pf_collect_drawings(this->{arena}, {keep}, _pf_held,",
                 "                                 sizeof(_pf_held) / sizeof(_pf_held[0]));",
                 "        }",
+            ])
+            if capacity is not None:
+                english = self._cpp_string_escape(
+                    f"The script keeps more than {capacity} live drawings of one type; "
+                    "the configured drawing capacity is exceeded."
+                )
+                lines.append(
+                    f"        if ((int)this->{arena}.order().size() > {capacity}) "
+                    f'_PF_LIMIT_STOP("live_drawings", {capacity}LL, "{english}");'
+                )
+            lines.extend([
                 "        return _pf_new;",
                 "    }",
             ])
