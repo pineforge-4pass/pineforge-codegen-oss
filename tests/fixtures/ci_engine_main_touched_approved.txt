@@ -1,0 +1,1535 @@
+"""Full-main / touched-PR integration with engine main (not a release pair).
+
+The trusted base definition supplies this driver and selection policy. Git
+objects at admitted base/head are data; only the native job imports the tested
+head's product and tests. Dispatch uses the identical implementation.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+from collections import Counter
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from typing import TypedDict
+
+
+PYTHON_TEST_REQUIREMENTS = (
+    "pytest==9.2.0",
+    "pytest-xdist==3.8.0",
+    "execnet==2.1.2",
+    "iniconfig==2.3.1",
+    "packaging==26.3",
+    "pluggy==1.7.0",
+    "pygments==2.21.0",
+)
+FULL_CLANG_PACKAGES = {
+    "clang": "1:18.0-59~exp2",
+    "clang-18": "1:18.1.3-1ubuntu1",
+    "llvm-18": "1:18.1.3-1ubuntu1",
+}
+FULL_CLANG = "/usr/bin/clang++-18"
+FULL_CLANG_VERSION = "Ubuntu clang version 18.1.3 (1ubuntu1)"
+CONSTRUCTION = (
+    "tests/test_coded_run_stops.py"
+    "::test_checked_construction_exposes_the_original_error"
+)
+SMOKE = (
+    CONSTRUCTION,
+    "tests/test_compile_smoke.py::test_minimal_strategy_compiles",
+    "tests/test_checked_settings.py::test_metadata_and_exception_wrappers_are_emitted",
+    "tests/test_checked_settings.py::test_checked_values_and_receipt_at_runtime",
+)
+PRIVATE_CASES_PATH = "ci/engine-main-private-cases.json"
+HISTORICAL_PRIVATE_CASES_PATH = "ci/engine-main-historical-private-cases.json"
+CONTROL_PATHS = {
+    ".github/workflows/gke-pr.yml",
+    ".github/workflows/engine-main-touched.yml",
+    "scripts/ci_engine_main_touched.py",
+    "tests/test_ci_engine_main_touched.py",
+    "scripts/gen_host_members.py",
+    PRIVATE_CASES_PATH,
+    HISTORICAL_PRIVATE_CASES_PATH,
+}
+# These stages can change emitted C++, its refusal/diagnostic path, or factory
+# inputs. Metadata-only request inventory and the timeframe CLI are outside this
+# list; an unknown product module fails closed to native work below.
+SHARED_EMITTER_MODULES = {
+    "__init__", "array_binding", "ast_nodes", "block_locals", "builtin_keywords",
+    "collection_history", "cpp_allowlist", "cpp_names", "diagnostic_codes",
+    "drawing_all", "errors", "external_requests", "finite_ta_length",
+    "function_overloads", "input_keys", "intrinsic_binding", "lexer",
+    "library_inline", "library_modules", "library_v5", "limits", "loop_types",
+    "matrix_overloads", "method_binding", "parser", "pine_libraries",
+    "pine_spelling", "pragmas", "request_discovery", "security_contexts", "session_reads",
+    "signatures", "support_checker", "symbols", "tokens", "tv_input_choices",
+}
+NON_NATIVE_PRODUCT_PATHS = {
+    "pineforge_codegen/request_feed_inventory.py",  # metadata after generation
+    "pineforge_codegen/timeframe_token_cli.py",  # CLI around timeframe validation
+}
+NATIVE_TEST_PATHS = {
+    "tests/test_compile_corpus.py", "tests/test_host_member_names.py",
+}
+NATIVE_HARNESSES = {
+    "tests/_compile.py", "tests/_e2e.py", "tests/_legacy_cpp.py",
+    "tests/_cpp_tokens.py", "tests/_emitted_member_assertions.py",
+}
+NATIVE_CALLS = {
+    "compile_cpp", "run_emitted_tu", "narrowing_diagnostics",
+    "skip_if_no_compile_env", "skip_if_no_engine_lib", "skip_unless_e2e_env",
+}
+PRIVATE_INPUTS = {
+    "private_fixture", "PINEFORGE_BTCUSDT_1H_FEED",
+    "PINEFORGE_STRING_SETTINGS_SOURCES",
+}
+CPP_SUFFIXES = (
+    ".cpp", ".cc", ".cxx", ".c", ".hpp", ".hh", ".hxx", ".h", ".inl", ".tpp", ".ipp",
+    ".cpp.in", ".hpp.in", ".h.in", ".cpp.j2", ".hpp.j2",
+    ".cc.in", ".cxx.in", ".hxx.in", ".tpl", ".tmpl", ".template", ".j2", ".jinja", ".jinja2",
+)
+
+
+def workers(value: str) -> int:
+    if not re.fullmatch(r"[1-8]", value):
+        raise ValueError("workers must be a decimal integer from 1 through 8")
+    return int(value)
+
+
+def commit_ref(value: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise ValueError("codegen refs must be full lowercase 40-hex commit IDs")
+    return value
+
+
+def git(repo: Path, *args: str) -> str:
+    return subprocess.check_output(
+        ["git", "-C", str(repo), *args], text=True,
+    ).strip()
+
+
+def parse_diff(raw: bytes) -> list[dict]:
+    """Read --name-status -z, retaining BOTH paths of renames/copies."""
+    if raw and not raw.endswith(b"\0"):
+        raise ValueError("unterminated Git diff")
+    fields = raw.decode("utf-8", errors="strict").split("\0")[:-1]
+    changes = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if not re.fullmatch(r"(?:[ADMT]|[RC][0-9]{1,3})", status):
+            raise ValueError(f"invalid Git diff status: {status!r}")
+        count = 2 if status.startswith(("R", "C")) else 1
+        paths = fields[index:index + count]
+        if len(paths) != count or not all(paths):
+            raise ValueError("incomplete Git diff record")
+        for path in paths:
+            if PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts:
+                raise ValueError(f"unsafe diff path: {path!r}")
+        changes.append({"status": status, "paths": paths})
+        index += count
+    return changes
+
+
+def native_path(path: str) -> bool:
+    product = PurePosixPath(path)
+    return (
+        path.startswith(("pineforge_codegen/codegen/", "pineforge_codegen/analyzer/"))
+        or (path.startswith("pineforge_codegen/") and (
+            product.stem in SHARED_EMITTER_MODULES
+            or product.name.startswith("emit_")
+            or any(word in product.stem for word in ("factory", "creation", "checked_settings"))
+            or path not in NON_NATIVE_PRODUCT_PATHS
+        ))
+        or path in CONTROL_PATHS
+        or path in NATIVE_HARNESSES
+        or path in NATIVE_TEST_PATHS
+        or path.lower().endswith(CPP_SUFFIXES)
+    )
+
+
+def identifiers(node: ast.AST) -> set[str]:
+    names = {
+        child.id if isinstance(child, ast.Name) else child.attr
+        for child in ast.walk(node)
+        if isinstance(child, (ast.Name, ast.Attribute))
+    }
+    names.update(child.arg for child in ast.walk(node) if isinstance(child, ast.arg))
+    return names
+
+
+def historical_refs(tree: ast.AST) -> list[str]:
+    """Resolve literal/constant reference arguments without importing tests."""
+    bindings = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    bindings.setdefault(target.id, []).append(node.value)
+
+    def literals(node, seen):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return {node.value} if re.fullmatch(r"[0-9a-f]{7,40}", node.value) else set()
+        if isinstance(node, ast.Name) and node.id not in seen:
+            return set().union(*(literals(value, seen | {node.id})
+                                 for value in bindings.get(node.id, [])))
+        return set()
+
+    refs = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and node.args and (
+            isinstance(node.func, ast.Name) and node.func.id == "reference_codegen"
+            or isinstance(node.func, ast.Attribute) and node.func.attr == "reference_codegen"
+        ):
+            refs.update(literals(node.args[0], set()))
+    return sorted(refs)
+
+
+def test_inventory(repo: Path, ref: str | None = None) -> dict[str, dict]:
+    """Static discovery; CI reads regular Git blobs, never candidate modules."""
+    inventory = {}
+    if ref is None:  # unit fixtures; production always supplies an immutable ref
+        sources = {
+            path.relative_to(repo).as_posix(): path.read_text(encoding="utf-8")
+            for path in sorted((repo / "tests").rglob("test_*.py"))
+        }
+    else:
+        commit_ref(ref)
+        entries = subprocess.check_output([
+            "git", "-C", str(repo), "ls-tree", "-rz", ref, "--", "tests",
+        ]).decode("utf-8", errors="strict")
+        sources = {}
+        for record in entries.split("\0"):
+            if not record:
+                continue
+            metadata, path = record.split("\t", 1)
+            if not re.fullmatch(r"tests/(?:[A-Za-z0-9_.-]+/)*test_[A-Za-z0-9_]+\.py", path):
+                continue
+            mode, kind, _ = metadata.split()
+            if mode not in {"100644", "100755"} or kind != "blob":
+                raise ValueError(f"test source is not a regular Git blob: {path}")
+            source = subprocess.check_output([
+                "git", "-C", str(repo), "show", f"{ref}:{path}",
+            ])
+            if len(source) > 1024 * 1024:
+                raise ValueError(f"test source exceeds 1 MiB: {path}")
+            sources[path] = source.decode("utf-8", errors="strict")
+    for path, source in sources.items():
+        tree = ast.parse(source, filename=str(path))
+        functions = {
+            node.name: node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        for cls in tree.body:
+            if isinstance(cls, ast.ClassDef) and cls.name.startswith("Test"):
+                functions.update({
+                    f"{cls.name}::{node.name}": node for node in cls.body
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                })
+        helpers = {name: identifiers(node) for name, node in functions.items()}
+        imports = {
+            node.module for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+        imports.update(
+            f"{node.module}.{alias.name}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+            for alias in node.names if alias.name != "*"
+        )
+        imports.update(
+            alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
+            for alias in node.names
+        )
+        cases = {}
+        for name, node in functions.items():
+            if not name.rsplit("::", 1)[-1].startswith("test_"):
+                continue
+            names = identifiers(node)
+            pending = list(names & helpers.keys())
+            seen = set()
+            while pending:
+                helper = pending.pop()
+                if helper in seen:
+                    continue
+                seen.add(helper)
+                names.update(helpers[helper])
+                pending.extend((helpers[helper] & helpers.keys()) - seen)
+            private = sorted(names & PRIVATE_INPUTS)
+            # String-named environment reads also carry input requirements.
+            dependency_nodes = [node, *(functions[helper] for helper in seen)]
+            texts = [
+                child.value for dependency in dependency_nodes for child in ast.walk(dependency)
+                if isinstance(child, ast.Constant) and isinstance(child.value, str)
+            ]
+            env_reads = set()
+            for dependency in dependency_nodes:
+                for child in ast.walk(dependency):
+                    if isinstance(child, ast.Call) and child.args and (
+                        isinstance(child.func, ast.Name) and child.func.id == "getenv"
+                        or isinstance(child.func, ast.Attribute) and child.func.attr in {"get", "getenv"}
+                    ):
+                        key = child.args[0]
+                        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                            env_reads.add(key.value)
+                    if isinstance(child, ast.Subscript) and isinstance(child.slice, ast.Constant):
+                        if isinstance(child.value, ast.Attribute) and child.value.attr == "environ":
+                            env_reads.add(child.slice.value)
+            private.extend(sorted(env_reads & PRIVATE_INPUTS))
+            corpus = (
+                "skip_unless_e2e_env" in names
+                or any("corpus" in item.lower() for item in names)
+                or any("PINEFORGE_ENGINE_CORPUS" in text for text in texts)
+                or any(module.startswith("tests._e2e") for module in imports)
+            )
+            cases[name] = {
+                "native": bool(
+                    names & NATIVE_CALLS or imports & {"tests._compile", "tests._e2e"}
+                    or path in NATIVE_TEST_PATHS or path.startswith("tests/test_e2e_")
+                ),
+                "private": sorted(set(private)),
+                "corpus": corpus,
+                "historical": "reference_codegen" in names,
+            }
+        inventory[path] = {
+            "imports": imports, "cases": cases,
+            # Resolve real historical objects before pytest imports. Full
+            # history normally supplies abbreviated refs; a missing full ref
+            # can be fetched by its immutable ID, never replaced with HEAD.
+            "history_refs": historical_refs(tree),
+        }
+    return inventory
+
+
+def merge_inventory(trusted: dict, head: dict) -> dict:
+    """Head data may add requirements/targets, never erase or exempt base ones."""
+    result = {}
+    for path in sorted(trusted.keys() | head.keys()):
+        old = trusted.get(path, {"imports": set(), "cases": {}})
+        new = head.get(path, {"imports": set(), "cases": {}})
+        cases = {}
+        for name in sorted(old["cases"].keys() | new["cases"].keys()):
+            base_case = old["cases"].get(name)
+            head_case = new["cases"].get(name, {})
+            cases[name] = {
+                "native": bool((base_case or {}).get("native") or head_case.get("native")),
+                "corpus": bool((base_case or {}).get("corpus") or head_case.get("corpus")),
+                # Only installed/base case metadata can authorize exclusions.
+                "private": (base_case or {}).get("private", []),
+                "historical": (base_case or {}).get("historical", False),
+            }
+        result[path] = {
+            "imports": old["imports"] | new["imports"], "cases": cases,
+            "history_refs": sorted(set(old.get("history_refs", []))
+                                   | set(new.get("history_refs", []))),
+        }
+    return result
+
+
+def select_tests(changes: list[dict], inventory: dict[str, dict],
+                 source_event: str = "pull_request") -> dict:
+    if source_event not in {"pull_request", "push_main"}:
+        raise ValueError("unknown source event")
+    paths = sorted({path for change in changes for path in change["paths"]})
+    changed_tests = {path for path in paths if path in inventory}
+    native_tests = {
+        path for path in changed_tests
+        if any(case["native"] for case in inventory[path]["cases"].values())
+    }
+    triggers = [
+        path for path in paths if native_path(path) or path in native_tests
+    ]
+    if source_event == "push_main":
+        # The changed paths are provenance only. Never use PR impact selection
+        # or its private-input exclusions to narrow the main suite.
+        required = sorted(
+            f"{path}::{name}" for path, entry in inventory.items()
+            for name in entry["cases"]
+        )
+        if not required:
+            raise ValueError("full main suite has no test inventory")
+        return {
+            "native": True, "mode": "full",
+            "reason": "Every main push requires the full repository suite",
+            "changes": changes, "triggers": triggers,
+            "selected": ["tests"], "required_tests": required,
+            "suite_files": sorted(inventory),
+            "selection_reasons": {"tests": ["full repository suite on exact main SHA"]},
+            "excluded": [], "needs_corpus": True,
+            "history_refs": sorted({
+                ref for entry in inventory.values() for ref in entry.get("history_refs", [])
+            }),
+            "input_needs": [
+                {"nodeid": f"{path}::{name}", "inputs": case["private"]}
+                for path, entry in sorted(inventory.items())
+                for name, case in sorted(entry["cases"].items()) if case["private"]
+            ],
+        }
+    if not triggers and source_event == "pull_request":
+        return {
+            "native": False, "mode": "skip",
+            "reason": "No emitter, generated C++, native harness/test or CI driver changes",
+            "changes": changes, "triggers": [], "selected": [], "excluded": [],
+            "needs_corpus": False,
+        }
+
+    modules = {
+        path[:-3].replace("/", ".") for path in paths
+        if path.endswith(".py") and (
+            path.startswith("pineforge_codegen/") or path in NATIVE_HARNESSES
+        )
+    }
+    topics = {
+        re.sub(r"^(emit_|visit_|test_)", "", PurePosixPath(path).stem)
+        for path in paths if path.startswith("pineforge_codegen/")
+    } - {"__init__", "base", "types", "helpers", "tables"}
+    selected = {node: ["mandatory public integration smoke"] for node in SMOKE}
+    excluded = []
+    needs_corpus = False
+    for path, entry in inventory.items():
+        reasons = []
+        if path in changed_tests:
+            reasons.append("changed test file")
+        if entry["imports"] & modules:
+            reasons.append("imports a changed module")
+        if any(f"_{topic}_" in f"_{PurePosixPath(path).stem}_" for topic in topics):
+            reasons.append("test filename matches changed module topic")
+        if path == "tests/test_codegen_golden.py" and any(
+            name.startswith("tests/golden/") for name in paths
+        ):
+            reasons.append("generated C++ golden input changed")
+        if path == "tests/test_script_run_prepare.py" and any(
+            name.endswith(("/emit_top.py", "/base.py", "/checked_settings.py"))
+            for name in paths
+        ):
+            reasons.append("constructor/lifecycle emitter changed")
+        if not reasons:
+            continue
+        for name, case in entry["cases"].items():
+            node = f"{path}::{name}"
+            if case["private"]:
+                excluded.append({"nodeid": node, "reason": "non-public inputs",
+                                 "inputs": case["private"]})
+                continue
+            selected.setdefault(node, []).extend(reasons)
+            needs_corpus |= case["corpus"]
+    for node in SMOKE:
+        path, name = node.split("::")
+        if name not in inventory.get(path, {}).get("cases", {}):
+            raise ValueError(f"mandatory smoke missing from tested checkout: {node}")
+    return {
+        "native": True, "mode": "touched",
+        "reason": "Actual diff touches native integration inputs",
+        "changes": changes, "triggers": triggers,
+        "selected": sorted(selected), "selection_reasons": selected,
+        "excluded": excluded, "needs_corpus": needs_corpus,
+        "history_refs": sorted({
+            ref for node in selected
+            for ref in inventory.get(node.split("::", 1)[0], {}).get("history_refs", [])
+        }),
+    }
+
+
+def write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def summary(message: str) -> None:
+    print(message, flush=True)
+    if path := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(path, "a", encoding="utf-8") as stream:
+            stream.write(message + "\n\n")
+
+
+class PrivateManifest(TypedDict):
+    path: str
+    schema_version: int
+    blob_sha256: str
+    case_ids: list[str]
+
+
+class PrivatePolicy(TypedDict):
+    kind: str
+    source_sha: str
+    target_sha: str
+    entry_key: str | None
+
+
+class WorkerPartition(TypedDict):
+    mode: str
+    plan: str
+    private_manifest: PrivateManifest | None
+    private_policy: PrivatePolicy | None
+
+
+class WorkerPayload(WorkerPartition):
+    bound_plan: dict | None
+
+
+def private_case_ids(value: object) -> list[str]:
+    """Validate data only; membership is proved against actual worker U."""
+    if (not isinstance(value, list)
+            or any(not isinstance(node, str) or not node.strip() for node in value)):
+        raise ValueError("private case_ids must be a list of nonempty strings")
+    if len(value) != len(set(value)):
+        raise ValueError("duplicate private case IDs")
+    return list(value)
+
+
+def validate_private_policy(value: object, path: str, head: object,
+                            definition: object) -> PrivatePolicy:
+    if (not isinstance(value, dict)
+            or set(value) != {"kind", "source_sha", "target_sha", "entry_key"}
+            or any(not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha)
+                   for sha in (head, definition, value.get("source_sha"), value.get("target_sha")))):
+        raise ValueError("full mode requires valid private_policy provenance")
+    current = (
+        value["kind"] == "tested-head" and path == PRIVATE_CASES_PATH
+        and value["source_sha"] == value["target_sha"] == head
+        and value["entry_key"] is None
+    )
+    historical = (
+        value["kind"] == "definition-historical" and path == HISTORICAL_PRIVATE_CASES_PATH
+        and value["source_sha"] == definition and value["target_sha"] == head
+        and value["entry_key"] == head and head != definition
+    )
+    if not (current or historical):
+        raise ValueError("private_policy provenance differs from tested head/workflow definition/path")
+    return dict(value)
+
+
+def validate_private_manifest(value: object, policy: object = None, *,
+                              head: object = None, definition: object = None) -> PrivateManifest:
+    if (not isinstance(value, dict)
+            or set(value) != {"path", "schema_version", "blob_sha256", "case_ids"}
+            or value["path"] not in (PRIVATE_CASES_PATH, HISTORICAL_PRIVATE_CASES_PATH)
+            or type(value["schema_version"]) is not int or value["schema_version"] != 1
+            or not isinstance(value["blob_sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", value["blob_sha256"])):
+        raise ValueError("full mode requires the bound private-case manifest identity")
+    validate_private_policy(policy, value["path"], head, definition)
+    return {**value, "case_ids": private_case_ids(value["case_ids"])}
+
+
+def read_private_blob(repo: Path, sha: str, path: str) -> bytes | None:
+    """Only absence permits fallback; any non-regular entry is a refusal."""
+    commit_ref(sha)
+    entries = subprocess.check_output([
+        "git", "-C", str(repo), "ls-tree", "-z", sha, "--", path,
+    ]).decode("utf-8", errors="strict").split("\0")
+    records = [entry for entry in entries if entry]
+    if not records:
+        return None
+    if len(records) != 1:
+        raise ValueError("private-case manifest is not one regular Git blob")
+    metadata, recorded_path = records[0].split("\t", 1)
+    mode, kind, _ = metadata.split()
+    if recorded_path != path or mode not in {"100644", "100755"} or kind != "blob":
+        raise ValueError("private-case manifest is not a regular Git blob")
+    return subprocess.check_output([
+        "git", "-C", str(repo), "show", f"{sha}:{path}",
+    ])
+
+
+def private_json(raw: bytes) -> object:
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate private manifest field: {key}")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(raw.decode("utf-8", errors="strict"), object_pairs_hook=unique_keys)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("malformed private-case manifest") from error
+
+
+def read_private_manifest(repo: Path, head: str, definition_repo: Path,
+                          definition: str) -> tuple[PrivateManifest, PrivatePolicy]:
+    """Project exact committed data without changing the tested historical tree."""
+    commit_ref(head)
+    commit_ref(definition)
+    path = PRIVATE_CASES_PATH
+    raw = read_private_blob(repo, head, path)
+    policy: PrivatePolicy = {
+        "kind": "tested-head", "source_sha": head, "target_sha": head, "entry_key": None,
+    }
+    if raw is not None:
+        data = private_json(raw)
+        if (not isinstance(data, dict) or set(data) != {"schema_version", "case_ids"}
+                or type(data["schema_version"]) is not int or data["schema_version"] != 1):
+            raise ValueError("private-case manifest schema must be exactly version 1 and case_ids")
+        case_ids = private_case_ids(data["case_ids"])
+    else:
+        if head == definition:
+            raise ValueError(f"NEEDS committed private-case manifest: {path}")
+        path = HISTORICAL_PRIVATE_CASES_PATH
+        raw = read_private_blob(definition_repo, definition, path)
+        if raw is None:
+            raise ValueError(f"NEEDS committed historical private-case policy: {path}")
+        data = private_json(raw)
+        if (not isinstance(data, dict) or set(data) != {"schema_version", "targets"}
+                or type(data["schema_version"]) is not int or data["schema_version"] != 1
+                or not isinstance(data["targets"], dict)):
+            raise ValueError("historical private-case policy schema must be exactly version 1 and targets")
+        for target, entry in data["targets"].items():
+            commit_ref(target)
+            if not isinstance(entry, dict) or set(entry) != {"case_ids"}:
+                raise ValueError("historical private-case entry must be exactly case_ids")
+            private_case_ids(entry["case_ids"])
+        if head not in data["targets"]:
+            raise ValueError(f"NEEDS exact historical private-case target: {head}")
+        case_ids = data["targets"][head]["case_ids"]
+        policy = {
+            "kind": "definition-historical", "source_sha": definition,
+            "target_sha": head, "entry_key": head,
+        }
+    manifest = validate_private_manifest({
+        "schema_version": data["schema_version"], "case_ids": case_ids,
+        "path": path, "blob_sha256": hashlib.sha256(raw).hexdigest(),
+    }, policy, head=head, definition=definition)
+    return manifest, policy
+
+
+def worker_partition(mode: str, plan_digest: str,
+                     manifest: object = None, policy: object = None, *,
+                     head: object = None, definition: object = None) -> WorkerPartition:
+    if (not isinstance(mode, str) or mode not in {"full", "touched"}
+            or not isinstance(plan_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", plan_digest)):
+        raise ValueError("invalid worker mode or plan binding")
+    if mode == "full":
+        manifest = validate_private_manifest(manifest, policy, head=head, definition=definition)
+    elif manifest is not None or policy is not None:
+        raise ValueError("touched mode cannot apply a private-case partition")
+    return {"mode": mode, "plan": plan_digest, "private_manifest": manifest,
+            "private_policy": policy}
+
+
+def validate_bound_partition(binding: WorkerPartition, bound: object) -> None:
+    if binding["mode"] != "full":
+        if bound is not None:
+            raise ValueError("touched worker received a full-mode bound plan")
+        return
+    if not isinstance(bound, dict):
+        raise ValueError("full worker lacks the digest-bound plan")
+    unsigned = {key: value for key, value in bound.items() if key != "plan_sha256"}
+    actual_digest = hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(),
+    ).hexdigest()
+    if (actual_digest != binding["plan"] or bound.get("plan_sha256") != actual_digest
+            or bound.get("mode") != binding["mode"]
+            or bound.get("private_manifest") != binding["private_manifest"]
+            or bound.get("private_policy") != binding["private_policy"]):
+        raise ValueError("worker partition is inconsistent with the digest-bound plan")
+
+
+def selection_partition(selection: dict) -> WorkerPartition:
+    binding = worker_partition(
+        selection["mode"], selection["plan_sha256"], selection.get("private_manifest"),
+        selection.get("private_policy"), head=selection.get("codegen_sha"),
+        definition=selection.get("workflow_definition_sha"),
+    )
+    validate_bound_partition(binding, selection if binding["mode"] == "full" else None)
+    return binding
+
+
+def plan(repo: Path, base: str, head: str, definition: str, count: int, out: Path,
+         source_event: str = "pull_request") -> dict:
+    count = workers(str(count))
+    base, head, definition = map(commit_ref, (base, head, definition))
+    definition_repo = Path(__file__).resolve().parents[1]
+    if git(definition_repo, "rev-parse", "HEAD") != definition:
+        raise ValueError("workflow driver checkout differs from workflow definition SHA")
+    if git(repo, "rev-parse", "HEAD") != head:
+        raise ValueError("tested checkout HEAD differs from requested codegen head")
+    if source_event not in {"pull_request", "push_main"}:
+        raise ValueError("unknown source event")
+    initial_push = source_event == "push_main" and base == "0" * 40
+    if source_event == "push_main" and not initial_push:
+        present = subprocess.run([
+            "git", "-C", str(repo), "cat-file", "-e", f"{base}^{{commit}}",
+        ], capture_output=True).returncode == 0
+        if not present:
+            # Fetch only the immutable event-before commit, never today's main.
+            subprocess.run([
+                "git", "-C", str(repo), "fetch", "--no-tags", "origin", base,
+            ], check=True)
+    for sha in ((head,) if initial_push else (base, head)):
+        if git(repo, "rev-parse", "--verify", f"{sha}^{{commit}}") != sha:
+            raise ValueError("unresolvable codegen input")
+    if initial_push:
+        paths = subprocess.check_output([
+            "git", "-C", str(repo), "ls-tree", "-rz", "--name-only", head,
+        ]).split(b"\0")
+        raw = b"".join(b"A\0" + path + b"\0" for path in paths if path)
+        merge_base = None
+    else:
+        # PRs use their merge base; pushes compare the exact before/after trees,
+        # including a non-fast-forward event's before commit.
+        refs = [base, head] if source_event == "push_main" else [f"{base}...{head}"]
+        raw = subprocess.check_output([
+            "git", "-C", str(repo), "diff", "--no-ext-diff", "--no-textconv",
+            "--find-renames", "--ignore-submodules=none", "--name-status", "-z",
+            *refs, "--",
+        ])
+        merge_base = base if source_event == "push_main" else git(repo, "merge-base", base, head)
+    # This baseline survives deletes/renames and changes to native calls; only
+    # its metadata can supply non-public exclusions, not candidate code.
+    baseline = {} if source_event == "push_main" else test_inventory(repo, merge_base)
+    head_inventory = test_inventory(repo, head)
+    inventory = (head_inventory if source_event == "push_main"
+                 else merge_inventory(baseline, head_inventory))
+    result = select_tests(parse_diff(raw), inventory, source_event)
+    result.update({
+        "source_event": source_event,
+        "diff_kind": "before_after" if source_event == "push_main" else "merge_base",
+        "codegen_base_sha": base, "codegen_sha": head,
+        "codegen_base_tree": None if initial_push else git(repo, "rev-parse", f"{base}^{{tree}}"),
+        "codegen_tree": git(repo, "rev-parse", "HEAD^{tree}"),
+        "diff_merge_base": merge_base,
+        "workflow_definition_sha": definition, "workers": count,
+        "workflow_definition_tree": git(definition_repo, "rev-parse", "HEAD^{tree}"),
+    })
+    if result["mode"] == "full":
+        result["private_manifest"], result["private_policy"] = read_private_manifest(
+            repo, head, definition_repo, definition,
+        )
+    result["plan_sha256"] = hashlib.sha256(
+        json.dumps(result, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    write_json(out / "selection.json", result)
+    (out / "selected-tests.txt").write_text(
+        "".join(node + "\n" for node in result["selected"]), encoding="utf-8",
+    )
+    if output := os.environ.get("GITHUB_OUTPUT"):
+        with open(output, "a", encoding="utf-8") as stream:
+            for key, value in {
+                "native": str(result["native"]).lower(),
+                "base": base, "head": head, "definition": definition, "workers": count,
+                "tree": result["codegen_tree"], "plan": result["plan_sha256"],
+                "source_event": source_event,
+                "mode": result["mode"],
+            }.items():
+                stream.write(f"{key}={value}\n")
+    manifest = result.get("private_manifest")
+    policy = result.get("private_policy")
+    manifest_summary = (
+        f"path=`{manifest['path']}`, schema={manifest['schema_version']}, "
+        f"digest=`{manifest['blob_sha256']}`, case count={len(manifest['case_ids'])}"
+        f", provenance={json.dumps(policy, sort_keys=True)}"
+        if manifest is not None else "none (not full mode)"
+    )
+    summary(
+        f"{'RUN' if result['native'] else 'SKIP native'}: {result['reason']}\n\n"
+        f"Workflow definition `{definition}`; tested codegen `{head}` "
+        f"(tree `{result['codegen_tree']}`); base `{base}`; "
+        f"diff baseline `{result['diff_merge_base']}`; source event `{source_event}`.\n\n"
+        f"Triggers: {len(result['triggers'])}. "
+        f"Mode: `{result['mode']}`; pytest targets: {len(result['selected'])}; "
+        f"public corpus required: {result['needs_corpus']}. "
+        f"Excluded input-dependent cases: {len(result['excluded'])}.\n\n"
+        "Actual U=UNRUN; H=UNRUN; P=UNRUN (collection not run); "
+        "hosted full success=UNRUN; audit errors=UNRUN (execution not run); "
+        "private execution UNRUN.\n\n"
+        f"Committed private manifest: {manifest_summary}.\n\n"
+        "Retained `selection.json` contains complete targets, triggers, exclusions "
+        "and manifest case IDs. Execution counts, complete U/H/P IDs, worker "
+        "collections, private removal records and errors belong in `execution.json` "
+        "when execution runs. Full-mode success covers hosted H=U-P only."
+    )
+    return result
+
+
+def logged(command: list[str], log: Path, *, cwd: Path | None = None,
+           capture: bool = False) -> str:
+    """Stream the real command and retain its exit; never use a shell pipeline."""
+    captured = []
+    with log.open("a", encoding="utf-8") as stream:
+        if stream.tell() == 0:
+            identity = log.parent / "native-identity.json"
+            if identity.is_file():
+                stream.write("Native identity:\n" + identity.read_text(encoding="utf-8") + "\n")
+        line = "$ " + shlex.join(command)
+        print(line, flush=True)
+        stream.write(line + "\n")
+        with subprocess.Popen(
+            command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        ) as process:
+            assert process.stdout is not None
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                stream.write(line)
+                if capture:
+                    captured.append(line)
+            code = process.wait()
+        stream.write(f"\nexit={code}\n")
+        print(f"exit={code}", flush=True)
+    if code:
+        raise subprocess.CalledProcessError(code, command)
+    return "".join(captured)
+
+
+def install_python_test_tools(out: Path) -> None:
+    logged([
+        sys.executable, "-m", "pip", "install", *PYTHON_TEST_REQUIREMENTS,
+    ], out / "install.log")
+
+
+def install_full_clang(out: Path) -> dict:
+    """Provision and bind the real full-mode compiler, regardless of PATH."""
+    logged(["sudo", "apt-get", "update"], out / "install.log")
+    logged([
+        "sudo", "apt-get", "install", "-y", "--allow-downgrades",
+        *(f"{name}={version}" for name, version in FULL_CLANG_PACKAGES.items()),
+    ], out / "install.log")
+    log = out / "compiler.log"
+    packages = logged([
+        "dpkg-query", "--show",
+        "--showformat=${Package}\t${Version}\t${Status}\t${Architecture}\n",
+        *FULL_CLANG_PACKAGES,
+    ], log, capture=True)
+    installed = {}
+    for line in packages.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 4:
+            raise ValueError("full-mode clang package query is malformed")
+        name, version, status, architecture = fields
+        if (name not in FULL_CLANG_PACKAGES or name in installed
+                or version != FULL_CLANG_PACKAGES[name]
+                or status != "install ok installed" or not architecture):
+            raise ValueError(f"full-mode clang package identity differs: {line}")
+        installed[name] = {"version": version, "architecture": architecture}
+    if set(installed) != set(FULL_CLANG_PACKAGES):
+        raise ValueError("full-mode clang package identity is incomplete")
+
+    resolved = logged(["readlink", "-e", FULL_CLANG], log, capture=True).strip()
+    if not resolved or "\n" in resolved or not Path(resolved).is_absolute():
+        raise ValueError("full-mode clang binary did not resolve to an absolute path")
+    owners = {}
+    for path in dict.fromkeys((FULL_CLANG, resolved)):
+        ownership = logged(["dpkg-query", "--search", path], log, capture=True).strip()
+        owner, separator, owned_path = ownership.rpartition(": ")
+        if (not separator or owned_path != path
+                or owner not in {"clang-18", f"clang-18:{installed['clang-18']['architecture']}"}):
+            raise ValueError(f"full-mode clang binary is not owned by clang-18: {path}")
+        owners[path] = owner
+    # dpkg can report changed files on stdout even with a zero exit.
+    if logged(["dpkg", "--verify", "clang-18"], log, capture=True).strip():
+        raise ValueError("full-mode clang installed files differ from package metadata")
+    version = logged([FULL_CLANG, "--version"], log, capture=True)
+    lines = version.splitlines()
+    targets = [line.removeprefix("Target: ") for line in lines if line.startswith("Target: ")]
+    if (not lines or lines[0] != FULL_CLANG_VERSION or len(targets) != 1
+            or not re.fullmatch(r"[A-Za-z0-9_.+-]+", targets[0])):
+        raise ValueError("full-mode clang compiler identity differs")
+    target = logged([FULL_CLANG, "-dumpmachine"], log, capture=True).strip()
+    if target != targets[0]:
+        raise ValueError("full-mode clang compiler target differs")
+    identity = {
+        "packages": installed, "compiler": FULL_CLANG, "resolved_compiler": resolved,
+        "owners": owners, "version_output": version, "target": target,
+    }
+    write_json(out / "compiler-identity.json", identity)
+    return identity
+
+
+def native_environment(engine: Path, build: Path, compiler: str) -> dict[str, str]:
+    resolved = shutil.which(compiler)
+    if resolved is None:
+        raise ValueError(f"native compiler missing: {compiler}")
+    eigen = next((path for path in (
+        build / "_deps/eigen-src", Path("/usr/include/eigen3"),
+    ) if (path / "Eigen/Dense").is_file()), None)
+    if eigen is None:
+        raise ValueError("real Eigen headers missing")
+    env = {
+        "PINEFORGE_ENGINE_INCLUDE": str(engine / "include"),
+        "PINEFORGE_GENERATED_INCLUDE": str(build / "include"),
+        "PINEFORGE_ENGINE_LIB": str(build / "lib/libpineforge.a"),
+        "PINEFORGE_EIGEN_INCLUDE": str(eigen),
+        "CXX": resolved,
+    }
+    required = (
+        engine / "include/pineforge/engine.hpp",
+        engine / "include/pineforge/checked_settings.hpp",
+        build / "include/pineforge/version.h",
+        build / "lib/libpineforge.a",
+    )
+    for path in required:
+        if not path.is_file() or not path.stat().st_size:
+            raise ValueError(f"required native input missing or empty: {path}")
+    if re.search(r"@[A-Z][A-Z0-9_]*@", required[2].read_text(encoding="utf-8")):
+        raise ValueError("generated version header contains unresolved template fields")
+    with required[3].open("rb") as archive:
+        if archive.read(8) != b"!<arch>\n":
+            raise ValueError("runtime is not a static archive")
+    return env
+
+
+def require_public_feed(feed: Path) -> None:
+    if not feed.is_file() or not feed.stat().st_size:
+        raise ValueError(f"NEEDS real public replay feed: {feed}")
+    with feed.open("rb") as stream:
+        if stream.read(128).startswith(b"version https://git-lfs.github.com/spec/"):
+            raise ValueError(f"NEEDS smudged public replay feed, got LFS pointer: {feed}")
+
+
+def provision_history(repo: Path, refs: list[str], out: Path) -> dict:
+    if git(repo, "rev-parse", "--is-shallow-repository") != "false":
+        raise ValueError("NEEDS full codegen history before collection")
+    resolved = {}
+    for ref in refs:
+        if not re.fullmatch(r"[0-9a-f]{7,40}", ref):
+            raise ValueError("invalid historical reference")
+        found = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+            capture_output=True, text=True,
+        )
+        if found.returncode:
+            if len(ref) != 40:
+                raise ValueError(f"NEEDS genuine historical object for abbreviated ref: {ref}")
+            logged(["git", "-C", str(repo), "fetch", "--no-tags", "origin", ref],
+                   out / "history.log")
+        sha = git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")
+        resolved[ref] = {"sha": commit_ref(sha), "tree": git(repo, "rev-parse", f"{sha}^{{tree}}")}
+    return resolved
+
+
+def collected_selectors(nodeids: set[str]) -> set[str]:
+    """Index once rather than scan the full suite for each static target."""
+    covered = set(nodeids)
+    for node in nodeids:
+        parts = node.split("[", 1)[0].split("::")
+        covered.update("::".join(parts[:index]) for index in range(1, len(parts) + 1))
+        path = PurePosixPath(parts[0])
+        covered.update(parent.as_posix() for parent in path.parents if parent.as_posix() != ".")
+    return covered
+
+
+def collection_row(report) -> dict:
+    return {
+        "nodeid": report.nodeid, "outcome": report.outcome,
+        "detail": str(report.longrepr) if report.failed or report.skipped else "",
+    }
+
+
+class WorkerCollectionAudit:
+    """Capture before/after selection inside each real xdist worker.
+
+    xdist only forwards unsuccessful collection reports to its controller.
+    Worker output supplies the successful reports, pre-deselection item list,
+    and explicit deselections as well, without a second pytest invocation.
+    """
+
+    def __init__(self, config, binding: WorkerPartition, bound_plan: dict | None = None) -> None:
+        self.config = config
+        self.binding = binding
+        self.bound_plan = bound_plan
+        self.items: list[str] = []
+        self.final: list[str] = []
+        self.deselected: list[str] = []
+        self.private_excluded: list[str] = []
+        self.partition_errors: list[str] = []
+        self.collection: list[dict] = []
+
+    def pytest_itemcollected(self, item) -> None:
+        self.items.append(item.nodeid)
+
+    def pytest_deselected(self, items) -> None:
+        self.deselected.extend(item.nodeid for item in items)
+
+    def pytest_collectreport(self, report) -> None:
+        self.collection.append(collection_row(report))
+
+    def partition(self, items, before: list[str]) -> None:
+        if self.binding["mode"] != "full":
+            return
+        universe = self.items
+        if len(universe) != len(set(universe)):
+            raise ValueError("duplicate universe nodeids")
+        if before != universe or [item.nodeid for item in items] != universe or self.deselected:
+            raise ValueError("unapproved removal or change before private partition")
+        identities = self.bound_plan if isinstance(self.bound_plan, dict) else {}
+        manifest = validate_private_manifest(
+            self.binding["private_manifest"], self.binding["private_policy"],
+            head=identities.get("codegen_sha"), definition=identities.get("workflow_definition_sha"),
+        )
+        validate_bound_partition(self.binding, self.bound_plan)
+        private = set(manifest["case_ids"])
+        unknown = private - set(universe)
+        if unknown:
+            raise ValueError(f"unknown private case IDs: {sorted(unknown)}")
+        covered = collected_selectors(set(universe))
+        if any(target not in covered for target in SMOKE):
+            raise ValueError("mandatory public smoke missing from universe")
+        smoke = {node for node in universe if node.split("[", 1)[0] in SMOKE}
+        if private & smoke:
+            raise ValueError("private manifest excludes mandatory public smoke")
+        hosted = [item for item in items if item.nodeid not in private]
+        if not hosted:
+            raise ValueError("hosted partition is empty")
+        removed = [item for item in items if item.nodeid in private]
+        self.private_excluded = [item.nodeid for item in removed]
+        items[:] = hosted
+        if removed:
+            self.config.hook.pytest_deselected(items=removed)
+
+    def pytest_collection_finish(self, session) -> None:
+        self.final = [item.nodeid for item in session.items]
+
+    def pytest_sessionfinish(self, session, exitstatus) -> None:
+        self.config.workeroutput["engine_main_collection"] = {
+            "plan": os.environ["PF_ENGINE_MAIN_PLAN"],
+            "binding": self.binding,
+            "items": self.items, "final": self.final,
+            "deselected": self.deselected, "collection": self.collection,
+            "private_excluded": self.private_excluded,
+            "partition_errors": self.partition_errors,
+            "exit": int(exitstatus),
+        }
+
+
+def pytest_configure(config) -> None:
+    # Loaded by -p in both controller and workers; the controller's instance is
+    # supplied explicitly to pytest.main. Keep plan selection stdlib-only.
+    if hasattr(config, "workerinput"):
+        import pytest
+
+        payload = config.workerinput.get("engine_main_partition")
+        try:
+            if not isinstance(payload, dict) or set(payload) != {
+                "mode", "plan", "private_manifest", "private_policy", "bound_plan",
+            }:
+                raise ValueError("missing or malformed worker partition payload")
+            bound = payload["bound_plan"]
+            if payload["mode"] == "full" and not isinstance(bound, dict):
+                raise ValueError("full worker lacks the digest-bound plan")
+            identities = bound if isinstance(bound, dict) else {}
+            binding = worker_partition(
+                payload["mode"], payload["plan"], payload["private_manifest"],
+                payload["private_policy"], head=identities.get("codegen_sha"),
+                definition=identities.get("workflow_definition_sha"),
+            )
+            if (binding["plan"] != os.environ.get("PF_ENGINE_MAIN_PLAN")
+                    or binding["mode"] != os.environ.get("PF_ENGINE_MAIN_MODE")):
+                raise ValueError("worker partition differs from PF_ENGINE_MAIN_PLAN/mode")
+            validate_bound_partition(binding, bound)
+        except ValueError as error:
+            raise pytest.UsageError(str(error)) from error
+
+        class PartitionWorker(WorkerCollectionAudit):
+            @pytest.hookimpl(wrapper=True, tryfirst=True)
+            def pytest_collection_modifyitems(self, items):
+                before = [item.nodeid for item in items]
+                result = yield
+                try:
+                    self.partition(items, before)
+                except ValueError as error:
+                    self.partition_errors.append(str(error))
+                    raise pytest.UsageError(str(error)) from error
+                return result
+
+        config.pluginmanager.register(
+            PartitionWorker(config, binding, bound), "engine-main-worker-audit",
+        )
+
+
+class ExecutionAudit:
+    """Actual collection and phase reports, never an expected count."""
+
+    def __init__(self, selection: dict | None = None) -> None:
+        self.selection = json.loads(json.dumps(selection)) if selection is not None else None
+        self.binding = selection_partition(self.selection) if self.selection is not None else None
+        self.collected: set[str] = set()
+        self.reports: list[dict] = []
+        self.collections: dict[str, list[str]] = {}
+        self.worker_inventory: dict[str, dict] = {}
+        self.worker_errors: list[str] = []
+        self.collection_reports: list[dict] = []
+
+    def pytest_configure_node(self, node) -> None:
+        if self.binding is None:
+            raise ValueError("controller lacks a bound execution partition")
+        # Serialize an independent typed payload; workers never read a mutable
+        # manifest file or an environment-provided private list.
+        payload: WorkerPayload = {
+            **json.loads(json.dumps(self.binding)),
+            "bound_plan": (json.loads(json.dumps(self.selection))
+                           if self.binding["mode"] == "full" else None),
+        }
+        node.workerinput["engine_main_partition"] = payload
+
+    def pytest_xdist_node_collection_finished(self, node, ids) -> None:
+        self.collected.update(ids)
+        worker = node.gateway.id if node is not None else "fixture"
+        if worker in self.collections:
+            self.worker_errors.append(f"{worker}: duplicate controller collection")
+        self.collections[worker] = list(ids)
+
+    def pytest_collectreport(self, report) -> None:
+        self.collection_reports.append(collection_row(report))
+
+    def pytest_testnodedown(self, node, error) -> None:
+        worker = node.gateway.id
+        if error is not None:
+            self.worker_errors.append(f"{worker}: {error}")
+        payload = getattr(node, "workeroutput", {}).get("engine_main_collection")
+        if not isinstance(payload, dict):
+            self.worker_errors.append(f"{worker}: missing worker collection audit")
+        else:
+            self.worker_inventory[worker] = payload
+
+    def pytest_runtest_logreport(self, report) -> None:
+        self.reports.append({
+            "nodeid": report.nodeid, "when": report.when,
+            "outcome": report.outcome, "xfail": hasattr(report, "wasxfail"),
+            "detail": str(report.longrepr) if report.failed or report.skipped else "",
+        })
+
+    def result(self, selected: list[str], exit_code: int, *, mode: str = "touched",
+               required: list[str] | None = None, suite_files: list[str] | None = None,
+               count: int | None = None, plan_digest: str | None = None,
+               private_manifest: object = None, private_policy: object = None) -> dict:
+        errors = list(self.worker_errors)
+        if mode not in {"full", "touched"}:
+            errors.append("invalid execution mode")
+        expected_binding = None
+        manifest = None
+        policy = None
+        if mode == "full":
+            try:
+                identities = self.selection if self.selection is not None else {}
+                expected_binding = worker_partition(
+                    mode, plan_digest, private_manifest, private_policy,
+                    head=identities.get("codegen_sha"),
+                    definition=identities.get("workflow_definition_sha"),
+                )
+                validate_bound_partition(expected_binding, self.selection)
+                manifest = expected_binding["private_manifest"]
+                policy = expected_binding["private_policy"]
+                if self.binding != expected_binding:
+                    errors.append("controller partition binding differs from plan")
+                if (self.selection is None or required != self.selection.get("required_tests")
+                        or suite_files != self.selection.get("suite_files")
+                        or count != self.selection.get("workers")
+                        or selected != self.selection.get("selected")):
+                    errors.append("controller repository scope differs from bound plan")
+            except ValueError as error:
+                errors.append(str(error))
+        if not self.collected:
+            errors.append("zero tests collected")
+        missing_targets = []
+        universe = next(iter(self.worker_inventory.values()), {}).get("items", [])
+        covered = collected_selectors(set(universe) if mode == "full" else self.collected)
+        for selector in (required if mode == "full" and required is not None else selected):
+            if selector not in covered:
+                errors.append(f"selected target did not collect: {selector}")
+                missing_targets.append(selector)
+        for legacy in ("False", "True"):
+            if f"{CONSTRUCTION}[{legacy}]" not in self.collected:
+                errors.append(f"checked-construction smoke parameter missing: {legacy}")
+        if count is not None:
+            if len(self.collections) != count or set(self.worker_inventory) != set(self.collections):
+                errors.append("worker collection inventory is incomplete")
+        collection = list(self.collection_reports)
+        deselected = set()
+        discovered = set()
+        private_removals = {}
+        ordered = next(iter(self.collections.values()), [])
+        private_ids = set(manifest["case_ids"]) if manifest is not None else set()
+        private_required = [node for node in universe if node in private_ids]
+        hosted_required = [node for node in universe if node not in private_ids]
+        if mode == "full":
+            if private_ids - set(universe):
+                errors.append("unknown private case IDs in actual universe")
+            if len(universe) != len(set(universe)):
+                errors.append("duplicate universe nodeids")
+            if not hosted_required:
+                errors.append("hosted partition is empty")
+            if ordered != hosted_required or self.collected != set(hosted_required):
+                errors.append("controller collection differs from hosted partition")
+            if any(node.split("[", 1)[0] in SMOKE for node in private_required):
+                errors.append("private manifest excludes mandatory public smoke")
+            if any(target not in covered for target in SMOKE):
+                errors.append("mandatory public smoke missing from universe")
+        for worker, ids in self.collections.items():
+            if ids != ordered or len(ids) != len(set(ids)):
+                errors.append(f"{worker}: inconsistent or duplicate collected nodeids")
+        for worker, payload in self.worker_inventory.items():
+            if payload.get("plan") != plan_digest:
+                errors.append(f"{worker}: collection plan binding differs")
+            items, final = payload.get("items", []), payload.get("final", [])
+            if mode == "full":
+                if payload.get("binding") != expected_binding:
+                    errors.append(f"{worker}: worker partition binding differs")
+                if (items != universe or final != hosted_required
+                        or final != self.collections.get(worker)
+                        or len(items) != len(set(items))):
+                    errors.append(f"{worker}: universe/hosted collection differs")
+                removed = payload.get("private_excluded")
+                private_removals[worker] = removed
+                if removed != private_required or payload.get("deselected") != private_required:
+                    errors.append(f"{worker}: private removals/deselections differ from exact P")
+                if payload.get("partition_errors"):
+                    errors.extend(f"{worker}: {error}" for error in payload["partition_errors"])
+                seen = {row["nodeid"] for row in payload.get("collection", [])
+                        if row["outcome"] == "passed"}
+                for path in suite_files or []:
+                    if path not in seen:
+                        errors.append(f"{worker}: repository test module not collected successfully: {path}")
+                worker_covered = collected_selectors(set(items))
+                if any(target not in worker_covered for target in required or []):
+                    errors.append(f"{worker}: bound targets absent from actual universe")
+            elif (final != self.collections.get(worker) or set(items) != set(final)
+                  or len(items) != len(final)):
+                errors.append(f"{worker}: items omitted or changed during collection")
+            worker_exit = payload.get("exit")
+            if (type(worker_exit) is not int or worker_exit not in {0, 1}
+                    or (exit_code == 0 and worker_exit != 0)):
+                errors.append(f"{worker}: unsuccessful or inconsistent worker exit: {worker_exit}")
+            discovered.update(items)
+            deselected.update(payload.get("deselected", []))
+            collection.extend({**row, "worker": worker} for row in payload.get("collection", []))
+        if deselected and mode != "full":
+            errors.append("tests were deselected")
+        collection_omissions = [row for row in collection if row["outcome"] != "passed"]
+        if collection_omissions:
+            errors.append("collection failed or skipped, including module-level omissions")
+        if mode == "full":
+            if not required or not suite_files:
+                errors.append("full mode lacks bound repository inventory")
+            if not self.worker_inventory or discovered != set(universe):
+                errors.append("full mode lacks complete worker discovery")
+            seen_modules = {row["nodeid"] for row in collection if row["outcome"] == "passed"}
+            for path in suite_files or []:
+                if path not in seen_modules:
+                    errors.append(f"repository test module not collected successfully: {path}")
+        executed = {
+            row["nodeid"] for row in self.reports
+            if row["when"] == "call" and row["outcome"] in {"passed", "failed"}
+            and not row["xfail"]
+        }
+        for node in sorted(self.collected - executed):
+            errors.append(f"selected case did not execute an ordinary test call: {node}")
+        phases = {}
+        for row in self.reports:
+            phases.setdefault(row["nodeid"], {}).setdefault(row["when"], []).append(row)
+            if row["nodeid"] not in self.collected:
+                errors.append(f"phase report outside collection: {row['nodeid']}")
+            if row["when"] not in {"setup", "call", "teardown"}:
+                errors.append(f"unexpected test phase: {row['nodeid']}")
+        for node in sorted(self.collected):
+            for phase in ("setup", "call", "teardown"):
+                rows = phases.get(node, {}).get(phase, [])
+                if len(rows) != 1:
+                    errors.append(f"missing or duplicate {phase} phase: {node}")
+                elif phase != "call" and rows[0]["outcome"] != "passed":
+                    errors.append(f"{phase} did not pass: {node}")
+        skips = [row for row in self.reports if row["outcome"] == "skipped" or row["xfail"]]
+        if skips:
+            errors.append("tests skipped or xfailed; these rows remain unexecuted")
+        if exit_code == 0 and any(row["outcome"] == "failed" for row in self.reports):
+            errors.append("pytest returned zero despite a failed phase")
+        return {
+            "pytest_exit": exit_code, "audit_errors": errors,
+            "collected_count": len(self.collected), "executed_count": len(executed),
+            "call_outcomes": dict(Counter(
+                row["outcome"] for row in self.reports if row["when"] == "call"
+            )),
+            "skips": skips, "collected_nodeids": sorted(self.collected),
+            "reports": self.reports, "mode": mode,
+            "collection_reports": collection, "worker_inventories": self.worker_inventory,
+            "worker_collections": self.collections, "private_removals": private_removals,
+            "private_manifest": manifest,
+            "private_policy": policy,
+            "universe_nodeids": list(universe) if mode == "full" else sorted(self.collected),
+            "hosted_required_nodeids": hosted_required if mode == "full" else sorted(self.collected),
+            "private_required_nodeids": private_required if mode == "full" else [],
+            "universe_count": len(universe) if mode == "full" else len(self.collected),
+            "hosted_required_count": len(hosted_required) if mode == "full" else len(self.collected),
+            "private_required_count": len(private_required) if mode == "full" else 0,
+            "private_execution": "UNRUN",
+            "full_success_scope": "hosted H=U-P only; private execution UNRUN",
+            "deselected_nodeids": sorted(deselected), "missing_targets": missing_targets,
+            "unexecuted_nodeids": sorted(self.collected - executed),
+            "collection_omissions": collection_omissions,
+            # An ordinary assertion failure may have complete execution
+            # coverage, but can never establish successful full execution.
+            "coverage_complete": not errors,
+            "full_success": mode == "full" and not errors and exit_code == 0
+            and all(row["outcome"] == "passed" for row in self.reports),
+        }
+
+
+def run_native(repo: Path, engine: Path, out: Path, selection: dict) -> int:
+    if not selection["native"] or not selection["selected"]:
+        raise ValueError("native job requires a nonempty native selection")
+    mode = selection["mode"]
+    if ((selection["source_event"] == "push_main" and mode != "full")
+            or (selection["source_event"] == "pull_request" and mode != "touched")
+            or (mode == "full" and (selection["selected"] != ["tests"]
+                                    or selection["excluded"]))):
+        raise ValueError("source event and execution mode/whole-suite scope differ")
+    binding = selection_partition(selection)
+    if git(repo, "rev-parse", "HEAD") != selection["codegen_sha"]:
+        raise ValueError("codegen checkout changed after selection")
+    engine_sha = git(engine, "rev-parse", "HEAD")
+    if engine_sha != git(engine, "rev-parse", "refs/remotes/origin/main"):
+        raise ValueError("engine checkout is not the main resolved by this run")
+    identity = {
+        "resolved_at": datetime.now(timezone.utc).isoformat(),
+        "workflow_definition_sha": selection["workflow_definition_sha"],
+        "workflow_definition_tree": selection["workflow_definition_tree"],
+        "plan_sha256": selection["plan_sha256"],
+        "codegen_base_sha": selection["codegen_base_sha"],
+        "source_event": selection["source_event"],
+        "mode": mode,
+        "private_manifest": binding["private_manifest"],
+        "private_policy": binding["private_policy"],
+        "private_execution": "UNRUN",
+        "codegen_sha": selection["codegen_sha"], "codegen_tree": selection["codegen_tree"],
+        "engine_ref": "refs/heads/main", "engine_sha": engine_sha,
+        "engine_tree": git(engine, "rev-parse", "HEAD^{tree}"),
+    }
+    write_json(out / "native-identity.json", identity)
+    manifest = identity["private_manifest"]
+    display_identity = {
+        **identity,
+        "private_manifest": {
+            "path": manifest["path"],
+            "schema_version": manifest["schema_version"],
+            "blob_sha256": manifest["blob_sha256"],
+            "declared_case_count": len(manifest["case_ids"]),
+        } if manifest is not None else None,
+    }
+    summary(
+        "Native checkout identity:\n\n```json\n"
+        + json.dumps(display_identity, indent=2)
+        + "\n```\n\nRetained `native-identity.json` and `selection.json` "
+        "contain the complete private manifest and case IDs."
+    )
+    install_python_test_tools(out)
+    compiler = os.environ.get("CXX", "/usr/bin/g++")
+    if mode == "full":
+        identity["full_clang"] = install_full_clang(out)
+        compiler = identity["full_clang"]["compiler"]
+        write_json(out / "native-identity.json", identity)
+    identity["historical_codegen"] = provision_history(
+        repo, selection.get("history_refs", []), out,
+    )
+    build = engine / "build"
+    if build.exists():
+        raise ValueError("fresh engine build directory already exists")
+    if shutil.which(compiler) is None:
+        raise ValueError(f"native compiler missing: {compiler}")
+    count = str(workers(str(selection["workers"])))
+    logged([
+        "cmake", "-S", str(engine), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
+        "-DPINEFORGE_BUILD_TESTS=OFF", "-DPINEFORGE_BUILD_SOURCE_LAYER=ON",
+        f"-DCMAKE_CXX_COMPILER={compiler}",
+    ], out / "build.log")
+    logged(["cmake", "--build", str(build), "--parallel", count], out / "build.log")
+    env = native_environment(engine, build, compiler)
+    if selection["needs_corpus"]:
+        logged(["git", "-C", str(engine), "submodule", "update", "--init", "corpus"],
+               out / "corpus.log")
+        logged(["git", "-C", str(engine / "corpus"), "lfs", "pull"], out / "corpus.log")
+        corpus = engine / "corpus"
+        if not list(corpus.glob("*/*/strategy.pine")):
+            raise ValueError("selected corpus tests require public strategies")
+        feed = corpus / "data/ohlcv_ETH-USDT-USDT_1m.csv"
+        require_public_feed(feed)
+        if not (engine / "scripts/run_strategy.py").is_file():
+            raise ValueError("public engine replay driver missing")
+        env["PINEFORGE_ENGINE_CORPUS"] = str(corpus)
+        identity["public_corpus"] = {
+            "sha": git(corpus, "rev-parse", "HEAD"),
+            "tree": git(corpus, "rev-parse", "HEAD^{tree}"),
+            "feed": str(feed), "feed_bytes": feed.stat().st_size,
+        }
+    os.environ.update(env)
+    identity["native_environment"] = env
+    identity["generated_header_sha256"] = hashlib.sha256(
+        (build / "include/pineforge/version.h").read_bytes()
+    ).hexdigest()
+    write_json(out / "native-identity.json", identity)
+    summary("Native paths:\n\n```json\n" + json.dumps(env, indent=2) + "\n```")
+    logged([env["CXX"], "--version"], out / "preflight.log")
+    # This prevents the existing regression's #ifdef branch silently vanishing.
+    probe = out / "native-contract.cpp"
+    probe.write_text(
+        "#include <pineforge/version.h>\n#include <pineforge/checked_settings.hpp>\n"
+        "#ifndef PF_SETTINGS_API_VERSION\n#error checked settings API is required\n#endif\n",
+        encoding="utf-8",
+    )
+    logged([
+        env["CXX"], "-std=c++17", "-fsyntax-only",
+        "-I", env["PINEFORGE_ENGINE_INCLUDE"],
+        "-I", env["PINEFORGE_GENERATED_INCLUDE"],
+        "-I", env["PINEFORGE_EIGEN_INCLUDE"], str(probe),
+    ], out / "preflight.log")
+
+    os.chdir(repo)
+    sys.path.insert(0, str(repo))
+    import pineforge_codegen
+    if Path(pineforge_codegen.__file__).resolve().parent != repo / "pineforge_codegen":
+        raise ValueError("imported codegen is not the tested checkout")
+    import pytest
+    audit = ExecutionAudit(selection)
+    # Disable environment-supplied options that could deselect or xfail smoke.
+    os.environ.pop("PYTEST_ADDOPTS", None)
+    os.environ.pop("PYTEST_PLUGINS", None)
+    os.environ["PF_ENGINE_MAIN_PLAN"] = selection["plan_sha256"]
+    os.environ["PF_ENGINE_MAIN_MODE"] = mode
+    driver_dir = str(Path(__file__).resolve().parent)
+    sys.path.insert(0, driver_dir)
+    os.environ["PYTHONPATH"] = os.pathsep.join((driver_dir, str(repo)))
+    args = [
+        "-o", "addopts=", "-v", "-ra", "-n", count,
+        "-p", "ci_engine_main_touched",
+        "--junitxml", str(out / "junit.xml"), *selection["selected"],
+    ]
+    with (out / "pytest.log").open("w", encoding="utf-8") as stream:
+        class Tee:
+            def __init__(self, original):
+                self.original = original
+
+            def write(self, text):
+                self.original.write(text)
+                stream.write(text)
+
+            def flush(self):
+                self.original.flush()
+                stream.flush()
+
+            def __getattr__(self, name):
+                return getattr(self.original, name)
+
+        stdout, stderr = sys.stdout, sys.stderr
+        try:
+            sys.stdout, sys.stderr = Tee(stdout), Tee(stderr)
+            print("Native identity: " + json.dumps(identity, sort_keys=True), flush=True)
+            print("pytest arguments: " + shlex.join(args), flush=True)
+            code = int(pytest.main(args, plugins=[audit]))
+        finally:
+            sys.stdout, sys.stderr = stdout, stderr
+    result = audit.result(
+        selection["selected"], code, mode=mode, required=selection.get("required_tests"),
+        suite_files=selection.get("suite_files"), count=int(count),
+        plan_digest=selection["plan_sha256"],
+        private_manifest=selection.get("private_manifest"),
+        private_policy=selection.get("private_policy"),
+    )
+    result["identity"] = identity
+    result["input_needs"] = selection.get("input_needs", [])
+    result["inventory_sha256"] = hashlib.sha256(
+        json.dumps(result, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    write_json(out / "execution.json", result)
+    manifest = result["private_manifest"]
+    manifest_summary = (
+        f"path=`{manifest['path']}`, schema={manifest['schema_version']}, "
+        f"digest=`{manifest['blob_sha256']}`, case count={len(manifest['case_ids'])}"
+        f", provenance={json.dumps(result['private_policy'], sort_keys=True)}"
+        if manifest is not None else "none (not full mode)"
+    )
+    summary(
+        f"mode={mode}; hosted full success={result['full_success']}; "
+        f"pytest exit={code}; collected={result['collected_count']}; "
+        f"executed={result['executed_count']}; call outcomes={result['call_outcomes']}; "
+        f"skips={len(result['skips'])}; audit errors={len(result['audit_errors'])}; "
+        f"U={result['universe_count']}; H={result['hosted_required_count']}; "
+        f"P={result['private_required_count']}; private execution UNRUN.\n\n"
+        f"Workflow definition `{selection['workflow_definition_sha']}`; "
+        f"tested codegen `{identity['codegen_sha']}` (tree `{identity['codegen_tree']}`); "
+        f"engine `{engine_sha}` (tree `{identity['engine_tree']}`); "
+        f"source event `{selection['source_event']}`; plan `{selection['plan_sha256']}`.\n\n"
+        f"Committed private manifest: {manifest_summary}.\n\n"
+        "Retained `selection.json` and `execution.json` contain complete case IDs "
+        "and manifest details; `execution.json` retains worker collections, private "
+        "removal records and all audit errors. Full-mode success covers hosted "
+        "H=U-P only."
+    )
+    status = code if code else (
+        1 if result["audit_errors"] or (mode == "full" and not result["full_success"]) else 0
+    )
+    if output := os.environ.get("GITHUB_OUTPUT"):
+        values = {
+            "completed_plan": selection["plan_sha256"],
+            "pytest_exit": code, "audit_errors": len(result["audit_errors"]),
+            "execution_mode": mode,
+            "inventory": result["inventory_sha256"],
+            "coverage_complete": str(result["coverage_complete"]).lower(),
+            "full_success": str(result["full_success"]).lower(),
+            "engine_sha": engine_sha, "engine_tree": identity["engine_tree"],
+        }
+        for legacy in ("False", "True"):
+            rows = [row for row in audit.reports
+                    if row["nodeid"] == f"{CONSTRUCTION}[{legacy}]"
+                    and row["when"] == "call" and not row["xfail"]]
+            values[f"construction_{legacy.lower()}"] = (
+                rows[0]["outcome"] if len(rows) == 1 else "missing"
+            )
+        if status == 0:
+            values["executed_plan"] = selection["plan_sha256"]
+        if result["full_success"]:
+            values["full_executed_plan"] = selection["plan_sha256"]
+        with open(output, "a", encoding="utf-8") as stream:
+            for key, value in values.items():
+                stream.write(f"{key}={value}\n")
+    return status
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mode", choices=("plan", "run"))
+    parser.add_argument("--repo", type=Path, required=True)
+    parser.add_argument("--base", required=True)
+    parser.add_argument("--head", required=True)
+    parser.add_argument("--definition", required=True)
+    parser.add_argument("--workers", default="8")
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--engine", type=Path)
+    parser.add_argument("--expected-plan")
+    parser.add_argument("--source-event", choices=("pull_request", "push_main"), default="pull_request")
+    args = parser.parse_args()
+    out = args.out.resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    try:
+        repo = args.repo.resolve()
+        selection = plan(repo, args.base, args.head, args.definition, workers(args.workers), out,
+                         args.source_event)
+        if args.mode == "plan":
+            return 0
+        if args.engine is None:
+            raise ValueError("--engine is required for run")
+        if not re.fullmatch(r"[0-9a-f]{64}", args.expected_plan or ""):
+            raise ValueError("run requires the trusted changes job's plan digest")
+        if args.expected_plan != selection["plan_sha256"]:
+            raise ValueError("native selection differs from the changes job")
+        return run_native(repo, args.engine.resolve(), out, selection)
+    except (OSError, ValueError, SyntaxError, subprocess.CalledProcessError) as error:
+        code = error.returncode if isinstance(error, subprocess.CalledProcessError) else 1
+        write_json(out / "failure.json", {"error": str(error), "exit": code})
+        summary(f"Native integration refused/failed: {error}; exit={code}")
+        return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

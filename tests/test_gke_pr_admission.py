@@ -28,6 +28,7 @@ TRIGGER = """on:
 SHA = re.compile(r"[0-9a-f]{40}")
 NATIVE_WORKFLOW = ".github/workflows/engine-main-touched.yml"
 NATIVE_DRIVER = "scripts/ci_engine_main_touched.py"
+APPROVED_NATIVE_DRIVER_SHA256 = "a708705d02bd80e6714e20c16310f737756b18a961a4ea435582c5c8577812f8"
 NATIVE_CALL = """    needs: [admit]
     if: ${{ needs.admit.outputs.allowed == 'true' }}
     # Permission ceiling for the shared workflow's dispatch-only publisher.
@@ -520,6 +521,9 @@ def runs(body, key="run"):
 
 
 def check_workflows(sources):
+    driver = sources.get(NATIVE_DRIVER)
+    require(isinstance(driver, str),
+            f"{NATIVE_DRIVER}: native implementation differs from base")
     require(len(sources) <= 100 and sum(len(v.encode()) for v in sources.values()) <= 4 * 1024 * 1024,
             "workflow file set exceeds bounds")
     manifest = json.loads(sources["package.json"])
@@ -622,7 +626,8 @@ def check_workflows(sources):
     has_native = bootstrap_jobs == bootstrap_new
     # TEMPORARY STAGE A ONLY. Two complete caller graphs, and only the
     # exact push-header activation paired with the new graph, are admitted.
-    # All workflow/driver bodies remain byte-for-byte pinned.
+    # The shared workflow body stays pinned. Bootstrap keeps the installed
+    # driver; activation requires one base-owned digest of its complete bytes.
     push = "  push:\n    branches: [main]\n"
     trusted = installed[NATIVE_WORKFLOW]
     require(trusted.count(push) <= 1, "installed native push header differs")
@@ -631,7 +636,8 @@ def check_workflows(sources):
                        if has_native else inactive)
     require(sources.get(NATIVE_WORKFLOW) == expected_native,
             f"{NATIVE_WORKFLOW}: native implementation differs from base")
-    require(sources.get(NATIVE_DRIVER) == installed[NATIVE_DRIVER],
+    require((hashlib.sha256(driver.encode("utf-8")).hexdigest() == APPROVED_NATIVE_DRIVER_SHA256
+             if has_native else driver == installed[NATIVE_DRIVER]),
             f"{NATIVE_DRIVER}: native implementation differs from base")
     require(TRIGGER in workflow, "admission trigger differs")
     header = workflow.split("\njobs:\n", 1)[0]
@@ -1814,6 +1820,14 @@ def test_test_check_executes_real_workflow_script(tmp_path):
 def bootstrap_fixture(sources, *, native):
     """Temporary controls use both real canonical shapes, with exact deltas."""
     result = dict(sources)
+    root = Path(__file__).resolve().parents[1]
+    driver_path = ("tests/fixtures/ci_engine_main_touched_approved.txt" if native else NATIVE_DRIVER)
+    driver_file = safe_path(root / driver_path)
+    print("Files to read: " + json.dumps([str(driver_file)]), flush=True)
+    driver = workflow_text(driver_file.read_bytes())
+    if native:
+        assert hashlib.sha256(driver.encode("utf-8")).hexdigest() == APPROVED_NATIVE_DRIVER_SHA256
+    result[NATIVE_DRIVER] = driver
     path = ".github/workflows/gke-pr.yml"
     text = result[path]
     body = jobs(text).get("engine-main")
@@ -1851,6 +1865,8 @@ def test_bootstrap_accepts_only_complete_graph_and_push_activation_pairs():
     for caller, callee in ((old, new), (new, old)):
         with pytest.raises(ValueError, match="native implementation differs"):
             check_workflows({**caller, NATIVE_WORKFLOW: callee[NATIVE_WORKFLOW]})
+        with pytest.raises(ValueError, match="native implementation differs"):
+            check_workflows({**caller, NATIVE_DRIVER: callee[NATIVE_DRIVER]})
     for native_sources in (old, new):
         for path, before, after in (
             (NATIVE_WORKFLOW, "ref: main", "ref: stale-engine"),
@@ -1859,6 +1875,65 @@ def test_bootstrap_accepts_only_complete_graph_and_push_activation_pairs():
             with pytest.raises(ValueError, match="native implementation differs"):
                 check_workflows({**native_sources,
                                  path: native_sources[path].replace(before, after, 1)})
+
+
+def test_native_driver_pin_uses_complete_bytes_against_the_real_base_policy():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    old = bootstrap_fixture(sources, native=False)
+    new = bootstrap_fixture(sources, native=True)
+    installed_driver = old[NATIVE_DRIVER]
+    approved_driver = new[NATIVE_DRIVER]
+    assert installed_driver != approved_driver
+    baseline = subprocess.run(
+        ["git", "show",
+         "e6dc2c01cc719bcd88b4416a085f5a07873da2fd:tests/test_gke_pr_admission.py"],
+        cwd=root, check=True, capture_output=True,
+    )
+    # Execute the genuine pinned policy, never the approved driver fixture.
+    # Both policy and candidate contexts resolve the real installed base files.
+    policy = {"__name__": "baseline_gke_pr_admission", "__file__": __file__}
+    exec(compile(workflow_text(baseline.stdout), __file__, "exec"), policy)
+    for checker, admitted_driver, refused_driver in (
+        (policy["check_workflows"], installed_driver, approved_driver),
+        (check_workflows, approved_driver, installed_driver),
+    ):
+        checker(old)
+        checker({**new, NATIVE_DRIVER: admitted_driver})
+        with pytest.raises(ValueError, match="native implementation differs"):
+            checker({**new, NATIVE_DRIVER: refused_driver})
+        with pytest.raises(ValueError, match="native implementation differs"):
+            checker({**old, NATIVE_DRIVER: approved_driver})
+        for graph in (old, new):
+            with pytest.raises(ValueError, match="native implementation differs"):
+                checker({path: text for path, text in graph.items() if path != NATIVE_DRIVER})
+
+        semantic_guard = 'if args.expected_plan != selection["plan_sha256"]:'
+        assert approved_driver.count(semantic_guard) == 1
+        assert approved_driver.endswith("\n")
+        for mutant in (
+            approved_driver[:-1],
+            approved_driver.replace(semantic_guard, semantic_guard.replace("!=", "=="), 1),
+            approved_driver + "# changed driver comment\n",
+            approved_driver + " ",
+            approved_driver.replace("\n", "\r\n"),
+            "raise SystemExit(0)\n",
+        ):
+            assert mutant != approved_driver
+            with pytest.raises(ValueError, match="native implementation differs"):
+                checker({**new, NATIVE_DRIVER: mutant})
+
+    # Invalid direct-call types must retain the native-implementation refusal,
+    # rather than failing in size accounting or treating metadata as authority.
+    for graph in (old, new):
+        for invalid in (
+            None, approved_driver.encode("utf-8"), 0,
+            {"sha256": APPROVED_NATIVE_DRIVER_SHA256},
+        ):
+            with pytest.raises(ValueError, match="native implementation differs"):
+                check_workflows({**graph, NATIVE_DRIVER: invalid})
 
 
 def test_bootstrap_reporter_keeps_old_results_only_for_installed_old_caller(monkeypatch):
