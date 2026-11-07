@@ -1708,6 +1708,132 @@ def test_pr_payloads_use_only_admitted_bare_scalar_hosted_runners():
         assert_hosted_head_checkout(jobs[name])
 
 
+def test_native_pr_route_is_required_and_dispatch_shares_the_same_jobs():
+    from tests.test_gke_pr_admission import bootstrap_fixture
+
+    fixture = bootstrap_fixture({
+        ".github/workflows/gke-pr.yml": (WORKFLOWS / "gke-pr.yml").read_text(encoding="utf-8"),
+        ".github/workflows/engine-main-touched.yml":
+            (WORKFLOWS / "engine-main-touched.yml").read_text(encoding="utf-8"),
+    }, native=True)
+    workflow = fixture[".github/workflows/gke-pr.yml"]
+    blocks = job_blocks(workflow)
+    assert set(blocks) == {
+        "admit", "workflow-lint", "package-files", "pytest", "differential",
+        "engine-main", "test-check", "result",
+    }
+    call = blocks["engine-main"]
+    assert "    needs: [admit]\n" in call
+    assert "    if: ${{ needs.admit.outputs.allowed == 'true' }}\n" in call
+    assert "    uses: ./.github/workflows/engine-main-touched.yml\n" in call
+    assert "      codegen_base_ref: ${{ needs.admit.outputs.base_sha }}\n" in call
+    assert "      codegen_head_ref: ${{ needs.admit.outputs.head_sha }}\n" in call
+    assert "      definition: ${{ github.sha }}\n" in call
+    assert "    needs: [admit, workflow-lint, package-files, pytest, differential, test-check, engine-main]\n" in blocks["result"]
+    native = fixture[".github/workflows/engine-main-touched.yml"]
+    trigger = native.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+    assert "  workflow_call:\n" in trigger and "  workflow_dispatch:\n" in trigger
+    assert "pull_request:" not in trigger and "pull_request_target:" not in trigger
+    assert set(job_blocks(native)) == {"changes", "native", "outcomes", "publish"}
+    assert "      decision_result:\n        value: ${{ jobs.outcomes.outputs.decision_result }}\n" in trigger
+    assert "      native_result:\n        value: ${{ jobs.outcomes.outputs.native_result }}\n" in trigger
+    assert not re.search(r"jobs\.[\w-]+\.result\b", trigger)
+    outcomes = job_blocks(native)["outcomes"]
+    assert "    needs: [changes, native]\n" in outcomes
+    assert "    if: always()\n" in outcomes
+    assert "    runs-on: ubuntu-24.04\n" in outcomes
+    assert "    permissions: {}\n" in outcomes
+    assert "      decision_result: ${{ steps.forward.outputs.decision_result }}\n" in outcomes
+    assert "      native_result: ${{ steps.forward.outputs.native_result }}\n" in outcomes
+    assert "        id: forward\n" in outcomes
+    assert "          NEEDS: ${{ toJSON(needs) }}\n" in outcomes
+    assert "        shell: python3 {0}\n" in outcomes
+    assert "uses:" not in outcomes and "GH_TOKEN" not in outcomes
+    assert "continue-on-error:" not in outcomes and "secrets" not in outcomes
+    execution = job_blocks(native)["native"]
+    assert "    runs-on: ubuntu-24.04\n" in execution
+    assert "ref: main\n" in execution
+    assert "--expected-plan" in execution and "ci_engine_main_touched.py run" in execution
+    assert "      mode: ${{ steps.plan.outputs.mode }}\n" in job_blocks(native)["changes"]
+    for output in (
+        "execution_mode", "inventory", "coverage_complete", "full_success",
+        "full_executed_plan", "engine_sha", "engine_tree",
+    ):
+        assert f"      {output}: ${{{{ steps.execute.outputs.{output} }}}}\n" in execution
+    assert "secrets" not in execution and "GH_TOKEN" not in execution
+    assert "statuses: write" not in native and "timeout-minutes:" not in native
+    assert "engine-main-touched" not in blocks["test-check"]
+    assert "  push:\n    branches: [main]\n" in trigger
+    assert "paths:" not in trigger and "paths-ignore:" not in trigger
+    assert "\nconcurrency:" not in native and "cancel-in-progress:" not in native
+    assert "ref: ${{ inputs.codegen_head_ref || github.event.after }}" in native
+    assert "CODEGEN_BASE: ${{ inputs.codegen_base_ref || github.event.before }}" in native
+    assert "CODEGEN_HEAD: ${{ inputs.codegen_head_ref || github.event.after }}" in native
+    assert "run: python3 -I workflow/tests/test_gke_pr_admission.py --push-identity" in native
+    assert "    permissions: {contents: read}\n" in execution
+    publisher = job_blocks(native)["publish"]
+    assert "needs: [changes, native]" in publisher and "always()" in publisher
+    assert "github.event_name == 'workflow_dispatch'" in publisher
+    assert "permissions: {contents: read, actions: read, checks: write}" in publisher
+    assert "ref: ${{ github.workflow_sha }}" in publisher
+    assert "--native-check" in publisher and "candidate" not in publisher
+
+
+def run_native_outcome_bridge(tmp_path, needs):
+    workflow = (WORKFLOWS / "engine-main-touched.yml").read_text(encoding="utf-8")
+    scripts = workflow_run_scripts(workflow, "outcomes")
+    assert len(scripts) == 1, "outcomes must run exactly one forwarding script"
+    script = tmp_path / "forward.py"
+    script.write_text(scripts[0], encoding="utf-8")
+    output = tmp_path / "job-output"
+    result = subprocess.run(
+        [sys.executable, "-I", str(script)],
+        cwd=tmp_path,
+        env={"NEEDS": json.dumps(needs), "GITHUB_OUTPUT": str(output)},
+        capture_output=True, text=True, check=False,
+    )
+    return result, output.read_text(encoding="utf-8") if output.exists() else ""
+
+
+@pytest.mark.parametrize("decision", ["success", "failure", "cancelled", "skipped"])
+@pytest.mark.parametrize("native", ["success", "failure", "cancelled", "skipped"])
+def test_native_outcome_bridge_forwards_the_actual_distinct_job_states(tmp_path, decision, native):
+    # Execute the shipped workflow code. Constants, swapped states and ignored
+    # inputs must fail even when one of the dependencies happens to succeed.
+    result, output = run_native_outcome_bridge(tmp_path, {
+        "changes": {"result": decision}, "native": {"result": native},
+    })
+    assert result.returncode == 0, result.stderr
+    assert output == f"decision_result={decision}\nnative_result={native}\n"
+
+
+@pytest.mark.parametrize("needs", [
+    None, [], {},
+    {"changes": {"result": "success"}},
+    {"native": {"result": "success"}},
+    {"changes": {"result": "success"}, "native": {"result": "success"}, "other": {}},
+])
+def test_native_outcome_bridge_rejects_missing_or_unexpected_dependencies(tmp_path, needs):
+    result, output = run_native_outcome_bridge(tmp_path, needs)
+    assert result.returncode != 0
+    assert "missing or unexpected native dependencies" in result.stderr
+    assert output == ""
+
+
+@pytest.mark.parametrize("job", ["changes", "native"])
+@pytest.mark.parametrize("row", [
+    None, [], {}, {"result": None}, {"result": True}, {"result": []},
+    {"result": ""}, {"result": "neutral"}, {"result": "success\nnative_result=success"},
+])
+def test_native_outcome_bridge_rejects_invalid_states_before_writing_outputs(tmp_path, job, row):
+    needs = {"changes": {"result": "success"}, "native": {"result": "success"}}
+    needs[job] = row
+    result, output = run_native_outcome_bridge(tmp_path, needs)
+    assert result.returncode != 0
+    assert f"{job}: missing or invalid job result" in result.stderr
+    assert output == ""
+
+
 @pytest.mark.parametrize("before,after,message", [
     ("needs: [admit]", "needs: []", "depend on admission"),
     ("outputs.allowed == 'true'", "outputs.allowed != 'false'", "require allowed"),
