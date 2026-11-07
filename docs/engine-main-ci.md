@@ -121,11 +121,38 @@ The driver installs exact Python test-tool versions with the current Python
 executable: `pytest==9.2.0`, `pytest-xdist==3.8.0`, `execnet==2.1.2`,
 `iniconfig==2.3.1`, `packaging==26.3`, `pluggy==1.7.0` and `pygments==2.21.0`.
 The package index remains a runtime dependency; version pins do not establish
-artifact provenance or make the environment hermetic. Full mode still runs
-`apt-get update` and `apt-get install -y clang` when `clang++` is absent.
-That compiler bootstrap remains unpinned pending qualified package identity
-and a separate compiler pin decision; Python pins do not pin the compiler.
-The driver performs a fresh Release/source-layer build:
+artifact provenance or make the environment hermetic.
+
+Full mode always runs `apt-get update` followed by
+`apt-get install -y --allow-downgrades clang=1:18.0-59~exp2
+clang-18=1:18.1.3-1ubuntu1 llvm-18=1:18.1.3-1ubuntu1`, including when another
+clang is already present. It requires all three exact installed versions and
+installed status from `dpkg-query`. It resolves `/usr/bin/clang++-18`, requires
+both that path and its resolved file to belong to `clang-18`, and refuses any
+installed-file differences reported by `dpkg --verify clang-18`. The selected
+binary must report `Ubuntu clang version 18.1.3 (1ubuntu1)` and matching target
+identities from `--version` and `-dumpmachine`; command failures propagate.
+`compiler.log` retains those queries and outputs, and `compiler-identity.json`
+records the observed package versions/architectures, selected and resolved
+paths, owners, version output and target. Successful bootstrap also includes
+that record in `native-identity.json`.
+
+These version observations came from package metadata and `clang++ --version`
+on Ubuntu 24.04.4/Noble aarch64, with target `aarch64-unknown-linux-gnu`. They
+establish neither installation under this source revision nor availability
+and compatibility on hosted `ubuntu-24.04` amd64. Both remain UNRUN. Repository
+indexes, exact package artifacts and their dependencies must still be
+available at runtime. Installed-file verification uses local package metadata;
+it does not establish artifact provenance, pin the entire dependency closure,
+or make this bootstrap hermetic. Missing packages or compiler identity fail
+the native job without a fallback.
+
+Full mode uses `/usr/bin/clang++-18` for the engine build, preflight and exported
+`CXX`, so the host-member generator's preferred compiler is the verified
+binary even when PATH or the incoming `CXX` names another compiler. PR touched
+mode retains its existing `CXX` selection (default `/usr/bin/g++`) and does not
+run this full-mode installer. The driver performs a fresh Release/source-layer
+build; the default PR command is:
 
 ```sh
 cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Release \

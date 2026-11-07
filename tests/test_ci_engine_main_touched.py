@@ -292,6 +292,260 @@ def test_python_tool_installer_uses_exact_requirements_and_preserves_transport_r
     assert log.endswith(f"\nexit={exit_code}\n")
 
 
+def _clang_steps(architecture="arm64", target="aarch64-unknown-linux-gnu",
+                 resolved="/usr/lib/llvm-18/bin/clang"):
+    """Command transport data, never a compiler executable or AST fixture."""
+    return [
+        [["sudo", "apt-get", "update"], "package index transport\n", 0],
+        [["sudo", "apt-get", "install", "-y", "--allow-downgrades",
+          "clang=1:18.0-59~exp2", "clang-18=1:18.1.3-1ubuntu1",
+          "llvm-18=1:18.1.3-1ubuntu1"], "package install transport\n", 0],
+        [["dpkg-query", "--show",
+          "--showformat=${Package}\t${Version}\t${Status}\t${Architecture}\n",
+          "clang", "clang-18", "llvm-18"],
+         f"clang\t1:18.0-59~exp2\tinstall ok installed\t{architecture}\n"
+         f"clang-18\t1:18.1.3-1ubuntu1\tinstall ok installed\t{architecture}\n"
+         f"llvm-18\t1:18.1.3-1ubuntu1\tinstall ok installed\t{architecture}\n", 0],
+        [["readlink", "-e", "/usr/bin/clang++-18"], resolved + "\n", 0],
+        [["dpkg-query", "--search", "/usr/bin/clang++-18"],
+         f"clang-18:{architecture}: /usr/bin/clang++-18\n", 0],
+        [["dpkg-query", "--search", resolved], f"clang-18: {resolved}\n", 0],
+        [["dpkg", "--verify", "clang-18"], "", 0],
+        [["/usr/bin/clang++-18", "--version"],
+         f"Ubuntu clang version 18.1.3 (1ubuntu1)\nTarget: {target}\n"
+         "Thread model: posix\nInstalledDir: /usr/bin\n", 0],
+        [["/usr/bin/clang++-18", "-dumpmachine"], target + "\n", 0],
+    ]
+
+
+def _command_transport(monkeypatch, steps):
+    calls = []
+
+    class Process:
+        def __init__(self, output, exit_code):
+            self.stdout = output.splitlines(keepends=True)
+            self.exit_code = exit_code
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def wait(self):
+            return self.exit_code
+
+    def popen(command, **kwargs):
+        expected, output, exit_code = steps[len(calls)]
+        calls.append(command)
+        assert command == expected
+        assert kwargs == {
+            "cwd": None, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
+            "text": True, "bufsize": 1,
+        }
+        if isinstance(output, OSError):
+            raise output
+        return Process(output, exit_code)
+
+    monkeypatch.setattr(ci.subprocess, "Popen", popen)
+    return calls
+
+
+@pytest.mark.parametrize("architecture,target,resolved", [
+    ("arm64", "aarch64-unknown-linux-gnu", "/usr/lib/llvm-18/bin/clang"),
+    ("amd64", "x86_64-unknown-linux-gnu", "/usr/lib/llvm-18/bin/clang++"),
+])
+def test_full_clang_installer_binds_package_and_executable_transport(
+    tmp_path, monkeypatch, architecture, target, resolved,
+):
+    steps = _clang_steps(architecture, target, resolved)
+    calls = _command_transport(monkeypatch, steps)
+    identity = ci.install_full_clang(tmp_path)
+    assert calls == [step[0] for step in steps]
+    assert identity["packages"] == {
+        "clang": {"version": "1:18.0-59~exp2", "architecture": architecture},
+        "clang-18": {"version": "1:18.1.3-1ubuntu1", "architecture": architecture},
+        "llvm-18": {"version": "1:18.1.3-1ubuntu1", "architecture": architecture},
+    }
+    assert identity["compiler"] == "/usr/bin/clang++-18"
+    assert identity["resolved_compiler"] == resolved
+    assert identity["target"] == target
+    assert identity["version_output"] == steps[7][1]
+    assert json.loads((tmp_path / "compiler-identity.json").read_text()) == identity
+    log = (tmp_path / "compiler.log").read_text()
+    assert steps[2][1] in log and steps[7][1] in log
+
+
+@pytest.mark.parametrize("package", ["clang", "clang-18", "llvm-18"])
+@pytest.mark.parametrize("defect", ["missing", "version", "status", "duplicate"])
+def test_full_clang_rejects_unbound_package_records(tmp_path, monkeypatch, package, defect):
+    steps = _clang_steps()
+    records = steps[2][1].splitlines(keepends=True)
+    record = next(row for row in records if row.startswith(package + "\t"))
+    if defect == "missing":
+        records.remove(record)
+    elif defect == "version":
+        fields = record.split("\t")
+        fields[1] = "1:18.1.3-1"
+        records[records.index(record)] = "\t".join(fields)
+    elif defect == "status":
+        records[records.index(record)] = record.replace("install ok installed", "deinstall ok config-files")
+    else:
+        records.append(record)
+    steps[2][1] = "".join(records)
+    calls = _command_transport(monkeypatch, steps)
+    with pytest.raises(ValueError, match="package identity"):
+        ci.install_full_clang(tmp_path)
+    assert calls == [step[0] for step in steps[:3]]
+    assert not (tmp_path / "compiler-identity.json").exists()
+
+
+@pytest.mark.parametrize("step,output", [
+    (2, "clang\t1:18.0-59~exp2\n"),
+    (2, "clang\t1:18.0-59~exp2\tinstall ok installed\t\n"),
+    (2, "clang-19\t1:19.1.7-1\tinstall ok installed\tarm64\n"),
+    (3, ""),
+    (3, "relative/clang\n"),
+    (3, "/usr/bin/clang\n/usr/bin/clang-18\n"),
+    (4, "clang-19: /usr/bin/clang++-18\n"),
+    (4, "clang-18: /usr/bin/clang++\n"),
+    (5, "clang-19: /usr/lib/llvm-18/bin/clang\n"),
+    (6, "??5??????   /usr/lib/llvm-18/bin/clang\n"),
+    (7, ""),
+    (7, "Ubuntu clang version 19.1.7\nTarget: aarch64-unknown-linux-gnu\n"),
+    (7, "Ubuntu clang version 18.1.3 (1)\nTarget: aarch64-unknown-linux-gnu\n"),
+    (7, "Ubuntu clang version 18.1.3 (1ubuntu1)\n"),
+    (7, "Ubuntu clang version 18.1.3 (1ubuntu1)\nTarget: aarch64\nTarget: x86_64\n"),
+    (8, "x86_64-unknown-linux-gnu\n"),
+])
+def test_full_clang_rejects_malformed_or_substituted_identities(
+    tmp_path, monkeypatch, step, output,
+):
+    steps = _clang_steps()
+    steps[step][1] = output
+    calls = _command_transport(monkeypatch, steps)
+    with pytest.raises(ValueError, match="full-mode clang"):
+        ci.install_full_clang(tmp_path)
+    assert calls == [row[0] for row in steps[:step + 1]]
+    assert not (tmp_path / "compiler-identity.json").exists()
+
+
+@pytest.mark.parametrize("step", range(9))
+@pytest.mark.parametrize("failure", ["exit", "missing-executable"])
+def test_full_clang_preserves_each_external_command_failure(
+    tmp_path, monkeypatch, step, failure,
+):
+    steps = _clang_steps()
+    if failure == "exit":
+        steps[step][2] = 20 + step
+        error_type = subprocess.CalledProcessError
+    else:
+        steps[step][1] = FileNotFoundError("command transport executable missing")
+        error_type = FileNotFoundError
+    calls = _command_transport(monkeypatch, steps)
+    with pytest.raises(error_type) as error:
+        ci.install_full_clang(tmp_path)
+    if failure == "exit":
+        assert error.value.returncode == 20 + step
+        assert error.value.cmd == steps[step][0]
+    else:
+        assert error.value is steps[step][1]
+    assert calls == [row[0] for row in steps[:step + 1]]
+    assert not (tmp_path / "compiler-identity.json").exists()
+
+
+@pytest.mark.parametrize("case", [
+    "full", "touched", "install-failure", "query-failure", "wrong-package",
+    "missing-compiler", "wrong-compiler",
+])
+@pytest.mark.parametrize("preinstalled", ["/opt/clang-19/bin/clang++", "/usr/bin/g++"])
+def test_native_bootstrap_consumes_verified_compiler_before_native_input_boundary(
+    tmp_path, monkeypatch, case, preinstalled,
+):
+    """Use production orchestration with command transport, stopping at native inputs."""
+    mode = "touched" if case == "touched" else "full"
+    repo, engine = tmp_path / "codegen", tmp_path / "engine"
+    selection = {
+        "native": True, "selected": ["tests"] if mode == "full" else list(ci.SMOKE),
+        "mode": mode, "source_event": "push_main" if mode == "full" else "pull_request",
+        "excluded": [], "codegen_sha": "a" * 40, "codegen_tree": "b" * 40,
+        "codegen_base_sha": "c" * 40, "workflow_definition_sha": "d" * 40,
+        "workflow_definition_tree": "e" * 40, "plan_sha256": "f" * 64, "workers": 2,
+    }
+    monkeypatch.setenv("CXX", preinstalled)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(ci, "git", lambda path, *args: (
+        selection["codegen_sha"] if path == repo else "1" * 40
+    ))
+    monkeypatch.setattr(ci, "provision_history", lambda *args: {})
+    monkeypatch.setattr(ci.shutil, "which", lambda value: (
+        value if value.startswith("/") else preinstalled
+    ))
+    compiler = "/usr/bin/clang++-18" if mode == "full" else preinstalled
+    steps = [[
+        [sys.executable, "-m", "pip", "install", *ci.PYTHON_TEST_REQUIREMENTS],
+        "Python install command transport\n", 0,
+    ]]
+    if mode == "full":
+        steps.extend(_clang_steps())
+    failure_step = None
+    error_type = None
+    if case in {"install-failure", "query-failure"}:
+        failure_step = 2 if case == "install-failure" else 3
+        steps[failure_step][2] = 37
+        error_type = subprocess.CalledProcessError
+    elif case == "wrong-package":
+        failure_step = 3
+        steps[failure_step][1] = steps[failure_step][1].replace(
+            "1:18.1.3-1ubuntu1", "1:18.1.3-1",
+        )
+        error_type = ValueError
+    elif case == "missing-compiler":
+        failure_step = 8
+        steps[failure_step][1] = FileNotFoundError("selected compiler transport missing")
+        error_type = FileNotFoundError
+    elif case == "wrong-compiler":
+        failure_step = 8
+        steps[failure_step][1] = steps[failure_step][1].replace("18.1.3", "19.1.7")
+        error_type = ValueError
+    steps.extend([
+        [["cmake", "-S", str(engine), "-B", str(engine / "build"),
+          "-DCMAKE_BUILD_TYPE=Release", "-DPINEFORGE_BUILD_TESTS=OFF",
+          "-DPINEFORGE_BUILD_SOURCE_LAYER=ON", f"-DCMAKE_CXX_COMPILER={compiler}"],
+         "configure command transport\n", 0],
+        [["cmake", "--build", str(engine / "build"), "--parallel", "2"],
+         "build command transport\n", 0],
+    ])
+    calls = _command_transport(monkeypatch, steps)
+
+    class NativeInputBoundary(Exception):
+        pass
+
+    def native_inputs(actual_engine, build, selected_compiler):
+        assert (actual_engine, build, selected_compiler) == (
+            engine, engine / "build", compiler,
+        )
+        raise NativeInputBoundary
+
+    monkeypatch.setattr(ci, "native_environment", native_inputs)
+    with pytest.raises(error_type or NativeInputBoundary) as error:
+        ci.run_native(repo, engine, tmp_path, selection)
+    if failure_step is not None:
+        assert calls == [row[0] for row in steps[:failure_step + 1]]
+        if case in {"install-failure", "query-failure"}:
+            assert error.value.returncode == 37
+            assert error.value.cmd == steps[failure_step][0]
+        assert not (tmp_path / "compiler-identity.json").exists()
+        return
+    assert calls == [row[0] for row in steps]
+    identity = json.loads((tmp_path / "native-identity.json").read_text())
+    if mode == "full":
+        assert identity["full_clang"]["compiler"] == compiler
+    else:
+        assert "full_clang" not in identity
+        assert not (tmp_path / "compiler-identity.json").exists()
+
+
 @pytest.mark.parametrize("missing", [
     "include/pineforge/engine.hpp", "include/pineforge/checked_settings.hpp",
     "build/include/pineforge/version.h", "build/lib/libpineforge.a",

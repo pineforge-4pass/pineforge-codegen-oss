@@ -31,6 +31,13 @@ PYTHON_TEST_REQUIREMENTS = (
     "pluggy==1.7.0",
     "pygments==2.21.0",
 )
+FULL_CLANG_PACKAGES = {
+    "clang": "1:18.0-59~exp2",
+    "clang-18": "1:18.1.3-1ubuntu1",
+    "llvm-18": "1:18.1.3-1ubuntu1",
+}
+FULL_CLANG = "/usr/bin/clang++-18"
+FULL_CLANG_VERSION = "Ubuntu clang version 18.1.3 (1ubuntu1)"
 CONSTRUCTION = (
     "tests/test_coded_run_stops.py"
     "::test_checked_construction_exposes_the_original_error"
@@ -528,8 +535,10 @@ def plan(repo: Path, base: str, head: str, definition: str, count: int, out: Pat
     return result
 
 
-def logged(command: list[str], log: Path, *, cwd: Path | None = None) -> None:
+def logged(command: list[str], log: Path, *, cwd: Path | None = None,
+           capture: bool = False) -> str:
     """Stream the real command and retain its exit; never use a shell pipeline."""
+    captured = []
     with log.open("a", encoding="utf-8") as stream:
         if stream.tell() == 0:
             identity = log.parent / "native-identity.json"
@@ -546,17 +555,78 @@ def logged(command: list[str], log: Path, *, cwd: Path | None = None) -> None:
             for line in process.stdout:
                 print(line, end="", flush=True)
                 stream.write(line)
+                if capture:
+                    captured.append(line)
             code = process.wait()
         stream.write(f"\nexit={code}\n")
         print(f"exit={code}", flush=True)
     if code:
         raise subprocess.CalledProcessError(code, command)
+    return "".join(captured)
 
 
 def install_python_test_tools(out: Path) -> None:
     logged([
         sys.executable, "-m", "pip", "install", *PYTHON_TEST_REQUIREMENTS,
     ], out / "install.log")
+
+
+def install_full_clang(out: Path) -> dict:
+    """Provision and bind the real full-mode compiler, regardless of PATH."""
+    logged(["sudo", "apt-get", "update"], out / "install.log")
+    logged([
+        "sudo", "apt-get", "install", "-y", "--allow-downgrades",
+        *(f"{name}={version}" for name, version in FULL_CLANG_PACKAGES.items()),
+    ], out / "install.log")
+    log = out / "compiler.log"
+    packages = logged([
+        "dpkg-query", "--show",
+        "--showformat=${Package}\t${Version}\t${Status}\t${Architecture}\n",
+        *FULL_CLANG_PACKAGES,
+    ], log, capture=True)
+    installed = {}
+    for line in packages.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 4:
+            raise ValueError("full-mode clang package query is malformed")
+        name, version, status, architecture = fields
+        if (name not in FULL_CLANG_PACKAGES or name in installed
+                or version != FULL_CLANG_PACKAGES[name]
+                or status != "install ok installed" or not architecture):
+            raise ValueError(f"full-mode clang package identity differs: {line}")
+        installed[name] = {"version": version, "architecture": architecture}
+    if set(installed) != set(FULL_CLANG_PACKAGES):
+        raise ValueError("full-mode clang package identity is incomplete")
+
+    resolved = logged(["readlink", "-e", FULL_CLANG], log, capture=True).strip()
+    if not resolved or "\n" in resolved or not Path(resolved).is_absolute():
+        raise ValueError("full-mode clang binary did not resolve to an absolute path")
+    owners = {}
+    for path in dict.fromkeys((FULL_CLANG, resolved)):
+        ownership = logged(["dpkg-query", "--search", path], log, capture=True).strip()
+        owner, separator, owned_path = ownership.rpartition(": ")
+        if (not separator or owned_path != path
+                or owner not in {"clang-18", f"clang-18:{installed['clang-18']['architecture']}"}):
+            raise ValueError(f"full-mode clang binary is not owned by clang-18: {path}")
+        owners[path] = owner
+    # dpkg can report changed files on stdout even with a zero exit.
+    if logged(["dpkg", "--verify", "clang-18"], log, capture=True).strip():
+        raise ValueError("full-mode clang installed files differ from package metadata")
+    version = logged([FULL_CLANG, "--version"], log, capture=True)
+    lines = version.splitlines()
+    targets = [line.removeprefix("Target: ") for line in lines if line.startswith("Target: ")]
+    if (not lines or lines[0] != FULL_CLANG_VERSION or len(targets) != 1
+            or not re.fullmatch(r"[A-Za-z0-9_.+-]+", targets[0])):
+        raise ValueError("full-mode clang compiler identity differs")
+    target = logged([FULL_CLANG, "-dumpmachine"], log, capture=True).strip()
+    if target != targets[0]:
+        raise ValueError("full-mode clang compiler target differs")
+    identity = {
+        "packages": installed, "compiler": FULL_CLANG, "resolved_compiler": resolved,
+        "owners": owners, "version_output": version, "target": target,
+    }
+    write_json(out / "compiler-identity.json", identity)
+    return identity
 
 
 def native_environment(engine: Path, build: Path, compiler: str) -> dict[str, str]:
@@ -845,20 +915,17 @@ def run_native(repo: Path, engine: Path, out: Path, selection: dict) -> int:
     write_json(out / "native-identity.json", identity)
     summary("Native checkout identity:\n\n```json\n" + json.dumps(identity, indent=2) + "\n```")
     install_python_test_tools(out)
-    if mode == "full" and shutil.which("clang++") is None:
-        # Standard hosted images normally include clang. Install the real
-        # public tool when absent; no stub or alternative AST output is used.
-        logged(["sudo", "apt-get", "update"], out / "install.log")
-        logged(["sudo", "apt-get", "install", "-y", "clang"], out / "install.log")
-        if shutil.which("clang++") is None:
-            raise ValueError("NEEDS real clang++ for the full host-member inventory")
+    compiler = os.environ.get("CXX", "/usr/bin/g++")
+    if mode == "full":
+        identity["full_clang"] = install_full_clang(out)
+        compiler = identity["full_clang"]["compiler"]
+        write_json(out / "native-identity.json", identity)
     identity["historical_codegen"] = provision_history(
         repo, selection.get("history_refs", []), out,
     )
     build = engine / "build"
     if build.exists():
         raise ValueError("fresh engine build directory already exists")
-    compiler = os.environ.get("CXX", "/usr/bin/g++")
     if shutil.which(compiler) is None:
         raise ValueError(f"native compiler missing: {compiler}")
     count = str(workers(str(selection["workers"])))
