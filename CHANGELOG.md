@@ -94,6 +94,25 @@ supported as exact pairs; on the 0.x line they are independent. See the
   switch: no price, a second price, a price given both by position and by name,
   an unknown argument name (`PF-E1088`), and a string, bool, color or
   collection price (`PF-E2083` to `PF-E2086`, only for a type the syntax proves).
+- PF-W1505 now explains both EMA seeding modes and names the engine run option
+  `series_origin_ms`, passed through the run's `syminfo`. The default first-value
+  seed matches TradingView charts with history before the range; when the
+  reference starts at the range start, declaring its first bar's open time in
+  epoch milliseconds selects `na` for the first `length-1` bars followed by an
+  SMA seed. This also applies to `ta.macd` and `ta.tsi`; `ta.kc` and `ta.kcw`
+  already start that way in every run, because the generated code applies the
+  warm-up to their EMA basis. Declared origins
+  start `request.security` at the first whole higher-timeframe bucket at or
+  after that time, with plain expressions `na` until its first bar completes.
+  In a measured 336-exit reference starting at the range start, 37 exit comments
+  differ by default, including 5 finite values where TradingView is `na`; none
+  differ with the origin declared. Six corpus cases add, drop or shift 1 to 3
+  trades in the first days by default; all six are exact with the declared
+  origin. A wrong origin gives wrong values; do not set it for live runs, where
+  it has no defined meaning. `ta.rsi`, `ta.rma` and `ta.atr` already use SMA
+  seeds. Migration: none; undeclared runs are unchanged. The diagnostic stays
+  an unconditional note at each `ta.ema` call; this text change leaves generated
+  C++ unchanged.
 - An affine chart loop proved endless is stopped with the loop-time error when
   its result reaches an effect. Omission is limited to an unused loop statement
   with no calls, whose writes have no readers except self-updates, a break

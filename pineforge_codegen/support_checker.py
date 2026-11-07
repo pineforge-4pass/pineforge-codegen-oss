@@ -1948,12 +1948,8 @@ class SupportChecker:
             if name == "ema":
                 self._note(
                     node,
-                    "ta.ema initial warmup is approximated: PineForge may "
-                    "return a finite value before TradingView does.",
-                    hint="A covered length-20 TradingView tape first returns "
-                         "a finite EMA at bar 19; standalone PineForge EMA "
-                         "is finite at bar 0. Its established lowering stays "
-                         "in place pending per-call-site population parity.",
+                    "ta.ema seeds from the first value of the data PineForge runs, so it can differ from TradingView at the start of a run whose reference started where your range starts.",
+                    hint="The first-value seed matches TradingView when its chart had history before your range, and the difference has decayed by then. If your TradingView reference starts at your range start, declare it: set series_origin_ms to the open time of its first bar (a run option, passed through syminfo). The indicator is then na for the first length-1 bars and starts from the SMA of the first length bars, as TradingView does. The same holds for ta.macd and ta.tsi; ta.kc and ta.kcw already start that way in every run. Declaring it also starts request.security series at the first whole higher-timeframe bucket at or after that time, and a plain security expression stays na until the first higher-timeframe bar completes.",
                 )
         if ns == "math" and name not in SUPPORTED_MATH:
             self._err(node, f"math.{name}(...) is not implemented in PineForge runtime.")
