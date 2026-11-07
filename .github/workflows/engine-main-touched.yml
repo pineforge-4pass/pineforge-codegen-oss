@@ -26,9 +26,9 @@ on:
       source_event:
         value: ${{ jobs.changes.outputs.source_event }}
       decision_result:
-        value: ${{ jobs.changes.result }}
+        value: ${{ jobs.outcomes.outputs.decision_result }}
       native_result:
-        value: ${{ jobs.native.result }}
+        value: ${{ jobs.outcomes.outputs.native_result }}
       native:
         value: ${{ jobs.changes.outputs.native }}
       base:
@@ -210,6 +210,42 @@ jobs:
           name: engine-main-native-${{ github.run_attempt }}
           path: ${{ runner.temp }}/engine-main-native
           if-no-files-found: error
+
+  outcomes:
+    name: Forward actual native dependency results
+    needs: [changes, native]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions: {}
+    outputs:
+      decision_result: ${{ steps.forward.outputs.decision_result }}
+      native_result: ${{ steps.forward.outputs.native_result }}
+    steps:
+      - name: Validate and forward job states without changing their meaning
+        id: forward
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        shell: python3 {0}
+        run: |
+          import json
+          import os
+
+          needs = json.loads(os.environ["NEEDS"])
+          if not isinstance(needs, dict) or set(needs) != {"changes", "native"}:
+              raise SystemExit("missing or unexpected native dependencies")
+          results = {}
+          for job in ("changes", "native"):
+              row = needs[job]
+              if not isinstance(row, dict) or row.get("result") not in (
+                  "success", "failure", "cancelled", "skipped",
+              ):
+                  raise SystemExit(f"{job}: missing or invalid job result")
+              results[job] = row["result"]
+          # These are metadata, not a success verdict. Validate both before
+          # writing either output; the caller still enforces identities/plan.
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"decision_result={results['changes']}\n")
+              output.write(f"native_result={results['native']}\n")
 
   publish:
     name: Publish historical native check

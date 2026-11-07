@@ -1227,6 +1227,14 @@ def test_native_admission_pins_the_only_call_callee_driver_and_result_dependency
         (NATIVE_WORKFLOW, "ref: main", "ref: stale-engine"),
         (NATIVE_WORKFLOW, "needs.changes.outputs.native == 'true'", "true"),
         (NATIVE_WORKFLOW, "--expected-plan", "--ignored-plan"),
+        (NATIVE_WORKFLOW, "jobs.outcomes.outputs.decision_result", "jobs.changes.result"),
+        (NATIVE_WORKFLOW, "jobs.outcomes.outputs.native_result", "jobs.native.result"),
+        (NATIVE_WORKFLOW, "steps.forward.outputs.native_result", "'success'"),
+        (NATIVE_WORKFLOW, "    if: always()\n    runs-on: ubuntu-24.04\n    permissions: {}",
+         "    if: success()\n    runs-on: ubuntu-24.04\n    permissions: {}"),
+        (NATIVE_WORKFLOW, 'needs = json.loads(os.environ["NEEDS"])',
+         'needs = {"changes": {"result": "success"}, "native": {"result": "success"}}'),
+        (NATIVE_WORKFLOW, 'results[job] = row["result"]', 'results[job] = "success"'),
         (NATIVE_DRIVER, "selection differs from the changes job", "ignored identity"),
     ]:
         assert before in sources[source_path]
