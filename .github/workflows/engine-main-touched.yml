@@ -3,8 +3,6 @@ name: Engine main full / PR touched
 # PRs enter only through gke-pr.yml's base-owned admission. Dispatch is a
 # write-authorized public-input proof route and never publishes a gate status.
 on:
-  push:
-    branches: [main]
   workflow_call:
     inputs:
       source_event:

@@ -613,9 +613,26 @@ def check_workflows(sources):
     # changes to this implementation need a separate base-policy adoption first.
     root = Path(__file__).resolve().parents[1]
     installed = read_sources(root, [NATIVE_WORKFLOW, NATIVE_DRIVER])
-    for path, trusted in installed.items():
-        require(sources.get(path) == trusted, f"{path}: native implementation differs from base")
     workflow = sources[".github/workflows/gke-pr.yml"]
+    bootstrap_jobs = set(jobs(workflow))
+    bootstrap_old = POD_JOBS | {"admit", "test-check", "result"}
+    bootstrap_new = bootstrap_old | {"engine-main"}
+    require(bootstrap_jobs in (bootstrap_old, bootstrap_new),
+            "admission job inventory differs")
+    has_native = bootstrap_jobs == bootstrap_new
+    # TEMPORARY STAGE A ONLY. Two complete caller graphs, and only the
+    # exact push-header activation paired with the new graph, are admitted.
+    # All workflow/driver bodies remain byte-for-byte pinned.
+    push = "  push:\n    branches: [main]\n"
+    trusted = installed[NATIVE_WORKFLOW]
+    require(trusted.count(push) <= 1, "installed native push header differs")
+    inactive = trusted.replace(push, "", 1)
+    expected_native = (inactive.replace("\non:\n", "\non:\n" + push, 1)
+                       if has_native else inactive)
+    require(sources.get(NATIVE_WORKFLOW) == expected_native,
+            f"{NATIVE_WORKFLOW}: native implementation differs from base")
+    require(sources.get(NATIVE_DRIVER) == installed[NATIVE_DRIVER],
+            f"{NATIVE_DRIVER}: native implementation differs from base")
     require(TRIGGER in workflow, "admission trigger differs")
     header = workflow.split("\njobs:\n", 1)[0]
     require(header.split("\non:\n", 1)[1].split("\nrun-name:", 1)[0].strip()
@@ -643,7 +660,7 @@ def check_workflows(sources):
     require(not any(k in {"env", "with"} and v for _, k, v in all_records),
             "admission env and with must use block mappings")
     bodies = jobs(workflow)
-    require(set(bodies) == POD_JOBS | {"admit", "test-check", "result", "engine-main"},
+    require(set(bodies) == (bootstrap_new if has_native else bootstrap_old),
             "admission job inventory differs")
     for name, body in bodies.items():
         if name == "engine-main":
@@ -732,13 +749,15 @@ def check_workflows(sources):
     require(len(result_steps) == 2 and not step_env(result_steps[0])
             and step_env(result_steps[1]) == {
                 **identity_env(), "NEEDS": "${{ toJSON(needs) }}",
-                "DEFINITION_SHA": "${{ github.sha }}",
+                **({"DEFINITION_SHA": "${{ github.sha }}"} if has_native else {}),
             },
             "result environment binding differs")
     require("    needs: [admit, workflow-lint, package-files, pytest]" in bodies["test-check"],
             "test-check dependencies differ")
     require(value_at(bodies["result"], 4, "needs")
-            == "[admit, workflow-lint, package-files, pytest, differential, test-check, engine-main]",
+            == ("[admit, workflow-lint, package-files, pytest, differential, test-check, engine-main]"
+                if has_native else
+                "[admit, workflow-lint, package-files, pytest, differential, test-check]"),
             "result dependencies differ")
     require(value_at(bodies["result"], 4, "name") == "gate", "gate check name differs")
     test_check_steps = step_blocks(bodies["test-check"])
@@ -871,14 +890,23 @@ def proof_success(needs, expected):
 
 
 def report_result(env, api=gh_json):
-    expected = {"admit", "workflow-lint", "package-files", "pytest", "differential", "test-check",
-                "engine-main"}
     try:
+        # Decide from the installed base caller, never from supplied NEEDS.
+        # The six-leg predicate disappears with this entire bootstrap delta
+        # at activation. A new installed caller cannot accept old NEEDS.
+        root = Path(__file__).resolve().parents[1]
+        installed = read_sources(root, [".github/workflows/gke-pr.yml"])
+        expected = set(jobs(installed[".github/workflows/gke-pr.yml"]))
+        old = POD_JOBS | {"admit", "test-check", "result"}
+        require(expected in (old, old | {"engine-main"}), "installed caller inventory differs")
+        has_native = "engine-main" in expected
+        expected -= {"result"}
         needs = json.loads(env["NEEDS"])
         passed = (proof_success(needs, expected)
                   and needs["admit"]["outputs"].get("head_sha") == env["HEAD_SHA"]
                   and needs["admit"]["outputs"].get("base_sha") == env["BASE_SHA"]
-                  and native_success(needs["engine-main"].get("outputs"), env))
+                  and (not has_native
+                       or native_success(needs["engine-main"].get("outputs"), env)))
     except (ValueError, KeyError, TypeError):
         passed = False
     # Refusals still publish failure on the immutable event head. No artifact
@@ -1222,7 +1250,7 @@ def test_native_admission_pins_the_only_call_callee_driver_and_result_dependency
     import pytest
 
     root = Path(__file__).resolve().parents[1]
-    sources = read_sources(root, workflow_paths(root))
+    sources = bootstrap_fixture(read_sources(root, workflow_paths(root)), native=True)
     path = ".github/workflows/gke-pr.yml"
     original = sources[path]
     call = jobs(original)["engine-main"]
@@ -1239,7 +1267,7 @@ def test_native_admission_pins_the_only_call_callee_driver_and_result_dependency
         mutant = original.replace(call, call.replace(before, after, 1), 1)
         with pytest.raises(ValueError, match="native workflow call"):
             check_workflows({**sources, path: mutant})
-    with pytest.raises(ValueError, match="inventory"):
+    with pytest.raises(ValueError, match="native implementation differs"):
         check_workflows({**sources, path: original.replace("  engine-main:" + call, "", 1)})
     dependency = "[admit, workflow-lint, package-files, pytest, differential, test-check, engine-main]"
     assert original.count(dependency) == 1
@@ -1470,6 +1498,14 @@ def test_result_refuses_every_incomplete_leg_and_stale_head(monkeypatch):
     import copy
     import pytest
 
+    root = Path(__file__).resolve().parents[1]
+    original_read = read_sources
+    installed = bootstrap_fixture(original_read(root, workflow_paths(root)), native=True)
+    monkeypatch.setattr(sys.modules[__name__], "read_sources",
+                        lambda root, paths: ({".github/workflows/gke-pr.yml":
+                                             installed[".github/workflows/gke-pr.yml"]}
+                                            if paths == [".github/workflows/gke-pr.yml"]
+                                            else original_read(root, paths)))
     env, responses = identity_fixture()
     env.update(GITHUB_SERVER_URL="https://github.com", GITHUB_RUN_ID="1", DEFINITION_SHA="d" * 40)
     expected = {"admit", "workflow-lint", "package-files", "pytest", "differential", "test-check",
@@ -1773,6 +1809,86 @@ def test_test_check_executes_real_workflow_script(tmp_path):
     run_case(scripts[0], changed, 1)
     with pytest.raises(AssertionError):
         run_case("pass", changed, 1)
+
+
+def bootstrap_fixture(sources, *, native):
+    """Temporary controls use both real canonical shapes, with exact deltas."""
+    result = dict(sources)
+    path = ".github/workflows/gke-pr.yml"
+    text = result[path]
+    body = jobs(text).get("engine-main")
+    if body is not None:
+        text = text.replace("  engine-main:" + body, "", 1)
+    new_needs = "[admit, workflow-lint, package-files, pytest, differential, test-check, engine-main]"
+    old_needs = "[admit, workflow-lint, package-files, pytest, differential, test-check]"
+    text = text.replace(new_needs, old_needs, 1)
+    definition = "          DEFINITION_SHA: ${{ github.sha }}\n"
+    text = text.replace(definition, "", 1)
+    if native:
+        text = text.replace("  test-check:\n", "  engine-main:\n" + NATIVE_CALL + "\n  test-check:\n", 1)
+        text = text.replace(old_needs, new_needs, 1)
+        # Only the result step has this exact NEEDS line in block env.
+        marker = "          NEEDS: ${{ toJSON(needs) }}\n          REPO:"
+        require(text.count(marker) == 1, "bootstrap result fixture binding differs")
+        text = text.replace(marker, "          NEEDS: ${{ toJSON(needs) }}\n"
+                            + definition + "          REPO:", 1)
+    result[path] = text
+    push = "  push:\n    branches: [main]\n"
+    callee = result[NATIVE_WORKFLOW].replace(push, "", 1)
+    result[NATIVE_WORKFLOW] = callee.replace("\non:\n", "\non:\n" + push, 1) if native else callee
+    return result
+
+
+def test_bootstrap_accepts_only_complete_graph_and_push_activation_pairs():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    old = bootstrap_fixture(sources, native=False)
+    new = bootstrap_fixture(sources, native=True)
+    check_workflows(old)
+    check_workflows(new)
+    for caller, callee in ((old, new), (new, old)):
+        with pytest.raises(ValueError, match="native implementation differs"):
+            check_workflows({**caller, NATIVE_WORKFLOW: callee[NATIVE_WORKFLOW]})
+    for native_sources in (old, new):
+        for path, before, after in (
+            (NATIVE_WORKFLOW, "ref: main", "ref: stale-engine"),
+            (NATIVE_DRIVER, "selection differs from the changes job", "ignored identity"),
+        ):
+            with pytest.raises(ValueError, match="native implementation differs"):
+                check_workflows({**native_sources,
+                                 path: native_sources[path].replace(before, after, 1)})
+
+
+def test_bootstrap_reporter_keeps_old_results_only_for_installed_old_caller(monkeypatch):
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    original_read = read_sources
+    sources = original_read(root, workflow_paths(root))
+    env, responses = identity_fixture()
+    env.update(GITHUB_SERVER_URL="https://github.com", GITHUB_RUN_ID="1")
+    expected = {"admit", "workflow-lint", "package-files", "pytest", "differential", "test-check"}
+    needs = {name: {"result": "success"} for name in expected}
+    needs["admit"]["outputs"] = {
+        "allowed": "true", "head_sha": env["HEAD_SHA"], "base_sha": env["BASE_SHA"],
+    }
+    env["NEEDS"] = json.dumps(needs)
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: calls.append(argv))
+    for native in (False, True):
+        fixture = bootstrap_fixture(sources, native=native)
+        monkeypatch.setattr(sys.modules[__name__], "read_sources",
+                            lambda root, paths: {".github/workflows/gke-pr.yml":
+                                                 fixture[".github/workflows/gke-pr.yml"]})
+        if native:
+            with pytest.raises(ValueError, match="PR admission or checks failed"):
+                report_result(env, lambda endpoint: responses[endpoint])
+            assert "state=failure" in calls.pop()
+        else:
+            report_result(env, lambda endpoint: responses[endpoint])
+            assert "state=success" in calls.pop()
 
 
 if __name__ == "__main__":

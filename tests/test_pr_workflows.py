@@ -1709,7 +1709,14 @@ def test_pr_payloads_use_only_admitted_bare_scalar_hosted_runners():
 
 
 def test_native_pr_route_is_required_and_dispatch_shares_the_same_jobs():
-    workflow = (WORKFLOWS / "gke-pr.yml").read_text(encoding="utf-8")
+    from tests.test_gke_pr_admission import bootstrap_fixture
+
+    fixture = bootstrap_fixture({
+        ".github/workflows/gke-pr.yml": (WORKFLOWS / "gke-pr.yml").read_text(encoding="utf-8"),
+        ".github/workflows/engine-main-touched.yml":
+            (WORKFLOWS / "engine-main-touched.yml").read_text(encoding="utf-8"),
+    }, native=True)
+    workflow = fixture[".github/workflows/gke-pr.yml"]
     blocks = job_blocks(workflow)
     assert set(blocks) == {
         "admit", "workflow-lint", "package-files", "pytest", "differential",
@@ -1723,7 +1730,7 @@ def test_native_pr_route_is_required_and_dispatch_shares_the_same_jobs():
     assert "      codegen_head_ref: ${{ needs.admit.outputs.head_sha }}\n" in call
     assert "      definition: ${{ github.sha }}\n" in call
     assert "    needs: [admit, workflow-lint, package-files, pytest, differential, test-check, engine-main]\n" in blocks["result"]
-    native = (WORKFLOWS / "engine-main-touched.yml").read_text(encoding="utf-8")
+    native = fixture[".github/workflows/engine-main-touched.yml"]
     trigger = native.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
     assert "  workflow_call:\n" in trigger and "  workflow_dispatch:\n" in trigger
     assert "pull_request:" not in trigger and "pull_request_target:" not in trigger

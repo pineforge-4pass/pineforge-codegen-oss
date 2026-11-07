@@ -1,5 +1,7 @@
 # Required engine main full suite and PR touched integration
 
+**Bootstrap checkpoint:** this commit registers the shared proof workflow and stages its trusted admission rules. The required PR-native prerequisite and automatic full-native main-push trigger are inactive here. Descriptions of those behaviors below describe the following activation target; they are not a claim that this bootstrap has installed or executed them. Activation still requires the real hosted proofs, input provisioning and review.
+
 This describes the source candidate after staged adoption, not installation,
 hosted proof or review acceptance.
 

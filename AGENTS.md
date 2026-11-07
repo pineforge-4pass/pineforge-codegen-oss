@@ -1,5 +1,7 @@
 # AGENTS.md — pineforge-codegen
 
+**Bootstrap checkpoint:** this commit registers the shared proof workflow and stages its trusted admission rules. The required PR-native prerequisite and automatic full-native main-push trigger are inactive here. Descriptions of those behaviors below describe the following activation target; they are not a claim that this bootstrap has installed or executed them. Activation still requires the real hosted proofs, input provisioning and review.
+
 > Project memory for AI coding agents. Keep terse and concrete. When the
 > codebase invariants below are wrong, the truth is the test suite —
 > update this file alongside any change that would break one of these
