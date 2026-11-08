@@ -4981,7 +4981,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             )
         ):
             self._error(
-                f"Invalid object name: {authored_name}. "
+                f"Invalid object name: {node.name}. "
                 "Namespaces of built-ins cannot be used.",
                 node.loc,
             )

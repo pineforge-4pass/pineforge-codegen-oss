@@ -511,3 +511,44 @@ def test_untitled_persistent_local_input_keeps_authored_key(name):
         "plot(h())\n",
     ))
     assert re.search(rf'get_input_double\("{re.escape(name)}",', cpp), cpp
+
+
+_OBJECT_NAMESPACE_LOCAL_NAMES = ("dayofweek", "time", "timenow")
+
+
+def _object_local_source(name):
+    return _program(
+        f"h() =>\n    Holder {name} = Holder.new(1.5)\n    {name}.value\n",
+        "plot(h())\n",
+        prelude="type Holder\n    float value\n",
+    )
+
+
+def test_object_local_namespace_rows_cover_the_builtin_intersection():
+    from pineforge_codegen.analyzer.base import _BUILTIN_NAMESPACE_NAMES
+
+    assert set(_OBJECT_NAMESPACE_LOCAL_NAMES) == (
+        set(_LOCAL_NAMES) & _BUILTIN_NAMESPACE_NAMES
+    )
+    assert "second" in _LOCAL_NAMES
+    assert "second" not in _BUILTIN_NAMESPACE_NAMES
+
+
+@pytest.mark.parametrize("name", _OBJECT_NAMESPACE_LOCAL_NAMES)
+def test_builtin_named_object_local_preserves_namespace_refusal(name):
+    with pytest.raises(CompileError) as caught:
+        transpile(_object_local_source(name))
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.message == (
+        f"Invalid object name: {name}. Namespaces of built-ins cannot be used."
+    )
+    assert "__pfhist" not in diagnostic.message
+    assert "__pfhist" not in str(caught.value)
+
+
+def test_non_namespace_builtin_named_object_local_matches_renamed_control():
+    control = _mask_manifest_notes(transpile(_object_local_source("aa")))
+    cpp = _mask_manifest_notes(transpile(_object_local_source("second")))
+    assert control.strip()
+    assert _normalize_local(cpp, "second", control) == control
