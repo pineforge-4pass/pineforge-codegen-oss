@@ -4199,8 +4199,8 @@ class CallVisitor:
         # Visit in parameter order, once each.
         ts_node, fmt_node, tz_node = slot(0), slot(1), slot(2)
         ts = self._visit_expr(ts_node) if ts_node is not None else "0"
-        fmt = self._visit_expr(fmt_node) if fmt_node is not None else '"yyyy-MM-dd"'
-        tz = self._visit_expr(tz_node) if tz_node is not None else '"UTC"'
+        fmt = self._visit_expr(fmt_node) if fmt_node is not None else "\"yyyy-MM-dd'T'HH:mm:ssZ\""
+        tz = self._visit_expr(tz_node) if tz_node is not None else "syminfo_.timezone"
         if (ts_node is not None and self._holds_na_aware_wide_double(ts_node)
                 and self._emitted_value_is_double(ts_node)):
             # A double-valued 64-bit product (``_wide_int_arith_cpp``)

@@ -400,6 +400,11 @@ you delete or weaken the special case, the test will tell you.
     (`tests/test_e2e_keyword_arguments.py`,
     `tests/test_e2e_keyword_arguments_construct.py`,
     `tests/test_e2e_keyword_hole_binding.py`).
+    For `str.format_time`, an omitted format uses `"yyyy-MM-dd'T'HH:mm:ssZ"`
+    and an omitted timezone uses the exchange time zone (`syminfo.timezone`),
+    as documented in the Pine User Manual's
+    [Formatting dates and times](https://www.tradingview.com/pine-script-docs/concepts/time/#formatting-dates-and-times)
+    section. Explicit format and timezone arguments retain their values.
 17. **A function's last statement is its value.** TradingView returns the
     value of a function's (or an if/switch arm's) last statement, whatever
     the statement: `x := e` and every `x op= e` yield x's new value (typed as

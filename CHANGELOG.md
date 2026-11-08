@@ -22,6 +22,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- `str.format_time` now uses TradingView's documented defaults when arguments
+  are omitted: `"yyyy-MM-dd'T'HH:mm:ssZ"` for the format and the exchange time
+  zone (`syminfo.timezone`) for the timezone. Pass `"yyyy-MM-dd"` and `"UTC"`
+  explicitly to restore the previous output. Regenerate C++ and relink
+  affected strategies.
 - History retention can be selected with keyword-only `history_capacity`
   in `transpile()`, `transpile_full()`, `transpile_with_request_inventory()`
   and `gate/glue.py::transpile_json()`. The JavaScript worker template does
