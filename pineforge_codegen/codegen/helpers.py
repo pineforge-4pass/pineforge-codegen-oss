@@ -380,8 +380,9 @@ CPP_STANDARD_MACROS |= frozenset(
 )
 
 # Identifiers used by the emitter as class/type names, namespaces, and
-# generated or inherited methods.  A user member with one of these names can
-# hide a type/callee, or (GeneratedStrategy) conflict with the constructor.
+# generated state members or inherited methods. A user member with one of
+# these names can duplicate state, hide a type/callee, or (GeneratedStrategy)
+# conflict with the constructor.
 # Engine namespaces, types and callees are imported by ``using namespace
 # pineforge``; an authored UDT can make its unqualified type reads ambiguous.
 CPP_EMITTER_NAMES = frozenset("""
@@ -459,12 +460,20 @@ CPP_EMITTER_NAMES = frozenset("""
     _pf_derive_prefix _pf_derive_main_tickerid _pf_derive_country
     _pf_tv_trim _pf_tv_increment_digits _pf_tv_decimal _pf_tv_pattern
     _pf_tv_number_style
+    _security_helper_series_ _security_helper_series_str_
+    _use_precalc _var_initialized _ta_initialized_ _inputs_initialized_
+    _pf_lines_ _pf_boxes_ _pf_labels_ _pf_linefills_
+    _pf_script_state_checkpoint_ _PFScriptState _PFForeignEmaSeeding
+    _PFALMA _PFKC _PFKCW _PFAnchoredVWAP _PFAnchoredVWAPBands
+    _PFPivotPointLevels _PFArrayField _PFTvFormatValue
+    _PFCollectionTraits _PFArrayHistoryValue _PFCollectionHistory
+    _pf_collection_history_changed kLoopTimeLimitMs kTvFloatStepEnd
     checked_settings trace is_na na nz fixnan
 """.split())
 
-# The generated history members, ``_<kind>_<n>`` (codegen/base.py
-# _prepare_inline_history_members), numbered past any script name spelled
-# like one.
+# Generated history kinds (codegen/base.py::_prepare_inline_history_members).
+# Only session_call advances its counter past authored names; the older
+# families retain their numbering and are reserved by the pattern below.
 INLINE_HISTORY_KINDS = (
     "hist_call", "series_arg", "udf_series_arg", "session_call", "fn_global_hist",
 )
@@ -532,14 +541,30 @@ CPP_TEMPORARY_NAMES = frozenset("""
     _pf_number_text
     _pf_substring_text _pf_substring_begin _pf_substring_end _pf_substring_error
     _pf_array_new_size _pf_array_new_value _pf_array_new_size_type _pf_array_new_error
+    _pf_read _pf_v5_l _pf_v5_r _pf_wide_l _pf_wide_r
+    _pf_symbol _pf_colon _pf_color _pf_bar_back _pf_ema_seeding
+    _pf_history_array _pf_history_offset _pf_matrix_target
+    _pf_array_index_type
 """.split())
+# These numbered members and locals keep their source-order spelling rather
+# than allocating against authored names. Reserve their complete spellings,
+# just as for fixed temporaries, without reserving ordinary underscore names.
 _CPP_TEMPORARY_PATTERN = re.compile(
     r"_v\d+|_secval_\d+(?:_v\d+)?|_tuple_result_\d+|_tuple_unused_\d+|__switch_val_\d+"
     r"|__selection_value_\d+"
-    r"|_for_(?:start|end|end_eval)_\d+|_pf_(?:str|array|round)_a\d+|_pf_slot_open_\d+"
+    r"|_for_(?:start|end|end_eval|step|down)_\d+"
+    r"|_pf_(?:str|array|round)_a\d+|_pf_slot_open_\d+"
     r"|_pf_every_bar_ta_\d+|_pf_shared_\d+_\d+|__pf_array\w*|__pf_raw_\w+"
     r"|_pf_collection_hist_\w+"
     r"|_pf_substring_arg\d+"
+    r"|_req_sec_(?:lower_tf_)?\d+(?:_\d+)?|_precalc_\w+|_sec\d+_\w+"
+    r"|_pf_(?:sec|rec)_missing_\d+|_eval_security_\d+"
+    r"|_RuntimeSec\d+|_runtime_(?:feed|request)_\d+"
+    r"|_ta_\w+_\d+(?:(?:_cs|__ni|_u)\d+)*"
+    r"|_prev_fixnan_\d+(?:(?:_cs|__ni|_u)\d+)*|_result__ta_\w+"
+    r"|_(?:hist_call|series_arg|udf_series_arg|fn_global_hist)_\d+"
+    r"|_s_(?:open|high|low|close|volume|hl2|hlc3|ohlc4|hlcc4)"
+    r"|_strat_\w+|_pf_ctf\d+_\w+|_pf_selection__pf_var_init_\w+"
 )
 
 
