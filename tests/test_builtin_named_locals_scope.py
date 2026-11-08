@@ -828,7 +828,12 @@ def test_builtin_derived_price_history_keeps_complete_cpp(source, reference, tmp
 def test_callable_local_census_matches_independent_builtin_inventories():
     from pineforge_codegen.analyzer.callable_history_names import _builtin_callable_local_names
 
-    assert _builtin_callable_local_names() == set(_LOCAL_NAMES)
+    census = _builtin_callable_local_names()
+    assert census == set(_LOCAL_NAMES)
+    # The allocator's clone-marker check looks for `_cs` and `__ni` inside a
+    # private name. Only a census name containing one can make it fire, and
+    # none does; a future name that does needs an allocation row of its own.
+    assert not {name for name in census if "_cs" in name or "__ni" in name}
 
 
 def test_authored_callable_text_preserves_exact_bindings_and_clone_suffixes():
@@ -907,15 +912,59 @@ def _callable_local_diagnostic_outcome(source):
     return status, [(diagnostic.message, diagnostic.hint) for diagnostic in diagnostics]
 
 
+# The support check's warning for a divergent built-in, with the name left out.
+_DIVERGENCE_SUFFIX = " diverges from TradingView semantics in PineForge."
+
+
+def _reads_identifier(source, name):
+    """Whether the parsed script has an identifier spelled ``name``."""
+    from pineforge_codegen.ast_nodes import Identifier
+    from pineforge_codegen.lexer import Lexer
+    from pineforge_codegen.limits import iter_ast_nodes
+    from pineforge_codegen.parser import Parser
+
+    program = Parser(Lexer(source).tokenize(), source=source).parse()
+    return any(
+        isinstance(node, Identifier) and node.name == name
+        for node, _depth in iter_ast_nodes(program)
+    )
+
+
+def _drop_divergence_warnings(name, source, status, diagnostics):
+    """Check the support check's divergence warning for ``name``, then drop it.
+
+    The support check reads names before scoping, so for the few built-ins it
+    flags as divergent it warns at every read, whatever the read is bound to:
+    a local of that spelling gets the warning a global of that name would, and
+    a script that never reads the name gets none. Every other name must stay
+    silent. A script refused after the support check reports only its own
+    error, so the warning can only be required of an accepted script.
+    """
+    from pineforge_codegen.support_checker import DIVERGENT_VARS, DIVERGENT_VARS_ERROR
+
+    assert not DIVERGENT_VARS_ERROR
+    divergence = name + _DIVERGENCE_SUFFIX
+    warned = any(message == divergence for message, _hint in diagnostics)
+    if name not in DIVERGENT_VARS:
+        assert not any(
+            message.endswith(_DIVERGENCE_SUFFIX) for message, _hint in diagnostics
+        )
+    elif status == "accepted":
+        assert warned == _reads_identifier(source, name)
+    return [(message, hint) for message, hint in diagnostics if message != divergence]
+
+
 @pytest.mark.parametrize("name", _LOCAL_NAMES)
 @pytest.mark.parametrize("build_source", _callable_local_diagnostic_cases())
 def test_callable_local_diagnostics_match_renamed_control(name, build_source):
     control_status, control = _callable_local_diagnostic_outcome(build_source("aa"))
-    subject_status, subject = _callable_local_diagnostic_outcome(build_source(name))
+    source = build_source(name)
+    subject_status, subject = _callable_local_diagnostic_outcome(source)
     assert subject_status == control_status
     assert control
-    divergence = f"{name} diverges from TradingView semantics in PineForge."
-    filtered = [(message, hint) for message, hint in subject if message != divergence]
+    # The neutral name is no divergent built-in: its script has no such warning.
+    assert not any(message.endswith(_DIVERGENCE_SUFFIX) for message, _hint in control)
+    filtered = _drop_divergence_warnings(name, source, subject_status, subject)
     expected = [
         (_replace_neutral_name(message, name), _replace_neutral_name(hint, name))
         for message, hint in control
@@ -952,3 +1001,113 @@ def test_library_function_locals_match_renamed_control(name, version, tail):
     qualified_local = re.compile(rf"(?<=__){re.escape(name)}\b")
     assert qualified_local.sub("aa", subject) == qualified_local.sub("aa", control)
     assert "__pfhist" not in subject
+
+
+# Rows for a tuple element read on the right of a reassignment, for drawing and
+# user-defined-type locals read with history, and a pin of the census names that
+# the support check flags as divergent.
+def _outcome_with_cpp(source):
+    """Status, C++ (accepted only) and (message, hint) pairs of one translation."""
+    from pineforge_codegen import transpile_full
+
+    try:
+        result = transpile_full(source)
+    except CompileError as error:
+        status, cpp, diagnostics = "refused", None, error.diagnostics
+    else:
+        status, cpp, diagnostics = "accepted", result["cpp"], result["diagnostics"]
+    return status, cpp, [(diagnostic.message, diagnostic.hint) for diagnostic in diagnostics]
+
+
+def _renamed_diagnostics(diagnostics, name):
+    return [
+        (_replace_neutral_name(message, name), _replace_neutral_name(hint, name))
+        for message, hint in diagnostics
+    ]
+
+
+def _tuple_element_reassignment_source(name):
+    return _program(
+        "pair() =>\n    [close, open]\n"
+        "f() =>\n"
+        f"    [{name}, bb] = pair()\n"
+        "    var int n = 0\n"
+        f"    n := {name} + 1\n    n\n",
+        "plot(f())\n",
+    )
+
+
+@pytest.mark.parametrize("name", _LOCAL_NAMES)
+def test_renamed_tuple_element_types_a_reassigned_int_like_renamed_control(name):
+    # Typing the write `n := element + 1` for the int `n` looks the element up
+    # in the tuple's renamed names with the name its binding records, so that
+    # binding table must follow the rename. A stale name raises ValueError
+    # instead of translating, and a raise fails this row.
+    control_source = _tuple_element_reassignment_source("aa")
+    subject_source = _tuple_element_reassignment_source(name)
+    control_status, control_cpp, control = _outcome_with_cpp(control_source)
+    subject_status, subject_cpp, subject = _outcome_with_cpp(subject_source)
+    assert subject_status == control_status
+    if control_status == "accepted":
+        assert control_cpp.strip()
+        assert _normalize_local(subject_cpp, name, control_cpp) == control_cpp
+    assert control
+    kept = _drop_divergence_warnings(name, subject_source, subject_status, subject)
+    assert kept == _renamed_diagnostics(control, name)
+    for message, hint in subject:
+        assert "__pfhist" not in message
+        assert hint is None or "__pfhist" not in hint
+
+
+def _object_history_source(name, shape):
+    if shape == "drawing":
+        return _program(
+            f"h() =>\n    label {name} = na\n    x = {name}[1]\n    1.0\n",
+            "plot(h())\n",
+        )
+    return _program(
+        f"h() =>\n    Holder {name} = Holder.new(close)\n"
+        f"    y = {name}[1]\n    nz({name}.value)\n",
+        "plot(h())\n",
+        prelude="type Holder\n    float value\n",
+    )
+
+
+# An object-typed local (a drawing or a user-defined-type instance) spelled like
+# a built-in namespace is refused by name (see the object-local namespace rows)
+# while its neutral control is accepted, so those names have nothing to compare
+# in these rows.
+_OBJECT_HISTORY_CASES = [
+    pytest.param(name, shape, id=f"{shape}-{name}")
+    for shape in ("drawing", "udt")
+    for name in _LOCAL_NAMES
+    if name not in _OBJECT_NAMESPACE_LOCAL_NAMES
+]
+
+
+@pytest.mark.parametrize("name,shape", _OBJECT_HISTORY_CASES)
+def test_drawing_and_object_locals_read_with_history_match_renamed_control(name, shape):
+    control_source = _object_history_source("aa", shape)
+    subject_source = _object_history_source(name, shape)
+    control_status, control_cpp, control = _outcome_with_cpp(control_source)
+    subject_status, subject_cpp, subject = _outcome_with_cpp(subject_source)
+    assert subject_status == control_status
+    assert control
+    if control_status == "accepted":
+        assert control_cpp.strip()
+        assert _normalize_local(subject_cpp, name, control_cpp) == control_cpp
+    kept = _drop_divergence_warnings(name, subject_source, subject_status, subject)
+    assert kept == _renamed_diagnostics(control, name)
+    for message, hint in subject:
+        assert "__pfhist" not in message
+        assert hint is None or "__pfhist" not in hint
+
+
+def test_census_names_the_support_check_flags_as_divergent_are_pinned():
+    from pineforge_codegen.support_checker import DIVERGENT_VARS
+
+    # The comparison rows take their expectation from this table, so an edit
+    # of the table itself is caught here against a written list.
+    assert set(DIVERGENT_VARS) & set(_LOCAL_NAMES) == {
+        "bar_index", "last_bar_index", "timenow",
+    }

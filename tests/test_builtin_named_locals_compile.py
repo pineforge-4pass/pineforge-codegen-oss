@@ -118,3 +118,11 @@ def test_string_history_compile_outcome_matches_neutral_control(shape):
             assert _normalize_compiler_error(subject_error, name) == control_error, (
                 shape, name, subject_error, control_error,
             )
+
+
+# A string variable without a history read compiles for every name of the census.
+@pytest.mark.parametrize("name", ["aa", *_LOCAL_NAMES])
+def test_string_history_free_variable_compiles_for_every_name(name):
+    compile_env.skip_if_no_compile_env()
+    source = _variant_source(name, "history-free", string=True)
+    compile_env.compile_cpp(transpile(source), label=f"string-history-free-{name}")
