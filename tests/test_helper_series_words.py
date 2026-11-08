@@ -90,15 +90,13 @@ def test_reference_identifier_inventory_covers_both_scalar_stores():
 # The words the reference introduced. The two store names were already part of the
 # old emission: they are the generator's own script-state members, which the
 # generator refuses to share with a Pine local, so they are not local names here.
-# A string-valued local named `second` already lands in the numeric store on the
-# code without this change (only the store differs, not the reference text), so
-# that one combination does not exercise the reference's words.
+# Every introduced word can name either a string or a numeric helper local;
+# declaration bindings determine the history store even for builtin spellings.
 _INTRODUCED_WORDS = sorted(_REFERENCE_TOKENS - _OLD_REFERENCE_TOKENS)
 _WORD_ROWS = [
     (name, string)
     for name in _INTRODUCED_WORDS
     for string in (False, True)
-    if (name, string) != ("second", True)
 ]
 
 
