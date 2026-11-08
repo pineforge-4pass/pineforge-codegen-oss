@@ -391,20 +391,29 @@ clock = Clock.new()
 onChart = clock.previous()
 x = request.security(syminfo.tickerid, "60", clock.previous()) or onChart
 ''', "a method, whose calls PineForge cannot always tell apart"),
-    ('''previous() => session.ispostmarket[1]
-type Clock
-    bool value = previous()
-x = Clock.new().value
-''', "which a UDT field default calls once for every new()"),
 ], ids=["unresolved-receiver", "unresolved-same-name-owners", "unbound-trace-call",
-        "requested-method-and-chart", "udt-default"])
-def test_unsafe_method_and_default_paths_keep_pf_e5048(body: str, reason: str) -> None:
+        "requested-method-and-chart"])
+def test_unsafe_method_paths_keep_pf_e5048(body: str, reason: str) -> None:
     with pytest.raises(CompileError) as caught:
         transpile('//@version=6\nstrategy("unsafe history")\n' + body
                   + 'if x\n    strategy.entry("L", strategy.long)\n')
     errors = [d for d in caught.value.diagnostics if d.code == "PF-E5048"]
     assert errors, caught.value.diagnostics
     assert all(reason in d.message for d in errors), errors
+
+
+def test_type_field_default_call_is_refused_before_pf_e5048() -> None:
+    """The analyzer refuses a call in a type field default, so the session
+    history read behind it never reaches the PF-E5048 check."""
+    body = '''previous() => session.ispostmarket[1]
+type Clock
+    bool value = previous()
+x = Clock.new().value
+'''
+    with pytest.raises(CompileError) as caught:
+        transpile('//@version=6\nstrategy("unsafe history")\n' + body
+                  + 'if x\n    strategy.entry("L", strategy.long)\n')
+    assert [d.code for d in caught.value.diagnostics] == ["PF-E2087"]
 
 
 @pytest.mark.parametrize("body", [

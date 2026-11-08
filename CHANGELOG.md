@@ -151,6 +151,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   with an internal `ValueError`. As in TradingView, the zone word is plain
   arithmetic on the date fields: the value is the fields read as UTC minus the
   signed offset.
+- In `//@version=6` scripts and libraries, type field defaults containing calls
+  or user-declared variable references now report `PF-E2087` at the default
+  expression's first token. V5 sources keep their earlier handling.
 - `strategy.default_entry_qty(fill_price)` reads the engine host's query of the
   default order size at a price (`default_entry_qty`); it used to lower to an
   undeclared function, so a script that used it did not build. It needs an
