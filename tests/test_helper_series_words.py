@@ -51,11 +51,15 @@ def _references(cpp):
     return sorted(_STRING.sub('""', reference) for reference in references)
 
 
-@pytest.mark.parametrize("names", [("first", "second"), ("try_emplace", "aa"), ("aa", "bb")])
+@pytest.mark.parametrize("names", [
+    ("first", "second"), ("try_emplace", "aa"), ("aa", "bb"),
+    ("_security_helper_series_", "bb"), ("_security_helper_series_str_", "bb"),
+])
 @pytest.mark.parametrize("capacity", [None, 100])
-def test_requested_helper_local_words_preserve_reference_text(names, capacity):
-    control = transpile(helper_source(), history_capacity=capacity)
-    cpp = transpile(helper_source(*names), history_capacity=capacity)
+@pytest.mark.parametrize("string", [False, True], ids=["numeric", "string"])
+def test_requested_helper_local_words_preserve_reference_text(names, capacity, string):
+    control = transpile(helper_source(string=string), history_capacity=capacity)
+    cpp = transpile(helper_source(*names, string=string), history_capacity=capacity)
     assert _references(cpp) == _references(control)
 
 
@@ -87,13 +91,12 @@ def test_reference_identifier_inventory_covers_both_scalar_stores():
     }
 
 
-# The words the reference introduced. The two store names were already part of the
-# old emission: they are the generator's own script-state members, which the
-# generator refuses to share with a Pine local, so they are not local names here.
+# Every reference word, including the two store names, is a valid Pine local:
+# the allocator escapes authored store spellings and preserves the stores.
 # A string-valued local named `second` already lands in the numeric store on the
 # code without this change (only the store differs, not the reference text), so
 # that one combination does not exercise the reference's words.
-_INTRODUCED_WORDS = sorted(_REFERENCE_TOKENS - _OLD_REFERENCE_TOKENS)
+_INTRODUCED_WORDS = sorted(_REFERENCE_TOKENS)
 _WORD_ROWS = [
     (name, string)
     for name in _INTRODUCED_WORDS
@@ -110,11 +113,12 @@ def test_every_reference_word_can_be_a_requested_helper_local(name, string, capa
     generator = CodeGen(Analyzer(program).analyze())
     spelling = generator._safe_name(name)
     cpp = transpile(source, history_capacity=capacity)
+    control = transpile(helper_source(string=string), history_capacity=capacity)
     if spelling != name:
         # Escaped Pine names retain their authored keys and use a distinct C++ ID.
         assert re.search(rf"\b{re.escape(spelling)}\b", cpp), spelling
-        assert not re.search(rf"\b{re.escape(name)}\s*=", cpp)
-    control = transpile(helper_source(string=string), history_capacity=capacity)
+        pattern = rf"\b{re.escape(name)}\s*="
+        assert len(re.findall(pattern, cpp)) == len(re.findall(pattern, control))
     assert _references(cpp) == _references(control)
 
 
