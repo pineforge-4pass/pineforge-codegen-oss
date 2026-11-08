@@ -5912,7 +5912,22 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if self._type_spec_from_hint(f.type_name) is not None
         }
         for f in node.fields:
-            if f.default:
+            if f.default is not None:
+                # Inspect syntax and authored bindings only: builtin members
+                # and calculations over literals keep their existing policy.
+                if any(
+                    isinstance(expr, FuncCall)
+                    or (
+                        isinstance(expr, Identifier)
+                        and self._value_bindings.declaration_bindings.get(id(expr)) is not None
+                    )
+                    for expr, _ in iter_ast_nodes(f.default)
+                ):
+                    from ..pine_spelling import expr_start
+                    self._error(
+                        "The default value cannot be a function, variable or calculation.",
+                        expr_start(f.default).loc or f.default.loc,
+                    )
                 self._visit(f.default)
         return PineType.VOID
 

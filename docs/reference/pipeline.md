@@ -33,9 +33,9 @@ existing parser grammar.
   scopes with declaration positions before request lowering, retaining their
   exact bindings through copies. Every block and callable owns its declarations;
   an initializer precedes its binding, and a counted-loop binder follows its
-  start but precedes its end/step. A default that names an earlier global is
-  still accepted (TradingView refuses it: a known gap); callable parameters and
-  field labels cannot bind defaults.
+  start but precedes its end/step. A callable parameter default that names an
+  earlier global is still accepted (TradingView refuses it: a known gap);
+  callable parameters and field labels cannot bind defaults.
   A qualifier with no visible value binding falls back to its namespace/type
   handler, including after a block-local declaration's scope ends.
   Unavailable authored declarations use PF-E2075, inaccessible block bindings

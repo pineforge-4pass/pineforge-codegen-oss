@@ -47,6 +47,15 @@ These checks change no accepted script's emission. The controls in
 `tests/test_series_to_simple_parameter_refusal.py` compare complete C++ to
 the pinned reference.
 
+User-defined type field defaults containing a call or an authored variable
+reference raise PF-E2087 at the default expression's first token, including
+within operators and ternaries. Builtin members,
+builtin variables (for example `close`) and calculations over literals retain
+their existing handling, and a default that reads a variable declared later
+keeps the PF-E2075 refusal it had. Constructor arguments and local
+initializers are unaffected; `tests/test_field_default_refusal.py` compares
+accepted controls' complete C++ to the pinned reference.
+
 A counted `for` whose end or step reads its own counter binds that name to
 the counter, including over an outer variable, parameter, block binding or
 enclosing counter, and regardless of later global declarations. The start is
