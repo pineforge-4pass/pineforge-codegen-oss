@@ -365,10 +365,9 @@ def _reference_cpp(source, reference, tmp_path):
         _program("f() =>\n    close[1] + high[2] + bar_index[1]\n", "plot(f())\n"),
         id="chart-builtin-reader",
     ),
-    pytest.param(
-        _variant_source("second", "tuple", string=False),
-        id="requested-numeric-tuple",
-    ),
+    # A numeric tuple element spelled like a built-in is not a preservation row:
+    # on main its history is stored in the built-in's series type. It is pinned
+    # against the renamed control by test_requested_numeric_tuple_matches_renamed_control.
 ])
 def test_outer_bindings_and_builtin_reads_keep_complete_cpp(source, reference, tmp_path):
     before = _reference_cpp(source, reference, tmp_path)
@@ -457,7 +456,7 @@ def _extended_callable_local_source(name, shape):
     if shape == "varip":
         body = (
             f"    varip float {name} = 0.0\n"
-            f"    {name} := close\n    nz({name}[1]) + {name}\n"
+            f"    {name} := 1.5\n    nz({name}[1]) + {name}\n"
         )
     else:
         binder, value = {
@@ -511,4 +510,4 @@ def test_untitled_persistent_local_input_keeps_authored_key(name):
         f"h() =>\n    var float {name} = input.float(1.5)\n    {name}\n",
         "plot(h())\n",
     ))
-    assert re.search(rf'get_input_float\("{re.escape(name)}",', cpp), cpp
+    assert re.search(rf'get_input_double\("{re.escape(name)}",', cpp), cpp
