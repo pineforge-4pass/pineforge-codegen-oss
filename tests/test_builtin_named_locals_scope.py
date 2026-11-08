@@ -1,11 +1,11 @@
 """Compare scoped builtin-named locals with reference or renamed-control C++.
 
-Preservation rows compare complete C++; sibling readers also retain their
-reference definitions. Local variants compare complete C++ after renaming,
-or compare tuple-history refusal text with the control. These checks do not
-compile or run the emitted code and supply no hosted-engine evidence.
-Control comparisons ignore notes in the embedded manifest because they are
-a separate known difference.
+Preservation rows compare complete C++, including embedded manifests;
+sibling readers also retain their reference definitions. Local variants
+compare complete C++ after renaming, or compare tuple-history refusal text
+with the control. Compile rows using these same source builders live in
+test_builtin_named_locals_compile.py. These checks do not run the emitted
+code or supply hosted-engine evidence.
 """
 
 import re
@@ -150,15 +150,6 @@ def _variant_source(name, variant, *, string):
     )
 
 
-def _mask_manifest_notes(cpp):
-    string = r'\\"(?:\\\\(?:\\.|[^\\])|[^"\\])*\\"'
-    return re.sub(
-        rf'(\\"unresolved\\":\[)(?:\s*{string}(?:\s*,\s*{string})*)?\s*(\])',
-        r"\1\2",
-        cpp,
-    )
-
-
 def _normalize_local(cpp, name, control):
     spelling = re.escape(name)
     local = re.compile(
@@ -212,7 +203,7 @@ def test_normalizer_is_identity_for_neutral_control(string, requested):
         _variant_source("aa", "typed", string=string)
         if requested else _chart_local_source("aa", string=string)
     )
-    control = _mask_manifest_notes(transpile(source))
+    control = transpile(source)
     assert _normalize_local(control, "aa", control) == control
 
 
@@ -302,45 +293,11 @@ def test_normalizer_retains_differences_beyond_local_spelling(cpp, control):
     assert _normalize_local(cpp, "second", control) != control
 
 
-@pytest.mark.parametrize("payload", [
-    pytest.param(r'\"note\"', id="single-note"),
-    pytest.param(r'\"one\",\"two\"', id="multiple-notes"),
-    pytest.param(r'\"note ] with \\\"quotes\\\" and \\\\ path\"', id="escaped-note"),
-])
-def test_manifest_note_mask_changes_only_unresolved_payload(payload):
-    prefix = r'const char* manifest = "{\"before\":\"keep\",\"unresolved\":['
-    suffix = r'],\"after\":[\"keep\"]}";'
-    cpp = prefix + payload + suffix
-    assert _mask_manifest_notes(cpp) == prefix + suffix
-
-
-def test_manifest_note_mask_preserves_text_without_unresolved_list():
-    cpp = 'Series<double> aa;\n' + r'const char* manifest = "{\"other\":[\"keep\"]}";'
-    assert _mask_manifest_notes(cpp) == cpp
-
-
-def test_manifest_note_mask_is_idempotent():
-    cpp = r'const char* manifest = "{\"unresolved\":[\"note\"],\"other\":\"keep\"}";'
-    once = _mask_manifest_notes(cpp)
-    assert _mask_manifest_notes(once) == once
-
-
-def test_manifest_note_mask_retains_series_type_difference():
-    subject = 'Series<int> aa;\n' + r'const char* manifest = "{\"unresolved\":[\"note\"]}";'
-    control = 'Series<std::string> aa;\n' + r'const char* manifest = "{\"unresolved\":[]}";'
-    empty = r'const char* manifest = "{\"unresolved\":[]}";'
-    subject = _mask_manifest_notes(subject)
-    control = _mask_manifest_notes(control)
-    assert subject == 'Series<int> aa;\n' + empty
-    assert control == 'Series<std::string> aa;\n' + empty
-    assert subject != control
-
-
 @pytest.fixture(scope="module")
 def reference():
     tree = reference_codegen(CPP_REFERENCE)
     if tree is None:
-        pytest.skip("The C++ reference commit is unavailable")
+        pytest.skip(f"The C++ reference commit {CPP_REFERENCE} is unavailable")
     return tree
 
 
@@ -382,8 +339,8 @@ def test_outer_bindings_and_builtin_reads_keep_complete_cpp(source, reference, t
     pytest.param("high", False, id="chart-numeric-high"),
 ])
 def test_chart_local_history_matches_renamed_control(name, string):
-    cpp = _mask_manifest_notes(transpile(_chart_local_source(name, string=string)))
-    control = _mask_manifest_notes(transpile(_chart_local_source("aa", string=string)))
+    cpp = transpile(_chart_local_source(name, string=string))
+    control = transpile(_chart_local_source("aa", string=string))
     assert _normalize_local(cpp, name, control) == control
     assert control.strip() and _HISTORY_READ.findall(control)
 
@@ -392,8 +349,8 @@ def test_sibling_declaration_preserves_builtin_reader(reference, tmp_path):
     source = _sibling_source("second")
     before = _reference_cpp(source, reference, tmp_path)
     cpp = transpile(source)
-    control = _mask_manifest_notes(transpile(_sibling_source("aa")))
-    assert _normalize_local(_mask_manifest_notes(cpp), "second", control) == control
+    control = transpile(_sibling_source("aa"))
+    assert _normalize_local(cpp, "second", control) == control
     # The declaring function changes; compare the reader and its evaluator.
     for function in ("g", "_eval_security_1"):
         definition = re.compile(
@@ -428,20 +385,16 @@ def test_requested_local_variants_match_renamed_control(name, variant, string):
             transpile(source)
         assert str(subject.value) == str(control.value)
     else:
-        control = _mask_manifest_notes(transpile(control_source))
-        cpp = _mask_manifest_notes(transpile(source))
+        control = transpile(control_source)
+        cpp = transpile(source)
         assert _normalize_local(cpp, name, control) == control
 
 
 @pytest.mark.parametrize("name", _LOCAL_NAMES)
 def test_requested_numeric_tuple_matches_renamed_control(name):
     # A numeric tuple element read with history, for every name of the census.
-    control = _mask_manifest_notes(
-        transpile(_variant_source("aa", "tuple", string=False))
-    )
-    cpp = _mask_manifest_notes(
-        transpile(_variant_source(name, "tuple", string=False))
-    )
+    control = transpile(_variant_source("aa", "tuple", string=False))
+    cpp = transpile(_variant_source(name, "tuple", string=False))
     assert _normalize_local(cpp, name, control) == control
 
 
@@ -477,12 +430,8 @@ def _extended_callable_local_source(name, shape):
     "shape", ["method", "varip", "for-in", "for-in-index", "for-in-value"],
 )
 def test_method_persistent_and_iteration_locals_match_renamed_control(name, shape):
-    control = _mask_manifest_notes(
-        transpile(_extended_callable_local_source("aa", shape))
-    )
-    cpp = _mask_manifest_notes(
-        transpile(_extended_callable_local_source(name, shape))
-    )
+    control = transpile(_extended_callable_local_source("aa", shape))
+    cpp = transpile(_extended_callable_local_source(name, shape))
     assert _normalize_local(cpp, name, control) == control
 
 
@@ -548,7 +497,326 @@ def test_builtin_named_object_local_preserves_namespace_refusal(name):
 
 
 def test_non_namespace_builtin_named_object_local_matches_renamed_control():
-    control = _mask_manifest_notes(transpile(_object_local_source("aa")))
-    cpp = _mask_manifest_notes(transpile(_object_local_source("second")))
+    control = transpile(_object_local_source("aa"))
+    cpp = transpile(_object_local_source("second"))
     assert control.strip()
     assert _normalize_local(cpp, "second", control) == control
+
+
+# Private storage allocation and authored diagnostic spellings.
+_PRIVATE_STORAGE_TOKEN = re.compile(
+    r"\b(?:second|minute)__pfhist[0-9]+(?:_cs[0-9]+|__ni[0-9]+)?\b"
+)
+
+
+def _allocation_source(authored):
+    return _program(
+        "h() =>\n    second = close\n    bb = nz(second[1])\n    second + bb\n",
+        'v = request.security(syminfo.tickerid, "60", h())\n'
+        'w = request.security(syminfo.tickerid, "240", h())\n'
+        f"plot(v + w + {authored})\n",
+        prelude=f"{authored} = 7.0\n",
+    )
+
+
+def _multiple_declaration_source(extra=()):
+    declarations = "".join(f"{name} = {value}\n" for name, value in extra)
+    more = "".join(f" + {name}" for name, _ in extra)
+    return _program(
+        "f() =>\n"
+        "    second = close\n    bb = nz(second[1])\n    second + bb\n"
+        "g() =>\n"
+        "    minute = open\n    second = high\n"
+        "    cc = nz(minute[1]) + nz(second[1])\n    minute + second + cc\n"
+        "k() =>\n"
+        "    r = 0.0\n    if close > open\n"
+        "        second = low\n        r := nz(second[1])\n    r\n",
+        declarations + f"plot(f() + g() + k(){more})\n",
+    )
+
+
+_SOURCE_ORDER_WRITES = {
+    "second__pfhist1": "close",
+    "minute__pfhist2": "open",
+    "second__pfhist3": "high",
+    "second__pfhist4": "low",
+}
+_PRIVATE_STORAGE_CASES = [
+    (
+        "authored-base", _allocation_source("second__pfhist1"),
+        {"second__pfhist1"},
+        {"second__pfhist1", "second__pfhist2", "second__pfhist2_cs1"},
+        {"second__pfhist2": "close"},
+    ),
+    (
+        "authored-call-clone", _allocation_source("second__pfhist1_cs1"),
+        {"second__pfhist1_cs1"},
+        {"second__pfhist1_cs1", "second__pfhist2", "second__pfhist2_cs1"},
+        {"second__pfhist2": "close"},
+    ),
+    (
+        "authored-nested-clone", _allocation_source("second__pfhist1__ni1"),
+        {"second__pfhist1__ni1"},
+        {"second__pfhist1__ni1", "second__pfhist2", "second__pfhist2_cs1"},
+        {"second__pfhist2": "close"},
+    ),
+    (
+        "later-authored-base", _allocation_source("second__pfhist2"),
+        {"second__pfhist2"},
+        {"second__pfhist2", "second__pfhist1", "second__pfhist1_cs1"},
+        {"second__pfhist1": "close"},
+    ),
+    (
+        "plain-global", _allocation_source("zz_plain"), {"zz_plain"},
+        {"second__pfhist1", "second__pfhist1_cs1"},
+        {"second__pfhist1": "close"},
+    ),
+    (
+        "source-order", _multiple_declaration_source(), set(),
+        {"second__pfhist1", "minute__pfhist2", "second__pfhist3", "second__pfhist4"},
+        _SOURCE_ORDER_WRITES,
+    ),
+    (
+        "unblocked-extra-names",
+        _multiple_declaration_source((
+            ("second__pfhist2", 1.0), ("minute__pfhist3", 2.0),
+        )),
+        {"second__pfhist2", "minute__pfhist3"},
+        {"second__pfhist1", "second__pfhist2", "second__pfhist3",
+         "second__pfhist4", "minute__pfhist2", "minute__pfhist3"},
+        _SOURCE_ORDER_WRITES,
+    ),
+    (
+        "reserved-source-order",
+        _multiple_declaration_source((
+            ("minute__pfhist2", 1.0), ("second__pfhist4", 2.0),
+        )),
+        {"minute__pfhist2", "second__pfhist4"},
+        {"second__pfhist1", "minute__pfhist2", "minute__pfhist3",
+         "second__pfhist4", "second__pfhist5", "second__pfhist6"},
+        {"second__pfhist1": "close", "minute__pfhist3": "open",
+         "second__pfhist5": "high", "second__pfhist6": "low"},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "case", _PRIVATE_STORAGE_CASES, ids=[case[0] for case in _PRIVATE_STORAGE_CASES],
+)
+def test_private_storage_reserves_authored_and_clone_names_in_source_order(case):
+    case_id, source, authored, expected, writes = case
+    cpp = transpile(source)
+    tokens = set(_PRIVATE_STORAGE_TOKEN.findall(cpp))
+    assert tokens == expected, case_id
+    members = set(re.findall(r"Series<double>\s+([A-Za-z_][A-Za-z_0-9]*)", cpp))
+    private_members = {name for name in members if _PRIVATE_STORAGE_TOKEN.fullmatch(name)}
+    assert private_members == tokens - authored
+    assert not members & authored
+    for name in authored:
+        assert re.search(rf"\b{re.escape(name)}\b", cpp), (case_id, name)
+    for storage, field in writes.items():
+        assert re.search(
+            rf"\b{re.escape(storage)}\.(?:push|update)\(current_bar_\.{field}\);", cpp,
+        ), (case_id, storage, field)
+
+
+def _typed_private_name_refusal_source(name):
+    return _program(
+        "h() =>\n    minute = 1.0\n"
+        f"    int {name} = 1.5\n    {name}\n",
+        "plot(h())\n",
+        prelude="second__pfhist1 = 7.0\n",
+    )
+
+
+def test_refusal_restoration_distinguishes_allocated_and_authored_private_names():
+    with pytest.raises(CompileError) as renamed:
+        transpile(_typed_private_name_refusal_source("second"))
+    assert len(renamed.value.diagnostics) == 1
+    assert renamed.value.diagnostics[0].message == (
+        "An int declaration cannot initialize 'second' with a float literal."
+    )
+    assert "second__pfhist" not in str(renamed.value)
+
+    # The other colliding local keeps restoration active in this script too.
+    with pytest.raises(CompileError) as authored:
+        transpile(_typed_private_name_refusal_source("second__pfhist1"))
+    assert len(authored.value.diagnostics) == 1
+    assert authored.value.diagnostics[0].message == (
+        "An int declaration cannot initialize 'second__pfhist1' with a float literal."
+    )
+    assert "'second__pfhist1'" in str(authored.value)
+
+
+# Generator refusals, collection history and requests capturing locals.
+def _matrix_receiver_source(name):
+    return _program(
+        f"h() =>\n    {name} = 1.0\n    matrix.det({name})\n",
+        "plot(h())\n",
+    )
+
+
+@pytest.mark.parametrize("name", _LOCAL_NAMES)
+def test_generator_refusal_restores_builtin_named_local(name):
+    with pytest.raises(CompileError) as control:
+        transpile(_matrix_receiver_source("aa"))
+    with pytest.raises(CompileError) as subject:
+        transpile(_matrix_receiver_source(name))
+    assert len(control.value.diagnostics) == len(subject.value.diagnostics) == 1
+    expected = control.value.diagnostics[0]
+    actual = subject.value.diagnostics[0]
+    assert expected.phase.value == actual.phase.value == "CODEGEN"
+    assert "'aa'" in expected.message
+    assert actual.message == expected.message.replace("'aa'", f"'{name}'")
+    assert "__pfhist" not in actual.message
+    assert "__pfhist" not in str(subject.value)
+
+
+def _matrix_local_history_source(name):
+    return _program(
+        f"h() =>\n    matrix<float> {name} = matrix.new<float>(2, 2, 1.0)\n"
+        f"    x = {name}[1]\n    matrix.det(x)\n",
+        "plot(h())\n",
+    )
+
+
+def test_matrix_local_history_refusal_retains_authored_receiver():
+    with pytest.raises(CompileError) as control:
+        transpile(_matrix_local_history_source("aa"))
+    with pytest.raises(CompileError) as subject:
+        transpile(_matrix_local_history_source("second"))
+    assert len(control.value.diagnostics) == len(subject.value.diagnostics) == 1
+    expected = control.value.diagnostics[0]
+    actual = subject.value.diagnostics[0]
+    assert expected.phase.value == actual.phase.value == "ANALYZER"
+    assert "aa[1]" in expected.message
+    assert actual.message == expected.message.replace("aa[1]", "second[1]")
+    assert "__pfhist" not in actual.message
+    assert "__pfhist" not in str(subject.value)
+
+
+def _captured_local_request_source(name):
+    return _program(
+        f"f() =>\n    {name} = close\n    p = nz({name}[1])\n"
+        f'    request.security(syminfo.tickerid, "60", {name} + p)\n',
+        "plot(f())\n",
+    )
+
+
+def _replace_neutral_name(value, name):
+    if isinstance(value, str):
+        return re.sub(r"\baa\b", name, value)
+    if isinstance(value, list):
+        return [_replace_neutral_name(item, name) for item in value]
+    if isinstance(value, dict):
+        return {key: _replace_neutral_name(item, name) for key, item in value.items()}
+    return value
+
+
+def _capabilities_manifest_literal(cpp):
+    literals = [
+        literal for literal in re.findall(r'"(?:\\.|[^"\\\n])*"', cpp)
+        if r'\"unresolved\":[' in literal
+    ]
+    assert len(literals) == 1, literals
+    return literals[0]
+
+
+@pytest.mark.parametrize("name", _LOCAL_NAMES)
+def test_captured_local_request_preserves_cpp_diagnostics_and_manifest(name):
+    import json
+
+    from pineforge_codegen import transpile_full
+
+    control = transpile_full(_captured_local_request_source("aa"))
+    subject = transpile_full(_captured_local_request_source(name))
+    assert _normalize_local(subject["cpp"], name, control["cpp"]) == control["cpp"]
+    expected_messages = [diagnostic.message for diagnostic in control["diagnostics"]]
+    messages = [diagnostic.message for diagnostic in subject["diagnostics"]]
+    assert expected_messages
+    assert messages == _replace_neutral_name(expected_messages, name)
+    assert subject["requests"] == _replace_neutral_name(control["requests"], name)
+    assert all("__pfhist" not in message for message in messages)
+    for result in (control, subject):
+        literal = _capabilities_manifest_literal(result["cpp"])
+        assert "__pfhist" not in literal
+        manifest = json.loads(json.loads(literal))
+        assert manifest["requests"]
+
+
+# Primitive families, collections and additional callable blocks.
+_ADDITIONAL_LOCAL_SHAPES = (
+    "int", "bool", "color", "array", "switch", "while",
+    "method-nested", "method-typed", "method-reassigned",
+)
+
+
+def _additional_callable_local_source(name, shape):
+    bodies = {
+        "int": f"    int {name} = 3\n    {name} + 1\n",
+        "bool": f"    bool {name} = close > open\n    {name} ? 1.0 : 0.0\n",
+        "color": f"    color {name} = color.red\n    color.r({name})\n",
+        "array": (
+            f"    array<float> {name} = array.from(1.0, 2.0)\n"
+            f"    array.get({name}, 0)\n"
+        ),
+        "switch": (
+            "    r = 0.0\n    switch\n        close > open =>\n"
+            f"            {name} = close\n            r := nz({name}[1])\n"
+            "        => r := 1.0\n    r\n"
+        ),
+        "while": (
+            "    r = 0.0\n    i = 0\n    while i < 2\n"
+            f"        {name} = close\n        r += nz({name}[1])\n"
+            "        i += 1\n    r\n"
+        ),
+        "method-nested": (
+            "    r = 0.0\n    if receiver > 0\n"
+            f"        {name} = receiver * 2.0\n"
+            f"        r := nz({name}[1]) + {name}\n    r\n"
+        ),
+        "method-typed": (
+            f"    float {name} = receiver * 2.0\n    nz({name}[1]) + {name}\n"
+        ),
+        "method-reassigned": (
+            f"    var float {name} = 0.0\n    {name} := receiver\n"
+            f"    nz({name}[1]) + {name}\n"
+        ),
+    }
+    if shape.startswith("method-"):
+        return _program(
+            "method m(float receiver) =>\n" + bodies[shape],
+            "v = close\nplot(v.m())\n",
+        )
+    return _program("h() =>\n" + bodies[shape], "plot(h())\n")
+
+
+@pytest.mark.parametrize("name", _LOCAL_NAMES)
+@pytest.mark.parametrize("shape", _ADDITIONAL_LOCAL_SHAPES)
+def test_additional_local_types_and_blocks_match_renamed_control(name, shape):
+    control = transpile(_additional_callable_local_source("aa", shape))
+    cpp = transpile(_additional_callable_local_source(name, shape))
+    assert _normalize_local(cpp, name, control) == control
+
+
+@pytest.mark.parametrize("source", [
+    pytest.param(
+        _program(
+            "f() =>\n    hl2[1] + hlc3[2] + hlcc4[1] + ohlc4[1]\n",
+            "plot(f())\n",
+        ),
+        id="chart-derived-price-history",
+    ),
+])
+def test_builtin_derived_price_history_keeps_complete_cpp(source, reference, tmp_path):
+    before = _reference_cpp(source, reference, tmp_path)
+    cpp = transpile(source)
+    assert cpp == before
+    expected_reads = _HISTORY_READ.findall(before)
+    assert cpp.strip() and expected_reads and _HISTORY_READ.findall(cpp) == expected_reads
+
+
+def test_callable_local_census_matches_independent_builtin_inventories():
+    from pineforge_codegen.analyzer.callable_history_names import _builtin_callable_local_names
+
+    assert _builtin_callable_local_names() == set(_LOCAL_NAMES)

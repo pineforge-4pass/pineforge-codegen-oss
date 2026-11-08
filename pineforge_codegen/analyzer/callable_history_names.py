@@ -17,6 +17,20 @@ _CLONE_SUFFIX = re.compile(r"_cs|__ni")
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
 
+def _builtin_callable_local_names() -> set[str]:
+    """Bare builtin variable spellings that can declare callable locals."""
+    from .. import signatures as sigs
+    from ..codegen.tables import BAR_BUILTINS, BAR_FIELDS, TIME_FIELD_EXPRS
+    from ..codegen.visit_expr import _REALTIME_ONLY_VARS
+    from ..lexer import KEYWORDS
+
+    return (
+        set(BUILTIN_VARS) | set(BAR_BUILTINS) | set(BAR_FIELDS)
+        | set(TIME_FIELD_EXPRS) | set(_REALTIME_ONLY_VARS)
+        | {name for name in sigs.BUILTIN_VARIABLES if "." not in name}
+    ) - KEYWORDS.keys()
+
+
 def separate_builtin_callable_locals(program, bindings) -> bool:
     """Give builtin-shadowing body declarations ordinary, private names.
 
@@ -24,17 +38,9 @@ def separate_builtin_callable_locals(program, bindings) -> bool:
     declaration. Reuse that inventory for every declaration kind and block
     depth, before any type or storage inventory consumes the raw spelling.
     """
-    from .. import signatures as sigs
-    from ..codegen.tables import BAR_BUILTINS, BAR_FIELDS, TIME_FIELD_EXPRS
-    from ..codegen.visit_expr import _REALTIME_ONLY_VARS
-    from ..lexer import KEYWORDS
     from .value_bindings import _declared_names
 
-    builtin_names = (
-        set(BUILTIN_VARS) | set(BAR_BUILTINS) | set(BAR_FIELDS)
-        | set(TIME_FIELD_EXPRS) | set(_REALTIME_ONLY_VARS)
-        | {name for name in sigs.BUILTIN_VARIABLES if "." not in name}
-    ) - KEYWORDS.keys()
+    builtin_names = _builtin_callable_local_names()
     colliding = set()
     for scope in bindings.scopes:
         if bindings.budget is not None:
