@@ -1,14 +1,15 @@
-"""A loop length must never pick up a same-spelled global input."""
+"""A percentile loop length reads its lexical loop binding."""
+
+import re
 
 import pytest
 
 from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
 
 
 @pytest.mark.parametrize("input_name", ["length", "window"])
 @pytest.mark.parametrize("expression", ["{counter}", "{counter} + 1"])
-def test_percentile_loop_length_refusal_is_independent_of_input_name(input_name, expression):
+def test_percentile_loop_length_uses_the_counter(input_name, expression):
     def source(counter):
         length = expression.format(counter=counter)
         return (
@@ -20,18 +21,15 @@ def test_percentile_loop_length_refusal_is_independent_of_input_name(input_name,
             'plot(total)\n'
         )
 
-    diagnostics = []
     for counter in (input_name, "iteration"):
         script = source(counter)
-        with pytest.raises(CompileError, match="Unsupported TA constructor length") as caught:
-            transpile(script)
-        diagnostic = caught.value.diagnostics[0]
-        assert diagnostic.code == "PF-E5092"
-        expected_line = next(
-            number for number, line in enumerate(script.splitlines(), start=1)
-            if "ta.percentile_nearest_rank" in line
+        cpp = transpile(script)
+        assert "pineforge::source::SeriesPercentileNearestRank" in cpp
+        line = next(
+            line for line in cpp.splitlines()
+            if "_ta_percentile_nearest_rank_" in line and ".compute(" in line
         )
-        assert diagnostic.location.line == expected_line
-        written_length = expression.format(counter=counter)
-        diagnostics.append(diagnostic.message.replace(f"'{written_length}'", "'counter'"))
-    assert diagnostics[0] == diagnostics[1]
+        assert re.search(
+            rf"ta_number\([^)]*\b{re.escape(counter)}\b", line
+        ), line
+        assert 'get_input_int("Window"' not in line

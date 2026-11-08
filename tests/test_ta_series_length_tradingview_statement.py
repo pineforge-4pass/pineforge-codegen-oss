@@ -2,16 +2,16 @@
 
 PineForge sizes a ta.* indicator buffer from a length that is constant or
 derived from an input. A series length (a loop counter, a value computed per
-bar) is refused. For the ta.* functions with a RECORDED TradingView result that
-a series length compiles (ta.sma, named in the engine's note on its
-TradingView compile probes; ta.percentile_nearest_rank, reported to compile in
-issue #295) the refusal names the Pine function and says that TradingView
-accepts the call. Every other function keeps the plain wording, with the C++
-class name, which makes no claim about TradingView: the functions where
-TradingView refuses a series length too (ta.ema, ta.rsi, ...), and the ones
-with no recorded result (ta.wma, ta.percentile_linear_interpolation,
-ta.pivothigh, ...). A function joins the first group only with its own recorded
-result.
+bar) is refused for functions that still need a constructor-sized buffer.
+ta.percentile_nearest_rank lowers to its engine series class. For the ta.*
+functions with a RECORDED TradingView result that a series length compiles
+(ta.sma, named in the engine's note on its TradingView compile probes) the
+refusal names the Pine function and says that TradingView accepts the call.
+Every other function keeps the plain wording, with the C++ class name, which
+makes no claim about TradingView: the functions where TradingView refuses a
+series length too (ta.ema, ta.rsi, ...), and the ones with no recorded result
+(ta.wma, ta.percentile_linear_interpolation, ta.pivothigh, ...). A function
+joins the first group only with its own recorded result.
 """
 
 import pytest
@@ -57,8 +57,6 @@ def _refusal(source: str):
 
 
 @pytest.mark.parametrize("source, argument, name", [
-    (_loop_source("ta.percentile_nearest_rank(close, i, 50)"), "i",
-     "ta.percentile_nearest_rank"),
     (_bar_source("ta.sma(close, n)"), "n", "ta.sma"),
 ])
 def test_a_series_length_with_a_recorded_tradingview_result_says_so(source, argument, name):
