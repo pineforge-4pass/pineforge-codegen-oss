@@ -727,6 +727,7 @@ def test_captured_local_request_preserves_cpp_diagnostics_and_manifest(name):
     import json
 
     from pineforge_codegen import transpile_full
+    from pineforge_codegen.support_checker import DIVERGENT_VARS, DIVERGENT_VARS_ERROR
 
     control = transpile_full(_captured_local_request_source("aa"))
     subject = transpile_full(_captured_local_request_source(name))
@@ -734,6 +735,14 @@ def test_captured_local_request_preserves_cpp_diagnostics_and_manifest(name):
     expected_messages = [diagnostic.message for diagnostic in control["diagnostics"]]
     messages = [diagnostic.message for diagnostic in subject["diagnostics"]]
     assert expected_messages
+    # The support check reads names before scoping: for the few built-in names
+    # it flags as divergent it warns at every read, whatever the read is bound
+    # to (a global or a parameter of that name gets the same warning). Those
+    # warnings are the only difference allowed, and only for those names.
+    divergence = f"{name} diverges from TradingView semantics in PineForge."
+    assert not DIVERGENT_VARS_ERROR
+    assert (divergence in messages) == (name in DIVERGENT_VARS)
+    messages = [message for message in messages if message != divergence]
     assert messages == _replace_neutral_name(expected_messages, name)
     assert subject["requests"] == _replace_neutral_name(control["requests"], name)
     assert all("__pfhist" not in message for message in messages)
