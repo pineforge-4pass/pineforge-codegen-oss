@@ -4,6 +4,8 @@ Preservation rows compare complete C++; sibling readers also retain their
 reference definitions. Local variants compare complete C++ after renaming,
 or compare tuple-history refusal text with the control. These checks do not
 compile or run the emitted code and supply no hosted-engine evidence.
+Control comparisons ignore notes in the embedded manifest because they are
+a separate known difference.
 """
 
 import re
@@ -148,6 +150,15 @@ def _variant_source(name, variant, *, string):
     )
 
 
+def _mask_manifest_notes(cpp):
+    string = r'\\"(?:\\\\(?:\\.|[^\\])|[^"\\])*\\"'
+    return re.sub(
+        rf'(\\"solved\\":\[)(?:\s*{string}(?:\s*,\s*{string})*)?\s*(\])',
+        r"\1\2",
+        cpp,
+    )
+
+
 def _normalize_local(cpp, name, control):
     spelling = re.escape(name)
     local = re.compile(
@@ -157,17 +168,22 @@ def _normalize_local(cpp, name, control):
         rf"(?:__pfhist[0-9]+)?(?P<suffix>(?:_cs[0-9]+)?)"
     )
     identifiers = re.compile(
-        r"(?P<qualified>(?:->|\.|::)\s*[A-Za-z_][A-Za-z_0-9]*)"
+        r"(?P<qualified>(?:->|\.|::)\s*(?P<member>[A-Za-z_][A-Za-z_0-9]*))"
         r"|[A-Za-z_][A-Za-z_0-9]*"
     )
+    storage_owner = re.compile(r"\b(?:this|GeneratedStrategy)\s*$")
 
     def rename(match):
-        if match.lastgroup == "qualified":
+        member = match["member"]
+        if member is not None and not storage_owner.search(
+            match.string, 0, match.start(),
+        ):
             return match[0]
-        binding = local.fullmatch(match[0])
+        binding = local.fullmatch(member if member is not None else match[0])
         if binding is None:
             return match[0]
-        return f"{binding['prefix']}aa{binding['suffix']}"
+        neutral = f"{binding['prefix']}aa{binding['suffix']}"
+        return match[0][:-len(member)] + neutral if member is not None else neutral
 
     # Separate code from comments and literals before replacing identifiers.
     text = re.compile(
@@ -196,8 +212,39 @@ def test_normalizer_is_identity_for_neutral_control(string, requested):
         _variant_source("aa", "typed", string=string)
         if requested else _chart_local_source("aa", string=string)
     )
-    control = transpile(source)
+    control = _mask_manifest_notes(transpile(source))
     assert _normalize_local(control, "aa", control) == control
+
+
+@pytest.mark.parametrize("name", ["second", "time_close"])
+@pytest.mark.parametrize("form", ["plain", "prefixed", "wrapped", "history"])
+def test_normalizer_renames_only_qualified_local_storage(name, form):
+    spelling = {
+        "plain": name,
+        "prefixed": f"pf_safe_{name}",
+        "wrapped": f"_{name}_",
+        "history": f"{name}__pfhist1",
+    }[form]
+    shared = (
+        "auto iterator = this->it->second;\n"
+        f"auto other = object.{name} + Scope::{name} + current_bar_.{name};\n"
+        f"auto unrelated = not_this->{spelling} + OtherGeneratedStrategy::{spelling};\n"
+    )
+    cpp = (
+        f"auto &value = this->{spelling};\n"
+        f"using Local = decltype(this -> {spelling});\n"
+        f"using Storage = decltype(GeneratedStrategy :: {spelling});\n"
+        f"auto &member = GeneratedStrategy::{spelling};\n"
+        + shared
+    )
+    control = (
+        "auto &value = this->aa;\n"
+        "using Local = decltype(this -> aa);\n"
+        "using Storage = decltype(GeneratedStrategy :: aa);\n"
+        "auto &member = GeneratedStrategy::aa;\n"
+        + shared
+    )
+    assert _normalize_local(cpp, name, control) == control
 
 
 @pytest.mark.parametrize("name", ["second", "volume"])
@@ -255,6 +302,40 @@ def test_normalizer_retains_differences_beyond_local_spelling(cpp, control):
     assert _normalize_local(cpp, "second", control) != control
 
 
+@pytest.mark.parametrize("payload", [
+    pytest.param(r'\"note\"', id="single-note"),
+    pytest.param(r'\"one\",\"two\"', id="multiple-notes"),
+    pytest.param(r'\"note ] with \\\"quotes\\\" and \\\\ path\"', id="escaped-note"),
+])
+def test_manifest_note_mask_changes_only_solved_payload(payload):
+    prefix = r'const char* manifest = "{\"before\":\"keep\",\"solved\":['
+    suffix = r'],\"after\":[\"keep\"]}";'
+    cpp = prefix + payload + suffix
+    assert _mask_manifest_notes(cpp) == prefix + suffix
+
+
+def test_manifest_note_mask_preserves_text_without_solved_list():
+    cpp = 'Series<double> aa;\n' + r'const char* manifest = "{\"other\":[\"keep\"]}";'
+    assert _mask_manifest_notes(cpp) == cpp
+
+
+def test_manifest_note_mask_is_idempotent():
+    cpp = r'const char* manifest = "{\"solved\":[\"note\"],\"other\":\"keep\"}";'
+    once = _mask_manifest_notes(cpp)
+    assert _mask_manifest_notes(once) == once
+
+
+def test_manifest_note_mask_retains_series_type_difference():
+    subject = 'Series<int> aa;\n' + r'const char* manifest = "{\"solved\":[\"note\"]}";'
+    control = 'Series<std::string> aa;\n' + r'const char* manifest = "{\"solved\":[]}";'
+    empty = r'const char* manifest = "{\"solved\":[]}";'
+    subject = _mask_manifest_notes(subject)
+    control = _mask_manifest_notes(control)
+    assert subject == 'Series<int> aa;\n' + empty
+    assert control == 'Series<std::string> aa;\n' + empty
+    assert subject != control
+
+
 @pytest.fixture(scope="module")
 def reference():
     tree = reference_codegen(CPP_REFERENCE)
@@ -302,8 +383,8 @@ def test_outer_bindings_and_builtin_reads_keep_complete_cpp(source, reference, t
     pytest.param("high", False, id="chart-numeric-high"),
 ])
 def test_chart_local_history_matches_renamed_control(name, string):
-    cpp = transpile(_chart_local_source(name, string=string))
-    control = transpile(_chart_local_source("aa", string=string))
+    cpp = _mask_manifest_notes(transpile(_chart_local_source(name, string=string)))
+    control = _mask_manifest_notes(transpile(_chart_local_source("aa", string=string)))
     assert _normalize_local(cpp, name, control) == control
     assert control.strip() and _HISTORY_READ.findall(control)
 
@@ -312,8 +393,8 @@ def test_sibling_declaration_preserves_builtin_reader(reference, tmp_path):
     source = _sibling_source("second")
     before = _reference_cpp(source, reference, tmp_path)
     cpp = transpile(source)
-    control = transpile(_sibling_source("aa"))
-    assert _normalize_local(cpp, "second", control) == control
+    control = _mask_manifest_notes(transpile(_sibling_source("aa")))
+    assert _normalize_local(_mask_manifest_notes(cpp), "second", control) == control
     # The declaring function changes; compare the reader and its evaluator.
     for function in ("g", "_eval_security_1"):
         definition = re.compile(
@@ -348,5 +429,18 @@ def test_requested_local_variants_match_renamed_control(name, variant, string):
             transpile(source)
         assert str(subject.value) == str(control.value)
     else:
-        control = transpile(control_source)
-        assert _normalize_local(transpile(source), name, control) == control
+        control = _mask_manifest_notes(transpile(control_source))
+        cpp = _mask_manifest_notes(transpile(source))
+        assert _normalize_local(cpp, name, control) == control
+
+
+@pytest.mark.parametrize("name", _LOCAL_NAMES)
+def test_requested_numeric_tuple_matches_renamed_control(name):
+    # A numeric tuple element read with history, for every name of the census.
+    control = _mask_manifest_notes(
+        transpile(_variant_source("aa", "tuple", string=False))
+    )
+    cpp = _mask_manifest_notes(
+        transpile(_variant_source(name, "tuple", string=False))
+    )
+    assert _normalize_local(cpp, name, control) == control
