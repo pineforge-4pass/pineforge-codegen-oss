@@ -22,7 +22,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
-- Requested-helper locals that shadow built-in variables retain their declared types and use the matching string or numeric history store.
+- A local declared in a function and spelled like a built-in variable now keeps its own type, history storage and reads in every declaration shape; method locals follow the same rule.
 - History retention can be selected with keyword-only `history_capacity`
   in `transpile()`, `transpile_full()`, `transpile_with_request_inventory()`
   and `gate/glue.py::transpile_json()`. The JavaScript worker template does

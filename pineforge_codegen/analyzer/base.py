@@ -161,14 +161,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._filename = filename
         self._budget = budget
         self._pine_version = ast.version
-        # A later reassignment also prevents an initializer from proving the
-        # type of a condition. Same-spelled bindings conservatively share this
-        # exclusion; their legacy emission types remain unchanged.
-        self._condition_reassigned_names = {
-            node.target.name
-            for node, _depth in iter_ast_nodes(ast)
-            if isinstance(node, Assignment) and isinstance(node.target, Identifier)
-        }
+        # Build name-dependent inventories after lexical locals are separated.
+        self._condition_reassigned_names: set[str] = set()
         # The functions that may be emitted once per call site for their
         # session.<flag>[k] reads; None: every one that reads a flag at an
         # offset (pineforge_codegen._generate passes none first, then each
@@ -176,7 +170,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._session_clones = session_clones
         self._session_uncloned: frozenset[str] = frozenset()
         self._budget_visit_count = 0
-        self._method_signatures = inventory_method_signatures(ast)
+        self._method_signatures = {}
         self._method_call_bindings: dict[
             tuple[int, str], BoundMethodArgs
         ] = {}
@@ -622,6 +616,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
     def analyze(self) -> AnalyzerContext:
         """Run semantic analysis and return the analyzer context."""
+        from .callable_history_names import restore_callable_diagnostics
+
+        try:
+            context = self._analyze()
+        except CompileError as error:
+            if restore_callable_diagnostics(self._ast, error.diagnostics):
+                error.args = CompileError(error.diagnostics).args
+            raise
+        restore_callable_diagnostics(self._ast, context.diagnostics)
+        return context
+
+    def _analyze(self) -> AnalyzerContext:
         self._ensure_pine_v6()
         validate_call_argument_order(self._ast, filename=self._filename)
         from ..builtin_keywords import bind_builtin_keywords
@@ -641,6 +647,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         from .value_bindings import ValueBindings
         self._value_bindings = ValueBindings(self._ast, self._filename, self._budget)
         self._value_bindings.resolve()
+        from .callable_history_names import separate_builtin_callable_locals
+        separate_builtin_callable_locals(self._ast, self._value_bindings)
+        # A later reassignment prevents an initializer from proving a
+        # condition's type. Use the same spellings as the main visit.
+        self._condition_reassigned_names = {
+            node.target.name
+            for node, _depth in iter_ast_nodes(self._ast)
+            if isinstance(node, Assignment) and isinstance(node.target, Identifier)
+        }
+        self._method_signatures = inventory_method_signatures(self._ast)
         from .qualifiers import ParameterQualifiers
         self._parameter_qualifiers = ParameterQualifiers(
             self._ast, self._value_bindings.declaration_bindings,
@@ -4952,17 +4968,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 if udt_ctor is not None and type_spec is None:
                     type_spec = TypeSpec.udt(udt_ctor)
 
+        authored_name = (node.annotations or {}).get(
+            "authored_local_names", {}
+        ).get(node.name, node.name)
         if (
             self._pine_version == 6
             and not self._in_v5_library_definition(node)
-            and node.name in _BUILTIN_NAMESPACE_NAMES
+            and authored_name in _BUILTIN_NAMESPACE_NAMES
             and (
                 udt_ctor is not None
                 or (type_spec is not None and type_spec.kind == "udt")
             )
         ):
             self._error(
-                f"Invalid object name: {node.name}. "
+                f"Invalid object name: {authored_name}. "
                 "Namespaces of built-ins cannot be used.",
                 node.loc,
             )

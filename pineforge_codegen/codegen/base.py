@@ -3876,18 +3876,23 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                          hint: str | None = None) -> None:
         """Record a warning on ``ctx.diagnostics``, the list ``transpile_full``
         returns beside the C++ (after the support checker's)."""
+        from ..analyzer.callable_history_names import authored_callable_text
+
         loc = node.loc if node is not None else None
         if loc is None:
             loc = SourceLocation(file=self.ctx.filename, line=1, col=1, end_col=1)
         self.ctx.diagnostics.append(Diagnostic(
             level=Level.WARNING, phase=Phase.CODEGEN, location=loc,
-            message=message, hint=hint))
+            message=authored_callable_text(self.ctx.ast, message),
+            hint=authored_callable_text(self.ctx.ast, hint)))
 
     def _codegen_error(self, node: ASTNode | None, message: str, hint: str | None = None) -> None:
         raise CompileError([self._codegen_error_diagnostic(node, message, hint)])
 
     def _codegen_error_diagnostic(self, node: ASTNode | None, message: str,
                                   hint: str | None = None) -> Diagnostic:
+        from ..analyzer.callable_history_names import authored_callable_text
+
         loc = node.loc if node is not None else None
         if loc is None:
             loc = SourceLocation(file=self.ctx.filename, line=1, col=1, end_col=1)
@@ -3895,8 +3900,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             level=Level.ERROR,
             phase=Phase.CODEGEN,
             location=loc,
-            message=message,
-            hint=hint,
+            message=authored_callable_text(self.ctx.ast, message),
+            hint=authored_callable_text(self.ctx.ast, hint),
         )
 
     def _ta_return_type(self, site: TACallSite) -> str:

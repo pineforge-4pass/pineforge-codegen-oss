@@ -444,3 +444,71 @@ def test_requested_numeric_tuple_matches_renamed_control(name):
         transpile(_variant_source(name, "tuple", string=False))
     )
     assert _normalize_local(cpp, name, control) == control
+
+
+def _extended_callable_local_source(name, shape):
+    if shape == "method":
+        return _program(
+            f"method read_local(float receiver) =>\n"
+            f"    {name} = receiver * 2.0\n"
+            f"    nz({name}[1]) + {name}\n",
+            "v = close\nplot(v.read_local())\n",
+        )
+    if shape == "varip":
+        body = (
+            f"    varip float {name} = 0.0\n"
+            f"    {name} := close\n    nz({name}[1]) + {name}\n"
+        )
+    else:
+        binder, value = {
+            "for-in": (name, name),
+            "for-in-index": (f"[{name}, item]", f"{name} + item"),
+            "for-in-value": (f"[position, {name}]", f"position + {name}"),
+        }[shape]
+        body = (
+            "    r = 0.0\n"
+            f"    for {binder} in array.from(1.5, 2.5)\n"
+            f"        r += {value}\n    r\n"
+        )
+    return _program("h() =>\n" + body, "plot(h())\n")
+
+
+@pytest.mark.parametrize("name", _LOCAL_NAMES)
+@pytest.mark.parametrize(
+    "shape", ["method", "varip", "for-in", "for-in-index", "for-in-value"],
+)
+def test_method_persistent_and_iteration_locals_match_renamed_control(name, shape):
+    control = _mask_manifest_notes(
+        transpile(_extended_callable_local_source("aa", shape))
+    )
+    cpp = _mask_manifest_notes(
+        transpile(_extended_callable_local_source(name, shape))
+    )
+    assert _normalize_local(cpp, name, control) == control
+
+
+@pytest.mark.parametrize("name", _LOCAL_NAMES)
+def test_typed_local_refusal_retains_authored_name(name):
+    def source(local):
+        return _program(
+            f"h() =>\n    int {local} = 1.5\n    {local}\n",
+            "plot(h())\n",
+        )
+
+    with pytest.raises(CompileError) as control:
+        transpile(source("aa"))
+    with pytest.raises(CompileError) as subject:
+        transpile(source(name))
+    message = str(subject.value)
+    assert f"'{name}'" in message
+    assert "__pfhist" not in message
+    assert message.replace(f"'{name}'", "'aa'") == str(control.value)
+
+
+@pytest.mark.parametrize("name", _LOCAL_NAMES)
+def test_untitled_persistent_local_input_keeps_authored_key(name):
+    cpp = transpile(_program(
+        f"h() =>\n    var float {name} = input.float(1.5)\n    {name}\n",
+        "plot(h())\n",
+    ))
+    assert re.search(rf'get_input_float\("{re.escape(name)}",', cpp), cpp
