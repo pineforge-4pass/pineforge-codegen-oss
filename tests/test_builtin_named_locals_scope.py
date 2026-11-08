@@ -153,7 +153,7 @@ def _variant_source(name, variant, *, string):
 def _mask_manifest_notes(cpp):
     string = r'\\"(?:\\\\(?:\\.|[^\\])|[^"\\])*\\"'
     return re.sub(
-        rf'(\\"solved\\":\[)(?:\s*{string}(?:\s*,\s*{string})*)?\s*(\])',
+        rf'(\\"unresolved\\":\[)(?:\s*{string}(?:\s*,\s*{string})*)?\s*(\])',
         r"\1\2",
         cpp,
     )
@@ -307,28 +307,28 @@ def test_normalizer_retains_differences_beyond_local_spelling(cpp, control):
     pytest.param(r'\"one\",\"two\"', id="multiple-notes"),
     pytest.param(r'\"note ] with \\\"quotes\\\" and \\\\ path\"', id="escaped-note"),
 ])
-def test_manifest_note_mask_changes_only_solved_payload(payload):
-    prefix = r'const char* manifest = "{\"before\":\"keep\",\"solved\":['
+def test_manifest_note_mask_changes_only_unresolved_payload(payload):
+    prefix = r'const char* manifest = "{\"before\":\"keep\",\"unresolved\":['
     suffix = r'],\"after\":[\"keep\"]}";'
     cpp = prefix + payload + suffix
     assert _mask_manifest_notes(cpp) == prefix + suffix
 
 
-def test_manifest_note_mask_preserves_text_without_solved_list():
+def test_manifest_note_mask_preserves_text_without_unresolved_list():
     cpp = 'Series<double> aa;\n' + r'const char* manifest = "{\"other\":[\"keep\"]}";'
     assert _mask_manifest_notes(cpp) == cpp
 
 
 def test_manifest_note_mask_is_idempotent():
-    cpp = r'const char* manifest = "{\"solved\":[\"note\"],\"other\":\"keep\"}";'
+    cpp = r'const char* manifest = "{\"unresolved\":[\"note\"],\"other\":\"keep\"}";'
     once = _mask_manifest_notes(cpp)
     assert _mask_manifest_notes(once) == once
 
 
 def test_manifest_note_mask_retains_series_type_difference():
-    subject = 'Series<int> aa;\n' + r'const char* manifest = "{\"solved\":[\"note\"]}";'
-    control = 'Series<std::string> aa;\n' + r'const char* manifest = "{\"solved\":[]}";'
-    empty = r'const char* manifest = "{\"solved\":[]}";'
+    subject = 'Series<int> aa;\n' + r'const char* manifest = "{\"unresolved\":[\"note\"]}";'
+    control = 'Series<std::string> aa;\n' + r'const char* manifest = "{\"unresolved\":[]}";'
+    empty = r'const char* manifest = "{\"unresolved\":[]}";'
     subject = _mask_manifest_notes(subject)
     control = _mask_manifest_notes(control)
     assert subject == 'Series<int> aa;\n' + empty
