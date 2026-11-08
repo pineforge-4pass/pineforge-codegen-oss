@@ -1662,7 +1662,7 @@ class SupportChecker:
         full = f"{ns}.{name}" if ns else name
         keyword_diagnostics = intrinsic_keyword_diagnostics(
             sigs.get_intrinsic(ns, name), node.kwargs,
-            filename=self._filename,
+            filename=self._filename, pine_version=self._ast.version,
         )
         self._diagnostics.extend(keyword_diagnostics)
         if keyword_diagnostics:

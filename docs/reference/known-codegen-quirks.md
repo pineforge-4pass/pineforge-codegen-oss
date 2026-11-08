@@ -396,7 +396,11 @@ you delete or weaken the special case, the test will tell you.
     (`str.format_time`, `timestamp`, `time`, `time_close`): a keyword that
     skips a parameter keeps the later arguments in their own slots, a skipped
     parameter takes its declared default, and a keyword the call does not have
-    is refused with `PF-E2027` (`PF-E5090` for math)
+    is refused with `PF-E2027` (`PF-E5090` for math). In Pine v6,
+    `when` on the seven strategy order functions instead reports `PF-E2081`
+    and explains that v6 removed the argument: wrap the call in an `if`
+    statement (`tests/test_public_issue_286.py`); the rule for every other
+    name is covered by
     (`tests/test_e2e_keyword_arguments.py`,
     `tests/test_e2e_keyword_arguments_construct.py`,
     `tests/test_e2e_keyword_hole_binding.py`).

@@ -27,6 +27,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   zone (`syminfo.timezone`) for the timezone. Pass `"yyyy-MM-dd"` and `"UTC"`
   explicitly to restore the previous output. Regenerate C++ and relink
   affected strategies.
+- A `when` argument on a strategy order call in Pine v6 now reports `PF-E2081`,
+  explaining that v6 removed the argument and recommending an `if` statement
+  around the call. Other unknown keywords keep `PF-E2027`.
 - History retention can be selected with keyword-only `history_capacity`
   in `transpile()`, `transpile_full()`, `transpile_with_request_inventory()`
   and `gate/glue.py::transpile_json()`. The JavaScript worker template does
@@ -93,8 +96,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - Direct `size`, `first`, `last` and `get` reads of `line.all`, `box.all`, `label.all` and `linefill.all` use live arena order; aliases and mutations raise `PF-E5086`, and `polyline.all` requires engine support (`PF-E5085`) (#295).
 - C++ name escaping covers the macros defined by the audited math, limits, C++ wrapper and paired engine headers, retaining authored input keys (#295).
 - A keyword argument of a built-in call reaches its own parameter. `timeframe.in_seconds(timeframe = ...)` and `timeframe.change(timeframe = ...)` used the chart's timeframe instead of the named one, `strategy.closedtrades.*(trade_num = ...)` and `strategy.opentrades.*(trade_num = ...)` read trade 0 instead of the named trade, `str.format_time(time, timezone = ...)` read the timezone as the format, `timestamp(timezone = ..., year = ..., ...)` dropped the timezone and a skipped `hour` moved `minute` into its slot, `matrix.new<float>(rows = 2, columns = 3)` built a matrix with no rows and no columns, `time("60", timezone = ...)` and `time_close` read the timezone as the session, and `math.random(seed = 3)` read the seed as the minimum; none of them raised a diagnostic. A keyword none of these calls declares is now refused with the unknown-keyword diagnostic, as TradingView refuses it. Regenerate C++ and relink strategies.
-- Strategy order calls report unknown keyword arguments, including `when`,
-  at the keyword with `PF-E2027` (#286;
+- Strategy order calls report unknown keyword arguments at the keyword
+  (#286;
   [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
 - Strategy orders with omitted `qty` use the default size; integer `switch` and
   `if` results with an explicit `na` arm preserve NaN, and

@@ -9,11 +9,18 @@ from .pine_spelling import expr_start
 from .signatures import IntrinsicFunc, Param
 
 
+_STRATEGY_ORDER_FUNCTIONS = frozenset({
+    "strategy.entry", "strategy.order", "strategy.exit", "strategy.close",
+    "strategy.close_all", "strategy.cancel", "strategy.cancel_all",
+})
+
+
 def intrinsic_keyword_diagnostics(
     intrinsic: IntrinsicFunc | None,
     kwargs: dict[str, ASTNode],
     *,
     filename: str | None = None,
+    pine_version: int | None = None,
 ) -> list[Diagnostic]:
     """Check record-driven keyword prohibitions and verified keyword names.
 
@@ -21,6 +28,7 @@ def intrinsic_keyword_diagnostics(
     This checks names, leaving argument order and other binding policies to
     their existing validators. A caller's filename fills the parser's default
     source label without replacing a location from an explicitly named source.
+    Version-specific migration wording requires an explicit source version.
     """
     if intrinsic is None or not kwargs:
         return []
@@ -74,6 +82,11 @@ def intrinsic_keyword_diagnostics(
                 "PF-E5090", {"function": intrinsic.name, "name": name,
                              "accepted": ", ".join(names)},
             )
+        elif (pine_version == 6 and name == "when"
+              and intrinsic.name in _STRATEGY_ORDER_FUNCTIONS):
+            message, hint = render_diagnostic(
+                "PF-E2081", {"key": intrinsic.name, "name": name},
+            )
         else:
             message, hint = render_diagnostic(
                 "PF-E2027", {"key": intrinsic.name, "name": name},
@@ -90,9 +103,12 @@ def validate_intrinsic_keywords(
     kwargs: dict[str, ASTNode],
     *,
     filename: str | None = None,
+    pine_version: int | None = None,
 ) -> None:
     """Validate the record's keyword policy for direct codegen clients."""
-    diagnostics = intrinsic_keyword_diagnostics(intrinsic, kwargs, filename=filename)
+    diagnostics = intrinsic_keyword_diagnostics(
+        intrinsic, kwargs, filename=filename, pine_version=pine_version,
+    )
     if diagnostics:
         raise CompileError(diagnostics)
 

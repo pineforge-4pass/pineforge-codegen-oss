@@ -4406,6 +4406,7 @@ class CallVisitor:
             sigs.get_intrinsic(parts[0], parts[1]) if len(parts) == 2
             else sigs.get_intrinsic(None, sig_key),
             node.kwargs,
+            pine_version=self.ctx.ast.version,
         )
         if len(parts) == 2:
             param_names = sigs.get_param_names(parts[0], parts[1]) or []

@@ -25,6 +25,16 @@ EMA_SEED_TEXT_DELTA = DELTA["text_changes"]["PF-W1505"]
 BEFORE = json.loads((FIXTURES / "catalog.before.json").read_text())["codes"]
 PRODUCT_BEFORE = json.loads((FIXTURES / "product.before.json").read_text())
 CATALOG_ENTRY_ADDITIONS = {
+    # Pine v6's order-condition migration has its own stable identity.
+    "PF-E2081": {
+        "severity": "error",
+        "area": "analysis",
+        "message": "{key}: the ''{name}'' argument was removed in Pine v6; place the order conditionally with an if statement around the call",
+        "hint": 'if close > open\n    strategy.entry("L", strategy.long)',
+        "explanation": "Pine v6 removed the when argument from strategy order functions. Put the condition in an if statement around the call instead.",
+        "args": {"key": {"kind": "identifier"}, "name": {"kind": "identifier"}},
+        "user_message": "Pine v6 removed ''{name}'' from {key}; wrap the call in an if statement.",
+    },
     "PF-E5084": {
         "severity": "error",
         "area": "codegen",
