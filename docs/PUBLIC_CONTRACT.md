@@ -476,12 +476,106 @@ are for advanced inspection and are not part of this 1.0 stability promise.
 ```python
 transpile(pine_source: str, *, check_support: bool = True,
           filename: str = "<input>",
-          libraries: Mapping[str, str] | None = None) -> str
+          libraries: Mapping[str, str] | None = None,
+          history_capacity: int | None = None,
+          drawing_capacity: int | None = None) -> str
 
 transpile_full(pine_source: str, *, check_support: bool = True,
                filename: str = "<input>",
-               libraries: Mapping[str, str] | None = None) -> dict
+               libraries: Mapping[str, str] | None = None,
+               history_capacity: int | None = None,
+               drawing_capacity: int | None = None) -> dict
 ```
+
+The same keyword-only capacity options are accepted by
+`transpile_with_request_inventory()` and root `gate/glue.py`.
+The JavaScript worker template in `scripts/worker-template.mjs` passes only
+the source and does not forward either option.
+`history_capacity` is an exact integer of at least 2 or `None`;
+`drawing_capacity` is an exact integer of at least 1 or `None`.
+Booleans, floating values, strings and smaller integers raise `PF-E5094`
+with `option` and `minimum` arguments.
+
+History retention depends on the source and these parameters, never the
+number of bars or trades. With `history_capacity=None`, existing Pine
+`max_bars_back` directives and literal-sized stores keep their capacities.
+Without a directive, a bare history with a statically proven offset exceeding
+its former 500-slot capacity retains offset plus one slots, within the existing
+evaluated-offset range. A nonconstant offset without a directive selects
+`DEFAULT_DYNAMIC_HISTORY_CAPACITY`, defined once in `codegen/capacities.py`,
+whose value is **5000**, this package's default retention for a script that
+reads history at an offset it does not state as a constant.
+This is a retention default, not a new refusal threshold: at default settings,
+reads beyond the retained capacity preserve their existing missing-value
+behavior, including scalar `na`. The inferred sizes apply to bare series and to
+requested-helper map entries. Collection snapshots and lazy held-source
+histories keep the size they had before: a collection snapshot its largest
+literal offset plus one (at least 2) or, for a nonconstant offset, the depth of
+a `max_bars_back` directive or the engine's 500-slot default; a lazy held-source
+history its literal length plus one or, for a runtime length, the 500-slot
+default. A lazily evaluated call with a literal length, such as the
+`ta.roc(close, 200)` of `close > open and ta.roc(close, 200) > 0`, keeps the
+201-slot store its own length requires: `history_capacity` neither shrinks nor
+refuses it.
+
+A collection-snapshot read at a nonconstant offset also counts as a
+nonconstant offset for this inference, although snapshots have their own
+rings: without a Pine directive, bare series then retain 5000 slots instead
+of 500, increasing their retained sample storage tenfold. A constant
+collection-snapshot read does not raise bare-series retention.
+
+An explicit `history_capacity=N` replaces fallback retention in bare series,
+collection snapshots and numeric/string requested-helper histories. Existing
+Pine directives and literal-sized stores are never reduced by a smaller
+fallback. With no larger Pine directive, every collection-snapshot ring has
+N slots under the option even when its reads use small literal offsets.
+A statically proven offset at or above N raises `PF-E5095` with
+`offset` and `capacity` arguments. A nonconstant offset is evaluated once,
+checked by the existing 0..10000 guard before narrowing, then compared with N
+before the history read. An offset at or above N stops the run with the
+existing engine code `pine_runtime_limit` and typed arguments
+`{"limit":"max_bars_back","max":N}`. Its English text reports the evaluated
+offset and selected capacity; the code and arguments identify the failure.
+The stop's `max` is the operator's slot count N, so a read at offset k fits
+when k < N, and its text has no `Error on bar` prefix.
+The same rule covers collection snapshots, requested histories, numeric/string
+helper-map reads and the `length-1` address of runtime held-source histories.
+An in-capacity read during warmup retains its existing missing-value behavior.
+Generated code uses the existing `_PF_LIMIT_STOP` compatibility shim; older
+engines without coded failures retain its `std::length_error` fallback.
+An integer outside the native Series constructor's signed-int domain raises
+`PF-E5097` with a `capacity` argument instead of emitting a narrowing conversion.
+There is no additional upper bound on `history_capacity` within that native
+integer range; memory grows with N times the number of retained series.
+
+When a Pine `max_bars_back=D` directive exceeds the operator's N, stores keep
+D slots, but both offset checks still use N alone: a constant offset at or
+above N raises `PF-E5095`, and a nonconstant offset at or above N stops at
+runtime with `max=N`, even if it is smaller than D.
+
+Capacity inference scans the whole script, including functions that are never
+called, so a subscript in an uncalled function can raise inferred retention
+or, with an option, cause the constant-offset refusal.
+
+Pine's `max_lines_count`, `max_boxes_count` and `max_labels_count` remain
+collection targets, defaulting to 50. Their existing collection timing and
+held-handle rules are unchanged. `drawing_capacity` denotes an operator bound
+on live drawings per collected type, after that collection, including the new
+drawing. When a line, box or label creation or copy leaves its kind's live count
+greater than N, the run stops with `pine_runtime_limit` and typed arguments
+`{"limit":"live_drawings","max":N}`. Each kind has its own count; linefills
+are outside the bound. Reaching a Pine declaration's count remains ordinary
+TradingView collection, not an error. Pinned drawings retain their existing
+protection and still contribute to the live count.
+
+Typed drawing overflow requires the paired engine release whose runtime-limit
+catalog includes `live_drawings`; on an older engine the drawing overflow is
+not typed as this limit. `None` preserves existing arenas and collection.
+An integer outside the helper's signed int64 maximum argument domain raises
+`PF-E5098` with a `capacity` argument before C++ is emitted. Those arenas
+currently use the signed 32-bit ID-domain maximum as their legacy storage
+argument; this is not a true unlimited arena policy. Replacing it requires
+an explicit engine policy, including physical reclamation of deleted records.
 
 `transpile()` returns one complete C++ source string. It raises
 `pineforge_codegen.errors.CompileError` for a located parse, support, analysis,
@@ -657,7 +751,9 @@ An explicit title that is not a compile-time string constant raises
 
 ## Pyodide and gate/glue JSON
 
-`gate/glue.py` defines `transpile_json(source: str) -> str`. It returns a
+`gate/glue.py` defines
+`transpile_json(source: str, *, history_capacity: int | None = None, drawing_capacity: int | None = None) -> str`.
+It returns a
 serialized JSON **string**. The shipped Pyodide worker runs that glue. Its
 success and compile-error envelopes are:
 
@@ -735,7 +831,8 @@ Every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
   declares each code's severity and the diagnostic carries it; read it, never
   infer it from the `E` / `W` prefix or from the words of a message ("visual
   only", "display"). A note is a classification, not a statement that results
-  are unaffected: PF-W1505, a note, still describes a warmup approximation.
+  are unaffected: PF-W1505, a note, describes EMA seeding that can differ from
+  TradingView at the start of a run.
 - `args`: an object of named values, raw: identifiers, types, keywords and
   Pine spellings as strings, counts as JSON numbers; never quoting, backticks
   or a formatted number.
@@ -780,11 +877,14 @@ specify this compatibility rule; they are not evidence of an app deployment.
 Since 1.5.0 the reviewed warning-to-note migration is exactly PF-W1505,
 PF-W1508, PF-W1509, PF-W1525, PF-W1526, PF-W1527, PF-W1528, PF-W1529,
 PF-W1530, PF-W1531 and PF-W1532, each a warning in 1.4.0. All other
-severities, all stable codes and every existing message, hint, explanation and
-argument definition are unchanged, and no existing key of a `Diagnostic`, a
-JSON diagnostic, the catalog or the envelopes is renamed or removed: `severity`
-gains the value `note` and `user_message` is added, while `code`, `args`,
-`message`, `hint`, `line`, `col` and `endCol` keep their values.
+severities and all stable codes are unchanged. At that migration, every existing
+message, hint, explanation and argument definition was unchanged, and no
+existing key of a `Diagnostic`, a JSON diagnostic, the catalog or the envelopes
+was renamed or removed: `severity` gained the value `note` and `user_message`
+was added, while `code`, `args`,
+`message`, `hint`, `line`, `col` and `endCol` kept their values. PF-W1505's
+message, hint and explanation describe both EMA seeding modes and the
+`series_origin_ms` run option (a text change only).
 The prior catalog and pin remain explicit legacy fixtures beside the exact
 delta in `tests/fixtures/diagnostic_notes/`. PF-W1509 remains a legacy
 template alias: the existing text classifier selects PF-W1508 when those
@@ -796,7 +896,7 @@ PF-W1509 describe a call PineForge skips as visual only (`plot(...)`,
 `table.new(...)`). PF-W1525 to PF-W1532 describe an earnings, dividends,
 splits, financial, footprint or other-symbol request whose value reaches only
 display and alert sinks and is lowered to `na`. PF-W1505 describes the
-`ta.ema` warmup approximation, a note by the explicit acceptance of the
+`ta.ema` seeding caveat, a note by the explicit acceptance of the
 initialization-note foundation. Five diagnostics that also speak of
 visual-only or display-only handling remain warnings: PF-W1502 (a `color(...)`
 cast), PF-W1506 (`color.from_gradient`), PF-W1507 (a drawing setter that drops
@@ -809,16 +909,49 @@ invalid arguments stay warnings or errors.
 
 PF-W1505 is a static note: the support checker emits it at each `ta.ema` call
 it visits, with no condition on the run, an input or the timeframe, and nothing
-in this revision suppresses or qualifies it per call. It still carries its
-original compile-time EMA caveat. This foundation does not establish startup
-adequacy or change seeding. The selected-window consumer may show its startup
-sentence only for a known finite shortfall in bars of that site's
-evaluation-context timeframe; absence is not parity. No sidecar exists yet, at
+in this revision suppresses or qualifies it per call. Its text describes
+both run modes; changing this text does not change generated C++ or seeding.
+
+By default, `ta.ema` seeds from the first value of the data PineForge runs and
+is finite from bar 0. The same holds for `ta.macd` and `ta.tsi`, which embed
+EMA. This seed matches TradingView when its chart had history before
+your range, as a normal chart does: the seed difference has decayed by then.
+When the TradingView reference run starts where your range starts, TradingView
+instead returns `na` for the first `length-1` bars, seeds from the SMA of the
+first `length` bars at bar `length-1`, and then applies the EMA recursion.
+`ta.kc` and `ta.kcw` already start that way in every run: the generated code
+applies the warm-up to their EMA basis, so their middle band is `na` until the
+Pine length is warm, including bar 0 (`tests/test_kc_middle_band.py` pins this
+against a standalone `ta.ema`).
+
+An engine that has the run option `series_origin_ms` takes it through the run's
+`syminfo`: epoch milliseconds of the open time of the first bar of the series the
+TradingView reference ran on; an engine without it ignores the key. When that
+origin is your range start, declaring it gives `ta.ema`, `ta.macd` and `ta.tsi`
+the same `na` interval, SMA seed and subsequent recursion. It also starts
+`request.security` series at the first whole
+higher-timeframe bucket at or after the origin; plain security expressions
+stay `na` until the first completed higher-timeframe bar. A wrong declared
+origin gives wrong values. The option has no defined meaning in a live run
+and must not be set there. `ta.rsi`, `ta.rma` and `ta.atr` already seed from
+the SMA; this note does not apply to them. No migration step is required;
+undeclared runs are unchanged.
+
+For a measured TradingView reference that starts at the range start, 37 of
+336 exit comments differ by default, including 5 finite values where
+TradingView is `na`; none differ with the origin declared. Across six corpus
+cases, default runs add, drop or shift 1 to 3 trades in the first days; all six
+are exact with the declared origin.
+
+This static note does not establish startup adequacy. The selected-window
+consumer may show its startup sentence only for a known finite shortfall in
+bars of that site's evaluation-context timeframe; absence is not parity.
+No sidecar exists yet, at
 compile time or at run time: this revision emits no `call_site_id` and no
 startup fact. The subsequent startup inventory and extraction must bind a
 versioned sidecar to Pine/generated identities, and share `call_site_id` and
 the exact source range with the diagnostic rather than joining by text; until
-that work lands, the static notes stay as they are. Input-bound lengths retain
+that work lands, the static notes remain unconditional. Input-bound lengths retain
 the input name or expression; runs/trials resolve submitted values and studies
 retain searched ranges. Recursive adequacy and seeding facts remain separate
 and may be unknown. The typed consumer fixtures (`warmup_consumer.py` and

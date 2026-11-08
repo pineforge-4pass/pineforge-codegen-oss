@@ -50,10 +50,9 @@ def test_input_int_ta_offset_uses_complete_htf_history_and_reset():
     assert "is_first_tick_" not in body
     assert "_hist_call" not in body
 
-    # B: direct dynamic-site registration owns declared storage and reset. The
-    # bare constructor intentionally retains the engine's finite default depth
-    # (500); a source max_bars_back directive is covered separately below.
-    assert "Series<double> _sec0__ta_ema_1_hist;" in cpp
+    # B: a dynamic offset with no directive selects the source-level default.
+    # A source max_bars_back directive is covered separately below.
+    assert "Series<double> _sec0__ta_ema_1_hist{5000};" in cpp
     assert "_sec0__ta_ema_1_hist.clear();" in cpp
 
 
@@ -144,7 +143,7 @@ plot(x)
 """
     cpp = transpile(src)
     body = _eval_body(cpp)
-    assert "Series<double> _sec0__ta_ema_1_hist;" in cpp
+    assert "Series<double> _sec0__ta_ema_1_hist{5000};" in cpp
     assert 'int _hidx = get_input_int("Offset", 2);' in body
     assert "_sec0__ta_ema_1_hist.push(_secval_0);" in body
     assert "_sec0__ta_ema_1_hist.clear();" in cpp
@@ -180,7 +179,7 @@ plot(x)
 """
     cpp = transpile(src)
     body = _eval_body(cpp)
-    assert "Series<double> _sec0__ta_ema_1_hist;" in cpp
+    assert "Series<double> _sec0__ta_ema_1_hist{5000};" in cpp
     assert "_sec0__ta_ema_1_hist[_hidx - 1]" in body
     assert "_sec0__ta_ema_1_hist.push(_secval_0);" in body
 

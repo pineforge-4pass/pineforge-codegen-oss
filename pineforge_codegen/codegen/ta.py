@@ -570,6 +570,32 @@ class TaSiteHelper:
         source = self._visit_expr(site.compute_args[0])
         length_node = self._lazy_source_clock_length_node(node)
         literal = self._lazy_source_clock_length_literal(length_node)
+        if literal is None and self._history_capacity is not None:
+            from .run_stops import checked_history_offset
+
+            length_raw = self._visit_expr(length_node)
+            length_expr = self._coerce_int_slot("_pf_raw", length_node, "int")
+            if (length_expr == "_pf_raw"
+                    and not self._emitted_value_is_double(length_node)):
+                length_expr = pine_index_int_cast("_pf_raw")
+            line = getattr(getattr(length_node, "loc", None), "line", 0) or 0
+            offset = checked_history_offset(
+                "_pf_raw - 1", line, self._history_capacity,
+            )
+            index = pine_index_int_cast("_pf_prior")
+            method = "roc" if self._ta_name_from_site(site) == "roc" else "change"
+            # Bind both arguments once. The held-source address is length-1,
+            # checked in its original width before the Series int conversion.
+            return (
+                f"([&]() -> double {{ auto _pf_series_raw = ({source}); "
+                f"auto _pf_raw = ({length_raw}); "
+                "double _pf_out = na<double>(); "
+                "if (!is_na(_pf_raw) && _pf_raw >= 1) { "
+                f"auto _pf_prior = {offset}; "
+                f"_pf_out = {info['hist']}[{index}]; }} "
+                f"return {info['clock']}.{method}(_pf_series_raw, "
+                f"{info['clock']}.previous_source(_pf_out, {length_expr})); }}())"
+            )
         if literal is not None:
             length_expr = str(literal)
             held = f"{info['hist']}[{literal - 1}]" if literal >= 1 else "na<double>()"

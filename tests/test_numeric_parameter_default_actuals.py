@@ -6,9 +6,9 @@ for positional and named calls. A formal-shadow case documents the current
 binding rule; nested and ternary defaults remain outside this module.
 
 Expected values come from independent source arithmetic and authored inputs,
-never from generated C++. Native cases use the paired engine when
-``PINEFORGE_REQUIRE_NATIVE=1``; without the paired inputs they skip with a
-reason so collection remains useful on an engine-free checkout.
+never from generated C++. Native cases run whenever the required paired
+native inputs are available. Missing inputs skip with a reason;
+``PINEFORGE_REQUIRE_NATIVE=1`` makes absent inputs fail rather than skip.
 
 The observer and runner source hashes in the emitted artifact metadata bind
 this module to the numeric inventory it shares. The run identity supplies the
@@ -33,7 +33,6 @@ from tests._numeric_support import _json, _sha
 
 
 _ROOT = Path(__file__).resolve().parents[1]
-_PARENT = "d9103e8cca57a3709ffb2e7c7c675dcb33ab2846"
 _REVIEW_SHA = "21f07db144e0065d1ff820da82cb36200319c8c995bc7c22928dee2c3d3812d5"
 _GRAPH_SHA = "8478ad47035c2c2113b27820c1300aa9bbb0da38e9a22d80794173d4ec8bcd6e"
 _REVIEW = """//@version=6
@@ -389,7 +388,7 @@ def test_default_result_native_after_real_strategy_run(tmp_path, case_id, opt):
         _json(directory / "expected.json", references[name])
         (directory / "source.pine").write_text(case.source, encoding="utf-8")
         _json(directory / "source_binding.json", {
-            "authoring_parent": _PARENT, "case_id": case_id,
+            "case_id": case_id,
             "review_record_sha256": _REVIEW_SHA, "source_graph_sha256": _GRAPH_SHA,
             "source_sha256": _sha(case.source.encode()),
             "reference_sha256": _sha((directory / "expected.json").read_bytes()),

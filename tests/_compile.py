@@ -28,6 +28,7 @@ Activation contract (env vars):
 
 If any of the above is missing, the calling test is skipped via
 ``pytest.skip(...)`` so CI without an engine checkout stays green.
+With ``PINEFORGE_REQUIRE_NATIVE=1``, a missing input fails instead.
 """
 
 from __future__ import annotations
@@ -193,21 +194,22 @@ def have_compile_env() -> bool:
 
 
 def skip_if_no_compile_env() -> None:
-    """Call from a test body to skip cleanly when env is missing.
+    """Skip missing native inputs, or fail when they are explicitly required.
 
     Centralises the skip message so each fail mode reads identically. The
     body checks each env piece individually so the user knows which knob to
     set, instead of a blanket "engine missing" message.
     """
+    unavailable = pytest.fail if os.environ.get("PINEFORGE_REQUIRE_NATIVE") == "1" else pytest.skip
     if _COMPILER is None:
-        pytest.skip("CXX compiler not found on PATH (try CXX=clang++).")
+        unavailable("CXX compiler not found on PATH (try CXX=clang++).")
     if _ENGINE_INC is None:
-        pytest.skip(
+        unavailable(
             "PINEFORGE_ENGINE_INCLUDE not set or invalid. "
             "Point it at pineforge-engine/include (containing pineforge/engine.hpp)."
         )
     if _EIGEN_INC is None:
-        pytest.skip(
+        unavailable(
             "Eigen3 headers not found. Set PINEFORGE_EIGEN_INCLUDE to the dir "
             "whose child is Eigen/ (or install eigen3 to a system path)."
         )
@@ -343,7 +345,8 @@ def have_engine_lib() -> bool:
 def skip_if_no_engine_lib() -> None:
     skip_if_no_compile_env()
     if _ENGINE_LIB is None:
-        pytest.skip(
+        unavailable = pytest.fail if os.environ.get("PINEFORGE_REQUIRE_NATIVE") == "1" else pytest.skip
+        unavailable(
             "No built libpineforge.a. Set PINEFORGE_ENGINE_LIB to the archive "
             "(or configure a build*/lib/ beside the engine checkout) to run the "
             "emitted translation unit."

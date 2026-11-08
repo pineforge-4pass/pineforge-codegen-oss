@@ -102,6 +102,26 @@ from .tables import (
 )
 
 
+_SECURITY_HELPER_SERIES_STORES = (
+    "_security_helper_series_", "_security_helper_series_str_",
+)
+_SECURITY_HELPER_SERIES_REF = '({store}.try_emplace("{key}", {capacity}).first->second)'
+# Derive the protected region from the emitted form, including the escaped
+# key literal. The following history subscript still contains Pine reads.
+_SECURITY_HELPER_SERIES_REGIONS = re.compile(
+    _SECURITY_CPP_LITERALS.pattern
+    + "|(?P<reference>"
+    + re.escape(_SECURITY_HELPER_SERIES_REF)
+    .replace(re.escape("{store}"), "(?:" + "|".join(
+        re.escape(store) for store in _SECURITY_HELPER_SERIES_STORES
+    ) + ")")
+    .replace(re.escape("{key}"), r'(?:\\.|[^"\\\n])*')
+    .replace(re.escape("{capacity}"), r"[0-9]+")
+    + ")",
+    re.S,
+)
+
+
 _SECURITY_CPP_SCOPES = re.compile(
     _SECURITY_CPP_LITERALS.pattern
     + r"|(?P<return_type>\)\s*->\s*[\w:\s<>,*&()]+(?=\{))"
@@ -2525,6 +2545,25 @@ class SecurityEmitter:
             last = match.end()
         parts.append((result[last:], False))
 
+        def protect_references() -> None:
+            regions: list[tuple[str, bool]] = []
+            for text, protected in parts:
+                if protected:
+                    regions.append((text, True))
+                    continue
+                last = 0
+                for match in _SECURITY_HELPER_SERIES_REGIONS.finditer(text):
+                    if match.group("reference") is None:
+                        continue
+                    regions.append((text[last:match.start()], False))
+                    regions.append((match.group(0), True))
+                    last = match.end()
+                regions.append((text[last:], False))
+            parts[:] = regions
+
+        # The expression visitor may have rendered storage before this pass.
+        protect_references()
+
         def sub(pattern: str, repl: str) -> None:
             for index, (text, protected) in enumerate(parts):
                 if protected:
@@ -2536,6 +2575,9 @@ class SecurityEmitter:
                     last = match.end()
                 out.append(re.sub(pattern, repl, text[last:]))
                 parts[index] = ("".join(out), protected)
+            # This substitution can introduce storage that later names must
+            # not reinterpret as Pine value reads.
+            protect_references()
 
         for name in sorted(security_mutable_names, key=len, reverse=True):
             info = self._global_mutable_infos.get(name)
@@ -3202,6 +3244,8 @@ class SecurityEmitter:
                     op="+",
                     right=local_index,
                 )
+            if self._history_capacity is not None:
+                combined_index.loc = source_node.index.loc or source_node.loc
             return Subscript(object=bound.object, index=combined_index)
         if (
             isinstance(bound, Identifier)
@@ -3539,6 +3583,7 @@ class SecurityEmitter:
                and (n.name in self._input_backed_vars
                     or n.name in self._global_mutable_infos) for n in index_nodes):
             offset = None
+        self._check_history_capacity_offset(offset, read.index)
         # Invalid literal offsets keep their existing refusal, including its
         # wording/code, rather than becoming a new support restriction.
         if (offset is not None and offset < 0) or (
@@ -3552,7 +3597,8 @@ class SecurityEmitter:
                 "a direct OHLC/time bar-series binding; derived helper-parameter "
                 "history requires a non-negative constant integer offset",
             )
-        capacity = max(offset + 1, self._max_bars_back_cap or 0)
+        capacity = max(offset + 1, self._max_bars_back_cap or 0,
+                       self._history_capacity or 0)
         # Series takes an int, then converts it to size_t. Never wrap/clamp.
         if not 1 <= capacity <= 2147483647:
             self._codegen_error(
@@ -5017,12 +5063,17 @@ class SecurityEmitter:
     def _security_helper_series_ref(self, series_name: str) -> str:
         """The map entry holding one helper series (string values in their
         own map, every other scalar in the historical double map)."""
-        store = (
-            "_security_helper_series_str_"
-            if series_name in self._security_string_series
-            else "_security_helper_series_"
-        )
-        return f'{store}["{self._cpp_string_escape(series_name)}"]'
+        store = _SECURITY_HELPER_SERIES_STORES[
+            series_name in self._security_string_series
+        ]
+        key = self._cpp_string_escape(series_name)
+        if (getattr(self, "_history_capacity", None) is not None
+                or getattr(self, "_inferred_history_capacity", None) is not None):
+            capacity = self._resolved_history_capacity()
+            return _SECURITY_HELPER_SERIES_REF.format(
+                store=store, key=key, capacity=capacity,
+            )
+        return f'{store}["{key}"]'
 
     def _security_helper_series_value(self, series_name: str, index_cpp: str) -> str:
         """A helper series read, restoring a color's ordinary integer type."""
@@ -9361,6 +9412,11 @@ class SecurityEmitter:
                 and self._security_is_bar_index(expr_node.object)
                 and sec_id in self._security_bar_index_secs):
             # ``bar_index[k]``: k requested bars back, na before the first.
+            if self._history_capacity is not None:
+                self._check_history_capacity_offset(
+                    self._resolve_security_index_literal(expr_node.index, helper_binding_stack),
+                    expr_node.index,
+                )
             member = self._security_bar_index_member(sec_id)
             offset = self._build_security_expr(
                 sec_id, expr_node.index, ta_range, ta_results, resolving,
@@ -9376,6 +9432,11 @@ class SecurityEmitter:
                     f"return na<double>(); return (double)({member} - _pf_bar_back); }}())")
 
         if isinstance(expr_node, Subscript):
+            if self._history_capacity is not None:
+                self._check_history_capacity_offset(
+                    self._resolve_security_index_literal(expr_node.index, helper_binding_stack),
+                    expr_node.index,
+                )
             if isinstance(expr_node.object, Identifier):
                 sample = self._security_sampled_argument(
                     expr_node.object.name, helper_binding_stack)
@@ -9477,6 +9538,7 @@ class SecurityEmitter:
                         helper_binding_stack,
                     )
                     if isinstance(composed, _SecurityArgumentHistoryRead):
+                        self._check_history_capacity_offset(composed.offset, expr_node.index)
                         return f"{composed.member}[{composed.offset}]"
                     # A direct field keeps the authored offset's check at
                     # its consuming initializer. Composed offsets were

@@ -21,6 +21,7 @@ CASES = json.loads((FIXTURES / "interfaces.json").read_text())["cases"]
 MATH_CASES = json.loads((FIXTURES / "interfaces.json").read_text())["math_keyword_cases"]
 DELTA = json.loads((FIXTURES / "delta.json").read_text())
 NOTE_CODES = set(DELTA["severity_changes"])
+EMA_SEED_TEXT_DELTA = DELTA["text_changes"]["PF-W1505"]
 BEFORE = json.loads((FIXTURES / "catalog.before.json").read_text())["codes"]
 PRODUCT_BEFORE = json.loads((FIXTURES / "product.before.json").read_text())
 CATALOG_ENTRY_ADDITIONS = {
@@ -84,8 +85,9 @@ CATALOG_ENTRY_ADDITIONS = {
 # (PF-E2083 to PF-E2086) and the strategy() declaration errors (PF-E5080 to
 # PF-E5082), the missing value lowering error (PF-E5083) and the requested
 # selection errors (PF-E3102 to PF-E3105 and PF-E3110), including an unmeasured empty
-# requested-timeframe arm, the two math keyword refusals (PF-E5089, PF-E5090)
-# and the max_bars_back refusal (PF-E5093).
+# requested-timeframe arm, the two math keyword refusals (PF-E5089, PF-E5090),
+# the max_bars_back refusal (PF-E5093) and the capacity option errors
+# (PF-E5094, PF-E5095, PF-E5097, PF-E5098).
 CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2040", "PF-E2041", "PF-E2042", "PF-E2043", "PF-E2044",
                      "PF-E2045", "PF-E2046", "PF-E2047", "PF-E2048", "PF-E2049",
@@ -105,6 +107,10 @@ CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E3102", "PF-E3103", "PF-E3104", "PF-E3105", "PF-E3110",
                      "PF-E3111",
                      "PF-E5093",  # max_bars_back(): num must resolve to a positive compile-time integer.
+                     "PF-E5094",  # A capacity option must be an integer of at least its minimum, or None.
+                     "PF-E5095",  # A constant history offset cannot fit history_capacity.
+                     "PF-E5097",  # history_capacity is outside the native Series constructor's range.
+                     "PF-E5098",  # drawing_capacity is outside the native int64 limit argument's range.
                      "PF-E5080", "PF-E5081", "PF-E5082", "PF-E5083", "PF-W1553"} | set(CATALOG_ENTRY_ADDITIONS)
 CATALOG_ADDITIONS.update(DELTA.get("added_codes", ()))
 CATALOG_ADDITIONS |= set(DELTA["catalog_additions"])
@@ -172,6 +178,10 @@ def _assert_catalog_delta(catalog):
                 assert old[field] == before, (code, field)
                 assert entry[field] == after, (code, field)
                 entry[field] = before
+        if code == "PF-W1505":
+            for field in ("message", "hint", "explanation"):
+                assert entry[field] == EMA_SEED_TEXT_DELTA[field], (code, field)
+                entry[field] = old[field]
         assert entry == old, code
     assert changed == NOTE_CODES
 
@@ -187,6 +197,7 @@ def test_exact_catalog_delta_and_legacy_pin():
     assert set(LOOKAHEAD_MIGRATION) == {"PF-E1085", "PF-W1085"}
     assert {code for code in legacy if legacy[code] != current[code]} == (
         NOTE_CODES | set(LOOKAHEAD_MIGRATION))
+    # Historical pins describe the snapshot, including PF-W1505's old text.
     for code, entry in BEFORE.items():
         meaning = json.dumps([entry["severity"], entry["message"], entry.get("hint"),
                               sorted(entry["args"])], ensure_ascii=False)
@@ -216,6 +227,12 @@ def test_catalog_legacy_bytes_only_have_the_declared_delta():
                     new_field = json.dumps(name) + ": " + json.dumps(after, ensure_ascii=False)
                     assert line.count(new_field) == 1, (code, name)
                     line = line.replace(new_field, old_field, 1)
+            if code == "PF-W1505":
+                for name in ("message", "hint", "explanation"):
+                    field = f'"{name}": ' + json.dumps(EMA_SEED_TEXT_DELTA[name], ensure_ascii=False)
+                    old_field = f'"{name}": ' + json.dumps(BEFORE[code][name], ensure_ascii=False)
+                    assert line.count(field) == 1
+                    line = line.replace(field, old_field, 1)
         restored.append(line)
     assert "".join(restored).encode() == (FIXTURES / "catalog.before.json").read_bytes()
 
@@ -252,6 +269,15 @@ def test_lookahead_migration_rejects_undeclared_changes(code, field):
 def test_math_catalog_delta_rejects_malformed_candidate(code, mutation):
     bad = copy.deepcopy(diagnostics_catalog()["codes"])
     bad[code][mutation] = ({"invented": {"kind": "text"}} if mutation == "args" else "changed")
+    with pytest.raises(AssertionError):
+        _assert_catalog_delta(bad)
+
+
+@pytest.mark.parametrize("field", ["message", "hint", "explanation"])
+def test_catalog_delta_rejects_undeclared_ema_text(field):
+    bad = copy.deepcopy(diagnostics_catalog()["codes"])
+    _assert_catalog_delta(bad)
+    bad["PF-W1505"][field] = "An undeclared EMA text change."
     with pytest.raises(AssertionError):
         _assert_catalog_delta(bad)
 
@@ -380,6 +406,13 @@ def test_math_keyword_interfaces_keep_exact_diagnostics(case):
     }
 
 
+def _restore_ema_seed_text(text):
+    """Undo only the declared message/hint literals on the live product side."""
+    for field in ("message", "hint"):
+        text = text.replace(EMA_SEED_TEXT_DELTA[field], BEFORE["PF-W1505"][field])
+    return text
+
+
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])
 def test_real_interfaces_keep_notes_and_short_sentences(case):
     source = case["source"]
@@ -414,10 +447,19 @@ def test_real_interfaces_keep_notes_and_short_sentences(case):
         row.pop("user_message")
         level = "warning" if d.code in NOTE_CODES else d.level.value
         row["severity"] = level
+        message, hint = d.message, d.hint
+        if d.code == "PF-W1505":
+            assert message == EMA_SEED_TEXT_DELTA["message"]
+            assert hint == EMA_SEED_TEXT_DELTA["hint"]
+            message = _restore_ema_seed_text(message)
+            hint = _restore_ema_seed_text(hint)
+            row["message"] = _restore_ema_seed_text(row["message"])
         python_rows.append({"severity": level, "phase": d.phase.value,
                             "location": asdict(d.location) if d.location else None,
-                            "message": d.message, "hint": d.hint, "code": d.code, "args": d.args})
+                            "message": message, "hint": hint, "code": d.code, "args": d.args})
     assert python_rows == baseline["python"]
+    if "error" in normalized:
+        normalized["error"] = _restore_ema_seed_text(normalized["error"])
     expected_wire = json.loads(PRODUCT_BEFORE["wire"][case["name"]])
     if "cpp" in normalized and "cpp" in expected_wire:
         normalized["cpp"] = without_trade_history_policy(normalized["cpp"])
@@ -425,9 +467,9 @@ def test_real_interfaces_keep_notes_and_short_sentences(case):
     assert json.dumps(normalized) == json.dumps(expected_wire)
     if failure:
         text = PRODUCT_BEFORE["text"][case["name"]]
-        assert str(failure) == text["error"]
+        assert _restore_ema_seed_text(str(failure)) == text["error"]
         legacy_levels = [replace(d, level=Level.WARNING) if d.code in NOTE_CODES else d for d in diagnostics]
-        assert CompileError(legacy_levels).format(source) == text["format"]
+        assert _restore_ema_seed_text(CompileError(legacy_levels).format(source)) == text["format"]
         if any(d.level == Level.NOTE for d in diagnostics):
             assert "note[ANALYZER]:" in failure.format(source)
 
