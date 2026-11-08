@@ -829,3 +829,126 @@ def test_callable_local_census_matches_independent_builtin_inventories():
     from pineforge_codegen.analyzer.callable_history_names import _builtin_callable_local_names
 
     assert _builtin_callable_local_names() == set(_LOCAL_NAMES)
+
+
+def test_authored_callable_text_preserves_exact_bindings_and_clone_suffixes():
+    from types import SimpleNamespace
+
+    from pineforge_codegen.analyzer.callable_history_names import authored_callable_text
+
+    program = SimpleNamespace(annotations={
+        "authored_local_names": {
+            "second__pfhist1": "second", "minute__pfhist2": "minute",
+        },
+    })
+    assert authored_callable_text(program, "'second__pfhist1' and minute__pfhist2") == (
+        "'second' and minute"
+    )
+    assert authored_callable_text(program, "second__pfhist1_cs3") == "second_cs3"
+    assert authored_callable_text(program, "second__pfhist1__ni2") == "second__ni2"
+    for spelling in (
+        "second__pfhist10", "second__pfhist3", "second", "minute__pfhist7_cs1",
+    ):
+        assert authored_callable_text(program, spelling) == spelling
+    assert authored_callable_text(program, None) is None
+    text = "'second__pfhist1' and minute__pfhist2_cs1"
+    for annotations in ({}, None):
+        assert authored_callable_text(SimpleNamespace(annotations=annotations), text) == text
+
+
+def _callable_local_diagnostic_cases():
+    from functools import partial
+
+    return [
+        pytest.param(
+            partial(_variant_source, variant=variant, string=False),
+            id=f"requested-numeric-{variant}",
+        )
+        for variant in (
+            "history-free", "typed", "reassigned", "nested", "two-sites", "loop", "tuple",
+        )
+    ] + [
+        pytest.param(partial(_chart_local_source, string=False), id="chart-numeric"),
+    ] + [
+        pytest.param(
+            partial(_variant_source, variant=variant, string=True),
+            id=f"requested-string-{variant}",
+        )
+        for variant in (
+            "history-free", "typed", "reassigned", "nested", "two-sites", "tuple",
+        )
+    ] + [
+        pytest.param(partial(_chart_local_source, string=True), id="chart-string"),
+    ] + [
+        pytest.param(
+            partial(_extended_callable_local_source, shape=shape), id=f"extended-{shape}",
+        )
+        for shape in ("method", "varip", "for-in", "for-in-index", "for-in-value")
+    ] + [
+        pytest.param(
+            partial(_additional_callable_local_source, shape=shape),
+            id=f"additional-{shape}",
+        )
+        for shape in _ADDITIONAL_LOCAL_SHAPES
+    ] + [
+        pytest.param(_captured_local_request_source, id="captured-request"),
+    ]
+
+
+def _callable_local_diagnostic_outcome(source):
+    from pineforge_codegen import transpile_full
+
+    try:
+        diagnostics = transpile_full(source)["diagnostics"]
+        status = "accepted"
+    except CompileError as error:
+        diagnostics = error.diagnostics
+        status = "refused"
+    return status, [(diagnostic.message, diagnostic.hint) for diagnostic in diagnostics]
+
+
+@pytest.mark.parametrize("name", _LOCAL_NAMES)
+@pytest.mark.parametrize("build_source", _callable_local_diagnostic_cases())
+def test_callable_local_diagnostics_match_renamed_control(name, build_source):
+    control_status, control = _callable_local_diagnostic_outcome(build_source("aa"))
+    subject_status, subject = _callable_local_diagnostic_outcome(build_source(name))
+    assert subject_status == control_status
+    assert control
+    divergence = f"{name} diverges from TradingView semantics in PineForge."
+    filtered = [(message, hint) for message, hint in subject if message != divergence]
+    expected = [
+        (_replace_neutral_name(message, name), _replace_neutral_name(hint, name))
+        for message, hint in control
+    ]
+    assert filtered == expected
+    for message, hint in subject:
+        assert "__pfhist" not in message
+        assert hint is None or "__pfhist" not in hint
+
+
+# The inliner qualifies library locals with their module and function names.
+# These rows pin that qualification, leaving the pass nothing to rename.
+@pytest.mark.parametrize("name", _LOCAL_NAMES)
+@pytest.mark.parametrize("version,tail", [
+    pytest.param(6, "v = L.f(close)\nplot(v)\n", id="v6-plain"),
+    pytest.param(5, "v = L.f(close)\nplot(v)\n", id="v5-plain"),
+    pytest.param(
+        6,
+        'v = request.security(syminfo.tickerid, "60", L.f(close))\nplot(v)\n',
+        id="v6-requested",
+    ),
+])
+def test_library_function_locals_match_renamed_control(name, version, tail):
+    def library_text(local):
+        return (
+            f'//@version={version}\nlibrary("Lib")\n'
+            f"export f(float x) =>\n    {local} = x * 2.0\n"
+            f"    nz({local}[1]) + {local}\n"
+        )
+
+    source = '//@version=6\nstrategy("T")\nimport pftest/Lib/1 as L\n' + tail
+    control = transpile(source, libraries={"pftest/Lib/1": library_text("aa")})
+    subject = transpile(source, libraries={"pftest/Lib/1": library_text(name)})
+    qualified_local = re.compile(rf"(?<=__){re.escape(name)}\b")
+    assert qualified_local.sub("aa", subject) == qualified_local.sub("aa", control)
+    assert "__pfhist" not in subject
