@@ -106,10 +106,17 @@ def _normalize_compiler_error(message, name):
 @pytest.mark.parametrize("shape", ["typed", "reassigned", "nested", "two-sites", "chart"])
 def test_string_history_compile_outcome_matches_neutral_control(shape):
     compile_env.skip_if_no_compile_env()
+    from tests.test_builtin_named_locals_price_refusal import (
+        PRICE_FIELD_NAMES, assert_price_refusal,
+    )
     control_ok, control_error = _compile_outcome(
         transpile(_string_history_source("aa", shape)), f"string-{shape}-aa",
     )
     for name in ("second", "close", "time"):
+        # A string price-field local read with history keeps the base's refusal.
+        if shape in ("typed", "nested", "two-sites") and name in PRICE_FIELD_NAMES:
+            assert_price_refusal(_string_history_source(name, shape))
+            continue
         subject_ok, subject_error = _compile_outcome(
             transpile(_string_history_source(name, shape)), f"string-{shape}-{name}",
         )

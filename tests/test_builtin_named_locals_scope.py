@@ -378,6 +378,13 @@ _VARIANTS = [
 def test_requested_local_variants_match_renamed_control(name, variant, string):
     source = _variant_source(name, variant, string=string)
     control_source = _variant_source("aa", variant, string=string)
+    # A string price-field local read with history keeps the base's refusal.
+    from tests.test_builtin_named_locals_price_refusal import (
+        PRICE_FIELD_NAMES, assert_price_refusal,
+    )
+    if string and variant in ("typed", "nested", "two-sites") and name in PRICE_FIELD_NAMES:
+        assert_price_refusal(source)
+        return
     if variant == "tuple":
         with pytest.raises(CompileError) as control:
             transpile(control_source)
@@ -957,6 +964,15 @@ def _drop_divergence_warnings(name, source, status, diagnostics):
 @pytest.mark.parametrize("name", _LOCAL_NAMES)
 @pytest.mark.parametrize("build_source", _callable_local_diagnostic_cases())
 def test_callable_local_diagnostics_match_renamed_control(name, build_source):
+    # A string price-field local read with history keeps the base's refusal.
+    from tests.test_builtin_named_locals_price_refusal import (
+        PRICE_FIELD_NAMES, assert_price_refusal,
+    )
+    case = getattr(build_source, "keywords", {})
+    if (case.get("string") and case.get("variant") in ("typed", "nested", "two-sites")
+            and name in PRICE_FIELD_NAMES):
+        assert_price_refusal(build_source(name))
+        return
     control_status, control = _callable_local_diagnostic_outcome(build_source("aa"))
     source = build_source(name)
     subject_status, subject = _callable_local_diagnostic_outcome(source)

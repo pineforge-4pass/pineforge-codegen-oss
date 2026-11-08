@@ -41,6 +41,15 @@ def _source(name, *, string, persistent):
 def test_builtin_named_helper_history_matches_renamed_control(
     name, string, capacity, persistent,
 ):
+    # A string price-field local read with history keeps the base's refusal.
+    from tests.test_builtin_named_locals_price_refusal import (
+        PRICE_FIELD_NAMES, assert_price_refusal,
+    )
+    if string and not persistent and name in PRICE_FIELD_NAMES:
+        assert_price_refusal(
+            _source(name, string=string, persistent=persistent), history_capacity=capacity,
+        )
+        return
     cpp = transpile(
         _source(name, string=string, persistent=persistent),
         history_capacity=capacity,

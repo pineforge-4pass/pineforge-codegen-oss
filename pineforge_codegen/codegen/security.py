@@ -96,8 +96,8 @@ from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .tables import (
     ARRAY_JOURNAL_DELTA_METHODS, ARRAY_JOURNAL_FULL_METHODS, MATRIX_VOID_METHODS,
     BAR_BUILTINS, DRAWING_TYPE_TO_CPP, MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_BAR_FIELDS,
-    SECURITY_BAR_FIELD_EXPRS, SECURITY_BAR_FIELD_TYPES, TA_TUPLE_FIELDS,
-    TIMEZONE_LAMBDA_BODIES,
+    SECURITY_BAR_FIELD_EXPRS, SECURITY_BAR_FIELD_TYPES, SECURITY_PRICE_LOCAL_NAMES,
+    TA_TUPLE_FIELDS, TIMEZONE_LAMBDA_BODIES,
     _math_minmax_na_expr, _math_round_digits_expr, _merge_kwargs,
 )
 
@@ -3262,6 +3262,37 @@ class SecurityEmitter:
             "a direct OHLC/time bar-series binding",
         )
 
+    def _security_check_price_named_local_history(self, read: Subscript) -> None:
+        """Keep the composer's PF-E3011 for the history of a string helper
+        local spelled like a price series (``SECURITY_PRICE_LOCAL_NAMES``).
+
+        Unless declared ``var``, such a local was bound to its value, so this
+        read reached the composer's refusal. Its private spelling now binds a
+        helper string series, whose history read does not compile yet. The
+        declaration the read resolved to carries the authored spelling, and
+        its analyzer symbol the type.
+        """
+        declaration = self.ctx.identifier_binding_nodes.get(id(read.object))
+        if not isinstance(declaration, VarDecl) or declaration.is_var:
+            return
+        authored = (declaration.annotations or {}).get("authored_local_names")
+        if not authored or authored.get(declaration.name) not in SECURITY_PRICE_LOCAL_NAMES:
+            return
+        if self._budget is not None:
+            self._budget.check(read.loc, Phase.CODEGEN)
+        if not any(
+            getattr(symbol, "_pf_decl_node", None) is declaration
+            and symbol.pine_type == PineType.STRING
+            for symbol in (scope.symbols.get(declaration.name)
+                           for scope in self.ctx.symbols.all_scopes)
+        ):
+            return
+        self._codegen_error(
+            read,
+            "request.security helper-parameter history currently requires "
+            "a direct OHLC/time bar-series binding",
+        )
+
     def _security_argument_inventory(self, item: dict) -> dict:
         """Helper calls reached through scalar expression composition.
 
@@ -3837,6 +3868,7 @@ class SecurityEmitter:
                     )
                 if binding is not None:
                     bound, bound_stack = binding
+                    self._security_check_price_named_local_history(n)
                     if not isinstance(bound, str):
                         local_index = n.index
                         resolved_local_index = (
@@ -9460,6 +9492,7 @@ class SecurityEmitter:
                     self._security_warn_unbound_param(expr_node.object)
                 if binding is not None:
                     bound, bound_stack = binding
+                    self._security_check_price_named_local_history(expr_node)
                     if isinstance(bound, str):
                         series_name = self._security_series_binding_target(bound)
                         if series_name is not None:
