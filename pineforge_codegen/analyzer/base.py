@@ -5913,9 +5913,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         }
         for f in node.fields:
             if f.default is not None:
-                # Inspect syntax and authored bindings only: builtin members
-                # and calculations over literals keep their existing policy.
-                if any(
+                # This refusal belongs to v6 code; v5 sources keep their earlier handling.
+                # Inspect syntax and authored bindings only: builtin members and
+                # calculations over literals keep their existing policy.
+                if (node.annotations or {}).get("pine_version", self._pine_version) == 6 and any(
                     isinstance(expr, FuncCall)
                     or (
                         isinstance(expr, Identifier)

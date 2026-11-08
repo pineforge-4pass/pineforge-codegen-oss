@@ -35,7 +35,9 @@ existing parser grammar.
   an initializer precedes its binding, and a counted-loop binder follows its
   start but precedes its end/step. A callable parameter default that names an
   earlier global is still accepted (TradingView refuses it: a known gap);
-  callable parameters and field labels cannot bind defaults.
+  callable parameters and field labels cannot bind defaults. Type field
+  defaults containing calls or authored variables raise PF-E2087 in
+  `//@version=6` scripts and libraries; v5 sources keep their earlier handling.
   A qualifier with no visible value binding falls back to its namespace/type
   handler, including after a block-local declaration's scope ends.
   Unavailable authored declarations use PF-E2075, inaccessible block bindings
