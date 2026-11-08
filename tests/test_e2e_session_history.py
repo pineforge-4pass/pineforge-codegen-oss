@@ -542,10 +542,13 @@ REFUSED = {
         "read(receiver) => receiver.m()\n"
         "foo = Foo.new()\n"
         "x = read(foo)\n", (5, 24), "which a method calls"),
+    # TradingView refuses a function call as a record field default (compile error CE10133),
+    # so the script stops at the default, before the session read in the function is reached.
     "a function a UDT field default calls": (
         "f() => session.ismarket[1]\n"
         "type Foo\n    bool v = f()\n"
-        "x = Foo.new().v\n", (3, 24), "field default"),
+        "x = Foo.new().v\n", (5, 14),
+        "The default value cannot be a function, variable or calculation"),
     # allow_entry_in(session.ismarket[1] ? ... : ...) is refused first for
     # its series direction (TV CE10123), at the argument rather than the
     # history read. test_allow_entry_in_qualifier.py retains that regression.
@@ -703,8 +706,11 @@ STILL_COMPILE = {
         "f() =>\n"
         "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
         "    close > open\n"
-        "type Foo\n    bool v = f()\n"
-        "foo = Foo.new()\n"
+        # TradingView refuses a function call as a record field default (compile error
+        # CE10133), so the call is passed to the constructor instead; the row's purpose
+        # (the session read inside a function a UDT value is built from) is unchanged.
+        "type Foo\n    bool v = false\n"
+        "foo = Foo.new(v = f())\n"
         "x = foo.v\n"),
     "a read in color.from_gradient in a request.security expression": (
         'c = request.security(syminfo.tickerid, "60", color.from_gradient('

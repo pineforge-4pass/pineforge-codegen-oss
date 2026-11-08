@@ -23,7 +23,10 @@ Covers ten fix families:
 
 import re
 
+import pytest
+
 from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
 
 
@@ -1194,16 +1197,30 @@ def test_ta_precalc_security_lower_tf_keywords_skip_only_expression_payload():
 
 
 def test_ta_precalc_walks_type_field_defaults():
-    """Accepted UDT field defaults participate in chart classification."""
+    """Accepted UDT field defaults participate in chart classification.
+
+    TradingView refuses a call as a record field default (compile error CE10133), so the
+    accepted default here is a literal and the same condition is read at the top level."""
     cpp = _cpp(
         "type State\n"
-        "    bool ready = close > open and ta.sma(close, 3) > close\n"
+        "    bool ready = false\n"
         "s = State.new()\n"
-        "plot(s.ready ? 1 : 0)"
+        "ready_now = close > open and ta.sma(close, 3) > close\n"
+        "plot(s.ready or ready_now ? 1 : 0)"
     )
     assert "std::vector<double> _precalc__ta_sma" not in cpp
     assert "_use_precalc ? _precalc__ta_sma" not in cpp
     assert "ta::SMA _ta_sma_1;" in cpp
+
+
+def test_ta_call_as_type_field_default_is_refused():
+    with pytest.raises(CompileError, match="default value cannot be a function"):
+        _cpp(
+            "type State\n"
+            "    bool ready = close > open and ta.sma(close, 3) > close\n"
+            "s = State.new()\n"
+            "plot(s.ready ? 1 : 0)"
+        )
 
 
 def test_text_align_wrapper_param_infers_string():
