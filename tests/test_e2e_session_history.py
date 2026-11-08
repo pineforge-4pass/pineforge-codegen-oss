@@ -857,7 +857,7 @@ def test_a_read_reached_through_a_callers_clone_gets_clones_too(tmp_path: Path) 
 @pytest.mark.parametrize("place", KEPT)
 def test_scripts_without_a_read_keep_their_cpp(place: str, tmp_path: Path) -> None:
     """A script with no session.<flag>[k] keeps the accepted scaffold's C++, even
-    with a name spelled like a generated history member."""
+    with a name spelled like a generated history member, after its name escape."""
     reference = reference_codegen(CPP_IDENTITY_REFERENCE)
     if reference is None:
         pytest.fail(f"required C++ identity reference {CPP_IDENTITY_REFERENCE} unavailable; "
@@ -871,7 +871,11 @@ def test_scripts_without_a_read_keep_their_cpp(place: str, tmp_path: Path) -> No
                     + 'if x\n    strategy.entry("L", strategy.long)\n', encoding="utf-8")
     now, before = transpile_json(pine), transpile_json(pine, reference)
     assert now["ok"] and before["ok"], (now["diagnostics"], before["diagnostics"])
-    assert without_trade_history_policy(now["cpp"]) == without_trade_history_policy(
+    cpp = now["cpp"]
+    generator = _codegen_for(KEPT[place])
+    for name in ("_series_arg_1", "_hist_call_1"):
+        cpp = cpp.replace(generator._safe_name(name), name)
+    assert without_trade_history_policy(cpp) == without_trade_history_policy(
         before["cpp"]
     )
     compile_cpp(now["cpp"], label=place)

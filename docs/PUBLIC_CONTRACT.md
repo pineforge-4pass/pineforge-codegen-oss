@@ -22,6 +22,8 @@ existing `pineforge_codegen.codegen.CPP_RESERVED` export contains the explicit
 reserved names. `_safe_name` also escapes emitter temporary patterns and
 allocates a distinct name when the script already uses the preferred escape.
 An identifier that does not collide keeps its spelling.
+Generated state members, helper types and unallocated numbered member families
+use the same escape rule, including locals of requested helpers.
 
 `bar` and `HUGE` use the existing C++ escape; unique input titles keep their
 Pine spellings. Repeated input titles use the ordinal override keys described

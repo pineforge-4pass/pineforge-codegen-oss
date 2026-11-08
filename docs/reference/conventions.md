@@ -108,7 +108,9 @@ resolve the receiver and implement its signature under the emission invariant.
 - **Reserved names.** `codegen/helpers.py::CPP_RESERVED` carries every C++17
 and C++20 keyword/operator alternative plus header macros and emitter names
 that can collide. `_safe_name` allocates distinct escapes against all authored
-spellings; UDT fields use the same mapping. It also carries
+spellings; UDT fields use the same mapping. Fixed generated state and helper
+names, and numbered state families that do not allocate against authored names,
+use the same escape rule. It also carries
 `codegen/host_members.py::HOST_MEMBER_NAMES`, the host members the generated
 class reads or writes unqualified (a script variable `session_isfirstbar_`
 used to become the value of `session.isfirstbar`, and one named
