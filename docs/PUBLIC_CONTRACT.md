@@ -864,6 +864,17 @@ decimal digits. `render_diagnostic(code, args)` returns the English
 byte; in the glue envelope `message` is the message, plus ` — ` and the hint
 when there is one.
 
+`PF-E2081` identifies the removed `when` argument on `strategy.entry`,
+`strategy.order`, `strategy.exit`, `strategy.close`, `strategy.close_all`,
+`strategy.cancel` and `strategy.cancel_all` in a Pine v6 source. Its
+`args.key` names the function and `args.name` is `"when"`; the location
+covers the keyword name. The message explains that Pine v6 removed the
+argument and recommends placing the call inside an `if` statement.
+Other unknown names keep `PF-E2027` and its generic wording. A v5 source
+keeps its existing refusal: generic `PF-E2027` with support checking,
+or the unsupported-version diagnostic `PF-E2002` when support checking is
+disabled.
+
 From 1.5.0 on, receivers translate by stable code using their own locale
 catalogs; the English `user_message` template is the translation source and
 fallback for an unknown code. An unknown code is shown at its declared

@@ -162,7 +162,12 @@ Registry builtins with verified keyword names
 (`IntrinsicFunc.keyword_names_verified`) declare their complete keyword set
 through their signature parameters. These names are validated before lowering
 and again at the shared keyword merge; unknown names report PF-E2027 at the
-keyword. Other records keep their existing binding policy. `math.pow`
+keyword. In Pine v6, `when` on `strategy.entry`, `strategy.order`,
+`strategy.exit`, `strategy.close`, `strategy.close_all`, `strategy.cancel`
+or `strategy.cancel_all` instead reports PF-E2081: Pine v6 removed the
+argument, so put the condition in an `if` statement around the call.
+Other names and source versions keep the generic diagnostic.
+Other records keep their existing binding policy. `math.pow`
 declares `base, exponent`; both named forms emit the positional expression.
 Argument ordering remains the separate PF-E2074 validation.
 
