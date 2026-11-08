@@ -1,11 +1,10 @@
-"""Process and identity helpers of the numeric inventory tests.
+"""Process and identity helpers for the numeric inventory tests.
 
-Recovered unchanged from tests/test_numeric_missing_value_rows.py at
-27e0e8dc879db9e24b8a621a6110e9d39119a7ba (the component created at 15b182c2),
-which is no longer in the tree: ``_sha`` hashes the bytes it is given, ``_json``
-writes the fields it is given, ``_process`` runs the argv it is given and
-retains the raw outputs and status before anything is interpreted, and
-``_git_identity`` reads the real Git HEAD and tree of a checkout.
+``_sha`` hashes the supplied bytes. ``_json`` writes the supplied value as
+sorted, indented JSON with a trailing newline and rejects NaN and infinity.
+``_process`` records the command and stdin hash, runs it with ``LC_ALL=C``,
+and retains raw output and return status or records a setup error.
+``_git_identity`` reads and validates a checkout's real Git HEAD and tree IDs.
 """
 
 from __future__ import annotations

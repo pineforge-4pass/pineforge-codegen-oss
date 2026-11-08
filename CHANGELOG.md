@@ -99,11 +99,17 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - A `var` array with a non-empty initializer declared inside an `if` block is initialized when the declaration is first reached, as in TradingView. The generated code reset it to empty and did not apply the initializer, so `array.size` and element reads differed (#333, #327). Regenerate C++ and relink strategies.
 - Methods whose first parameter is never referenced in their body now report `PF-E5087` at that parameter, with a hint to use it or declare a function instead.
 - Consumed `if`/`switch` selections mixing value and void arms now report located `PF-E5088`; requested void selections keep `PF-E3102`.
-- A `request.security` payload that reads the history of an expression inside a loop, or at several reads of one helper parameter, commits one history slot per requested bar holding the last evaluation of that bar, as TradingView does; every read of the bar sees the history before this bar. Regenerate C++ and relink strategies (#287; [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
+- A `request.security` payload that reads the history of an expression inside
+  a loop, or at several reads of one helper parameter, commits one history
+  slot per requested bar holding the last evaluation of that bar, as
+  TradingView does. Every read of the bar sees the history before this bar.
+  Regenerate C++ and relink strategies (#287;
+  [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
 - `request.security` registers input-derived `lookahead` selections using the
   selected input values, including overrides; choices that depend on bar data
-  still report `PF-E1085`. A scalar empty timeframe uses the chart timeframe;
-  an `if`/`switch` timeframe arm known to be empty still reports `PF-E3105`.
+  still report `PF-E1085`. A scalar empty timeframe still uses the chart
+  timeframe; an `if`/`switch` timeframe arm known to be empty still reports
+  `PF-E3105`.
   History reads of requested values now compile inside another request's TA
   expression, including aliases and repeated reads. Uncalled request wrappers
   no longer interfere with compiling unrelated direct requests (#294;
@@ -112,24 +118,26 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - Array fields in records that stay within one bar preserve omitted and explicit `na` IDs, distinct from empty arrays.
 - Copying a record that stays within one bar shares its array fields while keeping scalar fields independent.
 - A block-local `string` declaration at top level may now shadow a script-level `float` binding with declared or literal types without sharing storage; every other cross-type shadow keeps its existing refusal.
-- A series variable declared or written inside a loop opens its bar's history
-  slot at the first reach and updates it afterwards, so `y[i]` reads prior bars
-  rather than prior iterations. Expression histories in loops also keep one
-  slot per bar, holding its last evaluation. Functions read current globals
-  produced by tuple declarations; ordinary `string` declarations initialized
-  with `na` reset on each execution; named array-constructor arguments bind to
-  `size` and `initial_value`. Reassigned ordinary inputs restart from the
-  selected input value at their declaration on each bar; `var` and `varip`
-  inputs retain their accumulated state. Regenerate C++ and relink strategies
+- A series variable declared or written inside a loop now opens one history
+  slot per bar at the first reach and updates it on later iterations, as in
+  TradingView. Previously, each iteration opened a separate slot, so `y[i]`
+  could read prior iterations instead of prior bars. Expression histories in
+  loops also keep one slot per bar, holding its last evaluation. Functions
+  read current globals produced by tuple declarations; ordinary `string`
+  declarations initialized with `na` reset on each execution; named
+  array-constructor arguments bind to `size` and `initial_value`.
+  Reassigned ordinary inputs restart from the selected input value at their
+  declaration on each bar; `var` and `varip` inputs retain their accumulated
+  state. Regenerate C++ and relink strategies
   (#291; [#324](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/324),
   [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
 - Runtime history offsets below 0 or above 10000 stop at the read with an
   error naming the Pine line and offset, before integer narrowing. Constant
   offsets keep their existing behavior (#311;
   [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
-- `timestamp("...")` accepts full English month names, including
-  `"01 February 2024 00:00"`, and preserves the 64-bit timestamp through
-  `input.time` and function or tuple results (#293;
+- `timestamp("...")` now accepts full English month names, including
+  `"01 February 2024 00:00"`. The existing 64-bit timestamp handling through
+  `input.time` and function or tuple results is preserved (#293;
   [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
 - `timestamp("...")` date strings with a `UTC` or `GMT` zone word now give
   TradingView's value for four forms that differed. A negative zone with a
