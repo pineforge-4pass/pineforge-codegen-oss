@@ -1574,7 +1574,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         Direct primitive FuncDef locals can be named apart by declaration
         identity, then analyzed afresh so every clone owns its Series. Other
         declaration shapes retain this fail-closed boundary. Already-isolated
-        requested evaluators and non-colliding sources keep their spellings.
+        requested evaluators keep their spellings unless they shadow a builtin.
         """
         exact_series = set(self._series_decl_bindings)
         if not exact_series:
@@ -1689,7 +1689,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     ).add(name)
                     if (callable_owner in security_evaluator_only
                             and name not in self._ordinary_global_binding_names
-                            and name not in unqualified_persistent_raw_names):
+                            and name not in unqualified_persistent_raw_names
+                            and name not in BUILTIN_VARS):
                         continue
                     callable_nonpersistent.setdefault(name, []).append(
                         (callable_owner, stmt)
@@ -1818,7 +1819,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         collision_names = {
             name for name, bindings in callable_nonpersistent.items()
             if (name in self._ordinary_global_binding_names
-                or name in persistent_raw_names or len(bindings) > 1)
+                or name in persistent_raw_names or len(bindings) > 1
+                or name in BUILTIN_VARS)
         }
         from .callable_history_names import separate_callable_histories
         if separate_callable_histories(
@@ -8314,10 +8316,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Detect series vars / bar fields
         if isinstance(node.object, Identifier):
             name = node.object.name
-            if name in BAR_FIELDS:
+            sym = self._symbols.resolve(name)
+            local_declaration = (
+                sym is not None and sym.scope != "global"
+                and bool(self._collection_scope_stack)
+                and getattr(sym, "_pf_decl_node_id", None) is not None
+            )
+            if name in BAR_FIELDS and not local_declaration:
                 self._series_bar_fields.add(name)
             else:
-                sym = self._symbols.resolve(name)
                 if sym is not None:
                     if getattr(sym, "_pf_shadows_map_state", False):
                         self._error(
@@ -8569,20 +8576,26 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_global_history_nodes[id(node)] = (owner, name, node)
 
     def _visit_Identifier(self, node: Identifier) -> PineType:
+        sym = self._symbols.resolve(node.name)
+        local_builtin = (
+            node.name in BUILTIN_VARS and sym is not None
+            and sym.scope != "global" and bool(self._collection_scope_stack)
+            and getattr(sym, "_pf_decl_node_id", None) is not None
+        )
         # Some identifiers are namespace prefixes handled elsewhere
-        if node.name in ("strategy", "ta", "input", "math", "str", "color",
-                         "display", "syminfo", "timeframe", "plot",
-                         "alert", "barstate", "position", "shape", "location",
-                         "size", "currency", "order", "format", "text",
-                         "extend", "xloc", "yloc", "label", "line", "box",
-                         "table", "ticker", "request", "runtime", "chart",
-                         "barmerge", "adjustment", "earnings", "dividends",
-                         "splits", "session", "scale", "font",
-                         "hline", "backadjustment", "settlement_as_close",
-                         "dayofweek"):
+        if not local_builtin and node.name in (
+                "strategy", "ta", "input", "math", "str", "color",
+                "display", "syminfo", "timeframe", "plot",
+                "alert", "barstate", "position", "shape", "location",
+                "size", "currency", "order", "format", "text",
+                "extend", "xloc", "yloc", "label", "line", "box",
+                "table", "ticker", "request", "runtime", "chart",
+                "barmerge", "adjustment", "earnings", "dividends",
+                "splits", "session", "scale", "font",
+                "hline", "backadjustment", "settlement_as_close",
+                "dayofweek"):
             return PineType.VOID
 
-        sym = self._symbols.resolve(node.name)
         block_owner = getattr(sym, "_pf_script_block_owner", None)
         if id(node) not in self._identifier_decl_bindings:
             # Later type queries can revisit this node after its source scope
@@ -8594,7 +8607,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             )
         if (id(node) not in self._identifier_binding_scopes
                 and node.name in BUILTIN_VARS
-                and node.name not in BAR_FIELDS
+                and (node.name not in BAR_FIELDS or local_builtin)
                 and getattr(sym, "_pf_tuple_binding", False)
                 and (block_owner is None or any(
                     id(body) == block_owner for body in self._block_node_stack
@@ -8605,7 +8618,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             }
         elif (id(node) not in self._identifier_binding_scopes
                 and node.name in BUILTIN_VARS
-                and node.name not in BAR_FIELDS
+                and (node.name not in BAR_FIELDS or local_builtin)
                 and getattr(sym, "_pf_decl_node_id", None) is not None
                 and (block_owner is None or any(
                     id(body) == block_owner for body in self._block_node_stack

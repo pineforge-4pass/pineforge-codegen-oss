@@ -8,6 +8,7 @@ from ..ast_nodes import (
 )
 from ..limits import iter_ast_nodes
 from ..errors import Phase
+from .tables import BUILTIN_VARS
 
 
 def separate_callable_histories(program, bindings, primitive_histories) -> bool:
@@ -78,7 +79,9 @@ def separate_callable_histories(program, bindings, primitive_histories) -> bool:
     # Function and declaration source order determines allocation, never id().
     for node in direct.values():
         group = declarations[node.name]
-        if len(group) < 2:
+        # Builtin history and a callable's local history are separate bindings
+        # even when there is only one authored declaration of that spelling.
+        if len(group) < 2 and node.name not in BUILTIN_VARS:
             continue
         if any(id(other) not in other_safe_declarations and id(other) not in direct
                for other in group):
