@@ -94,9 +94,9 @@ def test_unknown_order_keywords_are_located_errors(
     ("{call}\n", False),
     ("if false\n    {call}\n", True),
     ("if false\n    {call}\n", False),
-    # With the support checker bypassed the translator does not visit the body
-    # of a function that nothing calls (true on main too), so this body is
-    # asked only through the support checker, which walks every body.
+    # With the support checker bypassed, a `when` argument inside the body of
+    # a function that nothing calls raises nothing, on main as well, so this
+    # body is asked only with the support checker, which checks every body.
     ("unused() =>\n    {call}\n", True),
 ))
 def test_unreachable_and_multiline_order_calls_still_validate_names(
