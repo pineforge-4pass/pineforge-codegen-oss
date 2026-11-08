@@ -107,6 +107,7 @@ def _variant_source(name, variant, *, string):
     seed = '"a"' if string else "0.0"
     empty = '""' if string else "0.0"
     constant = '"x"' if string else "1.0"
+    reassigned = '"b"' if string else "1.5"
     history_body = (
         f"    {name} = {value}\n    bb = {previous}\n    {name} + bb\n"
     )
@@ -119,7 +120,7 @@ def _variant_source(name, variant, *, string):
             f"    bb = {previous}\n    {name} + bb\n"
         ),
         "reassigned": (
-            f"    var {type_name} {name} = {seed}\n    {name} := {value}\n"
+            f"    var {type_name} {name} = {seed}\n    {name} := {reassigned}\n"
             f"    bb = {previous}\n    {name} + bb\n"
         ),
         "nested": (
@@ -147,19 +148,111 @@ def _variant_source(name, variant, *, string):
     )
 
 
-def _normalize_local(cpp, name):
+def _normalize_local(cpp, name, control):
     spelling = re.escape(name)
-    cpp = re.sub(rf"{spelling}__pfhist[0-9]+", "aa", cpp)
-    # Keep host fields (bar.close) and the map reference's .first->second.
-    # Only the local, its escaped spelling, and generated local names change.
-    return re.sub(
-        rf"(?<![\w.])(?<!first->)"
+    local = re.compile(
         rf"(?P<prefix>(?:_sec[0-9]+_[A-Za-z_][A-Za-z_0-9]*?_[0-9]+_"
         rf"|_pf_var_init_)?)"
-        rf"(?:pf_safe_)?{spelling}(?P<suffix>(?:_cs[0-9]+)?)\b",
-        r"\g<prefix>aa\g<suffix>",
-        cpp,
+        rf"(?:pf_safe_{spelling}|_{spelling}_|{spelling})"
+        rf"(?:__pfhist[0-9]+)?(?P<suffix>(?:_cs[0-9]+)?)"
     )
+    identifiers = re.compile(
+        r"(?P<qualified>(?:->|\.|::)\s*[A-Za-z_][A-Za-z_0-9]*)"
+        r"|[A-Za-z_][A-Za-z_0-9]*"
+    )
+
+    def rename(match):
+        if match.lastgroup == "qualified":
+            return match[0]
+        binding = local.fullmatch(match[0])
+        if binding is None:
+            return match[0]
+        return f"{binding['prefix']}aa{binding['suffix']}"
+
+    # Separate code from comments and literals before replacing identifiers.
+    text = re.compile(
+        r"""("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|//[^\n]*|/\*.*?\*/)""",
+        re.DOTALL,
+    )
+    parts = text.split(cpp)
+    neutral = text.split(control)
+    for index in range(0, len(parts), 2):
+        parts[index] = identifiers.sub(rename, parts[index])
+
+    # Corresponding text slots require identical surrounding code. A text
+    # replacement must equal that slot's control; shared literals stay intact.
+    if parts[::2] == neutral[::2]:
+        for index in range(1, len(parts), 2):
+            candidate = identifiers.sub(rename, parts[index])
+            if candidate == neutral[index]:
+                parts[index] = candidate
+    return "".join(parts)
+
+
+@pytest.mark.parametrize("string", [False, True], ids=["numeric", "string"])
+@pytest.mark.parametrize("requested", [False, True], ids=["chart", "requested"])
+def test_normalizer_is_identity_for_neutral_control(string, requested):
+    source = (
+        _variant_source("aa", "typed", string=string)
+        if requested else _chart_local_source("aa", string=string)
+    )
+    control = transpile(source)
+    assert _normalize_local(control, "aa", control) == control
+
+
+@pytest.mark.parametrize("name", ["second", "volume"])
+def test_normalizer_preserves_qualified_members_and_shared_text(name):
+    shared = (
+        "auto item = it->second + result.first->second;\n"
+        f"auto member = object.{name} + Scope::{name};\n"
+        f"auto spaced = it -> {name} + object . {name} + Scope :: {name};\n"
+        'if (_mode == "volume") use("second");\n'
+    )
+    cpp = (
+        f"double {name} = 1.5;\n" + shared
+        + f'auto &cell = store.try_emplace("{name}", 128).first->second;\n'
+    )
+    control = (
+        "double aa = 1.5;\n" + shared
+        + 'auto &cell = store.try_emplace("aa", 128).first->second;\n'
+    )
+    assert _normalize_local(cpp, name, control) == control
+
+
+@pytest.mark.parametrize(
+    "spelling", ["pf_safe_time_close", "_time_close_"],
+    ids=["prefixed", "wrapped"],
+)
+def test_normalizer_accepts_escaped_local_spellings(spelling):
+    cpp = f"double {spelling};\nauto value = _sec0_h_1_{spelling}_cs1;\n"
+    control = "double aa;\nauto value = _sec0_h_1_aa_cs1;\n"
+    assert _normalize_local(cpp, "time_close", control) == control
+
+
+@pytest.mark.parametrize("cpp,control", [
+    pytest.param(
+        "Series<int> second__pfhist1;",
+        "Series<std::string> aa;",
+        id="series-type",
+    ),
+    pytest.param(
+        "return second;",
+        "return std::to_string(aa);",
+        id="missing-call",
+    ),
+    pytest.param(
+        "return pine_second(current_bar_.timestamp, syminfo_.timezone);",
+        "return aa;",
+        id="builtin-read",
+    ),
+    pytest.param(
+        'note("built-in second");',
+        'note("");',
+        id="builtin-note",
+    ),
+])
+def test_normalizer_retains_differences_beyond_local_spelling(cpp, control):
+    assert _normalize_local(cpp, "second", control) != control
 
 
 @pytest.fixture(scope="module")
@@ -211,7 +304,7 @@ def test_outer_bindings_and_builtin_reads_keep_complete_cpp(source, reference, t
 def test_chart_local_history_matches_renamed_control(name, string):
     cpp = transpile(_chart_local_source(name, string=string))
     control = transpile(_chart_local_source("aa", string=string))
-    assert _normalize_local(cpp, name) == control
+    assert _normalize_local(cpp, name, control) == control
     assert control.strip() and _HISTORY_READ.findall(control)
 
 
@@ -220,7 +313,7 @@ def test_sibling_declaration_preserves_builtin_reader(reference, tmp_path):
     before = _reference_cpp(source, reference, tmp_path)
     cpp = transpile(source)
     control = transpile(_sibling_source("aa"))
-    assert _normalize_local(cpp, "second") == control
+    assert _normalize_local(cpp, "second", control) == control
     # The declaring function changes; compare the reader and its evaluator.
     for function in ("g", "_eval_security_1"):
         definition = re.compile(
@@ -256,4 +349,4 @@ def test_requested_local_variants_match_renamed_control(name, variant, string):
         assert str(subject.value) == str(control.value)
     else:
         control = transpile(control_source)
-        assert _normalize_local(transpile(source), name) == control
+        assert _normalize_local(transpile(source), name, control) == control
