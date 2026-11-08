@@ -31,6 +31,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
   explaining that v6 removed the argument and recommending an `if` statement
   around the call. Other unknown keywords keep `PF-E2027`.
 - Pine identifiers spelled like generated state members or helpers use the C++ name allocator, including history-bearing locals in requested helpers.
+- A local declared in a function or method and spelled like a built-in variable now keeps its own type, history storage and reads. Exceptions: a string local spelled like a price field (`open`, `high`, `low`, `close`, `hl2`, `hlc3`, `hlcc4`, `ohlc4`, `volume`) that is read with history in a function requested through `request.security` is still refused, as before; a string local that is read with history and used in a concatenation still does not compile, for any name; the support check still warns that `bar_index`, `last_bar_index` and `timenow` diverge from TradingView at every read of a local with that name; a script that declares the same built-in name in several callable shapes is accepted where an ordinary name is refused by the shared-Series check; and the confirmed-bar request receipt of a request inside the declaring function names the local by its internal storage spelling.
 - History retention can be selected with keyword-only `history_capacity`
   in `transpile()`, `transpile_full()`, `transpile_with_request_inventory()`
   and `gate/glue.py::transpile_json()`. The JavaScript worker template does

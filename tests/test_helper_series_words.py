@@ -93,15 +93,13 @@ def test_reference_identifier_inventory_covers_both_scalar_stores():
 
 # Every reference word, including the two store names, is a valid Pine local:
 # the allocator escapes authored store spellings and preserves the stores.
-# A string-valued local named `second` already lands in the numeric store on the
-# code without this change (only the store differs, not the reference text), so
-# that one combination does not exercise the reference's words.
+# Every word can name either a string or a numeric helper local; declaration
+# bindings determine the history store even for builtin spellings.
 _INTRODUCED_WORDS = sorted(_REFERENCE_TOKENS)
 _WORD_ROWS = [
     (name, string)
     for name in _INTRODUCED_WORDS
     for string in (False, True)
-    if (name, string) != ("second", True)
 ]
 
 

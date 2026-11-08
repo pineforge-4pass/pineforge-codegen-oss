@@ -177,7 +177,10 @@ class ValueBindings(DiagnosticsHelper):
             key = self.declaration_bindings.get(id(node))
             if key not in names:
                 continue
+            if self.budget is not None:
+                self.budget.check(node.loc, Phase.ANALYZER)
             node.name = names[key]
+            self.declaration_bindings[id(node)] = (key[0], node.name)
             use = (node.annotations or {}).get(_VALUE_USE)
             if isinstance(use, _ValueUse) and use.binding is not None:
                 node.annotations[_VALUE_USE] = replace(

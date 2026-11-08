@@ -204,7 +204,8 @@ class InputHelper:
         bound = self._input_binding_names().get(id(node))
         if bound is not None:
             return bound
-        return var_name if var_name else ""
+        from ..analyzer.callable_history_names import authored_callable_text
+        return authored_callable_text(self.ctx.ast, var_name) if var_name else ""
 
     def _input_title_value(self, node, _seen: frozenset = frozenset()) -> str | None:
         """A title expression's compile-time string value, or None. TradingView
