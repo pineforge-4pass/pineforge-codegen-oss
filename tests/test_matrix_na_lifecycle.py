@@ -536,6 +536,7 @@ strategy("typed matrix method arguments")
 type Carrier
     float seed
 method isNull(Carrier self, matrix<int> state = na) =>
+    self
     na(state)
 var Carrier carrier = Carrier.new(1.0)
 identifierPositional = carrier.isNull(na)
@@ -693,9 +694,9 @@ probe(bool gate) =>
         var map<string, int> missingMap = switch bar_index
             2 => map.new<string, int>()
         result := (not na(explicitMatrix) ? 1000 : 0) +
-            (not na(explicitMap) ? 100 : 0) +
-            (na(missingMatrix) ? 10 : 0) +
-            (na(missingMap) ? 1 : 0)
+             (not na(explicitMap) ? 100 : 0) +
+             (na(missingMatrix) ? 10 : 0) +
+             (na(missingMap) ? 1 : 0)
     result
 value = probe(bar_index >= 1)
 var int step0 = -99

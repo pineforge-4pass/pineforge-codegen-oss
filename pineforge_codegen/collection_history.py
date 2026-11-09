@@ -911,6 +911,24 @@ class CollectionHistoryChecker:
     def _reject(self, node, message: str, hint: str | None = None) -> Use:
         return Use("reject", node, message, hint)
 
+    def is_assignment_target(self, node) -> bool:
+        parent = self._parent.get(id(node))
+        return isinstance(parent, Assignment) and parent.target is node
+
+    def operator_use(self, node):
+        """The immediate operator consuming a history value, if any."""
+        parent = self._parent.get(id(node))
+        if isinstance(parent, BinOp):
+            return parent, parent.op, (parent.left, parent.right)
+        if isinstance(parent, UnaryOp):
+            return parent, parent.op, (parent.operand,)
+        if isinstance(parent, Ternary) and parent.condition is node:
+            return parent, "?:", (parent.condition, parent.true_val, parent.false_val)
+        if (isinstance(parent, Assignment) and parent.value is node
+                and parent.op != ":="):
+            return parent, parent.op[:-1], (parent.target, parent.value)
+        return None
+
     def _use(self, node, kind: str, label: str) -> Use:
         parent = self._parent.get(id(node))
         if isinstance(parent, MemberAccess) and parent.object is node:
@@ -931,14 +949,12 @@ class CollectionHistoryChecker:
                            "operator is not supported in PineForge.")
             return self._assignment_use(parent, node, kind, label)
         if isinstance(parent, (BinOp, UnaryOp)):
-            return self._reject(
-                node, f"{label} is {_a(kind)}, which TradingView refuses for "
-                f"operator {parent.op} (CE10123).")
+            # Keep the value's collection identity; the analyzer's operator
+            # relation checks its domain after visiting all operands.
+            return Use("read", node, form="history")
         if isinstance(parent, Ternary):
             if parent.condition is node:
-                return self._reject(
-                    node, f"{label} is {_a(kind)}, which TradingView refuses as "
-                    "the condition of ?: (CE10123).")
+                return Use("read", node, form="history")
             return self._flow(parent, kind, label, node)
         if isinstance(parent, (IfStmt, WhileStmt)) and parent.condition is node:
             statement = "if" if isinstance(parent, IfStmt) else "while"
@@ -946,12 +962,9 @@ class CollectionHistoryChecker:
                 node, f"{label} is {_a(kind)}, which TradingView refuses as the "
                 f"condition of an {statement} statement (CE10101).")
         if isinstance(parent, Subscript) and parent.object is node:
-            outer = NameUses()
-            outer.add(self.use(parent, kind, f"({label})[...]"))
-            return Use("other", node,
-                       f"({label})[...]: the history of {_a(kind)}'s history "
-                       "is not supported in PineForge.",
-                       needs_collection=outer.needs_collection())
+            return self._reject(
+                node, f"({label})[...]: the history of {_a(kind)}'s history "
+                "is not supported in PineForge.")
         if isinstance(parent, ExprStmt):
             return self._statement_use(parent, node, kind, label)
         if isinstance(parent, TupleLiteral):
@@ -1178,9 +1191,7 @@ class CollectionHistoryChecker:
 
     def _assignment_use(self, assignment: Assignment, node, kind: str, label: str) -> Use:
         if assignment.op != ":=":
-            return self._reject(
-                node, f"{label} is {_a(kind)}, which TradingView refuses for "
-                f"operator {assignment.op} (CE10123).")
+            return Use("read", node, form="history")
         target = assignment.target
         if not isinstance(target, Identifier):
             field_type = self._field_type(target, assignment)

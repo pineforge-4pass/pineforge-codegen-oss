@@ -1,0 +1,12 @@
+//@version=6
+strategy("Literal field default", overlay = true, initial_capital = 1000000)
+// The field's literal default needs no variable binding; the constructed field is one.
+type Reading
+    float value = 1.0
+reading = Reading.new()
+signalValue = reading.value
+plot(signalValue, "signal")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

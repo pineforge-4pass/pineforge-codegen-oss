@@ -250,6 +250,18 @@ class AnalyzerContext:
     # name lookup is not enough once a UDF parameter, block local, or loop
     # iterator shadows a same-spelled global binding.
     identifier_binding_scopes: dict = field(default_factory=dict)  # id(Identifier) -> scope name | None
+    # First lexical resolution to an exact declaration binder. Scope names
+    # such as "for" are shared by sibling and nested loops.
+    identifier_decl_bindings: dict = field(default_factory=dict)  # id(Identifier) -> (id(declaration), name) | None
+    # id(VarDecl) -> PineType for accepted differing primitive block shadows
+    # and their direct script declarations. Other storage keeps its gates.
+    primitive_block_shadow_types: dict = field(default_factory=dict)
+    # Dedicated source-evidence family of each counted loop, keyed by start.
+    # Legacy symbol storage remains independent (collection/callable inference).
+    for_counter_types: dict = field(default_factory=dict)  # id(start) -> PineType
+    # Exact declarations for identifier reads, retained after scopes unwind.
+    # Loop binders and ordinary locals can share both a name and a scope label.
+    identifier_binding_nodes: dict = field(default_factory=dict)
     var_member_init_exprs: dict = field(default_factory=dict)  # var-member name -> init AST expr
     # id(VarDecl) -> (node, emitted member name, PineType, rendered initializer,
     #                 is function/method scoped)
@@ -296,7 +308,7 @@ class AnalyzerContext:
     # SecurityCallInfo.callsite_idx disambiguation in visit_call.py to work.
     func_security_clone_only: set = field(default_factory=set)
     # Functions and methods that cannot keep a session.* flag's history per
-    # call site (name -> why): every method, and the functions a method, a
+    # call site (name -> why): unresolved methods and their callees, or those a
     # request.security expression or a UDT field default reaches. Codegen
     # refuses a session.<flag>[k] it emits in one of them.
     session_history_unsafe: dict = field(default_factory=dict)
@@ -304,6 +316,10 @@ class AnalyzerContext:
     # no per-call Series. A read of theirs the C++ holds asks
     # pineforge_codegen._generate to clone them.
     session_uncloned: frozenset = frozenset()
+    # Exact method owner -> (reader owner, history read). Only methods reaching
+    # a cloned session reader participate; an unbound call rendered outside
+    # the analyzed AST must retain PF-E5048 rather than share a history.
+    session_method_reads: dict = field(default_factory=dict)
     # (func_name, cs_idx) -> {orig_member_name: cloned_member_name}. Populated by
     # the analyzer ONLY for clones whose default ``{base}_cs{cs_idx}`` name would
     # collide with a clone minted through another enclosing function; lets codegen

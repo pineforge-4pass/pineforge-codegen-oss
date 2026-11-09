@@ -120,7 +120,7 @@ f() =>
     i
 v = request.security(syminfo.tickerid, "60", f() / 2)
 plot(v)
-""", "/ (double)(2)"),
+""", "using _pf_val_t = decltype(((double)(_pna_l) / (double)(_pna_r)));"),
 ])
 def test_int_division_through_helper_bindings_is_a_float(src, division):
     body = transpile(src)

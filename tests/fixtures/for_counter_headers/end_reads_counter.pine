@@ -1,0 +1,10 @@
+//@version=6
+strategy("Counter in own end expression value", initial_capital = 1000000, currency = currency.NONE)
+float acc = 0.0
+for i = 0 to (i == 0 ? 1 : 0)
+    acc := acc + i + 1
+// acc is 3 if the end expression is read once with i at its start value, 1 if it is read again after each step
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = acc)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

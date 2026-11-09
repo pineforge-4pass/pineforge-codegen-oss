@@ -5,7 +5,7 @@ returned it only for an expression, an ``if`` or a ``switch``; any other
 last statement fell through to the default ``return 0.0``. The Gaussian
 channel of cs-lev-tradleware-gaussian-channel-stochrsi-eth ends its filter in
 ``_f := ...``, so the filter was identically 0 and the script never traded
-(lane W2, F04: 9 population probes, 0 trades against TradingView's 2 to 551).
+(9 population probes, 0 trades against TradingView's 2 to 551).
 The same held for an ``if`` / ``switch`` arm whose last statement was one.
 
 TradingView's own tapes (``fixtures/w2_trio_tv/tail_*``, lab tv --no-note)
@@ -214,6 +214,7 @@ TYPED = HEAD + """type Obj
 bump(Obj o) =>
     o.v += 1{bump_tail}
 method quarter(Obj this, float x) =>
+    this
     float y = x
     y /= 4{quarter_tail}
 fArm(float v) =>

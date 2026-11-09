@@ -1,0 +1,13 @@
+//@version=6
+strategy("Switch enum title", currency = currency.NONE, initial_capital = 1000000)
+// Derived: the enum analyzer retains only string-literal titles; this default is discarded.
+enum Choice
+    first = switch 0
+        0 => "one"
+        => "two"
+value = Choice.first
+plot(str.length(str.tostring(value)), "title length")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

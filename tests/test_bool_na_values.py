@@ -158,7 +158,7 @@ if bar_index % 20 == 15
             id="single-expression-return",
         ),
         pytest.param(
-            HEADER + "method empty(float self) =>\n    bool present = true\n    na\n"
+            HEADER + "method empty(float self) =>\n    self, bool present = true\n    na\n"
             "v = close\nx = v.empty() ? 1 : 0\nplot(x)\n",
             5, 5, 7,  # The method's untyped na tail follows four spaces.
             id="method-untyped-return",
@@ -180,7 +180,7 @@ if bar_index % 20 == 15
             id="qualified-parameter-default",
         ),
         pytest.param(
-            HEADER + "method choose(float self, bool enabled = na) => enabled\n"
+            HEADER + "method choose(float self, bool enabled = na) => self, enabled\n"
             "v = close\nx = v.choose()\nplot(x ? 1 : 0)\n",
             3, 42, 44,  # The method's second parameter default begins at column 42.
             id="method-default",
@@ -198,7 +198,7 @@ if bar_index % 20 == 15
             id="indented-argument",
         ),
         pytest.param(
-            HEADER + "method choose(float self, bool enabled) => enabled\n"
+            HEADER + "method choose(float self, bool enabled) => self, enabled\n"
             "v = close\nx = v.choose(na)\nplot(x ? 1 : 0)\n",
             5, 14, 16,  # x = v.choose( occupies 13 columns before the bool argument na.
             id="method-argument",
@@ -300,7 +300,7 @@ if bar_index % 20 == 15
         ),
         # Non-bool method defaults and arguments keep the same binding path.
         pytest.param(
-            HEADER + "method choose(float self, int v = na) => v\n"
+            HEADER + "method choose(float self, int v = na) => self, v\n"
             "v = close\nx = v.choose()\ny = v.choose(na)\n"
             "plot(na(x) and na(y) ? 1 : 0)\n",
             id="method-int-default-and-argument",
@@ -313,7 +313,7 @@ if bar_index % 20 == 15
         ),
         # A typed declaration tail remains typed rather than a bare na return.
         pytest.param(
-            HEADER + "method choose(float self) =>\n    float v = na\n"
+            HEADER + "method choose(float self) =>\n    self, float v = na\n"
             "v = close\nx = v.choose() ? 1 : 0\nplot(x)\n",
             id="typed-method-declaration-return",
         ),
@@ -379,10 +379,10 @@ if bar_index % 20 == 15
             HEADER + "type Box\n    bool flag = na\nb = Box.new()\nplot(b.flag ? 1 : 0)\n",
             id="bool-field-default",
         ),
-        # A bare na condition keeps its existing numeric truth conversion.
+        # Explicit bool conversion supplies a valid Pine v6 condition.
         pytest.param(
-            HEADER + "x = na ? 1 : 0\nplot(x)\n",
-            id="bare-na-condition",
+            HEADER + "x = bool(na) ? 1 : 0\nplot(x)\n",
+            id="converted-na-condition",
         ),
     ],
 )

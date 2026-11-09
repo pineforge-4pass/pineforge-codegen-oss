@@ -89,7 +89,7 @@ TRACE = "".join(
 # the extended-hours chart the engine's session_isfirstbar_ /
 # session_islastbar_ are the chart's day, the 04:00 and 19:45 bars, and its
 # session_isfirstbar_regular_ / session_islastbar_regular_ the regular day's
-# 09:30 and 15:45 bars (lane K-SESSION-WINDOWS), as TradingView's.
+# 09:30 and 15:45 bars (the session-window cases), as TradingView's.
 PINNED: dict[str, dict[str, int]] = {}
 QUARTER = 15 * 60_000
 
@@ -519,31 +519,39 @@ REFUSED = {
     "a method called on a receiver PineForge cannot type": (
         "type Foo\n    float v = 1\n"
         "method m(Foo self) => session.ismarket[1] and self.v > 0\n"
-        "mk() => Foo.new()\n"
-        "a = mk().m()\n"
-        "x = bar_index % 2 == 0 ? mk().m() : a\n", (5, 39), "a method"),
-    "a method called on a loop variable": (
+        "read(receiver) => receiver.m()\n"
+        "foo = Foo.new()\n"
+        "x = read(foo)\n", (5, 39), "a method"),
+    "a method called through an untyped loop wrapper": (
         "type Foo\n    float v = 1\n"
         "method m(Foo self) => session.ismarket[1] and self.v > 0\n"
+        "read(receiver) => receiver.m()\n"
         "foos = array.from(Foo.new())\n"
         "x = false\n"
-        "for f in foos\n    x := f.m()\n", (5, 39), "a method"),
+        "for f in foos\n    x := read(f)\n", (5, 39), "a method"),
     "a function a mutable global's statements call, the global's name shadowed": (
         "f() => session.ismarket[3] ? 1.0 : 0.0\n"
         "var float g = 0.0\n"
         "g := nz(f())\n"
         "h(float g) => g > open\n"
         'x = request.security(syminfo.tickerid, "60", h(close)) or g > 0\n', (3, 24), "request.security"),
-    "a function a method calls": (
+    "a function an unresolved method calls": (
         "type Foo\n    float v = 1\n"
         "f() => session.ismarket[1]\n"
         "method m(Foo self) => f() and self.v > 0\n"
-        "mk() => Foo.new()\n"
-        "x = mk().m()\n", (5, 24), "which a method calls"),
+        "read(receiver) => receiver.m()\n"
+        "foo = Foo.new()\n"
+        "x = read(foo)\n", (5, 24), "which a method calls"),
+    # TradingView refuses a function call as a record field default (compile error CE10133),
+    # so the script stops at the default, before the session read in the function is reached.
     "a function a UDT field default calls": (
         "f() => session.ismarket[1]\n"
         "type Foo\n    bool v = f()\n"
-        "x = Foo.new().v\n", (3, 24), "field default"),
+        "x = Foo.new().v\n", (5, 14),
+        "The default value cannot be a function, variable or calculation"),
+    # allow_entry_in(session.ismarket[1] ? ... : ...) is refused first for
+    # its series direction (TV CE10123), at the argument rather than the
+    # history read. test_allow_entry_in_qualifier.py retains that regression.
 }
 
 
@@ -663,13 +671,6 @@ STILL_COMPILE = {
         "    self.v > 0\n"
         "foo = Foo.new()\n"
         "x = foo.m()\n"),
-    "a read in strategy.risk.allow_entry_in in a method": (
-        "type Foo\n    float v = 1\n"
-        "method m(Foo self) =>\n"
-        "    strategy.risk.allow_entry_in(session.ismarket[1] ? strategy.direction.long : strategy.direction.all)\n"
-        "    self.v > 0\n"
-        "foo = Foo.new()\n"
-        "x = foo.m()\n"),
     "a read in array.covariance's biased and str.tostring's format in a method": (
         "type Foo\n    float v = 1\n"
         "method m(Foo self) =>\n"
@@ -705,8 +706,11 @@ STILL_COMPILE = {
         "f() =>\n"
         "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
         "    close > open\n"
-        "type Foo\n    bool v = f()\n"
-        "foo = Foo.new()\n"
+        # TradingView refuses a function call as a record field default (compile error
+        # CE10133), so the call is passed to the constructor instead; the row's purpose
+        # (the session read inside a function a UDT value is built from) is unchanged.
+        "type Foo\n    bool v = false\n"
+        "foo = Foo.new(v = f())\n"
         "x = foo.v\n"),
     "a read in color.from_gradient in a request.security expression": (
         'c = request.security(syminfo.tickerid, "60", color.from_gradient('
@@ -853,7 +857,7 @@ def test_a_read_reached_through_a_callers_clone_gets_clones_too(tmp_path: Path) 
 @pytest.mark.parametrize("place", KEPT)
 def test_scripts_without_a_read_keep_their_cpp(place: str, tmp_path: Path) -> None:
     """A script with no session.<flag>[k] keeps the accepted scaffold's C++, even
-    with a name spelled like a generated history member."""
+    with a name spelled like a generated history member, after its name escape."""
     reference = reference_codegen(CPP_IDENTITY_REFERENCE)
     if reference is None:
         pytest.fail(f"required C++ identity reference {CPP_IDENTITY_REFERENCE} unavailable; "
@@ -867,7 +871,11 @@ def test_scripts_without_a_read_keep_their_cpp(place: str, tmp_path: Path) -> No
                     + 'if x\n    strategy.entry("L", strategy.long)\n', encoding="utf-8")
     now, before = transpile_json(pine), transpile_json(pine, reference)
     assert now["ok"] and before["ok"], (now["diagnostics"], before["diagnostics"])
-    assert without_trade_history_policy(now["cpp"]) == without_trade_history_policy(
+    cpp = now["cpp"]
+    generator = _codegen_for(KEPT[place])
+    for name in ("_series_arg_1", "_hist_call_1"):
+        cpp = cpp.replace(generator._safe_name(name), name)
+    assert without_trade_history_policy(cpp) == without_trade_history_policy(
         before["cpp"]
     )
     compile_cpp(now["cpp"], label=place)

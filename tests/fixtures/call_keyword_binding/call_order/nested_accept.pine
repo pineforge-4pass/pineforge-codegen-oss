@@ -1,0 +1,10 @@
+//@version=6
+strategy("Nested independent argument lists", initial_capital = 1000000, currency = currency.NONE)
+// Positional arguments inside a keyword value belong to a different call.
+metric = str.length(str.substring(source = str.substring("quantity", 1, 4), begin_pos = 0, end_pos = 2))
+if metric < 0
+    strategy.cancel("L")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

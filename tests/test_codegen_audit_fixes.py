@@ -211,8 +211,12 @@ def test_string_cast_bool():
 
 
 def test_int_cast_propagates_na():
+    # close is a float, so int(close) is the 64-bit cast (Pine's int is
+    # 64-bit); both branches of it keep na: a NaN (or a value outside int64_t)
+    # reads the integer na, and so does an integer na.
     cpp = _gen("i = int(close)\nplot(close)\n")
-    assert "is_na(_pf_v) ? na<int>() : (int)_pf_v" in cpp
+    assert "? (int64_t)_pf_v : na<int64_t>()" in cpp
+    assert "is_na(_pf_v) ? na<int64_t>() : (int64_t)_pf_v" in cpp
 
 
 # ---------------------------------------------------------------------------
@@ -319,9 +323,10 @@ def test_array_slice_string_elements():
         "sb = array.slice(sa, 0, 1)\nplot(close)\n"
     )
     # The slice keeps the receiver's ELEMENT type (std::string, not double).
-    # Iterators come from the bounds-checked lambda's ``__pf_array`` binding.
-    assert "std::vector<std::string>(__pf_array.begin()" in cpp
-    assert "}((sa))" in cpp
+    # The bounds-checked lambda returns a typed window of its receiver.
+    assert "_pf_slice_view<_PFSliceArray<std::string>>(__pf_array," in cpp
+    assignment = next(line for line in cpp.splitlines() if line.strip().startswith("sb ="))
+    assert assignment.count("(sa)") == 1
 
 
 # ---------------------------------------------------------------------------

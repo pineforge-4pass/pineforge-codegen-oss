@@ -1,0 +1,15 @@
+//@version=6
+strategy("Independent function locals", overlay = true, initial_capital = 1000000)
+// Each function binds its own spelling first; their sum is zero.
+first() =>
+    float privateValue = close - open
+    privateValue
+second() =>
+    float privateValue = open - close
+    privateValue
+signalValue = first() + second()
+plot(signalValue, "signal")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

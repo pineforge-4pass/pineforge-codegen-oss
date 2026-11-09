@@ -1,6 +1,6 @@
 # XSYM-C TradingView trade evidence
 
-Synthetic probes written for lane XSYM-C (Pine libraries inlined at transpile
+Synthetic probes for Pine libraries inlined at transpile
 time) and their unedited TradingView trade exports. They contain no closed,
 scraped or third-party source. Each was exported on 2026-09-28 with
 

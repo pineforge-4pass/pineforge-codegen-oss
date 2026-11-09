@@ -35,11 +35,25 @@ class FuncSig:
     tuple_count: int = 0         # number of tuple elements
 
 
+@dataclass(frozen=True)
+class InputDefaultContract:
+    """The Pine base type and qualifier required of an input default."""
+    pine_type: PineType
+    qualifier: str = "const"
+
+
 @dataclass
 class IntrinsicFunc:
     """Complete intrinsic function definition with all overloads."""
     name: str                    # e.g. "ta.sma" or "math.abs"
     signatures: list[FuncSig] = field(default_factory=list)
+    # Declared parameter names are the complete, verified keyword set.
+    # False preserves the record's existing keyword policy.
+    keyword_names_verified: bool = False
+    default_contract: InputDefaultContract | None = None
+    # Pine variadic callables forbid every keyword. This does not constrain
+    # their positional arity to the overload examples recorded below.
+    variadic: bool = False
 
     @property
     def primary(self) -> FuncSig:
@@ -73,8 +87,12 @@ def _sig(params: list[tuple], ret: PineType = PineType.FLOAT,
                    returns_tuple=returns_tuple, tuple_count=tuple_count)
 
 
-def _func(name: str, *sigs: FuncSig) -> IntrinsicFunc:
-    return IntrinsicFunc(name=name, signatures=list(sigs))
+def _func(name: str, *sigs: FuncSig,
+          keyword_names_verified: bool = False,
+          variadic: bool = False) -> IntrinsicFunc:
+    return IntrinsicFunc(name=name, signatures=list(sigs),
+                         keyword_names_verified=keyword_names_verified,
+                         variadic=variadic)
 
 
 # Shortcuts for common param types
@@ -156,7 +174,8 @@ _ta("crossunder", _sig([("source1", F), ("source2", F)], ret=B))
 _ta("cross",      _sig([("source1", F), ("source2", F)], ret=B))
 _ta("rising",     _sig([("source", F), ("length", I)], ret=B))
 _ta("falling",    _sig([("source", F), ("length", I)], ret=B))
-_ta("change",     _sig([("source", F), ("length", I, 1)]))
+_ta("change",     _sig([("source", F), ("length", I, 1)]),
+                  _sig([("source", B), ("length", I, 1)], ret=B))
 
 # --- Extremes & Lookback ---
 # ta.highest / ta.lowest have TWO overloads:
@@ -213,7 +232,8 @@ _ta("dev",     _sig([("source", F), ("length", I)]))
 # --- Cumulative & Historical ---
 _ta("cum",        _sig([("source", F)]))
 _ta("barssince",  _sig([("condition", B)], ret=I))
-_ta("valuewhen",  _sig([("condition", B), ("source", F), ("occurrence", I)]))
+_ta("valuewhen",  _sig([("condition", B), ("source", F), ("occurrence", I)]),
+                  _sig([("condition", B), ("source", B), ("occurrence", I)], ret=B))
 _ta("correlation", _sig([("source1", F), ("source2", F), ("length", I)]))
 
 # --- Chart all-time extremes (single series) ---
@@ -234,50 +254,60 @@ _ta("pivot_point_levels",
 
 MATH_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 
-def _math(short_name: str, *sigs: FuncSig) -> None:
-    MATH_FUNCTIONS[short_name] = _func(f"math.{short_name}", *sigs)
+def _math(short_name: str, *sigs: FuncSig,
+          keyword_names_verified: bool = False,
+          variadic: bool = False) -> None:
+    MATH_FUNCTIONS[short_name] = _func(
+        f"math.{short_name}", *sigs, keyword_names_verified=keyword_names_verified,
+        variadic=variadic,
+    )
 
 # Arithmetic
-_math("abs",    _sig([("x", F)]))
-_math("ceil",   _sig([("x", F)], ret=I))
-_math("floor",  _sig([("x", F)], ret=I))
+_math("abs",    _sig([("number", F)]), keyword_names_verified=True)
+_math("ceil",   _sig([("number", F)], ret=I), keyword_names_verified=True)
+_math("floor",  _sig([("number", F)], ret=I), keyword_names_verified=True)
 _math("round",
-      _sig([("x", F)], ret=I),                             # round(x) → int
-      _sig([("x", F), ("precision", I)]))                  # round(x, n) → float
-_math("round_to_mintick", _sig([("x", F)]))
-_math("sign",   _sig([("x", F)], ret=F))
+      _sig([("number", F)], ret=I),                       # round(number) → int
+      _sig([("number", F), ("precision", I)]),             # round(number, n) → float
+      keyword_names_verified=True)
+_math("round_to_mintick", _sig([("number", F)]), keyword_names_verified=True)
+_math("sign",   _sig([("number", F)], ret=F), keyword_names_verified=True)
 _math("max",
       _sig([("x", F), ("y", F)]),                          # 2-arg
       _sig([("x", F), ("y", F), ("z", F)]),                # 3-arg
-      _sig([("x", F), ("y", F), ("z", F), ("w", F)]))     # 4-arg
+      _sig([("x", F), ("y", F), ("z", F), ("w", F)]),      # 4-arg
+      variadic=True)
 _math("min",
       _sig([("x", F), ("y", F)]),
       _sig([("x", F), ("y", F), ("z", F)]),
-      _sig([("x", F), ("y", F), ("z", F), ("w", F)]))
+      _sig([("x", F), ("y", F), ("z", F), ("w", F)]),
+      variadic=True)
 _math("avg",
       _sig([("x", F), ("y", F)]),
       _sig([("x", F), ("y", F), ("z", F)]),
       _sig([("x", F), ("y", F), ("z", F), ("w", F)]),
       _sig([("x", F), ("y", F), ("z", F), ("w", F), ("u", F)]),
-      _sig([("x", F), ("y", F), ("z", F), ("w", F), ("u", F), ("v", F)]))
+      _sig([("x", F), ("y", F), ("z", F), ("w", F), ("u", F), ("v", F)]),
+      variadic=True)
 _math("sum",    _sig([("source", F), ("length", I)]))  # rolling sum → math::Sum in runtime
-_math("pow",    _sig([("base", F), ("exp", F)]))
-_math("sqrt",   _sig([("x", F)]))
-_math("exp",    _sig([("x", F)]))
-_math("log",    _sig([("x", F)]))
-_math("log10",  _sig([("x", F)]))
-_math("random", _sig([("min", F, 0.0), ("max", F, 1.0), ("seed", I, None)]))
+_math("pow", _sig([("base", F), ("exponent", F)]), keyword_names_verified=True)
+_math("sqrt",   _sig([("number", F)]), keyword_names_verified=True)
+_math("exp",    _sig([("number", F)]), keyword_names_verified=True)
+_math("log",    _sig([("number", F)]), keyword_names_verified=True)
+_math("log10",  _sig([("number", F)]), keyword_names_verified=True)
+_math("random", _sig([("min", F, 0.0), ("max", F, 1.0), ("seed", I, None)]),
+      keyword_names_verified=True)
 
 # Trigonometry
-_math("sin",    _sig([("x", F)]))
-_math("cos",    _sig([("x", F)]))
-_math("tan",    _sig([("x", F)]))
-_math("asin",   _sig([("x", F)]))
-_math("acos",   _sig([("x", F)]))
-_math("atan",   _sig([("x", F)]))
+_math("sin",    _sig([("angle", F)]), keyword_names_verified=True)
+_math("cos",    _sig([("angle", F)]), keyword_names_verified=True)
+_math("tan",    _sig([("angle", F)]), keyword_names_verified=True)
+_math("asin",   _sig([("angle", F)]), keyword_names_verified=True)
+_math("acos",   _sig([("angle", F)]), keyword_names_verified=True)
+_math("atan",   _sig([("angle", F)]), keyword_names_verified=True)
 _math("atan2",  _sig([("y", F), ("x", F)]))
-_math("todegrees", _sig([("x", F)]))
-_math("toradians", _sig([("x", F)]))
+_math("todegrees", _sig([("radians", F)]), keyword_names_verified=True)
+_math("toradians", _sig([("degrees", F)]), keyword_names_verified=True)
 
 
 # ============================================================================
@@ -298,16 +328,22 @@ STRATEGY_PARAMETERS = (
 
 STRATEGY_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 
-def _strat(short_name: str, *sigs: FuncSig) -> None:
-    STRATEGY_FUNCTIONS[short_name] = _func(f"strategy.{short_name}", *sigs)
+def _strat(short_name: str, *sigs: FuncSig,
+           keyword_names_verified: bool = False) -> None:
+    STRATEGY_FUNCTIONS[short_name] = _func(
+        f"strategy.{short_name}", *sigs,
+        keyword_names_verified=keyword_names_verified,
+    )
 
+# Order calls validate names against their own signature before lowering.
+# Keep this separate from arity: None also marks optional order parameters.
 _strat("entry", _sig([
     ("id", S), ("direction", B), ("qty", F, None),
     ("limit", F, None), ("stop", F, None),
     ("oca_name", S, None), ("oca_type", I, None),
     ("comment", S, None), ("alert_message", S, None),
     ("disable_alert", B, None), ("qty_type", I, None),
-], ret=VOID))
+], ret=VOID), keyword_names_verified=True)
 
 _strat("order", _sig([
     ("id", S), ("direction", B), ("qty", F, None),
@@ -315,7 +351,7 @@ _strat("order", _sig([
     ("oca_name", S, None), ("oca_type", I, None),
     ("comment", S, None), ("alert_message", S, None),
     ("disable_alert", B, None), ("qty_type", I, None),
-], ret=VOID))
+], ret=VOID), keyword_names_verified=True)
 
 _strat("exit", _sig([
     ("id", S), ("from_entry", S, ""),
@@ -330,26 +366,64 @@ _strat("exit", _sig([
     ("alert_message", S, None),
     ("alert_profit", S, None), ("alert_loss", S, None), ("alert_trailing", S, None),
     ("disable_alert", B, None),
-], ret=VOID))
+], ret=VOID), keyword_names_verified=True)
 
 _strat("close", _sig([
     ("id", S), ("comment", S, None),
     ("qty", F, None), ("qty_percent", F, None),
     ("alert_message", S, None), ("immediately", B, False),
     ("disable_alert", B, None),
-], ret=VOID))
+], ret=VOID), keyword_names_verified=True)
 
 _strat("close_all", _sig([
     ("comment", S, None), ("alert_message", S, None),
     ("immediately", B, False), ("disable_alert", B, None),
-], ret=VOID))
+], ret=VOID), keyword_names_verified=True)
 
-_strat("cancel", _sig([("id", S)], ret=VOID))
-_strat("cancel_all", _sig([], ret=VOID))
+_strat("cancel", _sig([("id", S)], ret=VOID), keyword_names_verified=True)
+_strat("cancel_all", _sig([], ret=VOID), keyword_names_verified=True)
+
+ARRAY_NEW_PARAMETERS = ("size", "initial_value")
 
 _strat("convert_to_account", _sig([("value", F)], ret=F))
 _strat("convert_to_symbol", _sig([("value", F)], ret=F))
 _strat("default_entry_qty", _sig([("fill_price", F)], ret=F))
+
+# strategy.closedtrades / strategy.opentrades accessor surfaces are NOT
+# symmetric in Pine v6. opentrades has no exit_* fields (a trade has not
+# closed yet). Both lack ``direction`` (Pine has ``size`` whose sign carries
+# the direction). Splitting the whitelist makes the support checker reject
+# typos like ``strategy.opentrades.exit_price(0)`` that previously slipped
+# through into codegen and produced trade-accessor calls the runtime does
+# not implement on the open-trades side.
+CLOSED_TRADE_ACCESSOR_METHODS: frozenset[str] = frozenset({
+    "profit", "profit_percent", "commission",
+    "entry_bar_index", "exit_bar_index", "entry_comment", "exit_comment",
+    "entry_id", "exit_id", "entry_price", "exit_price", "entry_time",
+    "exit_time", "size", "max_runup", "max_runup_percent",
+    "max_drawdown", "max_drawdown_percent",
+})
+OPEN_TRADE_ACCESSOR_METHODS: frozenset[str] = frozenset({
+    "profit", "profit_percent", "commission",
+    "entry_bar_index", "entry_comment", "entry_id",
+    "entry_price", "entry_time",
+    "size", "max_runup", "max_runup_percent",
+    "max_drawdown", "max_drawdown_percent",
+})
+
+# Every accessor takes the one parameter ``trade_num``. The records exist for
+# keyword binding only (the return type is not read from them): a call that
+# names it, ``strategy.closedtrades.profit(trade_num = 1)``, is bound to its
+# position like the positional spelling, and any other keyword is refused.
+TRADE_ACCESSOR_FUNCTIONS: dict[str, IntrinsicFunc] = {
+    f"strategy.{side}.{method}": _func(
+        f"strategy.{side}.{method}", _sig([("trade_num", I)], ret=F),
+        keyword_names_verified=True,
+    )
+    for side, methods in (("closedtrades", CLOSED_TRADE_ACCESSOR_METHODS),
+                          ("opentrades", OPEN_TRADE_ACCESSOR_METHODS))
+    for method in sorted(methods)
+}
 
 
 # ============================================================================
@@ -358,15 +432,19 @@ _strat("default_entry_qty", _sig([("fill_price", F)], ret=F))
 
 STR_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 
-def _str(short_name: str, *sigs: FuncSig) -> None:
-    STR_FUNCTIONS[short_name] = _func(f"str.{short_name}", *sigs)
+def _str(short_name: str, *sigs: FuncSig,
+         keyword_names_verified: bool = False) -> None:
+    STR_FUNCTIONS[short_name] = _func(
+        f"str.{short_name}", *sigs, keyword_names_verified=keyword_names_verified,
+    )
 
 _str("tostring",
      _sig([("value", F)], ret=S),
      _sig([("value", F), ("format", S)], ret=S))
 _str("tonumber",    _sig([("string", S)], ret=F))
 _str("format",      _sig([("formatString", S)], ret=S))  # variadic
-_str("format_time", _sig([("time", I), ("format", S), ("timezone", S, "")], ret=S))
+_str("format_time", _sig([("time", I), ("format", S), ("timezone", S, "")], ret=S),
+     keyword_names_verified=True)
 _str("length",      _sig([("string", S)], ret=I))
 _str("contains",    _sig([("source", S), ("str", S)], ret=B))
 _str("startswith",  _sig([("source", S), ("str", S)], ret=B))
@@ -407,6 +485,35 @@ _map("copy",     _sig([("id", F)], ret=F))
 _map("put_all",  _sig([("id", F), ("id2", F)], ret=VOID))
 
 
+# Scalar collection predicates. Collection storage and argument validation
+# retain their TypeSpec-aware dispatch; these signatures describe Pine values
+# independently of the historical C++ storage family.
+ARRAY_FUNCTIONS: dict[str, IntrinsicFunc] = {
+    "includes": _func("array.includes", _sig([("id", F), ("value", F)], ret=B)),
+    "every": _func("array.every", _sig([("id", F)], ret=B)),
+    "some": _func("array.some", _sig([("id", F)], ret=B)),
+}
+
+MATRIX_FUNCTIONS: dict[str, IntrinsicFunc] = {
+    name: _func(f"matrix.{name}", _sig([("id", F)], ret=B))
+    for name in (
+        "is_square", "is_identity", "is_diagonal", "is_antidiagonal",
+        "is_symmetric", "is_antisymmetric", "is_triangular",
+        "is_stochastic", "is_binary", "is_zero",
+    )
+}
+
+# matrix.new<type>(rows, columns, initial_value): the row and column counts
+# default to 0. The record exists for keyword binding only (its element type
+# is the call's template argument): ``rows = 2, columns = 3`` is bound to its
+# positions, a skipped count takes its default, any other keyword is refused.
+MATRIX_NEW = _func(
+    "matrix.new",
+    _sig([("rows", I, 0), ("columns", I, 0), ("initial_value", F)], ret=F),
+    keyword_names_verified=True,
+)
+
+
 # ============================================================================
 # syminfo.* functions
 # ============================================================================
@@ -431,6 +538,17 @@ REQUEST_FUNCTIONS: dict[str, IntrinsicFunc] = {
     ),
 }
 
+# Requests with payload-dependent returns keep their custom registration and
+# argument binder. The bool overload describes the value, without changing the
+# numeric storage chosen by that registration.
+REQUEST_VALUE_FUNCTIONS: dict[str, IntrinsicFunc] = {
+    "security": _func(
+        "request.security",
+        _sig([("symbol", S), ("timeframe", S), ("expression", F)]),
+        _sig([("symbol", S), ("timeframe", S), ("expression", B)], ret=B),
+    ),
+}
+
 
 # ============================================================================
 # Standalone built-in functions (no namespace)
@@ -438,23 +556,38 @@ REQUEST_FUNCTIONS: dict[str, IntrinsicFunc] = {
 
 BUILTIN_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 
-def _builtin(name: str, *sigs: FuncSig) -> None:
-    BUILTIN_FUNCTIONS[name] = _func(name, *sigs)
+def _builtin(name: str, *sigs: FuncSig, keyword_names_verified: bool = False) -> None:
+    BUILTIN_FUNCTIONS[name] = _func(
+        name, *sigs, keyword_names_verified=keyword_names_verified,
+    )
 
 _builtin("na",       _sig([("x", F)], ret=B))
 _builtin("nz",
          _sig([("source", F)], ret=F),
          _sig([("source", F), ("replacement", F)], ret=F))
 _builtin("fixnan",   _sig([("source", F)], ret=F))
+# The three overloads of Pine v6 (the numeric one first: it stays the primary
+# record); their parameter names are the complete keyword set.
 _builtin("timestamp",
          _sig([("year", I), ("month", I), ("day", I),
-               ("hour", I, 0), ("minute", I, 0), ("second", I, 0)], ret=I))
+               ("hour", I, 0), ("minute", I, 0), ("second", I, 0)], ret=I),
+         _sig([("timezone", S), ("year", I), ("month", I), ("day", I),
+               ("hour", I, 0), ("minute", I, 0), ("second", I, 0)], ret=I),
+         _sig([("dateString", S)], ret=I),
+         keyword_names_verified=True)
+# The widest overload names every parameter Pine v6 gives time() and
+# time_close(), the two offsets included (``time("60", bars_back = -1)``): a
+# keyword the validator does not find there is refused.
 _builtin("time",
-         _sig([("timeframe", S), ("session", S), ("timezone", S, "")], ret=I),
-         _sig([("timeframe", S)], ret=I))
+         _sig([("timeframe", S), ("session", S), ("timezone", S, ""),
+               ("bars_back", I, 0), ("timeframe_bars_back", I, 0)], ret=I),
+         _sig([("timeframe", S)], ret=I),
+         keyword_names_verified=True)
 _builtin("time_close",
-         _sig([("timeframe", S), ("session", S), ("timezone", S, "")], ret=I),
-         _sig([("timeframe", S)], ret=I))
+         _sig([("timeframe", S), ("session", S), ("timezone", S, ""),
+               ("bars_back", I, 0), ("timeframe_bars_back", I, 0)], ret=I),
+         _sig([("timeframe", S)], ret=I),
+         keyword_names_verified=True)
 _builtin("year",     _sig([("time", I, None), ("timezone", S, "")], ret=I))
 _builtin("month",    _sig([("time", I, None), ("timezone", S, "")], ret=I))
 _builtin("dayofmonth", _sig([("time", I, None), ("timezone", S, "")], ret=I))
@@ -472,8 +605,8 @@ _builtin("bool",     _sig([("x", F)], ret=B))
 _builtin("string",   _sig([("x", F)], ret=S))
 
 # Timeframe
-_builtin("timeframe.change", _sig([("timeframe", S)], ret=B))
-_builtin("timeframe.in_seconds", _sig([("timeframe", S)], ret=F))
+_builtin("timeframe.change", _sig([("timeframe", S)], ret=B), keyword_names_verified=True)
+_builtin("timeframe.in_seconds", _sig([("timeframe", S)], ret=F), keyword_names_verified=True)
 
 # Plain input() — overloaded on type of defval (PineScript v6)
 _builtin("input",
@@ -489,8 +622,14 @@ _builtin("input",
 
 INPUT_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 
-def _input(short_name: str, *sigs: FuncSig) -> None:
-    INPUT_FUNCTIONS[short_name] = _func(f"input.{short_name}", *sigs)
+def _input(short_name: str, *sigs: FuncSig,
+           default_type: PineType | None = None, default_qualifier: str = "const") -> None:
+    intrinsic = _func(f"input.{short_name}", *sigs)
+    intrinsic.default_contract = InputDefaultContract(
+        default_type if default_type is not None else sigs[0].params[0].pine_type,
+        default_qualifier,
+    )
+    INPUT_FUNCTIONS[short_name] = intrinsic
 
 # Common trailing: tooltip, inline, group, display (plot_display), confirm
 _C = [("tooltip", S, None), ("inline", S, None), ("group", S, None),
@@ -502,16 +641,41 @@ _input("float",  _sig([("defval", F), ("title", S, ""), ("minval", F, None),
                        ("maxval", F, None), ("step", F, None)] + _C, ret=F))
 _input("bool",   _sig([("defval", B), ("title", S, "")] + _C, ret=B))
 _input("string", _sig([("defval", S), ("title", S, ""), ("options", S, None)] + _C, ret=S))
-_input("source", _sig([("defval", F), ("title", S, "")] + _C, ret=F))
-_input("color",  _sig([("defval", I), ("title", S, "")] + _C, ret=I))
+_input("source", _sig([("defval", F), ("title", S, "")] + _C, ret=F),
+       default_qualifier="series")
+_input("color",  _sig([("defval", I), ("title", S, "")] + _C, ret=I),
+       default_type=PineType.COLOR)
 _input("timeframe", _sig([("defval", S, ""), ("title", S, "")] + _C, ret=S))
 _input("session", _sig([("defval", S, ""), ("title", S, "")] + _C, ret=S))
 _input("symbol", _sig([("defval", S, ""), ("title", S, "")] + _C, ret=S))
 _input("price",  _sig([("defval", F), ("title", S, "")] + _C, ret=F))
 _input("time",   _sig([("defval", I), ("title", S, "")] + _C, ret=I))
 _input("text_area", _sig([("defval", S), ("title", S, "")] + _C, ret=S))
-# defval is an enum member (typed as float in Pine's overloads; value is int index)
-_input("enum",   _sig([("defval", F), ("title", S, "")] + _C, ret=I))
+# The erased signature uses float; the default must carry a declared enum
+# identity, which the existing enum resolver checks, not a primitive proof.
+_input("enum",   _sig([("defval", F), ("title", S, "")] + _C, ret=I),
+       default_type=PineType.UNKNOWN)
+
+
+# Value-level inventory, including namespaces whose storage/binding has a
+# dedicated implementation. The legacy arity-only lookup below deliberately
+# remains separate: it cannot select a payload- or source-dependent overload.
+FUNCTION_REGISTRIES = (
+    TA_FUNCTIONS, MATH_FUNCTIONS, STRATEGY_FUNCTIONS, STR_FUNCTIONS,
+    MAP_FUNCTIONS, ARRAY_FUNCTIONS, MATRIX_FUNCTIONS, SYMINFO_FUNCTIONS,
+    REQUEST_FUNCTIONS, REQUEST_VALUE_FUNCTIONS, BUILTIN_FUNCTIONS,
+    INPUT_FUNCTIONS,
+)
+
+
+def get_value_function(name: str) -> IntrinsicFunc | None:
+    """Find a builtin's declared overloads by its full Pine name."""
+    short_name = name.rsplit(".", 1)[-1]
+    for registry in FUNCTION_REGISTRIES:
+        function = registry.get(short_name) or registry.get(name)
+        if function is not None and function.name == name:
+            return function
+    return None
 
 
 # ============================================================================
@@ -622,9 +786,9 @@ STRATEGY_VARIABLES: dict[str, PineType] = {
     "strategy.oca.reduce": I,
     "strategy.oca.none": I,
     # Direction constants
-    "strategy.direction.all": I,
-    "strategy.direction.long": I,
-    "strategy.direction.short": I,
+    "strategy.direction.all": S,
+    "strategy.direction.long": S,
+    "strategy.direction.short": S,
 }
 
 # Barstate variables
@@ -691,6 +855,8 @@ TIMEFRAME_VARIABLES: dict[str, PineType] = {
     "timeframe.period": S,
     "timeframe.multiplier": I,
     "timeframe.isintraday": B,
+    "timeframe.isminutes": B,
+    "timeframe.isseconds": B,
     "timeframe.isdaily": B,
     "timeframe.isweekly": B,
     "timeframe.ismonthly": B,
@@ -765,6 +931,35 @@ def merge_kwargs_to_positional(
     while merged and merged[-1] is None:
         merged.pop()
     return merged
+
+
+def get_intrinsic(namespace: str | None, func_name: str) -> IntrinsicFunc | None:
+    """Look up a registry record and its keyword-name validation policy."""
+    registry = {
+        "ta": TA_FUNCTIONS,
+        "math": MATH_FUNCTIONS,
+        "strategy": STRATEGY_FUNCTIONS,
+        "str": STR_FUNCTIONS,
+        "input": INPUT_FUNCTIONS,
+        "map": MAP_FUNCTIONS,
+        "syminfo": SYMINFO_FUNCTIONS,
+        "request": REQUEST_FUNCTIONS,
+        "array": ARRAY_FUNCTIONS,
+        "matrix": MATRIX_FUNCTIONS,
+        None: BUILTIN_FUNCTIONS,
+    }.get(namespace)
+    record = registry.get(func_name) if registry is not None else None
+    if record is None and namespace is None:
+        # The trade accessors are called through a three-part name
+        # (strategy.closedtrades.profit), so no namespace holds them: their
+        # records are keyed by the whole dotted name and found here.
+        record = TRADE_ACCESSOR_FUNCTIONS.get(func_name)
+    if record is None and namespace == "request":
+        # request.security keeps its custom binder; its value-level record is
+        # reachable here too. These records declare no verified keyword names,
+        # so every keyword check treats them as it treated an unknown call.
+        record = REQUEST_VALUE_FUNCTIONS.get(func_name)
+    return record
 
 
 def get_param_names(namespace: str | None, func_name: str) -> list[str] | None:
@@ -845,19 +1040,20 @@ def is_intrinsic_function(namespace: str | None, func_name: str) -> bool:
     return False
 
 
+def get_variable_type(namespace: str | None, name: str) -> PineType:
+    """Return a builtin variable's declared type, or UNKNOWN for other names."""
+    if namespace is None:
+        return BUILTIN_VARIABLES.get(name, PineType.UNKNOWN)
+    full = f"{namespace}.{name}"
+    for table in (
+        STRATEGY_VARIABLES, BARSTATE_VARIABLES, SYMINFO_VARIABLES,
+        TIMEFRAME_VARIABLES, BUILTIN_VARIABLES, DISPLAY_VARIABLES,
+    ):
+        if full in table:
+            return table[full]
+    return PineType.UNKNOWN
+
+
 def is_intrinsic_variable(namespace: str | None, name: str) -> bool:
     """Check if a name is a known TradingView built-in variable."""
-    if namespace is None:
-        return name in BUILTIN_VARIABLES
-    full = f"{namespace}.{name}"
-    if (full in STRATEGY_VARIABLES
-            or full in BARSTATE_VARIABLES
-            or full in SYMINFO_VARIABLES
-            or full in TIMEFRAME_VARIABLES
-            or full in BUILTIN_VARIABLES
-            or full in DISPLAY_VARIABLES):
-        return True
-    # e.g. strategy + "opentrades.capital_held" -> strategy.opentrades.capital_held
-    if namespace == "strategy" and "." in name:
-        return f"strategy.{name}" in STRATEGY_VARIABLES
-    return False
+    return get_variable_type(namespace, name) != PineType.UNKNOWN

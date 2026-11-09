@@ -1,0 +1,8 @@
+//@version=6
+strategy("Counter source type", currency=currency.NONE)
+bounds() => [0.5, 1.0]
+[first, last] = bounds()
+float acc = 0.0
+for walkIndex = first to last by 0.25
+    acc += 1.0
+plot(acc)

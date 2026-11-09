@@ -95,6 +95,7 @@ result = values.get(0)
     cpp = transpile(source)
     assert re.search(r"_udt_array_int_+push\(values, 7\)", cpp)
     assert "values.push_back(7);" not in cpp
+    # ea9ad9d proves the parameter present from the literal actual, 7.
     assert "self.insert(self.begin(), (value + 100));" in cpp
     compile_cpp(cpp, label="array-method-builtin-collision")
 

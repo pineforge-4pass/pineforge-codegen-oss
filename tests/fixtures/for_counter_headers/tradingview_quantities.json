@@ -1,0 +1,297 @@
+{
+  "provenance": "TradingView measurements, 2026-11-02. Each sha256 is the SHA-256 of that probe's TradingView export: the trades list or the reply that stops the run. Each source_sha256 identifies the measured source, not necessarily the repository fixture. The export files are not stored in the repository. For float_counter_*, first_end_read_*, int_counter_float_end and step_reads_counter_descending, fixtures preserve the measured expressions but may change strategy titles, comments and whitespace; float_counter_helper_value also places the helper body on its declaration line. The float-counter value and thirteen older iteration-count rows were measured on BINANCE:BTCUSDT 60, including seven tolerance-bracket probes at 12:22; each quantity holds on all 205 entries. The four additional large/small-step rows preserve every source byte except the strategy title; counts 3, 4, 3 and 3 are encoded as entry quantities 1.03, 1.04, 1.03 and 1.03 on all 180 exported entries. Their trade schedule is every eight bars from bar 0, with a close on the next bar. The first_end_read_start_two_down and first_end_read_start_two_up probes were measured at 11:57 on BINANCE:BTCUSDT 60; their exports have identical bytes and all 205 entries have quantity 1.1. The zero-entry probe is recorded separately because its accumulator starts at 0. The fstep_* sources are exact copies of the accepted TradingView scripts; their entry quantities encode 5, 7 and 3 loop iterations as 1 + count / 100. Their trade schedule is every eight bars from bar 0, with a close on the next bar. Compile-refusal spans use TradingView's 1-based inclusive end columns.",
+  "division_provenance": "The division_start_no_step, division_start_int_step, division_named_start, division_end_only and division_counter_value fixtures copy the measured v01 through v05 scripts byte for byte. fractional_input and fractional_series copy the measured fractional-input.pine and fractional-series.pine byte for byte. All seven exports contain 205 entries. The v01 and v03 exports are the same file. The series export alternates odd n (10.5, 103 entries) and even n (12, 102 entries), starting with odd n. Each sha256 below is the supplied full TradingView export digest; the source hashes identify the copied scripts. Carrier controls derive their 10.5 oracle from fractional_input's identical loop shape; they do not claim separate TradingView tapes.",
+  "fractional_consumer_provenance": "TradingView accepted descending.pine, array-index.pine and counter-string.pine on 2026-11-02 at 22:59. fractional_descending.pine, fractional_array_index.pine and counter_string.pine copy those sources byte for byte. The descending export has 205 entries of quantity 4.5. The array-index export has 205 entries of quantity 120: indices 2.5, 3.5 and 4.5 truncate to 2, 3 and 4. The counter-string export has 615 entries of quantity 1, with 205 entries for each exact id recorded below. Full export and source digests are the supplied measurement receipts. The counter_tostring known gap records current engine text separately from TradingView's 18-place ids.",
+  "reassignment_provenance": "All seven reassignment/helper fixtures copy the measured sources byte for byte. TradingView accepted every source on BINANCE:BTCUSDT 60 with default inputs. reassign_int_hint is the controlling row: an explicit int hint retains the quotient, quantity 2.5 on 205 entries, as do the plain and literal initializers. reassign_series_qty alternates 2.5 (103 entries) and 3.5 (102). reassign_untyped, reassign_typed (float hint) and helper_param each have quantity 10.5 on 205 entries and share fractional_input's supplied export digest. The helper_param source digest is computed from the copied source; export digests are supplied measurements, with no export or C++ hash recapture.",
+  "callable_quantity_provenance": "callable_var_qty.pine and callable_local_qty.pine copy the measured sources byte for byte. TradingView accepted each source on BINANCE:BTCUSDT 60 with default inputs. Each source was exported once; both exports contain 205 entries, all with quantity 2.5. The two exports are byte-equal, with each export digest bound to its own source digest below. The source and export digests are supplied measurement receipts; the supplied verdict table has SHA-256 0167f54f735894bacf4a6beb4b1643dff4ad2590a12015f42f78af0c54ac44a2.",
+  "widened_step_provenance": "The widened_float_step and widened_int_hint_float_step fixtures copy the measured sources byte for byte. TradingView refused both on BINANCE:BTCUSDT 60 with default inputs, reporting CE10106. Their check type stays int although the plain-quantity reassignment rows measure a value of 2.5. The source and error-artifact digests are supplied measurement receipts; the supplied verdict table has SHA-256 88b9dd5b851000ca157b7ade785ea20a85c8a2f8c7f10260ea93d1a0aa11763a.",
+  "callable_step_provenance": "The callable_direct_float_step, callable_bound_float_step, callable_input_float_step, plain_callable_direct_literal, plain_callable_direct_input and plain_callable_bound_input fixtures copy the measured sources byte for byte. TradingView refused all six on BINANCE:BTCUSDT 60 with default inputs, reporting CE10106 for a series int counter and literal float step. Each source was exported once. The source and error-artifact digests are supplied measurement receipts. The supplied verdict tables have SHA-256 e6e85132a0d37351bfc7238c05628552050398ce1206fbbccac1a15583809693 for callable_direct_float_step and callable_bound_float_step, b0eacb211dadf42644a3403b7658daa4b5e6626705a8a80f9b7aef76e354877d for callable_input_float_step and 81611becfb6be66642ccdbc1424db4b12b74dd5d145e838748243afa2259dc9b for the three plain-local callable fixtures.",
+  "ta_counter_type_receipt": {
+    "receipt": "tacarriers-2302",
+    "sha256": "be854854835eed60f33abe809a60e100cf978a304ba68138a332ef9d1124d1cc",
+    "int_source_ce10106": ["ta.median", "ta.mode", "ta.range", "ta.change(bar_index, 2)"],
+    "float_accepted": ["ta.max", "ta.min", "ta.percentile_nearest_rank", "ta.highest", "ta.lowest"],
+    "compile_only_zero_entries": ["ta.highest(3)"],
+    "ta.valuewhen": "no receipt, kept as on main"
+  },
+  "float_step_end_rule": {
+    "rule": "Accumulate the counter by repeated double addition. Continue while its excess beyond the end, computed as one double subtraction in the loop's direction, is strictly below 1e-10.",
+    "measurement": "TradingView counted shortfalls up to 9.999e-11 at the 0.3 scale and did not count them from 1.0e-10. Also measured at counter magnitudes of about 1, 1e3, 1e6 and 1e9; no magnitude-independent constant is claimed; not a constant TradingView publishes.",
+    "provenance": "The 72 recorded counts are read from c2_end_rule_tapes.json. Its inputs block preserves the sealed count TSV and measurement record SHA-256 digests. The older entry quantities and evidence below remain unchanged."
+  },
+  "entries_per_probe": 205,
+  "entry_counts": {
+    "callable_var_qty": 205,
+    "callable_local_qty": 205,
+    "fractional_descending": 205,
+    "fractional_array_index": 205,
+    "counter_string": 615
+  },
+  "entry_quantities": {
+    "reassign_int_hint": 2.5,
+    "reassign_plain_qty": 2.5,
+    "reassign_literal_qty": 2.5,
+    "callable_var_qty": 2.5,
+    "callable_local_qty": 2.5,
+    "reassign_untyped": 10.5,
+    "reassign_typed": 10.5,
+    "helper_param": 10.5,
+    "end_reads_counter": 1,
+    "end_reads_counter_other": 3,
+    "step_reads_counter": 15,
+    "end_reads_outer_value": 2,
+    "step_reads_outer_int": 7,
+    "a1_shadow_end_outer_int": 3,
+    "a2_shadow_step_outer_int": 15,
+    "a3_shadow_step_parameter": 15,
+    "b1_end_counter_later_global": 3,
+    "sec1_end_counter_in_security": 3,
+    "z1_step_nonzero_start": 15,
+    "float_counter_float_step": 5,
+    "float_counter_no_step": 3,
+    "float_counter_unit_step": 15,
+    "int_counter_float_end": 15,
+    "first_end_read_start_two_down": 1.1,
+    "first_end_read_start_two_up": 1.1,
+    "float_counter_value": 2.5,
+    "float_counter_tenth_step_to_one": 11,
+    "float_counter_helper_value": 5,
+    "float_counter_tenth_step_to_three_tenths": 4,
+    "float_counter_tenth_step_to_seven_tenths": 8,
+    "float_counter_fifth_step_to_three_fifths": 4,
+    "float_counter_end_between_steps": 3,
+    "float_counter_three_tenths_step": 4,
+    "float_counter_end_short_by_ten_billionth": 3,
+    "float_counter_end_short_by_hundred_thousandth": 3,
+    "float_counter_end_short_by_thousandth": 3,
+    "float_counter_nonzero_tenth_start": 4,
+    "float_counter_descending_tenth_step": 4,
+    "float_counter_approximate_third_step": 4,
+    "float_counter_large_magnitude": 3,
+    "float_counter_large_step": 1.03,
+    "float_counter_small_step": 1.04,
+    "float_counter_large_step_short_end": 1.03,
+    "float_counter_mid_step_short_end": 1.03,
+    "fstep_a_param_start": 1.05,
+    "fstep_b_body_local_start": 1.07,
+    "fstep_c_array_bounds": 1.03,
+    "division_start_no_step": 1.16,
+    "division_start_int_step": 1.165,
+    "division_named_start": 1.16,
+    "division_end_only": 1.06,
+    "division_counter_value": 4.5,
+    "fractional_input": 10.5,
+    "fractional_descending": 4.5,
+    "fractional_array_index": 120,
+    "counter_string": 1
+  },
+  "entry_quantity_patterns": {
+    "reassign_series_qty": {
+      "quantities": [2.5, 3.5],
+      "counts": [103, 102],
+      "order": "Alternating n = 5, n = 7, starting with n = 5"
+    },
+    "fractional_series": {
+      "quantities": [10.5, 12],
+      "counts": [103, 102],
+      "order": "Alternating odd n, even n, starting with odd n"
+    }
+  },
+  "entry_id_patterns": {
+    "counter_string": {
+      "ids": [
+        "i=2.500000000000000000",
+        "i=3.500000000000000000",
+        "i=4.500000000000000000"
+      ],
+      "counts": [205, 205, 205]
+    }
+  },
+  "trade_schedules": {
+    "float_counter_large_step": {"period": 8, "first_entry_bar": 0, "close_delay": 1},
+    "float_counter_small_step": {"period": 8, "first_entry_bar": 0, "close_delay": 1},
+    "float_counter_large_step_short_end": {"period": 8, "first_entry_bar": 0, "close_delay": 1},
+    "float_counter_mid_step_short_end": {"period": 8, "first_entry_bar": 0, "close_delay": 1},
+    "fstep_a_param_start": {"period": 8, "first_entry_bar": 0, "close_delay": 1},
+    "fstep_b_body_local_start": {"period": 8, "first_entry_bar": 0, "close_delay": 1},
+    "fstep_c_array_bounds": {"period": 8, "first_entry_bar": 0, "close_delay": 1}
+  },
+  "zero_entry_probes": {
+    "first_end_read_start_two_zero_entries": {"acc": 0, "entries": 0}
+  },
+  "compile_refusals": {
+    "int_start_float_end_float_step": {
+      "source_shape": "for v = 0 to 1.0 by 0.25",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "4:24-4:27",
+      "source_sha256": "0f499fb83d40959a1dfcd0a9eda45ed50e210324b2188c3b82f21df20c00b7a0",
+      "error_json_sha256": "612077dc4a00209b5b0c91531abbfa225b8fa3242267f743106c707a689d755f"
+    },
+    "helper_int_argument_float_step": {
+      "source_shape": "f(x) contains for v = x to 1.0 by 0.25; called as f(0)",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "5:31-5:34",
+      "source_sha256": "9c6aaeb9578724c1fddc0296a679395dd00f0271968d059709cc52d38655a1ec",
+      "error_json_sha256": "074376481bdab118aebc8fe4548b73616cca98d27e93c1432992435c9d9b85c5"
+    },
+    "widened_float_step": {
+      "source_shape": "n = input.int(5); s = n; s := s / 2; for i = s to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "7:19-7:21",
+      "source_sha256": "7e4b1ac7f4804d94a18e4d2e25c5b73ca8a53f8dfcbec37828468342c885376f",
+      "error_json_sha256": "15fae462d3cc80171955e5f8f1109ee8036f5f40fa22b3d73898da517f457d7a"
+    },
+    "widened_int_hint_float_step": {
+      "source_shape": "n = input.int(5); int s = n; s := s / 2; for i = s to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "7:19-7:21",
+      "source_sha256": "436c4da2f6674e4b32770a88957ed0c3b775d6fcc206a89796d7b7f8bd0f2f69",
+      "error_json_sha256": "cd67711a0727c06058e5f74d8b50eaa92a07dfcab7e652e669baa8191738594b"
+    },
+    "callable_direct_float_step": {
+      "source_shape": "measure(int seed) => var int s = seed; s := seed; s := s / 2; s; for i = measure(5) to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "9:28-9:30",
+      "source_sha256": "6b31db71ff140465c89f4704756f6ff7bc7792334c8ea055bb6bad045360936e",
+      "error_json_sha256": "222565ee733a6a7071ddab26813a3f85f44d7827f09b5bc1f499dd69b8f28164"
+    },
+    "callable_bound_float_step": {
+      "source_shape": "measure(int seed) => var int s = seed; s := seed; s := s / 2; s; x = measure(n); for i = x to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "11:19-11:21",
+      "source_sha256": "3d14afbd3351a98fdff6dfdaa3071013a28b00b6c1f705c3ca9fa940debc0eee",
+      "error_json_sha256": "0a0e26ca288a99bdff7971d2274508d876d688614137729c96f51ccbb882da9c"
+    },
+    "callable_input_float_step": {
+      "source_shape": "n = input.int(5); measure(int seed) => var int s = seed; s := seed; s := s / 2; s; for i = measure(n) to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "10:28-10:30",
+      "source_sha256": "93577e6dd9124856e177ecee4758eb8c947194bda4aadf26055ef2a30521cc41",
+      "error_json_sha256": "41abe4c758be1f7a17fd58a981ae0580d155ddb2b9eea2d730855a3ac33cf0e6"
+    },
+    "plain_callable_direct_literal": {
+      "source_shape": "measure(int seed) => int s = seed; s := s / 2; s; for i = measure(5) to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "8:28-8:30",
+      "source_sha256": "437f66ef40957df8f1046e59dfee9f7ebdf5a36a8391229af18d8ba70750d3bd",
+      "error_json_sha256": "7d7da1f8c771d560f1248d7d06b478e5c0818f35b48288c1c148123ffd9cb6ee"
+    },
+    "plain_callable_direct_input": {
+      "source_shape": "n = input.int(5); measure(int seed) => int s = seed; s := s / 2; s; for i = measure(n) to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "9:28-9:30",
+      "source_sha256": "f7e06871d0f08a5141037b621892fce6119f0c04d2d9615e36697c9568d5e189",
+      "error_json_sha256": "3edb8d447ddde8302749d720ca43ac5c55384cf2ceb5e191637f18f492823140"
+    },
+    "plain_callable_bound_input": {
+      "source_shape": "n = input.int(5); measure(int seed) => int s = seed; s := s / 2; s; x = measure(n); for i = x to 6 by 0.5",
+      "verdict": "REFUSED",
+      "code": "CE10106",
+      "span": "10:19-10:21",
+      "source_sha256": "feefbb1600b23a3a898b4963865e333d3bd81254da292ab88d7811eecde01219",
+      "error_json_sha256": "69a733318218c63957e40a329114e8df1b8b302c334b3397305abe29748db437"
+    }
+  },
+  "known_gaps": {
+    "helper_parameter_fraction": {
+      "probe": "helper_param",
+      "reason": "The source value query has no call-argument environment for an untyped parameter. The default-step helper counter stays int and loses the quotient before summation.",
+      "current_entry_quantity": 9,
+      "tradingview_entry_quantity": 10.5
+    },
+    "untyped_parameter_start": "For f(x) containing for v = x to 1.0 by 0.25, TradingView refuses f(0) with CE10106 (helper_int_argument_float_step) and accepts f(0.0). PineForge accepts and runs both with a float counter because this inference cannot distinguish their call-argument types; refusing the unknown start would also refuse the valid float-argument call.",
+    "counter_tostring": {
+      "probe": "counter_string",
+      "reason": "The emitted numeric formatter caps max_fraction at 15 and then caps min_fraction to it, so the double counter keeps its fraction but prints 15 fractional places instead of TradingView's measured 18. Fixing the shared formatter is outside the counter query and counter emission.",
+      "current_entry_ids": [
+        "i=2.500000000000000",
+        "i=3.500000000000000",
+        "i=4.500000000000000"
+      ]
+    }
+  },
+  "runtime_errors": {
+    "step_reads_counter_descending": "RE10021: 'step' in loop must be greater than zero",
+    "s1_step_neg_literal": "RE10021: 'step' in loop must be greater than zero",
+    "s2_step_zero_literal": "RE10021: 'step' in loop must be greater than zero",
+    "s3_step_neg_variable": "RE10021: 'step' in loop must be greater than zero"
+  },
+  "runtime_error_bar": 0,
+  "runtime_error_trade_count": 0,
+  "evidence": {
+    "reassign_int_hint": {"source": "reassign_int_hint.pine", "measured_source": "reassign_int_hint.pine", "sha256": "7c4c77e0830bfa3464171ec5562fc4724619a76d8275157a21b517431ce9f7dd", "source_sha256": "c9d7ebf0744337d9a9b6097f394b35dede11a08e7ff60c3cd261c6094e615ac6"},
+    "reassign_plain_qty": {"source": "reassign_plain_qty.pine", "measured_source": "reassign_plain_qty.pine", "sha256": "7c4c77e0830bfa3464171ec5562fc4724619a76d8275157a21b517431ce9f7dd", "source_sha256": "907d5827b99cc2279c2afe7f6e83283f2ff39592443595d02f12216cc81d333c"},
+    "reassign_literal_qty": {"source": "reassign_literal_qty.pine", "measured_source": "reassign_literal_qty.pine", "sha256": "7c4c77e0830bfa3464171ec5562fc4724619a76d8275157a21b517431ce9f7dd", "source_sha256": "95f293b390973e38f38665adbe3ae946112ab4b7f413a17579d40bb34d790b9e"},
+    "callable_var_qty": {"source": "callable_var_qty.pine", "measured_source": "callable_var_qty.pine", "sha256": "7c4c77e0830bfa3464171ec5562fc4724619a76d8275157a21b517431ce9f7dd", "source_sha256": "4e9d77ca008bc0542b07593977b00ff112f7696ce64e8d1206693452175b42b7"},
+    "callable_local_qty": {"source": "callable_local_qty.pine", "measured_source": "callable_local_qty.pine", "sha256": "7c4c77e0830bfa3464171ec5562fc4724619a76d8275157a21b517431ce9f7dd", "source_sha256": "04374d2c8500f4b9d9911df542735fcc2ec1359595edaa06ebf180e137a37a99"},
+    "reassign_series_qty": {"source": "reassign_series_qty.pine", "measured_source": "reassign_series_qty.pine", "sha256": "8b2923a9096d7b7d2a941c0f6bcb54a11e04a96714606dca91352d87b5b996dc", "source_sha256": "0ba66e2669200eed53015f3f9a8f5e7baf3cefa6ecc12e2caa1d82835635a565"},
+    "reassign_untyped": {"source": "reassign_untyped.pine", "measured_source": "reassign_untyped.pine", "sha256": "3aa0f43925521663a43f0421f5f4d8d0cee5f2925eeb09d0d22078c2d75aaa62", "source_sha256": "21896d14a3b77e0b889d804a4287b34422678aab64db2015d8ec5e35782c9ab1"},
+    "reassign_typed": {"source": "reassign_typed.pine", "measured_source": "reassign_typed.pine", "sha256": "3aa0f43925521663a43f0421f5f4d8d0cee5f2925eeb09d0d22078c2d75aaa62", "source_sha256": "1dfba9ed13151c4446d50dc871044df5c904e4f99a650de91155cb7ef2722e2c"},
+    "helper_param": {"source": "helper_param.pine", "measured_source": "helper_param.pine", "sha256": "3aa0f43925521663a43f0421f5f4d8d0cee5f2925eeb09d0d22078c2d75aaa62", "source_sha256": "ffa8cd5728b85a0c53b10d2b4131cc74cf40fa625d9e675b7716ca3259d0aead"},
+    "end_reads_counter": {"sha256": "e84496c2adc3436a4dd5d64496b684eea53b2daaa097ec550f5cb21459deb35b", "source_sha256": "6e7c9ac5494f2e85a31efcb856358ef0133cbf149d4b93447cb15ee9ee1ed522"},
+    "end_reads_counter_other": {"sha256": "7d393ff77e70190a9bea3317c4ee9fc02152af0499f3bdabd39561d7e6e2f7e0", "source_sha256": "8149b6a265232fb359219a2124b1ae9a98e9f861df9f5282f5da4d0c1de3ee1f"},
+    "step_reads_counter": {"sha256": "535bcd7cc99c8146a45e46ad9d0aff6da7c740cc58a4f57eecdf1d2c10d3856e", "source_sha256": "b61b4c7933e515491fdb16425c99ae51b944078eab5175b4087c6c3a7efdb323"},
+    "step_reads_counter_descending": {"sha256": "51b4d60bc9fea3633b56256cc866d2deb0f53d2fb556c8170e1c3be78fcc46b2", "source_sha256": "1148c17b77c93c4c48fea7464312b1d1ddc42b9e3860b3fc5e823c8684481dda"},
+    "end_reads_outer_value": {"sha256": "fb23b23e01e73fefab0c46fe70a6211212cd15bd952cc3ca069d21ccf25852ef", "source_sha256": "aacae35479a997ebc30d481bec519ee44315b2c20c2f35b60baf552b6b4f09b6"},
+    "step_reads_outer_int": {"sha256": "bcd1addb2b5230319801d9d522c08eb43b1c82ff574ee8f0e27369f5c237fb3d", "source_sha256": "33eaa3304bc034367c754f951c86d0d9960ed94e7e62c4c347d92867705a85bd"},
+    "a1_shadow_end_outer_int": {"sha256": "7d393ff77e70190a9bea3317c4ee9fc02152af0499f3bdabd39561d7e6e2f7e0", "source_sha256": "468baf8cf2a7a0536d44d99cd5db0202a7ed970610097ca219e5bcb9acbd3b39"},
+    "a2_shadow_step_outer_int": {"sha256": "535bcd7cc99c8146a45e46ad9d0aff6da7c740cc58a4f57eecdf1d2c10d3856e", "source_sha256": "14584ee6d4f44bf049971323b4becb2eb794c73cd7cee3dd74e22313fd9cbdb2"},
+    "a3_shadow_step_parameter": {"sha256": "535bcd7cc99c8146a45e46ad9d0aff6da7c740cc58a4f57eecdf1d2c10d3856e", "source_sha256": "e6078410fa14ebe7650ae244a41879bb2fb78430bba032ad4e2bbcc37e88c1f0"},
+    "b1_end_counter_later_global": {"sha256": "7d393ff77e70190a9bea3317c4ee9fc02152af0499f3bdabd39561d7e6e2f7e0", "source_sha256": "d92d514d5c0143c146c7f22dbe6e5732e95e9fff25e09b822ffeab7e394e8dcb"},
+    "sec1_end_counter_in_security": {"sha256": "7d393ff77e70190a9bea3317c4ee9fc02152af0499f3bdabd39561d7e6e2f7e0", "source_sha256": "a4a731402d9c154ec1c93f5057623a59eb31320464d789475a5b033615eadac1"},
+    "z1_step_nonzero_start": {"sha256": "535bcd7cc99c8146a45e46ad9d0aff6da7c740cc58a4f57eecdf1d2c10d3856e", "source_sha256": "acfc630b56bbdb49a0d614fb4f945ea08ee72f4311de79f8ca114632b0aea7b5"},
+    "float_counter_float_step": {"sha256": "b8483e12741c8f1ae8027260f09c5ff34221c7a9fd8223686f31dd24d89e4242", "source_sha256": "9706208a352563cf1cf9ce2a1a79f84dfc4eb4a93ef11b66baf5c4c2b4b45b24"},
+    "float_counter_no_step": {"sha256": "7d393ff77e70190a9bea3317c4ee9fc02152af0499f3bdabd39561d7e6e2f7e0", "source_sha256": "563d01f8616b652e8d004ed1d0d8eedfbca129162bd9af3e67a8309732555f2c"},
+    "float_counter_unit_step": {"sha256": "535bcd7cc99c8146a45e46ad9d0aff6da7c740cc58a4f57eecdf1d2c10d3856e", "source_sha256": "38b15580191950a0af87fcbf6e61542b48c5356362c0964d4e41c90941cf4b7c"},
+    "int_counter_float_end": {"sha256": "535bcd7cc99c8146a45e46ad9d0aff6da7c740cc58a4f57eecdf1d2c10d3856e", "source_sha256": "ab70e683024dc0628a5460d15bfa9a8246837b9f3c8e86dc048b3cccf465ed53"},
+    "first_end_read_start_two_down": {"sha256": "4ca8b5662f5d7b867812ca7f60f10b014f56a313fc144072f83293ec4feeb43b", "source_sha256": "032c9492b6ea3eaae7196bcd780c08d26063f5ea1b47b983960163067e4e2b8f"},
+    "first_end_read_start_two_up": {"sha256": "4ca8b5662f5d7b867812ca7f60f10b014f56a313fc144072f83293ec4feeb43b", "source_sha256": "f8e371c07c8b6eb651667069e171744a78a79e7f5e7ebf5db1c68aeb9b0cf247"},
+    "first_end_read_start_two_zero_entries": {"sha256": "a44585e8dcb09098c7fccb8f29b30d822dda00e9a1b4e2b698ecb47b2827e693", "source_sha256": "840cac29d859a3b4889e2fbfd733e0f961892b79e696fc758170e8e93b6216aa", "check": "TradingView export contains a header and zero entries"},
+    "float_counter_value": {"sha256": "00c263aaea6185d8f08ba099cc36f35ee7e8a1e42b2a29a576020f5e1964a0fc", "source_sha256": "89ee6cc4411bafb808d980fb894ed5e82b0bb4566e84647b751cbe647441f40c"},
+    "float_counter_tenth_step_to_one": {"sha256": "43323a1064ee8e4985e7e5e6f89668284604b00aeb08685e6336a90f9fb67c15", "source_sha256": "933e5484479ceb4918b6ca0842313c5f09d8cc351953848245fa447c8ece3554"},
+    "float_counter_helper_value": {"sha256": "b8483e12741c8f1ae8027260f09c5ff34221c7a9fd8223686f31dd24d89e4242", "source_sha256": "82f73b451a78bd6259aa76326ac9ca18a6e55fd6245d4aa7e8bfeece911cff98"},
+    "float_counter_tenth_step_to_three_tenths": {"sha256": "b689d36a5e157b86b9ebaaf0fbcdd916245e3b9185bd8dab6a638c20f59eecbd", "source_sha256": "7bbf5bba609c430e99a5dce8584be1a84275a1cb769da21c747f01d3139e03cf"},
+    "float_counter_tenth_step_to_seven_tenths": {"sha256": "95c18f57132ae8955b6d8fa59056a37a7a4e020540e81a098e5d7daef34b2f4f", "source_sha256": "266aec3e46db6634779caaef9f940bbc785e73600e0ed5d3a19b421f5939693b"},
+    "float_counter_fifth_step_to_three_fifths": {"sha256": "b689d36a5e157b86b9ebaaf0fbcdd916245e3b9185bd8dab6a638c20f59eecbd", "source_sha256": "35be0b14f82a14d47d1754f50468ca6e8207be5e6631eec0762cef23523d4f80"},
+    "float_counter_end_between_steps": {"sha256": "7d393ff77e70190a9bea3317c4ee9fc02152af0499f3bdabd39561d7e6e2f7e0", "source_sha256": "48557b371ff45879f2358539c1ad47c24a792ac3f32ecb6cac83eaaceba82b65"},
+    "float_counter_three_tenths_step": {"sha256": "b689d36a5e157b86b9ebaaf0fbcdd916245e3b9185bd8dab6a638c20f59eecbd", "source_sha256": "16a14968a4a3dfd04a96537e1a428f741c4a4421587e867191771e4e8364dc53"},
+    "float_counter_end_short_by_ten_billionth": {"sha256": "7d393ff77e70190a9bea3317c4ee9fc02152af0499f3bdabd39561d7e6e2f7e0", "source_sha256": "e35efe57d0db8bc1838a86404e935b622c62631bbc4d3e6c0f25dd898016ba90"},
+    "float_counter_end_short_by_hundred_thousandth": {"sha256": "7d393ff77e70190a9bea3317c4ee9fc02152af0499f3bdabd39561d7e6e2f7e0", "source_sha256": "020d4cc8ac1d9c6eba47357bd30937c12bfb7061981769ebf966625e0dc15b2b"},
+    "float_counter_end_short_by_thousandth": {"sha256": "7d393ff77e70190a9bea3317c4ee9fc02152af0499f3bdabd39561d7e6e2f7e0", "source_sha256": "53b3b330057ff479c24319fa696be8519ef96628b1112c2dc85816c4aee08faf"},
+    "float_counter_nonzero_tenth_start": {"sha256": "b689d36a5e157b86b9ebaaf0fbcdd916245e3b9185bd8dab6a638c20f59eecbd", "source_sha256": "39272b320156be5ed3bae6dc78d541d03dda21498d9b5c8d9bbf9d309442a1c6"},
+    "float_counter_descending_tenth_step": {"sha256": "b689d36a5e157b86b9ebaaf0fbcdd916245e3b9185bd8dab6a638c20f59eecbd", "source_sha256": "8504e9807d91920390d1129e08af6bc4496ec46b73f2c48f6bd4c3e528a4f6b7"},
+    "float_counter_approximate_third_step": {"sha256": "b689d36a5e157b86b9ebaaf0fbcdd916245e3b9185bd8dab6a638c20f59eecbd", "source_sha256": "95b5988e87a3190445aa791dab36de10dcf53177b4fc31622e5b2338a1e6b09c"},
+    "float_counter_large_magnitude": {"sha256": "7d393ff77e70190a9bea3317c4ee9fc02152af0499f3bdabd39561d7e6e2f7e0", "source_sha256": "1f8b4b13dd920f0aeac61fd2e12f3744b15e6e370a593b687679cb93cd99dfad"},
+    "float_counter_large_step": {"sha256": "c152179bb7615af5f831fd56aae6791e4c12a8e992a9a690549e1ab8b1d42db7", "source_sha256": "ed78ca07314c21659bf27bb95ec3c23b8cd09238fbd704d674b9e7e21d77cfac"},
+    "float_counter_small_step": {"sha256": "23424791b40f7bc83d933bc7597281af751f0a5ba467bb9114744020e687d5e2", "source_sha256": "25ea4bf580102f17d4acbb6a24e9b77106976b2e967c20638c0b3c50010f0af7"},
+    "float_counter_large_step_short_end": {"sha256": "c152179bb7615af5f831fd56aae6791e4c12a8e992a9a690549e1ab8b1d42db7", "source_sha256": "48f5db00f481707bea3cc5607fc25548ac2c897aef689df0e4ca66e806f1dc6e"},
+    "float_counter_mid_step_short_end": {"sha256": "c152179bb7615af5f831fd56aae6791e4c12a8e992a9a690549e1ab8b1d42db7", "source_sha256": "4d2e6f6db06db034e5028b4eb0515b8ebe2e9b8b580c28c5ede5ec4c79cbdd57"},
+    "fstep_a_param_start": {"sha256": "911608833e6f02374d11915e81985fa0cca14ab88053317ed413551adb64059c", "source_sha256": "096dcb41a868d376eb82fa5bbb7c94269229b0ecbfab6409869caba56fbbd74e"},
+    "fstep_b_body_local_start": {"sha256": "796704b642eb27b4df7e4867140abae7930ee125fd47c04c8750a6bea1a65920", "source_sha256": "3237f997e24c8cb0cd34d5b5653aee6b8a6674a748f8fa05a8932463371fd52c"},
+    "fstep_c_array_bounds": {"sha256": "c152179bb7615af5f831fd56aae6791e4c12a8e992a9a690549e1ab8b1d42db7", "source_sha256": "f304b32d237feffb84a75447a6104a61e017823005368a33ac9cab5c326d6a1c"},
+    "division_start_no_step": {"source": "division_start_no_step.pine", "measured_source": "v01_div_start_no_step.pine", "sha256": "601626fe43567172236ad8415b1cb0668e2f2f068d9db964505c0eb9ea792492", "source_sha256": "0d8a3e294351e3c077e64874bb69b0a4ebfac415e2763551eeb4391f0888ccab"},
+    "division_start_int_step": {"source": "division_start_int_step.pine", "measured_source": "v02_div_start_int_step.pine", "sha256": "227702b9125ac563b483ac9cde191d2fd165a84cd319da505a80e52014b7fd67", "source_sha256": "d632c352de6f15c35836ec9654444223581e688c3be84b4151e2f6b2862395b1"},
+    "division_named_start": {"source": "division_named_start.pine", "measured_source": "v03_div_named_start.pine", "sha256": "601626fe43567172236ad8415b1cb0668e2f2f068d9db964505c0eb9ea792492", "source_sha256": "3e98f880302ce87dd0926cbcbee58fa10b2d672bd6e7f6903d3c248d8159def6"},
+    "division_end_only": {"source": "division_end_only.pine", "measured_source": "v04_div_in_end_only.pine", "sha256": "ed918b8cab3dce893fa4742c9e623554208b3b0111f5e776c483009ae8029d55", "source_sha256": "ae887887d0ed3e3e3dab066b52f9987e8019ce8da500d96cdf177ce62b206acb"},
+    "division_counter_value": {"source": "division_counter_value.pine", "measured_source": "v05_div_start_uses_counter_value.pine", "sha256": "5937a1a604eaccad590bd5c048fc03e2135247b480d43031a792179aca0d3414", "source_sha256": "247254f382f52f5dec88b892aa7fd3b12586a36930d373a19cfd2cf267d534fb"},
+    "fractional_input": {"source": "fractional_input.pine", "measured_source": "fractional-input.pine", "sha256": "3aa0f43925521663a43f0421f5f4d8d0cee5f2925eeb09d0d22078c2d75aaa62", "source_sha256": "7d28e6e5a0fcad872ae300e63e096ba8e6573a7329843762360988c52ca0f02b"},
+    "fractional_series": {"source": "fractional_series.pine", "measured_source": "fractional-series.pine", "sha256": "1f5d502ce06983f69a6c3df3292179fa69a5de3cb423fee0beff66d97def5bdb", "source_sha256": "38921b7dc9bcd94450bbaa78d352d9546bf6db8e8c602cf86e126570db4ce73b"},
+    "fractional_descending": {"source": "fractional_descending.pine", "measured_source": "descending.pine", "sha256": "911f22a9365acf1daf33a3f6adb0bdf46142c7f062b7c0b3ba317b77b503b129", "source_sha256": "0bb92412d12cd18f348ba999e32d90ed018f966d8e480d923b881b6b899f5ce2"},
+    "fractional_array_index": {"source": "fractional_array_index.pine", "measured_source": "array-index.pine", "sha256": "8b1940bad020b14dfcacfc8193586c3304bcb3224f63c835082914670d106637", "source_sha256": "b7cd99e805d2377cd596042a9ee57b24133562924ac844403ad7dd15b26dd866"},
+    "counter_string": {"source": "counter_string.pine", "measured_source": "counter-string.pine", "sha256": "ea2e0040e9a2bac517dd9e593c07ef3e26727a9ac47dda83735fa25a271d739d", "source_sha256": "adbf627d72b6343805dc18fbd4760c88e540cc4c3fc409caf8fdceb0f24f3b26"},
+    "s1_step_neg_literal": {"sha256": "2cfe027222a5e99a8aea754cf09dd9e67cb38fbf539d0764fef38a7109a9c038", "source_sha256": "1de17a8b9b8778c5c13d2dac528f0e8d01ed04accd42225addb476861c580069"},
+    "s2_step_zero_literal": {"sha256": "72f8208f27a9c6e25cfc796a39c282aa0a22b7b6df9d51f5e95a2226147262e5", "source_sha256": "7f5d5e82820b27068929c020ad684ee151544b78918cf967ebf56edf49fe5859"},
+    "s3_step_neg_variable": {"sha256": "288ff78c63007ccaa0297b7f9d762da761811dd003f0c0ff31bc7909b36676e3", "source_sha256": "9a4fb83eb9ab0c57f938060c345673d354bc6dae46097d9309af1d58ced09640"},
+    "open_counter_header_end": {"check": "builds and runs"},
+    "open_counter_header_step": {"check": "builds and runs"}
+  }
+}

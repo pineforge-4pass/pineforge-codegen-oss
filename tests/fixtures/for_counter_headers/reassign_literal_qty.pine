@@ -1,0 +1,8 @@
+//@version=6
+strategy("carrier probe reassign_literal_qty", initial_capital = 1000000000000, currency = currency.NONE)
+s = 5
+s := s / 2
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = s)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

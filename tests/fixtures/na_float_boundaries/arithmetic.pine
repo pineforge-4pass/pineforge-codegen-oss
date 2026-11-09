@@ -1,0 +1,10 @@
+//@version=6
+strategy("Integer history arithmetic into float", currency=currency.USDT, initial_capital=1000000000, default_qty_type=strategy.fixed)
+int n = bar_index
+float w = n[1] + 1
+encoded = na(w) ? 1.0 : 2.0 + w / 1000.0
+if bar_index <= 1437 and bar_index % 3 == 0
+    strategy.entry("sample", strategy.long, qty=encoded)
+else if strategy.position_size != 0
+    strategy.close_all()
+plot(w)

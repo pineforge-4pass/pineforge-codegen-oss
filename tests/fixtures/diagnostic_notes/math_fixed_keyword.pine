@@ -1,0 +1,4 @@
+//@version=6
+strategy("Math fixed keyword")
+pf_value = math.round(x = 2.5)
+plot(pf_value)

@@ -1,6 +1,6 @@
 """Where a lane integrated by CGINT5a meets a rule already on main, or changes
 a function one of main's lanes changed, the integration keeps both rules
-(integration lane CGINT5a: CG-SILENT items 1, 2 and 4, cut on 9361dbb, on
+(integration cases for items 1, 2 and 4, cut on 9361dbb, on
 main's CGINT4 and TV-DEFAULTS; item 3 and CG-CHART-EMA-SEED are held). Each
 case runs the composition end to end -- ``transpile_json``, the built
 runtime, ``run_strategy.py`` -- or pins the C++ where the rules decide the
@@ -47,6 +47,7 @@ import pytest
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError, Level
 from tests._compile import compile_cpp
+from tests._numeric_expected import integer_arithmetic
 from tests._e2e import (
     Build, chart_feed_head, execute_all, ok, reference_codegen, same,
     skip_unless_e2e_env, transpile_json,
@@ -102,8 +103,9 @@ def test_an_ordered_operand_and_a_wide_product_share_one_expression():
     (token,) = _BINDING.findall(line)
     # The remove is bound before the size reads the array, and the product
     # is the 64-bit literal, not the C++ int product (400 * 7200000).
-    after = line.index(f"return ({token} + ")
+    after = line.index(f"auto _pna_l = ({token}); auto _pna_r = (")
     assert ".erase(" in line[:after] and "ints.size()" in line[after:]
+    assert integer_arithmetic(token, "+", "(double)ints.size()") in line
     assert WIDE in line and "(400 * 7200000)" not in line
 
 
@@ -116,7 +118,8 @@ if p > 0
 ''')
     payload = next(row for row in cpp.splitlines() if row.strip().startswith("_req_sec_0 ="))
     (token,) = _BINDING.findall(payload)
-    assert payload.index(".erase(") < payload.index(f"return ({token} + ")
+    assert payload.index(".erase(") < payload.index(f"auto _pna_l = ({token}); auto _pna_r = (")
+    assert integer_arithmetic(token, "+", "(double)ints.size()") in payload
     assert WIDE in payload
     assert "(400 * (((2 * 60) * 60) * 1000))" not in payload
     compile_cpp(cpp)

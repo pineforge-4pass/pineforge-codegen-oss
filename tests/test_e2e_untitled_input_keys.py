@@ -1,6 +1,6 @@
 """E2E: an untitled input is read under one key -- its declared name, the key
 the manifest lists -- by the member, the TA reset, a request.security
-timeframe and every other getter (lane C4, defect 4).
+timeframe and every other getter (a prior defect).
 
 TradingView (Pine v6 reference, ``input.int``): ``title (const string) Title
 of the input. If not specified, the variable name is used as the input's

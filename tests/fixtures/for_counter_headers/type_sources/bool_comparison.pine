@@ -1,0 +1,5 @@
+//@version=6
+strategy("Counter source type", currency=currency.NONE)
+flag = close > open
+a = array.from(flag)
+plot(array.get(a, 0) ? 1 : 0)

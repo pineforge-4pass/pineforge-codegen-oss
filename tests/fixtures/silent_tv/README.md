@@ -1,6 +1,6 @@
 # CG-SILENT TradingView trade evidence
 
-Synthetic probes written for lane CG-SILENT and their unedited TradingView
+Synthetic probes for silent evaluation and their unedited TradingView
 trade exports. They contain no closed or scraped source. Each was exported on
 2026-09-28 with
 

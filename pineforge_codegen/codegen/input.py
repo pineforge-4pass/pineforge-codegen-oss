@@ -16,13 +16,10 @@ Mixin contract — host class must provide:
 
 from __future__ import annotations
 
-import math
-
 from ..ast_nodes import (
     ASTNode,
     BinOp,
     BoolLiteral,
-    ColorLiteral,
     FuncCall,
     Identifier,
     MemberAccess,
@@ -33,8 +30,9 @@ from ..ast_nodes import (
 )
 from .. import signatures as sigs
 from ..pine_spelling import expr_start, global_input_calls, input_binding_names
-from .tables import _COLOR_CONSTANTS
-from .visit_expr import _color_literal_to_int64
+from ..symbols import PineType
+from .color_constants import literal_color_value
+from .constant_values import ConstantResolver, input_default_contract
 
 
 class InputHelper:
@@ -104,6 +102,12 @@ class InputHelper:
         func_name, namespace = self._resolve_callee(node.callee)
         if namespace != "input" or func_name != "enum" or not isinstance(default, Identifier):
             return default
+        return self._fold_enum_input_member(node, default)
+
+    def _fold_enum_input_member(self, node: FuncCall, member):
+        """Resolve a default or option through immutable declarations before the call."""
+        if not isinstance(member, Identifier):
+            return member
         declarations = {}
         reassigned = self._find_reassigned_vars()
         for statement in self.ctx.ast.body:
@@ -111,28 +115,29 @@ class InputHelper:
                 break
             if isinstance(statement, VarDecl):
                 declarations.setdefault(statement.name, []).append(statement)
-        candidate = default
+        candidate = member
         visited = set()
         while isinstance(candidate, Identifier) and candidate.name not in visited:
             visited.add(candidate.name)
             bindings = declarations.get(candidate.name, [])
             if len(bindings) != 1 or candidate.name in reassigned:
-                return default
+                return member
             declaration = bindings[0]
             if declaration.is_var or declaration.is_varip:
-                return default
+                return member
             candidate = declaration.value
         if isinstance(candidate, MemberAccess) and isinstance(candidate.object, Identifier):
             members = self._enum_defs.get(candidate.object.name, [])
             if candidate.member in members:
                 return candidate
-        return default
+        return member
 
     def _input_default_value(self, node: FuncCall) -> tuple[bool, object]:
         """``(True, value)`` when the defval is the constant a ``v = input...``
         binding records as ``v``'s known value -- a number, bool or string
-        literal, or a declared enum member (its index) -- else ``(False, None)``.
-        Only such an input is a stable scalar the TA reset can re-read."""
+        literal, a proven constant expression, or a declared enum member (its
+        index) -- else ``(False, None)``. Only such an input is a stable scalar
+        the TA reset can re-read."""
         default = self._get_input_default(node)
         if isinstance(default, (NumberLiteral, BoolLiteral, StringLiteral)):
             return True, default.value
@@ -140,6 +145,14 @@ class InputHelper:
             members = self._enum_defs.get(default.object.name)
             if members is not None and default.member in members:
                 return True, members.index(default.member)
+        resolver = getattr(self, "_constant_default_resolver", None)
+        if resolver is None:
+            resolver = self._constant_default_resolver = ConstantResolver(
+                self.ctx.ast, getattr(self, "_budget", None))
+        proof = resolver.expression(default)
+        if proof is not None and proof.pine_type in (
+                PineType.INT, PineType.FLOAT, PineType.BOOL, PineType.STRING):
+            return True, proof.value
         return False, None
 
     def _input_title_node(self, node: FuncCall):
@@ -173,8 +186,8 @@ class InputHelper:
         return names
 
     def _get_input_title(self, node: FuncCall, var_name: str | None = None) -> str:
-        """The key an ``input(...)`` call is read and listed by: its title's
-        string value, else the name of the declaration binding it, else
+        """The key an ``input(...)`` call is read and listed by: its normalized
+        title (``input_keys.assign_input_keys``), else its declaration name, else
         ``var_name``, else "".
 
         The binding name comes from the call node itself, so every getter of
@@ -191,7 +204,8 @@ class InputHelper:
         bound = self._input_binding_names().get(id(node))
         if bound is not None:
             return bound
-        return var_name if var_name else ""
+        from ..analyzer.callable_history_names import authored_callable_text
+        return authored_callable_text(self.ctx.ast, var_name) if var_name else ""
 
     def _input_title_value(self, node, _seen: frozenset = frozenset()) -> str | None:
         """A title expression's compile-time string value, or None. TradingView
@@ -246,16 +260,12 @@ class InputHelper:
     def _check_input_keys(self) -> None:
         """Warn about inputs of the script that share an override key.
 
-        An override reaches every input keyed by its title, else by the name of
-        the declaration holding the call (``_get_input_title``, the manifest's
-        ``title``), so inputs that share one cannot be overridden apart: two
-        untitled calls in one declaration (``n = input.int(9) +
-        input.int(3)``), two outside any declaration (keyed ""), an untitled
-        call and another input titled with its name, or one title repeated
-        across input groups (TradingView tells them apart; PineForge's
-        override protocol does not). The script still transpiles unchanged --
-        at its defaults every input reads its own default -- and one warning
-        per shared key names every input that key reaches.
+        Explicit duplicate titles already have declaration keys. Remaining
+        collisions include two untitled calls in one declaration (``n =
+        input.int(9) + input.int(3)``), two outside any declaration (keyed ""),
+        an untitled call and a title matching its binding name, or an assigned
+        suffix matching an authored title. These keep their existing defaults
+        and override behavior; one warning per shared key names all its calls.
         """
         calls_by_key: dict[str, list[FuncCall]] = {}
         for node, name in self._global_input_calls_with_names():
@@ -372,13 +382,23 @@ class InputHelper:
         return f'{getter}({self._input_key_literal(title)}, {default_cpp})'
 
     def _input_default_expression(self, node: FuncCall) -> tuple[str, int | None]:
-        """The getter's unchanged C++ default and its literal color value.
+        """The getter's C++ default and its proven packed color value.
 
         Both getter emission and the settings descriptor use this path; the
         manifest reads the descriptor's value rather than evaluating a second
         copy of the default. Unfoldable colors retain their previous metadata.
         """
         default = self._get_input_default(node)
+        contract = input_default_contract(node)
+        if (contract is not None and contract.pine_type == PineType.COLOR
+                and isinstance(default, (Identifier, FuncCall))):
+            resolver = getattr(self, "_constant_default_resolver", None)
+            if resolver is None:
+                resolver = self._constant_default_resolver = ConstantResolver(
+                    self.ctx.ast, getattr(self, "_budget", None))
+            proof = resolver.input_default(node)
+            if proof is not None:
+                return f"0x{proof.value:08X}LL", proof.value
         cpp = self._visit_expr(default) if default is not None else "0"
         func_name, namespace = self._resolve_callee(node.callee)
         color = (self._literal_color_value(default)
@@ -386,47 +406,8 @@ class InputHelper:
         return cpp, color
 
     def _literal_color_value(self, node) -> int | None:
-        """Evaluate only literal colors using the getter's palette/binding.
-
-        Match the existing color.hpp lowering: RGB channels truncate to int64
-        and keep their low byte; transparency is clamped to 0..100 and alpha
-        rounds half up, not Python's ties-to-even. No user identifiers or
-        arithmetic are newly accepted or folded here.
-        """
-        if isinstance(node, ColorLiteral):
-            return int(_color_literal_to_int64(node.value).removesuffix("LL"), 16)
-        if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
-            constant = _COLOR_CONSTANTS.get(node.member) if node.object.name == "color" else None
-            return constant[1] if constant is not None else None
-        if not isinstance(node, FuncCall):
-            return None
-        func_name, namespace = self._resolve_callee(node.callee)
-        if namespace != "color" or func_name not in ("new", "rgb"):
-            return None
-        arguments = self._color_arg_nodes(func_name, node)
-        if any(argument is None for argument in arguments):
-            return None
-        if func_name == "new" and len(arguments) == 2:
-            base = self._literal_color_value(arguments[0])
-            transparency = self._literal_or_none(arguments[1], signed=True)
-        elif func_name == "rgb" and len(arguments) in (3, 4):
-            channels = [self._literal_or_none(argument, signed=True) for argument in arguments[:3]]
-            if not all(isinstance(value, (int, float)) and not isinstance(value, bool)
-                       and (not isinstance(value, float) or math.isfinite(value))
-                       and -(1 << 63) < value < (1 << 63) for value in channels):
-                return None
-            red, green, blue = (int(value) & 0xFF for value in channels)
-            base = red << 16 | green << 8 | blue
-            transparency = self._literal_or_none(arguments[3], signed=True) if len(arguments) == 4 else 0
-        else:
-            return None
-        if (base is None or not isinstance(transparency, (int, float))
-                or isinstance(transparency, bool)
-                or (isinstance(transparency, float) and not math.isfinite(transparency))):
-            return None
-        transparency = min(100, max(0, transparency))
-        alpha = math.floor(255.0 * (100.0 - transparency) / 100.0 + 0.5)
-        return alpha << 24 | (base & 0xFFFFFF)
+        """The unchanged literal evaluator, also used by constant proofs."""
+        return literal_color_value(node)
 
     _GETTER_CPP_TYPE = {
         "get_input_bool": "bool", "get_input_int": "int",
@@ -469,9 +450,10 @@ class InputHelper:
         return self._GETTER_CPP_TYPE[self._input_getter_for_call(node, "input", None)]
 
     def _input_key_literal(self, title: str) -> str:
-        """``title`` as the C++ string literal the input getters key it by.
+        """An assigned key (or option value) as a C++ string literal.
 
-        A title is arbitrary Pine string text; pasted verbatim, a quote in it
+        Key assignment happens once before lowering, never during escaping.
+        A key is arbitrary Pine string text; pasted verbatim, a quote in it
         ends the literal early and a backslash escapes the next character, so
         the TU no longer compiles."""
         return f'"{self._cpp_string_escape(title)}"'
@@ -579,7 +561,7 @@ class InputHelper:
         emitted only when the corresponding signature argument is a const
         literal; a bound/option referencing a non-literal is omitted (never
         crashes). ``title`` is
-        the key the emitted C++ reads the input by: the title argument, else
+        the key the emitted C++ reads the input by: the assigned title key, else
         the name of the declaration holding the call
         (``pine_spelling.input_binding_names``), else "".
         """
@@ -650,6 +632,8 @@ class InputHelper:
                 opts_node = merged[oi]
                 elems = getattr(opts_node, "elements", None)
                 if elems is not None:
+                    if namespace == "input" and func_name == "enum":
+                        elems = [self._fold_enum_input_member(node, e) for e in elems]
                     vals = [self._literal_or_none(e) for e in elems]
                     # any non-const element -> omit the whole options list
                     if vals and all(isinstance(v, str) for v in vals):

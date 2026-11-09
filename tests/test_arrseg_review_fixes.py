@@ -17,7 +17,10 @@ from pineforge_codegen import transpile
 from pineforge_codegen.collection_history import NA_MATRIX_MESSAGE
 from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
-from tests._e2e import Build, chart_feed_head, execute_all, ok, skip_unless_e2e_env, trade_count
+from tests._e2e import (
+    Build, assert_run_stopped_with, chart_feed_head, execute_all, ok,
+    skip_unless_e2e_env, trade_count,
+)
 from tests.test_matrix_arithmetic_overloads import HEADER, witness
 
 
@@ -185,6 +188,12 @@ SUCCESS.update(CALLABLE)
 ERRORS = {
     "matrix_bound": (HEADER + MATRIX + "pb = m1[20]\nresult = pb.get(0, 0)\n", NA_MATRIX_MESSAGE),
     "matrix_alias": (HEADER + MATRIX + "pb = m1[20]\nalias = pb\nresult = matrix.get(alias, 0, 0)\n", NA_MATRIX_MESSAGE),
+}
+# The engine failure code each case stops with (read off a run against a built
+# library): the run ends with the engine's own code, it does not crash.
+FAILURE_CODES = {
+    "matrix_bound": "pine_na_reference",
+    "matrix_alias": "pine_na_reference",
 }
 
 SUCCESS.update({
@@ -441,5 +450,8 @@ def test_review_bound_na_matrix_errors(tmp_path):
     feed = chart_feed_head(engine, tmp_path, 4)
     runs = execute_all(engine, feed, tmp_path, {name: Build(source) for name, (source, _) in ERRORS.items()})
     for name, (_, message) in ERRORS.items():
-        assert runs[name].error is not None and message in runs[name].error, name
-        assert "-11" not in runs[name].error, name
+        assert_run_stopped_with(runs, name, FAILURE_CODES[name], message)
+
+
+def test_every_error_case_names_its_failure_code():
+    assert set(FAILURE_CODES) == set(ERRORS)

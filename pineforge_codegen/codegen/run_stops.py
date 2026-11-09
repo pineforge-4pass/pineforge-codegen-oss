@@ -37,6 +37,46 @@ decltype(auto) _pf_invariant_at(Container& container, Index index) {
 """
 
 
+def history_offset_guard(offset: str, line: int) -> str:
+    """Check an already evaluated numeric offset without narrowing it."""
+    return (
+        f"if (!is_na({offset}) && ({offset} < 0 || {offset} > 10000)) "
+        f'pine_runtime_error(std::string("History reference at line {line}: offset ") '
+        f'+ std::to_string({offset}) '
+        '+ ". The history offset must be a value between 0 and 10000."); '
+    )
+
+
+def history_capacity_guard(offset: str, capacity: int) -> str:
+    """Check one captured offset against an explicitly selected retention."""
+    return (
+        f"if (!is_na({offset}) && {offset} >= {capacity}LL) "
+        f'_PF_LIMIT_STOP("max_bars_back", {capacity}LL, '
+        '(std::string("The script attempts to reference historical data that is too far '
+        'from the current bar (") '
+        f'+ std::to_string({offset}) '
+        f'+ " bars back). The historical buffer\'s limit is {capacity} bars.").c_str()); '
+    )
+
+
+def checked_history_offset(offset: str, line: int, capacity: int | None = None,
+                           *, check_range: bool = True) -> str:
+    """Check one evaluated offset before its original type is narrowed."""
+    range_check = (
+        "if constexpr (!std::is_same_v<std::decay_t<decltype(_pf_idx_v)>, bool>) { "
+        f"{history_offset_guard('_pf_idx_v', line)}}} "
+    ) if check_range else ""
+    capacity_check = (
+        history_capacity_guard("_pf_idx_v", capacity)
+        if capacity is not None else ""
+    )
+    return (
+        f"([&]() {{ auto _pf_idx_v = ({offset}); "
+        f"{range_check}{capacity_check}"
+        "return _pf_idx_v; }())"
+    )
+
+
 def request_stop(marker: dict) -> str:
     """Metadata comes only from the original request's compile-time spelling."""
     escape = NamingHelper._cpp_string_escape

@@ -8,8 +8,8 @@ import re
 
 from ..ast_nodes import (
     BinOp, BoolLiteral, ForInStmt, ForStmt, FuncCall, FuncDef, Identifier, IfStmt,
-    MemberAccess, MethodDef, NumberLiteral, StringLiteral, SwitchStmt, TupleAssign,
-    UnaryOp, VarDecl, WhileStmt,
+    MemberAccess, MethodDef, NaLiteral, NumberLiteral, StringLiteral, SwitchStmt,
+    TupleAssign, UnaryOp, VarDecl, WhileStmt,
 )
 from ..limits import iter_ast_nodes, syntax_children
 from .capabilities import READ_ONLY_STRATEGY_CALLS, _expression
@@ -238,6 +238,15 @@ def _literal(node, bindings):
     return None
 
 
+def _lowers_to_empty_string(parameter) -> bool:
+    """A missing or na id or from_entry lowers to the host's empty-string sentinel.
+
+    The lowering (`_strategy_string_arg`) passes `""` for an absent argument and for a
+    literal na, so the lowered call is the same call; the receipt describes the lowered call.
+    """
+    return parameter.text == '""' and (parameter.node is None or isinstance(parameter.node, NaLiteral))
+
+
 def _finite(value) -> bool:
     return type(value) in (int, float) and math.isfinite(value)
 
@@ -263,7 +272,7 @@ def parameter_class(name, parameter, bindings):
         return "absent"
     value = _literal(parameter.node, bindings)
     if name in ("id", "from_entry"):
-        if parameter.node is None and parameter.text == '\"\"':
+        if _lowers_to_empty_string(parameter):
             value = ""
         if isinstance(value, str):
             return ("global" if not value else "named") if name == "from_entry" else (
@@ -387,7 +396,8 @@ def order_shapes_document(emitter) -> str:
         descriptor.update({name: parameter_class(name, parameter, bindings)
                            for name, parameter in record.parameters.items()})
         calls.append(descriptor)
-        ids.append({name: _literal(parameter.node, bindings) if parameter.node is not None else ""
+        ids.append({name: "" if parameter.node is None or _lowers_to_empty_string(parameter)
+                    else _literal(parameter.node, bindings)
                     for name, parameter in record.parameters.items() if name in ("id", "from_entry")})
     entries = [(site, ids[site].get("id"), call.get("direction"))
                for site, call in enumerate(calls) if call["call"] in ("entry", "order")

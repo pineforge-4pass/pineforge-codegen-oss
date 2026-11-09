@@ -1,7 +1,7 @@
 """Every argument of a lowered builtin is evaluated once per execution.
 
 Pine evaluates each call argument exactly once (only ``and`` / ``or`` and the
-``?:`` arms are lazy). The fixnan audit (lane W2, F03) ran every argument slot
+``?:`` arms are lazy). The fixnan audit ran every argument slot
 of the builtins below through a counting probe and found lowering templates
 that re-ran an argument's C++, reading it twice or once per loop iteration,
 or skipped it:

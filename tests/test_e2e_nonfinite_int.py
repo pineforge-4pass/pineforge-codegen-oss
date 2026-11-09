@@ -9,7 +9,7 @@ codegen narrowed the value into a C++ ``int`` at the assignment, where the
 infinity became ``na<int>()`` and ordered as na: ``if shares > 0`` never held
 where TradingView entered at the default quantity (the job-2545 MR VWAP SVP
 TDV strategy's VWAP reset bars, ``shares = math.floor(riskPerTrade /
-riskDiff)``; R5 lane TAIL-C).
+riskDiff)``; the nonfinite-int case).
 
 A plain global int fed only by those calls and read by an ordering comparison
 is now stored as the ``double`` its value already is (``_nonfinite_int_names``);
@@ -114,7 +114,7 @@ def test_only_a_floor_fed_global_keeps_the_double():
         "shares = math.floor(100 / z)\nx = shares + 1\nplot(x > 0 ? 1 : 0)\n",
         "f(int v) => v > 0\nshares = math.floor(100 / z)\nplot(f(shares) ? 1 : 0)\n",
         "shares = math.floor(100 / z)\nshares := 3\nplot(shares > 0 ? 1 : 0)\n",
-        "shares = math.floor(100 / z, 2)\nplot(shares > 0 ? 1 : 0)\n",
+        "shares = math.round(100 / z, 2)\nplot(shares > 0 ? 1 : 0)\n",
     ):
         cpp = transpile(head + body)
         assert "std::isfinite(shares) ? shares" not in cpp, body

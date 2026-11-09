@@ -6,14 +6,17 @@ scaffold or exception wrappers; test_checked_settings tests actual emissions.
 
 from __future__ import annotations
 
+import csv
 from hashlib import sha256
 
 import pytest
 
+from tests._e2e import Build, chart_feed_head, execute_all, ok, skip_unless_e2e_env
 from tests._legacy_cpp import legacy_cpp, without_restore_script_state, without_source_rename
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError, Level, Phase
 from tests.test_map_param_methods import _compile_and_run
+from tests._numeric_expected import integer_arithmetic, integer_to_double, require_numeric_hunk
 
 
 def test_duplicate_keyword_argument_is_a_parser_compile_error():
@@ -68,13 +71,31 @@ observed = typed_keywords(global_values, global_source)
 
 def test_valid_existing_positional_and_typed_keyword_forms_do_not_drift():
     cpp = transpile(_VALID_EXISTING_FORMS)
+    # The integer sum now preserves missingness before its float return.
+    total = integer_arithmetic(
+        integer_arithmetic("first", "+", "removed"), "+", "((present) ? (1) : (0))",
+    )
+    cpp = require_numeric_hunk(
+        cpp, "return ((first + removed) + ((present) ? (1) : (0)));",
+        f"return {integer_to_double(total)};",
+    )
     assert sha256(without_source_rename(legacy_cpp(cpp)).encode()).hexdigest() == (
         "c955f34b39e168579eab09094728963148a1a2c16d5c46b2bc2975d681d7963c"
     )
 
 
+def _integer_map_get_return_hunk(receiver: int, argument: int) -> tuple[str, str]:
+    value = (
+        f"[&](auto&& __pf_map_receiver_{receiver})->decltype(auto){{ "
+        f"return [&](auto&& __pf_map_param_arg_{argument})->decltype(auto){{ "
+        f"return __pf_map_receiver_{receiver}.get(__pf_map_param_arg_{argument}); "
+        '}((std::string("key"))); }((map))'
+    )
+    return f"return {value};", f"return {integer_to_double(value)};"
+
+
 @pytest.mark.parametrize(
-    ("source", "expected_hash"),
+    ("source", "expected_hash", "hunks"),
     [
         (
             '''//@version=6
@@ -84,6 +105,17 @@ probe(map<string, int> map) =>
 observed = probe(map.new<string, int>())
 ''',
             "26d575a62c58e2bb4f2129bd147282214d72897232eab2e7e6aa18b945fa616f",
+            # a579dae1 types the helper's result from the map its parameter
+            # binds (int), and with it the variable that reads it: main emits
+            # them as double behind no adapter. The three declarations are
+            # the whole difference from main's C++ (measured: a diff of the two
+            # emissions, 3 hunks), so the digest stays main's.
+            (
+                ("    double observed = 0.0;\n", "    int observed = 0;\n"),
+                ("        this->observed = 0.0;\n", "        this->observed = 0;\n"),
+                ("    double probe(PineMap<std::string, int> map) {",
+                 "    int probe(PineMap<std::string, int> map) {"),
+            ),
         ),
         (
             '''//@version=6
@@ -95,6 +127,7 @@ probe() =>
 observed = probe()
 ''',
             "cd9dfe67b885610a9052479ba587cefe52719ce5d5f372a6d32d6ad4a3a76be4",
+            (_integer_map_get_return_hunk(1, 2),),
         ),
         (
             '''//@version=6
@@ -104,14 +137,24 @@ map.put("key", 1)
 observed = map.get("key")
 ''',
             "e9e3aa71cdc225eb5f135867121a71c433e9f3d6e893eaa57df018cf0d8bdf6c",
+            (),
         ),
     ],
 )
 def test_lexical_identifier_named_map_remains_a_receiver(
     source: str,
     expected_hash: str,
+    hunks: tuple,
 ):
     cpp = transpile(source)
+    # The helper that reads a map of another scope keeps its existing double
+    # signature: a missing integer getter needs conversion at that return; the
+    # global getter stays integer. The helper that takes the map as a parameter
+    # is int (its hunks above require that signature).
+    if hunks and "    int probe(" not in cpp:
+        assert "    double probe(" in cpp
+    for previous, expected in hunks:
+        cpp = require_numeric_hunk(cpp, previous, expected)
     assert sha256(legacy_cpp(cpp).encode()).hexdigest() == expected_hash
 
 
@@ -212,21 +255,6 @@ observed = holder.values.get("key")
     assert _run_observed(transpile(source)) == 7.0
 
 
-_BLOCK_LOCAL_MAP_ISOLATION_SOURCE = '''//@version=6
-strategy("block map isolation")
-target = map.new<string, int>()
-observed = 0
-if bar_index >= 0
-    map = map.new<string, int>()
-    map.put("local", 9)
-    observed := map.get("local")
-if bar_index >= 0
-    map.put(target, "sibling", 2)
-    observed := observed * 10 + map.get(target, "sibling")
-map.put(target, "outside", 3)
-observed := observed * 10 + map.get(target, "outside")
-'''
-
 _BLOCK_LOCAL_VALUES_ISOLATION_SOURCE = '''//@version=6
 strategy("block map isolation")
 target = map.new<string, int>()
@@ -243,18 +271,64 @@ observed := observed * 10 + map.get(target, "outside")
 '''
 
 
-def test_map_namespace_read_rejects_an_expired_block_local():
-    with pytest.raises(CompileError) as caught:
-        transpile(_BLOCK_LOCAL_MAP_ISOLATION_SOURCE, filename="block-map.pine")
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.code == "PF-E2054"
-    assert diagnostic.message == "Block-local variable 'map' is read outside its block."
-    assert diagnostic.level is Level.ERROR
-    assert diagnostic.phase is Phase.ANALYZER
-    assert diagnostic.location.file == "block-map.pine"
-    # Lines 5-8 own map; the sibling's first read is line 10 after four spaces.
-    assert (diagnostic.location.line, diagnostic.location.col) == (10, 5)
+def test_map_namespace_call_after_an_expired_block_local():
+    """TradingView accepts namespace map calls after the local's scope ends."""
+    source = '''//@version=6
+strategy("pq2c", currency=currency.NONE, initial_capital=1000000)
+target = map.new<string, int>()
+if bar_index >= 0
+    map = map.new<string, int>()
+map.put(target, "outside", 3)
+observed = map.get(target, "outside")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")
+'''
+    cpp = transpile(source)
+    assert "class GeneratedStrategy" in cpp
+
+
+_EXPIRED_MAP_LOCAL_VALUE_SOURCE = '''//@version=6
+strategy("Map value after an expired block local named map", currency=currency.NONE, initial_capital=1000000)
+target = map.new<string, int>()
+if bar_index >= 0
+    map = map.new<string, int>()
+map.put(target, "first", 3)
+map.put(target, "second", 4)
+tradeQty = (map.get(target, "first") + 10 * map.get(target, "second") + 100 * map.size(target)) / 100.0
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = tradeQty)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")
+'''
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(_EXPIRED_MAP_LOCAL_VALUE_SOURCE, id="map"),
+        pytest.param(
+            _EXPIRED_MAP_LOCAL_VALUE_SOURCE.replace("    map = ", "    scratch = "),
+            id="scratch",
+        ),
+    ],
+)
+def test_map_namespace_calls_after_expired_local_match_tradingview_quantity(
+    source, tmp_path,
+):
+    """TradingView measured entry quantity 2.43; the neutral-name twin agrees.
+
+    Tape sha256: 927f04c9d4efc9ba9801f3c67d55516549e682408dfa1e404ea8e00b80eeadee.
+    """
+    engine = skip_unless_e2e_env()
+    feed = chart_feed_head(engine, tmp_path, 64)
+    runs = execute_all(engine, feed, tmp_path, {"map_value": Build(source)})
+    outcome = ok(runs, "map_value")
+    rows = csv.DictReader(outcome.trades["default"].decode("utf-8-sig").splitlines())
+    quantities = [float(row["Qty"]) for row in rows if row["Type"].startswith("Entry")]
+    assert quantities, "Expected entries from the TradingView-measured source"
+    assert all(quantity == 2.43 for quantity in quantities), quantities
 
 
 def test_map_namespace_calls_after_a_differently_named_block_local_runtime():
@@ -287,17 +361,22 @@ for i = 0 to 0
 
 
 @pytest.mark.parametrize(
-    ("source", "expected_hash", "expected_value"),
+    ("source", "expected_hash", "expected_value", "hunks"),
     [
         (
             _LATER_GLOBAL_MAP_SOURCE,
             "7a2128df4b4c4f4e10af1c129c3f6430b0f66974b3d33a1ae7c891439f5611b2",
             34.0,  # The namespace read returns 3 and the later receiver read returns 4: 3*10+4.
+            (("observed = ((before * 10) + after);",
+              "observed = " + integer_to_double(integer_arithmetic(
+                  integer_arithmetic("before", "*", "10"), "+", "after",
+              )) + ";"),),
         ),
         (
             _FOR_BLOCK_LOCAL_MAP_SOURCE,
             "173e0a55a404e280c651be398382a7cd3e852baf3b78fc646a4f4fce1cad8e97",
             8.0,  # The sole iteration puts 8 at "key" and reads it before leaving the block.
+            (),
         ),
     ],
 )
@@ -305,9 +384,13 @@ def test_map_namespace_resolution_respects_source_order_and_lexical_roots(
     source: str,
     expected_hash: str,
     expected_value: float,
+    hunks: tuple,
 ):
     cpp = transpile(source)
-    assert sha256(legacy_cpp(cpp).encode()).hexdigest() == expected_hash
+    pinned = cpp
+    for previous, expected in hunks:
+        pinned = require_numeric_hunk(pinned, previous, expected)
+    assert sha256(legacy_cpp(pinned).encode()).hexdigest() == expected_hash
     assert _run_observed(cpp) == expected_value
 
 
@@ -391,27 +474,6 @@ observed = probe()
             _typed_method_source('target.get("x", "y")'),
             "map.get: too many positional arguments (expected 1, got 2)",
         ),
-        (
-            _functional_source('map.get(id=target, key="x")'),
-            (
-                "map.get: keyword arguments are not supported "
-                "for this functional call form"
-            ),
-        ),
-        (
-            _functional_source('map.get(target, key="x")'),
-            (
-                "map.get: keyword arguments are not supported "
-                "for this functional call form"
-            ),
-        ),
-        (
-            _functional_source('target.get(key="x")'),
-            (
-                "map.get: keyword arguments are not supported "
-                "for this receiver-method call form"
-            ),
-        ),
     ],
 )
 def test_invalid_map_bindings_raise_stable_compile_errors(source: str, message: str):
@@ -421,3 +483,19 @@ def test_invalid_map_bindings_raise_stable_compile_errors(source: str, message: 
     assert caught.value.diagnostics[0].phase is Phase.CODEGEN
     assert caught.value.diagnostics[0].message == message
     assert str(caught.value).startswith("invalid-map-call.pine:")
+
+
+@pytest.mark.parametrize(
+    ("expression", "positional"),
+    [
+        ('map.get(id=target, key="x")', 'map.get(target, "x")'),
+        ('map.get(target, key="x")', 'map.get(target, "x")'),
+        ('target.get(key="x")', 'target.get("x")'),
+    ],
+)
+def test_valid_map_keyword_bindings_transpile(expression: str, positional: str):
+    assert transpile(
+        _functional_source(expression), filename="valid-map-call.pine"
+    ) == transpile(
+        _functional_source(positional), filename="valid-map-call.pine"
+    )

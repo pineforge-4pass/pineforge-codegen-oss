@@ -5,7 +5,7 @@ TradingView stores a color's transparency ``t`` as the alpha byte nearest
 ``100 - a * 100 / 255`` rounded, so a whole transparency reads back as itself
 and a fractional one goes through the byte: ``color.new(c, 10.5)`` reads 11
 and ``color.new(c, 20.5)`` 20. The engine's ``color.hpp`` computes both from
-a double transparency since lane W11-ENG-TIME-COLOR, and the transpiler hands
+a double transparency since the time/color handling changed, and the transpiler hands
 it the transparency unrounded (``helpers.color_alpha_cast``); it used to
 truncate one to an int, so ``color.new(c, 10.5)`` read 10.
 

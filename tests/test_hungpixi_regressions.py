@@ -59,7 +59,7 @@ def test_security_timeframe_switch_without_default_falls_back_to_the_chart():
     assert line.count("script_tf_") >= 3  # two selectors and the fallback
 
 
-def test_security_timeframe_switch_with_multistatement_arm_is_rejected():
+def test_security_timeframe_switch_with_local_arm_matches_expression_arm():
     source = (
         PRELUDE
         + "HTF = switch timeframe.period\n"
@@ -71,8 +71,9 @@ def test_security_timeframe_switch_with_multistatement_arm_is_rejected():
         + "plot(value)\n"
     )
 
-    with pytest.raises(CompileError, match="switch arms must contain one expression"):
-        transpile(source)
+    # Substituting selected leaves the literal arm used by the expression twin.
+    twin = source.replace('        selected = "5"\n        selected\n', '        "5"\n')
+    assert _registration_line(source) == _registration_line(twin)
 
 
 def test_closed_trade_entry_id_local_is_string_typed():

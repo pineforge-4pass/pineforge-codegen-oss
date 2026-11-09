@@ -6,7 +6,7 @@ previous call saw it, whether ``gv`` is ``var`` or not, and the same holds
 for ``bar_index``. The chart built-ins (``close``, ``open``, ``time``, ``hl2``,
 ...) keep the chart's history. ``fixtures/function_global_history`` holds
 TradingView's own tapes of three synthetic probes on BINANCE:ETHUSDT.P 15 (see
-its README for what each trade encodes): the r4 witness of lane W8E-EXITS, its
+its README for what each trade encodes): the r4 witness, its
 r5 built-ins control, and this lane's model probe (``[2]``, two call sites, a
 nested call, a loop, a global reassigned after the call, a function called on
 every bar) and conditional probe (a call whose body skips the read).
@@ -24,6 +24,9 @@ transpiles to the same C++ on both builds.
 from __future__ import annotations
 
 from tests._legacy_cpp import legacy_cpp
+from tests._numeric_expected import (
+    integer_arithmetic, integer_to_double, require_numeric_hunk,
+)
 import concurrent.futures
 import csv
 import datetime as dt
@@ -172,5 +175,27 @@ def test_the_pre_lane_build_read_the_charts_history(outcomes, tape):
 
 
 def test_chart_builtins_keep_the_pre_lane_lowering(outcomes):
-    assert (legacy_cpp(_outcome(outcomes, BUILTINS, "lane").cpp)
-            == legacy_cpp(_outcome(outcomes, BUILTINS, "legacy").cpp))
+    current = legacy_cpp(_outcome(outcomes, BUILTINS, BUILDS[0]).cpp)
+    previous = legacy_cpp(_outcome(outcomes, BUILTINS, "legacy").cpp)
+    # The calendar wrapper returns its integer timestamp into a double. Its
+    # parameters are nullable integers, so require that one complete adapter.
+    signature = "    double T("
+    start = previous.index(signature)
+    end = previous.index("\n    }\n", start)
+    body = previous[start:end]
+    value = body.split("        return ", 1)[1].removesuffix(";")
+    current = require_numeric_hunk(
+        current, f"return {value};", f"return {integer_to_double(value)};",
+    )
+    # Chart timestamp history is int64_t and can be missing before bar one.
+    # Its difference must stay missing before conversion to floating division.
+    # A scalar builtin uses its own series member; price fields use _s_*.
+    assert "    Series<int64_t> time" in current
+    assert "    int64_t ft()" in current
+    old_division = "((double)((ft() - time[1])) / (double)(900000))"
+    new_difference = integer_arithmetic("ft()", "-", "time[1]")
+    current = require_numeric_hunk(
+        current, old_division,
+        integer_arithmetic(new_difference, "/", "900000"),
+    )
+    assert current == previous

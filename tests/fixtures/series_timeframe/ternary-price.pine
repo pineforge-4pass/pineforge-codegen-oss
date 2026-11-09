@@ -1,0 +1,10 @@
+//@version=6
+strategy("Value probe: series ternary chooses request timeframe", currency = currency.NONE, initial_capital = 1000000)
+// The same condition and requested bar counter as the if expression.
+pick_tf = close > open ? "240" : "1D"
+got_v = request.security(syminfo.tickerid, pick_tf, bar_index)
+qty_v = 1 + got_v % 5
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = qty_v)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

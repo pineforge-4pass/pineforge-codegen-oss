@@ -58,7 +58,7 @@ def _refusal(source: str) -> CompileError:
 
 
 def _diag(error: CompileError, needle: str):
-    found = [d for d in error.diagnostics if needle in d.message]
+    found = [d for d in error.diagnostics if needle in d.message or d.code == needle]
     assert found, [d.message for d in error.diagnostics]
     return found[0]
 
@@ -311,7 +311,7 @@ TRADINGVIEW_REFUSED = {
     "ahist_field_noparen": ("CE10290", 10),
     "ahist_field_paren": ("CE10290", 10),
     "ahist_mfield": ("CE10290", 9),
-    "ahist_eq": ("CE10123", 7),
+    "ahist_eq": ("PF-E2066", 7),  # CE10123 in TV; the operator table owns this refusal.
 }
 
 
@@ -364,17 +364,20 @@ def test_a_method_straight_after_a_collection_history_cites_ce10011(body, line):
 # An array where TradingView expects something else: each refused there with
 # the code named (pine-facade, 2026-10-01).
 SCALAR_CONTEXTS = {
-    "equality": ("r = a == a[1] ? 1 : 0\n", "CE10123"),
-    "inequality": ("r = a[1] != a ? 1 : 0\n", "CE10123"),
-    "arithmetic": ("r = a[1] + 1\n", "CE10123"),
-    "comparison": ("r = a[1] > 0 ? 1 : 0\n", "CE10123"),
-    "negation": ("r = -a[1]\n", "CE10123"),
-    "ternary_condition": ("r = a[1] ? 1 : 0\n", "CE10123"),
+    # These CE10123 forms now stop at the common operator table.
+    "equality": ("r = a == a[1] ? 1 : 0\n", "PF-E2066"),
+    "inequality": ("r = a[1] != a ? 1 : 0\n", "PF-E2066"),
+    "arithmetic": ("r = a[1] + 1\n", "PF-E2066"),
+    "comparison": ("r = a[1] > 0 ? 1 : 0\n", "PF-E2066"),
+    # The same measured refusals name a unary operand and a condition,
+    # respectively; neither diagnostic invents a second operand.
+    "negation": ("r = -a[1]\n", "PF-E2076"),
+    "ternary_condition": ("r = a[1] ? 1 : 0\n", "PF-E2077"),
     "builtin_argument": ("r = math.abs(a[1])\n", "CE10123"),
     "nz_argument": ("r = nz(a[1])\n", "CE10123"),
     "float_declaration": ("float r = a[1]\n", "CE10173"),
     "float_reassignment": ("float r = 0.0\nr := a[1]\n", "CE10173"),
-    "compound_assignment": ("b = array.from(1.0)\nb += a[1]\nr = b.size()\n", "CE10123"),
+    "compound_assignment": ("b = array.from(1.0)\nb += a[1]\nr = b.size()\n", "PF-E2066"),
     "if_condition": ("float r = 0.0\nif a[1]\n    r := 1\n", "CE10101"),
     "while_condition": ("float r = 0.0\nwhile a[1]\n    r := 1\n    break\n", "CE10101"),
 }
@@ -386,6 +389,10 @@ def test_an_array_history_where_tradingview_expects_a_number_is_refused(name):
     error = _refusal(_script("a = array.from(close)\n" + body))
     diag = _diag(error, code)
     assert diag.location is not None
+    if name == "negation":
+        assert diag.args == {"op": "-", "operand_type": "array<float>"}
+    elif name == "ternary_condition":
+        assert diag.args == {"condition_type": "array<float>"}
 
 
 def test_a_bare_history_statement_is_refused():
@@ -752,21 +759,164 @@ def test_a_diamond_of_helpers_is_walked_once_per_helper():
     assert time.monotonic() - started < 30
 
 
-def test_many_bindings_are_walked_once_each():
-    # Each binding's uses come from an index of the script's names: a walk of
-    # the rest of the script per binding took 57 s for these 4,000 (7 s now,
-    # 4 s for the same script binding array.copy(a) instead). The budget is
-    # CPU time, which a loaded host's queue does not stretch: alone on a Linux
-    # test host this takes 13-14 s; in full-suite xdist runs there (load 45-74)
-    # 27-33 s of CPU took 57-78 s of wall clock.
+def _many_binding_script(binding_count: int) -> str:
     lines = ["a = array.from(close, open)", "float r = 0.0"]
-    for i in range(4000):
+    for i in range(binding_count):
         lines.append(f"p{i} = a[1]")
         lines.append(f"r += p{i}.size()")
-    import time
-    started = time.process_time()
-    transpile(_script("\n".join(lines) + "\n"))
-    assert time.process_time() - started < 60
+    return "\n".join(lines) + "\n"
+
+
+def _many_binding_type_script(binding_count: int) -> str:
+    lines = ["a = array.from(close, open)", "float r = 0.0"]
+    for i in range(binding_count):
+        lines.append(f"color c{i} = na")
+        lines.append(f"bool b{i} = false")
+        lines.append(f"string s{i} = na")
+        lines.append(f"float q{i} = na")
+        lines.append(f"p{i} = a[1]")
+        lines.append(f"r += p{i}.size()")
+    return "\n".join(lines) + "\n"
+
+
+def _many_binding_work(monkeypatch, binding_count: int, *, quadratic: bool = False):
+    """Return collection-history candidate visits for a generated script.
+
+    The quadratic branch is a test-local mutation: it deliberately scans every
+    identifier for every region query, so the same assertion proves that the
+    production index is doing linear work.
+    """
+    from collections import Counter
+
+    from pineforge_codegen.ast_nodes import Identifier
+    from pineforge_codegen.collection_history import CollectionHistoryChecker
+
+    visits_by_checker = {}
+    original_in_region = CollectionHistoryChecker._in_region
+
+    def counted_in_region(self, read, name, region, start, top):
+        visits_by_checker.setdefault(self, Counter())[name] += 1
+        return original_in_region(self, read, name, region, start, top)
+
+    monkeypatch.setattr(CollectionHistoryChecker, "_in_region", counted_in_region)
+
+    if quadratic:
+        def quadratic_region(self, name, region, start, top):
+            reads = []
+            for node in self._nodes_by_id.values():
+                if (isinstance(node, Identifier)
+                        and self._in_region(node, name, region, start, top)
+                        and node.name == name):
+                    reads.append(node)
+            return reads
+
+        monkeypatch.setattr(CollectionHistoryChecker, "_region_reads", quadratic_region)
+
+    transpile(_script(_many_binding_script(binding_count)))
+    return list(visits_by_checker.values())
+
+
+def _many_binding_type_work(monkeypatch, binding_count: int):
+    """Count actual top-level-body visits and scalar-slot calls."""
+    from collections import Counter
+
+    from pineforge_codegen.codegen.base import CodeGen
+    from pineforge_codegen.codegen.types import TypeInferer
+
+    counts = Counter()
+    original_slot = TypeInferer._slot_scalar_cpp_type
+    original_init = CodeGen.__init__
+
+    def counted_slot(self, name):
+        counts["slot_calls"] += 1
+        return original_slot(self, name)
+
+    def counted_init(self, ctx, budget=None):
+        class CountingBody(list):
+            def __iter__(body_self):
+                for statement in super().__iter__():
+                    counts["body_items"] += 1
+                    if counts["scan_active"]:
+                        counts["hint_items"] += 1
+                    yield statement
+
+        if not isinstance(ctx.ast.body, CountingBody):
+            ctx.ast.body = CountingBody(ctx.ast.body)
+        return original_init(self, ctx, budget=budget)
+
+    def count_hint(method_name):
+        original = getattr(TypeInferer, method_name)
+
+        def counted(self, *args, **kwargs):
+            counts[f"{method_name}_calls"] += 1
+            counts["scan_active"] += 1
+            try:
+                return original(self, *args, **kwargs)
+            finally:
+                counts["scan_active"] -= 1
+
+        return counted
+
+    with monkeypatch.context() as patch:
+        patch.setattr(CodeGen, "__init__", counted_init)
+        patch.setattr(TypeInferer, "_slot_scalar_cpp_type", counted_slot)
+        for method_name in (
+            "_global_color_hint", "_global_bool_hint", "_global_string_hint",
+            "_global_float_na_selection",
+        ):
+            patch.setattr(TypeInferer, method_name, count_hint(method_name))
+        transpile(_script(_many_binding_type_script(binding_count)))
+    counts.pop("scan_active", None)
+    return counts
+
+
+def test_many_binding_type_lookup_scales_linearly(monkeypatch):
+    """The hint index and slot lookup both scale with bindings, not N squared."""
+    small = _many_binding_type_work(monkeypatch, 32)
+    large = _many_binding_type_work(monkeypatch, 64)
+    assert small["slot_calls"] > 0 and small["body_items"] > 0, (
+        "type lookup instrumentation did not exercise the production paths",
+        small, large)
+    for method_name in (
+        "_global_color_hint", "_global_bool_hint", "_global_string_hint",
+        "_global_float_na_selection",
+    ):
+        assert small[f"{method_name}_calls"] > 0, (
+            "hint predicate was not exercised", method_name, small, large)
+    assert large["slot_calls"] <= small["slot_calls"] * 2 + 128, (
+        "slot lookup work is superlinear", small, large)
+    assert large["hint_items"] - small["hint_items"] <= 512, (
+        "top-level hint scan work is superlinear", small, large)
+
+
+def _assert_many_binding_work_is_linear(visits_by_checker, binding_count: int) -> None:
+    assert visits_by_checker, "collection-history region queries did not run"
+    expected = {f"p{i}": 1 for i in range(binding_count)}
+    for visits in visits_by_checker:
+        # Each binding contributes one source read and one consumer read;
+        # the remaining queries belong to the script's fixed scaffold.
+        assert sum(visits.values()) <= binding_count * 2 + 32, (
+            "collection-history candidate work is not linear", binding_count, visits)
+        assert {name: visits[name] for name in expected} == expected, (
+            "each bound history must be visited exactly once", binding_count, visits)
+
+
+@pytest.mark.parametrize("binding_count", [32, 4000])
+def test_many_bindings_are_walked_once_each(monkeypatch, binding_count):
+    from pineforge_codegen import limits
+
+    # This test measures work rather than host speed. Restore the production
+    # deadline after the real collection-history queries have been counted.
+    with monkeypatch.context() as patch:
+        patch.setattr(limits, "MAX_TRANSPILE_SECONDS", float("inf"))
+        visits = _many_binding_work(patch, binding_count)
+    _assert_many_binding_work_is_linear(visits, binding_count)
+
+
+def test_many_bindings_work_count_rejects_quadratic_walk(monkeypatch):
+    visits = _many_binding_work(monkeypatch, 32, quadratic=True)
+    with pytest.raises(AssertionError, match="collection-history candidate work is not linear"):
+        _assert_many_binding_work_is_linear(visits, 32)
 
 
 def test_the_changing_methods_are_the_codegen_s_mutating_ones():

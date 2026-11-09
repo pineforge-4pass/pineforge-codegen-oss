@@ -86,9 +86,10 @@ def _assert_method_declaration_fences_sma(
     assert diagnostic.phase is Phase.CODEGEN
     assert diagnostic.location.line == expected_line
     assert diagnostic.message == (
-        "Unsupported TA constructor length 'p' for ta::SMA: it is neither a "
+        "Unsupported TA constructor length 'p' for ta.sma: it is neither a "
         "compile-time constant nor derived from an input, so PineForge cannot "
-        "size the indicator buffer."
+        "size the indicator buffer. TradingView accepts a series length for "
+        "ta.sma(); PineForge does not support it yet."
     )
 
 
@@ -129,17 +130,32 @@ def test_literal_declaration_cannot_retroactively_authorize_earlier_use(
 ) -> None:
     if prefix.startswith("x ="):
         body = prefix + "var int p = 5\n"
-        expected_line = 3
+        expected_col = 24
     else:
         body = prefix
-        expected_line = 5
+        expected_col = 9
     source = '//@version=6\nstrategy("predecl")\n' + body
 
-    _assert_exact_pivot_ctor_rejection(
-        source,
-        filename="stable-var-predecl.pine",
-        expected_line=expected_line,
+    # name_resolution/ref_top_global (CE10272): a later declaration cannot bind
+    # the first authored read, including an argument to a TA constructor.
+    filename = "stable-var-predecl.pine"
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename=filename)
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.code == "PF-E2075"
+    assert diagnostic.args == {"name": "p"}
+    assert diagnostic.message == (
+        "Variable 'p' is not declared in the current lexical scope before this use."
     )
+    assert diagnostic.hint is None
+    assert (
+        diagnostic.location.file,
+        diagnostic.location.line,
+        diagnostic.location.col,
+        diagnostic.location.end_col,
+    ) == (filename, 3, expected_col, expected_col + 1)
 
 
 @pytest.mark.parametrize(
@@ -147,13 +163,15 @@ def test_literal_declaration_cannot_retroactively_authorize_earlier_use(
     [
         "prior = p[1]",
         "read(int prior = p[1]) => prior",
-        "type Sample\n    int prior = p",
-        "type Sample\n    int prior = p[1]",
+        # A variable is not a valid record field default (TradingView CE10133), so the
+        # variable is read through the constructor instead.
+        "type Sample\n    int prior = 0\nsample = Sample.new(prior = p)",
+        "type Sample\n    int prior = 0\nsample = Sample.new(prior = p[1])",
         "enum Choice\n    First = p[1]",
         (
             "type Sample\n"
             "    int value = 0\n"
-            "method read(Sample self, int prior = p[1]) => prior"
+            "method read(Sample self, int prior = p[1]) => self, prior"
         ),
         "for i = p[1] to 2\n    plot(i)",
         "for i = 0 to p[1]\n    plot(i)",
@@ -364,8 +382,21 @@ observed = requested(p)
     [
         "q := 7",
         "q := int(close)",
+        "q += 7",
+        "q -= 7",
+        "q *= 7",
+        "q /= 7",
+        "q %= 7",
     ],
-    ids=["literal-reassignment", "series-reassignment"],
+    ids=[
+        "literal-reassignment",
+        "series-reassignment",
+        "add-compound-reassignment",
+        "subtract-compound-reassignment",
+        "multiply-compound-reassignment",
+        "divide-compound-reassignment",
+        "modulo-compound-reassignment",
+    ],
 )
 def test_callable_ta_length_rejects_parameter_reassignment(
     reassignment: str,
@@ -431,9 +462,10 @@ def test_callable_parameter_rebinding_fences_literal_specialization(
     diagnostic = caught.value.diagnostics[0]
     assert diagnostic.phase is Phase.CODEGEN
     assert diagnostic.message == (
-        "Unsupported TA constructor length 'p' for ta::SMA: it is neither a "
+        "Unsupported TA constructor length 'p' for ta.sma: it is neither a "
         "compile-time constant nor derived from an input, so PineForge cannot "
-        "size the indicator buffer."
+        "size the indicator buffer. TradingView accepts a series length for "
+        "ta.sma(); PineForge does not support it yet."
     )
 
 
@@ -573,9 +605,10 @@ requested = request.security(syminfo.tickerid, "60", ta.sma(close, L))
     diagnostic = caught.value.diagnostics[0]
     assert diagnostic.phase is Phase.CODEGEN
     assert diagnostic.message == (
-        "Unsupported TA constructor length 'L' for ta::SMA: it is neither a "
+        "Unsupported TA constructor length 'L' for ta.sma: it is neither a "
         "compile-time constant nor derived from an input, so PineForge cannot "
-        "size the indicator buffer."
+        "size the indicator buffer. TradingView accepts a series length for "
+        "ta.sma(); PineForge does not support it yet."
     )
 
 

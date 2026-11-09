@@ -7,6 +7,11 @@ import re
 from pineforge_codegen import transpile
 from tests.test_runtime_var_initialization import _compile_and_run
 
+# _SOURCE reads history through a non-literal offset (the loop variable) and has
+# no max_bars_back directive, so its bare series are declared with the default
+# history capacity, `Series<double> name{5000};`; a script that reads only
+# literal offsets keeps the bare declaration `Series<double> name;`.
+_MEMBER_DYNAMIC = r"^\s+Series<double> (_udf_series_arg_\d+)\{5000\};$"
 
 _SOURCE = '''//@version=6
 strategy("UDF series parameter chart history")
@@ -77,7 +82,7 @@ def test_plain_udf_history_parameters_hold_last_on_skipped_chart_bars() -> None:
     # own independent buffers.  They advance in the on_bar preamble and an
     # execution only replaces the already-created current slot.
     members = re.findall(
-        r"^\s+Series<double> (_udf_series_arg_\d+);$", cpp, re.MULTILINE
+        _MEMBER_DYNAMIC, cpp, re.MULTILINE
     )
     assert len(members) == 5
     assert len(set(members)) == 5
@@ -98,8 +103,10 @@ def test_plain_udf_history_parameters_hold_last_on_skipped_chart_bars() -> None:
 def test_plain_udf_history_buffers_are_rollback_owned() -> None:
     cpp = transpile(_SOURCE)
     members = re.findall(
-        r"^\s+Series<double> (_udf_series_arg_\d+);$", cpp, re.MULTILINE
+        _MEMBER_DYNAMIC, cpp, re.MULTILINE
     )
+    # The loop below must run: an empty list would pass without checking anything.
+    assert len(members) == 5
     for member in members:
         assert re.search(rf"^\s+{re.escape(member)},$", cpp, re.MULTILINE)
         assert re.search(

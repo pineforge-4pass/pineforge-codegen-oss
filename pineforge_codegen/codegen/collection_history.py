@@ -218,7 +218,8 @@ class CollectionHistoryEmitter:
         return None
 
     def _legacy_array_history_element(self, receiver: str, spec: TypeSpec,
-                                      offset: str, mutable: bool = False) -> str:
+                                      offset: str, mutable: bool = False,
+                                      offset_check: str = "") -> str:
         element_cpp = self._type_spec_to_cpp(spec.element)
         capture = ""
         if mutable and receiver in getattr(self, "_array_journal_members", {}):
@@ -233,6 +234,7 @@ class CollectionHistoryEmitter:
                 f"([&]() -> decltype(auto) {{ "
                 f"auto& _pf_history_array = {receiver}; "
                 f"const int _pf_history_offset = {offset}; "
+                f"{offset_check}"
                 f"if (_pf_history_offset < 0 || "
                 f"static_cast<size_t>(_pf_history_offset) >= _pf_history_array.size()) "
                 f'_PF_ARRAY_STOP("index_out_of_bounds", nullptr, '
@@ -244,6 +246,7 @@ class CollectionHistoryEmitter:
             f"([&]() -> {element_cpp} {{ "
             f"const auto& _pf_history_array = {receiver}; "
             f"const int _pf_history_offset = {offset}; "
+            f"{offset_check}"
             f"if (_pf_history_offset < 0 || "
             f"static_cast<size_t>(_pf_history_offset) >= _pf_history_array.size()) "
             f"return na<{element_cpp}>(); "
@@ -275,8 +278,14 @@ class CollectionHistoryEmitter:
     def _collection_history_capacity(self, variable) -> str:
         """The ring's size: the largest literal offset read plus one, or the
         Series default (a ``max_bars_back`` cap) for a dynamic offset."""
+        if self._history_capacity is not None:
+            capacity = max(self._resolved_history_capacity(), variable.capacity or 0)
+            return f"{{{capacity}}}"
         if variable.capacity is None:
-            return self._series_decl_suffix()
+            # Existing collection constructors retain their own default;
+            # inference for bare scalar rings does not resize snapshots.
+            cap = self._max_bars_back_cap
+            return f"{{{cap}}}" if cap else ""
         return f"{{{max(2, variable.capacity)}}}"
 
     def _emit_collection_history_helper(self, lines: list[str]) -> None:
@@ -285,7 +294,17 @@ class CollectionHistoryEmitter:
             return
         float_spec = TypeSpec.primitive("float")
         matrices = [v.spec for v in variables if v.kind == "matrix"]
-        lines.append(COLLECTION_HISTORY_CPP.strip("\n"))
+        array_traits = COLLECTION_HISTORY_CPP
+        if getattr(self, "_uses_array_slice_views", False):
+            # History freezes contents, not live slice bindings.
+            array_traits = array_traits.replace(
+                "std::make_shared<const std::vector<E, A>>(value)",
+                "std::make_shared<const std::vector<E, A>>(value.detached_copy())",
+            ).replace(
+                "copy(const std::vector<E, A>& value) { return value; }",
+                "copy(const std::vector<E, A>& value) { return value.detached_copy(); }",
+            )
+        lines.append(array_traits.strip("\n"))
         lines.append(COLLECTION_HISTORY_ARRAY_VALUE_CPP.strip("\n"))
         if any(spec.element == float_spec for spec in matrices):
             lines.append(COLLECTION_HISTORY_MATRIX_CPP.strip("\n"))
@@ -364,6 +383,7 @@ class CollectionHistoryEmitter:
     def _collection_history_offset_cpp(self, node) -> str:
         offset = literal_offset(node)
         if offset is not None:
+            self._check_history_capacity_offset(offset, node.index)
             return str(offset)
         return self._history_offset_cpp(self._visit_expr(node.index), node.index)
 
@@ -381,7 +401,8 @@ class CollectionHistoryEmitter:
         use = annotation["use"]
         offset = literal_offset(node)
         if use == "reference" and offset == 0:
-            cpp_type = self._type_spec_to_cpp(annotation["spec"])
+            cpp_type = self._type_spec_to_cpp(
+                self._type_spec_from_expr(node) or annotation["spec"])
             return f"_PFArrayHistoryValue<{cpp_type}>({current})"
         if use == "loop" or offset == 0:
             return current

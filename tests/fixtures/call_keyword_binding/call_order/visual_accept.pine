@@ -1,0 +1,8 @@
+//@version=6
+strategy("Visual positional prefix", initial_capital = 1000000, currency = currency.NONE)
+// A positional plotted series precedes its named title.
+plot(close, title = "Close")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

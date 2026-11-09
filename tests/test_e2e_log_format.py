@@ -1,5 +1,5 @@
 """E2E: ``log.info`` / ``log.warning`` / ``log.error(formatString, arg0,
-...)`` log the formatted string, arguments included (lane C5, defect 5).
+...)`` log the formatted string, arguments included (a prior defect).
 
 TradingView (Pine v6 reference, ``log.info``): "Converts the formatting
 string and value(s) into a formatted string, and sends the result to the

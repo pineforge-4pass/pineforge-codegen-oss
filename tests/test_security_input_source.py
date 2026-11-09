@@ -12,7 +12,7 @@ security helper-parameter history currently requires a direct OHLC/time
 bar-series binding". CG-W9-SEC (on main) reads the requested bar's value of
 the series ``get_input_source`` selects (the ``_pf_src`` lambda,
 ``_security_source_input_expr``) and keeps one per completed requested bar
-for its history (``_sec<N>_hist_input_source_K``); lane CG-XSYM-A2 carried
+for its history (``_sec<N>_hist_input_source_K``); the earlier cases carried
 the same rule on a base without it, and its builder gave way to main's in
 the integration (CGINT4). A parameter of the helper holding the request,
 bound to such a value, is put in its place (``security_contexts``, lane
@@ -80,7 +80,12 @@ def test_input_length_history_reads_through_the_getter():
         'logeq(_s, _l) => ta.change(_s, _l) / _s[_l]\n'
         'x = request.security(syminfo.tickerid, "D", logeq(lemaSrc, lemaLen))\n') + TRADE)
     evaluator = _evaluators(cpp)[0]
-    assert ('int _hidx = get_input_int("LEMA Length", 3); if (is_na(_hidx)) '
+    assert ('int _hidx = get_input_int("LEMA Length", 3); '
+            'if (!is_na(_hidx) && (_hidx < 0 || _hidx > 10000)) '
+            'pine_runtime_error(std::string("History reference at line 5: offset ") '
+            '+ std::to_string(_hidx) '
+            '+ ". The history offset must be a value between 0 and 10000."); '
+            'if (is_na(_hidx)) '
             'return na<double>(); return (_hidx <= 0) ? '
             + REQUESTED.format(key="LEMA Source", base="close")
             + " : _sec0_hist_input_source_0[_hidx - 1];") in evaluator

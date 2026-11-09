@@ -1,9 +1,9 @@
 """``request.security`` of another symbol reads that symbol's pinned feed.
 
 A request of another symbol whose value can reach a trade was a deferred
-refusal (lane XSYM-A): its first read stopped the run whatever data the run
+refusal: its first read stopped the run whatever data the run
 was given. The engine now takes another symbol's bars as an instrument feed
-installed before the run (lane XSYM-D: ``register_security_eval`` with the
+installed before the run (``register_security_eval`` with the
 run-time symbol key, ``strategy_set_symbol_feed``), so the codegen registers
 such a request by its symbol string as the run computes it before the first
 bar -- a literal, an input's getter, or a helper's parameter resolved on each

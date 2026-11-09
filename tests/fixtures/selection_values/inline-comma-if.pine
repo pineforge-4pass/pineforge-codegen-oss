@@ -1,0 +1,17 @@
+//@version=6
+strategy("Inline comma if", currency = currency.NONE, initial_capital = 1000000)
+// Derived: the declaration parses as VarDecl, but the comma-tail if becomes ExprStmt.
+choose(float x) =>
+    switch
+        x >= 0 => y = x + 0.125, if y > 0
+            y + 1.0
+        else
+            -y + 0.5
+        => -x
+x = (bar_index % 2 == 0 ? 1.0 : -1.0) * close
+value = choose(x)
+plot(value, "selected")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

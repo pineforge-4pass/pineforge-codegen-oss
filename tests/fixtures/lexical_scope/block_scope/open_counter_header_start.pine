@@ -1,0 +1,10 @@
+//@version=6
+strategy("Counter binding in initial bound", currency = currency.NONE, initial_capital = 1000000)
+// Open: does TV reject a self-reference before the counter is initialized?
+float signalValue = 0.0
+for i = i to 1
+    signalValue := i
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

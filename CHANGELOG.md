@@ -20,6 +20,252 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## Unreleased (next release)
+
+- `str.format_time` now uses TradingView's documented defaults when arguments
+  are omitted: `"yyyy-MM-dd'T'HH:mm:ssZ"` for the format and the exchange time
+  zone (`syminfo.timezone`) for the timezone. Pass `"yyyy-MM-dd"` and `"UTC"`
+  explicitly to restore the previous output. Regenerate C++ and relink
+  affected strategies.
+- A `when` argument on a strategy order call in Pine v6 now reports `PF-E2081`,
+  explaining that v6 removed the argument and recommending an `if` statement
+  around the call. Other unknown keywords keep `PF-E2027`.
+- Pine identifiers spelled like generated state members or helpers use the C++ name allocator, including history-bearing locals in requested helpers.
+- A local declared in a function or method and spelled like a built-in variable now keeps its own type, history storage and reads. Exceptions: a string local spelled like a price field (`open`, `high`, `low`, `close`, `hl2`, `hlc3`, `hlcc4`, `ohlc4`, `volume`) that is read with history in a function requested through `request.security` is still refused, as before; a string local that is read with history and used in a concatenation still does not compile, for any name; the support check still warns that `bar_index`, `last_bar_index` and `timenow` diverge from TradingView at every read of a local with that name; a script that declares the same built-in name in several callable shapes is accepted where an ordinary name is refused by the shared-Series check; and the confirmed-bar request receipt of a request inside the declaring function names the local by its internal storage spelling.
+- History retention can be selected with keyword-only `history_capacity`
+  in `transpile()`, `transpile_full()`, `transpile_with_request_inventory()`
+  and `gate/glue.py::transpile_json()`. The JavaScript worker template does
+  not pass this option. Without a Pine directive, large constant offsets
+  infer sufficient bare history and dynamic offsets select this package's
+  5000-slot retention default. Static operator overflow and invalid capacities
+  have typed diagnostics. Explicit runtime history bounds
+  stop with `pine_runtime_limit` and arguments `limit=max_bars_back`, `max=N`;
+  in-capacity warmup reads retain their missing-value behavior. A Pine
+  `max_bars_back` larger than `history_capacity` keeps its slots in the
+  stores, but the offset checks use `history_capacity` alone. Requested-helper
+  history references preserve their C++ members when a helper local or a
+  mutable global that the request reads has the same name as one of them.
+  Regenerate C++ and relink affected strategies.
+- `drawing_capacity`, accepted by `transpile()`, `transpile_full()`,
+  `transpile_with_request_inventory()` and `gate/glue.py::transpile_json()`,
+  bounds live lines, boxes and labels independently after
+  Pine's existing collection step. Creating or copying beyond the selected
+  bound stops with `pine_runtime_limit` and arguments `limit=live_drawings`,
+  `max=N`. Pine declaration counts keep their ordinary TradingView collection
+  behavior; linefills are outside the bound. Typed stops require the paired
+  engine catalog's `live_drawings` value. Omitting the option preserves drawing
+  emission and collection. The JavaScript worker template does not pass this
+  option. Capacities outside the native int64 domain are refused even for
+  scripts without drawings. Regenerate C++ and relink affected strategies.
+- Typed `array.from()` initializers now match their declared element type, including function-local `var` and `varip` arrays of timestamps.
+- Variables initialized from `backadjustment.*`, `settlement_as_close.*` and
+  `adjustment.*` constants now use integer storage in emitted C++.
+- `int(x)` of a floating value, and a stored `math.floor(x)`, `math.ceil(x)`
+  or `math.round(x)`, is a 64-bit integer whatever its magnitude, as in
+  TradingView: `int(1.7e12)`, `int(math.floor(1.7e12))` and
+  `v = math.floor(1.7e12)` are all 1700000000000. The generated C++ used to
+  read such a value outside the 32-bit range as the integer `na`
+  (-2147483648), which then flowed into arithmetic as that number. A value
+  that does not fit 64 bits, and a NaN, read `na` on every compiler and
+  architecture. A variable, function result, record field or int array that
+  holds the result of such an expression is `int64_t`, and a function
+  parameter that receives one follows. A 32-bit integer `na` (`int(na)`,
+  `bar_index`, a narrow input) that meets one of them in a selection arm, a
+  position of a tuple-valued selection, a store or a `request.security`
+  payload stays `na` instead of becoming the
+  number -2147483648. A history read (`int(x[1])`), a builtin float member
+  (`int(strategy.equity)`) and a float field of a record (`int(b.v)`) count as
+  floating values too. This changes generated C++ for scripts that use these
+  forms: regenerate and relink affected strategies.
+- Repeated explicit input titles now have separate override keys: the first
+  keeps the bare title, and later inputs use `<title>#<n>`, starting at 2 and
+  skipping authored titles and keys already assigned. The manifest, effective
+  settings receipt and input getters use the same keys. The checked input
+  setter now accepts the bare title for the first input instead of refusing
+  it as ambiguous; the legacy input setter now sets only the first input
+  instead of every input with that title. Repeated explicit titles no longer
+  trigger the shared-key warning; remaining collisions involving untitled
+  fallbacks still warn.
+- A chart TA constructor length that shadows a global input or constant now follows its lexical binding; a series length for `ta.percentile_nearest_rank` now uses the engine's `SeriesPercentileNearestRank` buffer at each call site, including repeated calls from a loop. A call inside a conditional appends only when it runs. `PF-E5092` remains the refusal for a series length of `ta.sma` (#295), and its message names the Pine function (`ta.sma`, not `ta::SMA`) and says that TradingView accepts the call. Every other `ta.*` function keeps `PF-E5009` and its wording, which makes no claim about TradingView: the functions where TradingView refuses a series length too (`ta.rma`, `ta.ema`, `ta.rsi`, `ta.atr`, `ta.dmi`, `ta.macd`, `ta.kc`, `ta.hma`, `ta.tsi`, `ta.rci` and the `atrPeriod` of `ta.supertrend`) and the ones with no recorded result.
+- Constant-expression input defaults can size TA constructors while retaining the input getter in runtime resets (#295).
+- A `request.security` payload may read a global that is an element of a tuple declaration of a pure user function (`[_, g] = pair(x)` with `pair(value) => [value, value + 7.0]`), directly or through a function that reads it: the declaration is evaluated on the requested bar, as in TradingView, and only the element read is lowered. The function must have a one-tuple-literal body over its parameters, the requested bar's fields and literals, and be called positionally with arguments that have no state. A function with a `ta.*` call, `var`, `varip`, a request or a method, a multi-statement body, and the history of an element (`g[1]`) keep their refusals.
+- `line(na)` and `box(na)` emit the same missing handles as typed drawing declarations initialized with `na` (#295).
+- Literal `na` in emitted strategy string parameters uses the empty-string sentinel, including `strategy.exit`'s `from_entry` (#295).
+- Array bindings destructured from a helper's tuple retain their collection type for built-in method calls (#295).
+- `if` and `switch` expressions reassigned to a history-bearing variable update its current Series slot (#295).
+- Pine identifiers `bar` and `HUGE` use the existing C++ name escape without changing authored input titles (#295).
+- Colliding direct scalar history locals in ordinary functions get declaration-owned Series storage and retain separate call-site histories, including computed initializers that read a same-named global and locals of different scalar families (#295).
+- Direct `size`, `first`, `last` and `get` reads of `line.all`, `box.all`, `label.all` and `linefill.all` use live arena order; aliases and mutations raise `PF-E5086`, and `polyline.all` requires engine support (`PF-E5085`) (#295).
+- C++ name escaping covers the macros defined by the audited math, limits, C++ wrapper and paired engine headers, retaining authored input keys (#295).
+- A keyword argument of a built-in call reaches its own parameter. `timeframe.in_seconds(timeframe = ...)` and `timeframe.change(timeframe = ...)` used the chart's timeframe instead of the named one, `strategy.closedtrades.*(trade_num = ...)` and `strategy.opentrades.*(trade_num = ...)` read trade 0 instead of the named trade, `str.format_time(time, timezone = ...)` read the timezone as the format, `timestamp(timezone = ..., year = ..., ...)` dropped the timezone and a skipped `hour` moved `minute` into its slot, `matrix.new<float>(rows = 2, columns = 3)` built a matrix with no rows and no columns, `time("60", timezone = ...)` and `time_close` read the timezone as the session, and `math.random(seed = 3)` read the seed as the minimum; none of them raised a diagnostic. A keyword none of these calls declares is now refused with the unknown-keyword diagnostic, as TradingView refuses it. Regenerate C++ and relink strategies.
+- Strategy order calls report unknown keyword arguments at the keyword
+  (#286;
+  [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
+- Strategy orders with omitted `qty` use the default size; integer `switch` and
+  `if` results with an explicit `na` arm preserve NaN, and
+  `strategy.risk.allow_entry_in` retains input-dependent directions (#292).
+- `strategy.risk.max_drawdown()` and `strategy.risk.max_intraday_loss()` called with `type = strategy.percent_of_equity`, or with `strategy.percent_of_equity` held in a variable, apply the percentage limit as the positional form does. The keyword and variable forms were read as an amount of account currency, so a limit of 10 halted trading early (#325, #326, #327). Regenerate C++ and relink strategies.
+- `max_bars_back(series, DEPTH)` with a `const int` `DEPTH` keeps that many bars of history for the series, as the literal depth does. The named constant was ignored, so history reads beyond the default depth returned `na` (#326, #327). Regenerate C++ and relink strategies.
+- A `var` array with a non-empty initializer declared inside an `if` block is initialized when the declaration is first reached, as in TradingView. The generated code reset it to empty and did not apply the initializer, so `array.size` and element reads differed (#333, #327). Regenerate C++ and relink strategies.
+- Methods whose first parameter is never referenced in their body now report `PF-E5087` at that parameter, with a hint to use it or declare a function instead.
+- Consumed `if`/`switch` selections mixing value and void arms now report located `PF-E5088`; requested void selections keep `PF-E3102`.
+- A `request.security` payload that reads the history of an expression inside
+  a loop, or at several reads of one helper parameter, commits one history
+  slot per requested bar holding the last evaluation of that bar, as
+  TradingView does. Every read of the bar sees the history before this bar.
+  Regenerate C++ and relink strategies (#287;
+  [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
+- `request.security` registers input-derived `lookahead` selections using the
+  selected input values, including overrides; choices that depend on bar data
+  still report `PF-E1085`. A scalar empty timeframe still uses the chart
+  timeframe; an `if`/`switch` timeframe arm known to be empty still reports
+  `PF-E3105`.
+  History reads of requested values now compile inside another request's TA
+  expression, including aliases and repeated reads. Uncalled request wrappers
+  no longer interfere with compiling unrelated direct requests (#294;
+  [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
+- `input.enum` options named through immutable enum-member declarations now retain their choices and checked-settings support.
+- Array fields in records that stay within one bar preserve omitted and explicit `na` IDs, distinct from empty arrays.
+- Copying a record that stays within one bar shares its array fields while keeping scalar fields independent.
+- A block-local `string` declaration at top level may now shadow a script-level `float` binding with declared or literal types without sharing storage; every other cross-type shadow keeps its existing refusal.
+- A series variable declared or written inside a loop now opens one history
+  slot per bar at the first reach and updates it on later iterations, as in
+  TradingView. Previously, each iteration opened a separate slot, so `y[i]`
+  could read prior iterations instead of prior bars. Expression histories in
+  loops also keep one slot per bar, holding its last evaluation. Functions
+  read current globals produced by tuple declarations; ordinary `string`
+  declarations initialized with `na` reset on each execution; named
+  array-constructor arguments bind to `size` and `initial_value`.
+  Reassigned ordinary inputs restart from the selected input value at their
+  declaration on each bar; `var` and `varip` inputs retain their accumulated
+  state. Regenerate C++ and relink strategies
+  (#291; [#324](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/324),
+  [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
+- Runtime history offsets below 0 or above 10000 stop at the read with an
+  error naming the Pine line and offset, before integer narrowing. Constant
+  offsets keep their existing behavior (#311;
+  [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
+- `timestamp("...")` now accepts full English month names, including
+  `"01 February 2024 00:00"`. The existing 64-bit timestamp handling through
+  `input.time` and function or tuple results is preserved (#293;
+  [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
+- `timestamp("...")` date strings with a `UTC` or `GMT` zone word now give
+  TradingView's value for four forms that differed. A negative zone with a
+  zero hour keeps its sign (`GMT-00:30`, `UTC-0:30`). Minutes of 60 or more
+  are dropped and the hours kept (`UTC+01:60`, `UTC+00:90`). A number without
+  a sign after the word is ignored (`UTC30`, `UTC5`). With a numeric offset
+  and a word in one string the last one decides (`+0000 UTC+2`,
+  `UTC+2 +0000`). `UTC5` and `UTC+2 +0000` are no longer refused.
+- `timestamp("...")` with a UTC or GMT zone word of 24 hours or more, for
+  example `UTC+24`, `GMT-24` or `UTC+25`, now translates instead of stopping
+  with an internal `ValueError`. As in TradingView, the zone word is plain
+  arithmetic on the date fields: the value is the fields read as UTC minus the
+  signed offset.
+- In `//@version=6` scripts and libraries, type field defaults containing calls
+  or user-declared variable references now report `PF-E2087` at the default
+  expression's first token. V5 sources keep their earlier handling.
+- `strategy.default_entry_qty(fill_price)` reads the engine host's query of the
+  default order size at a price (`default_entry_qty`); it used to lower to an
+  undeclared function, so a script that used it did not build. It needs an
+  engine whose strategy host provides the query. The calls TradingView refuses
+  are refused too, at the offending argument or call, also inside the arm of a
+  switch: no price, a second price, a price given both by position and by name,
+  an unknown argument name (`PF-E1088`), and a string, bool, color or
+  collection price (`PF-E2083` to `PF-E2086`, only for a type the syntax proves).
+- PF-W1505 now explains both EMA seeding modes and names the engine run option
+  `series_origin_ms`, passed through the run's `syminfo`. The default first-value
+  seed matches TradingView charts with history before the range; when the
+  reference starts at the range start, declaring its first bar's open time in
+  epoch milliseconds selects `na` for the first `length-1` bars followed by an
+  SMA seed. This also applies to `ta.macd` and `ta.tsi`; `ta.kc` and `ta.kcw`
+  already start that way in every run, because the generated code applies the
+  warm-up to their EMA basis. Declared origins
+  start `request.security` at the first whole higher-timeframe bucket at or
+  after that time, with plain expressions `na` until its first bar completes.
+  In a measured 336-exit reference starting at the range start, 37 exit comments
+  differ by default, including 5 finite values where TradingView is `na`; none
+  differ with the origin declared. Six corpus cases add, drop or shift 1 to 3
+  trades in the first days by default; all six are exact with the declared
+  origin. A wrong origin gives wrong values; do not set it for live runs, where
+  it has no defined meaning. `ta.rsi`, `ta.rma` and `ta.atr` already use SMA
+  seeds. Migration: none; undeclared runs are unchanged. The diagnostic stays
+  an unconditional note at each `ta.ema` call; this text change leaves generated
+  C++ unchanged.
+- An affine chart loop proved endless is stopped with the loop-time error when
+  its result reaches an effect. Omission is limited to an unused loop statement
+  with no calls, whose writes have no readers except self-updates, a break
+  condition or one further unused variable declaration. Other flagged loops
+  stop when their result is read in a shape not measured, where TradingView
+  may drop them. Endless loops in functions, methods and `request.security`
+  still never end here while TradingView stops them; data-dependent endless
+  loops still hang.
+- Missing integer values remain `na` in float writes, numeric selections,
+  float arguments and arithmetic. Explicit float declarations keep fractional
+  values after integer initialization. Regenerate C++ and relink strategies.
+
+- Pine v6 calls refuse a positional argument after a named argument with
+  `PF-E2074` at that positional expression. The check also covers strategy
+  declarations, unused functions and v6 library bodies before lowering.
+- A v6 counted loop whose start has positive int check evidence now refuses a
+  float-typed step during translation with `PF-E2079` at the step expression
+  and the hint "Use an int step or a float counter." An unknown start with
+  a positively float step still selects a float counter.
+- Counted loops can read their own counter in the end and step expressions,
+  including when it shadows an outer binding and inside a `request.security`
+  helper. The counter now wins over an outer same-named variable. The step is
+  read once at counter 0. TradingView measurements establish that direction
+  is fixed from the start and the first end read at counter 0, then an end
+  that reads this counter is read again at the start before the first
+  continuation test. The v6 end also refreshes between iterations. A non-positive
+  v6 step stops the run instead of being converted into a positive step.
+  This changes generated C++ for explicit-step loops; regenerate and
+  relink affected strategies.
+- A v6 counted loop uses a float counter when its start has positive float
+  evidence, or when its start is unknown and its step has positive float
+  evidence, including inside a `request.security` helper. A start whose value
+  has positive int evidence keeps an int counter. Without float evidence, the
+  existing int route is unchanged; v5 library loops keep their existing
+  int-counter route.
+  Counter-family inference follows declaration sources in a dedicated query,
+  independently of shared expression and storage inference.
+  A division in a loop start keeps its fraction unless it is a constant
+  division with an exact integer result, which keeps the int route. The float-step
+  refusal follows TradingView's check type (a division of two ints is int).
+- Float-counter loops accumulate the counter by repeated double addition.
+  TradingView's measured loop-end rule admits a counter whose excess beyond
+  the end, computed as one double subtraction in the loop's direction, is
+  strictly below `1e-10`. The named value `kTvFloatStepEnd` is emitted only
+  for float-counter loops. Measured on TradingView at the 0.3 scale (counted
+  up to a 9.999e-11 shortfall, not counted from 1.0e-10) and at counter
+  magnitudes of about 1, 1e3, 1e6 and 1e9; no magnitude-independent constant
+  is claimed; not a constant TradingView publishes.
+  `0.0 to 0.3 by 0.1` counts four iterations;
+  `0.0 to 2999.9999999999 by 1000.0` counts three.
+  A positive infinite step exits after one iteration with a finite end
+  and needs no non-finite-step guard.
+- Known loop gaps: a float counter passed to
+  an untyped helper truncates here, while TradingView passes the fractional
+  value (accumulating `twice(x)` from 0.0 to 1.0 by 0.25 gives 2 here and 5
+  on TradingView). `array.from(x)` can also truncate a float counter through
+  inferred `array<int>` storage. An unknown start from an untyped parameter
+  with a positively float step now selects a float counter, independently
+  of shared parameter inference. For `f(x)` containing
+  `for v = x to 1.0 by 0.25`, TradingView refuses `f(0)` with CE10106 and
+  accepts `f(0.0)`. PineForge accepts and runs both with a float counter
+  because this inference cannot distinguish their call-argument types;
+  refusing the unknown start would also refuse the valid float-argument call.
+  Block-local/enclosing-counter bindings and stops inside `request.security`
+  have no TradingView tape.
+- A Pine v6 function or method reading a later local without an earlier
+  visible binding is refused during analysis at the read (`PF-E2075`),
+  using the same declaration-order rule as later globals (`PF-E2053`).
+  Reading a loop counter or `for ... in` binder after its loop without
+  another visible binding is now refused at translate time (`PF-E2054`);
+  these reads were previously accepted.
+  TradingView accepts a namespace call after an expired block local with the
+  same name; PineForge's analysis no longer refuses it, but code generation
+  still rejects some such calls (a known gap).
+
 ## 1.9.1 — 2026-10-31
 
 - Translation checks the generated C++ against a fixed allowlist and refuses a
@@ -324,8 +570,8 @@ changes the emitted C++ and the other two only the repository's own CI.
   contract: the `promote-baseline` workflow refuses untrusted heads and actors
   (SEC846,
   [#242](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/242)),
-  and `test.yml` adopts the organization's CI canon (CR-241,
-  [#243](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/243)).
+  and `test.yml` adopts the organization's CI canon
+  ([#243](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/243)).
 
 ## 1.6.3 — 2026-10-23
 
@@ -395,8 +641,8 @@ emitter, a change of the licensor's written entity, and CI changes.
 - New command `pf-cpp-allowlist` (`pineforge_codegen.cpp_allowlist:main`,
   installed with the package), a checker for a generated C++ translation unit
   that flags dangerous primitives
-  ([#210](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/210),
-  CR-164 S1). It is a denylist with known false positives, a mitigation and not
+  ([#210](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/210)).
+  It is a denylist with known false positives, a mitigation and not
   proof that a unit is safe (the wording of the 1.6.3 security advisory).
 - A script identifier equal to a symbol that the checker refuses when it appears
   bare (`system`, `free`, `socket`, `open` and the rest of the list in

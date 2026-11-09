@@ -229,6 +229,10 @@ alias = a
         "using _pf_idx_t = std::decay_t<decltype(_pf_idx_v)>; "
         "if constexpr (std::is_same_v<_pf_idx_t, bool>) return (int)_pf_idx_v; "
         "else return is_na(_pf_idx_v) ? na<int>() : (int)_pf_idx_v; }()); "
+        "if (!is_na(_pf_history_offset) && (_pf_history_offset < 0 || _pf_history_offset > 10000)) "
+        'pine_runtime_error(std::string("History reference at line 5: offset ") '
+        '+ std::to_string(_pf_history_offset) '
+        '+ ". The history offset must be a value between 0 and 10000."); '
         "if (_pf_history_offset < 0 || static_cast<size_t>(_pf_history_offset) >= _pf_history_array.size()) "
         "return na<int>(); return _pf_history_array[_pf_history_offset]; }());"
     ) in cpp
@@ -753,8 +757,12 @@ var a = switch choice
     => array.from(7, 9)
 ''' + HISTORY
     cpp = transpile(source)
-    # With no collection TypeSpec, a[3] registers scalar Series<double> storage.
-    assert "    Series<double> a;" in cpp
+    # 3ec62ae5 declares the member as the vector the arms build (a selection
+    # of arrays is an array variable); the history read is still the scalar
+    # one, with no collection history, and equal to the eager output below.
+    # That read of `(a[3]).size()` emits `None()` on main and on the release
+    # too (an invalid statement this pin has always held and does not judge).
+    assert "    std::vector<int> a;" in cpp
     assert "_pf_collection_hist_a" not in cpp
     assert "class _PFCachedCollectionHistory" not in cpp
     assert cpp == _eager_cpp(source, monkeypatch)

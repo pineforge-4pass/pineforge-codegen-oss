@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Clean-room synthetic library for PineForge's library inliner tests
-// (lane TAIL-F). Not a published TradingView library. `pick` is overloaded
+// Not a published TradingView library. `pick` is overloaded
 // by its parameter's qualifier alone, as the open TradingView/Request/3
 // library overloads `simple string` and `series string` parameters; `gated`
 // holds a barmerge constant it passes as the gaps of a request of another

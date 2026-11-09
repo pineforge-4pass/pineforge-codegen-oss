@@ -399,20 +399,25 @@ def test_nonterminal_pinemap_output_hash_is_stable():
     )
 
 
-def test_keyword_only_namespace_map_residuals_fail_closed():
-    expected = {
-        "clear": "keyword arguments are not supported",
-        "put_all": "unknown keyword argument 'from'",
-    }
-    for name, source in _KEYWORD_RESIDUAL_SOURCES.items():
-        with pytest.raises(CompileError, match=expected[name]):
-            transpile(source)
+def test_namespace_map_keyword_forms_match_positional_and_from_is_refused():
+    source = _KEYWORD_RESIDUAL_SOURCES["clear"]
+    assert transpile(source) == transpile(
+        source.replace("map.clear(id=m)", "map.clear(m)")
+    )
+    with pytest.raises(CompileError, match="unknown keyword argument 'from'"):
+        transpile(_KEYWORD_RESIDUAL_SOURCES["put_all"])
 
 
 def test_mixed_keyword_map_residuals_raise_compile_errors():
-    for source in _MIXED_KEYWORD_RESIDUAL_SOURCES.values():
-        with pytest.raises(CompileError, match=r"map\."):
-            transpile(source)
+    with pytest.raises(CompileError, match=r"map\."):
+        transpile(_MIXED_KEYWORD_RESIDUAL_SOURCES["put_all"])
+    for name, named, positional in (
+        ("get", 'map.get(values, key="x")', 'map.get(values, "x")'),
+        ("global_put_all", "target.put_all(id2=source)", "target.put_all(source)"),
+        ("global_get", 'values.get(key="x")', 'values.get("x")'),
+    ):
+        source = _MIXED_KEYWORD_RESIDUAL_SOURCES[name]
+        assert transpile(source) == transpile(source.replace(named, positional))
 
 
 def test_invalid_terminal_map_shapes_raise_compile_errors():

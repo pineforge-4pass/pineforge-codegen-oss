@@ -1,0 +1,14 @@
+//@version=6
+strategy("Earlier persistent and history bindings", overlay = true, initial_capital = 1000000)
+// All declarations precede their reads; history may be na first without preventing orders.
+probe() =>
+    var float firstValue = close - open
+    varip float secondValue = close - open
+    float currentValue = close - open
+    firstValue + secondValue + nz(currentValue[1])
+signalValue = probe()
+plot(signalValue, "signal")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

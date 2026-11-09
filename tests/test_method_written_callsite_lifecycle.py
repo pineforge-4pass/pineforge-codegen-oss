@@ -41,6 +41,7 @@ int main() {{
 def _persistent_method_source(*, nested: bool, written_sites: int) -> str:
     body = (
         """method sample(Holder self) =>
+    self
     float observed = na
     if true
         var float state = close
@@ -49,6 +50,7 @@ def _persistent_method_source(*, nested: bool, written_sites: int) -> str:
 """
         if nested
         else """method sample(Holder self) =>
+    self
     var float state = close
     state
 """
@@ -100,6 +102,7 @@ type Holder
     float seed
 var Holder holder = Holder.new(0.0)
 method sample(Holder self) =>
+    self
     var float state = close
     state
 wrapped() => holder.sample()
@@ -125,6 +128,7 @@ type A
 type B
     float pad
 method sample(B self) =>
+    self
     var float state = close
     state
 var A obj = A.new(0.0)
@@ -150,6 +154,7 @@ strategy("ternary method receiver")
 type Holder
     float seed
 method sample(Holder self) =>
+    self
     var float state = close
     state
 var Holder left = Holder.new(0.0)
@@ -172,6 +177,7 @@ strategy("method state clone panel")
 type Holder
     float seed
 method sample(Holder self, float src) =>
+    self
     var float state = src
     avg = ta.sma(src, 2)
     fixed = fixnan(src)
@@ -208,6 +214,7 @@ strategy("method series wrapper propagation")
 type Holder
     float seed
 method sample(Holder self, float src, bool active) =>
+    self
     float observed = na
     if active
         var float state = src
@@ -245,6 +252,7 @@ strategy("method series wrapper")
 type Holder
     float seed
 method sample(Holder self, float src, bool active) =>
+    self
     var float state = src
     avg = ta.sma(src, 2)
     fixed = fixnan(src)
@@ -272,6 +280,7 @@ strategy("method keyword compound wrapper")
 type Holder
     float seed
 method sample(Holder self, float src, bool active) =>
+    self
     var float state = src
     avg = ta.sma(src, 2)
     fixed = fixnan(src)
@@ -299,6 +308,7 @@ strategy("method conditional TA lifecycle")
 type Holder
     float seed
 method sample(Holder self, float src, bool active) =>
+    self
     float observed = na
     if active
         var float state = src
@@ -328,7 +338,7 @@ strategy("method calls history UDF")
 history(float src) => src[1]
 type Holder
     float seed
-method sample(Holder self, float src) => history(src)
+method sample(Holder self, float src) => self, history(src)
 var Holder holder = Holder.new(0.0)
 first = holder.sample(close)
 second = holder.sample(open)
@@ -351,7 +361,7 @@ def test_history_series_requirement_flows_between_sibling_methods() -> None:
 strategy("sibling method history flow")
 type Holder
     float seed
-method inner(Holder self, float src) => src[1]
+method inner(Holder self, float src) => self, src[1]
 method outer(Holder self, float src) => self.inner(src)
 var Holder holder = Holder.new(0.0)
 first = holder.outer(close)
@@ -374,7 +384,7 @@ def test_compound_history_argument_flows_between_sibling_methods() -> None:
 strategy("sibling method compound history bridge")
 type Holder
     float seed
-method inner(Holder self, float src) => src[1]
+method inner(Holder self, float src) => self, src[1]
 method outer(Holder self, float src) => self.inner(src + 1.0)
 var Holder holder = Holder.new(0.0)
 first = holder.outer(close)
@@ -392,7 +402,7 @@ def test_compound_history_argument_uses_wrapper_udt_parameter_type() -> None:
 strategy("wrapper method compound history bridge")
 type Holder
     float seed
-method inner(Holder self, float src) => src[1]
+method inner(Holder self, float src) => self, src[1]
 wrapped(Holder obj, float src) => obj.inner(src + 1.0)
 var Holder holder = Holder.new(0.0)
 first = wrapped(holder, close)
@@ -411,7 +421,7 @@ strategy("method history bridge name collision")
 inner(float src) => src + 100.0
 type Holder
     float seed
-method inner(Holder self, float src) => src[1]
+method inner(Holder self, float src) => self, src[1]
 method outer(Holder self, float src) => self.inner(src + 1.0)
 var Holder holder = Holder.new(0.0)
 first = holder.outer(close)
@@ -432,7 +442,7 @@ strategy("method calls TA UDF scalar control")
 smooth(float src) => ta.sma(src, 2)
 type Holder
     float seed
-method sample(Holder self, float src) => smooth(src)
+method sample(Holder self, float src) => self, smooth(src)
 var Holder holder = Holder.new(0.0)
 first = holder.sample(close)
 second = holder.sample(open)

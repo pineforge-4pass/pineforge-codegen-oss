@@ -26,7 +26,7 @@
   parameter or a global the loop reads too (such a name is expanded where it
   is read: ``h(ta.sma(close, 3), n)`` computed the SMA once per iteration).
 - Lane TAIL-E reads a ``ta.change`` / ``mom`` / ``roc`` in a top-level if
-  block through the hold-last source clock, and lane TAIL-G pushes a pure
+  block through the hold-last source clock, and the lazy history rule pushes a pure
   call read at an offset below a lazy edge once per execution of its scope,
   before its statement: an if whose head reads such a history and whose body
   calls ``ta.roc`` takes both rules, as do a value-form if and a nested if
@@ -125,8 +125,15 @@ def test_a_product_both_rules_reach_keeps_mains_form():
         assert "(int64_t)(static_cast<int64_t>" not in lines[name]
     # TAIL-F's cast where main's bounds do not reach: an array element, and a
     # product that fits int32.
-    assert "((int64_t)([&](auto&& __pf_array)" in lines["v"]
-    assert "((int64_t)(n) * (3))" in lines["q"]
+    from tests._numeric_expected import integer_arithmetic
+    wide = "((int64_t)(_pna_l) * (_pna_r))"
+    product = integer_arithmetic("n", "*", "3", wide)
+    # Both products require the full result family, original-type guards
+    # and casts, independent of their operand spelling.
+    result_contract = product[product.index("using _pf_val_t = "):]
+    assert "auto _pna_l = ([&](auto&& __pf_array)" in lines["v"]
+    assert result_contract in lines["v"]
+    assert product in lines["q"]
 
 
 def _history_series(decl: str, read: str = "g[1]") -> str:

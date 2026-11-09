@@ -1,0 +1,13 @@
+//@version=6
+strategy("Requested if alias", currency = currency.NONE, initial_capital = 1000000)
+// Boundary probe: security's scalar fallback has no ordinary IfStmt expression branch.
+chosen = if close >= open
+    high
+else
+    low
+value = request.security(syminfo.tickerid, timeframe.period, chosen)
+plot(value, "selected")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

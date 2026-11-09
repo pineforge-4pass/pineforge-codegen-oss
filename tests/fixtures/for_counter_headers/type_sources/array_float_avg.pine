@@ -1,0 +1,7 @@
+//@version=6
+strategy("Counter source type", currency=currency.NONE)
+floats = array.from(0.0, 1.0)
+float acc = 0.0
+for walkIndex = array.avg(floats) to 1.0 by 0.25
+    acc += 1.0
+plot(acc)

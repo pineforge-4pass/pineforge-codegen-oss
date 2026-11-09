@@ -1,4 +1,4 @@
-# Drawing lifetime tapes (lanes W8B-SIGSTATE-2 and CG-W9-MISC)
+# Drawing lifetime tapes
 
 Which drawings does TradingView delete, and what does a deleted one read? Each
 directory is one `lab tv --no-note` export (channel `ws-report-v1`,
@@ -7,7 +7,7 @@ for byte: `strategy.pine`, `tv_trades.csv` (times at UTC+8), `metrics.json`,
 `meta.json`. The probes are synthetic, written for these lanes; no closed or
 scraped strategy is involved. Every readout is an entry whose comment carries
 the values the script read on its bar (the entry fills at the next bar's open).
-The `w8b-*` tapes are lane W8B-SIGSTATE-2's (copied from
+The `w8b-*` tapes are copied from
 `exec/W8B-SIGSTATE-2-scratch/synth/tapes/`), the `w9dg-*` tapes lane
 CG-W9-MISC's.
 

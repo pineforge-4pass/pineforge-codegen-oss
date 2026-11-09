@@ -128,28 +128,28 @@ def assert_test_workflow_runner_routing(workflow):
     assert runners == {
         "authz": ["    runs-on: ubuntu-24.04"],
         "changes": ["    runs-on: ubuntu-24.04"],
-        "workflow-lint": ["    runs-on: gke-8cpu-16gb-amd64"],
-        "package-files": ["    runs-on: gke-8cpu-16gb-amd64"],
-        "pytest": ["    runs-on: gke-8cpu-16gb-amd64"],
+        "workflow-lint": ["    runs-on: ubuntu-24.04"],
+        "package-files": ["    runs-on: ubuntu-24.04"],
+        "pytest": ["    runs-on: ubuntu-24.04"],
         "compile": ["    runs-on: ubuntu-24.04"],
         "test-check": ["    runs-on: ubuntu-24.04"],
     }, "test.yml runner routing differs"
 
 
-def test_test_workflow_routes_only_push_dispatch_heavy_jobs_to_pods():
+def test_test_workflow_routes_push_dispatch_jobs_to_hosted_runners():
     workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
     assert_test_workflow_runner_routing(workflow)
 
 
 @pytest.mark.parametrize("name,before,after", [
-    ("workflow-lint", "gke-8cpu-16gb-amd64", "ubuntu-24.04"),
-    ("package-files", "gke-8cpu-16gb-amd64", "ubuntu-24.04"),
-    ("pytest", "gke-8cpu-16gb-amd64", "ubuntu-24.04"),
+    ("workflow-lint", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
+    ("package-files", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
+    ("pytest", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
     ("compile", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
     ("authz", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
     ("changes", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
     ("test-check", "ubuntu-24.04", "gke-8cpu-16gb-amd64"),
-    ("pytest", "gke-8cpu-16gb-amd64", "gke-4cpu-8gb-amd64"),
+    ("pytest", "ubuntu-24.04", "gke-4cpu-8gb-amd64"),
 ])
 def test_test_workflow_runner_mutations_are_rejected(name, before, after):
     workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
@@ -257,7 +257,7 @@ def assert_package_file_checks(workflow):
     package = jobs["package-files"]
     assert re.search(r"^    needs: \[authz\]$", package, re.M)
     assert [line for line in package.splitlines() if line.startswith("    runs-on:")] == [
-        "    runs-on: gke-8cpu-16gb-amd64",
+        "    runs-on: ubuntu-24.04",
     ]
     assert not re.search(r"^    if:", package, re.M), (
         "package-files must not carry a job-level pull_request guard"
@@ -1681,12 +1681,23 @@ def test_canonical_light_job_pr_guard_mutations_are_rejected(name):
         assert_test_workflow_is_canonical(mutant, gate_workflow)
 
 
+def assert_hosted_head_checkout(body):
+    assert re.search(r"^    runs-on: ubuntu-24.04$", body, re.M), (
+        "PR payload must use the bare hosted scalar"
+    )
+    assert_admitted_head_checkout(body)
+
+
 def assert_pod_head_checkout(body):
-    assert "    needs: [admit]" in body, "PR payload must depend on admission"
-    assert "needs.admit.outputs.allowed == 'true'" in body, "PR payload must require allowed"
     assert re.search(r"^    runs-on: gke-8cpu-16gb-amd64$", body, re.M), (
         "PR payload must use the bare GKE scalar"
     )
+    assert_admitted_head_checkout(body)
+
+
+def assert_admitted_head_checkout(body):
+    assert "    needs: [admit]" in body, "PR payload must depend on admission"
+    assert "needs.admit.outputs.allowed == 'true'" in body, "PR payload must require allowed"
     assert "    permissions: {contents: read}" in body
     assert "          repository: ${{ github.repository }}" in body
     assert "          ref: ${{ needs.admit.outputs.head_sha }}" in body, (
@@ -1700,28 +1711,156 @@ def assert_pod_head_checkout(body):
     assert not re.search(r"^\s+cache:", body, re.M)
 
 
-def test_pr_payloads_use_only_admitted_bare_scalar_pods():
+def test_pr_payloads_use_only_admitted_bare_scalar_hosted_runners():
     # Inspect the old PR gate on main so the regression is an admission
     # failure, rather than a missing-file error.
     path = WORKFLOWS / "gke-pr.yml"
     workflow = (path if path.exists() else WORKFLOWS / "gate.yml").read_text(encoding="utf-8")
     jobs = job_blocks(workflow)
-    for name in ("differential", "pytest", "compile", "workflow-lint", "package-files"):
-        assert_pod_head_checkout(jobs[name])
+    for name in ("differential", "pytest", "workflow-lint", "package-files"):
+        assert_hosted_head_checkout(jobs[name])
+    assert_pod_head_checkout(jobs["compile"])
+
+
+def test_native_pr_route_is_required_and_dispatch_shares_the_same_jobs():
+    from tests.test_gke_pr_admission import bootstrap_fixture
+
+    fixture = bootstrap_fixture({
+        ".github/workflows/gke-pr.yml": (WORKFLOWS / "gke-pr.yml").read_text(encoding="utf-8"),
+        ".github/workflows/engine-main-touched.yml":
+            (WORKFLOWS / "engine-main-touched.yml").read_text(encoding="utf-8"),
+    }, native=True)
+    workflow = fixture[".github/workflows/gke-pr.yml"]
+    blocks = job_blocks(workflow)
+    assert set(blocks) == {
+        "admit", "workflow-lint", "package-files", "pytest", "compile", "differential",
+        "engine-main", "test-check", "result",
+    }
+    call = blocks["engine-main"]
+    assert "    needs: [admit]\n" in call
+    assert "    if: ${{ needs.admit.outputs.allowed == 'true' }}\n" in call
+    assert "    uses: ./.github/workflows/engine-main-touched.yml\n" in call
+    assert "      codegen_base_ref: ${{ needs.admit.outputs.base_sha }}\n" in call
+    assert "      codegen_head_ref: ${{ needs.admit.outputs.head_sha }}\n" in call
+    assert "      definition: ${{ github.sha }}\n" in call
+    assert "    needs: [admit, workflow-lint, package-files, pytest, compile, differential, test-check, engine-main]\n" in blocks["result"]
+    native = fixture[".github/workflows/engine-main-touched.yml"]
+    trigger = native.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+    assert "  workflow_call:\n" in trigger and "  workflow_dispatch:\n" in trigger
+    assert "pull_request:" not in trigger and "pull_request_target:" not in trigger
+    assert set(job_blocks(native)) == {"changes", "native", "outcomes", "publish"}
+    assert "      decision_result:\n        value: ${{ jobs.outcomes.outputs.decision_result }}\n" in trigger
+    assert "      native_result:\n        value: ${{ jobs.outcomes.outputs.native_result }}\n" in trigger
+    assert not re.search(r"jobs\.[\w-]+\.result\b", trigger)
+    outcomes = job_blocks(native)["outcomes"]
+    assert "    needs: [changes, native]\n" in outcomes
+    assert "    if: always()\n" in outcomes
+    assert "    runs-on: ubuntu-24.04\n" in outcomes
+    assert "    permissions: {}\n" in outcomes
+    assert "      decision_result: ${{ steps.forward.outputs.decision_result }}\n" in outcomes
+    assert "      native_result: ${{ steps.forward.outputs.native_result }}\n" in outcomes
+    assert "        id: forward\n" in outcomes
+    assert "          NEEDS: ${{ toJSON(needs) }}\n" in outcomes
+    assert "        shell: python3 {0}\n" in outcomes
+    assert "uses:" not in outcomes and "GH_TOKEN" not in outcomes
+    assert "continue-on-error:" not in outcomes and "secrets" not in outcomes
+    execution = job_blocks(native)["native"]
+    assert "    runs-on: ubuntu-24.04\n" in execution
+    assert "ref: main\n" in execution
+    assert "--expected-plan" in execution and "ci_engine_main_touched.py run" in execution
+    assert "      mode: ${{ steps.plan.outputs.mode }}\n" in job_blocks(native)["changes"]
+    for output in (
+        "execution_mode", "inventory", "coverage_complete", "full_success",
+        "full_executed_plan", "engine_sha", "engine_tree",
+    ):
+        assert f"      {output}: ${{{{ steps.execute.outputs.{output} }}}}\n" in execution
+    assert "secrets" not in execution and "GH_TOKEN" not in execution
+    assert "statuses: write" not in native and "timeout-minutes:" not in native
+    assert "engine-main-touched" not in blocks["test-check"]
+    assert "  push:\n    branches: [main]\n" in trigger
+    assert "paths:" not in trigger and "paths-ignore:" not in trigger
+    assert "\nconcurrency:" not in native and "cancel-in-progress:" not in native
+    assert "ref: ${{ inputs.codegen_head_ref || github.event.after }}" in native
+    assert "CODEGEN_BASE: ${{ inputs.codegen_base_ref || github.event.before }}" in native
+    assert "CODEGEN_HEAD: ${{ inputs.codegen_head_ref || github.event.after }}" in native
+    assert "run: python3 -I workflow/tests/test_gke_pr_admission.py --push-identity" in native
+    assert "    permissions: {contents: read}\n" in execution
+    publisher = job_blocks(native)["publish"]
+    assert "needs: [changes, native]" in publisher and "always()" in publisher
+    assert "github.event_name == 'workflow_dispatch'" in publisher
+    assert "permissions: {contents: read, actions: read, checks: write}" in publisher
+    assert "ref: ${{ github.workflow_sha }}" in publisher
+    assert "--native-check" in publisher and "candidate" not in publisher
+
+
+def run_native_outcome_bridge(tmp_path, needs):
+    workflow = (WORKFLOWS / "engine-main-touched.yml").read_text(encoding="utf-8")
+    scripts = workflow_run_scripts(workflow, "outcomes")
+    assert len(scripts) == 1, "outcomes must run exactly one forwarding script"
+    script = tmp_path / "forward.py"
+    script.write_text(scripts[0], encoding="utf-8")
+    output = tmp_path / "job-output"
+    result = subprocess.run(
+        [sys.executable, "-I", str(script)],
+        cwd=tmp_path,
+        env={"NEEDS": json.dumps(needs), "GITHUB_OUTPUT": str(output)},
+        capture_output=True, text=True, check=False,
+    )
+    return result, output.read_text(encoding="utf-8") if output.exists() else ""
+
+
+@pytest.mark.parametrize("decision", ["success", "failure", "cancelled", "skipped"])
+@pytest.mark.parametrize("native", ["success", "failure", "cancelled", "skipped"])
+def test_native_outcome_bridge_forwards_the_actual_distinct_job_states(tmp_path, decision, native):
+    # Execute the shipped workflow code. Constants, swapped states and ignored
+    # inputs must fail even when one of the dependencies happens to succeed.
+    result, output = run_native_outcome_bridge(tmp_path, {
+        "changes": {"result": decision}, "native": {"result": native},
+    })
+    assert result.returncode == 0, result.stderr
+    assert output == f"decision_result={decision}\nnative_result={native}\n"
+
+
+@pytest.mark.parametrize("needs", [
+    None, [], {},
+    {"changes": {"result": "success"}},
+    {"native": {"result": "success"}},
+    {"changes": {"result": "success"}, "native": {"result": "success"}, "other": {}},
+])
+def test_native_outcome_bridge_rejects_missing_or_unexpected_dependencies(tmp_path, needs):
+    result, output = run_native_outcome_bridge(tmp_path, needs)
+    assert result.returncode != 0
+    assert "missing or unexpected native dependencies" in result.stderr
+    assert output == ""
+
+
+@pytest.mark.parametrize("job", ["changes", "native"])
+@pytest.mark.parametrize("row", [
+    None, [], {}, {"result": None}, {"result": True}, {"result": []},
+    {"result": ""}, {"result": "neutral"}, {"result": "success\nnative_result=success"},
+])
+def test_native_outcome_bridge_rejects_invalid_states_before_writing_outputs(tmp_path, job, row):
+    needs = {"changes": {"result": "success"}, "native": {"result": "success"}}
+    needs[job] = row
+    result, output = run_native_outcome_bridge(tmp_path, needs)
+    assert result.returncode != 0
+    assert f"{job}: missing or invalid job result" in result.stderr
+    assert output == ""
 
 
 @pytest.mark.parametrize("before,after,message", [
     ("needs: [admit]", "needs: []", "depend on admission"),
     ("outputs.allowed == 'true'", "outputs.allowed != 'false'", "require allowed"),
-    ("runs-on: gke-8cpu-16gb-amd64", "runs-on: [self-hosted, gke-8cpu-16gb-amd64]", "bare GKE"),
+    ("runs-on: ubuntu-24.04", "runs-on: gke-8cpu-16gb-amd64", "bare hosted"),
+    ("runs-on: ubuntu-24.04", "runs-on: [self-hosted, gke-8cpu-16gb-amd64]", "bare hosted"),
     ("ref: ${{ needs.admit.outputs.head_sha }}", "ref: ${{ github.event.pull_request.head.sha }}", "immutable admission"),
     ("persist-credentials: false", "persist-credentials: true", "persist-credentials"),
 ])
-def test_pod_checkout_mutations_are_rejected(before, after, message):
+def test_hosted_checkout_mutations_are_rejected(before, after, message):
     body = job_blocks((WORKFLOWS / "gke-pr.yml").read_text(encoding="utf-8"))["pytest"]
     assert body.count(before) == 1
     with pytest.raises(AssertionError, match=message):
-        assert_pod_head_checkout(body.replace(before, after, 1))
+        assert_hosted_head_checkout(body.replace(before, after, 1))
 
 
 def test_pr_node_setup_explicitly_disables_automatic_cache():

@@ -113,13 +113,20 @@ class TaSiteHelper:
         "vwap_anchored": frozenset({1}),
         "vwap_anchored_bands": frozenset({1}),
     }
+    _TA_INT_COMPUTE_ARGS = {
+        "change": frozenset({1}),
+        "valuewhen": frozenset({2}),
+    }
 
-    def _ta_compute_arg_cpp(self, ta_name: str, position: int, node) -> str:
-        """Render one TA compute argument with Pine bool truthiness."""
-        rendered = self._visit_expr(node)
+    def _ta_compute_arg_cpp(self, ta_name: str, position: int, node,
+                            render=None) -> str:
+        """Render a TA value in its numeric or boolean destination family."""
+        rendered = (render or self._visit_expr)(node)
         if position in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()):
             return self._coerce_bool_expr(rendered, node)
-        return rendered
+        if position in self._TA_INT_COMPUTE_ARGS.get(ta_name, ()):
+            return rendered
+        return self._coerce_int_slot(rendered, node, "double")
 
     def _ta_compute_args_for_site(self, site: "TACallSite") -> str:
         """``_ta_compute_args_for_site_base`` plus, for a site whose length the
@@ -563,6 +570,32 @@ class TaSiteHelper:
         source = self._visit_expr(site.compute_args[0])
         length_node = self._lazy_source_clock_length_node(node)
         literal = self._lazy_source_clock_length_literal(length_node)
+        if literal is None and self._history_capacity is not None:
+            from .run_stops import checked_history_offset
+
+            length_raw = self._visit_expr(length_node)
+            length_expr = self._coerce_int_slot("_pf_raw", length_node, "int")
+            if (length_expr == "_pf_raw"
+                    and not self._emitted_value_is_double(length_node)):
+                length_expr = pine_index_int_cast("_pf_raw")
+            line = getattr(getattr(length_node, "loc", None), "line", 0) or 0
+            offset = checked_history_offset(
+                "_pf_raw - 1", line, self._history_capacity,
+            )
+            index = pine_index_int_cast("_pf_prior")
+            method = "roc" if self._ta_name_from_site(site) == "roc" else "change"
+            # Bind both arguments once. The held-source address is length-1,
+            # checked in its original width before the Series int conversion.
+            return (
+                f"([&]() -> double {{ auto _pf_series_raw = ({source}); "
+                f"auto _pf_raw = ({length_raw}); "
+                "double _pf_out = na<double>(); "
+                "if (!is_na(_pf_raw) && _pf_raw >= 1) { "
+                f"auto _pf_prior = {offset}; "
+                f"_pf_out = {info['hist']}[{index}]; }} "
+                f"return {info['clock']}.{method}(_pf_series_raw, "
+                f"{info['clock']}.previous_source(_pf_out, {length_expr})); }}())"
+            )
         if literal is not None:
             length_expr = str(literal)
             held = f"{info['hist']}[{literal - 1}]" if literal >= 1 else "na<double>()"
@@ -1344,23 +1377,22 @@ class TaSiteHelper:
         mutable globals get rebound to the security-context shadows."""
         ta_name = self._ta_name_from_site(site)
 
+        def visit_compute(arg, position):
+            rendered = self._build_security_expr(
+                sec_id, arg, None, ta_results,
+                security_mutable_names=security_mutable_names,
+                helper_binding_stack=helper_binding_stack,
+                emitted_lines=emitted_lines,
+            )
+            if position in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()):
+                return self._coerce_bool_expr(rendered, arg)
+            if position in self._TA_INT_COMPUTE_ARGS.get(ta_name, ()):
+                return rendered
+            return self._security_float_cpp(rendered, arg, helper_binding_stack)
+
         if site.class_name in ("_PFAnchoredVWAP", "_PFAnchoredVWAPBands"):
             explicit = [
-                self._coerce_bool_expr(
-                    self._build_security_expr(
-                        sec_id, a, None, ta_results,
-                        security_mutable_names=security_mutable_names,
-                        helper_binding_stack=helper_binding_stack,
-                        emitted_lines=emitted_lines,
-                    ),
-                    a,
-                ) if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()) else
-                self._build_security_expr(
-                    sec_id, a, None, ta_results,
-                    security_mutable_names=security_mutable_names,
-                    helper_binding_stack=helper_binding_stack,
-                    emitted_lines=emitted_lines,
-                )
+                visit_compute(a, i)
                 for i, a in enumerate(site.compute_args)
             ]
             if len(explicit) < 2:
@@ -1372,21 +1404,7 @@ class TaSiteHelper:
 
         if site.class_name == "_PFPivotPointLevels":
             explicit = [
-                self._coerce_bool_expr(
-                    self._build_security_expr(
-                        sec_id, a, None, ta_results,
-                        security_mutable_names=security_mutable_names,
-                        helper_binding_stack=helper_binding_stack,
-                        emitted_lines=emitted_lines,
-                    ),
-                    a,
-                ) if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()) else
-                self._build_security_expr(
-                    sec_id, a, None, ta_results,
-                    security_mutable_names=security_mutable_names,
-                    helper_binding_stack=helper_binding_stack,
-                    emitted_lines=emitted_lines,
-                )
+                visit_compute(a, i)
                 for i, a in enumerate(site.compute_args)
             ]
             if len(explicit) < 3:
@@ -1400,30 +1418,7 @@ class TaSiteHelper:
             implicit = TA_IMPLICIT_COMPUTE_FULL[ta_name].replace("current_bar_.", "bar.")
             if site.compute_args:
                 explicit = ", ".join(
-                    (
-                        self._coerce_bool_expr(
-                            self._build_security_expr(
-                                sec_id,
-                                a,
-                                None,
-                                ta_results,
-                                security_mutable_names=security_mutable_names,
-                                helper_binding_stack=helper_binding_stack,
-                                emitted_lines=emitted_lines,
-                            ),
-                            a,
-                        )
-                        if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ())
-                        else self._build_security_expr(
-                            sec_id,
-                            a,
-                            None,
-                            ta_results,
-                            security_mutable_names=security_mutable_names,
-                            helper_binding_stack=helper_binding_stack,
-                            emitted_lines=emitted_lines,
-                        )
-                    )
+                    visit_compute(a, i)
                     for i, a in enumerate(site.compute_args)
                 )
                 if ta_name in self._TA_IMPLICIT_REPLACE:
@@ -1433,30 +1428,7 @@ class TaSiteHelper:
 
         if site.compute_args:
             explicit = ", ".join(
-                (
-                    self._coerce_bool_expr(
-                        self._build_security_expr(
-                            sec_id,
-                            a,
-                            None,
-                            ta_results,
-                            security_mutable_names=security_mutable_names,
-                            helper_binding_stack=helper_binding_stack,
-                            emitted_lines=emitted_lines,
-                        ),
-                        a,
-                    )
-                    if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ())
-                    else self._build_security_expr(
-                        sec_id,
-                        a,
-                        None,
-                        ta_results,
-                        security_mutable_names=security_mutable_names,
-                        helper_binding_stack=helper_binding_stack,
-                        emitted_lines=emitted_lines,
-                    )
-                )
+                visit_compute(a, i)
                 for i, a in enumerate(site.compute_args)
             )
             if ta_name in TA_IMPLICIT_APPEND:
@@ -1488,6 +1460,9 @@ class TaSiteHelper:
     # * series, for ta.highest / ta.lowest / ta.highestbars / ta.lowestbars:
     #   re-windowed on every call -- ``pineforge::source::Series*``, the length
     #   passed per call.
+    # * series, for ta.percentile_nearest_rank: each call appends to its own
+    #   buffer and passes source, length and percentage to
+    #   ``pineforge::source::SeriesPercentileNearestRank``.
     # * ta.supertrend: the factor (series or simple) of the first execution is
     #   the run's -- ``pineforge::source::PineSupertrend``.
     #
@@ -1501,12 +1476,48 @@ class TaSiteHelper:
     # arguments those literals bring to the constructor stay here
     # (``_ta_arg_takes_plan``).
 
+    # The ta.* functions with a RECORDED TradingView result that still reach a
+    # refusal name the Pine function and say that TradingView accepts the call.
+    # Every other function keeps the plain wording, which makes no claim about
+    # TradingView -- the functions in the list above, where TradingView
+    # refuses a series length as well, and the ones with no recorded result.
+    # Recorded results:
+    # * ta.sma: pine_ta_length.hpp, the engine's note on its TradingView
+    #   compile probes, names it among the functions that declare a series
+    #   length;
+    # * ta.percentile_nearest_rank: issue #295 reports that a script with a
+    #   loop-counter length compiles on TradingView; it is lowered by the
+    #   dynamic plan below and therefore does not reach this refusal set.
+    # A function joins this set only with its own recorded result.
+    _TA_TV_ACCEPTS_SERIES_LENGTH = frozenset({
+        "sma",
+    })
+
+    def _ta_tradingview_series_length_name(self, site: "TACallSite") -> str | None:
+        """``ta.<name>`` of a ta.* site whose series length TradingView is
+        recorded to compile but PineForge cannot size (the refusal says so),
+        or None for every other site: a function with no recorded result, one
+        where TradingView refuses a series length as well, or a site that is
+        not a ta.* call."""
+        node = getattr(site, "node", None)
+        if not isinstance(node, FuncCall):
+            return None
+        func_name, namespace = self._resolve_callee(node.callee)
+        if namespace != "ta" or not func_name:
+            return None
+        if func_name not in self._TA_TV_ACCEPTS_SERIES_LENGTH:
+            return None
+        return f"ta.{func_name}"
+
     _TA_SERIES_EXTREME_CLASSES = {
         "highest": "pineforge::source::SeriesHighest",
         "lowest": "pineforge::source::SeriesLowest",
         "highestbars": "pineforge::source::SeriesHighestBars",
         "lowestbars": "pineforge::source::SeriesLowestBars",
     }
+    _TA_SERIES_PERCENTILE_CLASS = (
+        "pineforge::source::SeriesPercentileNearestRank"
+    )
     # Pure str.* functions of simple arguments (a simple result).
     _SIMPLE_STR_FUNCS = frozenset({
         "upper", "lower", "contains", "startswith", "endswith", "length",
@@ -1526,8 +1537,9 @@ class TaSiteHelper:
     def _ta_dynamic_plan(self, site: "TACallSite") -> dict | None:
         """The lowering of a site with a constructor argument the constructor
         cannot take, or None (the ordinary constructor / runtime-reset path).
-        ``kind`` is ``first_call`` / ``series_extreme`` / ``supertrend``, or
-        ``refused`` (the constructor guard reports it)."""
+        ``kind`` is ``first_call`` / ``series_extreme`` /
+        ``series_percentile`` / ``supertrend``, or ``refused`` (the
+        constructor guard reports it)."""
         cache = self.__dict__.setdefault("_ta_dynamic_plan_cache", {})
         key = id(site)
         if key not in cache:
@@ -1623,15 +1635,27 @@ class TaSiteHelper:
     def _build_ta_dynamic_plan(self, site: "TACallSite") -> dict | None:
         if not site.ctor_args:
             return None
+        nodes = list(getattr(site, "ctor_nodes", None) or [])
+        # Constructor spellings do not carry scope. Before substituting a
+        # global input/constant, check the authored argument's exact binding;
+        # a loop counter or block local can have the same spelling.
+        shadowed = {
+            pos for pos, node in enumerate(nodes)
+            if site.owner_func is None
+            and any(isinstance(read, Identifier)
+                    and read.name in self._known_vars
+                    and not self._ta_identifier_reads_top_level(read, scoped=True)
+                    for read in self._walk_ast(node))
+        }
         refused = [
             pos for pos, arg in enumerate(site.ctor_args)
-            if not self._is_compile_time_value(self._resolve_ta_ctor_arg(arg))
-            and (self._runtime_ctor_arg_for_reset(arg) is None
-                 or self._ta_arg_takes_plan(site, pos, arg))
+            if pos in shadowed
+            or (not self._is_compile_time_value(self._resolve_ta_ctor_arg(arg))
+                and (self._runtime_ctor_arg_for_reset(arg) is None
+                     or self._ta_arg_takes_plan(site, pos, arg)))
         ]
         if not refused:
             return None
-        nodes = list(getattr(site, "ctor_nodes", None) or [])
         if len(nodes) != len(site.ctor_args):
             return {"kind": "refused", "refused": refused}
         # A call outside every callable is spelled from its own nodes, whose
@@ -1649,7 +1673,9 @@ class TaSiteHelper:
         """The plan of a site whose ``refused`` constructor arguments have the
         context-free C++ ``simple`` (None: series)."""
         family = self._ta_site_function(site)
-        if family in self._TA_SERIES_EXTREME_CLASSES:
+        if family == "percentile_nearest_rank":
+            kind = "series_percentile" if simple[refused[0]] is None else "first_call"
+        elif family in self._TA_SERIES_EXTREME_CLASSES:
             kind = "first_call" if simple[refused[0]] is not None else "series_extreme"
         elif family == "supertrend":
             kind = "supertrend"
@@ -1844,6 +1870,8 @@ class TaSiteHelper:
             return site.class_name
         if plan["kind"] == "series_extreme":
             return self._TA_SERIES_EXTREME_CLASSES[plan["family"]]
+        if plan["kind"] == "series_percentile":
+            return self._TA_SERIES_PERCENTILE_CLASS
         if plan["kind"] == "supertrend":
             return "pineforge::source::PineSupertrend"
         return f"pineforge::source::FirstCallBound<{site.class_name}>"
@@ -1943,6 +1971,22 @@ class TaSiteHelper:
         if kind == "series_extreme":
             length = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
             return f"{base_args}, pineforge::source::ta_number({length})"
+        if kind == "series_percentile":
+            if len(site.compute_args) != 2:
+                raise AssertionError(
+                    "percentile_nearest_rank series site must have source and percentage"
+                )
+            length = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
+            source = self._ta_compute_arg_cpp(
+                "percentile_nearest_rank", 0, site.compute_args[0], render_node
+            )
+            percentage = self._ta_compute_arg_cpp(
+                "percentile_nearest_rank", 2, site.compute_args[1], render_node
+            )
+            return (
+                f"{source}, pineforge::source::ta_number({length}), "
+                f"{percentage}"
+            )
         if kind == "supertrend":
             factor = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
             period = self._ta_dynamic_ctor_arg(site, plan, 1, render_node)

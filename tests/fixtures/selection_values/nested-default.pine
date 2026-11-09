@@ -1,0 +1,15 @@
+//@version=6
+strategy("PineForge F1 syntax probe", overlay = true, initial_capital = 1000000, pyramiding = 2, process_orders_on_close = false)
+cycleIndex = int(math.floor(bar_index / 20))
+flip = cycleIndex % 2 == 0
+signalValue = switch cycleIndex % 3
+    0 => close - open
+    1 => open - close
+    => switch flip
+        true => close
+        => open
+tradeQty = na(signalValue) ? 0.75 : (signalValue > 0 ? 1.25 : signalValue < 0 ? 2.5 : 3.75) + math.abs(signalValue) / (1.0 + math.abs(signalValue))
+if bar_index % 20 == 5
+    strategy.entry("F1", strategy.long, qty = tradeQty)
+if bar_index % 20 == 15
+    strategy.close("F1", comment = "scheduled")

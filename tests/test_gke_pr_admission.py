@@ -17,7 +17,7 @@ import textwrap
 
 POD_JOBS = {"workflow-lint", "package-files", "pytest", "compile", "differential"}
 TEST_POD_JOBS = {"workflow-lint", "package-files", "pytest"}
-POD_RUNNER = "gke-8cpu-16gb-amd64"
+POD_RUNNER = "ubuntu-24.04"
 BOTS = {"dependabot[bot]", "pineforge-app[bot]"}
 CHECKER = "python3 -I tests/test_gke_pr_admission.py"
 TRIGGER = """on:
@@ -26,6 +26,21 @@ TRIGGER = """on:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
 """
 SHA = re.compile(r"[0-9a-f]{40}")
+NATIVE_WORKFLOW = ".github/workflows/engine-main-touched.yml"
+NATIVE_DRIVER = "scripts/ci_engine_main_touched.py"
+APPROVED_NATIVE_DRIVER_SHA256 = "a708705d02bd80e6714e20c16310f737756b18a961a4ea435582c5c8577812f8"
+NATIVE_CALL = """    needs: [admit]
+    if: ${{ needs.admit.outputs.allowed == 'true' }}
+    # Permission ceiling for the shared workflow's dispatch-only publisher.
+    # Its changes/native execution jobs explicitly reduce to contents: read.
+    permissions: {contents: read, actions: read, checks: write}
+    uses: ./.github/workflows/engine-main-touched.yml
+    with:
+      codegen_base_ref: ${{ needs.admit.outputs.base_sha }}
+      codegen_head_ref: ${{ needs.admit.outputs.head_sha }}
+      definition: ${{ github.sha }}
+      workers: "8"
+"""
 
 
 def require(condition, message):
@@ -68,6 +83,192 @@ def authorize(env, api=gh_json):
     return env["BASE_SHA"], env["HEAD_SHA"]
 
 
+def authorize_proof(env, api=gh_json):
+    """Dispatch grants no status-writing authority and accepts public inputs only."""
+    repo = env["REPO"]
+    require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo), "invalid repository")
+    for key in ("BASE_SHA", "HEAD_SHA", "DEFINITION_SHA"):
+        require(SHA.fullmatch(env[key]), f"invalid {key} SHA")
+    require(env.get("SOURCE_EVENT", "pull_request") in {"pull_request", "push_main"},
+            "invalid proof source event")
+    for key in ("ACTOR", "TRIGGERING_ACTOR"):
+        login = env[key]
+        require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?", login), "invalid actor login")
+        if login not in BOTS:
+            permission = api(f"repos/{repo}/collaborators/{login}/permission")
+            require(isinstance(permission, dict) and permission.get("permission") in {
+                "admin", "maintain", "write",
+            }, f"{login} does not have write permission")
+    require(api(f"repos/{repo}").get("private") is False, "proof repository is not public")
+    for key in ("BASE_SHA", "HEAD_SHA"):
+        if key == "BASE_SHA" and env[key] == "0" * 40 and env.get("SOURCE_EVENT") == "push_main":
+            continue
+        require(api(f"repos/{repo}/commits/{env[key]}").get("sha") == env[key],
+                f"public {key} commit differs")
+
+
+def authorize_push(env):
+    """Bind the immutable event; a later main tip is deliberately not queried."""
+    require(env["EVENT"] == "push" and env["REF"] == "refs/heads/main",
+            "native push admission requires main")
+    require(env["DELETED"] == "false", "deleted main is not a testable push")
+    for key in ("BASE_SHA", "HEAD_SHA", "EVENT_SHA", "DEFINITION_SHA"):
+        require(SHA.fullmatch(env[key]), f"invalid {key} SHA")
+    require(env["HEAD_SHA"] != "0" * 40, "push has no tested head")
+    require(env["HEAD_SHA"] == env["EVENT_SHA"] == env["DEFINITION_SHA"],
+            "push event, tested head and definition differ")
+    repo = env["REPO"]
+    require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo), "invalid repository")
+    # GitHub already authorized this protected-main push. Run every event,
+    # including app/bot pushes; a later collaborator snapshot cannot suppress
+    # native execution. PR and write-capable dispatch retain their actor checks.
+
+
+def create_native_check(repo, payload):
+    """Only the isolated publisher calls the checks write API."""
+    result = subprocess.run(
+        ["gh", "api", "--method", "POST", f"repos/{repo}/check-runs", "--input", "-"],
+        input=json.dumps(payload), check=True, capture_output=True, text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def report_native_check(env, api=gh_json, create=create_native_check):
+    """Publish a source check from this attempt's actual completed native job."""
+    require(env["EVENT"] == "workflow_dispatch", "historical publication requires dispatch")
+    require(env["REF"].startswith("refs/heads/"), "proof definition must be a published branch")
+    authorize_proof(env, api)
+    for key in ("RUN_ID", "RUN_ATTEMPT"):
+        require(re.fullmatch(r"[1-9][0-9]*", env[key]), f"invalid {key}")
+    require(env["SERVER_URL"] == "https://github.com", "unexpected GitHub server")
+    needs = json.loads(env["NEEDS"])
+    require(isinstance(needs, dict) and set(needs) == {"changes", "native"},
+            "native publication dependencies differ")
+    decision, native = needs["changes"], needs["native"]
+    require(isinstance(decision, dict) and decision.get("result") == "success"
+            and isinstance(native, dict), "native decision did not succeed")
+    outputs = decision.get("outputs", {})
+    require(isinstance(outputs, dict) and outputs.get("native") == "true"
+            and outputs.get("base") == env["BASE_SHA"] and outputs.get("head") == env["HEAD_SHA"]
+            and outputs.get("definition") == env["DEFINITION_SHA"]
+            and outputs.get("source_event") == env["SOURCE_EVENT"]
+            and outputs.get("mode") == (
+                "full" if env["SOURCE_EVENT"] == "push_main" else "touched"
+            )
+            and isinstance(outputs.get("tree"), str) and SHA.fullmatch(outputs["tree"])
+            and isinstance(outputs.get("plan"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", outputs["plan"]),
+            "native publication source/decision binding differs")
+    prefix = f"repos/{env['REPO']}/actions/runs/{env['RUN_ID']}/attempts/{env['RUN_ATTEMPT']}"
+    run = api(prefix)
+    require(type(run.get("id")) is int and type(run.get("run_attempt")) is int
+            and run.get("id") == int(env["RUN_ID"])
+            and run.get("run_attempt") == int(env["RUN_ATTEMPT"])
+            and run.get("event") == "workflow_dispatch"
+            and run.get("head_sha") == env["DEFINITION_SHA"]
+            and run.get("head_branch") == env["REF"].removeprefix("refs/heads/")
+            and run.get("path") == NATIVE_WORKFLOW
+            and run.get("repository", {}).get("full_name") == env["REPO"],
+            "native workflow run/definition binding differs")
+    jobs_seen = []
+    total = None
+    for page in range(1, 101):
+        response = api(f"{prefix}/jobs?per_page=100&page={page}")
+        require(isinstance(response.get("jobs"), list)
+                and type(response.get("total_count")) is int, "unreadable native job inventory")
+        if total is None:
+            total = response["total_count"]
+        require(response["total_count"] == total and 0 <= total <= 10000,
+                "native job inventory changed or exceeds bounds")
+        jobs_seen.extend(response["jobs"])
+        if len(jobs_seen) >= total:
+            break
+        require(bool(response["jobs"]), "incomplete native job inventory")
+    require(len(jobs_seen) == total, "incomplete native job inventory")
+    matches = [job for job in jobs_seen if job.get("name") == "Engine main native"]
+    require(len(matches) == 1, "native execution job is missing or ambiguous")
+    job = matches[0]
+    require(type(job.get("id")) is int and job["id"] > 0, "invalid native job ID")
+    details = (f"{env['SERVER_URL']}/{env['REPO']}/actions/runs/{env['RUN_ID']}"
+               f"/job/{job['id']}")
+    require(type(job.get("run_id")) is int and job.get("run_id") == int(env["RUN_ID"])
+            and job.get("head_sha") == env["DEFINITION_SHA"]
+            and job.get("status") == "completed" and job.get("html_url") == details,
+            "native job attempt/definition/details binding differs")
+    state = native.get("result")
+    actual = job.get("conclusion")
+    require((state == actual and state in {"success", "failure", "cancelled"})
+            or (state == "failure" and actual in {"timed_out", "startup_failure", "action_required"}),
+            "native job result differs from completed GitHub job")
+    execution = native.get("outputs", {})
+    require(isinstance(execution, dict), "malformed native execution outputs")
+    expected_mode = outputs["mode"]
+    ordinary = (
+        execution.get("completed_plan") == outputs["plan"]
+        and execution.get("audit_errors") == "0"
+        and execution.get("execution_mode") == expected_mode
+        and isinstance(execution.get("inventory"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", execution["inventory"]) is not None
+        and all(isinstance(execution.get(key), str) and SHA.fullmatch(execution[key])
+                for key in ("engine_sha", "engine_tree"))
+        and execution.get("pytest_exit") in {"0", "1", "2", "3", "4", "5"}
+        and all(execution.get(f"construction_{legacy}") in {"passed", "failed"}
+                for legacy in ("false", "true"))
+    )
+    if state == "success":
+        require(ordinary and execution.get("pytest_exit") == "0"
+                and execution.get("audit_errors") == "0"
+                and execution.get("coverage_complete") == "true"
+                and execution.get("executed_plan") == outputs["plan"]
+                and (expected_mode != "full" or (
+                    execution.get("full_success") == "true"
+                    and execution.get("full_executed_plan") == outputs["plan"]
+                ))
+                and all(execution[f"construction_{legacy}"] == "passed"
+                        for legacy in ("false", "true")),
+                "successful native job lacks bound ordinary execution")
+        conclusion = "success"
+    elif state == "cancelled":
+        conclusion = "cancelled"
+    else:
+        conclusion = "failure" if ordinary else "action_required"
+    # Failure summaries report observed outcomes; they never label setup failure
+    # as assertion RED or infer the expected result from the selected source SHA.
+    observed = {
+        "definition_sha": env["DEFINITION_SHA"], "source_event": env["SOURCE_EVENT"],
+        "codegen_before": env["BASE_SHA"], "codegen_sha": env["HEAD_SHA"],
+        "codegen_tree": outputs["tree"], "plan": outputs["plan"],
+        "mode": expected_mode, "inventory": execution.get("inventory"),
+        "engine_sha": execution.get("engine_sha"), "engine_tree": execution.get("engine_tree"),
+        "coverage_complete": execution.get("coverage_complete"),
+        "full_success": execution.get("full_success"),
+        "full_executed_plan": execution.get("full_executed_plan"),
+        "audit_errors": execution.get("audit_errors"),
+        "native_job_result": actual, "ordinary_execution": ordinary,
+        "pytest_exit": execution.get("pytest_exit"),
+        "construction_false": execution.get("construction_false"),
+        "construction_true": execution.get("construction_true"),
+        "note": "Read native identity/build/audit logs; setup or incomplete execution is not assertion evidence.",
+    }
+    payload = {
+        "name": "engine-main-native-source", "head_sha": env["HEAD_SHA"],
+        "status": "completed", "conclusion": conclusion, "details_url": details,
+        "external_id": f"native:{env['RUN_ID']}:{env['RUN_ATTEMPT']}:{job['id']}",
+        "output": {"title": "Engine main native source execution",
+                   "summary": "```json\n" + json.dumps(observed, indent=2) + "\n```"},
+    }
+    posted = create(env["REPO"], payload)
+    require(type(posted.get("id")) is int, "native check creation returned no ID")
+    check = api(f"repos/{env['REPO']}/check-runs/{posted['id']}")
+    require(all(check.get(key) == payload[key] for key in (
+        "name", "head_sha", "status", "conclusion", "details_url", "external_id",
+    )), "created native check does not bind the requested source/result")
+    print(json.dumps({key: check.get(key) for key in (
+        "id", "head_sha", "conclusion", "details_url", "html_url",
+    )}, sort_keys=True), flush=True)
+    return check
+
+
 def safe_path(path):
     """Reject credential names and symlinks before following any local input."""
     path = Path(path)
@@ -108,7 +309,7 @@ def workflow_paths(root):
                 pending.append(child)
             else:
                 paths.append(str(child.relative_to(root)))
-    paths.extend([".github/actionlint.yaml", "package.json"])
+    paths.extend([".github/actionlint.yaml", "package.json", NATIVE_DRIVER])
     print("Files to read: " + json.dumps([str(root / p) for p in paths]), flush=True)
     return paths
 
@@ -120,7 +321,7 @@ def select_blobs(tree):
     for entry in tree["tree"]:
         require(isinstance(entry, dict) and isinstance(entry.get("path"), str), "unreadable tree path")
         path = entry["path"]
-        if not (path in {".github/actionlint.yaml", "package.json"} or path.startswith((
+        if not (path in {".github/actionlint.yaml", "package.json", NATIVE_DRIVER} or path.startswith((
                 ".github/workflows/", ".github/actions/"))):
             continue
         if entry.get("type") == "tree":
@@ -320,6 +521,9 @@ def runs(body, key="run"):
 
 
 def check_workflows(sources):
+    driver = sources.get(NATIVE_DRIVER)
+    require(isinstance(driver, str),
+            f"{NATIVE_DRIVER}: native implementation differs from base")
     require(len(sources) <= 100 and sum(len(v.encode()) for v in sources.values()) <= 4 * 1024 * 1024,
             "workflow file set exceeds bounds")
     manifest = json.loads(sources["package.json"])
@@ -383,6 +587,10 @@ def check_workflows(sources):
                         f"{path}: action must be SHA pinned")
             if key == "uses":
                 require("gke-pr.yml" not in value, "admission workflow must not be reusable")
+                if "engine-main-touched.yml" in value:
+                    require(path == ".github/workflows/gke-pr.yml" and depth == 4
+                            and value == "./" + NATIVE_WORKFLOW,
+                            "native workflow call outside the admitted route")
         if path != ".github/workflows/gke-pr.yml":
             require(not re.search(r"^\s*(?:group:\s*gke-|workflows:.*GKE PR)", text, re.M),
                     f"{path}: GKE routing outside admission")
@@ -405,7 +613,32 @@ def check_workflows(sources):
     require(any("-config-file .github/actionlint.yaml" in script
                 for script in runs(legacy_lint)),
             "workflow lint must use the repository actionlint config")
+    # A single, exact base-owned reusable implementation is admitted. Candidate
+    # changes to this implementation need a separate base-policy adoption first.
+    root = Path(__file__).resolve().parents[1]
+    installed = read_sources(root, [NATIVE_WORKFLOW, NATIVE_DRIVER])
     workflow = sources[".github/workflows/gke-pr.yml"]
+    bootstrap_jobs = set(jobs(workflow))
+    bootstrap_old = POD_JOBS | {"admit", "test-check", "result"}
+    bootstrap_new = bootstrap_old | {"engine-main"}
+    require(bootstrap_jobs in (bootstrap_old, bootstrap_new),
+            "admission job inventory differs")
+    has_native = bootstrap_jobs == bootstrap_new
+    # TEMPORARY STAGE A ONLY. Two complete caller graphs, and only the
+    # exact push-header activation paired with the new graph, are admitted.
+    # The shared workflow body stays pinned. Bootstrap keeps the installed
+    # driver; activation requires one base-owned digest of its complete bytes.
+    push = "  push:\n    branches: [main]\n"
+    trusted = installed[NATIVE_WORKFLOW]
+    require(trusted.count(push) <= 1, "installed native push header differs")
+    inactive = trusted.replace(push, "", 1)
+    expected_native = (inactive.replace("\non:\n", "\non:\n" + push, 1)
+                       if has_native else inactive)
+    require(sources.get(NATIVE_WORKFLOW) == expected_native,
+            f"{NATIVE_WORKFLOW}: native implementation differs from base")
+    require((hashlib.sha256(driver.encode("utf-8")).hexdigest() == APPROVED_NATIVE_DRIVER_SHA256
+             if has_native else driver == installed[NATIVE_DRIVER]),
+            f"{NATIVE_DRIVER}: native implementation differs from base")
     require(TRIGGER in workflow, "admission trigger differs")
     header = workflow.split("\njobs:\n", 1)[0]
     require(header.split("\non:\n", 1)[1].split("\nrun-name:", 1)[0].strip()
@@ -438,10 +671,16 @@ def check_workflows(sources):
         for name, body in bodies.items() if name != "compile"
         for _, k, _ in yaml_records(body)
     ), "admission matrix must not add or exclude rows")
-    require(set(bodies) == POD_JOBS | {"admit", "test-check", "result"}, "admission job inventory differs")
+    require(set(bodies) == (bootstrap_new if has_native else bootstrap_old),
+            "admission job inventory differs")
     for name, body in bodies.items():
+        if name == "engine-main":
+            require(body.strip() == NATIVE_CALL.strip(),
+                    "native workflow call must bind the exact admitted route and identities")
+            continue
         is_pod = name in POD_JOBS
-        require(value_at(body, 4, "runs-on") == (POD_RUNNER if is_pod else "ubuntu-24.04"),
+        require(value_at(body, 4, "runs-on")
+                == ("gke-8cpu-16gb-amd64" if name == "compile" else "ubuntu-24.04"),
                 f"{name}: runner differs")
         expected_permissions = (
             "{contents: read, statuses: write}" if name == "result"
@@ -458,8 +697,8 @@ def check_workflows(sources):
                     f"{name}: allowed guard differs")
             require(not re.search(r"github\s*(?:\[\s*['\"]token|[.]\s*token)", body)
                     and "GH_TOKEN:" not in body, f"{name}: credential refused")
-            expected_env = {
-                "PF_CI_LABELS": "'[\"self-hosted\",\"pf-ci\",\"pf-ci-x64\"]'",
+            expected_env = ({
+                "PF_CI_LABELS": "'[\"ubuntu-24.04\"]'",
                 "PYTHONHASHSEED": '"0"',
             } if name in {"pytest", "differential"} else {
                 "PF_CI_LABELS": "'[\"self-hosted\",\"pf-ci\",\"pf-ci-x64\"]'",
@@ -473,7 +712,7 @@ def check_workflows(sources):
                 "PINEFORGE_COMPILE_SHARD": "${{ matrix.compile-shard }}",
                 "PINEFORGE_COMPILE_SHARDS": '"4"',
                 "PINEFORGE_COMPILE_REPORT_DIR": "${{ github.workspace }}/.ci/compile-report",
-            } if name == "compile" else {}
+            } if name == "compile" else {})
             require(mapping_at(body, "env", 4) == expected_env, f"{name}: pod environment differs")
             for step in step_blocks(body):
                 allowed_step_env = (
@@ -577,11 +816,17 @@ def check_workflows(sources):
     require(runs(bodies["result"]) == [CHECKER + " --result"], "result must use the base checker")
     result_steps = step_blocks(bodies["result"])
     require(len(result_steps) == 2 and not step_env(result_steps[0])
-            and step_env(result_steps[1]) == {**identity_env(), "NEEDS": "${{ toJSON(needs) }}"},
+            and step_env(result_steps[1]) == {
+                **identity_env(), "NEEDS": "${{ toJSON(needs) }}",
+                **({"DEFINITION_SHA": "${{ github.sha }}"} if has_native else {}),
+            },
             "result environment binding differs")
     require("    needs: [admit, workflow-lint, package-files, pytest, compile]" in bodies["test-check"],
             "test-check dependencies differ")
-    require("    needs: [admit, workflow-lint, package-files, pytest, compile, differential, test-check]" in bodies["result"],
+    require(value_at(bodies["result"], 4, "needs")
+            == ("[admit, workflow-lint, package-files, pytest, compile, differential, test-check, engine-main]"
+                if has_native else
+                "[admit, workflow-lint, package-files, pytest, compile, differential, test-check]"),
             "result dependencies differ")
     require(value_at(bodies["result"], 4, "name") == "gate", "gate check name differs")
     test_check_steps = step_blocks(bodies["test-check"])
@@ -596,7 +841,7 @@ def check_workflows(sources):
             'python -m pip install -e ".[dev]"',
             "python -m pytest -q tests/test_license_entity.py",
         ],
-        "pytest": ['python -m pip install -e ".[dev]"', "python -m pytest -q"],
+        "pytest": ['python -m pip install -e ".[dev]"', "python -m pytest -q -n auto"],
         "differential": [
             "set -euo pipefail\npython -m pip install -e .\nnpm ci",
             "npm run gate:selftest", "npm audit --audit-level=high", "npm run gate:full",
@@ -709,17 +954,30 @@ def proof_success(needs, expected):
     return (isinstance(needs, dict) and set(needs) == set(expected)
             and all(isinstance(row, dict) and row.get("result") == "success"
                     for row in needs.values())
+            and isinstance(needs["admit"].get("outputs"), dict)
             and needs["admit"].get("outputs", {}).get("allowed") == "true")
 
 
 def report_result(env, api=gh_json):
-    expected = {
-        "admit", "workflow-lint", "package-files", "pytest", "compile",
-        "differential", "test-check",
-    }
-    needs = json.loads(env["NEEDS"])
-    passed = (proof_success(needs, expected)
-              and needs["admit"]["outputs"].get("head_sha") == env["HEAD_SHA"])
+    try:
+        # Decide from the installed base caller, never from supplied NEEDS.
+        # The pre-native predicate disappears with this entire bootstrap delta
+        # at activation. A new installed caller cannot accept old NEEDS.
+        root = Path(__file__).resolve().parents[1]
+        installed = read_sources(root, [".github/workflows/gke-pr.yml"])
+        expected = set(jobs(installed[".github/workflows/gke-pr.yml"]))
+        old = POD_JOBS | {"admit", "test-check", "result"}
+        require(expected in (old, old | {"engine-main"}), "installed caller inventory differs")
+        has_native = "engine-main" in expected
+        expected -= {"result"}
+        needs = json.loads(env["NEEDS"])
+        passed = (proof_success(needs, expected)
+                  and needs["admit"]["outputs"].get("head_sha") == env["HEAD_SHA"]
+                  and needs["admit"]["outputs"].get("base_sha") == env["BASE_SHA"]
+                  and (not has_native
+                       or native_success(needs["engine-main"].get("outputs"), env)))
+    except (ValueError, KeyError, TypeError):
+        passed = False
     # Refusals still publish failure on the immutable event head. No artifact
     # or head checkout is used. A stale run cannot publish success.
     try:
@@ -737,6 +995,37 @@ def report_result(env, api=gh_json):
     require(passed, "PR admission or checks failed")
 
 
+def native_success(outputs, env):
+    if not isinstance(outputs, dict):
+        return False
+    if not all(isinstance(value, str) for value in outputs.values()):
+        return False
+    if not (
+        outputs.get("decision_result") == "success"
+        and outputs.get("source_event") == "pull_request"
+        and outputs.get("base") == env["BASE_SHA"]
+        and outputs.get("head") == env["HEAD_SHA"]
+        and outputs.get("definition") == env["DEFINITION_SHA"]
+        and SHA.fullmatch(outputs.get("tree", ""))
+        and re.fullmatch(r"[0-9a-f]{64}", outputs.get("plan", ""))
+    ):
+        return False
+    return (
+        outputs.get("native") == "true" and outputs.get("native_result") == "success"
+        and outputs.get("mode") == outputs.get("execution_mode") == "touched"
+        and outputs.get("coverage_complete") == "true"
+        and re.fullmatch(r"[0-9a-f]{64}", outputs.get("inventory", ""))
+        and outputs.get("executed_plan") == outputs["plan"]
+    ) or (
+        outputs.get("native") == "false" and outputs.get("native_result") == "skipped"
+        and outputs.get("mode") == "skip"
+        and outputs.get("execution_mode", "") == ""
+        and outputs.get("inventory", "") == ""
+        and outputs.get("coverage_complete", "") == ""
+        and outputs.get("executed_plan", "") == ""
+    )
+
+
 def main():
     require(len(sys.argv) == 2, "expected one admission mode")
     env = dict(os.environ)
@@ -750,6 +1039,12 @@ def main():
         admit_workflows(env)
     elif sys.argv[1] == "--result":
         report_result(env)
+    elif sys.argv[1] == "--proof-identity":
+        authorize_proof(env)
+    elif sys.argv[1] == "--push-identity":
+        authorize_push(env)
+    elif sys.argv[1] == "--native-check":
+        report_native_check(env)
     elif sys.argv[1] == "--lint":
         root = Path.cwd()
         paths = workflow_paths(root)
@@ -957,7 +1252,7 @@ def test_real_workflow_mutations():
     for before, after, message in [
         ("pull_request_target:", "pull_request:", "trigger"),
         ("permissions: {}", "permissions: {contents: write}", "permissions"),
-        ("runs-on: gke-8cpu-16gb-amd64", "runs-on: ubuntu-24.04", "runner"),
+        ("runs-on: ubuntu-24.04", "runs-on: gke-8cpu-16gb-amd64", "runner"),
         ("persist-credentials: false", "persist-credentials: true", "checkout"),
         ("ref: ${{ github.sha }}", "ref: ${{ github.event.pull_request.head.sha }}", "checkout"),
         ("--identity", "--workflows", "identity"),
@@ -965,7 +1260,7 @@ def test_real_workflow_mutations():
         ("\n    if: always()\n", "\n    if: success()\n", "always"),
         ("npm ci", "npm ci\n          echo '${{ github.event.pull_request.title }}'", "interpolation"),
         ("permissions: {contents: read}", "permissions: {contents: read, id-token: write}", "id-token"),
-        ("    runs-on: gke-8cpu-16gb-amd64", "    environment: release\n    runs-on: gke-8cpu-16gb-amd64", "environment"),
+        ("    runs-on: ubuntu-24.04", "    environment: release\n    runs-on: ubuntu-24.04", "environment"),
         ("        run: npm run gate:full", "        run: echo '${{ secrets.TOKEN }}'", "secret"),
         ("        run: npm run gate:full", "        run: echo \"${{ secrets['TOKEN'] }}\"", "secret"),
         ("        run: npm run gate:full", "        run: echo '${{ toJSON(secrets) }}'", "secret"),
@@ -978,8 +1273,9 @@ def test_real_workflow_mutations():
          "    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]\n  workflow_dispatch:",
          "extra events"),
         ("        run: npm run gate:full", "        run: timeout 30 npm run gate:full", "time limit"),
+        ("    runs-on: ubuntu-24.04", "    runs-on: ubuntu-24.04\n    timeout-minutes: 15", "time limit"),
         ("        run: npm run gate:full", "        run: true", "proof commands"),
-        ("        run: python -m pytest -q\n", "        run: echo pytest\n", "proof commands"),
+        ("        run: python -m pytest -q -n auto\n", "        run: echo pytest\n", "proof commands"),
         ('      PYTHONHASHSEED: "0"', '      PYTHONHASHSEED: ${{ toJSON(github) }}', "pod environment"),
         ("      - name: Run the test suite\n", "      - name: Run the test suite\n"
          "        env:\n          AUTH: ${{ toJSON(github) }}\n", "step environment"),
@@ -1060,6 +1356,97 @@ def test_pull_request_shape_runs_compile_and_result_needs_it():
     assert "compile" in result_needs
 
 
+def test_native_admission_pins_the_only_call_callee_driver_and_result_dependency():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = bootstrap_fixture(read_sources(root, workflow_paths(root)), native=True)
+    path = ".github/workflows/gke-pr.yml"
+    original = sources[path]
+    call = jobs(original)["engine-main"]
+    for before, after in [
+        ("needs: [admit]", "needs: []"),
+        ("outputs.allowed == 'true'", "outputs.allowed != 'false'"),
+        ("outputs.base_sha", "outputs.head_sha"),
+        ("outputs.head_sha", "outputs.base_sha"),
+        ("definition: ${{ github.sha }}", "definition: ${{ needs.admit.outputs.head_sha }}"),
+        ('workers: "8"', 'workers: "auto"'),
+        ("./.github/workflows/engine-main-touched.yml", "./.github/workflows/other.yml"),
+    ]:
+        assert call.count(before) == 1
+        mutant = original.replace(call, call.replace(before, after, 1), 1)
+        with pytest.raises(ValueError, match="native workflow call"):
+            check_workflows({**sources, path: mutant})
+    with pytest.raises(ValueError, match="native implementation differs"):
+        check_workflows({**sources, path: original.replace("  engine-main:" + call, "", 1)})
+    dependency = "[admit, workflow-lint, package-files, pytest, compile, differential, test-check, engine-main]"
+    assert original.count(dependency) == 1
+    with pytest.raises(ValueError, match="result dependencies"):
+        check_workflows({
+            **sources, path: original.replace(dependency, dependency.replace(", engine-main]", "]"), 1),
+        })
+    for source_path, before, after in [
+        (NATIVE_WORKFLOW, "  push:\n    branches: [main]\n", ""),
+        (NATIVE_WORKFLOW, "    branches: [main]", "    branches: [main]\n    paths: ['docs/**']"),
+        (NATIVE_WORKFLOW, "permissions: {}",
+         "permissions: {}\n\nconcurrency:\n  group: native-main\n  cancel-in-progress: true"),
+        (NATIVE_WORKFLOW, "ref: main", "ref: stale-engine"),
+        (NATIVE_WORKFLOW, "needs.changes.outputs.native == 'true'", "true"),
+        (NATIVE_WORKFLOW, "--expected-plan", "--ignored-plan"),
+        (NATIVE_WORKFLOW, "jobs.outcomes.outputs.decision_result", "jobs.changes.result"),
+        (NATIVE_WORKFLOW, "jobs.outcomes.outputs.native_result", "jobs.native.result"),
+        (NATIVE_WORKFLOW, "steps.forward.outputs.native_result", "'success'"),
+        (NATIVE_WORKFLOW, "    if: always()\n    runs-on: ubuntu-24.04\n    permissions: {}",
+         "    if: success()\n    runs-on: ubuntu-24.04\n    permissions: {}"),
+        (NATIVE_WORKFLOW, 'needs = json.loads(os.environ["NEEDS"])',
+         'needs = {"changes": {"result": "success"}, "native": {"result": "success"}}'),
+        (NATIVE_WORKFLOW, 'results[job] = row["result"]', 'results[job] = "success"'),
+        (NATIVE_DRIVER, "selection differs from the changes job", "ignored identity"),
+    ]:
+        assert before in sources[source_path]
+        with pytest.raises(ValueError, match="native implementation differs"):
+            check_workflows({
+                **sources, source_path: sources[source_path].replace(before, after, 1),
+            })
+    for missing in (NATIVE_WORKFLOW, NATIVE_DRIVER):
+        with pytest.raises(ValueError, match="native implementation differs"):
+            check_workflows({key: value for key, value in sources.items() if key != missing})
+    with pytest.raises(ValueError, match="outside the admitted route"):
+        check_workflows({
+            **sources, ".github/workflows/other.yml":
+            "on:\n  workflow_dispatch:\njobs:\n  other:\n"
+            "    uses: ./.github/workflows/engine-main-touched.yml\n",
+        })
+
+
+def test_proof_dispatch_requires_both_writers_and_real_public_commits():
+    import copy
+    import pytest
+
+    env, responses = identity_fixture()
+    env["DEFINITION_SHA"] = "d" * 40
+    responses[f"repos/{env['REPO']}"] = {"private": False}
+    for key in ("BASE_SHA", "HEAD_SHA"):
+        responses[f"repos/{env['REPO']}/commits/{env[key]}"] = {"sha": env[key]}
+    authorize_proof(env, lambda endpoint: responses[endpoint])
+    for identity in ("ACTOR", "TRIGGERING_ACTOR"):
+        changed = copy.deepcopy(responses)
+        changed[f"repos/{env['REPO']}/collaborators/{env[identity]}/permission"] = {
+            "permission": "read",
+        }
+        with pytest.raises(ValueError, match="write permission"):
+            authorize_proof(env, lambda endpoint: changed[endpoint])
+    for endpoint, response, message in [
+        (f"repos/{env['REPO']}", {"private": True}, "not public"),
+        (f"repos/{env['REPO']}/commits/{env['HEAD_SHA']}", {"sha": "c" * 40}, "differs"),
+    ]:
+        changed = {**responses, endpoint: response}
+        with pytest.raises(ValueError, match=message):
+            authorize_proof(env, lambda endpoint: changed[endpoint])
+    with pytest.raises(ValueError, match="SHA"):
+        authorize_proof({**env, "BASE_SHA": "main"}, lambda endpoint: responses[endpoint])
+
+
 def test_admission_refuses_the_closed_promotion_target_trigger():
     import pytest
 
@@ -1094,7 +1481,7 @@ def test_test_workflow_pull_request_trigger_mutation_is_refused():
         check_workflows({**sources, path: mutant})
 
 
-def test_test_workflow_pod_runner_admission_and_mutations():
+def test_test_workflow_hosted_runner_admission_and_mutations():
     import pytest
 
     root = Path(__file__).resolve().parents[1]
@@ -1110,14 +1497,12 @@ def test_test_workflow_pod_runner_admission_and_mutations():
         return workflow.replace(body, changed, 1)
 
     candidate = sources[path]
-    for name in ("workflow-lint", "package-files", "pytest"):
-        candidate = with_runner(candidate, name, "gke-8cpu-16gb-amd64")
     assert {name: value_at(body, 4, "runs-on") for name, body in jobs(candidate).items()} == {
         "authz": "ubuntu-24.04",
         "changes": "ubuntu-24.04",
-        "workflow-lint": "gke-8cpu-16gb-amd64",
-        "package-files": "gke-8cpu-16gb-amd64",
-        "pytest": "gke-8cpu-16gb-amd64",
+        "workflow-lint": "ubuntu-24.04",
+        "package-files": "ubuntu-24.04",
+        "pytest": "ubuntu-24.04",
         "compile": "ubuntu-24.04",
         "test-check": "ubuntu-24.04",
     }
@@ -1127,9 +1512,9 @@ def test_test_workflow_pod_runner_admission_and_mutations():
         ("authz", "gke-8cpu-16gb-amd64"),
         ("changes", "gke-8cpu-16gb-amd64"),
         ("test-check", "gke-8cpu-16gb-amd64"),
-        ("workflow-lint", "ubuntu-24.04"),
-        ("package-files", "ubuntu-24.04"),
-        ("pytest", "ubuntu-24.04"),
+        ("workflow-lint", "gke-8cpu-16gb-amd64"),
+        ("package-files", "gke-8cpu-16gb-amd64"),
+        ("pytest", "gke-8cpu-16gb-amd64"),
         ("compile", "gke-8cpu-16gb-amd64"),
         ("pytest", "gke-4cpu-8gb-amd64"),
     ):
@@ -1142,11 +1527,9 @@ def test_test_workflow_pod_runner_admission_and_mutations():
     marker = "  workflow_dispatch:\n"
     assert candidate.count(marker) == 1
     pr_workflow = candidate.replace(marker, "  pull_request:\n" + marker, 1)
-    for name in ("workflow-lint", "package-files", "pytest"):
-        pr_workflow = with_runner(pr_workflow, name, "ubuntu-24.04")
     for name in ("authz", "changes", "workflow-lint", "package-files", "pytest", "compile", "test-check"):
         mutant = with_runner(pr_workflow, name, "gke-8cpu-16gb-amd64")
-        assert mutant != candidate
+        assert mutant != pr_workflow
         with pytest.raises(ValueError) as error:
             check_workflows({**sources, path: mutant})
         assert str(error.value) == "test.yml must not have a pull_request trigger"
@@ -1227,14 +1610,32 @@ def test_result_refuses_every_incomplete_leg_and_stale_head(monkeypatch):
     import copy
     import pytest
 
+    root = Path(__file__).resolve().parents[1]
+    original_read = read_sources
+    installed = bootstrap_fixture(original_read(root, workflow_paths(root)), native=True)
+    monkeypatch.setattr(sys.modules[__name__], "read_sources",
+                        lambda root, paths: ({".github/workflows/gke-pr.yml":
+                                             installed[".github/workflows/gke-pr.yml"]}
+                                            if paths == [".github/workflows/gke-pr.yml"]
+                                            else original_read(root, paths)))
     env, responses = identity_fixture()
-    env.update(GITHUB_SERVER_URL="https://github.com", GITHUB_RUN_ID="1")
+    env.update(GITHUB_SERVER_URL="https://github.com", GITHUB_RUN_ID="1", DEFINITION_SHA="d" * 40)
     expected = {
         "admit", "workflow-lint", "package-files", "pytest", "compile",
-        "differential", "test-check",
+        "differential", "test-check", "engine-main",
     }
     needs = {name: {"result": "success"} for name in expected}
-    needs["admit"]["outputs"] = {"allowed": "true", "head_sha": env["HEAD_SHA"]}
+    needs["admit"]["outputs"] = {
+        "allowed": "true", "head_sha": env["HEAD_SHA"], "base_sha": env["BASE_SHA"],
+    }
+    needs["engine-main"]["outputs"] = {
+        "source_event": "pull_request",
+        "decision_result": "success", "native_result": "success", "native": "true",
+        "mode": "touched", "execution_mode": "touched", "inventory": "a" * 64,
+        "coverage_complete": "true",
+        "base": env["BASE_SHA"], "head": env["HEAD_SHA"], "definition": env["DEFINITION_SHA"],
+        "tree": "e" * 40, "plan": "f" * 64, "executed_plan": "f" * 64,
+    }
     calls = []
     # Only the external status transport is replaced. The actual result and
     # live identity decisions execute, and their full outgoing payload is read.
@@ -1252,10 +1653,59 @@ def test_result_refuses_every_incomplete_leg_and_stale_head(monkeypatch):
             posted = calls.pop()
             assert "state=failure" in posted
             assert f"repos/owner/project/statuses/{env['HEAD_SHA']}" in posted
-    for output in ("allowed", "head_sha"):
+        env["NEEDS"] = json.dumps({key: row for key, row in needs.items() if key != name})
+        with pytest.raises(ValueError, match="PR admission or checks failed"):
+            report_result(env, lambda endpoint: responses[endpoint])
+        assert "state=failure" in calls.pop()
+    for output in ("allowed", "head_sha", "base_sha"):
         changed = copy.deepcopy(needs)
         changed["admit"]["outputs"][output] = "wrong"
         env["NEEDS"] = json.dumps(changed)
+        with pytest.raises(ValueError, match="PR admission or checks failed"):
+            report_result(env, lambda endpoint: responses[endpoint])
+        assert "state=failure" in calls.pop()
+    for output, value in [
+        ("source_event", "push_main"),
+        ("decision_result", "failure"), ("decision_result", "cancelled"),
+        ("decision_result", "skipped"), ("native_result", "failure"),
+        ("native_result", "cancelled"), ("native_result", "skipped"),
+        ("native_result", ""), ("native", "false"), ("native", "maybe"),
+        ("base", "c" * 40), ("head", "c" * 40), ("definition", "c" * 40),
+        ("tree", ""), ("plan", ""), ("executed_plan", "a" * 64),
+        ("executed_plan", None),
+        ("mode", "full"), ("execution_mode", "full"), ("inventory", ""),
+        ("coverage_complete", "false"),
+    ]:
+        changed = copy.deepcopy(needs)
+        changed["engine-main"]["outputs"][output] = value
+        env["NEEDS"] = json.dumps(changed)
+        with pytest.raises(ValueError, match="PR admission or checks failed"):
+            report_result(env, lambda endpoint: responses[endpoint])
+        assert "state=failure" in calls.pop()
+    docs = copy.deepcopy(needs)
+    docs["engine-main"]["outputs"].update(
+        native="false", native_result="skipped", executed_plan="",
+        mode="skip", execution_mode="", inventory="", coverage_complete="",
+    )
+    env["NEEDS"] = json.dumps(docs)
+    report_result(env, lambda endpoint: responses[endpoint])
+    assert "state=success" in calls.pop()
+    # An intended native skip still needs a successful, identity-bound decision.
+    for output, value in [
+        ("source_event", "push_main"),
+        ("decision_result", "skipped"), ("head", "c" * 40),
+        ("base", "c" * 40), ("definition", "c" * 40),
+        ("native_result", "success"), ("executed_plan", "f" * 64),
+        ("mode", "full"), ("execution_mode", "touched"), ("inventory", "a" * 64),
+    ]:
+        changed = copy.deepcopy(docs)
+        changed["engine-main"]["outputs"][output] = value
+        env["NEEDS"] = json.dumps(changed)
+        with pytest.raises(ValueError, match="PR admission or checks failed"):
+            report_result(env, lambda endpoint: responses[endpoint])
+        assert "state=failure" in calls.pop()
+    for malformed in ("{", "null", "[]", '{"engine-main": null}'):
+        env["NEEDS"] = malformed
         with pytest.raises(ValueError, match="PR admission or checks failed"):
             report_result(env, lambda endpoint: responses[endpoint])
         assert "state=failure" in calls.pop()
@@ -1264,6 +1714,182 @@ def test_result_refuses_every_incomplete_leg_and_stale_head(monkeypatch):
     with pytest.raises(ValueError, match="PR admission or checks failed"):
         report_result(env, lambda endpoint: responses[endpoint])
     assert "state=failure" in calls.pop()
+
+
+def test_push_admission_binds_before_after_and_never_queries_a_later_main(monkeypatch):
+    import pytest
+
+    env, responses = identity_fixture()
+    env.update(
+        EVENT="push", REF="refs/heads/main", DELETED="false",
+        EVENT_SHA=env["HEAD_SHA"], DEFINITION_SHA=env["HEAD_SHA"],
+    )
+    calls = []
+
+    def api(endpoint):
+        calls.append(endpoint)
+        return responses[endpoint]
+
+    monkeypatch.setitem(globals(), "gh_json", api)
+    authorize_push(env)
+    assert calls == []
+    authorize_push({**env, "BASE_SHA": "0" * 40})
+    authorize_push({**env, "ACTOR": "github-actions[bot]"})
+    assert calls == []
+    for changes in [
+        {"EVENT": "workflow_dispatch"}, {"REF": "refs/heads/topic"},
+        {"DELETED": "true"}, {"BASE_SHA": "main"},
+        {"HEAD_SHA": "c" * 40}, {"EVENT_SHA": "c" * 40},
+        {"DEFINITION_SHA": "c" * 40}, {"HEAD_SHA": "0" * 40},
+    ]:
+        with pytest.raises(ValueError):
+            authorize_push({**env, **changes})
+
+
+def native_publication_fixture():
+    env, responses = identity_fixture()
+    env.update(
+        EVENT="workflow_dispatch", REF="refs/heads/proof", SOURCE_EVENT="push_main",
+        DEFINITION_SHA="d" * 40, RUN_ID="1", RUN_ATTEMPT="2", SERVER_URL="https://github.com",
+    )
+    responses[f"repos/{env['REPO']}"] = {"private": False}
+    for key in ("BASE_SHA", "HEAD_SHA"):
+        responses[f"repos/{env['REPO']}/commits/{env[key]}"] = {"sha": env[key]}
+    prefix = f"repos/{env['REPO']}/actions/runs/1/attempts/2"
+    responses[prefix] = {
+        "id": 1, "run_attempt": 2, "event": "workflow_dispatch",
+        "head_sha": env["DEFINITION_SHA"], "head_branch": "proof", "path": NATIVE_WORKFLOW,
+        "repository": {"full_name": env["REPO"]},
+    }
+    job = {
+        "id": 3, "run_id": 1, "head_sha": env["DEFINITION_SHA"], "status": "completed",
+        "name": "Engine main native", "conclusion": "success",
+        "html_url": f"https://github.com/{env['REPO']}/actions/runs/1/job/3",
+    }
+    responses[f"{prefix}/jobs?per_page=100&page=1"] = {"total_count": 1, "jobs": [job]}
+    needs = {
+        "changes": {"result": "success", "outputs": {
+            "native": "true", "source_event": "push_main", "base": env["BASE_SHA"],
+            "mode": "full",
+            "head": env["HEAD_SHA"], "definition": env["DEFINITION_SHA"],
+            "tree": "e" * 40, "plan": "f" * 64,
+        }},
+        "native": {"result": "success", "outputs": {
+            "completed_plan": "f" * 64, "executed_plan": "f" * 64,
+            "pytest_exit": "0", "audit_errors": "0",
+            "execution_mode": "full", "inventory": "a" * 64, "coverage_complete": "true",
+            "full_success": "true", "full_executed_plan": "f" * 64,
+            "engine_sha": "b" * 40, "engine_tree": "c" * 40,
+            "construction_false": "passed", "construction_true": "passed",
+        }},
+    }
+    return env, responses, needs, job
+
+
+def test_historical_check_uses_source_sha_actual_job_and_observed_outcomes():
+    env, responses, needs, job = native_publication_fixture()
+    posted = []
+
+    def create(repo, payload):
+        assert repo == env["REPO"]
+        posted.append(payload)
+        responses[f"repos/{repo}/check-runs/9"] = {**payload, "id": 9}
+        return {"id": 9}
+
+    for state, outputs, conclusion in [
+        ("success", needs["native"]["outputs"].copy(), "success"),
+        ("failure", {
+            "completed_plan": "f" * 64, "pytest_exit": "1", "audit_errors": "0",
+            "execution_mode": "full", "inventory": "a" * 64, "coverage_complete": "true",
+            "full_success": "false", "engine_sha": "b" * 40, "engine_tree": "c" * 40,
+            "construction_false": "failed", "construction_true": "failed",
+        }, "failure"),
+        ("failure", {}, "action_required"),
+        ("cancelled", {}, "cancelled"),
+    ]:
+        needs["native"].update(result=state, outputs=outputs)
+        job["conclusion"] = state
+        env["NEEDS"] = json.dumps(needs)
+        check = report_native_check(env, lambda endpoint: responses[endpoint], create)
+        assert check["head_sha"] == env["HEAD_SHA"] != env["DEFINITION_SHA"]
+        assert check["conclusion"] == conclusion and check["details_url"] == job["html_url"]
+        assert posted[-1]["external_id"] == "native:1:2:3"
+        assert "context" not in posted[-1] and posted[-1]["name"] != "gate"
+
+
+def test_historical_check_refuses_missing_or_wrong_run_source_execution_binding():
+    import copy
+    import pytest
+
+    for mutation in (
+        "missing-native", "wrong-source", "wrong-scope", "wrong-plan", "no-execution",
+        "skip", "wrong-definition", "wrong-attempt", "not-completed", "wrong-details",
+        "wrong-job-head", "wrong-job-result", "missing-job",
+    ):
+        env, responses, needs, job = native_publication_fixture()
+        prefix = f"repos/{env['REPO']}/actions/runs/1/attempts/2"
+        if mutation == "missing-native":
+            del needs["native"]
+        elif mutation == "wrong-source":
+            needs["changes"]["outputs"]["head"] = env["DEFINITION_SHA"]
+        elif mutation == "wrong-scope":
+            needs["changes"]["outputs"]["source_event"] = "pull_request"
+        elif mutation == "wrong-plan":
+            needs["native"]["outputs"]["completed_plan"] = "a" * 64
+        elif mutation == "no-execution":
+            needs["native"]["outputs"] = {}
+        elif mutation == "skip":
+            needs["native"]["result"] = job["conclusion"] = "skipped"
+        elif mutation == "wrong-definition":
+            responses[prefix]["head_sha"] = env["HEAD_SHA"]
+        elif mutation == "wrong-attempt":
+            responses[prefix]["run_attempt"] = 3
+        elif mutation == "not-completed":
+            job["status"] = "in_progress"
+        elif mutation == "wrong-details":
+            job["html_url"] = "https://github.com/other/run"
+        elif mutation == "wrong-job-head":
+            job["head_sha"] = env["HEAD_SHA"]
+        elif mutation == "wrong-job-result":
+            job["conclusion"] = "failure"
+        else:
+            responses[f"{prefix}/jobs?per_page=100&page=1"] = {"total_count": 0, "jobs": []}
+        env["NEEDS"] = json.dumps(needs)
+        creates = []
+        with pytest.raises(ValueError):
+            report_native_check(env, lambda endpoint: responses[endpoint],
+                                lambda repo, payload: creates.append(payload))
+        assert creates == [], mutation
+    env, responses, needs, job = native_publication_fixture()
+    env["NEEDS"] = json.dumps(needs)
+
+    def wrong_association(repo, payload):
+        responses[f"repos/{repo}/check-runs/9"] = {
+            **copy.deepcopy(payload), "id": 9, "head_sha": env["DEFINITION_SHA"],
+        }
+        return {"id": 9}
+
+    with pytest.raises(ValueError, match="does not bind"):
+        report_native_check(env, lambda endpoint: responses[endpoint], wrong_association)
+
+
+def test_main_publication_requires_full_completion_beyond_passing_construction():
+    import pytest
+
+    for key, value in [
+        ("execution_mode", "touched"), ("inventory", ""),
+        ("coverage_complete", "false"), ("audit_errors", "1"),
+        ("full_success", "false"), ("full_executed_plan", ""),
+        ("full_executed_plan", "b" * 64), ("engine_sha", ""),
+    ]:
+        env, responses, needs, job = native_publication_fixture()
+        needs["native"]["outputs"][key] = value
+        env["NEEDS"] = json.dumps(needs)
+        creates = []
+        with pytest.raises(ValueError, match="lacks bound ordinary execution"):
+            report_native_check(env, lambda endpoint: responses[endpoint],
+                                lambda repo, payload: creates.append(payload))
+        assert creates == [], key
 
 
 def test_test_check_executes_real_workflow_script(tmp_path):
@@ -1297,6 +1923,155 @@ def test_test_check_executes_real_workflow_script(tmp_path):
     run_case(scripts[0], changed, 1)
     with pytest.raises(AssertionError):
         run_case("pass", changed, 1)
+
+
+def bootstrap_fixture(sources, *, native):
+    """Temporary controls use both real canonical shapes, with exact deltas."""
+    result = dict(sources)
+    root = Path(__file__).resolve().parents[1]
+    driver_path = ("tests/fixtures/ci_engine_main_touched_approved.txt" if native else NATIVE_DRIVER)
+    driver_file = safe_path(root / driver_path)
+    print("Files to read: " + json.dumps([str(driver_file)]), flush=True)
+    driver = workflow_text(driver_file.read_bytes())
+    if native:
+        assert hashlib.sha256(driver.encode("utf-8")).hexdigest() == APPROVED_NATIVE_DRIVER_SHA256
+    result[NATIVE_DRIVER] = driver
+    path = ".github/workflows/gke-pr.yml"
+    text = result[path]
+    body = jobs(text).get("engine-main")
+    if body is not None:
+        text = text.replace("  engine-main:" + body, "", 1)
+    new_needs = "[admit, workflow-lint, package-files, pytest, compile, differential, test-check, engine-main]"
+    old_needs = "[admit, workflow-lint, package-files, pytest, compile, differential, test-check]"
+    text = text.replace(new_needs, old_needs, 1)
+    definition = "          DEFINITION_SHA: ${{ github.sha }}\n"
+    text = text.replace(definition, "", 1)
+    if native:
+        text = text.replace("  test-check:\n", "  engine-main:\n" + NATIVE_CALL + "\n  test-check:\n", 1)
+        text = text.replace(old_needs, new_needs, 1)
+        # Only the result step has this exact NEEDS line in block env.
+        marker = "          NEEDS: ${{ toJSON(needs) }}\n          REPO:"
+        require(text.count(marker) == 1, "bootstrap result fixture binding differs")
+        text = text.replace(marker, "          NEEDS: ${{ toJSON(needs) }}\n"
+                            + definition + "          REPO:", 1)
+    result[path] = text
+    push = "  push:\n    branches: [main]\n"
+    callee = result[NATIVE_WORKFLOW].replace(push, "", 1)
+    result[NATIVE_WORKFLOW] = callee.replace("\non:\n", "\non:\n" + push, 1) if native else callee
+    return result
+
+
+def test_bootstrap_accepts_only_complete_graph_and_push_activation_pairs():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    old = bootstrap_fixture(sources, native=False)
+    new = bootstrap_fixture(sources, native=True)
+    check_workflows(old)
+    check_workflows(new)
+    for caller, callee in ((old, new), (new, old)):
+        with pytest.raises(ValueError, match="native implementation differs"):
+            check_workflows({**caller, NATIVE_WORKFLOW: callee[NATIVE_WORKFLOW]})
+        with pytest.raises(ValueError, match="native implementation differs"):
+            check_workflows({**caller, NATIVE_DRIVER: callee[NATIVE_DRIVER]})
+    for native_sources in (old, new):
+        for path, before, after in (
+            (NATIVE_WORKFLOW, "ref: main", "ref: stale-engine"),
+            (NATIVE_DRIVER, "selection differs from the changes job", "ignored identity"),
+        ):
+            with pytest.raises(ValueError, match="native implementation differs"):
+                check_workflows({**native_sources,
+                                 path: native_sources[path].replace(before, after, 1)})
+
+
+def test_native_driver_pin_uses_complete_bytes_against_the_real_base_policy():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    old = bootstrap_fixture(sources, native=False)
+    new = bootstrap_fixture(sources, native=True)
+    installed_driver = old[NATIVE_DRIVER]
+    approved_driver = new[NATIVE_DRIVER]
+    assert installed_driver != approved_driver
+    baseline = subprocess.run(
+        ["git", "show",
+         "e6dc2c01cc719bcd88b4416a085f5a07873da2fd:tests/test_gke_pr_admission.py"],
+        cwd=root, check=True, capture_output=True,
+    )
+    # Execute the genuine pinned policy, never the approved driver fixture.
+    # Both policy and candidate contexts resolve the real installed base files.
+    policy = {"__name__": "baseline_gke_pr_admission", "__file__": __file__}
+    exec(compile(workflow_text(baseline.stdout), __file__, "exec"), policy)
+    for checker, admitted_driver, refused_driver in (
+        (policy["check_workflows"], installed_driver, approved_driver),
+        (check_workflows, approved_driver, installed_driver),
+    ):
+        checker(old)
+        checker({**new, NATIVE_DRIVER: admitted_driver})
+        with pytest.raises(ValueError, match="native implementation differs"):
+            checker({**new, NATIVE_DRIVER: refused_driver})
+        with pytest.raises(ValueError, match="native implementation differs"):
+            checker({**old, NATIVE_DRIVER: approved_driver})
+        for graph in (old, new):
+            with pytest.raises(ValueError, match="native implementation differs"):
+                checker({path: text for path, text in graph.items() if path != NATIVE_DRIVER})
+
+        semantic_guard = 'if args.expected_plan != selection["plan_sha256"]:'
+        assert approved_driver.count(semantic_guard) == 1
+        assert approved_driver.endswith("\n")
+        for mutant in (
+            approved_driver[:-1],
+            approved_driver.replace(semantic_guard, semantic_guard.replace("!=", "=="), 1),
+            approved_driver + "# changed driver comment\n",
+            approved_driver + " ",
+            approved_driver.replace("\n", "\r\n"),
+            "raise SystemExit(0)\n",
+        ):
+            assert mutant != approved_driver
+            with pytest.raises(ValueError, match="native implementation differs"):
+                checker({**new, NATIVE_DRIVER: mutant})
+
+    # Invalid direct-call types must retain the native-implementation refusal,
+    # rather than failing in size accounting or treating metadata as authority.
+    for graph in (old, new):
+        for invalid in (
+            None, approved_driver.encode("utf-8"), 0,
+            {"sha256": APPROVED_NATIVE_DRIVER_SHA256},
+        ):
+            with pytest.raises(ValueError, match="native implementation differs"):
+                check_workflows({**graph, NATIVE_DRIVER: invalid})
+
+
+def test_bootstrap_reporter_keeps_old_results_only_for_installed_old_caller(monkeypatch):
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    original_read = read_sources
+    sources = original_read(root, workflow_paths(root))
+    env, responses = identity_fixture()
+    env.update(GITHUB_SERVER_URL="https://github.com", GITHUB_RUN_ID="1")
+    expected = {"admit", "workflow-lint", "package-files", "pytest", "compile", "differential", "test-check"}
+    needs = {name: {"result": "success"} for name in expected}
+    needs["admit"]["outputs"] = {
+        "allowed": "true", "head_sha": env["HEAD_SHA"], "base_sha": env["BASE_SHA"],
+    }
+    env["NEEDS"] = json.dumps(needs)
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: calls.append(argv))
+    for native in (False, True):
+        fixture = bootstrap_fixture(sources, native=native)
+        monkeypatch.setattr(sys.modules[__name__], "read_sources",
+                            lambda root, paths: {".github/workflows/gke-pr.yml":
+                                                 fixture[".github/workflows/gke-pr.yml"]})
+        if native:
+            with pytest.raises(ValueError, match="PR admission or checks failed"):
+                report_result(env, lambda endpoint: responses[endpoint])
+            assert "state=failure" in calls.pop()
+        else:
+            report_result(env, lambda endpoint: responses[endpoint])
+            assert "state=success" in calls.pop()
 
 
 if __name__ == "__main__":

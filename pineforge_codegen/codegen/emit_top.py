@@ -140,6 +140,13 @@ class TopLevelEmitter:
             for func_name, namespace in [self._resolve_callee(node.callee)]
         )
         lines.append('#include <pineforge/source/pine_strategy_host.hpp>')
+        if any(item.get("runtime_context") for item in self._security_calls):
+            lines.extend((
+                "#ifndef PINEFORGE_HAS_RUNTIME_CONTEXT_SERVICE_V1",
+                '#error "Runtime request templates require the paired runtime-context engine"',
+                "#endif",
+                "#include <utility>",
+            ))
         lines.append('#include <pineforge/ta.hpp>')
         lines.extend(['#if __has_include(<pineforge/checked_settings.hpp>)',
                       '#include <pineforge/checked_settings.hpp>', '#endif'])
@@ -157,6 +164,8 @@ class TopLevelEmitter:
         lines.append("#include <numeric>")
         lines.append("#include <string>")
         lines.append("#include <vector>")
+        if getattr(self, "_uses_array_slice_views", False):
+            lines.extend(("#include <stdexcept>", "#include <utility>"))
         if getattr(self, "_array_journal_members", {}):
             lines.extend(("#include <functional>", "#include <limits>",
                           "#include <stdexcept>", "#include <utility>"))
@@ -233,6 +242,11 @@ class TopLevelEmitter:
         # in favour of fully qualified names emitted at each call site.
         lines.append("using namespace pineforge;")
         lines.append("")
+        from .endless_for import plan_endless_for_loops
+        self._endless_for_actions = plan_endless_for_loops(self.ctx.ast)
+        if "stop" in self._endless_for_actions.values():
+            lines.append("inline constexpr int kLoopTimeLimitMs = 2000;")
+            lines.append("")
         lines.append(RUN_STOP_SHIMS_CPP)
         self._emit_ta_compat_shims(lines)
         if getattr(self, "_uses_drawing", False):
@@ -626,6 +640,8 @@ class TopLevelEmitter:
             "        _pf_require_settings_ok();",
             "        _pf_script_state_checkpoint_.reset();",
         ])
+        if any(item.get("runtime_context") for item in self._security_calls):
+            lines.append("        runtime_contexts().enable_history();")
         seen: set[str] = set()
         for declaration in declarations:
             name = self._script_state_member_name(declaration)
@@ -803,6 +819,7 @@ class TopLevelEmitter:
                     "",
                 ])
 
+        vector_traits_start = len(lines)
         lines.extend([
             "template <typename _PFElement, typename _PFAllocator>",
             f"struct {checkpoint_traits}<std::vector<_PFElement, _PFAllocator>> {{",
@@ -833,6 +850,9 @@ class TopLevelEmitter:
             "};",
             "",
         ])
+        if getattr(self, "_uses_array_slice_views", False):
+            from .array_slice import checkpoint_traits as slice_checkpoint_traits
+            lines[vector_traits_start:] = [slice_checkpoint_traits(checkpoint_traits)]
 
         if self._udt_has_array_fields():
             # A UDT array field: its binding, and the contents of an array it
@@ -994,6 +1014,7 @@ class TopLevelEmitter:
             getattr(self, "_uses_map", False)
             or getattr(self, "_uses_matrix", False)
             or getattr(self, "_udt_defs", {})
+            or getattr(self, "_uses_array_slice_views", False)
         )
         journal_members = getattr(self, "_array_journal_members", {})
         journal = (f"this->{self._array_journal_member_name}" if journal_members else None)
@@ -1105,6 +1126,7 @@ class TopLevelEmitter:
                 # A simple or series length is read on the bar
                 # (``_ta_dynamic_plan``): the member is default-constructed.
                 continue
+            refusal = self._ta_dynamic_refusal(site)
             if site.ctor_args:
                 # If a ctor arg is neither a compile-time literal nor expandable
                 # to an input-backed runtime expression, the old code silently
@@ -1118,9 +1140,10 @@ class TopLevelEmitter:
                     # An argument ``_ta_arg_takes_plan`` sends to the lowering
                     # of ``_ta_dynamic_plan`` that it cannot spell is refused
                     # here, as before string literals were spelled.
-                    if (not self._is_compile_time_value(r)
-                            and (self._runtime_ctor_arg_for_reset(a) is None
-                                 or self._ta_arg_takes_plan(site, arg_pos, a))):
+                    if ((refusal is not None and arg_pos in refusal["refused"])
+                            or (not self._is_compile_time_value(r)
+                                and (self._runtime_ctor_arg_for_reset(a) is None
+                                     or self._ta_arg_takes_plan(site, arg_pos, a)))):
                         # A TA source reached through request.security can have
                         # several helper-bound constructor variants. Validate
                         # only variants of this exact source node before the
@@ -1144,12 +1167,23 @@ class TopLevelEmitter:
                                     "arithmetic over those for TA constructor "
                                     "arguments.")
                         else:
-                            message = (
-                                f"Unsupported TA constructor length '{a}' for "
-                                f"{site.class_name}: it is neither a compile-time "
-                                "constant nor derived from an input, so PineForge "
-                                "cannot size the indicator buffer."
-                            )
+                            tv_name = self._ta_tradingview_series_length_name(site)
+                            if tv_name is None:
+                                message = (
+                                    f"Unsupported TA constructor length '{a}' for "
+                                    f"{site.class_name}: it is neither a compile-time "
+                                    "constant nor derived from an input, so PineForge "
+                                    "cannot size the indicator buffer."
+                                )
+                            else:
+                                message = (
+                                    f"Unsupported TA constructor length '{a}' for "
+                                    f"{tv_name}: it is neither a compile-time "
+                                    "constant nor derived from an input, so PineForge "
+                                    "cannot size the indicator buffer. TradingView "
+                                    f"accepts a series length for {tv_name}(); "
+                                    "PineForge does not support it yet."
+                                )
                             hint = ("Use a literal, an input.*() value, or "
                                     "arithmetic over those for TA lengths.")
                         self._codegen_error(getattr(site, "node", None), message, hint=hint)
@@ -1414,8 +1448,14 @@ class TopLevelEmitter:
                 self._emit_foreign_security_lookups(lines)
             lines.append("    void configure_security_evaluators() override {")
             lines.append("        security_eval_states_.clear();")
+            if any(info.get("runtime_context") for info in self._security_eval_info):
+                lines.append("        runtime_contexts().enable_history();")
             lines.extend(self._security_tf_replay_prologue())
             for info in self._security_eval_info:
+                if info.get("runtime_context"):
+                    continue
+                if info.get("series_tf_invalid") is not None:
+                    continue
                 tf = info.get("tf")
                 tf_expr = info.get("tf_expr")
                 if tf:
@@ -1431,7 +1471,8 @@ class TopLevelEmitter:
                         "request.security timeframe was not resolved for registration",
                     )
                 if tf_expr:
-                    la = "true" if info["lookahead_on"] else "false"
+                    la = info.get("lookahead_expr") or (
+                        "true" if info["lookahead_on"] else "false")
                     go = "true" if info.get("gaps_on") else "false"
                     # Heikin-Ashi same-symbol read: emit the 6th arg only when set
                     # so every non-HA strategy's generated code stays byte-identical
@@ -1458,7 +1499,7 @@ class TopLevelEmitter:
             lines.append("    }")
 
     def _emit_foreign_security_lookups(self, lines: list[str]) -> None:
-        """The run-time lookups of another symbol's request (lane XSYM-E):
+        """The run-time lookups of another symbol's request:
         whether its symbol string is the chart's, and whether its data is
         installed (``strategy_set_symbol_feed`` / ``_facts``). An engine
         without the symbol-keyed registration has neither."""
@@ -1573,9 +1614,8 @@ class TopLevelEmitter:
         "initial_capital": "initial_capital_",
     }
 
-    @staticmethod
     def _emit_history_series_write(
-            lines: list[str], pad: str, member: str, value: str) -> None:
+            self, lines: list[str], pad: str, member: str, value: str) -> None:
         """Emit one Pine-series write without conflating history with isnew.
 
         Historical fill recalculations keep ``barstate.isnew`` true, but a
@@ -1583,11 +1623,30 @@ class TopLevelEmitter:
         checkpoint must replace that bar's current history slot rather than
         append a duplicate slot.  The engine exposes those independent facts
         as ``is_first_tick_`` and ``history_advances_new_bar()`` respectively.
+
+        The new-bar flag stays true throughout a loop, so a write inside a
+        loop body would open one slot per iteration. TradingView commits one
+        slot per bar, holding the last evaluation: inside a loop the first
+        reach of the bar opens the slot and later reaches update it, told
+        apart by a flag local to the outermost loop's execution
+        (``_loop_scoped_history_flags``).
         """
+        flags = self._loop_history_flags
+        if flags is None:
+            lines.append(
+                f"{pad}if (history_advances_new_bar()) {member}.push({value});"
+            )
+            lines.append(f"{pad}else {member}.update({value});")
+            return
+        flag = flags.get(member)
+        if flag is None:
+            self._loop_history_flag_count += 1
+            flag = flags[member] = f"_pf_slot_open_{self._loop_history_flag_count}"
         lines.append(
-            f"{pad}if (history_advances_new_bar()) {member}.push({value});"
+            f"{pad}if (history_advances_new_bar() && !{flag}) {member}.push({value});"
         )
         lines.append(f"{pad}else {member}.update({value});")
+        lines.append(f"{pad}{flag} = true;")
 
     def _emit_on_bar(self, lines: list[str]) -> None:
         self._lexical_drawing_types = {}
@@ -1635,6 +1694,12 @@ class TopLevelEmitter:
                 "        if (history_advances_new_bar() && bar_index_ == 0) "
                 f"{info['member_name']}.clear();"
             )
+            clock = self._inline_history_bar_members.get(info["member_name"])
+            if clock is not None:
+                lines.append(
+                    "        if (history_advances_new_bar() && bar_index_ == 0) "
+                    f"{clock} = -1;"
+                )
 
         # A history-reading plain-UDF parameter advances on the chart clock,
         # even when lazy control flow skips its written call on this bar.  Seed
@@ -1713,21 +1778,20 @@ class TopLevelEmitter:
                     func_name_i, namespace_i = self._resolve_callee(stmt.value.callee)
                     is_static_global_input = (
                         stmt.name in self._global_member_vars
+                        and not self._decl_binding_is_series(id(stmt), stmt.name)
                         and not self._is_source_input(stmt.value)
                         and stmt.name not in self._array_vars
                         and stmt.name not in getattr(self, "_matrix_specs", {})
                         and stmt.name not in getattr(self, "_map_vars", {})
                         and not stmt.is_var
                         and not stmt.is_varip
+                        and stmt.name not in self._global_mutable_infos
                     )
                     if is_static_global_input:
                         safe = self._safe_name(stmt.name)
-                        default = self._get_input_default(stmt.value)
-                        default_cpp = self._visit_expr(default) if default is not None else "0"
                         title = self._get_input_title(stmt.value, var_name=stmt.name)
-                        getter = self._input_getter_for_call(stmt.value, func_name_i, namespace_i)
-                        default_cpp = self._coerce_string_input_default(getter, default_cpp)
-                        cpp_val = f'{getter}({self._input_key_literal(title)}, {default_cpp})'
+                        cpp_val = self._render_input_value(
+                            stmt.value, func_name_i, namespace_i, title)
                         static_vars.append(f"{safe} = {cpp_val};")
 
         if static_vars:
@@ -1745,10 +1809,11 @@ class TopLevelEmitter:
                 # declaration statements, not in the global on_bar preamble.
                 if name in getattr(self, "_func_local_var_names", ()):
                     continue
-                # A wide int array member (``std::vector<int64_t>``, see
-                # ``_wide_int_array_names``) needs its first-bar constructor
-                # spelled with the same element type: name the target for
-                # visit_call's ``array.new_*`` / ``array.from`` lowering.
+                # A typed array member, including a wide int array
+                # (``std::vector<int64_t>``, see ``_wide_int_array_names``),
+                # needs its first-bar constructor spelled with the same
+                # element type: name the target for visit_call's
+                # ``array.new_*`` / ``array.from`` lowering.
                 self._array_ctor_target_name = name
                 safe = self._safe_name(name)
                 runtime_info = self._runtime_scalar_var_init_by_member.get(name)
@@ -1788,7 +1853,23 @@ class TopLevelEmitter:
                 if name in self._array_vars:
                     for stmt in self.ctx.ast.body:
                         if isinstance(stmt, VarDecl) and stmt.name == name:
-                            cpp_val = self._visit_expr(stmt.value)
+                            previous_expected = getattr(
+                                self, "_array_ctor_expected", None
+                            )
+                            hinted = self._type_spec_from_hint_name(
+                                stmt.type_hint
+                            )
+                            if hinted is not None and hinted.kind == "array":
+                                self._array_ctor_expected = (
+                                    stmt.value,
+                                    self._widen_array_spec_for_name(
+                                        name, hinted
+                                    ),
+                                )
+                            try:
+                                cpp_val = self._visit_expr(stmt.value)
+                            finally:
+                                self._array_ctor_expected = previous_expected
                             lines.append(f"            {self._array_journal_initializer(safe, cpp_val)}")
                             break
                     continue
@@ -2218,6 +2299,10 @@ class TopLevelEmitter:
         when it was inlined from a v5 library (``library_v5``)."""
         node = fi.node
         previous = self._pine_v5_body
+        # A function is its own C++ scope: a loop flag of the code that
+        # called it does not exist inside it.
+        previous_loop_flags = self._loop_history_flags
+        self._loop_history_flags = None
         self._pine_v5_body = (
             node is not None
             and (getattr(node, "annotations", None) or {}).get("pine_version") == 5
@@ -2226,6 +2311,7 @@ class TopLevelEmitter:
             self._emit_func_def_body(fi, lines, call_site_idx, instance)
         finally:
             self._pine_v5_body = previous
+            self._loop_history_flags = previous_loop_flags
 
     def _emit_func_def_body(self, fi: FuncInfo, lines: list[str],
                             call_site_idx: int | None = None,
@@ -2355,7 +2441,10 @@ class TopLevelEmitter:
                     )
                 spec = recv_spec
                 if recv_spec is not None:
-                    cpp_t = self._type_spec_to_cpp(recv_spec)
+                    recv_spec = self._array_param_spec(fi, i, recv_spec)
+                    spec = recv_spec
+                    cpp_t = self._wide_declared_int_param(
+                        fi, i, self._type_spec_to_cpp(recv_spec))
                     if (
                         recv_spec.kind in {"array", "matrix"}
                         or (
@@ -2429,7 +2518,7 @@ class TopLevelEmitter:
                 # established drawing-handle route, and an untyped ``s`` used as
                 # a string -> ``std::string``. User UDT field mutation propagates
                 # through the arena even though the handle parameter is by value.
-                spec = fi.param_type_specs[i]
+                spec = self._array_param_spec(fi, i, fi.param_type_specs[i])
                 cpp_t = self._wide_declared_int_param(
                     fi, i, self._type_spec_to_cpp(spec))
                 if spec.kind == "udt":
@@ -2488,6 +2577,8 @@ class TopLevelEmitter:
             # The history parameter is represented as int64_t so timestamp
             # values and their na sentinel cannot narrow at the return edge.
             ret_type = "int64_t"
+        elif ("return", fi.name) in self._array_widths.wide:
+            ret_type = self._type_spec_to_cpp(self._array_return_spec(fi))
         elif (
             type_call_site_idx is not None
             and self._callsite_callable_return_pine_type(
@@ -2503,7 +2594,7 @@ class TopLevelEmitter:
         elif getattr(fi, "return_type_spec", None) is not None:
             # Exact return TypeSpec (collections plus narrowly cached primitive
             # terminal reads) takes precedence over the coarse PineType slot.
-            ret_type = self._type_spec_to_cpp(fi.return_type_spec)
+            ret_type = self._type_spec_to_cpp(self._array_return_spec(fi))
         else:
             ret_type = PINE_TYPE_TO_CPP.get(fi.return_type, "double")
         if return_udt:
@@ -2512,10 +2603,16 @@ class TopLevelEmitter:
             rhs_return_cpp_type = self._safe_name(return_udt_name)
         elif (self._is_nullable_collection_cpp_type(ret_type)
               or ret_type in DRAWING_TYPE_TO_CPP.values()
-              or ret_type in ("int", "int64_t")):
+              or (ret_type == "std::vector<int64_t>"
+                  and ("return", fi.name) in self._array_widths.wide)
+              or ret_type in ("int", "int64_t")
+              or ret_type.startswith("std::tuple<")):
             rhs_return_cpp_type = ret_type
         else:
             rhs_return_cpp_type = None
+        if (ret_type == "std::string" and self._has_bool_text()
+                and self._text_type(self._selection_terminal_expr(node.body)) == "bool"):
+            rhs_return_cpp_type = "std::string"
 
         # For per-call-site variants, suffix the function name and activate TA + var remapping
         func_name = (

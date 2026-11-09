@@ -11,7 +11,7 @@ identical behaviour. Compatibility/control rows do not call this pin.
 
 Runtime probes reuse the native synthetic-bar harness, including its engine
 skip guard, from test_security_helper_local_var. A skip is not a runtime
-verdict: the supervisor must run these cases with the paired built engine.
+verdict: the maintainer must run these cases with the paired built engine.
 """
 
 from __future__ import annotations
@@ -128,6 +128,8 @@ int main() {
 def _run_requested(
     cpp: str,
     feeds: dict[str, tuple[int, tuple[tuple[float, ...], ...]]] | None = None,
+    *,
+    value_expression: str = "_req_sec_0",
 ) -> dict[str, list[_Evaluation]]:
     """Observe the real requested evaluator during the normal native run.
 
@@ -135,6 +137,7 @@ def _run_requested(
     opens at its specified hourly open; later children open at the previous
     child close. These valid OHLC bars aggregate to the inputs of the oracle.
     No engine callbacks, slot flags or generated histories are mocked.
+    value_expression can observe a stored tuple component through the same driver.
     """
     if feeds is None:
         feeds = {"chart15": (15, _CHART_CLOSES)}
@@ -164,7 +167,10 @@ def _run_requested(
             + f'        strategy.run(bars, {len(bars)}, "{minutes}", "{minutes}");\n'
             + "    }\n"
         )
-    output = _compile_and_run(cpp + _OBSERVER + "".join(runs) + "    return 0;\n}\n")
+    observer = _OBSERVER.replace(
+        "<< _req_sec_0 <<", f"<< {value_expression} <<"
+    )
+    output = _compile_and_run(cpp + observer + "".join(runs) + "    return 0;\n}\n")
     evaluations: dict[str, list[_Evaluation]] = {tag: [] for tag in feeds}
     for line in output.splitlines():
         fields = line.split()

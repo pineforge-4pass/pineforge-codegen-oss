@@ -2,13 +2,15 @@
 constructor cannot take -- neither a compile-time constant nor an
 input/timeframe expression the runtime reset re-reads.
 
-TradingView answers such a call by its Pine qualifier (lane K-TA-DYNLEN; the
+TradingView answers such a call by its Pine qualifier; the
 rules and their tapes are in the engine header
 ``pineforge/source/pine_ta_length.hpp`` and the replays in
 ``tests/test_e2e_ta_dynamic_length.py``):
 
 * series length, ta.highest / ta.lowest / ta.highestbars / ta.lowestbars:
   ``pineforge::source::Series*``, the length passed on every call;
+* series length, ta.percentile_nearest_rank:
+  ``pineforge::source::SeriesPercentileNearestRank`` appends on every call;
 * ta.supertrend: ``pineforge::source::PineSupertrend``, factor and atrPeriod
   passed on the call and read on its first execution;
 * simple length (fixed for the run) of any family:
@@ -47,6 +49,84 @@ def _member_type(cpp: str, member: str) -> str:
 
 def _members(cpp: str, cpp_type: str) -> list[str]:
     return re.findall(rf"^\s*{re.escape(cpp_type)}\s+(\w+);$", cpp, re.M)
+
+
+def _percentile_compute_line(cpp: str) -> str:
+    return next(
+        line for line in cpp.splitlines()
+        if "_ta_percentile_nearest_rank_" in line and ".compute(" in line
+    )
+
+
+def test_series_percentile_loop_length_uses_the_engine_series_class() -> None:
+    src = """//@version=6
+strategy("repro")
+length = input.int(20, "Length")
+float acc = 0.0
+for len = 2 to 4
+    acc += ta.percentile_nearest_rank(close, len, 50)
+plot(acc)
+"""
+    cpp = transpile(src)
+    assert _members(cpp, "pineforge::source::SeriesPercentileNearestRank")
+    line = _percentile_compute_line(cpp)
+    assert re.search(r"\.compute\([^,\n]+,\s*[^,\n]+,\s*[^)\n]+\)", line), line
+    assert "pineforge::source::ta_number(len)" in line
+
+
+def test_series_percentile_loop_counter_shadows_same_named_input() -> None:
+    src = """//@version=6
+strategy("shadowed percentile")
+length = input.int(20, "Length")
+float acc = 0.0
+for length = 2 to 4
+    acc += ta.percentile_nearest_rank(close, length, 50)
+plot(acc)
+"""
+    cpp = transpile(src)
+    line = _percentile_compute_line(cpp)
+    assert "pineforge::source::ta_number(length)" in line
+    assert 'get_input_int("Length"' not in line
+
+
+def test_series_percentile_keeps_sma_and_ema_refusals() -> None:
+    cases = (
+        (
+            "ta.sma(close, length)",
+            "PF-E5092",
+            "ta.sma",
+            "TradingView accepts a series length for ta.sma(); "
+            "PineForge does not support it yet.",
+        ),
+        (
+            "ta.ema(close, length)",
+            "PF-E5009",
+            "ta::EMA",
+            "",
+        ),
+    )
+    reason = (
+        "it is neither a compile-time constant nor derived from an input, so "
+        "PineForge cannot size the indicator buffer."
+    )
+    for call, code, name, suffix in cases:
+        src = (
+            '//@version=6\nstrategy("refused loop length")\n'
+            "float out = 0.0\n"
+            "for length = 2 to 4\n"
+            f"    out += {call}\n"
+            "plot(out)\n"
+        )
+        with pytest.raises(CompileError) as caught:
+            transpile(src)
+        diagnostic = caught.value.diagnostics[0]
+        assert diagnostic.code == code
+        expected = (
+            f"Unsupported TA constructor length 'length' for {name}: {reason}"
+        )
+        if suffix:
+            expected += f" {suffix}"
+        assert diagnostic.message == expected
 
 
 def test_series_length_extremes_take_the_series_classes() -> None:
@@ -359,7 +439,7 @@ def test_other_series_lengths_stay_refused(call: str) -> None:
 # Explicit sizing originally isolated TA lengths from LEGACY (7a39cb3):
 # that build left an omitted initial_capital /
 # default_qty_type / default_qty_value to the host's defaults, which are not
-# TradingView's Pine v6 defaults (lane TV-DEFAULTS, test_e2e_strategy_defaults).
+# TradingView's Pine v6 defaults (test_e2e_strategy_defaults).
 # The active whole-C++ comparison uses the immutable accepted scaffold pinned
 # by CPP_IDENTITY_REFERENCE; the probe's original sizing remains unchanged.
 _CONSTANT_AND_INPUT = """//@version=6
@@ -372,9 +452,11 @@ hi = ta.highest(high, len)
 r = ta.rsi(close, fast)
 [st, dir] = ta.supertrend(3.0, len)
 e = request.security(syminfo.tickerid, "60", ta.ema(close, len))
+p_const = ta.percentile_nearest_rank(close, 9, 50)
+p_input = ta.percentile_nearest_rank(close, len, 50)
 if up and close > lo
     strategy.entry("L", strategy.long)
-plot(hi + r + st + dir + e)
+plot(hi + r + st + dir + e + p_const + p_input)
 """
 
 
@@ -389,9 +471,18 @@ def test_constant_and_input_lengths_keep_their_cpp(tmp_path: Path) -> None:
     before = transpile_json(pine, parent)
     assert ours["ok"] and before["ok"]
 
+    # d2e5855 writes direct Program tuple results into their existing members.
+    # Require both exact replacements, preserving the complete reference
+    # comparison and its existing rollback/trade-history normalisation.
+    expected = before["cpp"]
+    for name, field in (("st", "value"), ("dir", "direction")):
+        assignment = f"{name} = _result__ta_supertrend_6.{field};"
+        previous = "double " + assignment
+        assert expected.count(previous) == 1
+        expected = expected.replace(previous, assignment, 1)
     # The rollback hook leaves requested-evaluation state alone since the
     # fill-restore fix; everything else must stay identical.
     assert without_restore_script_state(
         without_trade_history_policy(ours["cpp"])
-    ) == without_restore_script_state(without_trade_history_policy(before["cpp"]))
+    ) == without_restore_script_state(without_trade_history_policy(expected))
     assert "pine_ta_length.hpp" not in ours["cpp"]

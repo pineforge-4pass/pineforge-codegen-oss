@@ -1,7 +1,7 @@
 # CGINT6 TradingView trade evidence
 
-Synthetic probes written for integration lane CGINT6 (lane CG-SILENT-2 picked
-onto codegen main 76a5b26) and their unedited TradingView trade exports. They
+Synthetic integration probes picked onto codegen main 76a5b26 and their
+unedited TradingView trade exports. They
 contain no closed or scraped source. Each was exported on 2026-09-29 with
 
 ```bash

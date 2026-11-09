@@ -7,11 +7,11 @@ Covers two transpiler defects:
      bind ``time`` to the bar's time (``current_bar_.timestamp`` on the chart,
      ``bar.timestamp`` inside ``request.security``) rather than shifting the
      timezone string into the ``int64_t`` timestamp parameter.
-  B) ``var x = array.from(...)`` must infer a single consistent element type
-     across the declaration and first-bar initializer for every element type
-     (``int``, ``float``, ``bool``, ``string``, ``color``), including integer
-     constants declared in function scope or via unary sign (``-1``) and mixed
-     numeric element lists.
+  B) ``var x = array.from(...)`` and explicitly typed declarations must use a
+     single consistent element type across the declaration and first-bar
+     initializer for every element type (``int``, ``float``, ``bool``,
+     ``string``, ``color``), including integer constants declared in function
+     scope or via unary sign (``-1``) and mixed numeric element lists.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import re
 import pytest
 
 from pineforge_codegen import transpile
+from tests._compile import compile_cpp, run_emitted_tu
 
 
 CALENDAR_BUILTINS = (
@@ -171,3 +172,38 @@ def test_var_array_from_decl_and_assign_vector_types_match(
     assert decl_elem == expected_cpp_elem
     assert assign_elem == expected_cpp_elem
     assert decl_elem == assign_elem
+
+
+def test_typed_array_from_uses_one_element_type_for_declaration_and_values():
+    src = """//@version=6
+strategy("typed array.from element type")
+read() =>
+    array<float> values = array.from(1, time)
+    values.get(0) + values.get(1)
+observed = read()
+reference = 1.0 + float(time)
+"""
+    cpp = transpile(src)
+    match = re.search(
+        r"std::vector<([^>]+)> values = std::vector<([^>]+)>\{",
+        cpp,
+    )
+    assert match is not None, f"missing typed array.from initializer in:{chr(10)}{cpp}"
+    declaration_elem, initializer_elem = match.groups()
+    assert declaration_elem == "double"
+    assert initializer_elem == declaration_elem
+    compile_cpp(cpp, label="typed-array-from-element-type")
+    driver = r"""
+#include <iomanip>
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{100.0, 100.0, 100.0, 100.0, 1.0, 1700000000000LL};
+    strategy.run(&bar, 1);
+    std::cout << std::fixed << std::setprecision(0)
+              << strategy.observed << " " << strategy.reference << "\n";
+}
+"""
+    assert run_emitted_tu(
+        cpp, driver, opt="-O0", label="typed-array-from-element-type"
+    ) == "1700000000001 1700000000001\n"

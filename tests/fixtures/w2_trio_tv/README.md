@@ -1,6 +1,6 @@
 # W2 lowering-trio TradingView trade evidence
 
-Synthetic public probes written for lane W2-CG-LOWERING-TRIO and their
+Synthetic public probes for lowering cases and their
 unedited TradingView trade exports. They contain no closed or scraped source.
 Each was exported with `lab tv --no-note`; the tapes' `Date and time` column is
 the exporting account's chart timezone, Asia/Taipei (UTC+8).

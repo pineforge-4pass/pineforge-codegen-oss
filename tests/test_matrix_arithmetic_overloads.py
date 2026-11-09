@@ -8,7 +8,10 @@ from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
 from pineforge_codegen.support_checker import SUPPORTED_MATRIX
 from tests._compile import compile_cpp
-from tests._e2e import Build, chart_feed_head, execute_all, ok, skip_unless_e2e_env, trade_count
+from tests._e2e import (
+    Build, assert_run_stopped_with, chart_feed_head, execute_all, ok,
+    skip_unless_e2e_env, trade_count,
+)
 
 
 HEADER = '//@version=6\nstrategy("matrix overloads", overlay=true)\n'
@@ -91,6 +94,15 @@ ERRORS = {
     "na_right": (HEADER + "m1 = matrix.new<float>(1, 1, 1.0)\nmatrix<float> m2 = na\nresult = matrix.sum(m1, m2)\n", "matrix operation on na ID"),
     "missing_history_sum": (HEADER + MATRICES + "result = matrix.sum(m1[1], m2)\n", "Cannot call matrix methods when id of matrix is na."),
 }
+# The engine failure code each case stops with (read off a run against a built
+# library): the run ends with the engine's own code, it does not crash.
+# dimension_mismatch has no engine code of its own yet and reads as unclassified.
+FAILURE_CODES = {
+    "dimension_mismatch": "engine_unclassified_error",
+    "na_left": "pine_na_reference",
+    "na_right": "pine_na_reference",
+    "missing_history_sum": "pine_na_reference",
+}
 
 
 @pytest.mark.parametrize("name", sorted(SUCCESS))
@@ -135,8 +147,11 @@ def test_matrix_sum_invalid_inputs_raise_without_signals(tmp_path):
     feed = chart_feed_head(engine, tmp_path, 4)
     runs = execute_all(engine, feed, tmp_path, {name: Build(source) for name, (source, _) in ERRORS.items()})
     for name, (_, message) in ERRORS.items():
-        assert runs[name].error is not None and message in runs[name].error, name
-        assert "-11" not in runs[name].error, name
+        assert_run_stopped_with(runs, name, FAILURE_CODES[name], message)
+
+
+def test_every_error_case_names_its_failure_code():
+    assert set(FAILURE_CODES) == set(ERRORS)
 
 
 @pytest.mark.parametrize("expression", ["matrix.mult(m1, values)", "m1.mult(values)"])

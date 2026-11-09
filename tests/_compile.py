@@ -28,8 +28,10 @@ Activation contract (env vars):
 * ``PINEFORGE_REQUIRE_COMPILE=1`` — missing compiler, engine or Eigen is a
   failure, including callers that use ``have_compile_env()`` at collection.
   GitHub CI sets this flag; local runs retain the opt-in skip.
+* ``PINEFORGE_REQUIRE_NATIVE=1`` — missing native inputs, including the built
+  runtime required by execution tests, fail instead of skipping.
 
-Without the required flag, missing inputs skip the calling test via
+Without either required flag, missing inputs skip the calling test via
 ``pytest.skip(...)``.
 """
 
@@ -197,14 +199,15 @@ def have_compile_env() -> bool:
     return _ENGINE_INC is not None and _EIGEN_INC is not None and _COMPILER is not None
 
 
-def _compile_unavailable(message: str) -> None:
-    if os.environ.get("PINEFORGE_REQUIRE_COMPILE") == "1":
+def _compile_unavailable(message: str, *, compile_input: bool = True) -> None:
+    if compile_input and os.environ.get("PINEFORGE_REQUIRE_COMPILE") == "1":
         pytest.fail(f"PINEFORGE_REQUIRE_COMPILE=1: {message}", pytrace=False)
-    pytest.skip(message)
+    unavailable = pytest.fail if os.environ.get("PINEFORGE_REQUIRE_NATIVE") == "1" else pytest.skip
+    unavailable(message)
 
 
 def skip_if_no_compile_env() -> None:
-    """Fail on missing required inputs, otherwise retain the opt-in skip.
+    """Skip missing native inputs, or fail when they are explicitly required.
 
     Centralises the skip message so each fail mode reads identically. The
     body checks each env piece individually so the user knows which knob to
@@ -363,10 +366,11 @@ def have_engine_lib() -> bool:
 def skip_if_no_engine_lib() -> None:
     skip_if_no_compile_env()
     if _ENGINE_LIB is None:
-        pytest.skip(
+        _compile_unavailable(
             "No built libpineforge.a. Set PINEFORGE_ENGINE_LIB to the archive "
             "(or configure a build*/lib/ beside the engine checkout) to run the "
-            "emitted translation unit."
+            "emitted translation unit.",
+            compile_input=False,
         )
 
 

@@ -4,7 +4,7 @@ The engine extrema ABI owns one fixed-size history per object.  A Pine length
 that selects between two input-qualified values is therefore lowered to two
 fixed histories advanced on every bar, followed by a value selection.  These
 tests pin that bounded lowering. Every other series length of these two
-functions takes the general series-length route instead (lane K-TA-DYNLEN:
+functions takes the general series-length route:
 ``pineforge::source::SeriesLowest`` / ``SeriesHighest``, TradingView's
 re-windowing rule, ``tests/test_e2e_ta_dynamic_length.py``); the shapes below
 that used to be refused must still stay off the finite-choice rewrite.
@@ -312,9 +312,9 @@ plot(x)
 def test_shadowed_numeric_builtin_does_not_take_finite_choice_route(
     shadowed: str,
 ) -> None:
-    # The existing stable-length path happens to accept this authored-invalid
-    # comparator.  This pass must decline it; fixing general annotation/type
-    # enforcement is deliberately outside the Wellman lowering.
+    # The comparator is authored-invalid (bool against int).  The operator
+    # typing relation now refuses it at the comparison, so the finite-choice
+    # route is never reached; before it, this pass had to decline it.
     src = f"""//@version=6
 strategy("finite choice builtin shadow")
 a = input.int(2, "A", minval=1)
@@ -325,8 +325,8 @@ x = ta.lowest(low, n)
 plot(x)
 """
 
-    cpp = transpile(src)
-    assert "pf_ta_length_choice" not in cpp
+    with pytest.raises(CompileError, match="cannot combine bool and int"):
+        transpile(src)
 
 
 @pytest.mark.parametrize("qualifier", ["var", "varip"])

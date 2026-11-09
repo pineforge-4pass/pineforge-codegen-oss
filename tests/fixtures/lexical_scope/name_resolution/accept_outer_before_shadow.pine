@@ -1,0 +1,14 @@
+//@version=6
+strategy("Outer read before local shadow", overlay = true, initial_capital = 1000000)
+// Before the local declaration the read binds the earlier global, yielding close-open.
+float lateValue = close - open
+probe() =>
+    value = lateValue
+    float lateValue = open
+    value
+signalValue = probe()
+plot(signalValue, "signal")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

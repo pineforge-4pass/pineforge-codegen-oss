@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 
+from .. import signatures as sigs
 from ..ast_nodes import FuncCall, Identifier, MemberAccess
 from ..symbols import method_receiver_type_name
 from .tables import (
@@ -31,6 +32,11 @@ from .tables import (
 )
 
 _MAP_VOID_METHODS = frozenset({"clear", "put_all"})
+
+# Largest declared line, box or label count the native arena factory accepts: its int32
+# domain minus the observed-slack it adds (drawing_bound_from_declared_count in
+# pineforge/drawing.hpp: INT32_MAX - kDrawingObservedSlack, with the slack 5).
+DRAWING_DECLARED_COUNT_MAX = 2**31 - 1 - 5
 
 # Builtin calls Pine types as void, each lowering to a void C++ statement. A
 # user function or selection arm ending in one returns no value, so it must be
@@ -198,6 +204,47 @@ ALL_DRAWING_METHODS = (
 class DrawingVisitor:
     """Drawing-objects-as-data emit helpers. Mixed into ``CodeGen``."""
 
+    def _emit_drawing_all_snapshot(self, kind):
+        # Copy IDs, not records. Deleting a drawing cannot invalidate iteration
+        # over this array, and a setter still writes through the handle.
+        handle = DRAWING_TYPE_TO_CPP[kind]
+        order = f"{DRAWING_ARENA[kind]}.order()"
+        return (
+            f"([&]() {{ std::vector<{handle}> __pf_snapshot; "
+            f"for (auto __pf_id : {order}) "
+            f"__pf_snapshot.push_back({handle}{{__pf_id}}); "
+            f"return __pf_snapshot; }}())"
+        )
+
+    def _emit_drawing_all_read(self, node):
+        from ..drawing_all import (
+            drawing_all_call, drawing_all_refusal, DRAWING_ALL_READS,
+        )
+        from .tables import ARRAY_METHODS, V5_ARRAY_INDEX_METHODS
+        call = drawing_all_call(node)
+        if call is None:
+            return None
+        kind, method, _receiver, arguments = call
+        if kind not in DRAWING_ARENA or method not in DRAWING_ALL_READS:
+            self._codegen_error(node, drawing_all_refusal(kind))
+        args = self._array_method_arg_nodes(method, arguments)
+        required = 1 if method == "get" else 0
+        if len(args) != required or any(arg is None for arg in args) or (
+            method != "get" and arguments.kwargs
+        ):
+            self._codegen_error(node, drawing_all_refusal(kind))
+        # DrawingArena::order() is a const deque of *live* ids, oldest first.
+        # Each read borrows it afresh, so delete/collection is visible to the
+        # next read. Declaration aliases/iteration take a separate snapshot;
+        # this existing direct-read path deliberately keeps its emitted bytes.
+        order = f"{DRAWING_ARENA[kind]}.order()"
+        if method == "size":
+            return f"static_cast<int>({order}.size())"
+        table = (V5_ARRAY_INDEX_METHODS
+                 if self._pine_v5_body and method == "get" else ARRAY_METHODS)
+        read = table[method](order, [self._visit_expr(arg) for arg in args])
+        return f"{DRAWING_TYPE_TO_CPP[kind]}{{{read}}}"
+
     # ------------------------------------------------------------------
     # Enum / extend lowering helpers
     # ------------------------------------------------------------------
@@ -300,6 +347,8 @@ class DrawingVisitor:
             y2 = self._visit_expr(vals.get("y2"))
             x1 = self._coerce_int_slot_with_cast(x1, vals.get("x1"), "int64_t")
             x2 = self._coerce_int_slot_with_cast(x2, vals.get("x2"), "int64_t")
+            y1 = self._coerce_int_slot(y1, vals.get("y1"), "double")
+            y2 = self._coerce_int_slot(y2, vals.get("y2"), "double")
             return (f"pf_line_new({arena}, {x1}, (double)({y1}), "
                     f"{x2}, (double)({y2}), {xloc}, {el}, {er})")
 
@@ -316,6 +365,8 @@ class DrawingVisitor:
             bottom = self._visit_expr(vals.get("bottom"))
             left = self._coerce_int_slot_with_cast(left, vals.get("left"), "int64_t")
             right = self._coerce_int_slot_with_cast(right, vals.get("right"), "int64_t")
+            top = self._coerce_int_slot(top, vals.get("top"), "double")
+            bottom = self._coerce_int_slot(bottom, vals.get("bottom"), "double")
             return (f"pf_box_new({arena}, {left}, (double)({top}), "
                     f"{right}, (double)({bottom}), {xloc})")
 
@@ -331,6 +382,7 @@ class DrawingVisitor:
             y = self._visit_expr(vals.get("y"))
             xloc = self._lower_xloc(vals.get("xloc"))
             x = self._coerce_int_slot_with_cast(x, vals.get("x"), "int64_t")
+            y = self._coerce_int_slot(y, vals.get("y"), "double")
             return (f"pf_label_new({arena}, {x}, (double)({y}), "
                     f"{text}, {xloc}, {yloc})")
 
@@ -347,6 +399,8 @@ class DrawingVisitor:
             vals = self._merge_drawing_args(node, ["price"])
             price = (self._visit_expr(vals["price"]) if vals.get("price") is not None
                      else "current_bar_.close")
+            if vals.get("price") is not None:
+                price = self._coerce_int_slot(price, vals["price"], "double")
             return (f"ChartPoint{{ .index=(int64_t)(pine_bar_index()), "
                     f".time=(int64_t)current_bar_.timestamp, .price=({price}) }}")
         if func_name == "from_index":
@@ -354,6 +408,7 @@ class DrawingVisitor:
             idx = self._visit_expr(vals.get("index"))
             price = self._visit_expr(vals.get("price"))
             idx = self._coerce_int_slot_with_cast(idx, vals.get("index"), "int64_t")
+            price = self._coerce_int_slot(price, vals.get("price"), "double")
             return (f"ChartPoint{{ .index={idx}, .time=na<int64_t>(), "
                     f".price=({price}) }}")
         if func_name == "from_time":
@@ -361,6 +416,7 @@ class DrawingVisitor:
             tm = self._visit_expr(vals.get("time"))
             price = self._visit_expr(vals.get("price"))
             tm = self._coerce_int_slot_with_cast(tm, vals.get("time"), "int64_t")
+            price = self._coerce_int_slot(price, vals.get("price"), "double")
             return (f"ChartPoint{{ .index=na<int64_t>(), .time={tm}, "
                     f".price=({price}) }}")
         if func_name == "new":
@@ -370,6 +426,7 @@ class DrawingVisitor:
             price = self._visit_expr(vals.get("price"))
             idx = self._coerce_int_slot_with_cast(idx, vals.get("index"), "int64_t")
             tm = self._coerce_int_slot_with_cast(tm, vals.get("time"), "int64_t")
+            price = self._coerce_int_slot(price, vals.get("price"), "double")
             return (f"ChartPoint{{ .index={idx}, .time={tm}, "
                     f".price=({price}) }}")
         return "ChartPoint{}"
@@ -429,9 +486,11 @@ class DrawingVisitor:
         if m in ("set_x1", "set_x2"):
             return put(f"pf_line_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'))
         if m in ("set_y1", "set_y2"):
-            return put(f"pf_line_{m}", a, r, f"(double)({av[0]})")
+            y = self._coerce_int_slot(av[0], raw[0], "double")
+            return put(f"pf_line_{m}", a, r, f"(double)({y})")
         if m in ("set_xy1", "set_xy2"):
-            return put(f"pf_line_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), f"(double)({av[1]})")
+            y = self._coerce_int_slot(av[1], raw[1], "double")
+            return put(f"pf_line_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), f"(double)({y})")
         if m in ("set_first_point", "set_second_point"):
             return put(f"pf_line_{m}", a, r, av[0])
         if m == "set_xloc":
@@ -449,9 +508,11 @@ class DrawingVisitor:
         if m in ("set_left", "set_right"):
             return put(f"pf_box_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'))
         if m in ("set_top", "set_bottom"):
-            return put(f"pf_box_{m}", a, r, f"(double)({av[0]})")
+            y = self._coerce_int_slot(av[0], raw[0], "double")
+            return put(f"pf_box_{m}", a, r, f"(double)({y})")
         if m in ("set_lefttop", "set_rightbottom"):
-            return put(f"pf_box_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), f"(double)({av[1]})")
+            y = self._coerce_int_slot(av[1], raw[1], "double")
+            return put(f"pf_box_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), f"(double)({y})")
         if m in ("set_top_left_point", "set_bottom_right_point"):
             return put(f"pf_box_{m}", a, r, av[0])
         if m == "set_xloc":
@@ -469,9 +530,11 @@ class DrawingVisitor:
         if m == "set_x":
             return put("pf_label_set_x", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'))
         if m == "set_y":
-            return put("pf_label_set_y", a, r, f"(double)({av[0]})")
+            y = self._coerce_int_slot(av[0], raw[0], "double")
+            return put("pf_label_set_y", a, r, f"(double)({y})")
         if m == "set_xy":
-            return put("pf_label_set_xy", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), f"(double)({av[1]})")
+            y = self._coerce_int_slot(av[1], raw[1], "double")
+            return put("pf_label_set_xy", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), f"(double)({y})")
         if m == "set_point":
             return put("pf_label_set_point", a, r, av[0])
         if m == "set_xloc":
@@ -627,28 +690,29 @@ class DrawingVisitor:
         # Preserve the unsupported arbitrary-map-receiver boundary. Namespace
         # functional calls are established; method calls must use a named
         # global/local/parameter receiver.
+        param_names = sigs.get_param_names("map", method)
+        if param_names is None:
+            return False
+        if ns != "map":
+            if not isinstance(receiver, Identifier):
+                return False
+            param_names = param_names[1:]
+
+        # A valid named binding has the same void result as its positional
+        # twin. Leave malformed bindings to the map emitter's diagnostics.
+        if len(node.args) > len(param_names):
+            return False
+        if any(name not in param_names for name in node.kwargs):
+            return False
+        if any(name in node.kwargs for name in param_names[:len(node.args)]):
+            return False
+        provided = set(param_names[:len(node.args)]) | set(node.kwargs)
+        if provided != set(param_names):
+            return False
         if ns == "map":
-            # The established namespace-functional form has a positional map
-            # receiver.  Keyword-only receiver routing remains unsupported
-            # and must retain its pre-KI-48g fallback output.
-            expected_arity = 1 if method == "clear" else 2
-            return len(node.args) == expected_arity and not node.kwargs
-        if not isinstance(node.callee.object, Identifier):
-            return False
-        name = node.callee.object.name
-        param_spec = getattr(self, "_current_func_param_specs", {}).get(name)
-        if method == "clear":
-            if node.args or node.kwargs:
-                return False
-        elif param_spec is not None and param_spec.kind == "map":
-            if not (
-                (len(node.args) == 1 and not node.kwargs)
-                or (not node.args and set(node.kwargs) == {"id2"})
-            ):
-                return False
-        elif len(node.args) != 1 or node.kwargs:
-            return False
-        recv_spec = param_spec or self._type_spec_from_expr(node.callee.object)
+            return True
+        param_spec = getattr(self, "_current_func_param_specs", {}).get(receiver.name)
+        recv_spec = param_spec or direct_spec
         return recv_spec is not None and recv_spec.kind == "map"
 
     # ------------------------------------------------------------------
@@ -697,6 +761,7 @@ class DrawingVisitor:
         (``_drawing_pin_members``) holds."""
         pins = getattr(self, "_drawing_pins", None) or {}
         caps = self._drawing_caps or {}
+        capacity = self._drawing_capacity
         for dtype, collector in DRAWING_COLLECTED.items():
             handle = DRAWING_TYPE_TO_CPP[dtype]
             arena = DRAWING_ARENA[dtype]
@@ -709,6 +774,17 @@ class DrawingVisitor:
                 f"            _pf_collect_drawings(this->{arena}, {keep}, _pf_held,",
                 "                                 sizeof(_pf_held) / sizeof(_pf_held[0]));",
                 "        }",
+            ])
+            if capacity is not None:
+                english = self._cpp_string_escape(
+                    f"The script keeps more than {capacity} live drawings of one type; "
+                    "the configured drawing capacity is exceeded."
+                )
+                lines.append(
+                    f"        if ((int)this->{arena}.order().size() > {capacity}) "
+                    f'_PF_LIMIT_STOP("live_drawings", {capacity}LL, "{english}");'
+                )
+            lines.extend([
                 "        return _pf_new;",
                 "    }",
             ])
@@ -758,7 +834,10 @@ class DrawingVisitor:
                 if self._spec_mentions_drawing(self._type_spec_from_hint_name(f.type_name)):
                     return True
         from .tables import DRAWING_NS
+        from ..drawing_all import drawing_all_kind
         for node in self._walk_ast(self.ctx.ast):
+            if drawing_all_kind(node) in DRAWING_NS:
+                return True
             if isinstance(node, FuncCall):
                 _fn, ns = self._resolve_callee(node.callee)
                 if ns in DRAWING_NS:
@@ -776,7 +855,13 @@ class DrawingVisitor:
         for node in self._walk_ast(self.ctx.ast):
             if isinstance(node, StrategyDecl):
                 for key, field in header_field.items():
-                    v = self._int_literal_value(node.kwargs.get(field))
+                    argument = node.kwargs.get(field)
+                    v = self._int_literal_value(argument)
+                    if v is not None and v > DRAWING_DECLARED_COUNT_MAX:
+                        # The native factory takes the count as an int32 and refuses more than
+                        # DRAWING_DECLARED_COUNT_MAX; a larger written value would wrap when it
+                        # is printed into the call, so it is refused here instead of narrowed.
+                        self._codegen_error(argument, "Numeric literal exceeds the generated C++ range.")
                     if v is not None and v > 0:
                         caps[key] = v
         return caps

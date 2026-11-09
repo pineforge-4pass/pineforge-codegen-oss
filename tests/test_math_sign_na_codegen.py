@@ -31,7 +31,7 @@ def _assert_na_safe_sign(expr: str) -> None:
 
 def test_math_sign_kwarg_propagates_float_na_and_evaluates_argument_once():
     cpp = without_source_rename(
-        _gen("float source = na\nresult = math.sign(x=source)\nplot(result)")
+        _gen("float source = na\nresult = math.sign(number=source)\nplot(result)")
     )
     assignment = _assignment(cpp, "result")
     _assert_na_safe_sign(assignment)
@@ -111,7 +111,7 @@ def test_math_sign_generated_cpp_compiles_for_float_int_history_and_kwarg():
     cpp = _gen(
         "float float_na = na\n"
         "int int_na = na\n"
-        "from_float = math.sign(x=float_na)\n"
+        "from_float = math.sign(number=float_na)\n"
         "from_int = math.sign(int_na)\n"
         "from_history = math.sign(close[1])\n"
         "plot(from_float + from_int + from_history)"

@@ -54,12 +54,25 @@ def na_preserving_int_cast(value_cpp: str, int_cpp_type: str = "int") -> str:
     (``fcvtzs``: saturation) disagreed on an epoch a missed provenance
     narrowed (W9-CG-EPOCH-INT64); ``na<int>()`` is the x86-64 answer, so
     Linux runs keep their bits.
+
+    The 64-bit form has the same guard: a floating value outside the range
+    of ``int64_t`` (and a NaN) reads ``na<int64_t>()`` instead of reaching the
+    undefined conversion, which resolves differently on x86-64 (the minimum
+    integer, the ``na`` sentinel) and on arm64 (saturation: a valid-looking
+    maximum). Pine's ``int`` is 64-bit, so ``int(1.7e12)`` is 1700000000000.
     """
     # Integer literals are proven non-``na``. Keep the historical explicit
     # cast for these tiny paths so a helper does not churn every matrix/color
     # call that passes a literal index or channel.
     if _INT_LITERAL_TEXT.fullmatch(value_cpp):
         return f"({int_cpp_type})({value_cpp})"
+    if int_cpp_type == "int64_t":
+        return (f"[&](){{ auto _pf_v = ({value_cpp}); "
+                f"if constexpr (std::is_floating_point_v<decltype(_pf_v)>) "
+                f"return (_pf_v >= -9223372036854775808.0 "
+                f"&& _pf_v < 9223372036854775808.0) "
+                f"? (int64_t)_pf_v : na<int64_t>(); "
+                f"else return is_na(_pf_v) ? na<int64_t>() : (int64_t)_pf_v; }}()")
     if int_cpp_type == "int":
         return (f"[&](){{ auto _pf_v = ({value_cpp}); "
                 f"if constexpr (std::is_floating_point_v<decltype(_pf_v)>) "
@@ -240,13 +253,22 @@ CPP_KEYWORDS = frozenset("""
 # become special after future emitter changes or on newer compilers.
 CPP_CONTEXTUAL = frozenset({"final", "override", "import", "module"})
 
+# Non-keyword native type names emitted without a namespace qualifier.
+# A Pine value, parameter, callable or UDT with one of these spellings can
+# hide a declaration type, cast, template argument or lambda return type
+# throughout the generated class, including its nested request scopes.
+# Engine type names and the namespace roots are in CPP_EMITTER_NAMES below.
+CPP_NATIVE_TYPE_NAMES = frozenset({
+    "int32_t", "int64_t", "uint32_t", "uint64_t", "size_t", "time_t", "tm",
+})
+
 # Macros visible through the standard and engine headers included by every
 # generated TU.  Their expansion in a member declaration is invalid C++.
 CPP_STANDARD_MACROS = frozenset("""
     __LINE__ __FILE__ __DATE__ __TIME__ __TIMESTAMP__ __cplusplus
     __STDC__ __STDC_HOSTED__ __STDC_VERSION__ __STDC_MB_MIGHT_NEQ_WC__
     __STDC_UTF_16__ __STDC_UTF_32__
-    NULL EOF NAN INFINITY HUGE_VAL HUGE_VALF HUGE_VALL
+    NULL EOF NAN INFINITY HUGE HUGE_VAL HUGE_VALF HUGE_VALL
     stdin stdout stderr assert offsetof va_start va_end va_arg va_copy
     EXIT_SUCCESS EXIT_FAILURE RAND_MAX MB_CUR_MAX EDOM ERANGE EILSEQ
     CHAR_BIT CHAR_MIN CHAR_MAX SCHAR_MIN SCHAR_MAX UCHAR_MAX
@@ -265,6 +287,7 @@ CPP_STANDARD_MACROS = frozenset("""
     PINEFORGE_HAS_RUN_FAILURE_CODES_V1
     PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1
     PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1
+    PINEFORGE_HAS_RUNTIME_CONTEXT_SERVICE_V1
     _PF_NO_DATA_STOP _PF_OTHER_SYMBOL_STOP _PF_ARRAY_STOP _PF_COLLECTION_STOP
     _PF_NA_STOP _PF_LIMIT_STOP _PF_UNSUPPORTED_STOP _PF_STRING_STOP
     _PF_ENGINE_INVARIANT _PF_INVARIANT_AT _PF_SETTING_FAILURE
@@ -276,11 +299,90 @@ CPP_STANDARD_MACROS = frozenset("""
     PF_PIVOT_LEVELS_HAS_ANCHOR
     PF_ABI_VERSION PF_NATIVE_API_VERSION
     PF_CAPABILITIES_API_VERSION PF_SETTINGS_API_VERSION
+    MB_LEN_MAX CHAR_WIDTH SCHAR_WIDTH UCHAR_WIDTH SHRT_WIDTH USHRT_WIDTH
+    INT_WIDTH UINT_WIDTH LONG_WIDTH ULONG_WIDTH LLONG_WIDTH ULLONG_WIDTH
+    BOOL_MAX BOOL_WIDTH
+    SNAN SNANF SNANL SNANF16 SNANF32 SNANF64 SNANF128
+    SNANF32X SNANF64X SNANF128X
+    HUGE_VAL_F16 HUGE_VAL_F32 HUGE_VAL_F64 HUGE_VAL_F128
+    HUGE_VAL_F32X HUGE_VAL_F64X HUGE_VAL_F128X
+    FP_ILOGB0 FP_ILOGBNAN FP_LLOGB0 FP_LLOGBNAN
+    FP_INT_UPWARD FP_INT_DOWNWARD FP_INT_TOWARDZERO
+    FP_INT_TONEARESTFROMZERO FP_INT_TONEAREST
+    FP_NAN FP_INFINITE FP_ZERO FP_SUBNORMAL FP_NORMAL
+    fpclassify signbit isfinite isnormal isnan isinf
+    MATH_ERRNO MATH_ERREXCEPT math_errhandling MAXFLOAT
+    issignaling issubnormal iszero isgreater isgreaterequal isless
+    islessequal islessgreater isunordered iseqsig
+    _MATH_H __GLIBC_INTERNAL_STARTING_HEADER_IMPLEMENTATION __FP_LONG_MAX
+    __SIMD_DECL __MATHCALL_VEC __MATHDECL_VEC __MATHCALL __MATHDECL
+    __MATHCALLX __MATHDECLX __MATHDECL_1_IMPL __MATHDECL_1 __MATHDECL_ALIAS
+    __MATHREDIR _Mdouble_ __MATH_PRECNAME __MATH_DECLARING_DOUBLE
+    __MATH_DECLARING_FLOATN __dremieee128 __gammaieee128
+    __REDIRTO __REDIRTO_ALT __MATH_DECLARE_LDOUBLE
+    __MATHCALL_NARROW_ARGS_1 __MATHCALL_NARROW_ARGS_2 __MATHCALL_NARROW_ARGS_3
+    __MATHCALL_NARROW_NORMAL __MATHCALL_NARROW_REDIR __MATHCALL_NARROW
+    _Mret_ _Marg_ __MATHCALL_NAME __MATHCALL_REDIR_NAME __MATHCALL_REDIR_NAME2
+    __MATH_TG __MATH_TG_F32 __MATH_TG_F64X __MATH_EVAL_FMT2
+    _LIBC_LIMITS_H_ _LIMITS_H _GLIBCXX_INCLUDE_NEXT_C_HEADERS
+    _GLIBCXX_CMATH _GLIBCXX_CLIMITS __cpp_lib_hypot __cpp_lib_interpolate
+    PINEFORGE_EXECUTION_OBSERVER_H PINEFORGE_REPORT_SINK_H
+    PINEFORGE_SELECTED_WINDOW_PLAN_H PINEFORGE_NATIVE_C_API_H PINEFORGE_H
+    PINEFORGE_HAS_NATIVE_C_API_V1 PINEFORGE_HAS_NATIVE_STRATEGY_HOST_V19
+    PINEFORGE_EXPORT_NATIVE_STRATEGY PINEFORGE_HAS_EQUITY_METRICS_FOLD_V1
+    PINEFORGE_HAS_NATIVE_DAY_PARTITION_V1
+    PF_PENDING_ORDER_STRUCT_VERSION PF_PENDING_ORDER_FIELD_COUNT
+    PF_PENDING_ORDER_STR_CAP PINEFORGE_ARRAY_HPP PINEFORGE_DETAIL_O1_STORE_HPP
+    PINEFORGE_SELECTED_WINDOW_H PINEFORGE_REPORT_MODE_H PF_REPORT_ENVELOPE_VERSION
+    PINEFORGE_HAS_OPTIONAL_REPORT_SEQUENCES_V1 PINEFORGE_HAS_TA_SERIES_LENGTH
+    PINEFORGE_PLACEMENT_AUDIT PINEFORGE_HAS_TRADE_SCRATCH_V1
+    PF_PINE_TIME_HAS_SYMINFO_TZ PF_LEG_PRICE_SETTER
+    PINEFORGE_VERSION_H PINEFORGE_VERSION_MAJOR PINEFORGE_VERSION_MINOR
+    PINEFORGE_VERSION_PATCH PINEFORGE_VERSION_STRING PINEFORGE_VERSION_FULL
+    PINEFORGE_GIT_SHA PF_STATIC_ASSERT PF_STATIC_ASSERT_JOIN_ PF_STATIC_ASSERT_JOIN
+    PF_API PINEFORGE_HAS_NATIVE_SECURITY_FEED_V1 PINEFORGE_HAS_NATIVE_FX_CURVE_V1
+    PINEFORGE_HAS_SCRATCH_TABLES_V1 PINEFORGE_HAS_CACHE_POLICY_V1
+    PF_CACHE_KIND_LEDGER_CACHE PF_CACHE_KIND_TRADE_PAGES PF_CACHE_KIND_DEPENDENCY_PAGES
+    PF_CACHE_KIND_EXIT_PAGES PF_CACHE_KIND_BOOK_PAGES PF_CACHE_KIND_RETAINED_SEQUENCE_PAGES
+    PF_CACHE_KIND_COHORT_ID_PAGES PF_CACHE_KIND_EXIT_RANK_PAGES PF_CACHE_KIND_ERASED_MINIMA_PAGES
+    PF_CACHE_KIND_CONSUMED_CYCLE_PAGES PF_CACHE_KIND_POSITION_TAIL_PAGES
+    PF_CACHE_KIND_SUCCESSOR_ROOT_PAGES PF_CACHE_KIND_RECEIPT_TAIL_PAGES
+    PF_CACHE_KIND_CHAIN_SEGMENT_PAGES PF_CACHE_KIND_EQUITY_CURVE_PAGES
+    PF_CACHE_KIND_TA_HISTORY_PAGES PF_CACHE_KIND_FEED_CALENDAR_PAGES
+    PF_CACHE_KIND_RECORDED_SERIES_PAGES PF_CACHE_KIND_PROJECTION_EXIT_PAGES
+    PF_STATE_QUERY_ALLOWED_V1 PF_STATE_QUERY_SELECTED_WINDOW_AFTER_SEAL_V1
+    PF_STATE_QUERY_INVALID_HANDLE_V1 PINEFORGE_HAS_SYMBOL_FEED_V1
+    PINEFORGE_HAS_SYMBOL_FEED_COLUMN_V1 PINEFORGE_HAS_SYMBOL_FACTS_V1
+    PINEFORGE_HAS_RECORDED_SERIES_V1 PINEFORGE_HAS_OUTPUTS_V1 PF_OUTPUTS_API_VERSION
+    PINEFORGE_HAS_SYMBOL_FEED_BORROWED_V1 PF_STREAM_ENGINE_LAYOUT_VERSION
+    PINEFORGE_HAS_REPORT_SINK_V1
+    PF_NATIVE_OK PF_NATIVE_E_HANDLE PF_NATIVE_E_STRUCT PF_NATIVE_E_TAG
+    PF_NATIVE_E_ARGUMENT PF_NATIVE_E_STATE PF_NATIVE_E_REJECTED PF_NATIVE_E_UNSUPPORTED
+    PF_NATIVE_E_EXCEPTION PF_NATIVE_E_NOT_WORKING PF_NATIVE_E_INVALID_TARGET
+    PF_NATIVE_E_RUN_FAILED PF_NATIVE_E_REFUSED PF_NATIVE_ABSENT PF_NATIVE_FAILURE_CALLBACK
+    PF_NATIVE_DECISION_V1_BASE_SIZE PF_NATIVE_WORKING_V1_BASE_SIZE PF_NATIVE_WORKING_V1_ARM_SIZE
+    PF_NATIVE_LOT_EXCURSION_V1_BASE_SIZE PF_NATIVE_REQUEST_V1_BASE_SIZE
+    PF_NATIVE_REQUEST_V1_ANCHOR_SIZE PF_NATIVE_REQUEST_V1_SIZING_SIZE PF_NATIVE_REQUEST_V1_SEED_SIZE
+    PF_NATIVE_RUN_SPEC_EXT_V1_BASE_SIZE PF_NATIVE_RUN_SPEC_EXT_V1_RISK_SIZE
+    PF_NATIVE_RUN_SPEC_EXT_V1_POLICY_SIZE PF_NATIVE_RUN_SPEC_EXT_V1_AUXILIARY_SIZE
+    PF_NATIVE_RUN_SPEC_EXT_V1_RETENTION_SIZE PF_NATIVE_CALLBACKS_V1_BASE_SIZE
+    PF_NATIVE_CALLBACKS_V1_HOOKS_SIZE PF_NATIVE_CALLBACKS_V1_POLICY_SIZE
 """.split())
+# math.h spells this complete constant family for these exact formats.
+CPP_STANDARD_MACROS |= frozenset(
+    base + suffix
+    for base in (
+        "M_E", "M_LOG2E", "M_LOG10E", "M_LN2", "M_LN10", "M_PI",
+        "M_PI_2", "M_PI_4", "M_1_PI", "M_2_PI", "M_2_SQRTPI",
+        "M_SQRT2", "M_SQRT1_2",
+    )
+    for suffix in ("f", "l", "f16", "f32", "f64", "f128", "f32x", "f64x")
+)
 
 # Identifiers used by the emitter as class/type names, namespaces, and
-# generated or inherited methods.  A user member with one of these names can
-# hide a type/callee, or (GeneratedStrategy) conflict with the constructor.
+# generated state members or inherited methods. A user member with one of
+# these names can duplicate state, hide a type/callee, or (GeneratedStrategy)
+# conflict with the constructor.
 # Engine namespaces, types and callees are imported by ``using namespace
 # pineforge``; an authored UDT can make its unqualified type reads ambiguous.
 CPP_EMITTER_NAMES = frozenset("""
@@ -306,7 +408,7 @@ CPP_EMITTER_NAMES = frozenset("""
     strategy_set_override strategy_set_override_checked
     strategy_set_magnifier_volume_weighted
     strategy_reads_trade_history
-    precalculate
+    precalculate bar
     strategy_entry strategy_close strategy_close_all strategy_exit
     strategy_exit_cancel_bracket strategy_cancel strategy_cancel_all strategy_order
     pine_bar_index pine_last_bar_index prev_chart_close is_first_tick is_last_tick
@@ -358,12 +460,20 @@ CPP_EMITTER_NAMES = frozenset("""
     _pf_derive_prefix _pf_derive_main_tickerid _pf_derive_country
     _pf_tv_trim _pf_tv_increment_digits _pf_tv_decimal _pf_tv_pattern
     _pf_tv_number_style
+    _security_helper_series_ _security_helper_series_str_
+    _use_precalc _var_initialized _ta_initialized_ _inputs_initialized_
+    _pf_lines_ _pf_boxes_ _pf_labels_ _pf_linefills_
+    _pf_script_state_checkpoint_ _PFScriptState _PFForeignEmaSeeding
+    _PFALMA _PFKC _PFKCW _PFAnchoredVWAP _PFAnchoredVWAPBands
+    _PFPivotPointLevels _PFArrayField _PFTvFormatValue
+    _PFCollectionTraits _PFArrayHistoryValue _PFCollectionHistory
+    _pf_collection_history_changed kLoopTimeLimitMs kTvFloatStepEnd
     checked_settings trace is_na na nz fixnan
 """.split())
 
-# The generated history members, ``_<kind>_<n>`` (codegen/base.py
-# _prepare_inline_history_members), numbered past any script name spelled
-# like one.
+# Generated history kinds (codegen/base.py::_prepare_inline_history_members).
+# Only session_call advances its counter past authored names; the older
+# families retain their numbering and are reserved by the pattern below.
 INLINE_HISTORY_KINDS = (
     "hist_call", "series_arg", "udf_series_arg", "session_call", "fn_global_hist",
 )
@@ -397,8 +507,8 @@ LIBC_RESERVED_NAMES = frozenset("""
 # close > open`` became the value of ``session.isfirstbar``).
 CPP_RESERVED = set(
     LEGACY_CPP_RESERVED | CPP_KEYWORDS | CPP_CONTEXTUAL |
-    CPP_STANDARD_MACROS | CPP_EMITTER_NAMES | HOST_MEMBER_NAMES |
-    LIBC_RESERVED_NAMES
+    CPP_NATIVE_TYPE_NAMES | CPP_STANDARD_MACROS | CPP_EMITTER_NAMES |
+    HOST_MEMBER_NAMES | LIBC_RESERVED_NAMES
 )
 
 # Temporaries the emitter declares in the C++ it generates around a user's
@@ -431,13 +541,30 @@ CPP_TEMPORARY_NAMES = frozenset("""
     _pf_number_text
     _pf_substring_text _pf_substring_begin _pf_substring_end _pf_substring_error
     _pf_array_new_size _pf_array_new_value _pf_array_new_size_type _pf_array_new_error
+    _pf_read _pf_v5_l _pf_v5_r _pf_wide_l _pf_wide_r
+    _pf_symbol _pf_colon _pf_color _pf_bar_back _pf_ema_seeding
+    _pf_history_array _pf_history_offset _pf_matrix_target
+    _pf_array_index_type
 """.split())
+# These numbered members and locals keep their source-order spelling rather
+# than allocating against authored names. Reserve their complete spellings,
+# just as for fixed temporaries, without reserving ordinary underscore names.
 _CPP_TEMPORARY_PATTERN = re.compile(
     r"_v\d+|_secval_\d+(?:_v\d+)?|_tuple_result_\d+|_tuple_unused_\d+|__switch_val_\d+"
-    r"|_for_(?:start|end|end_eval)_\d+|_pf_(?:str|array|round)_a\d+"
+    r"|__selection_value_\d+"
+    r"|_for_(?:start|end|end_eval|step|down)_\d+"
+    r"|_pf_(?:str|array|round)_a\d+|_pf_slot_open_\d+"
     r"|_pf_every_bar_ta_\d+|_pf_shared_\d+_\d+|__pf_array\w*|__pf_raw_\w+"
     r"|_pf_collection_hist_\w+"
     r"|_pf_substring_arg\d+"
+    r"|_req_sec_(?:lower_tf_)?\d+(?:_\d+)?|_precalc_\w+|_sec\d+_\w+"
+    r"|_pf_(?:sec|rec)_missing_\d+|_eval_security_\d+"
+    r"|_RuntimeSec\d+|_runtime_(?:feed|request)_\d+"
+    r"|_ta_\w+_\d+(?:(?:_cs|__ni|_u)\d+)*"
+    r"|_prev_fixnan_\d+(?:(?:_cs|__ni|_u)\d+)*|_result__ta_\w+"
+    r"|_(?:hist_call|series_arg|udf_series_arg|fn_global_hist)_\d+"
+    r"|_s_(?:open|high|low|close|volume|hl2|hlc3|ohlc4|hlcc4)"
+    r"|_strat_\w+|_pf_ctf\d+_\w+|_pf_selection__pf_var_init_\w+"
 )
 
 

@@ -1,5 +1,5 @@
 """E2E: an input override reaches every input-backed TA length, whatever the
-spelling around the TA call (lane C4, defect 1).
+spelling around the TA call (a prior defect).
 
 A static chart TA site -- one whose ``compute()`` arguments are bar data --
 is precalculated: ``prepare_script_run`` calls ``precalculate()`` before the

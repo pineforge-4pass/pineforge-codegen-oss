@@ -7,6 +7,7 @@ for every registered intrinsic function.
 """
 
 import pytest
+from tests._emitted_member_assertions import assert_int_member
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from pineforge_codegen.analyzer import Analyzer
@@ -613,108 +614,168 @@ class TestTAKwargs:
 
 
 class TestMathKwargs:
-    """Test math.* functions with kwargs through the full transpilation pipeline."""
+    """Test math kwargs through direct Analyzer/CodeGen clients."""
 
     def test_math_abs_kwargs(self):
-        cpp = _generate(_pine('x = math.abs(x=-5)'))
-        assert "std::abs" in cpp
+        assert _generate(_pine('x = math.abs(number=close-open)')) == \
+            _generate(_pine('x = math.abs(close-open)'))
 
     def test_math_max_kwargs(self):
-        cpp = _generate(_pine('x = math.max(x=1.0, y=2.0)'))
-        assert "std::max" in cpp
+        with pytest.raises(CompileError) as caught:
+            _generate(_pine('x = math.max(x=close, y=open)'))
+        diagnostic, = caught.value.diagnostics
+        assert diagnostic.code == "PF-E5089"
+        assert "variable number of arguments" in diagnostic.message
 
     def test_math_min_kwargs(self):
-        cpp = _generate(_pine('x = math.min(x=1.0, y=2.0)'))
-        assert "std::min" in cpp
+        with pytest.raises(CompileError) as caught:
+            _generate(_pine('x = math.min(x=close, y=open)'))
+        diagnostic, = caught.value.diagnostics
+        assert diagnostic.code == "PF-E5089"
+        assert "variable number of arguments" in diagnostic.message
 
     def test_math_ceil_kwargs(self):
-        cpp = _generate(_pine('x = math.ceil(x=1.5)'))
-        assert "std::ceil" in cpp
+        assert _generate(_pine('x = math.ceil(number=close-open)')) == \
+            _generate(_pine('x = math.ceil(close-open)'))
 
     def test_math_floor_kwargs(self):
-        cpp = _generate(_pine('x = math.floor(x=1.5)'))
-        assert "std::floor" in cpp
+        assert _generate(_pine('x = math.floor(number=close-open)')) == \
+            _generate(_pine('x = math.floor(close-open)'))
 
     def test_math_round_1arg_kwargs(self):
-        cpp = _generate(_pine('x = math.round(x=1.5)'))
-        assert "std::round" in cpp
+        assert _generate(_pine('x = math.round(number=close-open)')) == \
+            _generate(_pine('x = math.round(close-open)'))
 
     def test_math_round_2arg_kwargs(self):
-        cpp = _generate(_pine('x = math.round(x=1.555, precision=2)'))
-        assert "std::round" in cpp
-        assert "std::pow" in cpp  # round(x * pow(10, n)) / pow(10, n)
+        assert _generate(_pine('x = math.round(precision=2, number=close-open)')) == \
+            _generate(_pine('x = math.round(close-open, 2)'))
 
     def test_math_sqrt_kwargs(self):
-        cpp = _generate(_pine('x = math.sqrt(x=4.0)'))
-        assert "std::sqrt" in cpp
+        assert _generate(_pine('x = math.sqrt(number=close)')) == \
+            _generate(_pine('x = math.sqrt(close)'))
 
     def test_math_pow_kwargs(self):
-        cpp = _generate(_pine('x = math.pow(base=2.0, exp=3.0)'))
+        cpp = _generate(_pine('x = math.pow(base=2.0, exponent=3.0)'))
         assert "std::pow" in cpp
 
     def test_math_log_kwargs(self):
-        cpp = _generate(_pine('x = math.log(x=10.0)'))
-        assert "std::log" in cpp
+        assert _generate(_pine('x = math.log(number=close)')) == \
+            _generate(_pine('x = math.log(close)'))
 
     def test_math_log10_kwargs(self):
-        cpp = _generate(_pine('x = math.log10(x=100.0)'))
-        assert "std::log10" in cpp
+        assert _generate(_pine('x = math.log10(number=close)')) == \
+            _generate(_pine('x = math.log10(close)'))
 
     def test_math_exp_kwargs(self):
-        cpp = _generate(_pine('x = math.exp(x=1.0)'))
-        # math.exp → std::exp, but "exp" is a C++ reserved word so it becomes _exp_
-        # The important thing is that it compiles
-        assert "std::exp" in cpp or "_exp_" in cpp
+        assert _generate(_pine('x = math.exp(number=close-open)')) == \
+            _generate(_pine('x = math.exp(close-open)'))
 
     def test_math_sin_kwargs(self):
-        cpp = _generate(_pine('x = math.sin(x=1.0)'))
-        assert "std::sin" in cpp
+        assert _generate(_pine('x = math.sin(angle=close-open)')) == \
+            _generate(_pine('x = math.sin(close-open)'))
 
     def test_math_cos_kwargs(self):
-        cpp = _generate(_pine('x = math.cos(x=1.0)'))
-        assert "std::cos" in cpp
+        assert _generate(_pine('x = math.cos(angle=close-open)')) == \
+            _generate(_pine('x = math.cos(close-open)'))
 
     def test_math_tan_kwargs(self):
-        cpp = _generate(_pine('x = math.tan(x=1.0)'))
-        assert "std::tan" in cpp
+        assert _generate(_pine('x = math.tan(angle=close-open)')) == \
+            _generate(_pine('x = math.tan(close-open)'))
 
     def test_math_asin_kwargs(self):
-        cpp = _generate(_pine('x = math.asin(x=0.5)'))
-        assert "std::asin" in cpp
+        assert _generate(_pine('x = math.asin(angle=(close-open)/close)')) == \
+            _generate(_pine('x = math.asin((close-open)/close)'))
 
     def test_math_acos_kwargs(self):
-        cpp = _generate(_pine('x = math.acos(x=0.5)'))
-        assert "std::acos" in cpp
+        assert _generate(_pine('x = math.acos(angle=(close-open)/close)')) == \
+            _generate(_pine('x = math.acos((close-open)/close)'))
 
     def test_math_atan_kwargs(self):
-        cpp = _generate(_pine('x = math.atan(x=1.0)'))
-        assert "std::atan" in cpp
+        assert _generate(_pine('x = math.atan(angle=close-open)')) == \
+            _generate(_pine('x = math.atan(close-open)'))
 
     def test_math_sign_kwargs(self):
-        cpp = _generate(_pine('x = math.sign(x=-5.0)'))
-        assert ">" in cpp and "<" in cpp  # sign uses comparison
+        assert _generate(_pine('x = math.sign(number=close-open)')) == \
+            _generate(_pine('x = math.sign(close-open)'))
 
     def test_math_todegrees_kwargs(self):
-        cpp = _generate(_pine('x = math.todegrees(x=3.14)'))
-        assert "180.0" in cpp
-        assert "M_PI" in cpp
+        assert _generate(_pine('x = math.todegrees(radians=close-open)')) == \
+            _generate(_pine('x = math.todegrees(close-open)'))
 
     def test_math_toradians_kwargs(self):
-        cpp = _generate(_pine('x = math.toradians(x=180.0)'))
-        assert "M_PI" in cpp
+        assert _generate(_pine('x = math.toradians(degrees=close-open)')) == \
+            _generate(_pine('x = math.toradians(close-open)'))
+
+    @pytest.mark.parametrize("short_name,accepted", (
+        pytest.param("abs", "number", id="abs"),
+        pytest.param("ceil", "number", id="ceil"),
+        pytest.param("floor", "number", id="floor"),
+        pytest.param("round", "number, precision", id="round"),
+        pytest.param("round_to_mintick", "number", id="round_to_mintick"),
+        pytest.param("sign", "number", id="sign"),
+        pytest.param("sqrt", "number", id="sqrt"),
+        pytest.param("exp", "number", id="exp"),
+        pytest.param("log", "number", id="log"),
+        pytest.param("log10", "number", id="log10"),
+        pytest.param("sin", "angle", id="sin"),
+        pytest.param("cos", "angle", id="cos"),
+        pytest.param("tan", "angle", id="tan"),
+        pytest.param("asin", "angle", id="asin"),
+        pytest.param("acos", "angle", id="acos"),
+        pytest.param("atan", "angle", id="atan"),
+        pytest.param("todegrees", "radians", id="todegrees"),
+        pytest.param("toradians", "degrees", id="toradians"),
+    ))
+    def test_math_wrong_unary_keyword_is_refused(self, short_name, accepted):
+        source = _pine(f'x = math.{short_name}(x=close-open)')
+        with pytest.raises(CompileError) as caught:
+            _generate(source)
+        diagnostic, = caught.value.diagnostics
+        assert diagnostic.code == "PF-E5090"
+        assert diagnostic.args == {"function": f"math.{short_name}", "name": "x",
+                                   "accepted": accepted}
+        assert diagnostic.message == (
+            f"math.{short_name}: unknown keyword argument 'x'; accepted keyword names: {accepted}."
+        )
+        assert diagnostic.hint == f"Use these parameter names for math.{short_name}: {accepted}."
+        col = source.splitlines()[2].index("(x=") + 2
+        assert (diagnostic.location.line, diagnostic.location.col,
+                diagnostic.location.end_col) == (3, col, col + 1)
 
     def test_math_avg_kwargs(self):
-        cpp = _generate(_pine('x = math.avg(x=1.0, y=2.0)'))
-        assert "2.0" in cpp  # avg formula divides by 2
+        with pytest.raises(CompileError) as caught:
+            _generate(_pine('x = math.avg(x=close, y=open)'))
+        diagnostic, = caught.value.diagnostics
+        assert diagnostic.code == "PF-E5089"
+        assert "variable number of arguments" in diagnostic.message
 
     def test_math_avg_three_kwargs(self):
-        cpp = _generate(_pine('x = math.avg(x=1.0, y=2.0, z=3.0)'))
-        assert "/ 3.0" in cpp
+        with pytest.raises(CompileError) as caught:
+            _generate(_pine('x = math.avg(x=close, y=open, z=high)'))
+        diagnostic, = caught.value.diagnostics
+        assert diagnostic.code == "PF-E5089"
+        assert "variable number of arguments" in diagnostic.message
+
+    @pytest.mark.parametrize("short_name", ("max", "min", "avg"))
+    def test_math_variadic_candidate_names_are_refused(self, short_name):
+        source = _pine(f'x = math.{short_name}(number0=close, number1=open)')
+        with pytest.raises(CompileError) as caught:
+            _generate(source)
+        diagnostic, = caught.value.diagnostics
+        assert diagnostic.code == "PF-E5089"
+        assert diagnostic.args == {"function": f"math.{short_name}"}
+        assert diagnostic.message == (
+            f"math.{short_name}: TradingView refuses keyword arguments "
+            "for functions with a variable number of arguments."
+        )
+        assert diagnostic.hint == f"Pass every argument to math.{short_name} positionally."
+        col = source.splitlines()[2].index("number0") + 1
+        assert (diagnostic.location.line, diagnostic.location.col,
+                diagnostic.location.end_col) == (3, col, col + len("number0"))
 
     def test_math_round_to_mintick_kwargs(self):
-        cpp = _generate(_pine('x = math.round_to_mintick(x=100.123)'))
-        # Lowered to the engine method (NaN/mintick<=0 guarded).
-        assert "round_to_mintick(100.123)" in cpp
+        assert _generate(_pine('x = math.round_to_mintick(number=close-open)')) == \
+            _generate(_pine('x = math.round_to_mintick(close-open)'))
 
     def test_math_sum_kwargs_redirects_to_ta(self):
         """math.sum(source, length) should use math::Sum (rolling window)."""
@@ -989,34 +1050,33 @@ class TestG2CodegenHelpers:
         return transpile(f'//@version=6\nstrategy("T")\n{body}\n')
 
     def test_backadjustment_on_emits_int(self):
-        # backadjustment.* emit as integer constants (analyzer types as INT;
-        # engine ignores them — codegen drops them from request.security kwargs)
-        cpp = self._generate('x = backadjustment.on\n')
-        assert cpp  # just verify it compiles
+        # The analyzer's setting-namespace rows define INT member storage.
+        cpp = self._generate('back_on = backadjustment.on\n')
+        assert_int_member(cpp, "back_on")
 
     def test_backadjustment_off_emits_int(self):
-        cpp = self._generate('x = backadjustment.off\n')
-        assert cpp
+        cpp = self._generate('back_off = backadjustment.off\n')
+        assert_int_member(cpp, "back_off")
 
     def test_backadjustment_inherit_emits_int(self):
-        cpp = self._generate('x = backadjustment.inherit\n')
-        assert cpp
+        cpp = self._generate('back_inherit = backadjustment.inherit\n')
+        assert_int_member(cpp, "back_inherit")
 
     def test_settlement_as_close_on_emits_int(self):
-        cpp = self._generate('x = settlement_as_close.on\n')
-        assert cpp
+        cpp = self._generate('settlement_on = settlement_as_close.on\n')
+        assert_int_member(cpp, "settlement_on")
 
     def test_settlement_as_close_off_emits_int(self):
-        cpp = self._generate('x = settlement_as_close.off\n')
-        assert cpp
+        cpp = self._generate('settlement_off = settlement_as_close.off\n')
+        assert_int_member(cpp, "settlement_off")
 
     def test_adjustment_dividends_emits_int(self):
-        cpp = self._generate('x = adjustment.dividends\n')
-        assert cpp
+        cpp = self._generate('adjust_dividends = adjustment.dividends\n')
+        assert_int_member(cpp, "adjust_dividends")
 
     def test_adjustment_splits_emits_int(self):
-        cpp = self._generate('x = adjustment.splits\n')
-        assert cpp
+        cpp = self._generate('adjust_splits = adjustment.splits\n')
+        assert_int_member(cpp, "adjust_splits")
 
     def test_syminfo_prefix_emits_na(self):
         cpp = self._generate('x = syminfo.prefix\n')

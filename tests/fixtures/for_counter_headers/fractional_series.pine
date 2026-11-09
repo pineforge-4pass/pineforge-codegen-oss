@@ -1,0 +1,10 @@
+//@version=6
+strategy("synthetic fractional division series loop sum", currency=currency.NONE, initial_capital=1000000000000)
+n = 5 + bar_index % 2
+float pf_sum = 0
+for i = n / 2 to n / 2 + 2
+    pf_sum += i
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty=pf_sum)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

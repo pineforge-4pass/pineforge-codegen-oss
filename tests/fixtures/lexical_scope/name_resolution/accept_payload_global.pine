@@ -1,0 +1,11 @@
+//@version=6
+strategy("Payload supplied at a later call", overlay = true, initial_capital = 1000000)
+// The helper reads its parameter; the later global is passed only after its declaration.
+sample(value) => request.security(syminfo.tickerid, "D", value[1])
+float later = close - open
+signalValue = sample(later)
+plot(signalValue, "signal")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

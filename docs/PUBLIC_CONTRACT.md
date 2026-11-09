@@ -7,6 +7,13 @@ Text marked **since 1.5.0** describes diagnostic additions that 1.4.0 and
 earlier releases do not have: the `note` severity, the `user_message` template
 and the eleven codes that became notes.
 
+## Numeric conversions
+
+Supported numeric conversions preserve missingness in the original type:
+an integer `na` becomes floating `na` when a float destination consumes it.
+Integer arithmetic propagates missing operands before a numeric conversion.
+Consumed `if`/`switch` selections with both a value arm and a void arm report `PF-E5088` at the selection; statement selections, implicit missing arms and uniformly value or void arms retain their policy, and requested void selections keep `PF-E3102`.
+
 ## Identifiers in generated C++
 
 Legal Pine identifiers that collide with C++ keywords, engine names or emitter
@@ -15,6 +22,12 @@ existing `pineforge_codegen.codegen.CPP_RESERVED` export contains the explicit
 reserved names. `_safe_name` also escapes emitter temporary patterns and
 allocates a distinct name when the script already uses the preferred escape.
 An identifier that does not collide keeps its spelling.
+Generated state members, helper types and unallocated numbered member families
+use the same escape rule, including locals of requested helpers.
+
+`bar` and `HUGE` use the existing C++ escape; unique input titles keep their
+Pine spellings. Repeated input titles use the ordinal override keys described
+under "Input manifest and override keys".
 
 The imported engine names `report`, `report_sink`, `report_sequence`, `source`,
 `native_calendar`, `pine_color`, `RunFailureCode`, `RunFailureInfo`, `QtyType`,
@@ -50,6 +63,21 @@ alone does not require those rows. For a non-reader, the constructor calls
 The order-shapes receipt's `host_reads` therefore includes the setter only for
 non-readers. Older generated libraries can lack the export; its absence does
 not establish that the script is a non-reader.
+
+## Value lowering (unreleased)
+
+Translation also preserves these value contracts:
+
+- A chart TA constructor argument that shadows a global constant or input follows its lexical binding; an unsized `ta.percentile_nearest_rank` length is lowered to the engine's `SeriesPercentileNearestRank` class, with one buffer per call site. A call inside an `if` appends only when it runs; no tape pins that conditional shape. `PF-E5092` remains the refusal for a series length of `ta.sma`, and its message names the function and says that TradingView accepts the call. `PF-E5009` keeps the plain wording, which makes no claim about TradingView, for every other `ta.*` function: the ones where TradingView refuses a series length too (`ta.rma`, `ta.ema`, `ta.rsi`, `ta.atr`, `ta.dmi`, `ta.macd`, `ta.kc`, `ta.hma`, `ta.tsi`, `ta.rci` and the `atrPeriod` of `ta.supertrend`) and the ones with no recorded result.
+- A constant-expression input default can size a TA constructor; runtime resets still read the input getter.
+- `line(na)` and `box(na)` produce the same missing handles as typed declarations initialized with `na`.
+- Literal `na` in emitted strategy string slots uses the host's empty-string sentinel, including `from_entry`, `id`, `comment` and `oca_name`.
+- Array bindings from helper tuple destructuring retain their element type for built-in method lowering.
+- `strategy.default_entry_qty(fill_price)` lowers to the engine strategy host's query `default_entry_qty(price)`, the order size the default quantity settings give at that price; it needs a paired engine whose strategy host provides the query. The calls TradingView refuses are refused: no price, a second price, a price given both by position and by name, an unknown argument name (`PF-E1088`), and a string, bool, color or collection price (`PF-E2083` to `PF-E2086`, only for a type the syntax proves). `PF-E5084`, which refused every call until the host had the query, is retired: the code stays in the catalog and is no longer emitted. An entry with omitted `qty` keeps engine default sizing.
+- An `if` or `switch` value reassigned to a Series updates the current slot in each selected branch.
+- Colliding direct nonpersistent scalar history declarations in ordinary functions have separate Series storage, including call-site clones, locals of different scalar families and a computed local initializer reading a same-named global with its own history. Embedded block, tuple and loop declaration collisions retain their existing storage gates.
+- Direct `size`, `first`, `last` and `get` reads of `line.all`, `box.all`, `label.all` and `linefill.all` borrow live handles in oldest-first order, with the normal array bounds checks. Non-var declaration aliases and `for h in …` iteration take snapshots of those handles at the collection read; element setters and deletion still affect the live drawings. Whether a later creation in the same bar is visible through the alias is not yet measured against TradingView. `var`/`varip` aliases retain `PF-E5086` until a TradingView capture establishes their lifetime semantics. Declarations that yield a collection as a callable or selection-arm value, structural array mutations, collection reassignment, collection arguments/returns, history, pair iteration, user array-method overrides and other collection uses retain `PF-E5086`; `polyline.all` raises `PF-E5085` pending an engine handle and arena.
+- Authored identifiers that collide with macros defined by the audited math, limits, C++ wrapper and paired engine headers use the existing C++ name allocator; authored input keys remain unchanged.
 
 ## Optional compiled execution capabilities
 
@@ -331,8 +359,12 @@ unchanged. All generated factory, setter and batch entry points contain both
 standard and non-standard exceptions; checked variants return a status and an
 optional caller-buffer error instead of silently substituting defaults.
 
-Checked inputs are keyed exactly as the generated getters: title, fallback
-binding name, or the empty key. Metadata lists every declared input (including
+Checked inputs are keyed exactly as the generated getters. The first explicit
+title keeps that title as its key; later inputs of the exact same title use
+`<title>#2`, `<title>#3`, etc., in declaration order, across groups and input
+types. Untitled inputs keep their binding-name fallback (or the empty key).
+The manifest's `title` and receipt's `name` publish these opaque override keys;
+consumers must use them verbatim. Metadata lists every declared input (including
 inline inputs), its storage type, default, options, declared numeric limits and
 UI step. Unknown/ambiguous keys, invalid booleans/enums/options, numeric suffixes,
 integer overflow, non-finite numeric strings and limit violations are refused
@@ -368,7 +400,11 @@ member instead of reading an uninitialized script member (the old default was
 incorrectly member zero). Both the getter and deterministic receipt use that
 literal. Unfoldable defaults remain unsupported by checked setters and their
 receipt uses `na` without reading script state; the legacy getter is unchanged.
-Every enum option must be a literal member of one enum for checked support.
+Enum options use the same immutable initializer resolution as defaults:
+an identifier must have one non-reassigned declaration before the input call,
+and every declaration in its chain must be neither `var` nor `varip`.
+Every resolved option and the default must be members of the same enum for
+checked support. Choices retain their written order and member-index encoding.
 Stream begin fails on any script-preparation exception with its message and
 NOT_COMPLETED; ordinary batch preparation failures keep their historical empty
 report, diagnostic and completed status. Legacy exception text is standard-
@@ -442,12 +478,106 @@ are for advanced inspection and are not part of this 1.0 stability promise.
 ```python
 transpile(pine_source: str, *, check_support: bool = True,
           filename: str = "<input>",
-          libraries: Mapping[str, str] | None = None) -> str
+          libraries: Mapping[str, str] | None = None,
+          history_capacity: int | None = None,
+          drawing_capacity: int | None = None) -> str
 
 transpile_full(pine_source: str, *, check_support: bool = True,
                filename: str = "<input>",
-               libraries: Mapping[str, str] | None = None) -> dict
+               libraries: Mapping[str, str] | None = None,
+               history_capacity: int | None = None,
+               drawing_capacity: int | None = None) -> dict
 ```
+
+The same keyword-only capacity options are accepted by
+`transpile_with_request_inventory()` and root `gate/glue.py`.
+The JavaScript worker template in `scripts/worker-template.mjs` passes only
+the source and does not forward either option.
+`history_capacity` is an exact integer of at least 2 or `None`;
+`drawing_capacity` is an exact integer of at least 1 or `None`.
+Booleans, floating values, strings and smaller integers raise `PF-E5094`
+with `option` and `minimum` arguments.
+
+History retention depends on the source and these parameters, never the
+number of bars or trades. With `history_capacity=None`, existing Pine
+`max_bars_back` directives and literal-sized stores keep their capacities.
+Without a directive, a bare history with a statically proven offset exceeding
+its former 500-slot capacity retains offset plus one slots, within the existing
+evaluated-offset range. A nonconstant offset without a directive selects
+`DEFAULT_DYNAMIC_HISTORY_CAPACITY`, defined once in `codegen/capacities.py`,
+whose value is **5000**, this package's default retention for a script that
+reads history at an offset it does not state as a constant.
+This is a retention default, not a new refusal threshold: at default settings,
+reads beyond the retained capacity preserve their existing missing-value
+behavior, including scalar `na`. The inferred sizes apply to bare series and to
+requested-helper map entries. Collection snapshots and lazy held-source
+histories keep the size they had before: a collection snapshot its largest
+literal offset plus one (at least 2) or, for a nonconstant offset, the depth of
+a `max_bars_back` directive or the engine's 500-slot default; a lazy held-source
+history its literal length plus one or, for a runtime length, the 500-slot
+default. A lazily evaluated call with a literal length, such as the
+`ta.roc(close, 200)` of `close > open and ta.roc(close, 200) > 0`, keeps the
+201-slot store its own length requires: `history_capacity` neither shrinks nor
+refuses it.
+
+A collection-snapshot read at a nonconstant offset also counts as a
+nonconstant offset for this inference, although snapshots have their own
+rings: without a Pine directive, bare series then retain 5000 slots instead
+of 500, increasing their retained sample storage tenfold. A constant
+collection-snapshot read does not raise bare-series retention.
+
+An explicit `history_capacity=N` replaces fallback retention in bare series,
+collection snapshots and numeric/string requested-helper histories. Existing
+Pine directives and literal-sized stores are never reduced by a smaller
+fallback. With no larger Pine directive, every collection-snapshot ring has
+N slots under the option even when its reads use small literal offsets.
+A statically proven offset at or above N raises `PF-E5095` with
+`offset` and `capacity` arguments. A nonconstant offset is evaluated once,
+checked by the existing 0..10000 guard before narrowing, then compared with N
+before the history read. An offset at or above N stops the run with the
+existing engine code `pine_runtime_limit` and typed arguments
+`{"limit":"max_bars_back","max":N}`. Its English text reports the evaluated
+offset and selected capacity; the code and arguments identify the failure.
+The stop's `max` is the operator's slot count N, so a read at offset k fits
+when k < N, and its text has no `Error on bar` prefix.
+The same rule covers collection snapshots, requested histories, numeric/string
+helper-map reads and the `length-1` address of runtime held-source histories.
+An in-capacity read during warmup retains its existing missing-value behavior.
+Generated code uses the existing `_PF_LIMIT_STOP` compatibility shim; older
+engines without coded failures retain its `std::length_error` fallback.
+An integer outside the native Series constructor's signed-int domain raises
+`PF-E5097` with a `capacity` argument instead of emitting a narrowing conversion.
+There is no additional upper bound on `history_capacity` within that native
+integer range; memory grows with N times the number of retained series.
+
+When a Pine `max_bars_back=D` directive exceeds the operator's N, stores keep
+D slots, but both offset checks still use N alone: a constant offset at or
+above N raises `PF-E5095`, and a nonconstant offset at or above N stops at
+runtime with `max=N`, even if it is smaller than D.
+
+Capacity inference scans the whole script, including functions that are never
+called, so a subscript in an uncalled function can raise inferred retention
+or, with an option, cause the constant-offset refusal.
+
+Pine's `max_lines_count`, `max_boxes_count` and `max_labels_count` remain
+collection targets, defaulting to 50. Their existing collection timing and
+held-handle rules are unchanged. `drawing_capacity` denotes an operator bound
+on live drawings per collected type, after that collection, including the new
+drawing. When a line, box or label creation or copy leaves its kind's live count
+greater than N, the run stops with `pine_runtime_limit` and typed arguments
+`{"limit":"live_drawings","max":N}`. Each kind has its own count; linefills
+are outside the bound. Reaching a Pine declaration's count remains ordinary
+TradingView collection, not an error. Pinned drawings retain their existing
+protection and still contribute to the live count.
+
+Typed drawing overflow requires the paired engine release whose runtime-limit
+catalog includes `live_drawings`; on an older engine the drawing overflow is
+not typed as this limit. `None` preserves existing arenas and collection.
+An integer outside the helper's signed int64 maximum argument domain raises
+`PF-E5098` with a `capacity` argument before C++ is emitted. Those arenas
+currently use the signed 32-bit ID-domain maximum as their legacy storage
+argument; this is not a true unlimited arena policy. Replacing it requires
+an explicit engine policy, including physical reclamation of deleted records.
 
 `transpile()` returns one complete C++ source string. It raises
 `pineforge_codegen.errors.CompileError` for a located parse, support, analysis,
@@ -456,6 +586,12 @@ or generation error; its `diagnostics` attribute carries `Diagnostic` objects.
 `transpile()` returns no nonfatal diagnostics, neither warnings nor (since
 1.5.0) notes; use `transpile_full()` to read them. The `diagnostics` of a
 `CompileError` can carry them beside its errors.
+
+A counted-loop counter is visible in its loop's end and step expressions
+and its body, but not after the loop. A `for ... in` binder is local to the
+loop body. Reading either outside its scope raises analyzer `PF-E2054` at
+the identifier, unless an enclosing declaration or builtin supplies that
+name. Reassigning a name with no visible declaration retains `PF-E2020`.
 
 `transpile()`, `transpile_full()` and `transpile_with_request_inventory()` check
 the generated C++ allowlist even with `check_support=False` and raise
@@ -513,8 +649,9 @@ them identically.
 - `supported` is `false` for an input the compiled strategy cannot honour: a
   string input whose default or a choice is neither a string literal nor a known
   built-in constant (`size.small`, `position.top_right`, `na`, a reassigned
-  name), or an `input.enum` whose default or choices are not literal members of
-  one enum. Hide such inputs, exclude them from sweeps and optimization, and
+  name), or an `input.enum` whose default or choices do not resolve to members
+  of one enum through direct members or immutable declarations before the call.
+  Hide such inputs, exclude them from sweeps and optimization, and
   do not send a value: the strategy uses its compiled default, and the paired
   engine rejects a supplied value with `setting_unsupported`. Use `supported`
   to determine eligibility rather than `options` emptiness: every unsupported
@@ -537,9 +674,10 @@ them identically.
   series as `default` and the nine native sources (`close`, `high`, `hl2`,
   `hlc3`, `hlcc4`, `low`, `ohlc4`, `open`, `volume`) as `options`; a plain
   `input(close)` keeps its `string` type.
-- An enum input publishes its `Enum.member` choices in declaration order as
-  `options` and keeps its `Enum.member` `default`, which the receipt encodes as
-  the member's index (map it through the receipt's `option_values`).
+- An enum input publishes its `Enum.member` choices as `options` in written
+  option order, or enum declaration order when options are omitted. It keeps
+  its `Enum.member` `default`, which the receipt encodes as the member's index
+  (map it through the receipt's `option_values`).
 - A color input (`input.color`) has `type: "color"`. Its literal-foldable
   `default` is an unsigned packed `0xAARRGGBB` integer (0 through 4294967295),
   where `AA` is opacity: 255 is opaque and 0 is transparent. Named Pine v6
@@ -577,32 +715,47 @@ them identically.
   above, a plain `input(...)` whose default is not a literal is typed
   `string` with a `None` default.
 
-No key is renamed or removed and the override keys are unchanged; the values
-above are new or corrected values of existing keys, listed in the changelog.
+For a script whose explicit input titles are all different, no key is renamed
+or removed; a later input of a repeated title gets `<title>#<n>` as described
+in rule 1 below.
 The `title` is the **actual override key read by the emitted C++**:
 
-1. The value of an explicit compile-time constant `title`, if supplied.
+1. The value of an explicit compile-time constant `title`, if supplied. The
+   first occurrence keeps that value. Later occurrences of that exact title
+   append `#<n>` in declaration order, starting at 2 and taking the next
+   ordinal whose key is neither an authored explicit title anywhere in the
+   script nor a key already assigned. Groups and input types do not restart
+   the count.
 2. Otherwise, the name of the declaration containing the input call.
 3. Otherwise, the empty string `""`.
 
 For example, `length = input.int(14)` has key `"length"`, and
 `ta.ema(close, input.int(9, "Fast"))` has key `"Fast"`. The manifest includes
-both declared and inline global-scope calls, one row per call. If several
-calls share a title or fallback key, those rows retain the same `title` and
-their per-input `supported` flags do not reflect the collision. The translator
-warns about the colliding inputs. The legacy setters apply a shared override
-to all matching inputs; the checked setters refuse the key as ambiguous.
+both declared and inline global-scope calls, one row per call. Two inputs
+titled `"Length"` publish `"Length"` and `"Length#2"` when no input authors
+`"Length#2"`; a `"Length"` override sets only the first, and `"Length#2"` sets
+only the second. If another input authors `"Length#2"`, it keeps that key and
+the repeated `"Length"` gets `"Length#3"`, whether the authored `"Length#2"`
+comes before or after it.
+If several calls still share a key because of unchanged untitled fallbacks
+(including a fallback matching an explicit or assigned key), those rows retain
+the same `title` and their per-input `supported` flags do not reflect the
+collision. The translator warns about the colliding inputs. The legacy setters
+apply a shared override to all matching inputs; the checked setters refuse the
+key as ambiguous.
 On the paired 1.4.0 engine's normal checked path, a supplied shared key fails
 with `setting_rejected`, reason `ambiguous_key`; a completed run with no such
 override still reports the whole `fingerprint` as `null`. This differs from
 legacy-path unresolved provenance rows, which may remain inside a fingerprint.
-Give each input a unique title. Different `group=` labels do not separate keys.
+Give those remaining colliding inputs different explicit titles.
 An explicit title that is not a compile-time string constant raises
 `CompileError`.
 
 ## Pyodide and gate/glue JSON
 
-`gate/glue.py` defines `transpile_json(source: str) -> str`. It returns a
+`gate/glue.py` defines
+`transpile_json(source: str, *, history_capacity: int | None = None, drawing_capacity: int | None = None) -> str`.
+It returns a
 serialized JSON **string**. The shipped Pyodide worker runs that glue. Its
 success and compile-error envelopes are:
 
@@ -632,6 +785,33 @@ argument.
 
 ## Diagnostic codes
 
+Methods whose first parameter is never referenced in their body report the fatal analyzer diagnostic `PF-E5087` at that parameter, with a hint to use it or declare a function instead; later unused parameters and ordinary functions remain accepted.
+
+Pine v6 call arguments must put all positional arguments before named
+arguments. `PF-E2074` is a fatal analyzer diagnostic at the first positional
+expression that follows a named argument in the same call. It covers calls
+and strategy declarations before argument rewriting or unused-code removal,
+including v6 library bodies, and remains enforced with `check_support=False`.
+Nested calls have independent argument lists; all-named calls may name
+parameters in any order. Imported v5 libraries retain their existing policy.
+
+Callable value reads follow declaration order. A Pine v6 function or method
+reading a later local without an earlier visible binding reports `PF-E2075`
+at that identifier; a later direct global retains `PF-E2053`. Earlier outer
+bindings remain visible before a local shadow is declared.
+
+A Pine v6 `for` loop whose counter start has positive int evidence reports
+`PF-E2079` for a float-typed step. This fatal analyzer diagnostic points at the
+step expression, with the hint "Use an int step or a float counter."
+Unknown starts are not refused by this diagnostic.
+
+Translator changes must follow the
+[emission invariant](../AGENTS.md#emission-invariant). Missing lowerings require
+a `PF-E` refusal at the construct's source location where that rule permits
+refusal. TradingView-valid scripts that already transpile and compile keep
+compiling while their semantics are implemented. The existing diagnostic
+catalog and Python/JSON error envelopes carry located refusals.
+
 Every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
 `CompileError`'s `diagnostics`, and in the glue envelopes) carries the stable
 `code` and `args` introduced in 1.2.0. Since 1.5.0 it also carries
@@ -653,7 +833,8 @@ Every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
   declares each code's severity and the diagnostic carries it; read it, never
   infer it from the `E` / `W` prefix or from the words of a message ("visual
   only", "display"). A note is a classification, not a statement that results
-  are unaffected: PF-W1505, a note, still describes a warmup approximation.
+  are unaffected: PF-W1505, a note, describes EMA seeding that can differ from
+  TradingView at the start of a run.
 - `args`: an object of named values, raw: identifiers, types, keywords and
   Pine spellings as strings, counts as JSON numbers; never quoting, backticks
   or a formatted number.
@@ -685,6 +866,17 @@ decimal digits. `render_diagnostic(code, args)` returns the English
 byte; in the glue envelope `message` is the message, plus ` — ` and the hint
 when there is one.
 
+`PF-E2081` identifies the removed `when` argument on `strategy.entry`,
+`strategy.order`, `strategy.exit`, `strategy.close`, `strategy.close_all`,
+`strategy.cancel` and `strategy.cancel_all` in a Pine v6 source. Its
+`args.key` names the function and `args.name` is `"when"`; the location
+covers the keyword name. The message explains that Pine v6 removed the
+argument and recommends placing the call inside an `if` statement.
+Other unknown names keep `PF-E2027` and its generic wording. A v5 source
+keeps its existing refusal: generic `PF-E2027` with support checking,
+or the unsupported-version diagnostic `PF-E2002` when support checking is
+disabled.
+
 From 1.5.0 on, receivers translate by stable code using their own locale
 catalogs; the English `user_message` template is the translation source and
 fallback for an unknown code. An unknown code is shown at its declared
@@ -698,11 +890,14 @@ specify this compatibility rule; they are not evidence of an app deployment.
 Since 1.5.0 the reviewed warning-to-note migration is exactly PF-W1505,
 PF-W1508, PF-W1509, PF-W1525, PF-W1526, PF-W1527, PF-W1528, PF-W1529,
 PF-W1530, PF-W1531 and PF-W1532, each a warning in 1.4.0. All other
-severities, all stable codes and every existing message, hint, explanation and
-argument definition are unchanged, and no existing key of a `Diagnostic`, a
-JSON diagnostic, the catalog or the envelopes is renamed or removed: `severity`
-gains the value `note` and `user_message` is added, while `code`, `args`,
-`message`, `hint`, `line`, `col` and `endCol` keep their values.
+severities and all stable codes are unchanged. At that migration, every existing
+message, hint, explanation and argument definition was unchanged, and no
+existing key of a `Diagnostic`, a JSON diagnostic, the catalog or the envelopes
+was renamed or removed: `severity` gained the value `note` and `user_message`
+was added, while `code`, `args`,
+`message`, `hint`, `line`, `col` and `endCol` kept their values. PF-W1505's
+message, hint and explanation describe both EMA seeding modes and the
+`series_origin_ms` run option (a text change only).
 The prior catalog and pin remain explicit legacy fixtures beside the exact
 delta in `tests/fixtures/diagnostic_notes/`. PF-W1509 remains a legacy
 template alias: the existing text classifier selects PF-W1508 when those
@@ -714,7 +909,7 @@ PF-W1509 describe a call PineForge skips as visual only (`plot(...)`,
 `table.new(...)`). PF-W1525 to PF-W1532 describe an earnings, dividends,
 splits, financial, footprint or other-symbol request whose value reaches only
 display and alert sinks and is lowered to `na`. PF-W1505 describes the
-`ta.ema` warmup approximation, a note by the explicit acceptance of the
+`ta.ema` seeding caveat, a note by the explicit acceptance of the
 initialization-note foundation. Five diagnostics that also speak of
 visual-only or display-only handling remain warnings: PF-W1502 (a `color(...)`
 cast), PF-W1506 (`color.from_gradient`), PF-W1507 (a drawing setter that drops
@@ -727,16 +922,49 @@ invalid arguments stay warnings or errors.
 
 PF-W1505 is a static note: the support checker emits it at each `ta.ema` call
 it visits, with no condition on the run, an input or the timeframe, and nothing
-in this revision suppresses or qualifies it per call. It still carries its
-original compile-time EMA caveat. This foundation does not establish startup
-adequacy or change seeding. The selected-window consumer may show its startup
-sentence only for a known finite shortfall in bars of that site's
-evaluation-context timeframe; absence is not parity. No sidecar exists yet, at
+in this revision suppresses or qualifies it per call. Its text describes
+both run modes; changing this text does not change generated C++ or seeding.
+
+By default, `ta.ema` seeds from the first value of the data PineForge runs and
+is finite from bar 0. The same holds for `ta.macd` and `ta.tsi`, which embed
+EMA. This seed matches TradingView when its chart had history before
+your range, as a normal chart does: the seed difference has decayed by then.
+When the TradingView reference run starts where your range starts, TradingView
+instead returns `na` for the first `length-1` bars, seeds from the SMA of the
+first `length` bars at bar `length-1`, and then applies the EMA recursion.
+`ta.kc` and `ta.kcw` already start that way in every run: the generated code
+applies the warm-up to their EMA basis, so their middle band is `na` until the
+Pine length is warm, including bar 0 (`tests/test_kc_middle_band.py` pins this
+against a standalone `ta.ema`).
+
+An engine that has the run option `series_origin_ms` takes it through the run's
+`syminfo`: epoch milliseconds of the open time of the first bar of the series the
+TradingView reference ran on; an engine without it ignores the key. When that
+origin is your range start, declaring it gives `ta.ema`, `ta.macd` and `ta.tsi`
+the same `na` interval, SMA seed and subsequent recursion. It also starts
+`request.security` series at the first whole
+higher-timeframe bucket at or after the origin; plain security expressions
+stay `na` until the first completed higher-timeframe bar. A wrong declared
+origin gives wrong values. The option has no defined meaning in a live run
+and must not be set there. `ta.rsi`, `ta.rma` and `ta.atr` already seed from
+the SMA; this note does not apply to them. No migration step is required;
+undeclared runs are unchanged.
+
+For a measured TradingView reference that starts at the range start, 37 of
+336 exit comments differ by default, including 5 finite values where
+TradingView is `na`; none differ with the origin declared. Across six corpus
+cases, default runs add, drop or shift 1 to 3 trades in the first days; all six
+are exact with the declared origin.
+
+This static note does not establish startup adequacy. The selected-window
+consumer may show its startup sentence only for a known finite shortfall in
+bars of that site's evaluation-context timeframe; absence is not parity.
+No sidecar exists yet, at
 compile time or at run time: this revision emits no `call_site_id` and no
 startup fact. The subsequent startup inventory and extraction must bind a
 versioned sidecar to Pine/generated identities, and share `call_site_id` and
 the exact source range with the diagnostic rather than joining by text; until
-that work lands, the static notes stay as they are. Input-bound lengths retain
+that work lands, the static notes remain unconditional. Input-bound lengths retain
 the input name or expression; runs/trials resolve submitted values and studies
 retain searched ranges. Recursive adequacy and seeding facts remain separate
 and may be unknown. The typed consumer fixtures (`warmup_consumer.py` and
@@ -775,9 +1003,11 @@ exceptions, not a general permission to regenerate existing pins.
 ## Compatibility boundary
 
 `check_support=False` on either Python function is **experimental**. It skips
-the support gate and can produce C++ that fails to compile or does not match
-Pine behavior; the 1.0 compatibility promise applies with the default
-`check_support=True`.
+the support gate; the 1.0 compatibility promise applies with the default
+`check_support=True`. Existing bypass paths can produce C++ that fails to
+compile or does not match Pine behavior. Those are defects under the emission
+invariant, which applies with either value of `check_support`; see the
+[open defects](codegen-coverage-gaps.md).
 
 There is no installed command-line interface. This package makes no
 process-exit-code promises for a CLI, shell wrapper, or gate script. Consumers

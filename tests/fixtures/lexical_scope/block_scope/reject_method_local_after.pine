@@ -1,0 +1,12 @@
+//@version=6
+strategy("Method local outside method", currency = currency.NONE)
+// Derived: method locals are declarations in a callable block, not globals.
+method readValue(float self) =>
+    float inside = self - open
+    inside
+signalValue = close.readValue()
+signalValue := inside
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

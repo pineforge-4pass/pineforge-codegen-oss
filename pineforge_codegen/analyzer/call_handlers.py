@@ -71,6 +71,7 @@ from ..ast_nodes import (
     Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, NaLiteral,
 )
 from ..method_binding import bind_function_defaults
+from ..loop_types import FLOAT_REASSIGNMENT, has_fractional_int_value
 from ..pine_spelling import sub_outside_literals
 from ..external_requests import FEED_LOWERING, LOWERING_ANNOTATION
 from ..security_contexts import CONTEXT_ANNOTATION, DEAD_ANNOTATION
@@ -78,6 +79,7 @@ from ..symbols import PineType, unify_pine_types
 from .. import signatures as sigs
 from .. import tv_input_choices as tv_in
 from .contracts import FixnanCallSite, FuncInfo, SecurityCallInfo, TACallSite
+from .types import OperatorTypeQuery
 from .tables import (
     BAR_FIELDS, TA_CLASS_MAP, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
     TA_TUPLE_RETURNS, TA_TUPLE_ELEMENT_COUNTS, TA_COMPUTE_ARGS,
@@ -242,6 +244,11 @@ class CallHandlers:
         loops/collections remain unknown and cannot silently pick FLOAT.
         """
         if isinstance(stmt, VarDecl):
+            if (stmt.annotations or {}).get(FLOAT_REASSIGNMENT):
+                # Return variants must keep the declaration's widened storage
+                # family even when its written hint or initializer is int.
+                local_types[stmt.name] = PineType.FLOAT
+                return
             hinted = {
                 "int": PineType.INT,
                 "float": PineType.FLOAT,
@@ -392,6 +399,32 @@ class CallHandlers:
             },
         )
         return inferred if inferred != PineType.UNKNOWN else fallback
+
+    def _check_callsite_operator_types(self, func_def, bound_args) -> None:
+        """Validate a written call without publishing its proofs to codegen."""
+        declared = self._param_type_specs_from_def(func_def)
+        local_types = {
+            name: (
+                declared[index] if index < len(declared) and declared[index] is not None
+                else self._operator_operand_type(bound_args[index])
+                if index < len(bound_args) else None
+            )
+            for index, name in enumerate(func_def.params)
+        }
+        previous_owner = self._current_top_level_stmt
+        previous_scope = self._symbols.current_scope
+        # Arguments were queried in the caller. Free names in the body
+        # belong to the definition's lexical scope; parameters and locals
+        # are supplied separately by the operator query's environment.
+        self._symbols.current_scope = self._operator_definition_scopes.get(
+            id(func_def), self._symbols.global_scope,
+        )
+        self._current_top_level_stmt = func_def
+        try:
+            OperatorTypeQuery(self, local_types).check_body(func_def.body)
+        finally:
+            self._current_top_level_stmt = previous_owner
+            self._symbols.current_scope = previous_scope
 
     def _merge_ta_args(self, func_name: str, node: FuncCall) -> list:
         """Merge positional args and kwargs into a unified positional list."""
@@ -1027,6 +1060,8 @@ class CallHandlers:
             self._visit(arg)
         for val in node.kwargs.values():
             self._visit(val)
+        if func_name == "default_entry_qty":
+            self._check_default_entry_qty_price(node)
         if func_name in ("convert_to_account", "convert_to_symbol", "default_entry_qty"):
             return PineType.FLOAT
         return PineType.VOID
@@ -1790,6 +1825,22 @@ class CallHandlers:
         declared_specs = list(
             self._func_param_type_specs.get(func_name, ())
         )
+        fractional_args = set()
+        if self._pine_version == 6 and not self._in_v5_library_definition(func_def):
+            for index, (arg, param_type) in enumerate(zip(bound_args, param_types)):
+                if (param_type == PineType.INT
+                        and (index >= len(declared_specs)
+                             or declared_specs[index] is None)
+                        and not self._in_v5_library_definition(arg)
+                        and has_fractional_int_value(
+                            arg, self._loop_type_sources,
+                            self._value_bindings.declaration_bindings,
+                        )):
+                    # An untyped parameter holds the argument's value. An
+                    # int/int quotient has an int check type, but narrowing
+                    # the callable boundary would discard its fraction.
+                    param_types[index] = PineType.FLOAT
+                    fractional_args.add(index)
         effective_param_types = [
             (
                 self._primitive_pine_type_from_spec(declared_specs[index])
@@ -1817,6 +1868,10 @@ class CallHandlers:
             self._type_spec_from_expr(arg) if arg is not None else None
             for arg in bound_args
         ]
+        for index in fractional_args:
+            # A named quotient can still have the legacy int TypeSpec.
+            # Its value proof must also reach the emitted parameter type.
+            arg_specs[index] = self._pine_type_to_spec(PineType.FLOAT)
         for i in range(len(param_specs)):
             if param_specs[i] is None and i < len(arg_specs):
                 param_specs[i] = arg_specs[i]
@@ -1837,6 +1892,22 @@ class CallHandlers:
         # Determine return type: re-analyze the function body with known param types
         # For now, use the cached return type from initial analysis
         return_type = self._func_return_types.get(func_name, PineType.FLOAT)
+        terminal = self._direct_terminal_return_expr(func_def)
+        if isinstance(terminal, FuncCall) and isinstance(terminal.callee, MemberAccess):
+            result_spec = self._callsite_terminal_return_spec(
+                func_def,
+                {
+                    name: spec
+                    for name, spec in zip(func_def.params, param_specs)
+                },
+            )
+            result_type = self._primitive_pine_type_from_spec(result_spec)
+            if result_type != PineType.UNKNOWN:
+                # Infer the registered result with the callee's parameter
+                # specs, then preserve it before primitive return inference.
+                self._func_return_type_specs[func_name] = result_spec
+                self._func_return_types[func_name] = result_type
+                return_type = result_type
 
         # If the return type was UNKNOWN or VOID, infer it ONLY when the body
         # is a single bare identifier that returns a parameter directly
@@ -1865,6 +1936,7 @@ class CallHandlers:
         # parameter's family independently at each written call.  Do this
         # before the legacy FuncInfo merge so the first call cannot dictate
         # every later call's return type.
+        self._check_callsite_operator_types(func_def, bound_args)
         return_type = self._callsite_callable_return_type(
             func_def, effective_param_types, return_type
         )

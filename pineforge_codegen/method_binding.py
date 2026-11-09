@@ -1,4 +1,4 @@
-"""Strict, source-order-preserving binding for typed Pine methods.
+"""Call argument order and strict binding for typed Pine methods.
 
 Typed extension methods are inventoried before semantic analysis so a call may
 precede its declaration without falling through to a same-named builtin.  This
@@ -10,7 +10,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .ast_nodes import ASTNode, FuncCall, MethodDef, Program
+from .ast_nodes import ASTNode, FuncCall, FuncDef, Identifier, MethodDef, Program, StrategyDecl
+from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+from .limits import iter_ast_nodes, syntax_children
+from .pine_spelling import expr_start
+
+
+def method_receiver_is_used(node: MethodDef) -> bool:
+    """Query body syntax with the shared walker, including nested bodies.
+
+    Assignment targets count conservatively: the syntax walker does not
+    distinguish reads from writes. Parameter defaults are outside the body.
+    """
+    return bool(node.params) and any(
+        isinstance(child, Identifier) and child.name == node.params[0]
+        for stmt in node.body
+        for child, _depth in iter_ast_nodes(stmt)
+    )
 
 
 @dataclass(frozen=True)
@@ -87,7 +103,7 @@ def inventory_method_signatures(program: Program) -> dict[str, MethodSignature]:
     return result
 
 
-def _written_actuals(call: FuncCall) -> list[ASTNode]:
+def _written_actuals(call: FuncCall | StrategyDecl) -> list[ASTNode]:
     """Recover written order lost by the parser's args/kwargs split."""
 
     fallback = [*call.args, *call.kwargs.values()]
@@ -108,6 +124,48 @@ def _written_actuals(call: FuncCall) -> list[ASTNode]:
         )
     )
     return [node for _index, node in indexed]
+
+
+def validate_call_argument_order(program: Program, *, filename: str = "<input>") -> None:
+    """Validate v6 source before argument rewriting or reachability pruning.
+
+    Every call has its own positional prefix and keyword suffix, regardless
+    of its callee or signature. Reuse the methods' written-actual view so
+    separating args/kwargs cannot hide a late positional argument.
+    """
+    if program.version != 6:
+        return
+    violations: list[SourceLocation] = []
+    stack: list[ASTNode] = [program]
+    while stack:
+        node = stack.pop()
+        annotations = node.annotations or {}
+        if annotations.get("pine_version") == 5:
+            continue  # Preserve the separate imported-v5 compatibility policy.
+        if isinstance(node, (FuncCall, StrategyDecl)) and node.args and node.kwargs:
+            positional = {id(argument) for argument in node.args}
+            saw_keyword = False
+            for argument in _written_actuals(node):
+                if id(argument) not in positional:
+                    saw_keyword = True
+                elif saw_keyword:
+                    violations.append(
+                        expr_start(argument).loc or argument.loc or node.loc
+                        or SourceLocation(filename, 1, 1, 2)
+                    )
+                    break
+        stack.extend(syntax_children(node))
+        if isinstance(node, (FuncDef, MethodDef)):
+            # Defaults are syntax stored in annotations; ordinary walkers
+            # intentionally skip annotations such as ArgOrder's node aliases.
+            stack.extend(default for default in annotations.get("param_defaults", ())
+                         if isinstance(default, ASTNode))
+    if violations:
+        location = min(violations, key=lambda loc: (loc.file, loc.line, loc.col))
+        raise CompileError([Diagnostic(
+            level=Level.ERROR, phase=Phase.ANALYZER, location=location,
+            message="Positional arguments cannot follow keyword arguments.",
+        )])
 
 
 def bind_function_defaults(

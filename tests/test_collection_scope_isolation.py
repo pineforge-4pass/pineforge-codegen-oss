@@ -216,6 +216,7 @@ def _udf_method_source(reverse: bool) -> str:
     slot.get(0, 0)
 '''
     method = '''method read_float(Holder self) =>
+    self
     slot = map.new<string, float>()
     slot.put("k", 2.5)
     slot.get("k")
@@ -646,6 +647,7 @@ strategy("scope method persistent collection")
 type Holder
     int seed
 method use(Holder self) =>
+    self
     var slot = array.from("x")
     slot.push("y")
     slot.size()
@@ -850,7 +852,7 @@ matrix_result = matrix_probe()
 
 
 def test_unique_local_collection_output_hash_is_stable() -> None:
-    # Re-pinned once by lane TV-DEFAULTS (was 14200 bytes, 95d691b8...): the
+    # Re-pinned once by an earlier fixture update (was 14200 bytes, 95d691b8...): the
     # probe's strategy() declares no capital or quantity, so its constructor
     # now carries TradingView's three Pine v6 defaults and nothing else moved.
     cpp = transpile(_IDENTITY_SOURCE)

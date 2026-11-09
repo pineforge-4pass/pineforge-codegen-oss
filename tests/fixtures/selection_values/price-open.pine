@@ -1,0 +1,21 @@
+//@version=6
+strategy("F1 parity probe", pyramiding = 0, calc_on_every_tick = false, calc_on_order_fills = false, process_orders_on_close = false, default_qty_type = strategy.fixed, default_qty_value = 1, initial_capital = 1000000)
+float f1_input_158 = (int(bar_index / 20) % 2 == 0 ? 1.0 : -1.0) * float(open)
+f1_sl_158(float x) =>
+    switch
+        x >= 0 => y = x + 0.125, if y > 0
+            y + 1.0
+        else
+            -y + 0.5
+        => -x
+float f1_leaf_158 = f1_sl_158(f1_input_158)
+float f1_signal_158 = float(f1_leaf_158) + (0.22)
+float f1_qty_158 = 1.0 + math.abs(nz(f1_signal_158, -0.75)) % 7.0
+var string f1_active_158 = ""
+var string f1_value_158 = ""
+if bar_index % 20 == 5 and strategy.position_size == 0
+    f1_value_158 := str.tostring(f1_signal_158)
+    f1_active_158 := "f1-" + f1_value_158
+    strategy.entry(f1_active_158, strategy.long, qty = f1_qty_158)
+if bar_index % 20 == 15 and strategy.position_size != 0
+    strategy.close(f1_active_158, comment = f1_value_158)

@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import re
 
+from ..intrinsic_binding import validate_intrinsic_keywords
+from ..signatures import IntrinsicFunc
 from ..symbols import PineType
 from .helpers import (
     evaluate_args_once, na_preserving_int_cast, pine_index_int_cast,
@@ -48,6 +50,13 @@ def _pine_bool_arg(value: str) -> str:
 # ---------------------------------------------------------------------------
 # Bar field / built-in mappings
 # ---------------------------------------------------------------------------
+
+# Pine string values, independent of the risk host's signed integer encoding.
+STRATEGY_DIRECTION_VALUES = {
+    "long": "long",
+    "short": "short",
+    "all": "all",
+}
 
 BAR_FIELDS = {
     "close": "current_bar_.close", "open": "current_bar_.open", "high": "current_bar_.high",
@@ -232,6 +241,15 @@ SECURITY_BAR_FIELDS = frozenset(SECURITY_BAR_FIELD_EXPRS) | {"time_close"}
 
 # Backwards-compatible name for consumers that only need the OHLCV subset.
 SECURITY_OHLC_BAR_FIELDS = frozenset({"open", "high", "low", "close", "volume"})
+
+# The price-series spellings whose ``name[k]`` the analyzer read as the bar's
+# own history (its ``BAR_FIELDS``) before callable locals had private
+# spellings, which left a requested helper's non-``var`` local so spelled to
+# PF-E3011. A string local keeps that refusal (security.py
+# ``_security_check_price_named_local_history``); ``time`` was never one.
+SECURITY_PRICE_LOCAL_NAMES = frozenset({
+    "open", "high", "low", "close", "hl2", "hlc3", "hlcc4", "ohlc4", "volume",
+})
 
 # Generated C++ runtime function names referenced by the codegen as string
 # literals. Centralising them here gives a single source of truth across
@@ -757,35 +775,124 @@ def _checked_array_fill_range(a: str, args: list[str], journal: str | None = Non
     )
 
 
-def checked_array_slice(a: str, args: list[str], *, result_type: str) -> str:
+def checked_array_slice(
+    a: str, args: list[str], *, result_type: str, view_function: str | None = None,
+) -> str:
     """``array.slice(id, index_from, index_to)`` — bounded range extraction.
 
-    ``result_type`` stays caller-supplied so the typed method lane keeps
-    emitting the receiver's own element type; only the bounds checks are new.
+    ``result_type`` keeps the receiver's element family. Full generation
+    supplies its lifetime-owning window helper; standalone table consumers
+    retain the historical range materialization.
     """
     check = _checked_array_range_prelude(method="slice")
+    result = (
+        f"{view_function}<{result_type}>(__pf_array, "
+        "(size_t)__pf_array_index_from, (size_t)__pf_array_index_to)"
+        if view_function else
+        f"{result_type}(__pf_array.begin()+(size_t)__pf_array_index_from, "
+        "__pf_array.begin()+(size_t)__pf_array_index_to)"
+    )
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_from_value){ "
         "return [&](auto&& __pf_raw_index_to_value){ "
         f"{check}"
-        f"return {result_type}(__pf_array.begin()+(size_t)__pf_array_index_from, "
-        "__pf_array.begin()+(size_t)__pf_array_index_to); "
+        f"return {result}; "
         f"}}(({args[1]})); }}(({args[0]})); }}(({a}))"
     )
 
 
+_ARRAY_INDEX_CONSTANT_CPP = re.compile(r"[\s()0-9.eE+*-]+")
+
+
+def _array_index_is_proven_finite(index: str) -> bool:
+    """Prove a bounded class of numeric C++ constants finite and non-NA.
+
+    Recognize decimal int literals with grouping, unary signs and ``+ - *``
+    only when every literal and intermediate lies strictly between INT_MIN
+    and INT_MAX + 1. This guarantees ordinary C++ int arithmetic without
+    overflow or the integer NA sentinel. Also recognize decimal double
+    literals with grouping/unary signs whose parsed magnitude is below the
+    largest double, but no floating arithmetic. Exclude the rounded overflow
+    boundary rather than assuming the C++ compiler rounds it the same way.
+
+    The syntax common to Python and C++ is parsed, never executed. Names,
+    calls, casts, suffixed/wide integers and all other forms remain unknown;
+    a numeric type alone cannot exclude an NA sentinel. This proves neither
+    an in-bounds address nor a nonempty array: keep every runtime check.
+    """
+    if (not _ARRAY_INDEX_CONSTANT_CPP.fullmatch(index)
+            or "++" in index or "--" in index):
+        return False
+
+    import ast as _ast
+    import sys
+
+    def value(node):
+        if isinstance(node, _ast.Constant) and type(node.value) in (int, float):
+            result = node.value
+        elif isinstance(node, _ast.UnaryOp) and isinstance(
+                node.op, (_ast.UAdd, _ast.USub)):
+            inner = value(node.operand)
+            if inner is None:
+                return None
+            result = -inner if isinstance(node.op, _ast.USub) else inner
+        elif isinstance(node, _ast.BinOp) and isinstance(
+                node.op, (_ast.Add, _ast.Sub, _ast.Mult)):
+            left, right = value(node.left), value(node.right)
+            if type(left) is not int or type(right) is not int:
+                return None
+            result = (left + right if isinstance(node.op, _ast.Add)
+                      else left - right if isinstance(node.op, _ast.Sub)
+                      else left * right)
+        else:
+            return None
+        if type(result) is int:
+            return result if -(1 << 31) < result < (1 << 31) else None
+        return result if abs(result) < sys.float_info.max else None
+
+    try:
+        tree = _ast.parse(index.strip(), mode="eval")
+        return value(tree.body) is not None
+    except (SyntaxError, ValueError, RecursionError):
+        return False
+
+
 def _checked_array_get(a: str, args: list[str], normalize_negative: bool = True) -> str:
     check = _checked_array_index_prelude(method="get", normalize_negative=normalize_negative)
+    if _array_index_is_proven_finite(args[0]):
+        # Keep the original checked getter, including its reference/value
+        # lifetime split, when no missing-index value return is needed.
+        return (
+            "[&](auto&& __pf_array)->decltype(auto){ "
+            "return [&](auto&& __pf_raw_index_value)->decltype(auto){ "
+            f"{check}"
+            "if constexpr(std::is_lvalue_reference_v<decltype(__pf_array)>) "
+            "return (__pf_array[(size_t)__pf_array_index]); "
+            "else { using __pf_array_value_type=typename "
+            "std::decay_t<decltype(__pf_array)>::value_type; "
+            "return __pf_array_value_type(__pf_array[(size_t)__pf_array_index]); } "
+            f"}}(({args[0]})); }}(({a}))"
+        )
     return (
         "[&](auto&& __pf_array)->decltype(auto){ "
         "return [&](auto&& __pf_raw_index_value)->decltype(auto){ "
-        f"{check}"
-        "if constexpr(std::is_lvalue_reference_v<decltype(__pf_array)>) "
-        "return (__pf_array[(size_t)__pf_array_index]); "
-        "else { using __pf_array_value_type=typename "
+        "using __pf_array_value_type=typename "
         "std::decay_t<decltype(__pf_array)>::value_type; "
-        "return __pf_array_value_type(__pf_array[(size_t)__pf_array_index]); } "
+        "using _pf_array_index_type=std::decay_t<decltype(__pf_raw_index_value)>; "
+        "if constexpr(std::is_floating_point_v<__pf_array_value_type> && "
+        "std::is_integral_v<_pf_array_index_type> && "
+        "!std::is_same_v<_pf_array_index_type,bool>) { "
+        "if(is_na(__pf_raw_index_value)) return na<__pf_array_value_type>(); } "
+        f"{check}"
+        # Both floating returns are values; decltype(auto) must never mix a
+        # temporary NA with an element reference. Other element families keep
+        # the existing lvalue/temporary lifetime rules.
+        "if constexpr(std::is_floating_point_v<__pf_array_value_type>) "
+        "return __pf_array_value_type(__pf_array[(size_t)__pf_array_index]); "
+        "else if constexpr(std::is_lvalue_reference_v<decltype(__pf_array)>) "
+        "return (__pf_array[(size_t)__pf_array_index]); "
+        "else return __pf_array_value_type(__pf_array[(size_t)__pf_array_index]); "
         f"}}(({args[0]})); }}(({a}))"
     )
 
@@ -794,10 +901,24 @@ def _checked_array_set(a: str, args: list[str], normalize_negative: bool = True,
                        journal: str | None = None) -> str:
     check = _checked_array_index_prelude(method="set", normalize_negative=normalize_negative)
     capture = f"{journal}.save_set(__pf_array, (size_t)__pf_array_index); " if journal else ""
+    missing = ""
+    if not _array_index_is_proven_finite(args[0]):
+        # The value has already run, including a nested get. A missing
+        # integral index into a floating array has no address to journal/write.
+        missing = (
+            "using __pf_array_value_type=typename "
+            "std::decay_t<decltype(__pf_array)>::value_type; "
+            "using _pf_array_index_type=std::decay_t<decltype(__pf_raw_index_value)>; "
+            "if constexpr(std::is_floating_point_v<__pf_array_value_type> && "
+            "std::is_integral_v<_pf_array_index_type> && "
+            "!std::is_same_v<_pf_array_index_type,bool>) { "
+            "if(is_na(__pf_raw_index_value)) return; } "
+        )
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_value){ "
         "return [&](auto&& __pf_array_value){ "
+        f"{missing}"
         f"{check}"
         f"{capture}"
         "__pf_array[(size_t)__pf_array_index]=__pf_array_value; "
@@ -1050,8 +1171,7 @@ MAP_METHODS = {
 }
 
 # Declared signature order after removing the method receiver ``id``.  This is
-# consumed by the typed-map UDF-parameter lane; established global/local and
-# namespace map lowerings intentionally retain their existing output.
+# consumed by every map-call route, with ``id`` restored for namespace calls.
 MAP_METHOD_KWARGS: dict[str, list[str]] = {
     "put": ["key", "value"],
     "get": ["key"],
@@ -1401,21 +1521,44 @@ STR_ARGS_READ_REPEATEDLY = {
 # kwarg merge helper (used by visitor / dispatch sites that accept kwargs)
 # ---------------------------------------------------------------------------
 
-def _merge_kwargs(args: list, kwargs: dict, param_names: list | None, visit_expr) -> list:
+def _bind_kwargs_aligned(args: list, kwargs: dict, param_names: list | None,
+                         *, intrinsic: IntrinsicFunc | None = None) -> list:
+    """The call's arguments at the slots of their parameters, unvisited.
+
+    Positional arguments keep their places and each keyword lands at the
+    position of the parameter it names. A parameter that is skipped while a
+    later one is named stays ``None``: the caller applies that parameter's own
+    default, or refuses the call, instead of reading the later argument in the
+    skipped slot. Trailing ``None`` slots are dropped. Registry callers supply
+    their record so verified keyword names are checked first.
+    """
+    validate_intrinsic_keywords(intrinsic, kwargs)
+    bound = list(args)
+    if kwargs and param_names:
+        for i, pname in enumerate(param_names):
+            if pname in kwargs:
+                while len(bound) <= i:
+                    bound.append(None)
+                if bound[i] is None:
+                    bound[i] = kwargs[pname]
+        while bound and bound[-1] is None:
+            bound.pop()
+    return bound
+
+
+def _merge_kwargs(args: list, kwargs: dict, param_names: list | None, visit_expr,
+                  *, intrinsic: IntrinsicFunc | None = None) -> list:
     """Merge positional + kwargs into a unified positional list of C++ exprs.
 
     ``param_names`` is the declared signature order from
     ``signatures.py``. ``visit_expr`` is a callable applied to each kept
-    AST node; pass ``lambda x: x`` when the caller wants raw nodes back."""
-    if not kwargs or not param_names:
-        return [visit_expr(a) for a in args]
-    merged = list(args)
-    for i, pname in enumerate(param_names):
-        if pname in kwargs:
-            while len(merged) <= i:
-                merged.append(None)
-            if merged[i] is None:
-                merged[i] = kwargs[pname]
-    while merged and merged[-1] is None:
-        merged.pop()
-    return [visit_expr(a) for a in merged if a is not None]
+    AST node; pass ``lambda x: x`` when the caller wants raw nodes back.
+    Registry callers supply their record so verified keyword names are checked
+    before any argument is evaluated or omitted.
+
+    The list is COMPRESSED: a skipped parameter leaves no slot, so a caller
+    that reads fixed indices reads a later keyword in the skipped slot. A call
+    whose parameters can be skipped binds with ``_bind_kwargs_aligned``.
+    """
+    bound = _bind_kwargs_aligned(args, kwargs, param_names, intrinsic=intrinsic)
+    return [visit_expr(a) for a in bound if a is not None]

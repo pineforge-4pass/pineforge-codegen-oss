@@ -1,0 +1,9 @@
+//@version=6
+strategy("Float counter with fractional step", currency=currency.NONE, initial_capital=1000000)
+float acc = 0.0
+for x = 0.0 to 1.0 by 0.25
+    acc += 1.0
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = acc)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

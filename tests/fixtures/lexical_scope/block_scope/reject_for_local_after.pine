@@ -1,0 +1,12 @@
+//@version=6
+strategy("For body local after loop", currency = currency.NONE)
+// Derived: exit_scope removes the local; the emitter's name union still admits it.
+float signalValue = 0.0
+for i = 0 to 1
+    float inside = close - open
+    signalValue := inside
+signalValue := inside
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

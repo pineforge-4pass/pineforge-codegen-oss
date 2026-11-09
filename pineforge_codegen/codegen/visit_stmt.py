@@ -73,10 +73,15 @@ classes from ``..ast_nodes``.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import functools
+import re
+
 from ..errors import Phase
 from ..ast_nodes import (
     ASTNode,
     Assignment,
+    BinOp,
     BreakStmt,
     ContinueStmt,
     EnumDecl,
@@ -90,7 +95,9 @@ from ..ast_nodes import (
     ImportStmt,
     MemberAccess,
     MethodDef,
+    NaLiteral,
     StrategyDecl,
+    Subscript,
     SwitchStmt,
     Ternary,
     TupleAssign,
@@ -101,17 +108,49 @@ from ..ast_nodes import (
 )
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from ..external_requests import UNPINNED_ANNOTATION
+from ..security_contexts import ScriptIndex
+from .for_loops import for_continuation
+from .helpers import cpp_code_only
 from .tables import (
     ARRAY_NEW_CTORS,
     DRAWING_TYPE_TO_CPP,
     TA_RETURNS_BOOL,
     TA_TUPLE_FIELDS,
     MATRIX_RETURNING_METHODS,
+    PINE_TYPE_TO_CPP,
+    STRATEGY_DIRECTION_VALUES,
 )
 
 # Sentinel for "no block-scoped overlay was activated" so an empty saved map
 # is still distinguishable from the no-op case.
 _NO_BLOCK_REMAP = object()
+
+
+def _loop_scoped_history_flags(visit):
+    """Give the outermost loop of a body the flags of the series it writes.
+
+    A series declared or written in a loop opens its bar's history slot at
+    the first reach and updates it afterwards
+    (``_emit_history_series_write``); the flag that tells the two apart is a
+    C++ local declared just before the OUTERMOST loop statement, so nested
+    loops share it and each execution of the loop starts with the slot closed.
+    The declarations are inserted once the body is emitted, when the series it
+    writes are known.
+    """
+    @functools.wraps(visit)
+    def wrapper(self, node, lines, indent, *args, **kwargs):
+        if self._loop_history_flags is not None:
+            return visit(self, node, lines, indent, *args, **kwargs)
+        start = len(lines)
+        self._loop_history_flags = flags = {}
+        try:
+            return visit(self, node, lines, indent, *args, **kwargs)
+        finally:
+            self._loop_history_flags = None
+            if flags:
+                pad = "    " * indent
+                lines[start:start] = [f"{pad}bool {flag} = false;" for flag in flags.values()]
+    return wrapper
 
 
 class StmtVisitor:
@@ -130,6 +169,8 @@ class StmtVisitor:
             if self._budget_visit_count % 128 == 0:
                 self._budget.check(node.loc, Phase.CODEGEN)
         pad = "    " * indent
+        if self._emit_security_selection_stmt(node, lines, pad):
+            return
 
         if isinstance(node, StrategyDecl):
             return
@@ -159,16 +200,22 @@ class StmtVisitor:
                         and inferred_spec.kind in {"array", "map", "matrix"}):
                     activation_spec = inferred_spec
             previous_pending_alias = self._pending_decl_outer_alias
-            if (is_callable_binding
+            primitive_shadow = (
+                id(node) in self.ctx.primitive_block_shadow_types
+                and id(node) not in self._direct_program_var_decl_nodes
+            )
+            if ((is_callable_binding or primitive_shadow)
                     and not node.is_var
                     and not node.is_varip
-                    and self._collection_spec_for_name(node.name) is not None
+                    and (primitive_shadow
+                         or self._collection_spec_for_name(node.name) is not None)
                     and any(
                         isinstance(part, Identifier) and part.name == node.name
                         for part in self._walk_ast(node.value)
                     )):
                 safe_name = self._safe_name(node.name)
-                if (node.name in self._global_collection_types
+                if (not primitive_shadow
+                        and node.name in self._global_collection_types
                         and node.name not in self._current_func_param_specs
                         and node.name not in self._current_func_collection_specs
                         and node.name not in self._current_loop_var_specs):
@@ -202,6 +249,10 @@ class StmtVisitor:
                 self._visit_var_decl(node, lines, pad)
             finally:
                 self._pending_decl_outer_alias = previous_pending_alias
+            if primitive_shadow:
+                # Inputs and expression-valued declarations can return before
+                # the general declaration path remembers their scalar type.
+                self._current_func_local_types[node.name] = self._type_for_decl(node)
             if is_callable_binding:
                 self._activate_callable_collection_binding(
                     node.name,
@@ -284,10 +335,27 @@ class StmtVisitor:
         elif isinstance(node, TupleAssign):
             self._visit_tuple_assign(node, lines, pad)
             tuple_cpp_types = self._tuple_binding_cpp_types(node)
-            if getattr(self, "_active_func_name", None) is not None:
-                for name in node.names:
-                    if name and name != "_":
-                        self._activate_callable_collection_binding(name, None)
+            tuple_array_specs = {}
+            for name, cpp_type in zip(node.names, tuple_cpp_types):
+                if cpp_type.startswith("std::vector<") and cpp_type.endswith(">"):
+                    element = cpp_type[len("std::vector<"):-1]
+                    hint = {"double": "float", "std::string": "string"}.get(
+                        element, element)
+                    spec = (TypeSpec.primitive("int64") if element == "int64_t"
+                            else self._type_spec_from_hint_name(hint))
+                    if spec is not None:
+                        tuple_array_specs[name] = TypeSpec.array(spec)
+            for name in node.names:
+                if name and name != "_":
+                    spec = self._array_widths.bindings.get((id(node), name))
+                    if (spec is not None
+                            or getattr(self, "_active_func_name", None) is not None):
+                        self._activate_callable_collection_binding(
+                            name, spec if spec is not None
+                            else tuple_array_specs.get(name))
+                    elif name in tuple_array_specs:
+                        self._collection_types[name] = tuple_array_specs[name]
+                        self._array_vars.add(name)
             scalar_names = [
                 name
                 for name in node.names
@@ -310,8 +378,8 @@ class StmtVisitor:
             for index, name in enumerate(node.names):
                 if name and name != "_":
                     # A supported tuple destructure creates fresh lexical
-                    # bindings.  Tuple elements are primitive on the current
-                    # supported surface, so install an explicit tombstone: an
+                    # bindings. A primitive or array element installs a
+                    # tombstone for arbitrary UDT lookup: an
                     # unrelated same-named global/callable UDT must not target-
                     # type a later ``name := na`` as ``State{}``.
                     self._lexical_udt_types[name] = None
@@ -354,7 +422,9 @@ class StmtVisitor:
                 c = node.expr.callee
                 if (isinstance(c.object, MemberAccess) and isinstance(c.object.object, Identifier)
                         and c.object.object.name == "strategy" and c.object.member == "risk"
-                        and node.expr.args):
+                        and (node.expr.args
+                             or (c.member == "allow_entry_in"
+                                 and "value" in node.expr.kwargs))):
                     risk_func = c.member
                     _RISK_MEMBER_MAP = {
                         "max_intraday_filled_orders": (
@@ -366,32 +436,73 @@ class StmtVisitor:
                         "max_cons_loss_days": ("set_pine_risk_max_cons_loss_days", "int"),
                     }
                     if risk_func == "allow_entry_in":
-                        val = self._visit_expr(node.expr.args[0])
-                        if val == "1":
-                            direction = "1"
-                        elif val == "-1":
-                            direction = "-1"
+                        arg = (
+                            node.expr.args[0]
+                            if node.expr.args
+                            else node.expr.kwargs["value"]
+                        )
+                        val = self._visit_expr(arg)
+                        if (
+                            isinstance(arg, MemberAccess)
+                            and isinstance(arg.object, MemberAccess)
+                            and isinstance(arg.object.object, Identifier)
+                            and arg.object.object.name == "strategy"
+                            and arg.object.member == "direction"
+                            and arg.member in STRATEGY_DIRECTION_VALUES
+                            and self._type_spec_from_expr(arg.object) is None
+                        ):
+                            direction = (
+                                "1" if arg.member == "long"
+                                else "-1" if arg.member == "short"
+                                else "0"
+                            )
+                        elif self._infer_type(arg) == "std::string":
+                            used = set(self._safe_name_occupied)
+                            used.update(re.findall(r"\b[A-Za-z_]\w*\b", cpp_code_only(val)))
+                            temporary = self._allocate_generated_cpp_name(
+                                "_pf_risk_direction_value", used
+                            )
+                            long_value = self._cpp_string_escape(
+                                STRATEGY_DIRECTION_VALUES["long"]
+                            )
+                            short_value = self._cpp_string_escape(
+                                STRATEGY_DIRECTION_VALUES["short"]
+                            )
+                            direction = (
+                                f"([&]() -> int {{ const std::string {temporary} = ({val}); "
+                                f'return {temporary} == std::string("{long_value}") ? 1 : '
+                                f'{temporary} == std::string("{short_value}") ? -1 : 0; }}())'
+                            )
                         else:
-                            direction = "0"
-                        lines.append(f"{pad}set_pine_risk_direction({direction});")
+                            direction = val
+                        lines.append(
+                            f"{pad}set_pine_risk_direction({direction});"
+                        )
                         return
                     if risk_func in _RISK_MEMBER_MAP:
                         setter, cast_type = _RISK_MEMBER_MAP[risk_func]
                         val = self._visit_expr(node.expr.args[0])
                         # The percent flag travels with the matching setter so
                         # every risk update atomically replaces both fields.
-                        if risk_func in ("max_drawdown", "max_intraday_loss") and len(node.expr.args) >= 2:
-                            arg2 = node.expr.args[1]
-                            is_pct = (isinstance(arg2, MemberAccess)
-                                      and isinstance(arg2.object, Identifier)
-                                      and arg2.object.name == "strategy"
-                                      and arg2.member == "percent_of_equity")
-                        else:
-                            is_pct = False
                         if risk_func in ("max_drawdown", "max_intraday_loss"):
+                            type_arg = (
+                                node.expr.args[1] if len(node.expr.args) >= 2
+                                else node.expr.kwargs.get("type")
+                            )
+                            is_pct = self._risk_type_is_percent_of_equity(type_arg)
+                            if is_pct is None:
+                                # Mutable aliases and computed enums must use
+                                # the value at this call, not an initializer.
+                                type_value = self._visit_expr(type_arg)
+                                percent_flag = (
+                                    f"(({type_value}) == "
+                                    "static_cast<int>(QtyType::PERCENT_OF_EQUITY))"
+                                )
+                            else:
+                                percent_flag = "true" if is_pct else "false"
                             lines.append(
                                 f"{pad}{setter}(({cast_type})({val}), "
-                                f"{'true' if is_pct else 'false'});"
+                                f"{percent_flag});"
                             )
                         else:
                             lines.append(f"{pad}{setter}(({cast_type})({val}));")
@@ -416,6 +527,35 @@ class StmtVisitor:
             if stripped == "color" or stripped.startswith("(int64_t)pine_color::"):
                 return
             lines.append(f"{pad}{cpp};")
+
+    def _risk_type_is_percent_of_equity(self, expr) -> bool | None:
+        """Prove an enum through lexical aliases, or leave it for evaluation."""
+        if expr is None:
+            return False
+        seen = set()
+        while isinstance(expr, Identifier):
+            index = getattr(self, "_risk_type_index", None)
+            if index is None:
+                index = self._risk_type_index = ScriptIndex(self.ctx.ast)
+            declaration = self.ctx.identifier_binding_nodes.get(
+                id(expr), index.decls.get(index.refs.get(id(expr)))
+            )
+            if not isinstance(declaration, VarDecl):
+                return None
+            binding = index.decl_binding.get((id(declaration), declaration.name))
+            if binding is None or binding in seen or binding in index.reassigned:
+                return None
+            seen.add(binding)
+            expr = declaration.value
+        if (
+            isinstance(expr, MemberAccess)
+            and isinstance(expr.object, Identifier)
+            and expr.object.name == "strategy"
+            and expr.member in ("percent_of_equity", "cash")
+            and self._type_spec_from_expr(expr.object) is None
+        ):
+            return expr.member == "percent_of_equity"
+        return None
 
     def _concat_receiver_name(self, expr) -> str | None:
         """If ``expr`` is a Pine ``matrix.concat`` call (in either method
@@ -523,13 +663,23 @@ class StmtVisitor:
                 )
                 previous_input_name = self._current_input_var_name
                 self._current_input_var_name = node.name
-                # A ``var`` int array that stores epoch milliseconds is declared
-                # ``std::vector<int64_t>``; its one-shot constructor here must
+                # A typed array declaration, including a ``var`` int array that
+                # stores epoch milliseconds, must make its one-shot constructor
                 # spell the same type (visit_call array.new_* / array.from).
                 previous_ctor_target = getattr(self, "_array_ctor_target_name", None)
+                previous_ctor_expected = getattr(self, "_array_ctor_expected", None)
                 self._array_ctor_target_name = node.name
                 try:
                     type_spec = info.get("type_spec")
+                    if (
+                        node.type_hint
+                        and type_spec is not None
+                        and type_spec.kind == "array"
+                    ):
+                        self._array_ctor_expected = (
+                            node.value,
+                            self._widen_array_spec_for_name(node.name, type_spec),
+                        )
                     target_cpp_type = info.get("drawing_cpp")
                     if (
                         target_cpp_type is None
@@ -611,6 +761,7 @@ class StmtVisitor:
                 finally:
                     self._current_input_var_name = previous_input_name
                     self._array_ctor_target_name = previous_ctor_target
+                    self._array_ctor_expected = previous_ctor_expected
                 if (info.get("drawing_cpp") is None
                         and not info.get("statement_ordered_aggregate")):
                     init_cpp = self._typed_na_init(
@@ -664,12 +815,14 @@ class StmtVisitor:
         if is_global_member and isinstance(node.value, FuncCall) and self._is_input_call(node.value):
             func_name_i, namespace_i = self._resolve_callee(node.value.callee)
             is_static_global_input = (
-                not self._is_source_input(node.value)
+                not declaration_is_series
+                and not self._is_source_input(node.value)
                 and node.name not in self._array_vars
                 and node.name not in getattr(self, "_matrix_specs", {})
                 and node.name not in getattr(self, "_map_vars", {})
                 and not node.is_var
                 and not node.is_varip
+                and node.name not in self._global_mutable_infos
             )
 
         if is_static_global_input:
@@ -699,21 +852,44 @@ class StmtVisitor:
             func_name, namespace = self._resolve_callee(node.value.callee)
             if namespace == "array" and func_name in ARRAY_NEW_CTORS | {"new", "from", "copy", "slice"}:
                 captured = self._callable_collection_bindings.get(id(node))
+                hinted = self._type_spec_from_hint_name(node.type_hint)
+                inferred = self._type_spec_from_expr(node.value)
+                declared = (
+                    hinted
+                    if hinted is not None and hinted.kind == "array"
+                    else (
+                        captured
+                        if captured is not None and captured.kind == "array"
+                        else inferred
+                    )
+                )
                 spec = self._widen_array_spec_for_name(
                     node.name,
-                    captured
-                    if captured is not None and captured.kind == "array"
-                    else self._type_spec_from_expr(node.value)
-                        or self._array_spec_for_name(node.name),
+                    declared or self._array_spec_for_name(node.name),
                 )
+                storage = self._array_widths.nodes.get(id(node), ())
+                if not self._array_widths.wide.isdisjoint(storage):
+                    spec = self._array_widths.widen(
+                        self._array_widths.specs.get(id(node), spec), storage)
                 previous_target = getattr(self, "_array_ctor_target_name", None)
+                previous_expected = getattr(self, "_array_ctor_expected", None)
                 self._array_ctor_target_name = node.name
+                if (
+                    (hinted is not None and hinted.kind == "array")
+                    or (captured is not None and captured.kind == "array")
+                    or not self._array_widths.wide.isdisjoint(storage)
+                ):
+                    self._array_ctor_expected = (node.value, spec)
                 try:
                     init = self._visit_expr(node.value)
                 finally:
                     self._array_ctor_target_name = previous_target
+                    self._array_ctor_expected = previous_expected
                 self._array_vars.add(node.name)
-                self._collection_types.setdefault(node.name, spec)
+                if not self._array_widths.wide.isdisjoint(storage):
+                    self._collection_types[node.name] = spec
+                else:
+                    self._collection_types.setdefault(node.name, spec)
                 cpp_type = self._type_spec_to_cpp(spec)
                 if is_global_member:
                     lines.append(f"{pad}{safe} = {init};")
@@ -854,7 +1030,8 @@ class StmtVisitor:
                 node.name,
                 target_cpp_type=(
                     target_cpp_type
-                    if target_cpp_type in DRAWING_TYPE_TO_CPP.values()
+                    if (target_cpp_type in DRAWING_TYPE_TO_CPP.values()
+                        or target_cpp_type == "std::string")
                     else self._series_handle_target(node.name)
                 ),
             )
@@ -948,6 +1125,9 @@ class StmtVisitor:
             name=node.name,
             type_hint=node.type_hint,
         )
+        if (target_cpp_type is None
+                and self._slot_scalar_cpp_type(node.name) == "std::string"):
+            target_cpp_type = "std::string"
         if target_cpp_type is None:
             target_cpp_type = self._udt_target_cpp_type(
                 target_name=node.name,
@@ -970,8 +1150,10 @@ class StmtVisitor:
             remember_local_type(cpp_type)
             lines.append(f"{pad}{cpp_type} {safe} = {cpp_val};")
 
-    @staticmethod
-    def _compound_assign_rhs(target_read: str, op: str, val_cpp: str) -> str | None:
+    def _compound_assign_rhs(self, target_read: str, op: str, val_cpp: str,
+                             target_node=None, value_node=None, *,
+                             target_is_double: bool = False,
+                             value_is_double: bool = False) -> str | None:
         """RHS for a compound assignment that must NOT lower to the C++
         compound operator.
 
@@ -983,6 +1165,18 @@ class StmtVisitor:
         for operators where the native C++ compound form is correct
         (+=, -=, *=).
         """
+        # Requested helper state already stores numeric values as doubles.
+        # Its caller supplies the emitted operand families after converting
+        # the RHS; the chart AST's int hint cannot type those series reads.
+        if (self._infer_type(target_node) != "std::string"
+                and ((not target_is_double and self._integer_na_operand(target_node))
+                     or (not value_is_double and self._integer_na_operand(value_node)))):
+            expression = BinOp(left=target_node, op=op[0], right=value_node)
+            return self._na_arithmetic_cpp(
+                expression, target_read, val_cpp,
+                lambda a, b: self._lower_binop(
+                    expression, a, b, na_checked=True),
+            )
         if op == "/=":
             return f"((double)({target_read}) / (double)({val_cpp}))"
         if op == "%=":
@@ -1074,18 +1268,26 @@ class StmtVisitor:
         # targets otherwise bypass the ordinary identifier assignment path.
         target_name = self._get_target_name(node.target)
         self._validate_matrix_reassignment(node, target_name)
+        tuple_cpp_type = self._lexical_tuple_cpp_type(node.target)
 
         # If/switch expression in assignment: x := if cond ...
-        if isinstance(node.value, (IfStmt, SwitchStmt)):
+        if isinstance(node.value, (IfStmt, SwitchStmt)) and node.op == ":=":
             safe = (
                 self._safe_name(target_name)
                 if target_name
                 else self._visit_mutable_expr(node.target)
             )
-            selection_cpp_type = self._nullable_collection_target_cpp_type(
-                name=target_name,
-                target_node=node.target if target_name is None else None,
+            safe = self._active_var_remap.get(safe, safe)
+            series_target = (
+                target_name is not None
+                and self._binding_is_series(target_name, safe)
             )
+            selection_cpp_type = tuple_cpp_type
+            if selection_cpp_type is None:
+                selection_cpp_type = self._nullable_collection_target_cpp_type(
+                    name=target_name,
+                    target_node=node.target if target_name is None else None,
+                )
             if selection_cpp_type is None:
                 selection_cpp_type = self._udt_target_cpp_type(
                     target_name=target_name,
@@ -1099,14 +1301,26 @@ class StmtVisitor:
             if selection_cpp_type is None:
                 selection_cpp_type = self._int_slot_cpp_type(target_name)
             indent = len(pad) // 4
-            self._visit_selection_value(
-                node.value,
-                safe,
-                lines,
-                indent,
-                target_cpp_type=selection_cpp_type,
-                slot_cpp_type=self._infer_type(node.target),
-            )
+            saved_target = getattr(self, "_selection_series_target", None)
+            self._selection_series_target = safe if series_target else None
+            if series_target:
+                selection_cpp_type = self._series_type_for(target_name)
+            # The common writer updates Series slots; typed arms retain their
+            # source-aware NA conversion and unmatched arms use the storage type.
+            try:
+                self._visit_selection_value(
+                    node.value,
+                    safe,
+                    lines,
+                    indent,
+                    target_cpp_type=selection_cpp_type,
+                    slot_cpp_type=(
+                        selection_cpp_type if series_target
+                        else self._infer_type(node.target)
+                    ),
+                )
+            finally:
+                self._selection_series_target = saved_target
             return
 
         # Get target name
@@ -1133,6 +1347,11 @@ class StmtVisitor:
                 target_cpp_type = self._udt_target_cpp_type(
                     target_node=node.target,
                 )
+            if (target_cpp_type is None and self._is_na_expr(node.value)
+                    and self._udt_field_is_string(node.target)):
+                # A bare na assigned to a string field is the typed string na,
+                # not the numeric ``na<double>()`` (a char conversion).
+                target_cpp_type = "std::string"
             val_cpp = self._visit_rhs_value(
                 node.value, target_cpp_type=target_cpp_type
             )
@@ -1153,8 +1372,28 @@ class StmtVisitor:
                     val_cpp = self._coerce_double_slot(val_cpp, node.value)
                 lines.append(f"{pad}{target_cpp} = {val_cpp};")
             else:
-                rhs = self._compound_assign_rhs(target_cpp, node.op, val_cpp)
+                rhs = self._compound_assign_rhs(
+                    target_cpp, node.op, val_cpp, node.target, node.value)
                 if rhs is not None:
+                    if node.op in ("+=", "-=", "*="):
+                        # A checked lvalue is evaluated once, as by native compound assignment.
+                        slot = "_pf_assign_target"
+                        while slot in target_cpp or slot in val_cpp:
+                            slot += "_"
+                        value = "_pf_assign_value"
+                        while value in target_cpp or value in val_cpp:
+                            value += "_"
+                        rhs = self._compound_assign_rhs(
+                            slot, node.op, value, node.target, node.value)
+                        rhs = self._coerce_int_slot(
+                            rhs, node.value, field_int, value_is_double=True,
+                        )
+                        # C++ compound assignment evaluates the RHS before
+                        # checking the target, which the RHS may have resized.
+                        lines.append(f"{pad}{{ auto {value} = ({val_cpp});")
+                        lines.append(f"{pad}    auto&& {slot} = ({target_cpp});")
+                        lines.append(f"{pad}    {slot} = {rhs}; }}")
+                        return
                     rhs = self._coerce_int_slot(
                         rhs, node.value, field_int, value_is_double=True,
                     )
@@ -1187,7 +1426,8 @@ class StmtVisitor:
                 val_cpp = self._coerce_int_slot(val_cpp, node.value, elem_int)
                 lines.append(f"{pad}{safe}.update({val_cpp});")
             else:
-                rhs = self._compound_assign_rhs(f"{safe}[0]", node.op, val_cpp)
+                rhs = self._compound_assign_rhs(
+                    f"{safe}[0]", node.op, val_cpp, node.target, node.value)
                 if rhs is not None:
                     # x /= y → x.update((double)x[0] / (double)y); x %= y → fmod
                     rhs = self._coerce_int_slot(
@@ -1207,18 +1447,21 @@ class StmtVisitor:
             # a double NaN is stored into an int/int64_t/bool member (UB, defeats
             # is_na<T>()). Only computed for bare na — every other RHS is
             # unaffected.
-            tct = self._nullable_collection_target_cpp_type(name=target_name)
+            tct = tuple_cpp_type or self._nullable_collection_target_cpp_type(
+                name=target_name,
+            )
             if tct is None:
                 tct = self._udt_target_cpp_type(target_name=target_name)
             if tct is None and self._is_na_expr(node.value):
                 tct = self._na_reassign_cpp_type(target_name)
             val_cpp = self._visit_rhs_value(node.value, target_name, target_cpp_type=tct)
-            int_slot = self._int_slot_cpp_type(target_name)
+            int_slot = self._int_slot_cpp_type(target_name, tuple_cpp_type)
             if node.op == ":=":
                 val_cpp = self._coerce_int_slot(val_cpp, node.value, int_slot)
                 lines.append(f"{pad}{self._array_journal_initializer(safe, val_cpp)}")
             else:
-                rhs = self._compound_assign_rhs(safe, node.op, val_cpp)
+                rhs = self._compound_assign_rhs(
+                    safe, node.op, val_cpp, node.target, node.value)
                 if rhs is not None:
                     # ``/=`` and ``%=`` lower to an always-double form, so an
                     # int target narrows whatever the operands were.
@@ -1238,18 +1481,21 @@ class StmtVisitor:
                     else:
                         lines.append(f"{pad}{safe} {node.op} {val_cpp};")
         else:
-            tct = self._nullable_collection_target_cpp_type(name=target_name)
+            tct = tuple_cpp_type or self._nullable_collection_target_cpp_type(
+                name=target_name,
+            )
             if tct is None:
                 tct = self._udt_target_cpp_type(target_name=target_name)
             if tct is None and self._is_na_expr(node.value):
                 tct = self._na_reassign_cpp_type(target_name)
             val_cpp = self._visit_rhs_value(node.value, target_name, target_cpp_type=tct)
-            int_slot = self._int_slot_cpp_type(target_name)
+            int_slot = self._int_slot_cpp_type(target_name, tuple_cpp_type)
             if node.op == ":=":
                 val_cpp = self._coerce_int_slot(val_cpp, node.value, int_slot)
                 lines.append(f"{pad}{safe} = {val_cpp};")
             else:
-                rhs = self._compound_assign_rhs(safe, node.op, val_cpp)
+                rhs = self._compound_assign_rhs(
+                    safe, node.op, val_cpp, node.target, node.value)
                 if rhs is not None:
                     # ``/=`` and ``%=`` lower to an always-double form, so an
                     # int target narrows whatever the operands were.
@@ -1275,23 +1521,19 @@ class StmtVisitor:
         # (codegen/collection_history.py).
         for statement in self._collection_history_decl_statements(node):
             lines.append(f"{pad}{statement}")
-        is_top_level = any(id(node) == id(stmt) for stmt in self.ctx.ast.body)
+        is_top_level = id(node) in self._direct_program_tuple_decl_nodes
         global_targets = (
-            set(getattr(self.ctx, "ordinary_global_binding_names", set()))
-            & self._qualified_func_var_raw_names
+            {name for name in node.names if name != "_"}
             if is_top_level
             else set()
         )
         security_result_fields: list[str] | None = None
 
-        # Exact supported request.security tuples are authoritative Program
-        # globals: a later UDF reads their class-member storage, so a local
-        # structured binding would shadow the members with fresh values while
-        # leaving the UDF-visible state stale. Keep this narrow to security
-        # tuples whose analyzer metadata proves a supported helper family, an
-        # exact direct literal, or a known TA tuple result. Ordinary
-        # non-security heterogeneous tuples retain their established local
-        # destructuring behavior.
+        # Every direct Program tuple declaration writes authoritative member
+        # storage, independently of history or later UDF reads. Exact node
+        # ownership keeps same-spelled function/block tuples lexical.
+        # Requested TA tuples additionally expose named result fields rather
+        # than std::tuple elements.
         if is_top_level and isinstance(node.value, FuncCall):
             func_name, namespace = self._resolve_callee(node.value.callee)
             if namespace == "request" and func_name == "security":
@@ -1316,44 +1558,6 @@ class StmtVisitor:
                     None,
                 )
                 if info is not None:
-                    tuple_size = info.get("tuple_size", 0)
-                    tuple_types = tuple(
-                        info.get("tuple_element_types", ()) or ()
-                    )
-                    numeric_tuple = (
-                        tuple_size >= 2
-                        and len(tuple_types) == tuple_size
-                        and all(
-                            item in (PineType.INT, PineType.FLOAT)
-                            for item in tuple_types
-                        )
-                    )
-                    bool_tuple = (
-                        tuple_size >= 2
-                        and len(tuple_types) == tuple_size
-                        and all(item == PineType.BOOL for item in tuple_types)
-                    )
-                    # A helper tuple mixing bool, string and numeric
-                    # elements (the analyzer admits nothing else).
-                    mixed_helper_tuple = (
-                        not isinstance(expr_node, TupleLiteral)
-                        and info.get("returns_tuple", False)
-                        and tuple_size >= 2
-                        and len(tuple_types) == tuple_size
-                    )
-                    exact_direct_tuple = (
-                        isinstance(expr_node, TupleLiteral)
-                        and tuple_size >= 2
-                        and len(tuple_types) == tuple_size
-                        and all(
-                            item in (
-                                PineType.INT,
-                                PineType.FLOAT,
-                                PineType.BOOL,
-                            )
-                            for item in tuple_types
-                        )
-                    )
                     ta_site = self._get_ta_site(expr_node)
                     known_ta_tuple = (
                         ta_site is not None
@@ -1363,18 +1567,8 @@ class StmtVisitor:
                         security_result_fields = TA_TUPLE_FIELDS[
                             self._ta_name_from_site(ta_site)
                         ]
-                    if (
-                        numeric_tuple
-                        or bool_tuple
-                        or mixed_helper_tuple
-                        or exact_direct_tuple
-                        or known_ta_tuple
-                    ):
-                        global_targets.update(
-                            name for name in node.names if name != "_"
-                        )
 
-        def emit_call_tuple(call_expr: str) -> None:
+        def emit_call_tuple(call_expr: str, *, decompose: bool = False) -> None:
             """Destructure once, routing exact history elements to Series.
 
             A structured binding always creates scalar C++ locals, which would
@@ -1406,6 +1600,13 @@ class StmtVisitor:
             temp = f"_tuple_result_{self._tuple_assign_counter}"
             self._tuple_assign_counter += 1
             lines.append(f"{pad}auto {temp} = {call_expr};")
+            elements = [f"{temp}_elem_{idx}" for idx in range(len(node.names))]
+            if decompose:
+                # An ordinary helper can forward a requested TA result
+                # struct as well as a std::tuple. Decompose the materialized
+                # result by reference, preserving either result's element
+                # types without calling the helper again.
+                lines.append(f"{pad}auto& [{', '.join(elements)}] = {temp};")
             for idx, name in enumerate(node.names):
                 if name == "_":
                     continue
@@ -1415,9 +1616,22 @@ class StmtVisitor:
                         security_result_fields is not None
                         and idx < len(security_result_fields)
                     )
+                    else elements[idx] if decompose
                     else f"std::get<{idx}>({temp})"
                 )
                 safe = self._safe_name(name)
+                destination = (
+                    self._series_type_for(name) if name in series_names
+                    else self._slot_scalar_cpp_type(name) if name in global_targets
+                    else None
+                )
+                element_types = self._tuple_binding_cpp_types(node)
+                source = self._tuple_element_value(node.value, idx, None)
+                if (destination == "double" and idx < len(element_types)
+                        and element_types[idx] in ("int", "int64_t")
+                        and (source is None
+                             or self._int_operand_may_be_na(source[0], source[1]))):
+                    value = self._coerce_int_slot(value, None, destination)
                 if name in series_names:
                     if safe in self._active_var_remap:
                         safe = self._active_var_remap[safe]
@@ -1504,32 +1718,21 @@ class StmtVisitor:
                 return
             if func_name and namespace is None and func_name in self._func_names:
                 call_expr = self._visit_func_call(node.value)
-                emit_call_tuple(call_expr)
+                emit_call_tuple(call_expr, decompose=True)
                 return
 
-            # UDT instance method returning a tuple: ``[a, b, c] = receiver.method(...)``.
-            # The plain-function branch above misses this because _resolve_callee
-            # returns ``("method", "receiver")`` for ``recv.method(...)``, not
-            # ``(key, None)``. We resolve the receiver's UDT type and look up
-            # the method-key ``TypeName.methodName`` in the FuncInfo map; when
-            # its FuncInfo carries ``returns_tuple=True`` we know
-            # ``_visit_func_call`` has already lowered the call as
-            # ``_udt_TypeName_method(receiver, ...)`` returning
-            # ``std::tuple<...>``, so structured bindings drop in.
-            # Probe: data/validation/udt-method-probe-17-tuple-return-destructure.
+            # Typed receiver methods return the same tuple as an ordinary
+            # helper. Resolve them as calls do, including scalar receivers
+            # whose lexical UDT metadata is an explicit tombstone.
             callee = node.value.callee
             if isinstance(callee, MemberAccess):
-                recv_spec = self._type_spec_from_expr(callee.object)
-                receiver_name = method_receiver_type_name(recv_spec)
-                if receiver_name is not None:
-                    method_key = f"{receiver_name}.{callee.member}"
-                    fi_u = self._func_info_map.get(method_key)
-                    if (fi_u is not None
-                            and getattr(fi_u, "is_udt_method", False)
-                            and getattr(fi_u, "returns_tuple", False)):
-                        call_expr = self._visit_func_call(node.value)
-                        emit_call_tuple(call_expr)
-                        return
+                fi_u = self._tuple_call_info(node.value)
+                if (fi_u is not None
+                        and getattr(fi_u, "is_udt_method", False)
+                        and getattr(fi_u, "returns_tuple", False)):
+                    call_expr = self._visit_func_call(node.value)
+                    emit_call_tuple(call_expr, decompose=True)
+                    return
 
         lines.append(f"{pad}/* unsupported tuple assignment */")
 
@@ -1540,26 +1743,99 @@ class StmtVisitor:
         self._tuple_placeholder_counter = index + 1
         return f"_tuple_unused_{index}"
 
+    def _tuple_call_info(self, call: FuncCall):
+        """One callable identity for tuple storage and tuple evaluation."""
+        if isinstance(call.callee, Identifier):
+            return self._func_info_map.get(call.callee.name)
+        if isinstance(call.callee, MemberAccess):
+            # Member layout is queried outside the caller's lexical emission
+            # scope. Its primitive receiver may have no TypeSpec there (an
+            # input is one such binding), although analysis already resolved
+            # this exact call. Reuse that identity before attempting inference.
+            methods = self._wide_method_call_bindings().get(id(call), ())
+            if len(methods) == 1:
+                return methods[0][0]
+            _receiver_spec, method_info = self._typed_user_method_info(
+                call.callee.object, call.callee.member,
+            )
+            return method_info
+        return None
+
     def _tuple_binding_cpp_types(self, node: TupleAssign) -> list[str]:
         """Exact supported tuple element types for later lexical operations."""
         count = len(node.names)
+        if isinstance(node.value, (IfStmt, SwitchStmt)):
+            return self._infer_selection_tuple_types(node.value, count)
         if not isinstance(node.value, FuncCall):
             return ["double"] * count
-        func_name, namespace = self._resolve_callee(node.value.callee)
-        fi = None
-        if namespace is None:
-            fi = self._func_info_map.get(func_name)
-        elif isinstance(node.value.callee, MemberAccess):
-            recv_spec = self._type_spec_from_expr(node.value.callee.object)
-            receiver_name = method_receiver_type_name(recv_spec)
-            if receiver_name is not None:
-                fi = self._func_info_map.get(
-                    f"{receiver_name}.{node.value.callee.member}"
-                )
+        fi = self._tuple_call_info(node.value)
         if (fi is not None
                 and fi.node is not None
                 and getattr(fi, "returns_tuple", False)):
-            return self._infer_tuple_types(fi.node, count)
+            # Member layout queries run outside the callee's emission scope.
+            # Use the same declared/call-site parameter families as its
+            # emitted variant, then restore the caller's lexical context.
+            call_site = self._callable_target_callsite_idx(fi, node.value)
+            declared = self.ctx.func_declared_param_type_specs.get(fi.name, ())
+            variant = self.ctx.func_callsite_param_types.get(
+                (fi.name, call_site), ()
+            )
+            attrs = (
+                "_current_func_param_types", "_current_func_param_specs",
+                "_current_func_series_param_types", "_current_func_local_types",
+                "_active_func_name",
+            )
+            saved = {attr: getattr(self, attr, None) for attr in attrs}
+            param_types = {}
+            param_specs = {}
+            series_types = {}
+            series_params = self.ctx.func_series_vars.get(fi.name, set())
+            for index, name in enumerate(fi.node.params):
+                spec = (
+                    fi.param_type_specs[index]
+                    if index < len(fi.param_type_specs) else None
+                )
+                if name in series_params:
+                    cpp_type = self._series_param_element_cpp_type(
+                        fi, index, call_site
+                    )
+                    series_types[name] = cpp_type
+                elif ((index >= len(declared) or declared[index] is None)
+                      and index < len(variant)
+                      and variant[index] in (
+                          PineType.INT, PineType.FLOAT, PineType.BOOL,
+                          PineType.STRING, PineType.COLOR,
+                      )):
+                    cpp_type = {
+                        PineType.INT: "int64_t", PineType.FLOAT: "double",
+                        PineType.BOOL: "bool", PineType.STRING: "std::string",
+                        PineType.COLOR: "int64_t",
+                    }[variant[index]]
+                elif spec is not None:
+                    cpp_type = self._type_spec_to_cpp(
+                        self._array_param_spec(fi, index, spec)
+                    )
+                    cpp_type = self._wide_declared_int_param(fi, index, cpp_type)
+                else:
+                    cpp_type = PINE_TYPE_TO_CPP.get(
+                        fi.param_types[index]
+                        if index < len(fi.param_types) else PineType.UNKNOWN,
+                        "double",
+                    )
+                    cpp_type = self._wide_declared_int_param(fi, index, cpp_type)
+                param_types[name] = cpp_type
+                if spec is not None:
+                    param_specs[name] = spec
+            self._current_func_param_types = param_types
+            self._current_func_param_specs = param_specs
+            self._current_func_series_param_types = series_types
+            self._current_func_local_types = {}
+            self._active_func_name = fi.name
+            try:
+                return self._infer_tuple_types(fi.node, count)
+            finally:
+                for attr, value in saved.items():
+                    setattr(self, attr, value)
         return ["double"] * count
 
     def _push_block_var_remap(self, owner):
@@ -1587,6 +1863,11 @@ class StmtVisitor:
         self._lexical_known_var_tombstones = set(
             saved_known_tombstones
         )
+        saved_local_types = self._current_func_local_types
+        if self.ctx.primitive_block_shadow_types:
+            # Only newly admitted programs need this scalar overlay; block
+            # exit must restore the outer type for writes and raw-name helpers.
+            self._current_func_local_types = dict(saved_local_types)
 
         renames = self._block_var_renames.get(id(owner))
         collection_specs = self._block_collection_types.get(id(owner))
@@ -1600,6 +1881,7 @@ class StmtVisitor:
                 saved_udt_types,
                 saved_series_bindings,
                 saved_known_tombstones,
+                saved_local_types,
             )
         saved_remap = self._active_var_remap
         if renames:
@@ -1636,6 +1918,7 @@ class StmtVisitor:
             saved_udt_types,
             saved_series_bindings,
             saved_known_tombstones,
+            saved_local_types,
         )
 
     def _pop_block_var_remap(self, saved) -> None:
@@ -1648,6 +1931,7 @@ class StmtVisitor:
             saved_udt_types,
             saved_series_bindings,
             saved_known_tombstones,
+            saved_local_types,
         ) = saved
         try:
             if saved_remap is not _NO_BLOCK_REMAP:
@@ -1666,6 +1950,7 @@ class StmtVisitor:
             self._lexical_udt_types = saved_udt_types
             self._lexical_series_bindings = saved_series_bindings
             self._lexical_known_var_tombstones = saved_known_tombstones
+            self._current_func_local_types = saved_local_types
             self._block_map_binding_visible = previous_map_visible
             self._block_map_visibility_depth = previous_map_depth
 
@@ -1673,10 +1958,14 @@ class StmtVisitor:
                                 indent: int) -> None:
         """Emit one lexical branch/loop body with its exact var remap."""
         saved = self._push_block_var_remap(body)
+        scope = (self._security_open_scope()
+                 if getattr(self, "_security_selection_context", None) is not None else None)
         try:
             for stmt in body:
                 self._visit_stmt(stmt, lines, indent)
         finally:
+            if scope is not None:
+                self._security_scope_path = scope
             self._pop_block_var_remap(saved)
 
     def _emit_block_with_assign(
@@ -1689,6 +1978,8 @@ class StmtVisitor:
     ) -> None:
         """Expression-body counterpart of :meth:`_visit_block_statements`."""
         saved = self._push_block_var_remap(body)
+        scope = (self._security_open_scope()
+                 if getattr(self, "_security_selection_context", None) is not None else None)
         try:
             self._emit_body_with_assign(
                 body,
@@ -1698,6 +1989,8 @@ class StmtVisitor:
                 target_cpp_type=target_cpp_type,
             )
         finally:
+            if scope is not None:
+                self._security_scope_path = scope
             self._pop_block_var_remap(saved)
 
     def _visit_if(self, node: IfStmt, lines: list[str], indent: int) -> None:
@@ -1723,9 +2016,32 @@ class StmtVisitor:
                 )
                 lines.append(f"{pad}}}")
 
+    @_loop_scoped_history_flags
     def _visit_for(self, node: ForStmt, lines: list[str], indent: int,
                    value_target: tuple[str, str | None] | None = None) -> None:
+        action = getattr(self, "_endless_for_actions", {}).get(id(node))
+        if action is not None:
+            # Keep lexical/naming bookkeeping (including nested loop tokens)
+            # identical for statements after this one; discard only its text.
+            saved_tv_float_step_end = self._uses_tv_float_step_end
+            try:
+                self._visit_counter_bound_for(node, [], indent, value_target)
+            finally:
+                self._uses_tv_float_step_end = saved_tv_float_step_end
+            if action == "stop":
+                pad = "    " * indent
+                lines.append(
+                    f'{pad}pine_runtime_error(std::string("Error on bar ") '
+                    '+ std::to_string(bar_index_) '
+                    '+ ": Loop takes too long to execute (> " '
+                    '+ std::to_string(::kLoopTimeLimitMs) + " ms)");'
+                )
+            return
+        if self._for_header_reads_new_counter(node):
+            self._visit_counter_bound_for(node, lines, indent, value_target)
+            return
         pad = "    " * indent
+        counter_cpp_type = self._for_counter_cpp_type(node.start, step=node.step)
         start = self._visit_expr(node.start)
         end = self._visit_expr(node.end)
         step = self._visit_expr(node.step) if node.step is not None else "1"
@@ -1746,40 +2062,30 @@ class StmtVisitor:
         e_var = f"_for_end_{fid}"
         step_var = f"_for_step_{fid}"
         down_var = f"_for_down_{fid}"
-        end_mentions_binder = bool(
-            node.var
-            and any(
-                isinstance(part, Identifier) and part.name == node.var
-                for part in self._walk_ast(node.end)
-            )
-        )
-        end_eval = f"_for_end_eval_{fid}" if end_mentions_binder else None
-        # ``from``/``to``/``by`` land in ``int`` slots. A double-valued bound
-        # (an array size, an na-able expression, ...) narrows there, which is
-        # undefined for na — so spell the conversion out. A bound that IS na
-        # then reads as na<int>() (INT_MIN), and the loop must run zero times
-        # rather than descend two billion steps toward it, so the guarded form
-        # also tests the bounds. Loops whose bounds were already integral emit
-        # exactly as before.
-        start_cpp = self._coerce_int_slot(f"({start})", node.start, "int")
-        end_cpp = self._coerce_int_slot(f"({end})", node.end, "int")
-        step_cpp = self._coerce_int_slot(f"({step})", node.step, "int")
+        # The dedicated counter query selects every header slot. Float counters
+        # keep their raw step; integer counters retain the existing na-safe narrowing.
+        if counter_cpp_type == "double":
+            start_cpp = self._coerce_double_slot(f"({start})", node.start)
+            end_cpp = self._coerce_double_slot(f"({end})", node.end)
+            step_cpp = self._coerce_double_slot(f"({step})", node.step)
+        else:
+            start_cpp = self._coerce_int_slot(f"({start})", node.start, "int")
+            end_cpp = self._coerce_int_slot(f"({end})", node.end, "int")
+            step_cpp = self._coerce_int_slot(f"({step})", node.step, "int")
         na_capable = (
-            start_cpp != f"({start})"
+            counter_cpp_type == "double"
+            or start_cpp != f"({start})"
             or end_cpp != f"({end})"
             or step_cpp != f"({step})"
+            # A bound the slot coercion leaves as written can still hold the integer na
+            # sentinel at run time; without the guard the loop counts from its start to INT_MIN.
+            or any(self._for_bound_may_be_missing(operand)
+                   for operand in (node.start, node.end, node.step))
         )
-        if end_eval is not None:
-            # The ``to`` expression is authored outside the loop-binder scope,
-            # but its refresh executes inside the generated C++ ``for`` where
-            # the binder would shadow a same-named outer member/parameter. A
-            # pre-binder lambda preserves the authored lexical binding while
-            # still reevaluating the expression after every iteration.
-            lines.append(f"{pad}auto {end_eval} = [&]() {{ return {end_cpp}; }};")
-        lines.append(f"{pad}int {s_var} = {start_cpp};")
-        end_expr = f"{end_eval}()" if end_eval is not None else end_cpp
-        lines.append(f"{pad}int {e_var} = {end_expr};")
-        lines.append(f"{pad}int {step_var} = {step_cpp};")
+        lines.append(f"{pad}{counter_cpp_type} {s_var} = {start_cpp};")
+        lines.append(f"{pad}{counter_cpp_type} {e_var} = {end_cpp};")
+        lines.append(f"{pad}{counter_cpp_type} {step_var} = {step_cpp};")
+        self._emit_for_step_stop(node, step_var, lines, indent)
         if na_capable:
             # ``-na<int>()`` would overflow; leave an na step alone and let the
             # loop condition reject it.
@@ -1797,22 +2103,220 @@ class StmtVisitor:
         )
         # Pine v6 evaluates ``to`` before every iteration; v5 (a v5 library's
         # body) fixes it before the first one.
-        refresh = "" if self._pine_v5_body else f", {e_var} = {end_expr}"
+        refresh = "" if self._pine_v5_body else f", {e_var} = {end_cpp}"
+        continuation = self._for_continuation(
+            counter_cpp_type, var, e_var, step_var, down_var,
+        )
         lines.append(
-            f"{pad}for (int {var} = {s_var}; "
+            f"{pad}for ({counter_cpp_type} {var} = {s_var}; "
             f"{na_guard}"
-            f"({down_var} ? ({var} >= {e_var}) : ({var} <= {e_var})); "
+            f"{continuation}; "
             f"{var} += ({down_var} ? -{step_var} : {step_var})"
             f"{refresh}) {{"
         )
         self._emit_counted_loop_body(node, lines, indent + 1, value_target)
         lines.append(f"{pad}}}")
 
+    def _for_bound_may_be_missing(self, operand) -> bool:
+        """Whether a counted-loop bound can hold the integer na sentinel at run time.
+
+        The header guard is needed only for a bound that reads a history value, spells na,
+        or reads a name the integer-missing analysis cannot prove present. Calls over present
+        arguments (``int(n / 2)``, a helper called with literals) cannot become missing and
+        keep the established C++ of integer loops; a callee's own name is not a value read.
+        """
+        if operand is None:
+            return False
+        parts = list(self._walk_ast(operand))
+        callees = {id(part.callee) for part in parts if isinstance(part, FuncCall)}
+        return any(
+            isinstance(part, (NaLiteral, Subscript))
+            or (isinstance(part, Identifier) and id(part) not in callees
+                and self._integer_na_operand(part))
+            for part in parts)
+
+    def _for_continuation(self, counter_cpp_type, var, end, step, down) -> str:
+        if counter_cpp_type == "double":
+            self._uses_tv_float_step_end = True
+        return for_continuation(counter_cpp_type, var, end, step, down)
+
+    def _for_header_reads_new_counter(self, node: ForStmt) -> bool:
+        """The loop's own counter wins in end/step, including over outer names."""
+        return any(
+            self._for_expr_reads_new_counter(node, expression)
+            for expression in (node.end, node.step)
+        )
+
+    def _for_expr_reads_new_counter(self, node: ForStmt, expression) -> bool:
+        """Find reads resolved to this counter, including helper arguments."""
+        binding = (id(node), node.var)
+        return bool(node.var) and any(
+            isinstance(part, Identifier)
+            and self.ctx.identifier_decl_bindings.get(id(part)) == binding
+            for part in self._walk_ast(expression)
+        )
+
+    def _emit_for_step_stop(
+        self, node: ForStmt, step_var: str, lines: list[str], indent: int,
+        *, pine_v5: bool | None = None,
+    ) -> None:
+        """Use the runtime.error stop path for v6's RE10021."""
+        if pine_v5 is None:
+            pine_v5 = self._pine_v5_body
+        if node.step is not None and not pine_v5:
+            pad = "    " * indent
+            lines.append(
+                f"{pad}if (!is_na({step_var}) && {step_var} <= 0) "
+                """pine_runtime_error("'step' in loop must be greater than zero");"""
+            )
+
+    def _visit_counter_bound_for(
+        self, node: ForStmt, lines: list[str], indent: int,
+        value_target: tuple[str, str | None] | None = None,
+    ) -> None:
+        """Render chart expressions around the shared counter-bound loop."""
+        counter_cpp_type = self._for_counter_cpp_type(node.start, step=node.step)
+        start = self._visit_expr(node.start)
+        start_cpp = (
+            self._coerce_double_slot(f"({start})", node.start)
+            if counter_cpp_type == "double"
+            else self._coerce_int_slot(f"({start})", node.start, "int")
+        )
+        fid = self._for_counter
+        self._for_counter += 1
+        names = tuple(f"_for_{part}_{fid}" for part in ("start", "end", "step", "down"))
+        with self._counter_bound_binding(node, counter_cpp_type):
+            self._emit_counter_bound_loop(
+                node, lines, indent, start=start, var=self._safe_name(node.var),
+                start_cpp=start_cpp, names=names, render=self._visit_expr,
+                counter_cpp_type=counter_cpp_type,
+                emit_body=lambda body_indent: self._emit_loop_body(
+                    node.body, lines, body_indent, value_target,
+                ),
+            )
+
+    def _emit_counter_bound_loop(
+        self, node: ForStmt, lines: list[str], indent: int, *,
+        start: str, start_cpp: str, var: str, names: tuple[str, str, str, str],
+        counter_cpp_type: str, render, emit_body,
+        guard_na: bool = False, pine_v5: bool | None = None,
+    ) -> None:
+        """Shared chart/security lowering; callers supply lexical renderers.
+
+        ``start`` has already been rendered outside the counter's binding.
+        Header expressions and the body are rendered with that binding active.
+        """
+        if pine_v5 is None:
+            pine_v5 = self._pine_v5_body
+        s_var, e_var, step_var, down_var = names
+        pad = "    " * indent
+        inner = "    " * (indent + 1)
+        lines.append(f"{pad}{{")
+        lines.append(f"{inner}{counter_cpp_type} {s_var} = {start_cpp};")
+        # TradingView measures the v6 step and direction's end at counter 0,
+        # then re-reads a counter-dependent end at the start before testing.
+        initial_counter = s_var if pine_v5 else "0"
+        lines.append(f"{inner}{counter_cpp_type} {var} = {initial_counter};")
+        end = render(node.end)
+        step = render(node.step) if node.step is not None else "1"
+        if counter_cpp_type == "double":
+            end_cpp = self._coerce_double_slot(f"({end})", node.end)
+            step_cpp = self._coerce_double_slot(f"({step})", node.step)
+        else:
+            end_cpp = self._coerce_int_slot(f"({end})", node.end, "int")
+            step_cpp = self._coerce_int_slot(f"({step})", node.step, "int")
+        na_capable = (
+            guard_na
+            or counter_cpp_type == "double"
+            or start_cpp != f"({start})"
+            or end_cpp != f"({end})"
+            or step_cpp != f"({step})"
+        )
+        lines.append(f"{inner}{counter_cpp_type} {e_var} = {end_cpp};")
+        lines.append(f"{inner}{counter_cpp_type} {step_var} = {step_cpp};")
+        self._emit_for_step_stop(node, step_var, lines, indent + 1, pine_v5=pine_v5)
+        if na_capable:
+            lines.append(
+                f"{inner}if (!is_na({step_var}) && {step_var} < 0)"
+                f" {step_var} = -{step_var};"
+            )
+        else:
+            lines.append(f"{inner}if ({step_var} < 0) {step_var} = -{step_var};")
+        lines.append(f"{inner}if ({step_var} == 0) {step_var} = 1;")
+        lines.append(f"{inner}const bool {down_var} = ({s_var} > {e_var});")
+        if not pine_v5:
+            lines.append(f"{inner}{var} = {s_var};")
+            if self._for_expr_reads_new_counter(node, node.end):
+                lines.append(f"{inner}{e_var} = {end_cpp};")
+        na_guard = (
+            f"!is_na({s_var}) && !is_na({e_var}) && !is_na({step_var}) && "
+            if na_capable else ""
+        )
+        # A continue advances the counter and refreshes the end; break does
+        # neither. Initial direction and the once-read step stay fixed.
+        refresh = "" if pine_v5 else f", {e_var} = {end_cpp}"
+        continuation = self._for_continuation(
+            counter_cpp_type, var, e_var, step_var, down_var,
+        )
+        lines.append(
+            f"{inner}for (; {na_guard}"
+            f"{continuation}; "
+            f"{var} += ({down_var} ? -{step_var} : {step_var})"
+            f"{refresh}) {{"
+        )
+        emit_body(indent + 2)
+        lines.append(f"{inner}}}")
+        lines.append(f"{pad}}}")
+
+    @contextmanager
+    def _counter_bound_binding(self, node: ForStmt, counter_cpp_type: str):
+        """Shadow outer storage and parameter representations in the header."""
+        safe = self._safe_name(node.var)
+        saved_remap = self._active_var_remap
+        saved_series = self._current_func_series_params
+        mappings = (
+            "_current_func_param_types", "_current_func_param_specs",
+            "_current_func_series_param_types", "_current_func_local_types",
+        )
+        saved = {name: getattr(self, name) for name in mappings}
+        self._active_var_remap = {
+            key: value for key, value in saved_remap.items() if key != safe
+        }
+        self._current_func_series_params = saved_series - {node.var}
+        for name, mapping in saved.items():
+            setattr(self, name, {
+                key: value for key, value in mapping.items() if key != node.var
+            })
+        try:
+            with self._counted_loop_binding(node, counter_cpp_type):
+                yield
+        finally:
+            self._active_var_remap = saved_remap
+            self._current_func_series_params = saved_series
+            for name, mapping in saved.items():
+                setattr(self, name, mapping)
+
     def _emit_counted_loop_body(
         self, node: ForStmt, lines: list[str], indent: int,
         value_target: tuple[str, str | None] | None = None,
     ) -> None:
         """Emit a counted loop's body with its lexical counter binding."""
+        counter_cpp_type = self._for_counter_cpp_type(node.start, step=node.step)
+        binding = (
+            self._counter_bound_binding(node, counter_cpp_type)
+            if counter_cpp_type == "double"
+            else self._counted_loop_binding(node, counter_cpp_type)
+        )
+        with binding:
+            self._emit_loop_body(node.body, lines, indent, value_target)
+
+    @contextmanager
+    def _counted_loop_binding(
+        self, node: ForStmt, counter_cpp_type: str | None = None,
+    ):
+        """The same primitive counter scope for header reads and the body."""
+        if counter_cpp_type is None:
+            counter_cpp_type = self._for_counter_cpp_type(node.start, step=node.step)
         # Register the loop counter so reads of it inside the body resolve (the
         # unknown-identifier guard in _visit_ident would otherwise flag it).
         saved_loop = self._current_loop_vars
@@ -1823,7 +2327,9 @@ class StmtVisitor:
         self._current_counted_loop_vars = set(self._current_counted_loop_vars)
         if node.var:
             self._current_loop_vars.add(node.var)
-            self._current_loop_var_specs[node.var] = TypeSpec.primitive("int")
+            self._current_loop_var_specs[node.var] = TypeSpec.primitive(
+                "float" if counter_cpp_type == "double" else "int",
+            )
             self._current_counted_loop_vars.add(node.var)
         _blk_saved = self._push_block_var_remap(node)
         if node.var:
@@ -1834,12 +2340,12 @@ class StmtVisitor:
             self._lexical_series_bindings[node.var] = False
             self._lexical_known_var_tombstones.add(node.var)
         try:
-            self._emit_loop_body(node.body, lines, indent, value_target)
+            yield
         finally:
             self._pop_block_var_remap(_blk_saved)
-        self._current_loop_vars = saved_loop
-        self._current_loop_var_specs = saved_loop_specs
-        self._current_counted_loop_vars = saved_counted
+            self._current_loop_vars = saved_loop
+            self._current_loop_var_specs = saved_loop_specs
+            self._current_counted_loop_vars = saved_counted
 
     def _emit_closed_trade_fold(
         self, node: ForStmt, plan, lines: list[str], indent: int, var: str,
@@ -1923,6 +2429,7 @@ class StmtVisitor:
             )
         lines.append("#endif")
 
+    @_loop_scoped_history_flags
     def _visit_for_in(self, node, lines: list[str], indent: int,
                       value_target: tuple[str, str | None] | None = None) -> None:
         pad = "    " * indent
@@ -1930,11 +2437,15 @@ class StmtVisitor:
         saved_loop = self._current_loop_vars
         saved_loop_specs = self._current_loop_var_specs
         saved_counted = self._current_counted_loop_vars
+        saved_index = self._current_loop_index_vars
         self._current_loop_vars = set(self._current_loop_vars)
         self._current_loop_var_specs = dict(self._current_loop_var_specs)
         # Its binders shadow a counted loop's of the same spelling.
         self._current_counted_loop_vars = (
             self._current_counted_loop_vars - {node.var, *(node.vars or ())})
+        # ... and an outer array position binder of the same spelling.
+        self._current_loop_index_vars = (
+            self._current_loop_index_vars - {node.var, *(node.vars or ())})
         iterable_spec = self._type_spec_from_expr(node.iterable)
         if (iterable_spec is not None and iterable_spec.kind == "array"
                 and self._array_history_value_names()):
@@ -1965,6 +2476,12 @@ class StmtVisitor:
                         self._current_loop_var_specs[v] = tuple_specs[idx]
                     else:
                         self._current_loop_var_specs.pop(v, None)
+                    if (idx == 0 and len(node.vars) == 2
+                            and iterable_spec is not None
+                            and iterable_spec.kind == "array"):
+                        # The first binder of an array's [index, value] form
+                        # is the element's position: always a present int.
+                        self._current_loop_index_vars.add(v)
         map_pair_loop = (
             iterable_spec is not None
             and iterable_spec.kind == "map"
@@ -2119,7 +2636,9 @@ class StmtVisitor:
         self._current_loop_vars = saved_loop
         self._current_loop_var_specs = saved_loop_specs
         self._current_counted_loop_vars = saved_counted
+        self._current_loop_index_vars = saved_index
 
+    @_loop_scoped_history_flags
     def _visit_while(self, node: WhileStmt, lines: list[str], indent: int,
                      value_target: tuple[str, str | None] | None = None) -> None:
         pad = "    " * indent
@@ -2411,6 +2930,18 @@ class StmtVisitor:
         for i, stmt in enumerate(body):
             if i == len(body) - 1:
                 # Last statement — try to turn into assignment
+                context = getattr(self, "_security_selection_context", None)
+                if (context is not None and isinstance(stmt, VarDecl)
+                        and id(stmt) in context["declarations"]):
+                    self._visit_stmt(stmt, lines, indent)
+                    name = context["declarations"][id(stmt)]
+                    cpp = (self._security_helper_series_value(name, "0")
+                           if stmt.is_var or stmt.is_varip else name)
+                    cpp = self._coerce_int_slot(
+                        cpp, stmt.value, self._int_slot_cpp_type(None, target_cpp_type))
+                    lines.append(
+                        f"{'    ' * indent}{self._array_journal_initializer(target, cpp)}")
+                    return
                 if isinstance(stmt, ExprStmt):
                     # Check if it's a skip expr
                     if self._is_skip_expr(stmt.expr):

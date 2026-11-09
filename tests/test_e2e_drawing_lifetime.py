@@ -121,7 +121,15 @@ CASES = (
         Readout("time == t(0, 15) or time == t(0, 45) or time == t(4, 0)",
                 ("line.get_y1(d)", "line.get_y2(d)", "line.get_y1(f)", "line.get_y2(f)",
                  "line.get_y1(array.get(keep, 0))", "line.get_y2(array.get(keep, 0))")),
-    )),
+    # The pre-lane build misses this tape only on an engine that does not itself
+    # return na for a deleted or collected drawing. On engine main 144d02c8 it
+    # reads 333 / 777 / 888 where TradingView reads na (3 of 3 entries differ);
+    # on the engine of the pull request that bounds drawings (9eaaf421) it reads
+    # TradingView's values on every entry (18 values compared, 14 of them na on
+    # both sides): the engine now carries the rule, so the control has no
+    # older-build failure left to demand. The current build's replay still has
+    # to match the tape (test_every_readout_is_tradingviews).
+    ), fails_before=False),
     Case("w8b-drawing-na-after-delete", (
         Readout("time == t(0, 0) or time == t(0, 15) or time == t(4, 0)",
                 ("na(d) ? 1 : 0", "na(b) ? 1 : 0", "na(array.get(lines, 0)) ? 1 : 0",

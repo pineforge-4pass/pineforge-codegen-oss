@@ -8,7 +8,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen.analyzer import Analyzer
-from pineforge_codegen.errors import CompileError
+from pineforge_codegen.errors import CompileError, Level, Phase
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from tests._compile import compile_cpp
@@ -233,9 +233,9 @@ observed = pick()
     compile_cpp(cpp)
 
 
-def test_scalar_array_binding_is_not_misclassified_as_builtin_namespace():
+def test_scalar_local_named_array_does_not_change_the_namespace_call_type():
     source = r'''//@version=6
-strategy("Array namespace shadow remains fail closed")
+strategy("Array namespace call beside a scalar local")
 global_values = array.from("x")
 blocked() =>
     int array = 1
@@ -243,8 +243,13 @@ blocked() =>
 observed = blocked()
 '''
     cpp = transpile(source)
-    assert "std::string blocked(" not in cpp
-    assert "double blocked(" in cpp
+    # The call is the array namespace's get over an array<string>: a string
+    # function (a579dae1 types a terminal call from its callee's bound specs).
+    # It used to keep the unrefined double, which a string body does not
+    # compile with; the engine reads its value in
+    # test_e2e_array_terminal_temporaries.py.
+    assert "std::string blocked(" in cpp
+    assert "double blocked(" not in cpp
 
 
 def test_temporary_array_from_receiver_reuses_captured_type_without_new_clones():
@@ -415,7 +420,7 @@ observed = read_value()
         "array.get(array.slice(values, 0, 1), 0)",
     ),
 )
-def test_arbitrary_temporary_array_receivers_remain_fail_closed(terminal: str):
+def test_arbitrary_temporary_array_receivers_type_the_terminal_result(terminal: str):
     source = f'''//@version=6
 strategy("Temporary receiver scope boundary")
 values = array.from("x")
@@ -426,8 +431,13 @@ blocked() =>
 observed = blocked()
 '''
     cpp = transpile(source)
-    assert "std::string blocked(" not in cpp
-    assert "double blocked(" in cpp
+    # a579dae1 types a helper's terminal call from the callee's bound parameter
+    # specs and its lexical globals, so the element of an array<string> is a
+    # string whatever the receiver is spelled as. The helper used to keep the
+    # unrefined double, which a string-returning body does not compile with; the
+    # value is read on the engine in test_e2e_array_terminal_temporaries.py.
+    assert "std::string blocked(" in cpp
+    assert "double blocked(" not in cpp
 
 
 def test_nested_method_copy_udt_element_preserves_handle_type():
@@ -1366,44 +1376,67 @@ def test_expired_block_tuple_binding_does_not_shadow_element_callee(
 
 
 @pytest.mark.parametrize(
-    "body",
+    "body, error_line",
     (
-        '''    first_value = array.from(produce()).copy().get(0)
+        ('''    first_value = array.from(produce()).copy().get(0)
     local_value = first_value
     local_value
-''',
-        '''    local_value = array.from(produce()).copy().get(0)
+''', None),
+        ('''    local_value = array.from(produce()).copy().get(0)
     local_value := "replacement"
     local_value
-''',
-        '''    [local_value, other] = if true
+''', None),
+        ('''    [local_value, other] = if true
         [array.from(produce()).copy().get(0), 1]
     else
         [array.from(produce()).copy().get(0), 1]
     local_value
-''',
-        '''    if close > open
+''', None),
+        ('''    if close > open
         local_value = array.from(produce()).copy().get(0)
     local_value
-''',
-        '''    local_value = array.from(produce()).copy().get(0)
+''', 8),
+        ('''    local_value = array.from(produce()).copy().get(0)
     extras = array.from(local_value)
     local_value
-''',
+''', None),
     ),
 )
 def test_forward_local_identity_non_direct_bindings_remain_fail_closed(
-    body: str,
+    body: str, error_line: int | None,
 ):
+    # Keep the forward call for the None rows. Only the expired-read row
+    # defines the producer first so it reaches the block-scope diagnostic.
+    producer = 'produce() =>\n    "x"\n'
     source = (
         "//@version=6\n"
         'strategy("Forward non-direct local boundary")\n'
+        f"{producer if error_line is not None else ''}"
         "blocked() =>\n"
         f"{body}"
-        "produce() =>\n"
-        '    "x"\n'
+        f"{producer if error_line is None else ''}"
         "observed = blocked()\n"
     )
+
+    if error_line is not None:
+        # TradingView refuses the expired read after resolving the earlier
+        # producer definition.
+        with pytest.raises(CompileError) as caught:
+            transpile(source)
+        diagnostic, = caught.value.diagnostics
+        assert diagnostic.level is Level.ERROR
+        assert diagnostic.phase is Phase.ANALYZER
+        assert diagnostic.code == "PF-E2054"
+        assert diagnostic.args == {"name": "local_value"}
+        assert diagnostic.message == (
+            "Block-local variable 'local_value' is read outside its block."
+        )
+        assert (
+            diagnostic.location.line,
+            diagnostic.location.col,
+            diagnostic.location.end_col,
+        ) == (error_line, 5, 16)
+        return
 
     cpp = transpile(source)
     assert "std::string blocked(" not in cpp

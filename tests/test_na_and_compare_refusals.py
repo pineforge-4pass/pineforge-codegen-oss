@@ -58,7 +58,7 @@ def _assert_diagnostic(
         (
             _script("value = not math.sign(close - open) > 0\n"),
             3,
-            22,  # FuncCall.loc is the "(" after "value = not math.sign".
+            13,  # The operand starts with math, before the call's suffix.
             "float",
         ),
         (
@@ -87,19 +87,19 @@ def test_not_rejects_proven_numeric_operands(
     [
         (
             _script(
-                "bool a = true\n"
+                "float a = close\n"
                 "float b = close\n"
                 "float c = open\n"
                 "value = a > b == c\n"
             ),
             6,
-            18,  # c is the numeric right operand of the equality.
+            18,  # Analyzer location: numeric c; TV locates the bool comparison.
             "==",
         ),
         (
             _script("value = close == open == close[1]\n"),
             3,
-            31,  # Subscript.loc is the "[" after "value = close == open == close".
+            26,  # The numeric history operand starts with close, before "[".
             "==",
         ),
         (
@@ -120,6 +120,15 @@ def test_equality_rejects_proven_bool_numeric_pairs(
         {"op": operator},
         line,
         col,
+    )
+
+
+def test_bool_ordering_in_the_original_comparison_chain_is_refused() -> None:
+    # A bool left operand cannot fill >'s numeric slot, before checking ==.
+    _assert_diagnostic(
+        _script("bool a = true\nfloat b = close\nfloat c = open\nvalue = a > b == c\n"),
+        "PF-E2066", "Operator '>' cannot combine bool and float.",
+        {"op": ">", "left": "bool", "right": "float"}, 6, 9,
     )
 
 
@@ -145,12 +154,12 @@ def test_direct_na_equality_reports_the_value_operand() -> None:
         (
             "value = na == close\n",
             3,
-            15,  # close follows the fourteen characters in "value = na == ".
+            9,  # The comparison starts at its left operand, na.
         ),
         (
             "value = na != close\n",
             3,
-            15,  # close follows the fourteen characters in "value = na != ".
+            9,  # The comparison starts at its left operand, na.
         ),
         (
             "int count = 1\nvalue = count == na\n",
@@ -167,7 +176,7 @@ def test_direct_na_equality_reports_the_value_operand() -> None:
 def test_direct_numeric_na_comparisons_remain_refused(
     body: str, line: int, col: int
 ) -> None:
-    # The numeric operand keeps the existing diagnostic with no template arguments.
+    # The comparison starts at its left operand and takes no template arguments.
     _assert_diagnostic(
         _script(body),
         "PF-E2050",
@@ -179,88 +188,93 @@ def test_direct_numeric_na_comparisons_remain_refused(
 
 
 @pytest.mark.parametrize(
-    "body, comparison_cpp",
+    "body,line,col",
     [
         (
             'string sample = input.string("value")\nvalue = sample == na\n',
-            "(sample == na<std::string>())",  # The string operand types the bare na.
+            4, 9,  # The string operand starts at sample.
         ),
         (
             'string sample = input.string("value")\nvalue = sample != na\n',
-            "(sample != na<std::string>())",  # Inequality keeps the same string na.
+            4, 9,  # The string operand starts at sample.
         ),
         (
             'string sample = input.string("value")\nvalue = na == sample\n',
-            "(na<std::string>() == sample)",  # The right string types the left na.
+            4, 9,  # na is the left operand of the comparison.
         ),
         (
             'string sample = input.string("value")\nvalue = na != sample\n',
-            "(na<std::string>() != sample)",  # Operand order stays as written.
+            4, 9,  # na is the left operand of the comparison.
         ),
         (
             "type TextState\n"
-            "    string text\n"
+            "    string value\n"
             'state = TextState.new("value")\n'
-            "value = state.text == na\n",
-            "== na<std::string>()",  # The object's string field types the bare na.
+            "value = state.value == na\n",
+            6, 9,  # The field operand starts with its receiver.
         ),
         (
             "type TextState\n"
-            "    string text\n"
+            "    string value\n"
             'state = TextState.new("value")\n'
-            "value = state.text != na\n",
-            "!= na<std::string>()",  # Field inequality keeps the same string na.
+            "value = state.value != na\n",
+            6, 9,  # The field operand starts with its receiver.
         ),
         (
             "type TextState\n"
-            "    string text\n"
+            "    string value\n"
             'state = TextState.new("value")\n'
-            "value = na == state.text\n",
-            "na<std::string>() ==",  # The right string field types the left na.
+            "value = na == state.value\n",
+            6, 9,  # na is the left operand, before the field receiver.
         ),
         (
             "type TextState\n"
-            "    string text\n"
+            "    string value\n"
             'state = TextState.new("value")\n'
-            "value = na != state.text\n",
-            "na<std::string>() !=",  # Field access stays on the right.
+            "value = na != state.value\n",
+            6, 9,  # na is the left operand, before the field receiver.
         ),
         (
             "array<float> samples = array.from(close)\nvalue = samples == na\n",
-            "(samples == std::vector<double>{})",  # An array types na as its empty vector.
+            4, 9,  # The collection operand starts at samples.
         ),
         (
             "array<float> samples = array.from(close)\nvalue = samples != na\n",
-            "(samples != std::vector<double>{})",  # Array inequality keeps its prior lowering.
+            4, 9,  # The collection operand starts at samples.
         ),
         (
             "array<float> samples = array.from(close)\nvalue = na == samples\n",
-            "(std::vector<double>{} == samples)",  # The right array types the left na.
+            4, 9,  # na is the left operand, before the collection.
         ),
         (
             "array<float> samples = array.from(close)\nvalue = na != samples\n",
-            "(std::vector<double>{} != samples)",  # Array operand order stays as written.
+            4, 9,  # na is the left operand, before the collection.
         ),
     ],
 )
-def test_direct_nonnumeric_na_comparisons_keep_their_lowering(
-    body: str, comparison_cpp: str
+def test_direct_nonnumeric_na_comparisons_are_refused(
+    body: str, line: int, col: int,
 ) -> None:
-    cpp = transpile(_script(body + "plot(value ? 1 : 0)\n"))
-    assert comparison_cpp in cpp
-    compile_cpp(cpp, label="nonnumeric na comparison")
+    # Direct bare-na comparisons have the same restriction in every domain.
+    _assert_diagnostic(
+        _script(body), "PF-E2050",
+        'Cannot compare a value to "na" directly. Use the "na()" function instead.',
+        {}, line, col,
+    )
 
 
-def test_direct_na_comparison_with_unproven_call_type_remains_accepted() -> None:
+def test_direct_na_comparison_does_not_require_a_known_call_type() -> None:
     source = _script(
         "read_value() => close\n"
         "value = read_value() == na\n"
         "plot(value ? 1 : 0)\n"
     )
-    cpp = transpile(source)
-    # A user call has no certain scalar type; its existing float lowering types na.
-    assert "na<double>()" in cpp
-    compile_cpp(cpp, label="unproven na comparison")
+    # The independent direct-na check points at read_value's first token.
+    _assert_diagnostic(
+        source, "PF-E2050",
+        'Cannot compare a value to "na" directly. Use the "na()" function instead.',
+        {}, 4, 9,
+    )
 
 
 def test_consecutive_not_reports_the_second_keyword() -> None:

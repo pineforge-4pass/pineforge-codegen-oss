@@ -1,0 +1,13 @@
+//@version=6
+strategy("Plain callable literal float-step check", initial_capital = 1000000000000, currency = currency.NONE)
+measure(int seed) =>
+    int s = seed
+    s := s / 2
+    s
+count_v = 0.0
+for i = measure(5) to 6 by 0.5
+    count_v += 1
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1 + count_v / 100)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

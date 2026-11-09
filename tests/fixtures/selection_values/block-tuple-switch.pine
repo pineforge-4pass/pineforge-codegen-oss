@@ -1,0 +1,14 @@
+//@version=6
+strategy("Tuple block switch", currency = currency.NONE, initial_capital = 1000000)
+// Derived: recursive tuple selection yields [1,10]/[2,20] when n%3=0, else [3,30].
+[value, other] = switch bar_index % 3
+    0 =>
+        switch bar_index % 2
+            0 => [1.0, 10.0]
+            => [2.0, 20.0]
+    => [3.0, 30.0]
+plot(value + other, "selected")
+if bar_index > 6 and bar_index % 7 == 3
+    strategy.entry("L", strategy.long, qty = 1)
+if bar_index > 6 and bar_index % 7 == 5
+    strategy.close("L")

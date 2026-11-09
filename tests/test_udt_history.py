@@ -21,7 +21,7 @@ import pytest
 from pathlib import Path
 
 from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from pineforge_codegen.errors import CompileError, Phase
 from tests._compile import compile_cpp
 
 FIXTURES = Path(__file__).parent / "fixtures" / "udt_history_tv"
@@ -136,9 +136,14 @@ def test_equality_of_references_tradingview_refuses_is_refused(decl, expr, kind)
         f"s = {expr}\n"
         "if s\n"
         '    strategy.entry("L", strategy.long)\n')
-    [diag] = [d for d in error.diagnostics if "CE10123" in d.message]
-    assert kind in diag.message
-    assert "line and label" in diag.message
+    # CE10123 rejects these nominal reference domains. Both operands keep
+    # their type through history, so the shared relation rejects the pair.
+    [diag] = error.diagnostics
+    assert diag.phase is Phase.ANALYZER
+    assert diag.code == "PF-E2066"
+    assert diag.args == {
+        "op": "!=" if "!=" in expr else "==", "left": kind, "right": kind,
+    }
 
 
 def test_line_and_label_references_compare_by_identity():
@@ -505,8 +510,9 @@ def test_a_requested_field_value_still_compiles():
 TRADINGVIEW_REFUSED = {
     "udth_noparen": "CE10011",
     "udth_method_noparen": "CE10010",
-    "udth_eq": "CE10123",
-    "udth_box_eq": "CE10123",
+    # TV's CE10123 reference comparisons stop in the analyzer's operator table.
+    "udth_eq": "PF-E2066",
+    "udth_box_eq": "PF-E2066",
     "udth_field_noparen": "CE10290",
     "udth_field_paren": "CE10290",
 }
@@ -515,7 +521,10 @@ TRADINGVIEW_REFUSED = {
 @pytest.mark.parametrize("name", sorted(TRADINGVIEW_REFUSED))
 def test_every_probe_tradingview_refused_is_refused(name):
     error = _refusal((FIXTURES / f"{name}.pine").read_text(encoding="utf-8"))
-    assert any(TRADINGVIEW_REFUSED[name] in d.message for d in error.diagnostics), (
+    assert any(
+        TRADINGVIEW_REFUSED[name] in d.message or d.code == TRADINGVIEW_REFUSED[name]
+        for d in error.diagnostics
+    ), (
         [d.message for d in error.diagnostics])
 
 
