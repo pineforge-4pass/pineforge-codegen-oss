@@ -4,13 +4,16 @@ A requested helper's non-``var`` string local named ``open``, ``high``,
 ``low``, ``close``, ``hl2``, ``hlc3``, ``hlcc4``, ``ohlc4`` or ``volume``
 whose history it reads keeps the base commit's PF-E3011 refusal at that read.
 Every other built-in-named local, the numeric locals of those names and their
-string locals without a history read keep the neutral control's C++. Sources
-come from the scope comparison's builders. The base rows read the base
-commit's refusal through the glue run on that commit's tree; every other row
-runs this checkout's transpiler only, and no row compiles C++.
+string locals without a history read keep the neutral control's C++. A string
+global, a string parameter and a library local of those names, read with
+history in a requested helper, are not such locals and keep what the base
+commit gives. Sources come from the scope comparison's builders. The base rows
+read the base commit's outcome (its refusal, or its C++ where it accepts the
+script) through the glue run on that commit's tree; every other row runs this
+checkout's transpiler only, and no row compiles C++.
 
-Other test files import ``PRICE_FIELD_NAMES`` and ``assert_price_refusal``
-inside their test bodies, since this module imports the scope file on load.
+The scope and helper test files, which this module imports on load, import
+``PRICE_FIELD_NAMES`` and ``assert_price_refusal`` inside their test bodies.
 """
 
 import pytest
@@ -18,8 +21,10 @@ import pytest
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._e2e import reference_codegen, transpile_json
+from tests._pine_libraries import Layout
 from tests.test_builtin_named_locals_scope import (
-    _LOCAL_NAMES, _chart_local_source, _normalize_local, _variant_source,
+    _LOCAL_NAMES, _chart_local_source, _normalize_local, _program,
+    _requested_source, _variant_source,
 )
 from tests.test_helper_builtin_named_locals import CPP_REFERENCE
 
@@ -73,6 +78,64 @@ def _reference_refusal(source, reference, tmp_path):
     ]
 
 
+def _reference_outcome(source, reference, tmp_path, libraries=None):
+    """The reference commit's outcome for ``source``, read through its glue:
+    ``("accepted", cpp)``, or ``("refused", entries)`` with one (severity,
+    code, message, line, column) entry per diagnostic. ``libraries`` maps the
+    import paths of the script to library text."""
+    pine = tmp_path / "strategy.pine"
+    pine.write_text(source, encoding="utf-8")
+    extra_env = {}
+    if libraries is not None:
+        layout = Layout(tmp_path / "library_env")
+        pins = {
+            path: layout.add_library(path, text.encode("utf-8"))
+            for path, text in libraries.items()
+        }
+        layout.add_probe("strategy", source.encode("utf-8"), pins)
+        extra_env = layout.env
+    result = transpile_json(pine, root=reference, extra_env=extra_env)
+    if result["ok"]:
+        return "accepted", result["cpp"]
+    return "refused", [
+        (entry["severity"], entry["code"], entry["message"], entry["line"], entry["col"])
+        for entry in result["diagnostics"]
+    ]
+
+
+def _glue_entry(diagnostic):
+    """A diagnostic as the glue reports it: (severity, code, message, line,
+    column), with the hint, if any, joined to the message."""
+    location = diagnostic.location
+    message = diagnostic.message
+    if diagnostic.hint:
+        message += " — " + diagnostic.hint
+    return (
+        diagnostic.level.value, diagnostic.code, message,
+        location.line if location else 1, location.col if location else 1,
+    )
+
+
+def _assert_keeps_the_base_outcome(source, reference, tmp_path, libraries=None):
+    """Assert that this checkout gives ``source`` exactly what the reference
+    commit gives it: the same C++ where the reference accepts the script, the
+    same diagnostics where it refuses it."""
+    expected = _reference_outcome(source, reference, tmp_path, libraries)
+    try:
+        cpp = transpile(source, libraries=libraries)
+    except CompileError as error:
+        # The script reaches the code generator, where the rule is, and is not
+        # stopped by an earlier phase.
+        errors = {d.phase for d in error.diagnostics if d.level == Level.ERROR}
+        assert errors == {Phase.CODEGEN}, error.diagnostics
+        actual = ("refused", [_glue_entry(d) for d in error.diagnostics])
+    else:
+        assert cpp.strip()
+        actual = ("accepted", cpp)
+    assert actual[0] == expected[0], (actual[0], expected[0])
+    assert actual[1] == expected[1]
+
+
 @pytest.mark.parametrize("name", PRICE_FIELD_NAMES)
 def test_price_named_string_local_history_keeps_the_base_refusal(name, reference, tmp_path):
     source = _variant_source(name, "typed", string=True)
@@ -83,6 +146,80 @@ def test_price_named_string_local_history_keeps_the_base_refusal(name, reference
         diagnostic.level.value, diagnostic.code, diagnostic.message,
         location.line, location.col,
     )]
+
+
+@pytest.mark.parametrize("name", PRICE_FIELD_NAMES)
+def test_price_named_string_local_positional_history_keeps_the_base_refusal(
+    name, reference, tmp_path,
+):
+    # The history is read as the argument of a call, directly in the helper.
+    source = _requested_source(
+        f"    string {name} = str.tostring(close)\n"
+        f"    bb = str.length({name}[1])\n    bb + 1\n",
+        string=False,
+    )
+    diagnostic = assert_price_refusal(source)
+    location = diagnostic.location
+    assert _reference_refusal(source, reference, tmp_path) == [(
+        diagnostic.level.value, diagnostic.code, diagnostic.message,
+        location.line, location.col,
+    )]
+
+
+# The refusal is keyed on a non-``var`` string local declared in the helper
+# whose authored spelling is a price name. A string global, a string parameter
+# and a library local of those spellings are other bindings: whatever the base
+# commit gives them, they keep.
+def _string_global_source(name):
+    return _requested_source(
+        f"    bb = {name}[1]\n    str.length(bb)\n", string=False,
+        prelude=f"string {name} = str.tostring(close)\n",
+    )
+
+
+def _string_parameter_source(name):
+    return _program(
+        f"h({name}) =>\n    bb = {name}[1]\n    str.length(bb)\n",
+        'v = request.security(syminfo.tickerid, "60", h(str.tostring(close)))\n'
+        "plot(v)\n",
+        prelude="n = input.int(3)\nz = close[n]\n",
+    )
+
+
+_LIBRARY_PATH = "pftest/Lib/1"
+_LIBRARY_SCRIPT = (
+    '//@version=6\nstrategy("p")\nimport pftest/Lib/1 as L\n'
+    "n = input.int(3)\nz = close[n]\n"
+    'v = request.security(syminfo.tickerid, "60", L.f(close))\nplot(v)\n'
+)
+
+
+def _library_text(name):
+    return (
+        '//@version=6\nlibrary("Lib")\n'
+        f"export f(float x) =>\n    string {name} = str.tostring(x)\n"
+        f"    bb = {name}[1]\n    str.length({name} + bb)\n"
+    )
+
+
+@pytest.mark.parametrize("name", PRICE_FIELD_NAMES)
+def test_price_named_string_global_history_keeps_the_base_outcome(name, reference, tmp_path):
+    _assert_keeps_the_base_outcome(_string_global_source(name), reference, tmp_path)
+
+
+@pytest.mark.parametrize("name", PRICE_FIELD_NAMES)
+def test_price_named_string_parameter_history_keeps_the_base_outcome(name, reference, tmp_path):
+    _assert_keeps_the_base_outcome(_string_parameter_source(name), reference, tmp_path)
+
+
+@pytest.mark.parametrize("name", PRICE_FIELD_NAMES)
+def test_price_named_string_library_local_history_keeps_the_base_outcome(
+    name, reference, tmp_path,
+):
+    _assert_keeps_the_base_outcome(
+        _LIBRARY_SCRIPT, reference, tmp_path,
+        libraries={_LIBRARY_PATH: _library_text(name)},
+    )
 
 
 @pytest.mark.parametrize("name,shape", [
