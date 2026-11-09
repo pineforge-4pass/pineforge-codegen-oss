@@ -472,6 +472,8 @@ The supported programmatic entry points are the Python functions
 `gate/glue.py` `transpile_json` protocol shipped in the Pyodide package. The
 pipeline classes shown in the [README](../README.md#advanced-run-the-pipeline-stages-directly)
 are for advanced inspection and are not part of this 1.0 stability promise.
+The functions described under "Producer metadata (unreleased)" are not part
+of this promise until a release ships them.
 
 ## Python functions
 
@@ -490,7 +492,8 @@ transpile_full(pine_source: str, *, check_support: bool = True,
 ```
 
 The same keyword-only capacity options are accepted by
-`transpile_with_request_inventory()` and root `gate/glue.py`.
+`transpile_with_request_inventory()`, `transpile_with_producer_metadata()`
+and root `gate/glue.py`.
 The JavaScript worker template in `scripts/worker-template.mjs` passes only
 the source and does not forward either option.
 `history_capacity` is an exact integer of at least 2 or `None`;
@@ -593,8 +596,9 @@ loop body. Reading either outside its scope raises analyzer `PF-E2054` at
 the identifier, unless an enclosing declaration or builtin supplies that
 name. Reassigning a name with no visible declaration retains `PF-E2020`.
 
-`transpile()`, `transpile_full()` and `transpile_with_request_inventory()` check
-the generated C++ allowlist even with `check_support=False` and raise
+`transpile()`, `transpile_full()`, `transpile_with_request_inventory()` and
+`transpile_with_producer_metadata()` check the generated C++ allowlist even
+with `check_support=False` and raise
 `CompileError` with at most 20 fixed reasons at `filename:1:1` when it reports
 findings.
 
@@ -750,6 +754,116 @@ legacy-path unresolved provenance rows, which may remain inside a fingerprint.
 Give those remaining colliding inputs different explicit titles.
 An explicit title that is not a compile-time string constant raises
 `CompileError`.
+
+## Request-feed inventory
+
+`pineforge_codegen.transpile_with_request_inventory()` accepts the arguments
+of `transpile_full()` plus `primary_chart_timeframe: str | None = None`.
+It runs one translation and returns the same five fields, plus
+`request_feed_inventory`. Unlike `requests`, this inventory includes
+same-ticker bar requests. It contains exactly `schema`
+(`"pineforge-request-feed-inventory/v1"`), `source_sha256` (the SHA-256 of the
+returned C++'s UTF-8 bytes), `artifact_sha256` (`None` before linking),
+`primary_chart_timeframe` (a canonical wire token or `None`) and `entries`
+(a list in source order, empty when no bar requests are made).
+Each entry describes a literal timeframe token, an input reference or an
+unknown timeframe; see [the inventory module](../pineforge_codegen/request_feed_inventory.py)
+for those shapes and the binding helper used after linking.
+A chart binding that is no wire token, such as `"1H"`, raises
+`pineforge_codegen.request_feed_inventory.RequestFeedInventoryError`;
+`"D"` is accepted.
+
+## Producer metadata (unreleased)
+
+```python
+pineforge_codegen.transpile_with_producer_metadata(
+    pine_source: str, *, filename: str = "<input>", check_support: bool = True,
+    libraries: Mapping[str, str] | None = None,
+    primary_chart_timeframe: str | None = None,
+    history_capacity: int | None = None,
+    drawing_capacity: int | None = None,
+) -> dict
+
+pineforge_codegen.producer_metadata_json(metadata) -> bytes
+```
+
+The result of `transpile_with_producer_metadata` has exactly two keys:
+`cpp` (the generated C++ string) and `metadata` (the document below).
+The C++ and the fields `inputs`, `strategy_params`, `request_feed_inventory`,
+`diagnostics` and `cppSha256` come from one generation, through one call to
+`transpile_with_request_inventory()`. The `filename` is the argument of the
+call and `input_kind_schema` is a constant. A caller need not translate
+again, rename fields or serialize diagnostics.
+
+The builder produces exactly these seven metadata keys in this order;
+the validator does not require their order.
+Nested values are plain JSON types: dictionaries with string keys, lists,
+strings, booleans, integers, finite floats and `None`. Building the document
+converts tuples to lists; validating or serializing an existing document
+refuses tuples. Enums, dataclasses, bytes, sets, non-string keys, non-finite
+numbers and strings that cannot be encoded as UTF-8 are refused.
+
+| Key | Python value | Meaning |
+| --- | --- | --- |
+| `inputs` | `list[dict]` | The input manifest, unchanged in content. |
+| `input_kind_schema` | `int` | Exactly `1`, never `True` or `1.0`: version 1 of the input-kind metadata. An `input.symbol()` entry carries `"kind": "symbol"`; every other entry has no `kind` key. |
+| `strategy_params` | `dict` | The sibling API's `strategyParams`, renamed and converted to plain JSON types. |
+| `request_feed_inventory` | `dict` | The inventory described above, never null; exactly its five keys and schema, with `artifact_sha256` null. |
+| `diagnostics` | `list[dict]` | One flat dictionary per warning or note, in the sibling API's order, as described below. |
+| `filename` | `str` | The source filename passed to this call, defaulting to `"<input>"`. |
+| `cppSha256` | `str` | 64 lowercase hexadecimal digits: SHA-256 of the UTF-8 bytes of the returned C++, equal to the inventory's `source_sha256`. |
+
+A program that writes the C++ must hash the bytes it writes and compare
+the result with `cppSha256` before using the pair.
+
+Each diagnostics item has exactly eight keys: `severity` (`"warning"` or
+`"note"`, the diagnostic level's string value), `phase` (the phase's string
+value), `message` (a string), `filename` (a string or null), `line`, `column`
+and `end_column` (integers or null), and `hint` (a string or null).
+The location fields come from `location.file`, `.line`, `.col` and `.end_col`;
+when the diagnostic has no location, all four are null. Version 1
+deliberately omits `code` and `args`.
+
+`pineforge_codegen.producer_metadata` also exports `PRODUCER_METADATA_KEYS`
+(the tuple of seven names above), `INPUT_KIND_SCHEMA` (`1`),
+`build_producer_metadata(result, *, filename)` and
+`validate_producer_metadata(metadata)`. The builder accepts the sibling
+API's result without another translation. The validator checks the seven
+metadata keys and field types, the plain JSON types above, the integer
+`input_kind_schema` value `1`, the inventory's five keys, schema and null
+artifact hash, and the eight keys and field types of each diagnostics item.
+It checks that `cppSha256` and the inventory's `source_sha256` are 64
+lowercase hexadecimal digits and equal. It does not check where a `kind`
+key appears, or the contents of inventory `entries` beyond requiring plain
+JSON objects. Any string is accepted for `primary_chart_timeframe`, as is
+null; the validator does not check wire tokens or key order. It returns
+`None` when these checks hold.
+
+`producer_metadata_json` validates and returns the canonical bytes:
+
+```python
+json.dumps(metadata, sort_keys=True, separators=(",", ":"),
+           ensure_ascii=False, allow_nan=False).encode("utf-8")
+```
+
+The bytes are the document: UTF-8, keys sorted at every level, no spaces
+after separators and no trailing newline. A reader must decode UTF-8
+strictly, parse with NaN, Infinity and duplicate keys refused, and must
+neither require nor forbid a trailing newline.
+
+Source errors raise `pineforge_codegen.errors.CompileError` as the sibling
+API does. An invalid `primary_chart_timeframe` raises
+`RequestFeedInventoryError`. A value refused by the metadata builder,
+validator or serializer raises `pineforge_codegen.ProducerMetadataError`
+(a `ValueError`), with its path for an invalid JSON value. A non-string C++
+value or a hash mismatch also raises `ProducerMetadataError`. In a direct
+call to `build_producer_metadata`, a C++ string that cannot be encoded as
+UTF-8 raises that error too. Translation returns ASCII C++; source text
+that cannot be encoded fails inside translation.
+No error returns a partial result. Capacity options, library sources,
+line-ending normalization and the generated C++ allowlist follow the
+same pipeline guarantees as the sibling API, including allowlist checking
+with `check_support=False`.
 
 ## Pyodide and gate/glue JSON
 

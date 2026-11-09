@@ -22,6 +22,9 @@ from .library_inline import inline_libraries
 from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
 from .method_binding import validate_call_argument_order
 from .pragmas import extract_pf_trace_pragmas
+from .producer_metadata import (
+    ProducerMetadataError, producer_metadata_json, build_producer_metadata,
+)
 from .request_discovery import discover_requests, request_sites
 from .request_feed_inventory import build_request_feed_inventory
 from .security_contexts import (
@@ -339,3 +342,24 @@ def transpile_with_request_inventory(pine_source: str, *, check_support: bool = 
         "request_feed_inventory": build_request_feed_inventory(
             gen, ctx, sites, cpp, primary_chart_timeframe=primary_chart_timeframe),
     }
+
+
+def transpile_with_producer_metadata(
+    pine_source: str, *, filename: str = "<input>", check_support: bool = True,
+    libraries: Mapping[str, str] | None = None,
+    primary_chart_timeframe: str | None = None,
+    history_capacity: int | None = None,
+    drawing_capacity: int | None = None,
+) -> dict:
+    """Return C++ and plain producer metadata from one translation.
+
+    Calls :func:`transpile_with_request_inventory` once with the same
+    arguments. ``metadata`` is ready for :func:`producer_metadata_json`;
+    its ``cppSha256`` identifies the UTF-8 bytes of the returned ``cpp``.
+    """
+    result = transpile_with_request_inventory(
+        pine_source, filename=filename, check_support=check_support, libraries=libraries,
+        primary_chart_timeframe=primary_chart_timeframe,
+        history_capacity=history_capacity, drawing_capacity=drawing_capacity,
+    )
+    return {"cpp": result["cpp"], "metadata": build_producer_metadata(result, filename=filename)}

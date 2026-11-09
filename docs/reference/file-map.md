@@ -46,6 +46,8 @@ pineforge_codegen/
 │                                   paths (one context per value) before
 │                                   the analyzer; refuses what
 │                                   registration cannot compute.
+├── producer_metadata.py            Plain metadata and canonical JSON bound
+│                                   to one C++ translation.
 ├── request_discovery.py            transpile_full()'s requests: the
 │                                   other symbols' feeds a script reads,
 │                                   keyed as registration computes them
@@ -180,6 +182,8 @@ tests/
 │                                   the cross-namespace file).
 ├── test_support_checker.py         Per-rule support-checker behaviour.
 ├── test_codegen_new.py     (~2k loc)  Substring assertions on emitted C++.
+├── test_producer_metadata.py       Producer document shape, values, hashes
+│                                   and serialization.
 ├── test_signatures.py              Signature-registry unit tests.
 └── test_{lexer,parser,analyzer,symbols,errors,…}.py
 ```
