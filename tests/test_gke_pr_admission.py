@@ -679,8 +679,7 @@ def check_workflows(sources):
                     "native workflow call must bind the exact admitted route and identities")
             continue
         is_pod = name in POD_JOBS
-        require(value_at(body, 4, "runs-on")
-                == ("gke-8cpu-16gb-amd64" if name == "compile" else "ubuntu-24.04"),
+        require(value_at(body, 4, "runs-on") == POD_RUNNER,
                 f"{name}: runner differs")
         expected_permissions = (
             "{contents: read, statuses: write}" if name == "result"
@@ -701,7 +700,7 @@ def check_workflows(sources):
                 "PF_CI_LABELS": "'[\"ubuntu-24.04\"]'",
                 "PYTHONHASHSEED": '"0"',
             } if name in {"pytest", "differential"} else {
-                "PF_CI_LABELS": "'[\"self-hosted\",\"pf-ci\",\"pf-ci-x64\"]'",
+                "PF_CI_LABELS": "'[\"ubuntu-24.04\"]'",
                 "PYTHONHASHSEED": '"0"',
                 "PINEFORGE_REQUIRE_COMPILE": '"1"',
                 "PINEFORGE_ENGINE_PAIRING": '"pinned"',
@@ -2004,17 +2003,42 @@ def test_native_driver_pin_uses_complete_bytes_against_the_real_base_policy():
     # Both policy and candidate contexts resolve the real installed base files.
     policy = {"__name__": "baseline_gke_pr_admission", "__file__": __file__}
     exec(compile(workflow_text(baseline.stdout), __file__, "exec"), policy)
-    for checker, admitted_driver, refused_driver in (
-        (policy["check_workflows"], installed_driver, approved_driver),
-        (check_workflows, approved_driver, installed_driver),
+
+    def historical_graph(graph):
+        # The genuine base policy predates compile admission. Reconstruct its
+        # complete caller inventory without changing that policy or the driver.
+        result = dict(graph)
+        path = ".github/workflows/gke-pr.yml"
+        text = result[path]
+        compile_job = "  compile:" + jobs(text)["compile"]
+        assert text.count(compile_job) == 1
+        text = text.replace(compile_job, "", 1)
+        for before, after in (
+            ("    needs: [admit, workflow-lint, package-files, pytest, compile]\n",
+             "    needs: [admit, workflow-lint, package-files, pytest]\n"),
+            ('          expected = {"admit", "workflow-lint", "package-files", "pytest", "compile"}\n',
+             '          expected = {"admit", "workflow-lint", "package-files", "pytest"}\n'),
+            ("    needs: [admit, workflow-lint, package-files, pytest, compile, differential, test-check",
+             "    needs: [admit, workflow-lint, package-files, pytest, differential, test-check"),
+        ):
+            assert text.count(before) == 1
+            text = text.replace(before, after, 1)
+        assert set(jobs(text)) == set(jobs(graph[path])) - {"compile"}
+        result[path] = text
+        return result
+
+    for checker, admitted_driver, refused_driver, old_graph, new_graph in (
+        (policy["check_workflows"], installed_driver, approved_driver,
+         historical_graph(old), historical_graph(new)),
+        (check_workflows, approved_driver, installed_driver, old, new),
     ):
-        checker(old)
-        checker({**new, NATIVE_DRIVER: admitted_driver})
+        checker(old_graph)
+        checker({**new_graph, NATIVE_DRIVER: admitted_driver})
         with pytest.raises(ValueError, match="native implementation differs"):
-            checker({**new, NATIVE_DRIVER: refused_driver})
+            checker({**new_graph, NATIVE_DRIVER: refused_driver})
         with pytest.raises(ValueError, match="native implementation differs"):
-            checker({**old, NATIVE_DRIVER: approved_driver})
-        for graph in (old, new):
+            checker({**old_graph, NATIVE_DRIVER: approved_driver})
+        for graph in (old_graph, new_graph):
             with pytest.raises(ValueError, match="native implementation differs"):
                 checker({path: text for path, text in graph.items() if path != NATIVE_DRIVER})
 
@@ -2031,7 +2055,7 @@ def test_native_driver_pin_uses_complete_bytes_against_the_real_base_policy():
         ):
             assert mutant != approved_driver
             with pytest.raises(ValueError, match="native implementation differs"):
-                checker({**new, NATIVE_DRIVER: mutant})
+                checker({**new_graph, NATIVE_DRIVER: mutant})
 
     # Invalid direct-call types must retain the native-implementation refusal,
     # rather than failing in size accounting or treating metadata as authority.

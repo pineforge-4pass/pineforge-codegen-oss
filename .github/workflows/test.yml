@@ -341,7 +341,7 @@ jobs:
             compile-shard: 0
             suite-shard: 3
     env:
-      PF_CI_LABELS: '["self-hosted","pf-ci","pf-ci-x64"]'
+      PF_CI_LABELS: '["ubuntu-24.04"]'
       PYTHONHASHSEED: "0"
       PINEFORGE_REQUIRE_COMPILE: "1"
       PINEFORGE_ENGINE_PAIRING: "pinned"

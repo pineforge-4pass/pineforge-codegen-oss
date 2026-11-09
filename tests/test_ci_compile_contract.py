@@ -76,9 +76,9 @@ def _assert_pytest_contract(workflow: str) -> None:
         assert forbidden not in job, f"pytest must not contain {forbidden}"
     assert "    needs: [authz, changes]\n" in job
     assert "    if: needs.changes.outputs.code == 'true'\n" in job
-    assert "    runs-on: gke-8cpu-16gb-amd64\n" in job
+    assert "    runs-on: ubuntu-24.04\n" in job
     assert '        python-version: ["3.11", "3.12", "3.13", "3.14"]\n' in job
-    assert "        run: python -m pytest -q\n" in job
+    assert "        run: python -m pytest -q -n auto\n" in job
 
 
 def _assert_aggregate_contract(workflow: str) -> None:
@@ -113,7 +113,7 @@ def _assert_compile_contract(workflow: str, *, pr: bool = False) -> None:
         assert "    if: ${{ needs.admit.outputs.allowed == 'true' }}\n" in job, (
             "PR compile must require admission"
         )
-        assert "    runs-on: gke-8cpu-16gb-amd64\n" in job
+        assert "    runs-on: ubuntu-24.04\n" in job
     else:
         assert "    needs: [authz, changes]\n" in job
         assert "    if: needs.changes.outputs.code == 'true'\n" in job, (
@@ -125,7 +125,7 @@ def _assert_compile_contract(workflow: str, *, pr: bool = False) -> None:
         else "    permissions:\n      contents: read\n"
     ) in job
     assert "      fail-fast: false\n" in job, "compile must run every matrix part"
-    assert "      PF_CI_LABELS: '[\"self-hosted\",\"pf-ci\",\"pf-ci-x64\"]'\n" in job
+    assert "      PF_CI_LABELS: '[\"ubuntu-24.04\"]'\n" in job
     assert '      PYTHONHASHSEED: "0"\n' in job
     assert '      PINEFORGE_REQUIRE_COMPILE: "1"\n' in job, (
         "compile must require compile inputs"
@@ -163,6 +163,20 @@ def _assert_compile_contract(workflow: str, *, pr: bool = False) -> None:
     assert "          path: .ci/pineforge-engine\n" in checkout
     assert "          submodules: true\n" in checkout, "compile must check out the corpus submodule"
     assert job.count("          persist-credentials: false\n") == 2
+    install = _step(job, "Install compile-only prerequisites")
+    assert "          sudo apt-get update\n" in install, (
+        "compile must update package lists"
+    )
+    assert "          sudo apt-get install --yes --no-install-recommends g++ libeigen3-dev\n" in install, (
+        "compile must install g++ and Eigen"
+    )
+    assert install.startswith(
+        "        shell: bash\n"
+        "        run: |\n"
+        "          set -euo pipefail\n"
+        "          sudo apt-get update\n"
+        "          sudo apt-get install --yes --no-install-recommends g++ libeigen3-dev\n"
+    ), "compile must install prerequisites before checking them"
     if pr:
         head = _step(job, "Check out the admitted head")
         assert "          repository: ${{ github.repository }}\n" in head
@@ -171,18 +185,15 @@ def _assert_compile_contract(workflow: str, *, pr: bool = False) -> None:
         ), "PR compile must check out the admitted head"
         assert "          fetch-depth: 0\n" in head
         assert "          persist-credentials: false\n" in head
-        install = _step(job, "Check compile-only prerequisites")
-        assert "apt-get" not in job, "PR compile must not install packages at run time"
         assert "          g++ --version\n" in install
         assert "test -d /usr/include/eigen3" in install, (
-            "PR compile must check the image Eigen directory"
+            "PR compile must check the installed Eigen directory"
         )
-        assert "g++ is missing from the GKE image" in install
-        assert "Eigen include directory /usr/include/eigen3 is missing from the GKE image" in install
-    else:
-        install = _step(job, "Install compile-only prerequisites")
-        assert "sudo apt-get install --yes --no-install-recommends g++ libeigen3-dev" in install, (
-            "compile must install g++ and Eigen"
+        assert "g++ is missing after the installation step" in install, (
+            "PR compile must report missing g++ after installation"
+        )
+        assert "Eigen include directory /usr/include/eigen3 is missing after the installation step" in install, (
+            "PR compile must report missing Eigen after installation"
         )
     for check in (
         'test -f "$PINEFORGE_ENGINE_INCLUDE/pineforge/engine.hpp"',
@@ -522,14 +533,35 @@ def test_pr_workflow_requires_the_paired_compile_sweep():
         "PR compile must check out the admitted head",
     ),
     (
-        "          g++ --version\n",
-        "          apt-get update\n          g++ --version\n",
-        "PR compile must not install packages at run time",
+        "          sudo apt-get update\n",
+        "",
+        "compile must update package lists",
+    ),
+    ("g++ libeigen3-dev", "g++", "compile must install g++ and Eigen"),
+    (
+        "      - name: Install compile-only prerequisites\n",
+        "      - name: Check compile-only prerequisites\n",
+        "missing Install compile-only prerequisites step",
+    ),
+    (
+        "          sudo apt-get update\n",
+        "          g++ --version\n          sudo apt-get update\n",
+        "compile must install prerequisites before checking them",
     ),
     (
         "          test -d /usr/include/eigen3 || {\n",
         "",
-        "PR compile must check the image Eigen directory",
+        "PR compile must check the installed Eigen directory",
+    ),
+    (
+        "g++ is missing after the installation step",
+        "g++ is missing from the GKE image",
+        "PR compile must report missing g++ after installation",
+    ),
+    (
+        "Eigen include directory /usr/include/eigen3 is missing after the installation step",
+        "Eigen include directory /usr/include/eigen3 is missing from the GKE image",
+        "PR compile must report missing Eigen after installation",
     ),
 ])
 def test_pr_compile_controls_reject_reverted_rules(old, new, message):

@@ -1,13 +1,15 @@
 # Scripts the front end is allowed to reject in the translate-implies-compile
 # sweep. One repository-relative label per line, sorted, without duplicates.
 # A rejection that is not listed here fails the sweep; a listed script that no
-# longer rejects also fails, so this file only shrinks toward the truth.
+# longer rejects also fails. Remove labels as their sources start translating.
 # Engine corpus labels would be prefixed engine-corpus/; none is rejected today.
 #
-# Measured on a clean run of the whole fixture set (one shard) against the
-# paired engine tree: 46 rejections. The 13 under tests/gate-corpus/err are
+# Original whole-fixture measurement (one shard) against the paired engine
+# tree: 46 rejections. The 13 under tests/gate-corpus/err are
 # the expected-error gate fixtures; the pine_libraries entries are library
 # sources, not strategies.
+# Merging codegen main a156a7d2 added 85 labels for fixtures rejected by its
+# new front-end diagnostics; the original baseline predates that merge.
 tests/fixtures/array_history_tv/ahist_bound_push.pine
 tests/fixtures/array_history_tv/ahist_eq.pine
 tests/fixtures/array_history_tv/ahist_field_noparen.pine
@@ -19,11 +21,67 @@ tests/fixtures/array_history_tv/ahist_mfield.pine
 tests/fixtures/array_history_tv/ahist_noparen.pine
 tests/fixtures/array_history_tv/ahist_param_push.pine
 tests/fixtures/array_history_tv/ahist_slice_set.pine
+tests/fixtures/call_argument_order/LEX.positional_after_keyword.pine
 tests/fixtures/color_tv/w11-color-v5-eth15/strategy.pine
+tests/fixtures/diagnostic_notes/math_fixed_keyword.pine
+tests/fixtures/diagnostic_notes/math_variadic_keyword.pine
 tests/fixtures/drawing_lifetime/w9dg-pin-holders/strategy.pine
+tests/fixtures/for_counter_headers/callable_bound_float_step.pine
+tests/fixtures/for_counter_headers/callable_direct_float_step.pine
+tests/fixtures/for_counter_headers/callable_input_float_step.pine
+tests/fixtures/for_counter_headers/plain_callable_bound_input.pine
+tests/fixtures/for_counter_headers/plain_callable_direct_input.pine
+tests/fixtures/for_counter_headers/plain_callable_direct_literal.pine
+tests/fixtures/for_counter_headers/widened_float_step.pine
+tests/fixtures/for_counter_headers/widened_int_hint_float_step.pine
+tests/fixtures/function_definition_scope/function_uses_late_local.pine
+tests/fixtures/lexical_scope/block_scope/open_counter_header_start.pine
+tests/fixtures/lexical_scope/block_scope/reject_aggregate_after.pine
+tests/fixtures/lexical_scope/block_scope/reject_for_local_after.pine
+tests/fixtures/lexical_scope/block_scope/reject_forin_local_after.pine
+tests/fixtures/lexical_scope/block_scope/reject_function_if_after.pine
+tests/fixtures/lexical_scope/block_scope/reject_function_local_after.pine
+tests/fixtures/lexical_scope/block_scope/reject_function_switch_after.pine
+tests/fixtures/lexical_scope/block_scope/reject_function_while_after.pine
+tests/fixtures/lexical_scope/block_scope/reject_if_write_after.pine
+tests/fixtures/lexical_scope/block_scope/reject_loop_tuple_after.pine
+tests/fixtures/lexical_scope/block_scope/reject_method_local_after.pine
+tests/fixtures/lexical_scope/block_scope/reject_persistent_after.pine
+tests/fixtures/lexical_scope/block_scope/reject_sibling_before_declaration.pine
+tests/fixtures/lexical_scope/block_scope/reject_sibling_function.pine
+tests/fixtures/lexical_scope/block_scope/reject_varip_after.pine
+tests/fixtures/lexical_scope/name_resolution/ref_expired_scope.pine
+tests/fixtures/lexical_scope/name_resolution/ref_field_default.pine
+tests/fixtures/lexical_scope/name_resolution/ref_other_function_scope.pine
+tests/fixtures/lexical_scope/name_resolution/ref_parameter_default.pine
+tests/fixtures/lexical_scope/name_resolution/ref_self_initializer.pine
+tests/fixtures/lexical_scope/name_resolution/ref_sibling_scope.pine
+tests/fixtures/lexical_scope/name_resolution/ref_top_global.pine
+tests/fixtures/lexical_scope/name_resolution/ref_top_if_local.pine
+tests/fixtures/loop_variable_scope/LOOPS.counter_after.pine
 tests/fixtures/open_items_tv/tuple_literal_decl.pine
 tests/fixtures/open_items_tv/tuple_literal_ternary.pine
 tests/fixtures/open_items_tv/tuple_literal_var.pine
+tests/fixtures/operator_history_tv/hist_array_binary.pine
+tests/fixtures/operator_history_tv/hist_array_compound.pine
+tests/fixtures/operator_history_tv/hist_array_cond.pine
+tests/fixtures/operator_history_tv/hist_array_unary.pine
+tests/fixtures/operator_history_tv/hist_map_binary.pine
+tests/fixtures/operator_history_tv/hist_map_compound.pine
+tests/fixtures/operator_history_tv/hist_map_cond.pine
+tests/fixtures/operator_history_tv/hist_map_unary.pine
+tests/fixtures/operator_history_tv/hist_matrix_binary.pine
+tests/fixtures/operator_history_tv/hist_matrix_compound.pine
+tests/fixtures/operator_history_tv/hist_matrix_cond.pine
+tests/fixtures/operator_history_tv/hist_matrix_unary.pine
+tests/fixtures/operator_history_tv/hist_nested_binary.pine
+tests/fixtures/operator_history_tv/hist_nested_compound.pine
+tests/fixtures/operator_history_tv/hist_nested_cond.pine
+tests/fixtures/operator_history_tv/hist_nested_unary.pine
+tests/fixtures/operator_history_tv/hist_udtfield_binary.pine
+tests/fixtures/operator_history_tv/hist_udtfield_compound.pine
+tests/fixtures/operator_history_tv/hist_udtfield_cond.pine
+tests/fixtures/operator_history_tv/hist_udtfield_unary.pine
 tests/fixtures/pine_libraries/pftest/ArmLine/1.pine
 tests/fixtures/pine_libraries/pftest/Base/1.pine
 tests/fixtures/pine_libraries/pftest/Overloads/1.pine
@@ -32,6 +90,35 @@ tests/fixtures/pine_libraries/pftest/V5Rules/1.pine
 tests/fixtures/pine_libraries/pftest/W11ColorV5/1.pine
 tests/fixtures/popfix_tv/lowertf_no_arm.pine
 tests/fixtures/popfix_tv/tf_switch_na_arm.pine
+tests/fixtures/selection_values/delimited-switch.pine
+tests/fixtures/selection_values/enum-title-switch.pine
+tests/fixtures/selection_values/for-end-if.pine
+tests/fixtures/selection_values/for-end-switch.pine
+tests/fixtures/selection_values/for-start-if.pine
+tests/fixtures/selection_values/for-start-switch.pine
+tests/fixtures/selection_values/inline-assignment-switch.pine
+tests/fixtures/selection_values/inline-case-if.pine
+tests/fixtures/selection_values/inline-case-switch.pine
+tests/fixtures/selection_values/inline-comma-if.pine
+tests/fixtures/selection_values/inline-comma-switch.pine
+tests/fixtures/selection_values/inline-declaration-switch.pine
+tests/fixtures/selection_values/inline-default-if.pine
+tests/fixtures/selection_values/inline-default-switch.pine
+tests/fixtures/selection_values/inline-if-with-switch.pine
+tests/fixtures/selection_values/inline-method-switch.pine
+tests/fixtures/selection_values/inline-unreached-function.pine
+tests/fixtures/selection_values/inline-unused-switch.pine
+tests/fixtures/selection_values/nested-case.pine
+tests/fixtures/selection_values/nested-default.pine
+tests/fixtures/selection_values/price-close.pine
+tests/fixtures/selection_values/price-high.pine
+tests/fixtures/selection_values/price-hl2.pine
+tests/fixtures/selection_values/price-low.pine
+tests/fixtures/selection_values/price-open.pine
+tests/fixtures/selection_values/ternary-if.pine
+tests/fixtures/selection_values/ternary-switch.pine
+tests/fixtures/selection_values/udt-default-if.pine
+tests/fixtures/selection_values/udt-default-switch.pine
 tests/fixtures/tail_f_tv/array_ref_args.pine
 tests/fixtures/udt_history_tv/udth_box_eq.pine
 tests/fixtures/udt_history_tv/udth_eq.pine

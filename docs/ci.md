@@ -77,9 +77,10 @@ The shared pytest matrix runs the same command as both former PR matrices.
 The differential leg retains Python 3.14, Node 22, the Pyodide selftest,
 dependency audit and full gate. Package metadata and entity checks run on every
 admitted diff, as does the workflow/App-environment guard.
-The compile gate runs in `gke-pr.yml` for pull requests, on the admitted GKE
-pods. Pushes to `main` run the retained compile gate in `test.yml` on
-`ubuntu-24.04`.
+The compile gate runs in `gke-pr.yml` for pull requests, on GitHub-hosted
+`ubuntu-24.04` after admission, installing Ubuntu's `g++` and `libeigen3-dev`
+like the push-time job. Pushes to `main` run the retained compile gate
+in `test.yml` on `ubuntu-24.04`.
 
 All current PR jobs use the bare scalar `ubuntu-24.04`. Pinned setup actions
 supply Python versions and Node/npm 22. Payload jobs have only `contents: read`, persist no checkout

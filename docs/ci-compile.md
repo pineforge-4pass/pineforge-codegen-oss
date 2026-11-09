@@ -1,6 +1,7 @@
 # Translate implies compile in PR CI
 
-Pull requests run the compile gate from `gke-pr.yml` on the admitted GKE pods.
+Pull requests run the compile gate from `gke-pr.yml` on GitHub-hosted
+`ubuntu-24.04` after admission.
 Pushes to `main` run the retained compile gate from `test.yml` on
 `ubuntu-24.04`.
 The four Python 3.11–3.14 legs stay unchanged from main.
@@ -46,7 +47,8 @@ commit for the entire `compile` job and for the SHAs recorded in its reports.
 The job verifies that the checkout SHA matches the pin before running tests. It
 uses the existing read-only Actions token, disables credential persistence, and
 installs Ubuntu's `g++` and `libeigen3-dev`. The PR compile job in `gke-pr.yml`
-uses the same pin and relies on the prebuilt GKE image's toolchain and Eigen.
+uses the same pin and installs Ubuntu's `g++` and `libeigen3-dev` like the
+push-time job, then checks the toolchain and Eigen before running tests.
 `tests/_compile.py` already resolves or synthesizes the generated version
 header from that engine source tree; a runtime build is unnecessary for a
 syntax-only check. The checkout SHA and submodule state appear in the job log.

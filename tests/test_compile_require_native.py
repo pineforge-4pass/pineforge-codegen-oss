@@ -17,6 +17,8 @@ from tests import _compile
      "emitted translation unit."),
 ])
 def test_missing_native_inputs_skip_or_fail_with_the_same_message(monkeypatch, required, missing, message):
+    # The compile job exports PINEFORGE_REQUIRE_COMPILE; this row pins the native flag alone.
+    monkeypatch.delenv("PINEFORGE_REQUIRE_COMPILE", raising=False)
     for name in ("_COMPILER", "_ENGINE_INC", "_EIGEN_INC", "_ENGINE_LIB"):
         monkeypatch.setattr(_compile, name, object())
     monkeypatch.setattr(_compile, missing, None)

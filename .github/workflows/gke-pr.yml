@@ -129,7 +129,7 @@ jobs:
     name: compile
     needs: [admit]
     if: ${{ needs.admit.outputs.allowed == 'true' }}
-    runs-on: gke-8cpu-16gb-amd64
+    runs-on: ubuntu-24.04
     permissions: {contents: read}
     strategy:
       fail-fast: false
@@ -156,7 +156,7 @@ jobs:
             compile-shard: 0
             suite-shard: 3
     env:
-      PF_CI_LABELS: '["self-hosted","pf-ci","pf-ci-x64"]'
+      PF_CI_LABELS: '["ubuntu-24.04"]'
       PYTHONHASHSEED: "0"
       PINEFORGE_REQUIRE_COMPILE: "1"
       PINEFORGE_ENGINE_PAIRING: "pinned"
@@ -201,17 +201,19 @@ jobs:
           path: .ci/pineforge-engine
           submodules: true
           persist-credentials: false
-      - name: Check compile-only prerequisites
+      - name: Install compile-only prerequisites
         shell: bash
         run: |
           set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends g++ libeigen3-dev
           if ! command -v g++ >/dev/null 2>&1; then
-            echo "::error::g++ is missing from the GKE image"
+            echo "::error::g++ is missing after the installation step"
             exit 1
           fi
           g++ --version
           test -d /usr/include/eigen3 || {
-            echo "::error::Eigen include directory /usr/include/eigen3 is missing from the GKE image"
+            echo "::error::Eigen include directory /usr/include/eigen3 is missing after the installation step"
             exit 1
           }
           test -f "$PINEFORGE_ENGINE_INCLUDE/pineforge/engine.hpp"

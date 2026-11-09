@@ -1688,13 +1688,6 @@ def assert_hosted_head_checkout(body):
     assert_admitted_head_checkout(body)
 
 
-def assert_pod_head_checkout(body):
-    assert re.search(r"^    runs-on: gke-8cpu-16gb-amd64$", body, re.M), (
-        "PR payload must use the bare GKE scalar"
-    )
-    assert_admitted_head_checkout(body)
-
-
 def assert_admitted_head_checkout(body):
     assert "    needs: [admit]" in body, "PR payload must depend on admission"
     assert "needs.admit.outputs.allowed == 'true'" in body, "PR payload must require allowed"
@@ -1719,7 +1712,7 @@ def test_pr_payloads_use_only_admitted_bare_scalar_hosted_runners():
     jobs = job_blocks(workflow)
     for name in ("differential", "pytest", "workflow-lint", "package-files"):
         assert_hosted_head_checkout(jobs[name])
-    assert_pod_head_checkout(jobs["compile"])
+    assert_hosted_head_checkout(jobs["compile"])
 
 
 def test_native_pr_route_is_required_and_dispatch_shares_the_same_jobs():
