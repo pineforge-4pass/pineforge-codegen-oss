@@ -11,8 +11,9 @@ from an earlier bar reads the array as it was on that bar. So a type whose
 objects never outlive their bar (``_udt_bar_local_types``: no ``var``
 declaration, collection, field or history read holds one) aliases a stable
 ``var`` array it is built from (``_PFArrayField<T>::alias``), exact and
-without a copy; a type that is kept keeps the copy every earlier build
-stored.
+without a copy. A directly retained type built from stable var arrays now
+holds the final creation-bar snapshot; collection and nested-object escapes
+keep the copy every earlier build stored.
 
 TradingView's tape of ``fixtures/silent2_tv/cgs2_udt_array_fields`` spells
 both on every close.
@@ -74,14 +75,17 @@ def test_a_bar_local_record_aliases_its_var_arrays():
     ("var keep = array.new<FeatureArrays>()\nkeep.push(fa)\n", True),
     # Held by another type's field.
     ("type Box\n    FeatureArrays inner\nbx = Box.new(fa)\n", True),
-    # Held by a var.
-    ("var FeatureArrays first = na\nfirst := fa\n", True),
+    # Held directly by a var: live in the creation bar, then a frozen handle.
+    ("var FeatureArrays first = na\nfirst := fa\n", False),
 ])
 def test_a_kept_record_keeps_its_copies(extra, kept_type):
     source_text = _FEATURES.replace('if d > 0\n', extra + 'if d > 0\n')
     cpp = transpile(source_text)
     assert ("std::vector<double> f1 = " in cpp) is kept_type
     assert "_PFArrayField" not in cpp
+    if not kept_type:
+        assert "_PFRetainedArrayField<double> f1" in cpp
+        assert "_pf_retained_f1Array.close();" in cpp
     compile_cpp(cpp)
 
 
