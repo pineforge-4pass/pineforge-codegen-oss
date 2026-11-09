@@ -1980,8 +1980,20 @@ class ExprVisitor:
                         f"const bool _pf_v5_r = ({right}); "
                         f"return _pf_v5_l {op} _pf_v5_r; }}())")
         if node.op == "+":
-            lt = self._infer_type(node.left)
-            rt = self._infer_type(node.right)
+            def _concat_type(operand):
+                inferred = self._infer_type(operand)
+                if (inferred == "double"
+                        and isinstance(operand, Identifier)
+                        and operand.name in self._current_func_locals
+                        and self._identifier_reads_series(operand)
+                        and self._series_type_for(operand.name) == "std::string"):
+                    # Series locals bypass the scalar local-type map. Their
+                    # current slot has the same type as their history reads.
+                    return "std::string"
+                return inferred
+
+            lt = _concat_type(node.left)
+            rt = _concat_type(node.right)
             if lt == "std::string" or rt == "std::string":
                 def _as_string(rendered, inferred):
                     if inferred == "std::string":
