@@ -1,8 +1,8 @@
 """Compile the same callable-local sources used by the scope comparisons.
 
-The string-with-history shapes do not compile for any name because of a
-separate known std::to_string defect, so those rows pin only that renaming
-preserves the compile outcome, and no row here checks a value.
+The string-with-history rows require successful compilation for neutral and
+built-in spellings, except the requested price-field shapes that retain their
+translation-time refusal. No row here checks a value.
 """
 
 import re
@@ -112,6 +112,7 @@ def test_string_history_compile_outcome_matches_neutral_control(shape):
     control_ok, control_error = _compile_outcome(
         transpile(_string_history_source("aa", shape)), f"string-{shape}-aa",
     )
+    assert control_ok, (shape, control_error)
     for name in ("second", "close", "time"):
         # A string price-field local read with history keeps the base's refusal.
         if shape in ("typed", "nested", "two-sites") and name in PRICE_FIELD_NAMES:

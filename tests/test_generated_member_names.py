@@ -303,4 +303,11 @@ def test_ordinary_names_keep_reference_cpp(position, string, reference, tmp_path
     pine.write_text(source, encoding="utf-8")
     before = transpile_json(pine, root=reference)
     assert before["ok"], before
-    assert transpile(source) == before["cpp"]
+    expected = before["cpp"]
+    if string:
+        from tests.test_string_local_history_concat import with_string_join_fixed
+
+        # The reference joined a string local with its previous value through
+        # std::to_string (issue #354); that one site is the whole difference.
+        expected = with_string_join_fixed(expected)
+    assert transpile(source) == expected
