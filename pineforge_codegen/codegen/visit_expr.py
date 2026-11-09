@@ -767,7 +767,8 @@ class ExprVisitor:
         name = node.name
         if name in self._current_func_series_params:
             return True
-        if (name in self._current_func_param_types or name in BAR_FIELDS
+        if (name in self._current_func_param_types
+                or (name in BAR_FIELDS and self._builtin_local_symbol(node) is None)
                 or self._reads_builtin_variable(node)):
             return False
         return self._binding_is_series(
@@ -798,7 +799,7 @@ class ExprVisitor:
         # Function parameters are plain locals, never series members
         if name in self._current_func_param_types:
             return self._safe_name(name)
-        if name in BAR_FIELDS:
+        if name in BAR_FIELDS and self._builtin_local_symbol(node) is None:
             return BAR_FIELDS[name]
         if self._reads_builtin_variable(node):
             return BAR_BUILTINS[name]
@@ -2414,7 +2415,8 @@ class ExprVisitor:
             if name in self._current_func_param_types:
                 self._warn_untracked_reference_history(node)
                 return self._safe_name(name)
-            if name in BAR_FIELDS or name in BAR_SERIES_PUSH:
+            if ((name in BAR_FIELDS or name in BAR_SERIES_PUSH)
+                    and self._builtin_local_symbol(node.object) is None):
                 # Index matches Pine: [0] current bar, [k] k bars ago (runtime Series deque).
                 return f"_s_{name}[{series_idx}]"
             # Apply per-call-site / exact block-member remap before deciding

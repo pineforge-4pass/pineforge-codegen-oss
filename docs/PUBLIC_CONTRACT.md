@@ -22,6 +22,8 @@ existing `pineforge_codegen.codegen.CPP_RESERVED` export contains the explicit
 reserved names. `_safe_name` also escapes emitter temporary patterns and
 allocates a distinct name when the script already uses the preferred escape.
 An identifier that does not collide keeps its spelling.
+Generated state members, helper types and unallocated numbered member families
+use the same escape rule, including locals of requested helpers.
 
 `bar` and `HUGE` use the existing C++ escape; unique input titles keep their
 Pine spellings. Repeated input titles use the ordinal override keys described
@@ -863,6 +865,17 @@ decimal digits. `render_diagnostic(code, args)` returns the English
 `(message, hint)`, which equal the diagnostic's `message` and `hint` byte for
 byte; in the glue envelope `message` is the message, plus ` — ` and the hint
 when there is one.
+
+`PF-E2081` identifies the removed `when` argument on `strategy.entry`,
+`strategy.order`, `strategy.exit`, `strategy.close`, `strategy.close_all`,
+`strategy.cancel` and `strategy.cancel_all` in a Pine v6 source. Its
+`args.key` names the function and `args.name` is `"when"`; the location
+covers the keyword name. The message explains that Pine v6 removed the
+argument and recommends placing the call inside an `if` statement.
+Other unknown names keep `PF-E2027` and its generic wording. A v5 source
+keeps its existing refusal: generic `PF-E2027` with support checking,
+or the unsupported-version diagnostic `PF-E2002` when support checking is
+disabled.
 
 From 1.5.0 on, receivers translate by stable code using their own locale
 catalogs; the English `user_message` template is the translation source and

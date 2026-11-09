@@ -79,6 +79,10 @@ def test_catalog_entries_are_well_formed():
 def test_catalog_codes_are_pinned():
     """Removing or repurposing a code fails; a new code must be pinned too."""
     pinned = json.loads(PIN.read_text(encoding="utf-8"))["codes"]
+    # The migration-specific order diagnostic must not repurpose this identity.
+    assert pinned["PF-E2027"] == (
+        "97d497fb95ae41955206393a4e2ef7b816710f3c10480b93180d6c312459517a"
+    )
     removed = sorted(set(pinned) - set(CATALOG))
     assert not removed, f"codes are never removed: {removed}"
     repurposed = sorted(c for c in pinned if pin_digest(CATALOG[c]) != pinned[c])

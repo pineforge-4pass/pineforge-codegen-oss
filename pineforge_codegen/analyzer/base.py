@@ -161,14 +161,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._filename = filename
         self._budget = budget
         self._pine_version = ast.version
-        # A later reassignment also prevents an initializer from proving the
-        # type of a condition. Same-spelled bindings conservatively share this
-        # exclusion; their legacy emission types remain unchanged.
-        self._condition_reassigned_names = {
-            node.target.name
-            for node, _depth in iter_ast_nodes(ast)
-            if isinstance(node, Assignment) and isinstance(node.target, Identifier)
-        }
+        # Build name-dependent inventories after lexical locals are separated.
+        self._condition_reassigned_names: set[str] = set()
         # The functions that may be emitted once per call site for their
         # session.<flag>[k] reads; None: every one that reads a flag at an
         # offset (pineforge_codegen._generate passes none first, then each
@@ -176,7 +170,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._session_clones = session_clones
         self._session_uncloned: frozenset[str] = frozenset()
         self._budget_visit_count = 0
-        self._method_signatures = inventory_method_signatures(ast)
+        self._method_signatures = {}
         self._method_call_bindings: dict[
             tuple[int, str], BoundMethodArgs
         ] = {}
@@ -622,6 +616,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
     def analyze(self) -> AnalyzerContext:
         """Run semantic analysis and return the analyzer context."""
+        from .callable_history_names import restore_callable_diagnostics
+
+        try:
+            context = self._analyze()
+        except CompileError as error:
+            if restore_callable_diagnostics(self._ast, error.diagnostics):
+                error.args = CompileError(error.diagnostics).args
+            raise
+        restore_callable_diagnostics(self._ast, context.diagnostics)
+        return context
+
+    def _analyze(self) -> AnalyzerContext:
         self._ensure_pine_v6()
         validate_call_argument_order(self._ast, filename=self._filename)
         from ..builtin_keywords import bind_builtin_keywords
@@ -641,6 +647,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         from .value_bindings import ValueBindings
         self._value_bindings = ValueBindings(self._ast, self._filename, self._budget)
         self._value_bindings.resolve()
+        from .callable_history_names import separate_builtin_callable_locals
+        separate_builtin_callable_locals(self._ast, self._value_bindings)
+        # A later reassignment prevents an initializer from proving a
+        # condition's type. Use the same spellings as the main visit.
+        self._condition_reassigned_names = {
+            node.target.name
+            for node, _depth in iter_ast_nodes(self._ast)
+            if isinstance(node, Assignment) and isinstance(node.target, Identifier)
+        }
+        self._method_signatures = inventory_method_signatures(self._ast)
         from .qualifiers import ParameterQualifiers
         self._parameter_qualifiers = ParameterQualifiers(
             self._ast, self._value_bindings.declaration_bindings,
@@ -1574,7 +1590,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         Direct primitive FuncDef locals can be named apart by declaration
         identity, then analyzed afresh so every clone owns its Series. Other
         declaration shapes retain this fail-closed boundary. Already-isolated
-        requested evaluators and non-colliding sources keep their spellings.
+        requested evaluators keep their spellings unless they shadow a builtin.
         """
         exact_series = set(self._series_decl_bindings)
         if not exact_series:
@@ -1689,7 +1705,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     ).add(name)
                     if (callable_owner in security_evaluator_only
                             and name not in self._ordinary_global_binding_names
-                            and name not in unqualified_persistent_raw_names):
+                            and name not in unqualified_persistent_raw_names
+                            and name not in BUILTIN_VARS):
                         continue
                     callable_nonpersistent.setdefault(name, []).append(
                         (callable_owner, stmt)
@@ -1818,7 +1835,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         collision_names = {
             name for name, bindings in callable_nonpersistent.items()
             if (name in self._ordinary_global_binding_names
-                or name in persistent_raw_names or len(bindings) > 1)
+                or name in persistent_raw_names or len(bindings) > 1
+                or name in BUILTIN_VARS)
         }
         from .callable_history_names import separate_callable_histories
         if separate_callable_histories(
@@ -4950,10 +4968,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 if udt_ctor is not None and type_spec is None:
                     type_spec = TypeSpec.udt(udt_ctor)
 
+        authored_name = (node.annotations or {}).get(
+            "authored_local_names", {}
+        ).get(node.name, node.name)
         if (
             self._pine_version == 6
             and not self._in_v5_library_definition(node)
-            and node.name in _BUILTIN_NAMESPACE_NAMES
+            and authored_name in _BUILTIN_NAMESPACE_NAMES
             and (
                 udt_ctor is not None
                 or (type_spec is not None and type_spec.kind == "udt")
@@ -5912,7 +5933,23 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if self._type_spec_from_hint(f.type_name) is not None
         }
         for f in node.fields:
-            if f.default:
+            if f.default is not None:
+                # This refusal belongs to v6 code; v5 sources keep their earlier handling.
+                # Inspect syntax and authored bindings only: builtin members and
+                # calculations over literals keep their existing policy.
+                if (node.annotations or {}).get("pine_version", self._pine_version) == 6 and any(
+                    isinstance(expr, FuncCall)
+                    or (
+                        isinstance(expr, Identifier)
+                        and self._value_bindings.declaration_bindings.get(id(expr)) is not None
+                    )
+                    for expr, _ in iter_ast_nodes(f.default)
+                ):
+                    from ..pine_spelling import expr_start
+                    self._error(
+                        "The default value cannot be a function, variable or calculation.",
+                        expr_start(f.default).loc or f.default.loc,
+                    )
                 self._visit(f.default)
         return PineType.VOID
 
@@ -8314,10 +8351,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Detect series vars / bar fields
         if isinstance(node.object, Identifier):
             name = node.object.name
-            if name in BAR_FIELDS:
+            sym = self._symbols.resolve(name)
+            local_declaration = (
+                sym is not None and sym.scope != "global"
+                and bool(self._collection_scope_stack)
+                and getattr(sym, "_pf_decl_node_id", None) is not None
+            )
+            if name in BAR_FIELDS and not local_declaration:
                 self._series_bar_fields.add(name)
             else:
-                sym = self._symbols.resolve(name)
                 if sym is not None:
                     if getattr(sym, "_pf_shadows_map_state", False):
                         self._error(
@@ -8569,20 +8611,26 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_global_history_nodes[id(node)] = (owner, name, node)
 
     def _visit_Identifier(self, node: Identifier) -> PineType:
+        sym = self._symbols.resolve(node.name)
+        local_builtin = (
+            node.name in BUILTIN_VARS and sym is not None
+            and sym.scope != "global" and bool(self._collection_scope_stack)
+            and getattr(sym, "_pf_decl_node_id", None) is not None
+        )
         # Some identifiers are namespace prefixes handled elsewhere
-        if node.name in ("strategy", "ta", "input", "math", "str", "color",
-                         "display", "syminfo", "timeframe", "plot",
-                         "alert", "barstate", "position", "shape", "location",
-                         "size", "currency", "order", "format", "text",
-                         "extend", "xloc", "yloc", "label", "line", "box",
-                         "table", "ticker", "request", "runtime", "chart",
-                         "barmerge", "adjustment", "earnings", "dividends",
-                         "splits", "session", "scale", "font",
-                         "hline", "backadjustment", "settlement_as_close",
-                         "dayofweek"):
+        if not local_builtin and node.name in (
+                "strategy", "ta", "input", "math", "str", "color",
+                "display", "syminfo", "timeframe", "plot",
+                "alert", "barstate", "position", "shape", "location",
+                "size", "currency", "order", "format", "text",
+                "extend", "xloc", "yloc", "label", "line", "box",
+                "table", "ticker", "request", "runtime", "chart",
+                "barmerge", "adjustment", "earnings", "dividends",
+                "splits", "session", "scale", "font",
+                "hline", "backadjustment", "settlement_as_close",
+                "dayofweek"):
             return PineType.VOID
 
-        sym = self._symbols.resolve(node.name)
         block_owner = getattr(sym, "_pf_script_block_owner", None)
         if id(node) not in self._identifier_decl_bindings:
             # Later type queries can revisit this node after its source scope
@@ -8594,7 +8642,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             )
         if (id(node) not in self._identifier_binding_scopes
                 and node.name in BUILTIN_VARS
-                and node.name not in BAR_FIELDS
+                and (node.name not in BAR_FIELDS or local_builtin)
                 and getattr(sym, "_pf_tuple_binding", False)
                 and (block_owner is None or any(
                     id(body) == block_owner for body in self._block_node_stack
@@ -8605,7 +8653,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             }
         elif (id(node) not in self._identifier_binding_scopes
                 and node.name in BUILTIN_VARS
-                and node.name not in BAR_FIELDS
+                and (node.name not in BAR_FIELDS or local_builtin)
                 and getattr(sym, "_pf_decl_node_id", None) is not None
                 and (block_owner is None or any(
                     id(body) == block_owner for body in self._block_node_stack

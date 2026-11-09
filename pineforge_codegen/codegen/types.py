@@ -3918,6 +3918,12 @@ class TypeInferer:
                 _dret = self._drawing_call_return_cpp(node.value)
                 if _dret is not None:
                     return _dret
+        local = self._builtin_local_symbol(node)
+        if local is not None:
+            if local.type_spec is not None:
+                return promote_wide_int(self._type_spec_to_cpp(local.type_spec))
+            if local.pine_type not in (PineType.UNKNOWN, PineType.VOID):
+                return promote_wide_int(PINE_TYPE_TO_CPP[local.pine_type])
         # Analyzer scopes are popped before codegen, so ctx.symbols.resolve may
         # find a same-named global instead of this active callable's plain
         # local.  The local binding is known from the emitted body inventory;
@@ -4021,6 +4027,33 @@ class TypeInferer:
         if udt is None:
             return None
         return DRAWING_TYPE_TO_CPP.get(udt, udt)
+
+    def _builtin_local_symbol(self, node):
+        """Recover a builtin-shadowing declaration from its own callable scope."""
+        if node.name not in sigs.BUILTIN_VARIABLES:
+            return None
+        declaration = (
+            node if isinstance(node, VarDecl)
+            else self.ctx.identifier_binding_nodes.get(id(node))
+        )
+        if declaration is None:
+            return None
+        symbols = getattr(self, "_builtin_local_symbols", None)
+        if symbols is None:
+            symbols = self._builtin_local_symbols = {}
+            for scope in self.ctx.symbols.all_scopes:
+                owner = scope
+                while (owner is not None
+                       and not owner.name.startswith(("func_", "method_"))):
+                    owner = owner.parent
+                if owner is None:
+                    continue
+                for symbol in scope.symbols.values():
+                    declared = getattr(symbol, "_pf_decl_node", None)
+                    if (symbol.name in sigs.BUILTIN_VARIABLES
+                            and isinstance(declared, VarDecl)):
+                        symbols[id(declared)] = symbol
+        return symbols.get(id(declaration))
 
     def _variable_symbol(self, name: str):
         """The symbol the variable ``name`` resolves to.
@@ -6187,6 +6220,9 @@ class TypeInferer:
                 return self._type_spec_to_cpp(spec)
         if isinstance(node, Subscript) and isinstance(node.object, Identifier):
             name = node.object.name
+            local = self._builtin_local_symbol(node.object)
+            if local is not None:
+                return self._type_for_decl(local._pf_decl_node)
             if name in self.ctx.series_vars:
                 return self._series_type_for(name)
             if name in self.ctx.series_bar_fields:
@@ -6216,6 +6252,9 @@ class TypeInferer:
             lexical_tuple_type = self._lexical_tuple_cpp_type(node)
             if lexical_tuple_type is not None:
                 return lexical_tuple_type
+            local = self._builtin_local_symbol(node)
+            if local is not None:
+                return self._type_for_decl(local._pf_decl_node)
             binding = self.ctx.identifier_decl_bindings.get(id(node))
             if (binding is not None
                     and binding[0] in self.ctx.primitive_block_shadow_types):

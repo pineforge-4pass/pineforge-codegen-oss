@@ -242,6 +242,15 @@ SECURITY_BAR_FIELDS = frozenset(SECURITY_BAR_FIELD_EXPRS) | {"time_close"}
 # Backwards-compatible name for consumers that only need the OHLCV subset.
 SECURITY_OHLC_BAR_FIELDS = frozenset({"open", "high", "low", "close", "volume"})
 
+# The price-series spellings whose ``name[k]`` the analyzer read as the bar's
+# own history (its ``BAR_FIELDS``) before callable locals had private
+# spellings, which left a requested helper's non-``var`` local so spelled to
+# PF-E3011. A string local keeps that refusal (security.py
+# ``_security_check_price_named_local_history``); ``time`` was never one.
+SECURITY_PRICE_LOCAL_NAMES = frozenset({
+    "open", "high", "low", "close", "hl2", "hlc3", "hlcc4", "ohlc4", "volume",
+})
+
 # Generated C++ runtime function names referenced by the codegen as string
 # literals. Centralising them here gives a single source of truth across
 # emitter modules; the editor's built-in dynamic-code-execution scanner

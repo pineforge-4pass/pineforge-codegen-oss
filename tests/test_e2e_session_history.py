@@ -542,10 +542,13 @@ REFUSED = {
         "read(receiver) => receiver.m()\n"
         "foo = Foo.new()\n"
         "x = read(foo)\n", (5, 24), "which a method calls"),
+    # TradingView refuses a function call as a record field default (compile error CE10133),
+    # so the script stops at the default, before the session read in the function is reached.
     "a function a UDT field default calls": (
         "f() => session.ismarket[1]\n"
         "type Foo\n    bool v = f()\n"
-        "x = Foo.new().v\n", (3, 24), "field default"),
+        "x = Foo.new().v\n", (5, 14),
+        "The default value cannot be a function, variable or calculation"),
     # allow_entry_in(session.ismarket[1] ? ... : ...) is refused first for
     # its series direction (TV CE10123), at the argument rather than the
     # history read. test_allow_entry_in_qualifier.py retains that regression.
@@ -703,8 +706,11 @@ STILL_COMPILE = {
         "f() =>\n"
         "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
         "    close > open\n"
-        "type Foo\n    bool v = f()\n"
-        "foo = Foo.new()\n"
+        # TradingView refuses a function call as a record field default (compile error
+        # CE10133), so the call is passed to the constructor instead; the row's purpose
+        # (the session read inside a function a UDT value is built from) is unchanged.
+        "type Foo\n    bool v = false\n"
+        "foo = Foo.new(v = f())\n"
         "x = foo.v\n"),
     "a read in color.from_gradient in a request.security expression": (
         'c = request.security(syminfo.tickerid, "60", color.from_gradient('
@@ -851,7 +857,7 @@ def test_a_read_reached_through_a_callers_clone_gets_clones_too(tmp_path: Path) 
 @pytest.mark.parametrize("place", KEPT)
 def test_scripts_without_a_read_keep_their_cpp(place: str, tmp_path: Path) -> None:
     """A script with no session.<flag>[k] keeps the accepted scaffold's C++, even
-    with a name spelled like a generated history member."""
+    with a name spelled like a generated history member, after its name escape."""
     reference = reference_codegen(CPP_IDENTITY_REFERENCE)
     if reference is None:
         pytest.fail(f"required C++ identity reference {CPP_IDENTITY_REFERENCE} unavailable; "
@@ -865,7 +871,11 @@ def test_scripts_without_a_read_keep_their_cpp(place: str, tmp_path: Path) -> No
                     + 'if x\n    strategy.entry("L", strategy.long)\n', encoding="utf-8")
     now, before = transpile_json(pine), transpile_json(pine, reference)
     assert now["ok"] and before["ok"], (now["diagnostics"], before["diagnostics"])
-    assert without_trade_history_policy(now["cpp"]) == without_trade_history_policy(
+    cpp = now["cpp"]
+    generator = _codegen_for(KEPT[place])
+    for name in ("_series_arg_1", "_hist_call_1"):
+        cpp = cpp.replace(generator._safe_name(name), name)
+    assert without_trade_history_policy(cpp) == without_trade_history_policy(
         before["cpp"]
     )
     compile_cpp(now["cpp"], label=place)

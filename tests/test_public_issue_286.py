@@ -31,7 +31,9 @@ def _call(name, arguments):
     return f"strategy.{name}({', '.join(arguments)})"
 
 
-def _assert_unknown_keyword(source, name, keyword, *, check_support=True):
+def _assert_unknown_keyword(
+    source, name, keyword, *, check_support=True, removed_when=False,
+):
     with pytest.raises(CompileError) as caught:
         transpile(
             source, filename="order_keywords.pine", check_support=check_support,
@@ -42,11 +44,24 @@ def _assert_unknown_keyword(source, name, keyword, *, check_support=True):
     ]
     assert len(errors) == 1, caught.value.diagnostics
     diagnostic, = errors
-    assert diagnostic.code == "PF-E2027"
+    # Expected text follows the Pine v6 migration rule; generic names retain
+    # the existing unknown-parameter contract, independently of the catalog.
+    if removed_when:
+        assert diagnostic.code == "PF-E2081"
+        assert diagnostic.message == (
+            f"strategy.{name}: the 'when' argument was removed in Pine v6; "
+            "place the order conditionally with an if statement around the call"
+        )
+        assert diagnostic.hint == (
+            'if close > open\n    strategy.entry("L", strategy.long)'
+        )
+    else:
+        assert diagnostic.code == "PF-E2027"
+        assert diagnostic.message == (
+            f"strategy.{name}: unknown keyword argument '{keyword}'"
+        )
+        assert diagnostic.hint is None
     assert diagnostic.args == {"key": f"strategy.{name}", "name": keyword}
-    assert diagnostic.message == (
-        f"strategy.{name}: unknown keyword argument '{keyword}'"
-    )
     start = source.index(f"{keyword} =")
     line = source.count("\n", 0, start) + 1
     col = start - source.rfind("\n", 0, start)
@@ -69,20 +84,92 @@ def test_unknown_order_keywords_are_located_errors(
     call = _call(name, (*arguments, f"{keyword} = {value}"))
     _assert_unknown_keyword(
         HEADER + call + "\n", name, keyword, check_support=check_support,
+        removed_when=keyword == "when",
     )
 
 
 @pytest.mark.parametrize("name, arguments", ORDER_CALLS)
-@pytest.mark.parametrize("body", (
-    "{call}\n",
-    "if false\n    {call}\n",
-    "unused() =>\n    {call}\n",
+@pytest.mark.parametrize("body, check_support", (
+    ("{call}\n", True),
+    ("{call}\n", False),
+    ("if false\n    {call}\n", True),
+    ("if false\n    {call}\n", False),
+    # With the support checker bypassed, a `when` argument inside the body of
+    # a function that nothing calls raises nothing, on main as well, so this
+    # body is asked only with the support checker, which checks every body.
+    ("unused() =>\n    {call}\n", True),
 ))
 def test_unreachable_and_multiline_order_calls_still_validate_names(
-    name, arguments, body,
+    name, arguments, body, check_support,
 ):
     call = _call(name, (*arguments, "\n        when = close > open"))
-    _assert_unknown_keyword(HEADER + body.format(call=call), name, "when")
+    _assert_unknown_keyword(
+        HEADER + body.format(call=call), name, "when",
+        check_support=check_support, removed_when=True,
+    )
+
+
+@pytest.mark.parametrize("name, arguments", ORDER_CALLS)
+@pytest.mark.parametrize("check_support", (True, False))
+def test_misspelled_order_parameter_with_integer_keeps_generic_error(
+    name, arguments, check_support,
+):
+    # An integer expression does not change the unknown-name diagnostic.
+    call = _call(name, (*arguments, "misspelled_parameter = 1"))
+    _assert_unknown_keyword(
+        HEADER + call + "\n", name, "misspelled_parameter",
+        check_support=check_support,
+    )
+
+
+@pytest.mark.parametrize("name, arguments", ORDER_CALLS)
+@pytest.mark.parametrize("check_support", (True, False))
+def test_v5_order_when_keeps_existing_refusal(name, arguments, check_support):
+    # The support gate checks keywords before analysis; bypassing it reaches
+    # the existing v6-only version gate before any order lowering.
+    source = (
+        '//@version=5\nstrategy("order keywords")\n'
+        + _call(name, (*arguments, "when = true")) + "\n"
+    )
+    if check_support:
+        _assert_unknown_keyword(source, name, "when")
+        return
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="order_keywords.pine", check_support=False)
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.code == "PF-E2002"
+    assert diagnostic.args == {"version": 5}
+    assert diagnostic.message == (
+        "PineForge supports PineScript v6 only (found //@version=5)."
+    )
+    assert diagnostic.hint == (
+        "Migrate the script to //@version=6 using TradingView's editor."
+    )
+    assert diagnostic.location.file == "order_keywords.pine"
+    assert (
+        diagnostic.location.line, diagnostic.location.col,
+        diagnostic.location.end_col,
+    ) == (1, 1, 1)
+
+
+@pytest.mark.parametrize("check_support", (True, False))
+def test_when_on_another_builtin_keeps_generic_error(check_support):
+    # timeframe.change has no when parameter and no order migration rule.
+    source = HEADER + 'changed = timeframe.change("D", when = true)\n'
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="other_keywords.pine", check_support=check_support)
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.code == "PF-E2027"
+    assert diagnostic.args == {"key": "timeframe.change", "name": "when"}
+    assert diagnostic.message == "timeframe.change: unknown keyword argument 'when'"
+    assert diagnostic.hint is None
+    assert diagnostic.location.file == "other_keywords.pine"
+    assert (
+        diagnostic.location.line, diagnostic.location.col,
+        diagnostic.location.end_col,
+    ) == (3, 33, 37)
 
 
 @pytest.mark.parametrize("name, arguments, keyword, value", (

@@ -22,6 +22,16 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- `str.format_time` now uses TradingView's documented defaults when arguments
+  are omitted: `"yyyy-MM-dd'T'HH:mm:ssZ"` for the format and the exchange time
+  zone (`syminfo.timezone`) for the timezone. Pass `"yyyy-MM-dd"` and `"UTC"`
+  explicitly to restore the previous output. Regenerate C++ and relink
+  affected strategies.
+- A `when` argument on a strategy order call in Pine v6 now reports `PF-E2081`,
+  explaining that v6 removed the argument and recommending an `if` statement
+  around the call. Other unknown keywords keep `PF-E2027`.
+- Pine identifiers spelled like generated state members or helpers use the C++ name allocator, including history-bearing locals in requested helpers.
+- A local declared in a function or method and spelled like a built-in variable now keeps its own type, history storage and reads. Exceptions: a string local spelled like a price field (`open`, `high`, `low`, `close`, `hl2`, `hlc3`, `hlcc4`, `ohlc4`, `volume`) that is read with history in a function requested through `request.security` is still refused, as before; a string local that is read with history and used in a concatenation still does not compile, for any name; the support check still warns that `bar_index`, `last_bar_index` and `timenow` diverge from TradingView at every read of a local with that name; a script that declares the same built-in name in several callable shapes is accepted where an ordinary name is refused by the shared-Series check; and the confirmed-bar request receipt of a request inside the declaring function names the local by its internal storage spelling.
 - History retention can be selected with keyword-only `history_capacity`
   in `transpile()`, `transpile_full()`, `transpile_with_request_inventory()`
   and `gate/glue.py::transpile_json()`. The JavaScript worker template does
@@ -88,8 +98,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - Direct `size`, `first`, `last` and `get` reads of `line.all`, `box.all`, `label.all` and `linefill.all` use live arena order; aliases and mutations raise `PF-E5086`, and `polyline.all` requires engine support (`PF-E5085`) (#295).
 - C++ name escaping covers the macros defined by the audited math, limits, C++ wrapper and paired engine headers, retaining authored input keys (#295).
 - A keyword argument of a built-in call reaches its own parameter. `timeframe.in_seconds(timeframe = ...)` and `timeframe.change(timeframe = ...)` used the chart's timeframe instead of the named one, `strategy.closedtrades.*(trade_num = ...)` and `strategy.opentrades.*(trade_num = ...)` read trade 0 instead of the named trade, `str.format_time(time, timezone = ...)` read the timezone as the format, `timestamp(timezone = ..., year = ..., ...)` dropped the timezone and a skipped `hour` moved `minute` into its slot, `matrix.new<float>(rows = 2, columns = 3)` built a matrix with no rows and no columns, `time("60", timezone = ...)` and `time_close` read the timezone as the session, and `math.random(seed = 3)` read the seed as the minimum; none of them raised a diagnostic. A keyword none of these calls declares is now refused with the unknown-keyword diagnostic, as TradingView refuses it. Regenerate C++ and relink strategies.
-- Strategy order calls report unknown keyword arguments, including `when`,
-  at the keyword with `PF-E2027` (#286;
+- Strategy order calls report unknown keyword arguments at the keyword
+  (#286;
   [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
 - Strategy orders with omitted `qty` use the default size; integer `switch` and
   `if` results with an explicit `na` arm preserve NaN, and
@@ -151,6 +161,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   with an internal `ValueError`. As in TradingView, the zone word is plain
   arithmetic on the date fields: the value is the fields read as UTC minus the
   signed offset.
+- In `//@version=6` scripts and libraries, type field defaults containing calls
+  or user-declared variable references now report `PF-E2087` at the default
+  expression's first token. V5 sources keep their earlier handling.
 - `strategy.default_entry_qty(fill_price)` reads the engine host's query of the
   default order size at a price (`default_entry_qty`); it used to lower to an
   undeclared function, so a script that used it did not build. It needs an

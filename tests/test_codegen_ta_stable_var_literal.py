@@ -163,8 +163,10 @@ def test_literal_declaration_cannot_retroactively_authorize_earlier_use(
     [
         "prior = p[1]",
         "read(int prior = p[1]) => prior",
-        "type Sample\n    int prior = p",
-        "type Sample\n    int prior = p[1]",
+        # A variable is not a valid record field default (TradingView CE10133), so the
+        # variable is read through the constructor instead.
+        "type Sample\n    int prior = 0\nsample = Sample.new(prior = p)",
+        "type Sample\n    int prior = 0\nsample = Sample.new(prior = p[1])",
         "enum Choice\n    First = p[1]",
         (
             "type Sample\n"
