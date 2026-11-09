@@ -95,10 +95,10 @@ def test_reference_identifier_inventory_covers_both_scalar_stores():
 # the allocator escapes authored store spellings and preserves the stores.
 # Every word can name either a string or a numeric helper local; declaration
 # bindings determine the history store even for builtin spellings.
-_INTRODUCED_WORDS = sorted(_REFERENCE_TOKENS)
+_REFERENCE_WORDS = sorted(_REFERENCE_TOKENS)
 _WORD_ROWS = [
     (name, string)
-    for name in _INTRODUCED_WORDS
+    for name in _REFERENCE_WORDS
     for string in (False, True)
 ]
 
@@ -133,7 +133,7 @@ def mutable_global_source(name, *, var=True):
     )
 
 
-@pytest.mark.parametrize("name", _INTRODUCED_WORDS)
+@pytest.mark.parametrize("name", _REFERENCE_WORDS)
 @pytest.mark.parametrize("var", [True, False], ids=["var", "reassigned"])
 @pytest.mark.parametrize("capacity", [None, 100])
 def test_every_introduced_word_can_be_a_security_payload_mutable_global(name, var, capacity):
