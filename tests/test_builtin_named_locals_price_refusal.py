@@ -116,11 +116,19 @@ def _glue_entry(diagnostic):
     )
 
 
-def _assert_keeps_the_base_outcome(source, reference, tmp_path, libraries=None):
+def _assert_keeps_the_base_outcome(source, reference, tmp_path, libraries=None,
+                                   string_join_fixed=False):
     """Assert that this checkout gives ``source`` exactly what the reference
     commit gives it: the same C++ where the reference accepts the script, the
-    same diagnostics where it refuses it."""
+    same diagnostics where it refuses it. ``string_join_fixed`` repairs, in the
+    reference's C++, the one join of a string local with its previous value
+    that the reference wrapped in std::to_string (issue #354); that site is
+    then the whole difference that is allowed."""
     expected = _reference_outcome(source, reference, tmp_path, libraries)
+    if string_join_fixed and expected[0] == "accepted":
+        from tests.test_string_local_history_concat import with_string_join_fixed
+
+        expected = ("accepted", with_string_join_fixed(expected[1]))
     try:
         cpp = transpile(source, libraries=libraries)
     except CompileError as error:
@@ -219,6 +227,7 @@ def test_price_named_string_library_local_history_keeps_the_base_outcome(
     _assert_keeps_the_base_outcome(
         _LIBRARY_SCRIPT, reference, tmp_path,
         libraries={_LIBRARY_PATH: _library_text(name)},
+        string_join_fixed=True,
     )
 
 
