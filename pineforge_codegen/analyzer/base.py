@@ -113,6 +113,7 @@ from .operators import (
     fixed_builtin_result, join_value_types, reference_value_type, resolve_operator,
     source_builtin_result,
 )
+from .callable_history_names import AUTHORED_LOCAL_NAMES
 
 
 _BUILTIN_NAMESPACE_NAMES = frozenset({
@@ -4969,7 +4970,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     type_spec = TypeSpec.udt(udt_ctor)
 
         authored_name = (node.annotations or {}).get(
-            "authored_local_names", {}
+            AUTHORED_LOCAL_NAMES, {}
         ).get(node.name, node.name)
         if (
             self._pine_version == 6

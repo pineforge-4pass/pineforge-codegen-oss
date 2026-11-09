@@ -12,7 +12,9 @@ from ..errors import Phase
 from .tables import BUILTIN_VARS
 
 
-_AUTHORED_LOCAL_NAMES = "authored_local_names"
+# The annotation key of the map from a private declaration spelling to the
+# spelling the script authored; the code generator and the analyzer read it.
+AUTHORED_LOCAL_NAMES = "authored_local_names"
 _CLONE_SUFFIX = re.compile(r"_cs|__ni")
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
@@ -112,13 +114,13 @@ def separate_builtin_callable_locals(program, bindings) -> bool:
             names[(id(node), name)] = storage
 
     bindings.rename_declarations(names)
-    authored = dict((program.annotations or {}).get(_AUTHORED_LOCAL_NAMES, {}))
+    authored = dict((program.annotations or {}).get(AUTHORED_LOCAL_NAMES, {}))
     for node, local_names in declarations:
         if bindings.budget is not None:
             bindings.budget.check(node.loc, Phase.ANALYZER)
         originals = {names[(id(node), name)]: name for name in local_names}
         node.annotations = {
-            **(node.annotations or {}), _AUTHORED_LOCAL_NAMES: originals,
+            **(node.annotations or {}), AUTHORED_LOCAL_NAMES: originals,
         }
         authored.update(originals)
         if isinstance(node, VarDecl):
@@ -133,14 +135,14 @@ def separate_builtin_callable_locals(program, bindings) -> bool:
             if node.vars:
                 node.vars = [names.get((id(node), name), name) for name in node.vars]
     program.annotations = {
-        **(program.annotations or {}), _AUTHORED_LOCAL_NAMES: authored,
+        **(program.annotations or {}), AUTHORED_LOCAL_NAMES: authored,
     }
     return True
 
 
 def authored_callable_text(program, text):
     """Restore source names only in diagnostics and input binding keys."""
-    names = (program.annotations or {}).get(_AUTHORED_LOCAL_NAMES, {})
+    names = (program.annotations or {}).get(AUTHORED_LOCAL_NAMES, {})
     if not names or text is None:
         return text
 
@@ -159,7 +161,7 @@ def authored_callable_text(program, text):
 
 def restore_callable_diagnostics(program, diagnostics) -> bool:
     """Keep private declaration spellings out of analyzer diagnostics."""
-    if not (program.annotations or {}).get(_AUTHORED_LOCAL_NAMES):
+    if not (program.annotations or {}).get(AUTHORED_LOCAL_NAMES):
         return False
     changed = False
     for diagnostic in diagnostics:

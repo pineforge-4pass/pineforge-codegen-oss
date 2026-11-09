@@ -550,7 +550,7 @@ CPP_TEMPORARY_NAMES = frozenset("""
 # than allocating against authored names. Reserve their complete spellings,
 # just as for fixed temporaries, without reserving ordinary underscore names.
 _CPP_TEMPORARY_PATTERN = re.compile(
-    r"_v\d+|_secval_\d+(?:_v\d+)?|_tuple_result_\d+|_tuple_unused_\d+|__switch_val_\d+"
+    r"_v\d+|_secval_\d+(?:_v\d+)?|_tuple_result_\d+(?:_elem_\d+)?|_tuple_unused_\d+|__switch_val_\d+"
     r"|__selection_value_\d+"
     r"|_for_(?:start|end|end_eval|step|down)_\d+"
     r"|_pf_(?:str|array|round)_a\d+|_pf_slot_open_\d+"
