@@ -219,6 +219,7 @@ _NUMBERED_NAMES = {
     "_for_step_12": "visit_stmt.py:_visit_for",
     "_for_down_12": "visit_stmt.py:_visit_for",
     "_result__ta_macd_1": "visit_stmt.py:_visit_tuple_assign",
+    "_tuple_result_0_elem_0": "visit_stmt.py:_visit_tuple_assign",
     "_pf_selection__pf_var_init_value": "visit_stmt.py:Series selection temporary",
 }
 
