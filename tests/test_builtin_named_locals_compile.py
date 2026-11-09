@@ -1,8 +1,9 @@
 """Compile the same callable-local sources used by the scope comparisons.
 
 The string-with-history rows require successful compilation for neutral and
-built-in spellings, except the requested price-field shapes that retain their
-translation-time refusal. No row here checks a value.
+built-in spellings, and no row here checks a value. The exception is a
+price-field name (here close) in the shapes typed, nested and two-sites:
+those rows pin the base's refusal instead of a compile outcome.
 """
 
 import re
@@ -11,6 +12,9 @@ import pytest
 
 from pineforge_codegen import transpile
 from tests import _compile as compile_env
+from tests.test_builtin_named_locals_price_refusal import (
+    PRICE_FIELD_NAMES, assert_price_refusal,
+)
 from tests.test_builtin_named_locals_scope import (
     _ADDITIONAL_LOCAL_SHAPES,
     _LOCAL_NAMES,
@@ -103,21 +107,35 @@ def _normalize_compiler_error(message, name):
     )
 
 
-@pytest.mark.parametrize("shape", ["typed", "reassigned", "nested", "two-sites", "chart"])
+_STRING_HISTORY_SHAPES = ["typed", "reassigned", "nested", "two-sites", "chart"]
+_STRING_HISTORY_NAMES = ("second", "close", "time")
+
+
+def _keeps_the_base_refusal(shape, name):
+    """A string price-field local read with history keeps the base's refusal."""
+    return shape in ("typed", "nested", "two-sites") and name in PRICE_FIELD_NAMES
+
+
+# These pairs run the transpiler only, so they need no compiler.
+@pytest.mark.parametrize("shape,name", [
+    pytest.param(shape, name, id=f"{shape}-{name}")
+    for shape in _STRING_HISTORY_SHAPES for name in _STRING_HISTORY_NAMES
+    if _keeps_the_base_refusal(shape, name)
+])
+def test_string_history_of_price_named_local_keeps_the_base_refusal(shape, name):
+    assert_price_refusal(_string_history_source(name, shape))
+
+
+@pytest.mark.parametrize("shape", _STRING_HISTORY_SHAPES)
 def test_string_history_compile_outcome_matches_neutral_control(shape):
     compile_env.skip_if_no_compile_env()
-    from tests.test_builtin_named_locals_price_refusal import (
-        PRICE_FIELD_NAMES, assert_price_refusal,
-    )
     control_ok, control_error = _compile_outcome(
         transpile(_string_history_source("aa", shape)), f"string-{shape}-aa",
     )
     assert control_ok, (shape, control_error)
-    for name in ("second", "close", "time"):
-        # A string price-field local read with history keeps the base's refusal.
-        if shape in ("typed", "nested", "two-sites") and name in PRICE_FIELD_NAMES:
-            assert_price_refusal(_string_history_source(name, shape))
-            continue
+    for name in _STRING_HISTORY_NAMES:
+        if _keeps_the_base_refusal(shape, name):
+            continue  # Pinned without a compiler by the refusal test above.
         subject_ok, subject_error = _compile_outcome(
             transpile(_string_history_source(name, shape)), f"string-{shape}-{name}",
         )
