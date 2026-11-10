@@ -22,6 +22,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Pine v6 now refuses an `if` or `while` condition whose numeric value comes
+  from a `ta.*` call or a built-in variable such as `strategy.position_size`,
+  as TradingView does. Use a comparison such as `ta.change(t) != 0` for a bool
+  condition. Bool overloads and Pine v5 libraries keep their existing behavior. (#361)
 - `str.format_time` now uses TradingView's documented defaults when arguments
   are omitted: `"yyyy-MM-dd'T'HH:mm:ssZ"` for the format and the exchange time
   zone (`syminfo.timezone`) for the timezone. Pass `"yyyy-MM-dd"` and `"UTC"`
