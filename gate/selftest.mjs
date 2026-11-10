@@ -1,8 +1,9 @@
-// Canary: prove the gate's checks actually catch divergences. Imports the PURE
-// comparator + verdict checker (gate/compare.mjs) so it runs in <1s without
-// loading Pyodide. Covers BOTH (a) native↔wasm parity (compareResults) and
-// (b) expected-verdict-by-corpus-dir (checkExpectedVerdict).
+// Canary for the gate's pure comparison, verdict, and runtime-identity rules.
+// These fixtures check helper behavior; actual runtime identity and whole-gate
+// parity require running the gate with initialized Pyodide.
+import assert from "node:assert/strict";
 import { checkExpectedVerdict, compareResults } from "./compare.mjs";
+import { checkRuntimeVersion } from "./runtime-version.mjs";
 
 const OK = '{"ok":true,"cpp":"X"}';
 const ERR = '{"ok":false,"error":"e","diagnostics":[]}';
@@ -35,6 +36,50 @@ const verdictCases = [
   ["ok/malformed", true, { json: "not json" }, { json: OK }, true],
 ];
 
+// --- (c) exact version identity: independent inputs, no runtime initialization ---
+const matchingVersions = ["0.0.0", "2.17.4", "41.6.2-rc.3+build.009"];
+const mismatchCases = [
+  ["observed", ["2.17.5", "2.17.4", "2.17.4"]],
+  ["target", ["2.17.4", "2.18.0", "2.17.4"]],
+  ["peer", ["2.17.4", "2.17.4", "3.0.0"]],
+  ["build-metadata", ["41.6.2+build.1", "41.6.2+build.2", "41.6.2+build.2"]],
+];
+const invalidVersions = [
+  ["missing", undefined, "<undefined>"],
+  ["null", null, "<null>"],
+  ["number", 2174, "<number>"],
+  ["boolean", true, "<boolean>"],
+  ["boxed-string", new String("2.17.4"), "<object>"],
+  ["coercible-object", { toString: () => "2.17.4" }, "<object>"],
+  ...[
+    "", " ", " 2.17.4", "2.17.4 ", "2.17.4\n", "2.\t17.4",
+    "*", "2.17.x", "^2.17.4", "~2.17.4", ">=2.17.4", "=2.17.4",
+    "2.17.4 || 3.0.0", "v2.17.4", "2.17", "2.17.4.1", "02.17.4",
+    "2.17.4-01", "2.17.4-", "2.17.4+", "2.17.4-rc..1",
+  ].map((value) => [`token ${JSON.stringify(value)}`, value, JSON.stringify(value)]),
+];
+const rejectedVersions = mismatchCases.map(([name, [observed, target, peer]]) => [
+  `mismatch-${name}`,
+  [observed, target, peer],
+  `Pyodide version identity mismatch: observed=${JSON.stringify(observed)}, target=${JSON.stringify(target)}, peer=${JSON.stringify(peer)}`,
+]);
+for (const [name, value, shown] of invalidVersions) {
+  for (const [index, field] of ["observed", "target", "peer"].entries()) {
+    const inputs = ["2.17.4", "2.17.4", "2.17.4"];
+    inputs[index] = value;
+    rejectedVersions.push([
+      `${field}-${name}`, inputs,
+      `Pyodide version identity invalid: ${field}=${shown} (expected an exact version string)`,
+    ]);
+  }
+  // Even equal invalid inputs must fail; equality alone cannot validate identity.
+  rejectedVersions.push([
+    `all-${name}`, [value, value, value],
+    "Pyodide version identity invalid: " +
+      ["observed", "target", "peer"].map((field) => `${field}=${shown} (expected an exact version string)`).join("; "),
+  ]);
+}
+
 let failed = 0;
 for (const [name, n, b, mustFlag] of cmpCases) {
   const flagged = compareResults(name, n, b) !== null;
@@ -50,8 +95,24 @@ for (const [name, expectOk, n, b, mustFlag] of verdictCases) {
     failed++;
   }
 }
+for (const version of matchingVersions) {
+  try {
+    assert.equal(checkRuntimeVersion(version, version, version), version);
+  } catch (err) {
+    console.error(`selftest FAIL (checkRuntimeVersion): matching ${version}`, err);
+    failed++;
+  }
+}
+for (const [name, inputs, message] of rejectedVersions) {
+  try {
+    assert.throws(() => checkRuntimeVersion(...inputs), { name: "Error", message });
+  } catch (err) {
+    console.error(`selftest FAIL (checkRuntimeVersion): ${name}`, err);
+    failed++;
+  }
+}
 if (failed) {
   console.error(`gate selftest: ${failed} case(s) failed`);
   process.exit(1);
 }
-console.log(`gate selftest: ${cmpCases.length} comparator + ${verdictCases.length} verdict cases OK`);
+console.log(`gate selftest: ${cmpCases.length} comparator + ${verdictCases.length} verdict + ${matchingVersions.length + rejectedVersions.length} runtime-identity helper cases OK`);

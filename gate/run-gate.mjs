@@ -14,6 +14,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkExpectedVerdict, compareResults } from "./compare.mjs";
+import { checkRuntimeVersion } from "./runtime-version.mjs";
 
 const require = createRequire(import.meta.url);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -60,10 +61,14 @@ async function main() {
   );
   const archiveBytes = readFileSync(archive);
 
-  // 2. Load Pyodide, unpack, run glue.
+  // 2. Load Pyodide and check its identity before unpacking or running glue.
   const { loadPyodide } = await import("pyodide");
   const indexURL = dirname(require.resolve("pyodide/package.json"));
   const pyodide = await loadPyodide({ indexURL });
+  const observed = pyodide.version;
+  const target = readFileSync(join(ROOT, "PYODIDE_TARGET"), "utf8").trim();
+  const peer = JSON.parse(readFileSync(join(ROOT, "npm", "package.json"), "utf8"))?.peerDependencies?.pyodide;
+  const pyodideVer = checkRuntimeVersion(observed, target, peer);
   const u8 = new Uint8Array(archiveBytes.buffer, archiveBytes.byteOffset, archiveBytes.byteLength);
   pyodide.unpackArchive(u8, "gztar", { extractDir: "/codegen" });
   pyodide.runPython(GLUE);
@@ -101,10 +106,9 @@ async function main() {
     if (v) verdictFailures.push(v);
   }
 
-  // 5. release.json (versions derived from the loaded Pyodide lock).
+  // 5. release.json (checked runtime identity and metadata from its Pyodide lock).
   const lock = require("pyodide/pyodide-lock.json");
   const codegen = readFileSync(join(ROOT, "VERSION"), "utf8").trim();
-  const pyodideVer = readFileSync(join(ROOT, "PYODIDE_TARGET"), "utf8").trim();
   const release = {
     codegen,
     pyodide: pyodideVer,
