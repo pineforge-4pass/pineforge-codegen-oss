@@ -361,21 +361,21 @@ int main() {
     ) == "ok\n"
 
 
-BASE = "db32112f46ecf351c1c21755c33d8a6531cc8160"
+BASE = "a156a7d2785c8729e54da7eb01c5d41ddd03df14"
 
 
 def _reference_cpp(source):
-    """Only use a reachable ancestor; otherwise the caller pins tokens."""
+    """Require the base ancestor and its whole translation unit."""
     repo = Path(__file__).resolve().parents[1]
     reachable = subprocess.run(
         ["git", "-C", str(repo), "merge-base", "--is-ancestor", BASE, "HEAD"],
         capture_output=True,
     )
-    if reachable.returncode:
-        return None
+    assert reachable.returncode == 0, (
+        f"required byte oracle commit {BASE} is missing or is not an ancestor"
+    )
     tree = reference_codegen(BASE)
-    if tree is None:
-        return None
+    assert tree is not None, f"required byte oracle commit {BASE} is missing"
     env = dict(os.environ, PYTHONPATH=str(tree))
     result = subprocess.run(
         [sys.executable, "-c",
@@ -390,16 +390,8 @@ def _reference_cpp(source):
 @pytest.mark.parametrize("source", [PER_BAR_RECORD, LITERAL])
 def test_unselected_neighbours_keep_base_emission(source):
     cpp = transpile(source)
-    reference = _reference_cpp(source)
-    if reference is not None:
-        assert cpp == reference
-    elif source == PER_BAR_RECORD:
-        assert "_PFArrayField<int>::alias(source)" in cpp
-        assert "_PFRetainedArray" not in cpp
-    else:
-        assert "std::vector<int> stamps" not in cpp
-        assert "std::vector<int> values" in cpp
-        assert "_PFRetainedArray" not in cpp
+    assert cpp == _reference_cpp(source)
+    assert "_PFRetainedArray" not in cpp
 
 
 @pytest.mark.parametrize("source", [
@@ -424,6 +416,39 @@ observed = chained.size()
 def test_unmeasured_lifetimes_keep_base_emission(source):
     cpp = transpile(source)
     assert "_PFRetainedArray" not in cpp
-    reference = _reference_cpp(source)
-    if reference is not None:
-        assert cpp == reference
+    assert cpp == _reference_cpp(source)
+
+
+@pytest.mark.parametrize("source", [
+    pytest.param(HEADER + '''type Book
+    array<int> stamps
+method reset(Book self) =>
+    self.stamps := array.new<int>()
+var source = array.new<int>()
+var b = Book.new(source)
+b.reset()
+observed = b.stamps.size()
+''', id="parameter-field-rebind"),
+    pytest.param(HEADER + '''type Book
+    array<int> stamps
+method duplicate(array<int> values) =>
+    values.copy()
+var source = array.new<int>()
+var b = Book.new(source)
+copied = source.duplicate()
+observed = b.stamps.size() + copied.size()
+''', id="parameter-array-copy"),
+    pytest.param(HEADER + '''type Book
+    array<int> stamps
+method portion(array<int> values) =>
+    values.slice(0, 0)
+var source = array.new<int>()
+var b = Book.new(source)
+sliced = source.portion()
+observed = b.stamps.size() + sliced.size()
+''', id="parameter-array-slice"),
+])
+def test_unresolved_callable_types_keep_base_emission(source):
+    cpp = transpile(source)
+    assert "_PFRetainedArray" not in cpp
+    assert cpp == _reference_cpp(source)
