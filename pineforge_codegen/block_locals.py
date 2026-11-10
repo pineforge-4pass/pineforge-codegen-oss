@@ -1,12 +1,13 @@
 """Declarations in the script's top-level blocks that cannot share a member.
 
-The codegen holds every declaration of the script's top level -- a direct one
-and one inside a top-level ``if`` / loop / ``switch`` block -- in one class
-member per name. Pine scopes a block's declaration to its block, so two blocks
-may declare one name with types one member cannot hold: a counter ``k = 0`` in
-one block and ``k = array.get(names, i)`` (a string) in another, a script of
-the fruit-fly probes' shape, did not compile. The codegen names each
-declaration whose type cannot share the member of the name
+The codegen initially holds declarations of the script's top level -- direct
+ones and ones inside top-level ``if`` / loop / ``switch`` blocks -- in one
+class member per name. Pine scopes a block's declaration to its block, so two
+blocks may declare one name with types one member cannot hold: a counter
+``k = 0`` in one block and a string in another. A block's ``var`` / ``varip``
+also needs separate storage from a plain declaration in a sibling block,
+which would overwrite its persistent value. The codegen selects declarations
+that need their own member
 (``CodeGen.block_locals_needing_names``, by ``decl_key``); ``transpile()``
 gives each of them, and every read of it in its block, a name of its own
 (``k__pfblk1``) and runs again (``pineforge_codegen._generate``). Scripts
@@ -36,25 +37,60 @@ def block_declarations(body: list):
     and those in its statement blocks (``if`` / loop / ``switch``, nested
     too), as ``CodeGen`` hoists them. An ``if`` or ``switch`` value's block
     keeps its declarations to itself."""
+    for decl, block in _block_declarations(body):
+        yield decl, block is not None
+
+
+def _block_declarations(body: list):
     for stmt in body:
-        yield from _declarations(stmt, False)
+        yield from _declarations(stmt, None)
 
 
-def _declarations(node, nested: bool):
+def _declarations(node, block: int | None):
     if isinstance(node, VarDecl):
-        yield node, nested
-    elif isinstance(node, IfStmt):
-        for stmt in (*node.body, *node.else_body):
-            yield from _declarations(stmt, True)
+        yield node, block
+        return
+    if isinstance(node, IfStmt):
+        bodies = (node.body, node.else_body)
     elif isinstance(node, (ForStmt, ForInStmt, WhileStmt)):
-        for stmt in node.body:
-            yield from _declarations(stmt, True)
+        bodies = (node.body,)
     elif isinstance(node, SwitchStmt):
-        for _value, body in node.cases:
-            for stmt in body:
-                yield from _declarations(stmt, True)
-        for stmt in node.default_body:
-            yield from _declarations(stmt, True)
+        bodies = [body for _value, body in node.cases] + [node.default_body]
+    else:
+        return
+    for body in bodies:
+        owner = id(body) if block is None else block
+        for stmt in body:
+            yield from _declarations(stmt, owner)
+
+
+def persistent_plain_block_keys(body: list) -> frozenset:
+    """Persistent declarations sharing a name with a plain sibling block.
+
+    Nested statements keep their outermost body's identity: a declaration
+    shadowing an ancestor in that body alone does not select either one.
+    Direct script declarations, including tuple bindings, keep their route.
+    """
+    decls = list(_block_declarations(body))
+    direct = {decl.name for decl, block in decls if block is None}
+    for stmt in body:
+        if isinstance(stmt, TupleAssign):
+            direct.update(stmt.names)
+    plain_blocks: dict[str, set[int]] = {}
+    for decl, block in decls:
+        if block is not None and not (decl.is_var or decl.is_varip):
+            plain_blocks.setdefault(decl.name, set()).add(block)
+    needing: set = set()
+    for decl, block in decls:
+        if (block is None or decl.name in direct
+                or not (decl.is_var or decl.is_varip)):
+            continue
+        siblings = plain_blocks.get(decl.name, set())
+        if len(siblings) > 1 or (siblings and block not in siblings):
+            key = decl_key(decl)
+            if key is not None:
+                needing.add(key)
+    return frozenset(needing)
 
 
 def rename_block_locals(program: Program, keys: frozenset) -> None:
