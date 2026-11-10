@@ -7,9 +7,13 @@ Reports include known compile failures as well as every unexpected compiler fail
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -37,6 +41,34 @@ ISSUE_281 = tuple(
 KNOWN_COMPILE_FAILURES = {
     "tests/fixtures/drawing_lifetime/w9dg-label-collect/strategy.pine": (
         "same class as issue #281 case 3: no is_na overload for std::string"
+    ),
+}
+MATRIX_SCHEMA_VERSION = 1
+MATRIX_GENERATOR_VERSION = "3"
+MATRIX_INPUT_PINS = {
+    "generator": (
+        "scripts/generate_compile_matrix.py",
+        "cb32efc3df5fd6b7936d78e7821fdd10227b6b0fa8257f562ab686d2354a7cfe",
+    ),
+    "spec": (
+        "tests/fixtures/generated_compile_matrix/coverage_spec.json",
+        "4a18c44b2f33f55530ed2b6e12fe45b77f1f8524e5f3f720f8617770196cedd9",
+    ),
+    "seedIndex": (
+        "tests/fixtures/generated_compile_matrix/seed-index.json",
+        "e1fe87c0f8e9a4b25980206c03d1800c4dbf3a3940b062461a10c5eacb10b867",
+    ),
+    "seed:single_line_parameter_after_comma": (
+        "tests/fixtures/generated_compile_matrix/single_line_parameter_after_comma.pine",
+        "0c42aca26fa0199fbd4547efb48fe08e4f2e789954aba075584731a2318c842d",
+    ),
+    "seed:ternary_string_missing_branch": (
+        "tests/fixtures/generated_compile_matrix/ternary_string_missing_branch.pine",
+        "9d9aac30e97db1448e8aeb392ecfb4e3ad3ce3be0ab535353acc7d4da74566c8",
+    ),
+    "seed:array_string_field_missing_predicate": (
+        "tests/fixtures/generated_compile_matrix/array_string_field_missing_predicate.pine",
+        "9cd4381f340e216579c6616108e77cf523ba625f2281b16fcde254a777911cac",
     ),
 }
 
@@ -261,7 +293,17 @@ def _sweep(paths: list[Path], *, corpus_root: Path | None = None) -> list[Result
 
 
 @pytest.fixture(scope="module")
-def sweep_results(tmp_path_factory):
+def sweep_report_dir(tmp_path_factory):
+    configured = os.environ.get("PINEFORGE_COMPILE_REPORT_DIR")
+    destination = _checked_path(
+        Path(configured) if configured else tmp_path_factory.mktemp("translate-implies-compile")
+    )
+    destination.mkdir(parents=True, exist_ok=True)
+    return destination
+
+
+@pytest.fixture(scope="module")
+def sweep_results(sweep_report_dir):
     # Setup failures happen outside all xfail-marked test bodies.
     pairing = _pairing()
     skip_if_no_compile_env()
@@ -274,11 +316,7 @@ def sweep_results(tmp_path_factory):
     started = time.monotonic()
     results: list[Result] = []
     yield results
-    configured = os.environ.get("PINEFORGE_COMPILE_REPORT_DIR")
-    destination = _checked_path(
-        Path(configured) if configured else tmp_path_factory.mktemp("translate-implies-compile")
-    )
-    destination.mkdir(parents=True, exist_ok=True)
+    destination = sweep_report_dir
     results.sort(key=lambda result: result.path)
     failures = [result for result in results if result.outcome == "compile-failed"]
     rejected = [result for result in results if result.outcome == "front-end-rejected"]
@@ -600,3 +638,452 @@ def test_engine_corpus_ratchet_uses_root_relative_labels(tmp_path, monkeypatch):
     assert [(result.path, result.outcome) for result in results] == [
         (label, "front-end-rejected") for label in labels[3::4]
     ]
+
+
+def _matrix_group(case: dict) -> str:
+    expected = case["expected"]
+    diagnostics = (
+        case["expectedDiagnosticCode"], case["expectedDiagnosticPhase"],
+        case["expectedDiagnosticHint"],
+    )
+    if (
+        case["legality"] == "valid"
+        and expected["classification"] in {"valid_intended_supported", "valid_unsupported"}
+        and expected["translation"] == expected["compile"] == "MUST_SUCCEED"
+        and diagnostics == (None, None, None)
+        and case["renderFamily"] in {"ordinary", "community_seed"}
+    ):
+        return case["renderFamily"]
+    if (
+        case["legality"] == "invalid"
+        and case["renderFamily"] == "invalid_control"
+        and expected["classification"] == "language_invalid"
+        and expected["translation"] == "MUST_REJECT_WITH_EXPECTED_PF_E"
+        and expected["compile"] == "NOT_APPLICABLE"
+        and isinstance(diagnostics[0], str)
+        and re.fullmatch(r"PF-E[0-9]{4}", diagnostics[0])
+        and isinstance(diagnostics[1], str) and diagnostics[1]
+        and isinstance(diagnostics[2], str) and diagnostics[2]
+        and isinstance(case["expectedDiagnosticMessage"], str)
+        and case["expectedDiagnosticMessage"]
+    ):
+        return "invalid_control"
+    raise ValueError("inconsistent legality, expectation, family or diagnostic fields")
+
+
+def _matrix_source(output_dir: Path, source_path: str) -> Path:
+    relative = Path(source_path)
+    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+        raise ValueError(f"sourcePath must stay below output directory: {source_path}")
+    path = output_dir / relative
+    for component in (path, *path.parents):
+        if component.is_symlink():
+            raise ValueError(f"symlink in matrix source path: {component}")
+    return _checked_path(path)
+
+
+def check_matrix_manifest(manifest, output_dir) -> list[str]:
+    """Check the reviewed interface and exact disk inputs without a compiler."""
+    problems = []
+
+    def problem(message):
+        problems.append("INCOMPLETE: incompatible matrix manifest: " + message)
+
+    if not isinstance(manifest, dict):
+        problem("manifest must be an object")
+        return problems
+    if type(manifest.get("schemaVersion")) is not int or (
+        manifest.get("schemaVersion") != MATRIX_SCHEMA_VERSION
+    ):
+        problem("schemaVersion must be integer 1")
+    if manifest.get("generatorVersion") != MATRIX_GENERATOR_VERSION:
+        problem('generatorVersion must be string "3"')
+    identities = manifest.get("inputIdentities")
+    if not isinstance(identities, dict):
+        problem("inputIdentities must be an object")
+        identities = {}
+    if set(identities) != set(MATRIX_INPUT_PINS):
+        problem("inputIdentities keys differ from reviewed inputs")
+    for identity, (relative, pinned) in MATRIX_INPUT_PINS.items():
+        recorded = identities.get(identity)
+        if recorded != pinned:
+            problem(f"inputIdentities.{identity} pin mismatch or missing")
+        try:
+            path = _checked_path(ROOT / relative)
+            print(f"Matrix input file: {path}", flush=True)
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        except (OSError, ValueError) as error:
+            problem(f"inputIdentities.{identity} input unavailable: {error}")
+            continue
+        if actual != pinned or actual != recorded:
+            problem(f"inputIdentities.{identity} differs from real file sha256")
+        header = {"generator": "generatorSourceHash", "spec": "specSourceHash"}.get(identity)
+        if header is not None and (manifest.get(header) != pinned or manifest.get(header) != actual):
+            problem(f"{header} pin mismatch, missing or differs from real file sha256")
+
+    for section, fields in (
+        ("generation", ("status",)),
+        ("coverage", ("status", "inventoryStatus", "positiveDomainStatus", "positiveCompileCoverage")),
+        ("results", ("status",)),
+        ("consumerContract", ("status", "positive", "invalidControl", "failureRule", "verdictRule")),
+    ):
+        value = manifest.get(section)
+        if not isinstance(value, dict):
+            problem(f"{section} must be an object")
+        elif any(not isinstance(value.get(field), str) or not value[field] for field in fields):
+            problem(f"{section} is missing required status/contract fields")
+    cases = manifest.get("cases")
+    coverage = manifest.get("coverage")
+    if not isinstance(cases, list) or not cases:
+        problem("cases must be a nonempty list")
+        return problems
+    if not isinstance(coverage, dict):
+        return problems
+    groups = {"ordinary": [], "community_seed": [], "invalid_control": []}
+    ids = []
+    paths = []
+    for case in cases:
+        if not isinstance(case, dict) or not isinstance(case.get("id"), str) or not case["id"]:
+            problem("case has missing or invalid id")
+            continue
+        name = case["id"]
+        ids.append(name)
+        try:
+            groups[_matrix_group(case)].append(name)
+        except (KeyError, TypeError, ValueError) as error:
+            problem(f"{name}: case classification: {error}")
+        try:
+            source = _matrix_source(Path(output_dir), case["sourcePath"])
+            paths.append(source)
+            print(f"Matrix source file: {source}", flush=True)
+            actual = hashlib.sha256(source.read_bytes()).hexdigest()
+            if case.get("sourceSha256") != actual:
+                problem(f"{name}: sourceSha256 differs from source bytes")
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            problem(f"{name}: source unavailable: {error}")
+    if len(set(ids)) != len(ids):
+        problem("duplicate case ids")
+    if len(set(paths)) != len(paths):
+        problem("duplicate source paths")
+    ordinary = len(groups["ordinary"])
+    controls = len(groups["invalid_control"])
+    seeds = len(groups["community_seed"])
+    for field, actual in (
+        ("positiveUnionCount", ordinary), ("positiveEmittedCount", ordinary),
+        ("invalidControlCount", controls), ("seedCount", seeds),
+        ("ordinarySelectedCount", ordinary + controls),
+        ("ordinaryEmittedCount", ordinary + controls), ("totalEmittedCount", len(cases)),
+    ):
+        if type(coverage.get(field)) is not int or coverage[field] != actual:
+            problem(f"coverage.{field} does not match computed case count {actual}")
+    if sorted(groups["ordinary"]) != coverage.get("positiveUnionCaseIds"):
+        problem("coverage.positiveUnionCaseIds differs from ordinary positives")
+    specification = manifest.get("specification")
+    if not isinstance(specification, dict):
+        problem("specification is missing")
+    else:
+        required_seeds = specification.get("requiredSeeds")
+        if (
+            not isinstance(required_seeds, list)
+            or any(not isinstance(seed, str) for seed in required_seeds)
+            or sorted(groups["community_seed"]) != sorted(required_seeds)
+        ):
+            problem("community seeds differ from specification.requiredSeeds")
+        declared_controls = specification.get("invalidControls")
+        if not isinstance(declared_controls, list) or controls != len(declared_controls):
+            problem("invalid control count differs from specification.invalidControls")
+    producer_results = manifest.get("results", {})
+    if not isinstance(producer_results, dict) or (
+        not isinstance(producer_results.get("cases"), dict)
+        or set(producer_results["cases"]) != set(ids)
+    ):
+        problem("results.cases does not contain every case exactly once")
+    return problems
+
+
+def _matrix_phase(outcome=None, diagnostic=None, *, diagnostics=None):
+    return {
+        "outcome": outcome, "firstDiagnostic": diagnostic,
+        "diagnostics": diagnostics, "exitCode": None,
+    }
+
+
+def _matrix_selection(manifest):
+    groups = {"ordinary": [], "community_seed": [], "invalid_control": [], "unclassified": []}
+    cases = manifest.get("cases", [])
+    for case in cases if isinstance(cases, list) else []:
+        if not isinstance(case, dict):
+            continue
+        try:
+            if not isinstance(case.get("id"), str) or not case["id"]:
+                raise ValueError("missing or invalid case id")
+            group = _matrix_group(case)
+        except (KeyError, TypeError, ValueError):
+            group = "unclassified"
+        groups[group].append(case)
+    positives = sorted(
+        groups["ordinary"] + groups["community_seed"], key=lambda case: case["id"],
+    )
+    selected_ids = set(_shard([case["id"] for case in positives]))
+    selected = [case for case in positives if case["id"] in selected_ids]
+    controls = sorted(groups["invalid_control"], key=lambda case: case["id"])
+    return groups, selected, controls
+
+
+@pytest.fixture(scope="module")
+def generated_matrix(tmp_path_factory, sweep_report_dir, request):
+    output = tmp_path_factory.mktemp("generated-compile-matrix") / "packet"
+    report = {
+        "shard": int(os.environ.get("PINEFORGE_COMPILE_SHARD", "0")),
+        "shards": int(os.environ.get("PINEFORGE_COMPILE_SHARDS", "1")),
+        "generator": {"exitCode": None, "stderr": None},
+        "producer": None, "cases": [],
+        "consumer": {"status": "INCOMPLETE", "reasons": ["generation has not completed"]},
+    }
+
+    def retain():
+        reasons = report["consumer"]["reasons"]
+        for row in report["cases"]:
+            if row["translation"]["outcome"] is None or (
+                row["group"] != "invalid_control" and row["compile"]["outcome"] is None
+            ):
+                reasons.append(f"{row['id']}: missing result or unexecuted compile")
+        report["counts"] = {
+            group: sum(row["group"] == group for row in report["cases"])
+            for group in ("ordinary", "community_seed", "invalid_control")
+        }
+        (sweep_report_dir / "generated-matrix-results.json").write_text(
+            json.dumps(report, indent=2) + "\n", encoding="utf-8",
+        )
+
+    # Retain incomplete evidence even if generator setup, admission or native setup fails.
+    request.addfinalizer(retain)
+    try:
+        generation = subprocess.run(
+            [
+                sys.executable, str(ROOT / MATRIX_INPUT_PINS["generator"][0]),
+                "--spec", str(ROOT / MATRIX_INPUT_PINS["spec"][0]),
+                "--output-dir", str(output),
+            ],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+    except OSError as error:
+        report["consumer"]["reasons"] = [f"generator unavailable: {error}"]
+        pytest.fail(f"INCOMPLETE: matrix generator unavailable: {error}", pytrace=False)
+    report["generator"] = {"exitCode": generation.returncode, "stderr": generation.stderr}
+    try:
+        manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as error:
+        report["consumer"]["reasons"] = [f"manifest unavailable: {error}"]
+        pytest.fail(
+            f"INCOMPLETE: matrix generator exit={generation.returncode}; "
+            f"manifest unavailable: {error}\n{generation.stderr}", pytrace=False,
+        )
+    problems = check_matrix_manifest(manifest, output)
+    selected = controls = []
+    if isinstance(manifest, dict):
+        coverage = manifest.get("coverage")
+        producer_results = manifest.get("results")
+        report["producer"] = {
+            "generation": manifest.get("generation"),
+            "coverage": ({
+                key: value for key, value in manifest.get("coverage", {}).items()
+                if key == "status" or key.endswith("Status") or key == "positiveCompileCoverage"
+            } if isinstance(coverage, dict) else coverage),
+            "results": {
+                "status": producer_results.get("status") if isinstance(producer_results, dict) else None,
+            },
+            "consumerContract": manifest.get("consumerContract"),
+        }
+        groups, selected, controls = _matrix_selection(manifest)
+        report["matrixCounts"] = {group: len(cases) for group, cases in groups.items()}
+        # Keep unavailable sources and unexecuted cases visible even on admission failure.
+        for case in controls + selected + groups["unclassified"]:
+            report["cases"].append({
+                "id": case.get("id"), "sourceSha256": case.get("sourceSha256"),
+                "group": (
+                    "unclassified" if case in groups["unclassified"] else _matrix_group(case)
+                ),
+                "shard": report["shard"], "shards": report["shards"],
+                "translation": _matrix_phase(), "compile": _matrix_phase(),
+                "diagnostics": [], "failure": None,
+            })
+    report["consumer"]["reasons"] = list(problems)
+    if generation.returncode != 0:
+        reason = f"matrix generator exit={generation.returncode}\n{generation.stderr}"
+        report["consumer"]["reasons"].append(reason)
+        pytest.fail("INCOMPLETE: " + reason, pytrace=False)
+    if problems:
+        pytest.fail("\n".join(problems), pytrace=False)
+    for field in ("status", "inventoryStatus"):
+        value = manifest["coverage"][field]
+        if value != "COMPLETE":
+            report["consumer"]["reasons"].append(f"producer coverage.{field}={value}")
+    # The public compile helper does not expose all native identities or raw success receipts.
+    report["consumer"]["reasons"].append(
+        "native command/version, input identities and raw exit receipts are unavailable "
+        "through the public compile helper; no complete verification is claimed"
+    )
+    report["nativeReceipts"] = {
+        key: None for key in (
+            "codegenIdentity", "engineIdentity", "compilerIdentity", "headersIdentity",
+            "eigenIdentity", "generatedHeadersIdentity",
+        )
+    }
+    return {
+        "manifest": manifest, "output": output, "report": report,
+        "positives": selected, "controls": controls,
+        "rows": {row["id"]: row for row in report["cases"]},
+    }
+
+
+def _matrix_translate(case, generated_matrix):
+    row = generated_matrix["rows"][case["id"]]
+    try:
+        source = _matrix_source(generated_matrix["output"], case["sourcePath"]).read_bytes()
+        if hashlib.sha256(source).hexdigest() != case["sourceSha256"]:
+            raise ValueError("sourceSha256 differs from source bytes before translation")
+        cpp = transpile(source.decode("utf-8"), filename=case["id"])
+    except CompileError as error:
+        row["diagnostics"] = [
+            {
+                "code": diagnostic.code, "phase": diagnostic.phase.value.lower(),
+                "message": diagnostic.message, "hint": diagnostic.hint,
+            }
+            for diagnostic in error.diagnostics
+        ]
+        row["translation"] = _matrix_phase(
+            "REJECTED", (str(error).splitlines() or [type(error).__name__])[0],
+            diagnostics=str(error),
+        )
+        return None
+    except Exception as error:
+        row["translation"] = _matrix_phase(
+            "ERROR", f"{type(error).__name__}: {(str(error).splitlines() or [''])[0]}",
+            diagnostics=str(error),
+        )
+        return None
+    row["translation"] = _matrix_phase("SUCCEEDED")
+    return cpp
+
+
+@pytest.fixture(scope="module")
+def generated_matrix_controls(generated_matrix):
+    for case in generated_matrix["controls"]:
+        row = generated_matrix["rows"][case["id"]]
+        _matrix_translate(case, generated_matrix)
+        diagnostics = row["diagnostics"]
+        if (
+            row["translation"]["outcome"] != "REJECTED" or not diagnostics
+            or diagnostics[0]["code"] != case["expectedDiagnosticCode"]
+            or diagnostics[0]["phase"] != case["expectedDiagnosticPhase"]
+        ):
+            row["failure"] = (
+                f"{case['id']}: expected {case['expectedDiagnosticCode']} "
+                f"phase={case['expectedDiagnosticPhase']}; "
+                f"got {row['translation']['outcome']} {diagnostics} "
+                f"{row['translation']['firstDiagnostic']}"
+            )
+            generated_matrix["report"]["consumer"]["reasons"].append(row["failure"])
+            # The producer contract stops execution at the first failed invalid control.
+            pytest.fail(row["failure"], pytrace=False)
+    return generated_matrix
+
+
+def test_generated_matrix_invalid_controls(generated_matrix_controls):
+    assert all(
+        row["translation"]["outcome"] == "REJECTED"
+        for row in generated_matrix_controls["report"]["cases"]
+        if row["group"] == "invalid_control"
+    )
+
+
+@pytest.mark.parametrize("family", ["ordinary", "community_seed"])
+def test_generated_matrix_positive_translates_and_compiles(
+    family, generated_matrix_controls, sweep_results,
+):
+    matrix = generated_matrix_controls
+    failures = []
+    for case in matrix["positives"]:
+        if case["renderFamily"] != family:
+            continue
+        row = matrix["rows"][case["id"]]
+        cpp = _matrix_translate(case, matrix)
+        if cpp is not None:
+            try:
+                compile_cpp(cpp, label=case["id"], extra_flags=STRATEGY_FP_FLAGS)
+            except AssertionError as error:
+                row["compile"] = _matrix_phase(
+                    "FAILED", _first_error(error),
+                    diagnostics=getattr(error, "diagnostics", str(error)),
+                )
+            except (pytest.skip.Exception, pytest.fail.Exception, Exception) as error:
+                row["compile"] = _matrix_phase(
+                    "INCOMPLETE", f"{type(error).__name__}: {error}", diagnostics=str(error),
+                )
+            else:
+                row["compile"] = _matrix_phase("SUCCEEDED")
+        if row["translation"]["outcome"] != "SUCCEEDED" or row["compile"]["outcome"] != "SUCCEEDED":
+            row["failure"] = (
+                f"{case['id']}: translation={row['translation']['outcome']} "
+                f"{row['translation']['firstDiagnostic']}; "
+                f"compile={row['compile']['outcome']} {row['compile']['firstDiagnostic']}"
+            )
+            failures.append(row["failure"])
+    matrix["report"]["consumer"]["reasons"].extend(failures)
+    assert not failures, "\n".join(failures)
+
+
+def test_generated_matrix_manifest_is_compatible(generated_matrix):
+    assert check_matrix_manifest(generated_matrix["manifest"], generated_matrix["output"]) == []
+
+
+def test_generated_matrix_shards_cover_every_positive_once(generated_matrix, monkeypatch):
+    manifest = generated_matrix["manifest"]
+    expected = sorted(
+        case["id"] for case in manifest["cases"]
+        if _matrix_group(case) in {"ordinary", "community_seed"}
+    )
+    collected = []
+    monkeypatch.setenv("PINEFORGE_COMPILE_SHARDS", "4")
+    for index in range(4):
+        monkeypatch.setenv("PINEFORGE_COMPILE_SHARD", str(index))
+        _, positives, controls = _matrix_selection(manifest)
+        ids = [case["id"] for case in positives]
+        assert ids == expected[index::4]
+        assert all(_matrix_group(case) == "invalid_control" for case in controls)
+        collected.extend(ids)
+    assert sorted(collected) == expected
+    assert len(set(collected)) == len(collected)
+
+
+@pytest.mark.parametrize("mutation,expected_problem", [
+    ("old-generator", "generatorVersion must be"),
+    ("string-schema", "schemaVersion must be"),
+    ("boolean-schema", "schemaVersion must be"),
+    ("deleted-pin", "generatorSourceHash pin mismatch"),
+    ("changed-pin", "inputIdentities.seedIndex pin mismatch"),
+    ("changed-source-hash", "sourceSha256 differs from source bytes"),
+    ("deleted-case", "coverage.totalEmittedCount does not match"),
+    ("changed-group-count", "coverage.positiveUnionCount does not match"),
+])
+def test_generated_matrix_manifest_mutations(generated_matrix, mutation, expected_problem):
+    manifest = copy.deepcopy(generated_matrix["manifest"])
+    if mutation == "old-generator":
+        manifest["generatorVersion"] = "2"
+    elif mutation == "string-schema":
+        manifest["schemaVersion"] = "1"
+    elif mutation == "boolean-schema":
+        manifest["schemaVersion"] = True
+    elif mutation == "deleted-pin":
+        del manifest["generatorSourceHash"]
+    elif mutation == "changed-pin":
+        manifest["inputIdentities"]["seedIndex"] = "0" * 64
+    elif mutation == "changed-source-hash":
+        manifest["cases"][0]["sourceSha256"] = "0" * 64
+    elif mutation == "deleted-case":
+        manifest["cases"].pop()
+    elif mutation == "changed-group-count":
+        manifest["coverage"]["positiveUnionCount"] += 1
+    problems = check_matrix_manifest(manifest, generated_matrix["output"])
+    assert any(expected_problem in problem for problem in problems), problems

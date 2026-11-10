@@ -122,6 +122,26 @@ or a value other than 40 hex characters fails sweep setup. In `pinned` mode the
 engine SHA must also equal the pin; `floating` skips only that equality. Optional
 runs record `unrecorded` for the pin and for an unavailable or malformed SHA.
 
+## Generated compile matrix consumer
+
+The sweep module generates a fresh matrix in a pytest temporary directory.
+It requires integer schema version 1, string generator version `"3"`, and
+the six reviewed input hashes, compared with the manifest and real files.
+Every emitted source digest and each declared group count is checked.
+Compiler-free mutation rows exercise the same manifest admission function.
+Ordinary positives and community seeds share one sorted case-id list;
+the existing shard function selects index K modulo the shard count.
+Separate positive rows for the two render families require public translation
+and `compile_cpp` with `STRATEGY_FP_FLAGS`, retaining every attempted failure.
+Invalid controls run in every shard and require their intended diagnostic code
+and phase. A failed control stops subsequent generated execution.
+`generated-matrix-results.json` shares the sweep report directory and records
+each selected source hash, phase outcome, first diagnostic, and shard identity.
+Pending or skipped work remains incomplete; unavailable native receipts stay null.
+Producer coverage, inventory, results and generation statuses are preserved.
+The consumer status remains `INCOMPLETE`; positive execution cannot resolve
+the producer's unresolved inventory or establish complete verification.
+
 The required `test-check` depends on the full pytest and compile matrices.
 An unexpected compile failure, strict XPASS, missing required input, or failed
 checkout therefore prevents that check from succeeding. A skipped compile job
