@@ -1614,9 +1614,9 @@ class TaSiteHelper:
         string literals are spelled, that this module lowers instead
         (``_ta_length_literal_facts``): anything beside an input.string
         choice, and an input.string choice of a parameter that is not known
-        to be an int -- a float, or one ``_ta_ctor_param`` does not know (a
-        VWAP band multiplier, ``math.sum``'s length) -- since the runtime
-        reset casts its expression to a length."""
+        to be an int -- a float (a VWAP band multiplier among them), or one
+        ``_ta_ctor_param`` does not know (``math.sum``'s length) -- since the
+        runtime reset casts its expression to a length."""
         newly, outside = self._ta_length_literal_facts(arg, inline)
         if not newly:
             return False
@@ -1910,7 +1910,10 @@ class TaSiteHelper:
         from ..analyzer.tables import TA_MULTI_CTOR, TA_PERIOD_ARG
         from ..signatures import TA_FUNCTIONS
         family = self._ta_site_function(site)
-        if family in TA_MULTI_CTOR:
+        if site.class_name in ("ta::VWAPBands", "_PFAnchoredVWAPBands"):
+            # Both analyzer dispatches construct bands from stdev_mult only.
+            indices = list(TA_MULTI_CTOR["vwap_anchored_bands"])
+        elif family in TA_MULTI_CTOR:
             indices = list(TA_MULTI_CTOR[family])
             if family in ("pivothigh", "pivotlow") and len(site.ctor_args) == 2:
                 indices = [1, 2]
@@ -1948,7 +1951,9 @@ class TaSiteHelper:
             arg = site.ctor_args[position]
             # The live input first: a compile-time resolution of an input-backed
             # argument is only its default (the constructor's placeholder).
-            value = self._runtime_ctor_arg_for_reset(arg)
+            param = self._ta_ctor_param(site, position)
+            pine_type = param.pine_type if param is not None else PineType.INT
+            value = self._runtime_ctor_arg_for_reset(arg, pine_type)
             if value is None:
                 resolved = self._resolve_ta_ctor_arg(arg)
                 if self._is_compile_time_value(resolved):

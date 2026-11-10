@@ -283,6 +283,9 @@ you delete or weaken the special case, the test will tell you.
    (`_collect_known_var`), where the reset read the alias's own member
    before the body set it, an EMA of length 0 for the whole run
    (`tests/test_e2e_alias_ta_length.py`, tapes `fixtures/alias_len_tv`).
+   Where a runtime constructor argument was narrowed to an integer, a float
+   signature slot instead retains its fraction, including VWAP band
+   multipliers; integer slots keep their narrowing and preserve `na`.
 14. **String escapes are the Pine manual's.** The lexer (`_read_quoted`)
    reads `\n` / `\t` as U+000A / U+0009 and `\\`, `\"`, `\'` as the
    character; any other `\X` reads as `X` ("the character's meaning does
