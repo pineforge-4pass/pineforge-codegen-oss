@@ -1,0 +1,948 @@
+{
+  "schemaVersion": 1,
+  "draftRevision": "2026-10-30.3",
+  "status": "DRAFT",
+  "purpose": "Full applicable statement/layout/value-type core coverage plus deterministic all-axis pairwise coverage; every valid positive source must translate and compile against the paired engine.",
+  "bounds": {
+    "candidate100000": 100000,
+    "ordinary512": 512,
+    "seeds3": 3,
+    "total515": 515
+  },
+  "axes": [
+    {
+      "name": "statement_kind",
+      "levels": [
+        "if",
+        "if_else",
+        "ternary",
+        "switch",
+        "for",
+        "while",
+        "function_definition",
+        "method",
+        "var",
+        "varip",
+        "tuple_return"
+      ]
+    },
+    {
+      "name": "body_layout",
+      "levels": [
+        "single_line",
+        "indented"
+      ]
+    },
+    {
+      "name": "primitive_type",
+      "levels": [
+        "int",
+        "float",
+        "bool",
+        "string",
+        "color"
+      ]
+    },
+    {
+      "name": "value_shape",
+      "levels": [
+        "scalar",
+        "array",
+        "map",
+        "matrix",
+        "udt_field_scalar",
+        "udt_field_array",
+        "udt_field_map",
+        "udt_field_matrix"
+      ]
+    },
+    {
+      "name": "missing_value_position",
+      "levels": [
+        "none",
+        "branch_order",
+        "return",
+        "initializer",
+        "argument",
+        "collection_handle",
+        "collection_element",
+        "udt_field"
+      ]
+    },
+    {
+      "name": "missing_predicate_target",
+      "levels": [
+        "none",
+        "container_handle",
+        "container_element",
+        "udt_field_container"
+      ]
+    },
+    {
+      "name": "map_key_type",
+      "levels": [
+        "none",
+        "int",
+        "float",
+        "bool",
+        "string",
+        "color",
+        "array",
+        "map",
+        "matrix",
+        "udt"
+      ]
+    }
+  ],
+  "classificationPolicy": {
+    "evidencePrecedence": [
+      "tv_observed",
+      "pine_documentation",
+      "implementation_observation"
+    ],
+    "defaultClassification": "valid",
+    "defaultExpectedOutcome": "valid_intended_supported",
+    "constraintEvidenceDefault": "pine_documentation",
+    "constraintFactField": "fact",
+    "compatibilityRule": "schemaVersion remains 1, but draftRevision 2026-10-30.3 requires these policy fields. A consumer that cannot implement them must report incompatible input, never ignore them and apply revision .2 semantics.",
+    "resolution": "Resolve evidence for the same semantic fact at the highest available tier. Conflicting evidence at that tier is unresolved. Across independent facts apply inapplicable, then invalid, then unresolved, then valid. A valid role never cancels a restriction on another role.",
+    "implementationRule": "Implementation observations record actual behavior only. They cannot establish language invalidity, remove a positive target, or convert a current failure into a desired refusal. An otherwise unclassified input is valid and MUST translate AND compile.",
+    "tvRule": "A real existing TV observation may establish a language fact with its source/receipt provenance. It never populates this matrix's unmeasured TV result. Issue-author claims are provenance, not tv_observed receipts.",
+    "missingEvidenceRule": "An explicitly named evidence conflict or missing diagnostic remains visible as unresolved evidence. Never invent an expected PF-E code or report a constant successful refusal."
+  },
+  "layoutApplicability": [
+    {
+      "statementKinds": ["if", "if_else"],
+      "applicable": ["single_line", "indented"],
+      "singleLineRole": "One physical local-block line per branch under the required indented if/else headers; comma-separated statements may share that line. This is not a body placed after the if condition.",
+      "indentedRole": "An indented local block with its statements on separate lines.",
+      "languageBasis": "Pine v6 conditional structures and local-block grammar; existing arm_commas.pine and its recorded TV tape include a one-line if/else local block.",
+      "reference": "tests/fixtures/tail_f_tv/README.md"
+    },
+    {
+      "statementKinds": ["switch"],
+      "applicable": ["single_line", "indented"],
+      "singleLineRole": "Each case/default body follows its => on the arm line; the switch header and arms retain required newlines and indentation.",
+      "indentedRole": "Each arm's body is on indented lines after =>.",
+      "languageBasis": "Pine v6 switch arm local blocks; existing arm_commas.pine and arm_commas_decl.pine have recorded TV tapes.",
+      "reference": "tests/fixtures/tail_f_tv/README.md"
+    },
+    {
+      "statementKinds": ["for", "while"],
+      "applicable": ["indented"],
+      "inapplicable": ["single_line"],
+      "languageBasis": "Pine v6 loop syntax requires the loop body to be an indented local block; no same-header-line body is requested.",
+      "reference": "https://www.tradingview.com/pine-script-docs/language/loops/"
+    },
+    {
+      "statementKinds": ["function_definition", "method", "tuple_return"],
+      "applicable": ["single_line", "indented"],
+      "singleLineRole": "A real function/method body, including a tuple expression for tuple_return, follows => on the definition line.",
+      "indentedRole": "The function/method body or tuple return is in the indented local block after =>.",
+      "languageBasis": "Pine v6 user-defined functions, methods and tuple-return syntax.",
+      "reference": "https://www.tradingview.com/pine-script-docs/language/user-defined-functions/"
+    },
+    {
+      "statementKinds": ["ternary", "var", "varip"],
+      "applicable": ["single_line", "indented"],
+      "singleLineRole": "A complete ternary-bearing statement or var/varip declaration on one line in global statement scope.",
+      "indentedRole": "The same selected expression/declaration occurs as a statement inside a valid enclosing indented local block; no body is invented for the expression/declaration itself.",
+      "languageBasis": "Pine v6 ternary expressions, declaration modes and local statement scopes; the absence of a declaration body does not exclude its statement layout.",
+      "reference": "https://www.tradingview.com/pine-script-docs/language/variable-declarations/"
+    }
+  ],
+  "missingValueSemantics": {
+    "none": "No explicit typed missing-value insertion is selected; a separate predicate target can still exercise a handle or element.",
+    "branch_order": "Exercise both missing-first and missing-last arms within the same case, preserving the selected value shape and leaf/payload type.",
+    "return": "A selected value returned from an actual helper or applicable block; collections use a missing handle, scalars use a missing leaf.",
+    "initializer": "A typed declaration initialized with = na for the selected scalar or collection handle, including one read through a UDT field. This remains a distinct source construct and coverage obligation from a later missing collection-handle reassignment.",
+    "argument": "An explicit typed missing value in a real call's argument slot; an omitted required argument in an invalid control is a separate invalidInputFact.",
+    "collection_handle": "Construct the selected array/map/matrix as present, then assign na to its existing handle with := before reading it as the selected value. A UDT collection starts with a present field and then uses holder.value := na. primitive_type still records the payload type. This is never an alias of initializer; a name or comment difference earns no distinction.",
+    "collection_element": "A typed missing payload element stored in the selected collection, distinct from a missing handle.",
+    "udt_field": "A missing field value: scalar leaf for udt_field_scalar or collection handle for udt_field_array/map/matrix.",
+    "predicateTargets": {
+      "none": "No additional missing-value predicate target is selected.",
+      "container_handle": "Apply na() to the selected container handle, including an alias of a UDT-held container.",
+      "container_element": "Apply na() to an actual payload read from the selected container; a bool leaf has no na() overload.",
+      "udt_field_container": "Apply na() directly to the selected UDT's array/map/matrix field."
+    }
+  },
+  "enumerationPolicy": {
+    "mode": "core_full_cross_union_all_axes_pairwise",
+    "coreAxes": ["statement_kind", "body_layout", "primitive_type"],
+    "pairwiseAxes": ["statement_kind", "body_layout", "primitive_type", "value_shape", "missing_value_position", "missing_predicate_target", "map_key_type"],
+    "seed": "2026-10-30.3",
+    "seedUse": "SHA-256 of UTF-8 seed + LF + canonical named-axis JSON ranks pairwise tie candidates; hash collisions use declared axis/level order. No host PRNG, time or object identity is an input.",
+    "completionRule": "For each applicable core triple and each two-axis level pair, seek the lexicographically first complete valid assignment in declared axis/level order using the declarative constraints. Prune partial incompatible assignments; do not construct or require the full seven-axis Cartesian metadata table. Retain unsatisfiable and unresolved reasons by tuple/pair.",
+    "coreRule": "A is one canonical valid completion for every applicable core triple. All requested statement kinds require ordinary positive rows. Missing completions and zero-form counts are incomplete, never silently excluded.",
+    "pairTargetRule": "A pair target is a two-axis level pair with a valid complete extension under the language constraints, independent of current implementation behavior. Record every pair as positive target, inapplicable, invalid-only, or unresolved with evidence; no unresolved pair counts as achieved.",
+    "pairInventoryRule": "If any valid extension exists, classify the pair positive_target and retain its witness. Otherwise an unresolved extension makes it unresolved; otherwise an applicable invalid extension makes it invalid_only; otherwise it is inapplicable. Retain matched constraint ids and reasons. Do not decide satisfiability from only the selected candidate pool.",
+    "candidateRule": "The candidate pool is the deduplicated union of core completions, one canonical completion for each positive pair target, and one canonical completion for each positive input fact. candidateCount counts these actual complete assignments, not the raw Cartesian product or partial search nodes. candidateCount plus the explicit invalid controls and required seeds must not exceed candidate100000.",
+    "structuralBoundRule": "Derive a finite upper bound from the product of core-axis sizes, the sum of two-axis size products, the sum of axis sizes, the number of statement kinds and valid constraints, and explicit control/seed counts. Record that bound separately from actual counts. No full seven-axis product table is required.",
+    "pairwiseRule": "B is a deterministic greedy cover of all positive target pairs and positive input facts from that pool, independently of A. Choose maximum uncovered-pair gain, then maximum uncovered-positive-fact gain, then the seeded SHA-256 rank, then declared axis/level order. Stop only when both uncovered sets are empty or no gain is possible; the latter is incomplete.",
+    "unionRule": "Deduplicate A and B by the complete ordered axis tuple and ordinary render family. Preserve both membership flags and selection orders. The emitted set is the positive union plus explicit invalid controls plus exactly the three mandatory seeds; source listing order is render family then stable id.",
+    "countRule": "Compute coreTupleCount, coreCaseCount, pairwiseCaseCount, overlapCaseCount and positiveUnionCount separately from actual sets. positiveUnionCount = coreCaseCount + pairwiseCaseCount - overlapCaseCount. ordinarySelectedCount = positiveUnionCount + invalidControlCount; totalEmittedCount = ordinarySelectedCount + seedCount.",
+    "capRule": "ordinarySelectedCount <= ordinary512 and seedCount == seeds3 and totalEmittedCount <= total515. Explicit invalid controls consume ordinary slots. Any conflict reports actual counts and uncovered targets; it cannot enlarge caps, truncate, filter present failures, or shrink an axis.",
+    "coverageLimit": "The core is a full applicable three-axis cross only. B proves two-way coverage across all seven axes; neither establishes the seven-axis cross, other higher-order interactions, runtime parity or TV equivalence."
+  },
+  "inputFactPolicy": {
+    "positive": "A covers all applicable core triples. B covers positive facts: each axis level with a valid extension, each requested statement form, and each classification=valid constraint with a valid extension. Every positive case also has source/render/provenance obligations. Seeds and invalid controls cannot discharge positive pairs, facts or core tuples.",
+    "positiveFactKinds": ["axis_level", "statement_form", "valid_constraint"],
+    "positiveFactIdentity": "axis_level has axis and level; statement_form has statement_kind; valid_constraint has constraintId. A fact is achieved only by an emitted ordinary positive row whose complete axes satisfy it. Sort facts by kind, then declared axis/level order or constraint declaration order.",
+    "sourceObligations": ["selected_axis_roles_present_in_source", "real_public_translation_required", "paired_header_compile_required", "exact_source_hash", "validity_provenance_separate_from_tv_result"],
+    "explicitInvalid": "Only invalidControls are emitted expected-refusal inputs. Their ids, exact source, intended PF-E code, catalog source and test source are required facts; they never discharge positive pairs.",
+    "inapplicableInventory": "Keep requested levels, layout applicability, constraints and the reasons for combinations with no requested role. Inventory acknowledgement is not an emitted positive fact or a positive pair.",
+    "unresolvedEvidence": "Keep exact unresolved tuple/pair/role selectors and missing source or diagnostic evidence separately. They cannot discharge positive facts or establish a refusal. Report coverage completeness for the resolved positive domain separately from unresolved overall inventory.",
+    "invalidInventory": "Language-invalid roles outside the small explicit control set remain inventoried with their evidence. Do not enumerate the full invalid cross or demand positive coverage for invalid-only map-key levels."
+  },
+  "constraints": [
+    {
+      "id": "loops_require_indented_body",
+      "fact": "layout",
+      "matches": {
+        "statement_kind": ["for", "while"],
+        "body_layout": ["single_line"]
+      },
+      "classification": "inapplicable",
+      "reason": "The loop form has no same-header-line body; retain this inventory cell without removing indented for/while rows.",
+      "languageBasis": "Pine v6 loop local-block grammar; see layoutApplicability."
+    },
+    {
+      "id": "collection_positions_require_collection_shape",
+      "fact": "missing_position",
+      "matches": {
+        "value_shape": [
+          "scalar",
+          "udt_field_scalar"
+        ],
+        "missing_value_position": [
+          "collection_handle",
+          "collection_element"
+        ]
+      },
+      "classification": "inapplicable",
+      "reason": "A scalar value has no collection handle or collection element position.",
+      "languageBasis": "Pine v6 type and member grammar."
+    },
+    {
+      "id": "udt_field_position_requires_udt_field_shape",
+      "fact": "missing_position",
+      "matches": {
+        "value_shape": [
+          "scalar",
+          "array",
+          "map",
+          "matrix"
+        ],
+        "missing_value_position": [
+          "udt_field"
+        ]
+      },
+      "classification": "inapplicable",
+      "reason": "The selected value is not a UDT field.",
+      "languageBasis": "Pine v6 user-defined type field access grammar."
+    },
+    {
+      "id": "container_predicates_require_container_shape",
+      "fact": "predicate_target",
+      "matches": {
+        "value_shape": [
+          "scalar",
+          "udt_field_scalar"
+        ],
+        "missing_predicate_target": [
+          "container_handle",
+          "container_element",
+          "udt_field_container"
+        ]
+      },
+      "classification": "inapplicable",
+      "reason": "This row does not select a container on which a container missing-value predicate can operate.",
+      "languageBasis": "Pine v6 na() target typing."
+    },
+    {
+      "id": "udt_container_predicate_requires_udt_container_field",
+      "fact": "predicate_target",
+      "matches": {
+        "value_shape": [
+          "scalar",
+          "array",
+          "map",
+          "matrix",
+          "udt_field_scalar"
+        ],
+        "missing_predicate_target": [
+          "udt_field_container"
+        ]
+      },
+      "classification": "inapplicable",
+      "reason": "The selected value is not an array, map, or matrix UDT field.",
+      "languageBasis": "Pine v6 user-defined type field access and na() target typing."
+    },
+    {
+      "id": "container_predicates_require_container_payload",
+      "fact": "predicate_target",
+      "matches": {
+        "value_shape": [
+          "array",
+          "map",
+          "matrix"
+        ],
+        "missing_predicate_target": [
+          "udt_field_container"
+        ]
+      },
+      "classification": "inapplicable",
+      "reason": "The selected container is not a UDT field; use container_handle or container_element for this value.",
+      "languageBasis": "Pine v6 user-defined type field access grammar."
+    },
+    {
+      "id": "map_key_is_only_meaningful_for_map_shapes",
+      "fact": "map_key",
+      "matches": {
+        "value_shape": [
+          "scalar",
+          "array",
+          "matrix",
+          "udt_field_scalar",
+          "udt_field_array",
+          "udt_field_matrix"
+        ],
+        "map_key_type": [
+          "int",
+          "float",
+          "bool",
+          "string",
+          "color",
+          "array",
+          "map",
+          "matrix",
+          "udt"
+        ]
+      },
+      "classification": "inapplicable",
+      "reason": "Only a map or a UDT map field has a map key type.",
+      "languageBasis": "Pine v6 map declaration and field type grammar."
+    },
+    {
+      "id": "map_shape_requires_a_key_type",
+      "fact": "map_key",
+      "matches": {
+        "value_shape": [
+          "map",
+          "udt_field_map"
+        ],
+        "map_key_type": [
+          "none"
+        ]
+      },
+      "classification": "inapplicable",
+      "reason": "A map render must select a key type; none is the non-map sentinel.",
+      "languageBasis": "Pine v6 map type grammar."
+    },
+    {
+      "id": "primitive_map_keys_are_valid_roles",
+      "fact": "map_key",
+      "matches": {
+        "value_shape": [
+          "map",
+          "udt_field_map"
+        ],
+        "map_key_type": [
+          "int",
+          "float",
+          "bool",
+          "string",
+          "color"
+        ]
+      },
+      "classification": "valid",
+      "reason": "These are the primitive key roles inventoried for the map and UDT map-field families.",
+      "languageBasis": "Pine v6 map key type grammar; the generator must preserve the selected key role in case metadata."
+    },
+    {
+      "id": "composite_map_keys_are_invalid",
+      "fact": "map_key",
+      "matches": {
+        "value_shape": [
+          "map",
+          "udt_field_map"
+        ],
+        "map_key_type": [
+          "array",
+          "map",
+          "matrix"
+        ]
+      },
+      "classification": "invalid",
+      "reason": "Collection handles are payload roles and cannot serve as map keys.",
+      "languageBasis": "Pine v6 map key type grammar excludes array, map, and matrix handles."
+    },
+    {
+      "id": "udt_map_key_legality_unresolved",
+      "fact": "map_key",
+      "evidenceTier": null,
+      "matches": {
+        "value_shape": [
+          "map",
+          "udt_field_map"
+        ],
+        "map_key_type": [
+          "udt"
+        ]
+      },
+      "classification": "unresolved",
+      "reason": "The named source does not establish whether a UDT payload is legal as a Pine v6 map key; retain this cell and do not count it as proved coverage.",
+      "languageBasis": "Requires an independent Pine v6 language reference; current parser or transpiler behavior is not evidence."
+    },
+    {
+      "id": "bool_missing_leaf_values_are_invalid",
+      "fact": "missing_value_type",
+      "matches": {
+        "primitive_type": [
+          "bool"
+        ],
+        "value_shape": [
+          "scalar",
+          "udt_field_scalar"
+        ],
+        "missing_value_position": [
+          "branch_order",
+          "return",
+          "initializer",
+          "argument",
+          "udt_field"
+        ]
+      },
+      "classification": "invalid",
+      "reason": "A typed missing value cannot be used as a boolean leaf value in Pine v6.",
+      "languageBasis": "Pine v6 bool values have no na state."
+    },
+    {
+      "id": "bool_collection_missing_elements_are_invalid",
+      "fact": "missing_value_type",
+      "matches": {
+        "primitive_type": ["bool"],
+        "value_shape": ["array", "map", "matrix", "udt_field_array", "udt_field_map", "udt_field_matrix"],
+        "missing_value_position": ["collection_element"]
+      },
+      "classification": "invalid",
+      "reason": "A boolean collection handle may be missing, but a boolean element cannot be a typed missing leaf.",
+      "languageBasis": "Pine v6 migration guide, Boolean values cannot be na; collection handles and payload values are distinct."
+    },
+    {
+      "id": "bool_element_missing_predicate_is_invalid",
+      "fact": "missing_predicate_type",
+      "matches": {
+        "primitive_type": ["bool"],
+        "value_shape": ["array", "map", "matrix", "udt_field_array", "udt_field_map", "udt_field_matrix"],
+        "missing_predicate_target": ["container_element"]
+      },
+      "classification": "invalid",
+      "reason": "Pine v6 na() has no boolean overload; na on a boolean element differs from na on its container handle.",
+      "languageBasis": "Pine v6 migration guide, Boolean values cannot be na."
+    },
+    {
+      "id": "bool_collection_handles_can_still_be_missing",
+      "fact": "missing_value_type",
+      "matches": {
+        "primitive_type": [
+          "bool"
+        ],
+        "value_shape": [
+          "array",
+          "map",
+          "matrix",
+          "udt_field_array",
+          "udt_field_map",
+          "udt_field_matrix"
+        ],
+        "missing_value_position": [
+          "collection_handle"
+        ]
+      },
+      "classification": "valid",
+      "reason": "The missing value belongs to the container handle; primitive_type records the container payload role.",
+      "languageBasis": "Pine v6 nullable collection handles are distinct from their element type."
+    },
+    {
+      "id": "non_bool_typed_missing_positions_are_valid_roles",
+      "fact": "missing_value_type",
+      "matches": {
+        "primitive_type": [
+          "int",
+          "float",
+          "string",
+          "color"
+        ],
+        "missing_value_position": [
+          "branch_order",
+          "return",
+          "initializer",
+          "argument",
+          "collection_handle",
+          "collection_element",
+          "udt_field"
+        ]
+      },
+      "classification": "valid",
+      "reason": "These primitive families are inventoried at every applicable typed missing-value position.",
+      "languageBasis": "Pine v6 nullable primitive and collection element rules; applicability is further constrained by value_shape."
+    },
+    {
+      "id": "varip_aggregate_payload_legality_unresolved",
+      "fact": "declaration_payload",
+      "evidenceTier": null,
+      "matches": {
+        "statement_kind": [
+          "varip"
+        ],
+        "value_shape": [
+          "array",
+          "map",
+          "matrix",
+          "udt_field_scalar",
+          "udt_field_array",
+          "udt_field_map",
+          "udt_field_matrix"
+        ]
+      },
+      "classification": "unresolved",
+      "reason": "The named source does not establish the complete Pine v6 varip payload restriction for collections and UDT-related roles.",
+      "languageBasis": "Requires an independent Pine v6 language reference; current parser or transpiler behavior is not evidence."
+    }
+  ],
+  "invalidControls": [
+    {
+      "id": "map_get_unknown_keyword",
+      "renderFamily": "invalid_control",
+      "source": "//@version=6\nstrategy(\"invalid typed map call\")\nprobe(map<string, int> target, map<string, int> source) =>\n    target.get(foo=\"x\")\nobserved = probe(map.new<string, int>(), map.new<string, int>())\n",
+      "expectedOutcome": "language_invalid",
+      "expectedDiagnosticCode": "PF-E5016",
+      "expectedDiagnosticPhase": "codegen",
+      "expectedDiagnosticMessage": "map.get: unknown keyword argument 'foo'",
+      "expectedDiagnosticHint": "Expected map.get(key).",
+      "languageBasis": "map.get's receiver-method signature requires key and defines no foo parameter.",
+      "languageReference": "https://www.tradingview.com/pine-script-reference/v6/#fun_map.get",
+      "catalogSource": "pineforge_codegen/diagnostics_catalog.json#/codes/PF-E5016",
+      "testSource": "tests/test_map_call_diagnostics.py::_typed_method_source and malformed-call parameter table",
+      "emitterSource": "pineforge_codegen/codegen/visit_call.py::_map_call_arg_nodes",
+      "invalidInputFact": "unknown_keyword",
+      "axes": {"statement_kind": "function_definition", "body_layout": "indented", "primitive_type": "int", "value_shape": "map", "missing_value_position": "none", "missing_predicate_target": "none", "map_key_type": "string"}
+    },
+    {
+      "id": "map_get_missing_key",
+      "renderFamily": "invalid_control",
+      "source": "//@version=6\nstrategy(\"invalid typed map call\")\nprobe(map<string, int> target, map<string, int> source) =>\n    target.get()\nobserved = probe(map.new<string, int>(), map.new<string, int>())\n",
+      "expectedOutcome": "language_invalid",
+      "expectedDiagnosticCode": "PF-E5020",
+      "expectedDiagnosticPhase": "codegen",
+      "expectedDiagnosticMessage": "map.get: missing required argument 'key'",
+      "expectedDiagnosticHint": "Expected map.get(key).",
+      "languageBasis": "map.get's receiver-method signature requires the key argument.",
+      "languageReference": "https://www.tradingview.com/pine-script-reference/v6/#fun_map.get",
+      "catalogSource": "pineforge_codegen/diagnostics_catalog.json#/codes/PF-E5020",
+      "testSource": "tests/test_map_call_diagnostics.py::_typed_method_source and malformed-call parameter table",
+      "emitterSource": "pineforge_codegen/codegen/visit_call.py::_map_call_arg_nodes",
+      "invalidInputFact": "missing_required_argument",
+      "axes": {"statement_kind": "function_definition", "body_layout": "indented", "primitive_type": "int", "value_shape": "map", "missing_value_position": "none", "missing_predicate_target": "none", "map_key_type": "string"}
+    },
+    {
+      "id": "map_get_duplicate_key_binding",
+      "renderFamily": "invalid_control",
+      "source": "//@version=6\nstrategy(\"invalid typed map call\")\nprobe(map<string, int> target, map<string, int> source) =>\n    target.get(\"x\", key=\"y\")\nobserved = probe(map.new<string, int>(), map.new<string, int>())\n",
+      "expectedOutcome": "language_invalid",
+      "expectedDiagnosticCode": "PF-E5019",
+      "expectedDiagnosticPhase": "codegen",
+      "expectedDiagnosticMessage": "map.get: argument 'key' passed both positionally and by keyword",
+      "expectedDiagnosticHint": "Expected map.get(key); bind each argument once.",
+      "languageBasis": "Pine argument binding permits a parameter to be bound only once.",
+      "languageReference": "https://www.tradingview.com/pine-script-docs/language/user-defined-functions/",
+      "catalogSource": "pineforge_codegen/diagnostics_catalog.json#/codes/PF-E5019",
+      "testSource": "tests/test_map_call_diagnostics.py::_typed_method_source and malformed-call parameter table",
+      "emitterSource": "pineforge_codegen/codegen/visit_call.py::_map_call_arg_nodes",
+      "invalidInputFact": "duplicate_parameter_binding",
+      "axes": {"statement_kind": "function_definition", "body_layout": "indented", "primitive_type": "int", "value_shape": "map", "missing_value_position": "none", "missing_predicate_target": "none", "map_key_type": "string"}
+    }
+  ],
+  "unresolvedEvidence": [
+    {
+      "id": "invalid_inventory_diagnostic_mapping",
+      "constraintIds": ["composite_map_keys_are_invalid", "bool_missing_leaf_values_are_invalid", "bool_collection_missing_elements_are_invalid", "bool_element_missing_predicate_is_invalid"],
+      "status": "UNRESOLVED_DIAGNOSTIC_EVIDENCE",
+      "reason": "Language-invalid inventory is retained, but no intended PF-E mapping is established here for these roles; they are not emitted refusal controls and cannot count as successful refusals."
+    },
+    {
+      "id": "udt_key_and_varip_aggregate_reference",
+      "constraintIds": ["udt_map_key_legality_unresolved", "varip_aggregate_payload_legality_unresolved"],
+      "status": "UNRESOLVED_LANGUAGE_EVIDENCE",
+      "reason": "The existing precise selectors remain visible pending independent language evidence; implementation acceptance or refusal cannot resolve them."
+    }
+  ],
+  "generatorInterface": {
+    "command": "python3 scripts/generate_compile_matrix.py --spec <file> --output-dir <new-directory> [--seed-index <index>]",
+    "requiredArguments": ["--spec", "--output-dir"],
+    "optionalArguments": ["--seed-index"],
+    "seedIndexDefault": "tests/fixtures/generated_compile_matrix/seed-index.json",
+    "outputRule": "The output parent must exist. Refuse any existing output directory, including an empty one, before writing. Do not remove or reuse prior output.",
+    "outputs": ["manifest.json", "cases/<stable-id>.pine"],
+    "ownExitCodes": {"generation_complete": 0, "incomplete_input_or_coverage": 2, "generation_or_storage_crash": 1},
+    "exitRule": "CLI exit describes the generator's own outcome only. No result verdict is inferred from that exit or a marker. A crash must retain a non-zero own exit and an incomplete result when storage permits; a deliberate crash control must establish that on the authorized runtime route.",
+    "installation": "No installer, package entry point or second compiler runner."
+  },
+  "namingContract": {
+    "ordinaryId": "case- plus full lowercase SHA-256 of canonical UTF-8 JSON {axes: complete named-axis object, renderFamily: ordinary}. Sort object keys, use compact comma/colon separators, and append no newline.",
+    "pairwiseRankInput": "The same compact sorted-key named-axis object alone, prefixed by the fixed seed and one LF, encoded as UTF-8.",
+    "invalidControlId": "control- plus invalidControls.id; control identity is separate from ordinary positive identity even when the axes coincide.",
+    "seedId": "The unchanged requiredSeeds id.",
+    "sourceHash": "SHA-256 of the exact bytes written to the source path; never the stable-id input or normalized text.",
+    "caseOrder": "Lexicographic renderFamily then stable id. Preserve separate core and pairwise selection orders.",
+    "manifestHashInputs": ["raw_spec_bytes", "generator_source_bytes", "seed_index_bytes", "each_emitted_source_bytes"],
+    "repeatability": "Repeated generation from identical bytes must yield identical ids, filenames, case order, source bytes, hashes and metadata across hosts."
+  },
+  "seedInputProvenance": {
+    "inputSha256": "ea777c2c79898a26ab1767bd95ce16fcf5f321513bbdec69149087a5c775a350",
+    "sourceUrl": "https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/281",
+    "baselineCodegen": "b1ba934180665126ffd671709f39878e99838e1b",
+    "reportedEngine": "ec44968",
+    "digestBasis": "Expected source digests and byte sizes are copied from the supplied seed index and generator integration report. The authorized generator must independently assemble and hash the unchanged fragments.",
+    "validityBasis": "Mandatory valid positive witnesses by the source contract; issue-author TV claims are retained separately from measured TV receipts.",
+    "actualBaselineStatus": "UNEXECUTED_IN_THIS_SOURCE_ONLY_STAGE"
+  },
+  "requiredSeeds": [
+    "single_line_parameter_after_comma",
+    "ternary_string_missing_branch",
+    "array_string_field_missing_predicate"
+  ],
+  "seedFixtures": [
+    {
+      "id": "single_line_parameter_after_comma",
+      "sourceBytes": 233,
+      "sourceSha256": "0c42aca26fa0199fbd4547efb48fe08e4f2e789954aba075584731a2318c842d",
+      "header": "//@version=6\nstrategy('repro')\ntype Box\n    array<string> items\n",
+      "body": "var b = Box.new(array.new<string>())\nadd(Box x, string s) => array.push(x.items, s), x.items.size()\nadd(b, 'a')\n",
+      "tail": "if bar_index == 5\n    strategy.entry('L', strategy.long)\n",
+      "assembly": "header + body + tail, byte-for-byte, with no inserted or removed characters",
+      "reportedRedPhase": "front_end",
+      "reportedRedDescription": "unknown parameter after comma",
+      "baseline": {
+        "phase": "front_end",
+        "measured": false,
+        "provenance": "community issue report; this source-only stage did not execute the baseline"
+      },
+      "expectedOutcome": {
+        "classification": "valid_intended_supported",
+        "translation": "MUST_SUCCEED",
+        "compile": "MUST_SUCCEED",
+        "tv": "NOT_MEASURED"
+      },
+      "provenance": {
+        "sourceUrl": "https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/281",
+        "baselineCodegen": "b1ba934180665126ffd671709f39878e99838e1b",
+        "reportedRelease": "1.9.0",
+        "reportedEngine": "ec44968",
+        "tvStatus": "issue author says all three run on TV; not measured by this source-only stage"
+      }
+    },
+    {
+      "id": "ternary_string_missing_branch",
+      "sourceBytes": 241,
+      "sourceSha256": "9d9aac30e97db1448e8aeb392ecfb4e3ad3ce3be0ab535353acc7d4da74566c8",
+      "header": "//@version=6\nstrategy('repro')\ntype Box\n    array<string> items\n",
+      "body": "var b = Box.new(array.new<string>())\ntake(Box x) => x.items.size() > 2 ? x.items.shift() : na\nb.items.push('a')\ntake(b)\n",
+      "tail": "if bar_index == 5\n    strategy.entry('L', strategy.long)\n",
+      "assembly": "header + body + tail, byte-for-byte, with no inserted or removed characters",
+      "reportedRedPhase": "cpp_compile",
+      "reportedRedDescription": "generated C++ string versus numeric return type",
+      "baseline": {
+        "phase": "cpp_compile",
+        "measured": false,
+        "provenance": "community issue report; this source-only stage did not execute the baseline"
+      },
+      "expectedOutcome": {
+        "classification": "valid_intended_supported",
+        "translation": "MUST_SUCCEED",
+        "compile": "MUST_SUCCEED",
+        "tv": "NOT_MEASURED"
+      },
+      "provenance": {
+        "sourceUrl": "https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/281",
+        "baselineCodegen": "b1ba934180665126ffd671709f39878e99838e1b",
+        "reportedRelease": "1.9.0",
+        "reportedEngine": "ec44968",
+        "tvStatus": "issue author says all three run on TV; not measured by this source-only stage"
+      }
+    },
+    {
+      "id": "array_string_field_missing_predicate",
+      "sourceBytes": 189,
+      "sourceSha256": "9cd4381f340e216579c6616108e77cf523ba625f2281b16fcde254a777911cac",
+      "header": "//@version=6\nstrategy('repro')\ntype Box\n    array<string> items\n",
+      "body": "var b = Box.new()\nif na(b.items)\n    b.items := array.new<string>()\n",
+      "tail": "if bar_index == 5\n    strategy.entry('L', strategy.long)\n",
+      "assembly": "header + body + tail, byte-for-byte, with no inserted or removed characters",
+      "reportedRedPhase": "cpp_compile",
+      "reportedRedDescription": "generated C++ missing container predicate overload",
+      "baseline": {
+        "phase": "cpp_compile",
+        "measured": false,
+        "provenance": "community issue report; this source-only stage did not execute the baseline"
+      },
+      "expectedOutcome": {
+        "classification": "valid_intended_supported",
+        "translation": "MUST_SUCCEED",
+        "compile": "MUST_SUCCEED",
+        "tv": "NOT_MEASURED"
+      },
+      "provenance": {
+        "sourceUrl": "https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/281",
+        "baselineCodegen": "b1ba934180665126ffd671709f39878e99838e1b",
+        "reportedRelease": "1.9.0",
+        "reportedEngine": "ec44968",
+        "tvStatus": "issue author says all three run on TV; not measured by this source-only stage"
+      }
+    }
+  ],
+  "renderFamilies": [
+    {
+      "id": "ordinary",
+      "kind": "generated",
+      "maxCases": 512,
+      "sourceRule": "Render a real Pine v6 strategy from each selected metadata row. Every selected axis level must be represented by the source and retained in the manifest; no stub, constant-result shortcut, ignored input, or current-failure filter is permitted. Eligible one-axis siblings must differ in source constructs, not just names/comments. initializer uses a typed missing declaration; collection_handle uses a subsequent handle reassignment. Ordinary sources that share one lexical normal form (comments, whitespace and consistent renames removed; basis lexical_normal_form_v1) under different rows cause renderer_source_collision and incomplete generation before the duplicate earns emitted coverage; all planned targets remain due. sourceSha256 stays the exact-bytes identity and comparisonSha256 is a separate fingerprint.",
+      "namingRule": "Use a stable semantic case id derived from the ordered axis levels and render family. Write the source as cases/<stable-id>.pine and hash its exact bytes with SHA-256.",
+      "pairCoverageRole": "The deduplicated core/pairwise union covers every applicable core triple, positive pair target and positive input fact. Its cap is shared with explicit invalid controls."
+    },
+    {
+      "id": "invalid_control",
+      "kind": "explicit_expected_refusal",
+      "maxCases": 3,
+      "sourceRule": "Emit only the exact invalidControls sources with their catalog/test evidence and intended PF-E code; do not generate an invalid Cartesian cross.",
+      "namingRule": "Use control-<invalidControls.id> as the stable id and write cases/<stable-id>.pine; hash the exact emitted UTF-8 bytes.",
+      "pairCoverageRole": "Consumes ordinary512 capacity and proves only its explicit refusal fact; never positive pair/core coverage."
+    },
+    {
+      "id": "community_seed",
+      "kind": "required_seed",
+      "maxCases": 3,
+      "sourceRule": "For each required seed, concatenate its exact header, body, and tail strings unchanged. Do not cast, rewrite, split, normalize, or replace a constructor or line to work around the reported issue.",
+      "namingRule": "Use the required seed id as the stable case id and write the exact assembled source as cases/<seed-id>.pine.",
+      "pairCoverageRole": "Seeds are mandatory witnesses and are reported separately from ordinary pairwise coverage; they cannot be used to hide an uncovered ordinary legal pair."
+    }
+  ],
+  "expectedOutcomes": [
+    {
+      "id": "valid_intended_supported",
+      "classification": "valid_intended_supported",
+      "translation": "MUST_SUCCEED",
+      "compile": "MUST_SUCCEED",
+      "tv": "NOT_MEASURED",
+      "coverageRole": "positive_compile_coverage"
+    },
+    {
+      "id": "valid_unsupported",
+      "classification": "valid_unsupported",
+      "translation": "MUST_SUCCEED",
+      "compile": "MUST_SUCCEED",
+      "tv": "NOT_MEASURED",
+      "coverageRole": "positive_compile_requirement",
+      "rule": "A known implementation gap does not relax a valid source's desired outcome. Record VISIBLE_GAP as an observation; a refusal or build failure remains a failure."
+    },
+    {
+      "id": "language_invalid",
+      "classification": "language_invalid",
+      "translation": "MUST_REJECT_WITH_EXPECTED_PF_E",
+      "compile": "NOT_APPLICABLE",
+      "tv": "NOT_MEASURED",
+      "coverageRole": "explicit_invalid_control_only",
+      "rule": "Requires a per-control intended PF-E code and catalog/test evidence. A different error, crash, accepted translation or missing receipt cannot establish the expected refusal."
+    },
+    {
+      "id": "legality_unresolved",
+      "classification": "unresolved",
+      "translation": "UNKNOWN",
+      "compile": "UNKNOWN",
+      "tv": "NOT_MEASURED",
+      "coverageRole": "INCOMPLETE",
+      "rule": "Keep the precise cell and its unresolved basis visible; it cannot prove a pair or a successful compile."
+    }
+  ],
+  "resultDefaults": {
+    "status": "INCOMPLETE",
+    "translation": {"status": "UNEXECUTED", "phase": null, "exit": null, "diagnostics": null},
+    "compile": {"status": "UNEXECUTED", "phase": null, "exit": null, "diagnostics": null},
+    "tv": {"status": "NOT_MEASURED", "receipt": null},
+    "toolIdentities": null
+  },
+  "consumerContract": {
+    "translationApi": "pineforge_codegen.transpile",
+    "compileHelper": "tests._compile.compile_cpp",
+    "compileStandard": "c++17",
+    "compileExtraFlags": "tests._compile.STRATEGY_FP_FLAGS",
+    "requiredNativeInputs": ["paired_engine_include", "Eigen_include", "actual_generated_version_header", "compiler"],
+    "inputRule": "Resolve and record the exact paired engine, Eigen, generated header and compiler before loading the helper. Its optional skip/synthesized-version fallbacks do not satisfy required matrix inputs.",
+    "positiveRule": "Every ordinary positive source and all three immutable seeds pass real public translation and then the existing compile helper. A current unsupported-valid failure is still a failed positive requirement.",
+    "invalidRule": "Each explicit control passes real public translation and must raise CompileError with its intended PF-E code and expected phase. Retain all diagnostics and the own work exit. A crash, different error, accepted input or absent receipt is not the intended refusal.",
+    "receiptRule": "Record actual source/codegen/engine/header/Eigen/generated-header/compiler identities, phase, own exit and diagnostics. The helper returns None on success and raises an assertion with a diagnostic preview on compiler failure; do not fabricate unexposed raw compiler receipts. Missing required native receipt evidence leaves INCOMPLETE and is a consumer integration obligation.",
+    "verdictRule": "Read actual manifest/result rows and the independent judge output. Translation-only success, skipped compilation, missing inputs, zero collection, wrong diagnostics or unknown outcomes cannot establish a pass.",
+    "laterGates": ["full_paired_engine_pytest", "public_corpus_compile_sweep_without_required_skips", "real_CI", "independent_Claude_review"]
+  },
+  "manifestContract": {
+    "requiredTopLevel": [
+      "schemaVersion",
+      "draftRevision",
+      "generatorVersion",
+      "specSourceHash",
+      "generatorSourceHash",
+      "inputIdentities",
+      "specification",
+      "candidates",
+      "generation",
+      "cases",
+      "coverage",
+      "results"
+    ],
+    "caseFields": [
+      "id",
+      "renderFamily",
+      "sourcePath",
+      "sourceSha256",
+      "axes",
+      "constraints",
+      "legality",
+      "validityProvenance",
+      "expected",
+      "seedProvenance",
+      "coverageMembership",
+      "expectedDiagnosticCode",
+      "invalidInputFact"
+    ],
+    "resultFields": [
+      "translation",
+      "compile",
+      "tv",
+      "codegenIdentity",
+      "engineIdentity",
+      "compilerIdentity",
+      "headerIdentity",
+      "eigenIdentity",
+      "generatedHeaderIdentity"
+    ],
+    "statusRules": [
+      "Generation completion is separate from test success.",
+      "All translation and compile results default to UNEXECUTED, exits/diagnostics/identities to null and TV results to NOT_MEASURED. Counts that have not been computed are null, not constant zero.",
+      "Missing headers, Eigen, generated version input, compiler, or paired engine input is INCOMPLETE.",
+      "Zero collected cases, translator-only success, skipped required compiles, unknown outcomes, missing seeds, or digest mismatches are INCOMPLETE.",
+      "A result is derived from the translator and compiler result files, never from a completion marker alone.",
+      "The manifest retains actual phase, exit, diagnostic, source, codegen, engine, header, Eigen, generated-header, and compiler identities when the consumer runs.",
+      "Generation may complete for the resolved positive domain while unresolved inventory remains explicit; unresolved overall inventory cannot become a complete-matrix acceptance claim."
+    ],
+    "coverageFields": [
+      "candidateCount",
+      "structuralEnumerationUpperBound",
+      "enumeratedCaseCount",
+      "coreTupleCount",
+      "coreCaseCount",
+      "pairwiseCaseCount",
+      "overlapCaseCount",
+      "positiveUnionCount",
+      "invalidControlCount",
+      "ordinarySelectedCount",
+      "seedCount",
+      "totalEmittedCount",
+      "core",
+      "pairwise",
+      "overlapCaseIds",
+      "positiveUnionCaseIds",
+      "formPositiveCounts",
+      "pairInventory",
+      "targetPairs",
+      "achievedPairs",
+      "uncoveredPairs",
+      "targetInputFacts",
+      "achievedInputFacts",
+      "uncoveredInputFacts",
+      "invalidControlFacts",
+      "inapplicableInventoryFacts",
+      "invalidInventoryFacts",
+      "unresolvedEvidence",
+      "positiveDomainStatus",
+      "inventoryStatus",
+      "basis",
+      "positiveCompileCoverage"
+    ],
+    "coverageStructure": {
+      "core": ["axes", "targetTuples", "achievedTuples", "uncoveredTuples", "caseIds", "selectionOrder"],
+      "pairwise": ["axes", "seed", "caseIds", "selectionOrder"],
+      "pairInventoryEntry": ["pair", "classification", "witnessAxes", "constraintIds", "evidence"],
+      "coverageMembership": ["core", "pairwise"],
+      "setRule": "Tuple objects use named axes in declared axis/level order. Pair records use two {axis, level} entries in declared axis order; lists sort by axis indices then level indices. All achieved/uncovered sets and counts are recomputed from actual case memberships. Nonapplicable case fields are explicit null.",
+      "countRule": "enumeratedCaseCount = candidateCount + invalidControlCount + seedCount and must fit candidate100000. coreTupleCount is the target core set size; coreCaseCount and pairwiseCaseCount count A and B; overlapCaseIds is their intersection; positiveUnionCaseIds is their union. formPositiveCounts counts only emitted ordinary positives.",
+      "pairRule": "targetPairs comes from existential language-valid completions, not selected rows. achievedPairs and achievedInputFacts are recomputed from B; uncovered sets are targets minus achieved. Core achievedTuples is recomputed from emitted ordinary positive sources. Seed and invalid-control metadata is never included.",
+      "statusRule": "basis starts generation_metadata_only and positiveCompileCoverage starts UNEXECUTED. Metadata coverage is not compilation evidence."
+    }
+  },
+  "acceptanceRows": [
+    {"id": "core_and_forms", "requiredEvidence": "Independently recompute every applicable core triple and emitted projection; no uncovered triple and every requested form has ordinary positive rows.", "status": "UNEXECUTED"},
+    {"id": "all_axis_pairs", "requiredEvidence": "Independently solve all two-axis targets and inventory reasons, then recompute achieved/uncovered pairs from B and repeat seed/order determinism.", "status": "UNEXECUTED"},
+    {"id": "counts_caps_and_hashes", "requiredEvidence": "Recompute A, B, intersection, deduplicated union, control/seed totals, all caps, canonical ids and exact emitted source/input hashes.", "status": "UNEXECUTED"},
+    {"id": "invalid_controls", "requiredEvidence": "Run the three exact control sources through public translation; require their catalog/test-grounded PF-E codes with actual phase, own exit and all diagnostics.", "status": "UNEXECUTED"},
+    {"id": "immutable_baseline_witnesses", "requiredEvidence": "On the retained pre-fix codegen and paired engine, obtain actual RED receipts: first seed front-end failure, other two translated C++ build failures; same exact digests must later translate and compile after fixes.", "status": "UNEXECUTED"},
+    {"id": "positive_compilation", "requiredEvidence": "Every emitted valid source translates and compiles via the real public API and existing helper with exact paired native inputs; retain actual receipts without required skips or error filtering.", "status": "UNEXECUTED"},
+    {"id": "final_gates", "requiredEvidence": "Full paired-engine pytest and corpus sweep, real CI and independent Claude review; all required checks have actual result files.", "status": "UNEXECUTED"}
+  ],
+  "provenance": {
+    "sourceCorrection": {
+      "date": "2026-11-01",
+      "status": "UNEXECUTED_IN_THIS_SOURCE_ONLY_STAGE",
+      "scope": "Distinct initializer and collection-handle constructs; input-driven eligible-axis source discrimination and ignored-input controls; comparison-normal-form collision guard shared with the tests. Domains, constraints, bounds, enumeration seed, controls and seed bytes are retained.",
+      "issueSlotContract": "render_case retains a reserved scope-issues list with no defined producer. Empty-list assertions supply no evidence; selected source paths are asserted instead. Future issue-producing conditions require an explicit root contract decision.",
+      "selectionTestGaps": [
+        "No direct proof that changing the seed changes a tied selection; existing checks cover repeatability and seeded ranks.",
+        "The small selection oracle does not exercise per-fact evidence precedence. The source-eligibility oracle is not a selection-precedence test."
+      ],
+      "operationalLimit": "No generator/test wall-clock bound, alarm or search-node cap is authored. Existing candidate/case bounds establish no runtime duration. A future authorized off-box runner owns its operational bound and incomplete non-zero timeout/kill evidence; no new time/count acceptance gate is introduced.",
+      "pathLimit": "All followed inputs must be announced before reading; sensitive names, *.env components and symlink components are refused. A future runner must use real permitted paths."
+    },
+    "runtimeEngineIdentity": {
+      "reportedShortHash": "ec44968",
+      "reportStatus": "UNVERIFIED_COMMUNITY_REPORT",
+      "runtimeEnginePin": null,
+      "runtimeEnginePinStatus": "ABSENT",
+      "requirement": "The responsible owner must supply and retain the exact paired engine and native input identities before any separately authorized pre-fix baseline run. Never infer a runtime pin from the reported short hash."
+    },
+    "languageEvidence": "This draft records language-level classifications separately from implementation behavior. Where the named inputs do not establish Pine v6 legality, the cell is unresolved.",
+    "existingTvLanguageEvidence": {
+      "receipt": "tests/fixtures/tail_f_tv/README.md",
+      "sources": ["tests/fixtures/tail_f_tv/arm_commas.pine", "tests/fixtures/tail_f_tv/arm_commas_decl.pine"],
+      "scope": "Recorded one-line if/else local-block bodies and switch arm bodies/declarations only; no inferred TV results for generated rows.",
+      "inspection": "Receipt/source text read only; no new TV measurement or independent receipt execution in this stage."
+    },
+    "documentationReferences": [
+      "https://www.tradingview.com/pine-script-docs/language/conditional-structures/",
+      "https://www.tradingview.com/pine-script-docs/language/loops/",
+      "https://www.tradingview.com/pine-script-docs/language/user-defined-functions/",
+      "https://www.tradingview.com/pine-script-docs/language/methods/",
+      "https://www.tradingview.com/pine-script-docs/language/variable-declarations/",
+      "https://www.tradingview.com/pine-script-docs/language/operators/",
+      "https://www.tradingview.com/pine-script-docs/language/type-system/",
+      "https://www.tradingview.com/pine-script-docs/language/maps/",
+      "https://www.tradingview.com/pine-script-docs/migration-guides/to-pine-version-6/#boolean-values-cannot-be-na"
+    ],
+    "documentationRetrieval": "Named language bases only; no network retrieval in this source-authoring stage.",
+    "tvEvidence": "NOT_MEASURED",
+    "issueProvenance": "The three seed phases and the statement that all three run on TV come from the supplied community issue metadata. They are not a TV measurement by this stage.",
+    "generatorTests": [
+      "independent enumeration retains every axis level, recomputes the full applicable core cross and proves every requested form has ordinary positive rows",
+      "independent manifest check recomputes pair targets, achieved/uncovered sets, A/B overlap, emitted union counts, caps, source hashes and input-fact categories",
+      "independent repeat generation has identical source bytes, ids, fixed seed, selection order and manifest metadata",
+      "explicit invalid controls produce intended PF-E codes with catalog/test provenance; invalid inventory without codes stays unresolved evidence",
+      "input-driven source comparisons use the generator's lexical normal form, hold every other axis fixed and discriminate all common-context eligible levels; ignored-axis, comment-only and rename-only renderers are negative controls on the same positive inputs, and literal/operator/construct changes stay distinct",
+      "the independent oracle's eligible set equals the generator's positive classified set over the real SPEC product; each axis group is cross-checked and a dropped group or row, or an added unsupported row, fails the check",
+      "the runtime engine pin is asserted null with status ABSENT and the short hash is asserted unverified input provenance",
+      "initializer declarations and later missing-handle assignments retain their selected-value paths across every eligible collection context, including the reader's cited array case",
+      "a frozen-source, comment-only or rename-only renderer shares one normal form and causes a retained renderer_source_collision issue (both case ids, both raw SHA-256 values, the comparison hash) and a non-zero own result; the duplicate is un-emitted and emitted pair/core coverage is recomputed from actual sources; an unreadable source form is INCOMPLETE with a named reason",
+      "deliberate generator crash produces the work's own non-zero exit and incomplete actual result"
+    ],
+    "generatorTestsStatus": "UNEXECUTED_IN_THIS_SOURCE_ONLY_STAGE"
+  }
+}
