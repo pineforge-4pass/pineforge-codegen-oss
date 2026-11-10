@@ -292,18 +292,25 @@ def _sweep(paths: list[Path], *, corpus_root: Path | None = None) -> list[Result
     return results
 
 
-@pytest.fixture(scope="module")
-def sweep_report_dir(tmp_path_factory):
+def _sweep_report_dir(tmp_path_factory) -> Path:
+    """The report directory: the environment override, else one folder per pytest session.
+
+    A plain function, not a fixture: the pairing controls of tests/test_require_compile.py
+    import `sweep_results` alone into a probe module, so that fixture must not depend on
+    another fixture of this module. Both fixtures that write a report call this function
+    and so share the same directory.
+    """
     configured = os.environ.get("PINEFORGE_COMPILE_REPORT_DIR")
     destination = _checked_path(
-        Path(configured) if configured else tmp_path_factory.mktemp("translate-implies-compile")
+        Path(configured) if configured
+        else tmp_path_factory.getbasetemp() / "translate-implies-compile"
     )
     destination.mkdir(parents=True, exist_ok=True)
     return destination
 
 
 @pytest.fixture(scope="module")
-def sweep_results(sweep_report_dir):
+def sweep_results(tmp_path_factory):
     # Setup failures happen outside all xfail-marked test bodies.
     pairing = _pairing()
     skip_if_no_compile_env()
@@ -316,7 +323,7 @@ def sweep_results(sweep_report_dir):
     started = time.monotonic()
     results: list[Result] = []
     yield results
-    destination = sweep_report_dir
+    destination = _sweep_report_dir(tmp_path_factory)
     results.sort(key=lambda result: result.path)
     failures = [result for result in results if result.outcome == "compile-failed"]
     rejected = [result for result in results if result.outcome == "front-end-rejected"]
@@ -831,7 +838,7 @@ def _matrix_selection(manifest):
 
 
 @pytest.fixture(scope="module")
-def generated_matrix(tmp_path_factory, sweep_report_dir, request):
+def generated_matrix(tmp_path_factory, request):
     output = tmp_path_factory.mktemp("generated-compile-matrix") / "packet"
     report = {
         "shard": int(os.environ.get("PINEFORGE_COMPILE_SHARD", "0")),
@@ -852,7 +859,7 @@ def generated_matrix(tmp_path_factory, sweep_report_dir, request):
             group: sum(row["group"] == group for row in report["cases"])
             for group in ("ordinary", "community_seed", "invalid_control")
         }
-        (sweep_report_dir / "generated-matrix-results.json").write_text(
+        (_sweep_report_dir(tmp_path_factory) / "generated-matrix-results.json").write_text(
             json.dumps(report, indent=2) + "\n", encoding="utf-8",
         )
 
