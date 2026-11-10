@@ -119,11 +119,15 @@ def prepare(cg):
             # Preserve array.copy/slice, including their existing ownership.
             if namespace == "array" and method in {"copy", "slice"}:
                 return
-            if (isinstance(node.callee, MemberAccess)
-                    and method in {"copy", "slice"}
-                    and (spec := cg._type_spec_from_expr(node.callee.object)) is not None
-                    and spec.kind == "array"):
-                return
+            if isinstance(node.callee, MemberAccess) and method in {"copy", "slice"}:
+                receiver = node.callee.object
+                spec = cg._type_spec_from_expr(receiver)
+                # Parameter and loop-variable types are not known at plan time:
+                # a receiver bound by one of them may be an array.
+                if (spec is not None and spec.kind == "array"
+                        or spec is None and isinstance(receiver, Identifier)
+                        and receiver.name in shadowed):
+                    return
             if namespace in {"array", "map", "matrix"} or method in {
                     "push", "unshift", "insert", "set", "fill", "put"}:
                 for arg in [*node.args, *node.kwargs.values()]:
@@ -164,8 +168,11 @@ def prepare(cg):
                     valid &= direct_binding(node.value, type_name)
             if isinstance(node, Assignment) and isinstance(node.target, MemberAccess):
                 holder = cg._type_spec_from_expr(node.target.object)
-                if (holder is not None and holder.kind == "udt" and holder.name == type_name
-                        and node.target.member in array_fields):
+                if (node.target.member in array_fields
+                        and (holder is None
+                             or holder.kind == "udt" and holder.name == type_name)):
+                    # Without a holder type, a matching array field may be
+                    # rebound through a parameter. Selection needs a proof.
                     valid = False
             if not isinstance(node, FuncCall):
                 continue

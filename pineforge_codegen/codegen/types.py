@@ -48,7 +48,7 @@ from ..ast_nodes import (
 from ..analyzer.value_bindings import ValueBindings
 from ..collection_history import history_annotation
 from ..cpp_names import cpp_identifier_fragment
-from ..errors import Phase
+from ..errors import CodegenInvariantError, Phase
 from ..external_requests import UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
 from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
@@ -457,7 +457,7 @@ class TypeInferer:
         retained = getattr(self, "_retained_alias_plan", None)
         if retained and field_cpp.startswith(retained.cpp_name + "<"):
             if name not in retained.sources:
-                raise AssertionError("retained array field lacks a proven source")
+                raise CodegenInvariantError(value_node)
             return retained.binding(self, name)
         if (name is not None
                 and name in self._stable_var_array_names()
