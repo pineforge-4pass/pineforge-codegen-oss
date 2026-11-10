@@ -155,6 +155,19 @@ diagnostic's cluster or the next cluster number for a new diagnostic.
 Infrastructure failures remain incomplete and never suggest a table entry.
 Coverage and consumer results stay `INCOMPLETE`; inventory stays `UNRESOLVED`.
 
+Only the case id and the failing phase are compared. The cluster id and the
+normalized reason are documentation: the reader checks their form (`K` and two
+digits, numbered from `K01` without gaps, one phase and reason per cluster and
+one cluster per phase and reason, a reason of at most 200 characters) and a
+failure message names the cluster of a known failure, but a run never compares
+either column with the compiler's output.
+
+To regenerate the table, run the full sweep on the paired engine and codegen
+checkouts (the unsharded command below) and read the failure message of the
+matrix row: it lists each new failure with a proposed table row and each stale
+case id. Edit the file by hand, adding the proposed rows and deleting the stale
+ids, then run the same command again; it must pass. No script writes the file.
+
 The required `test-check` depends on the full pytest and compile matrices.
 An unexpected compile failure, strict XPASS, missing required input, or failed
 checkout therefore prevents that check from succeeding. A skipped compile job
