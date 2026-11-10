@@ -796,7 +796,7 @@ class TaSiteHelper:
         if family in self.LAZY_PER_EXECUTION_TA:
             return (
                 "per-execution native: the reached-only inline compute is "
-                "TradingView's clock (lab tv 2026-09-03)"
+                "TradingView's clock (evidence dated 2026-09-03)"
             )
         if family in self.LAZY_SOURCE_CLOCK_TA:
             return "hold-last source-clock family with a non-numeric source"
@@ -1080,7 +1080,7 @@ class TaSiteHelper:
     # A pure user call's history below a lazy edge
     # ------------------------------------------------------------------
     #
-    # TradingView rule, pinned 2026-09-29 with ``lab tv`` on BINANCE:BTCUSDT
+    # TradingView rule, pinned 2026-09-29 on BINANCE:BTCUSDT
     # 15 (``tests/fixtures/lazy_call_history``): ``f(...)[k]`` on a user
     # function's call in the lazily evaluated right operand of ``and``/``or``
     # or in a ternary's arm reads the call's value k executions of its scope
@@ -1447,7 +1447,7 @@ class TaSiteHelper:
     #
     # A ``ta.*`` constructor argument that is neither a compile-time value nor
     # a runtime-resettable input/timeframe expression used to be refused. Its
-    # Pine qualifier decides TradingView's answer (lab tv, K-TA-DYNLEN
+    # Pine qualifier decides TradingView's answer (K-TA-DYNLEN evidence dated
     # 2026-09-26; the engine header pineforge/source/pine_ta_length.hpp states
     # every rule with its tape):
     #
