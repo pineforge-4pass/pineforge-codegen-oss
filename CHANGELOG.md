@@ -59,6 +59,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
   option. Capacities outside the native int64 domain are refused even for
   scripts without drawings. Regenerate C++ and relink affected strategies.
 - Typed `array.from()` initializers now match their declared element type, including function-local `var` and `varip` arrays of timestamps.
+- A `var` declared in one block no longer shares storage with a plain variable
+  of the same name in a sibling block, so it keeps its value across runs (#359).
 - Variables initialized from `backadjustment.*`, `settlement_as_close.*` and
   `adjustment.*` constants now use integer storage in emitted C++.
 - `int(x)` of a floating value, and a stored `math.floor(x)`, `math.ceil(x)`

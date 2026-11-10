@@ -4838,18 +4838,22 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     _SHARED_MEMBER_TYPES = frozenset({"int", "int64_t", "double", "bool"})
 
     def _block_locals_needing_names(self) -> frozenset:
-        """The declarations in the script's top-level blocks whose type the
-        member of their name cannot hold (``block_locals``). The member has
-        the type of the name's direct top-level declaration, else of its
-        first declaration; a string, a collection or an object beside another
-        type did not compile. Numbers and bools share one member, as before."""
+        """Block declarations needing distinct storage (``block_locals``).
+
+        A persistent declaration cannot share a plain sibling's member.
+        Otherwise the member has the type of the name's direct top-level
+        declaration, else of its first declaration; incompatible types get
+        separate names. Numbers and bools share one member, as before.
+        """
+        from ..block_locals import persistent_plain_block_keys
+
         decls = [(decl, nested) for decl, nested in block_declarations(self.ctx.ast.body)
                  if not decl.is_var and not decl.is_varip and decl.value is not None]
         member: dict[str, str | None] = {}
         for decl, nested in decls:
             if not nested:
                 member.setdefault(decl.name, self._declared_cpp_type(decl))
-        needing: set = set()
+        needing: set = set(persistent_plain_block_keys(self.ctx.ast.body))
         for decl, nested in decls:
             if nested and id(decl) in self.ctx.primitive_block_shadow_types:
                 # This declaration has ordinary lexical C++ storage already.
