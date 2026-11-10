@@ -79,6 +79,8 @@ class _Scope:
 
 
 def _declared_names(node: ASTNode):
+    if isinstance(node, (FuncDef, MethodDef)):
+        return tuple(node.params)
     if isinstance(node, VarDecl):
         return (node.name,)
     if isinstance(node, TupleAssign):
@@ -171,7 +173,8 @@ class ValueBindings(DiagnosticsHelper):
         """Rename only uses resolved to these exact current-tree declarations.
 
         Keep copied authored-use metadata consistent for the next analysis.
-        Initializers, parameters and earlier global reads retain their bindings.
+        Initializers and earlier global reads retain their exact bindings;
+        parameter uses change only when their declaring callable is selected.
         """
         for node, _scope, _position, _role in self.uses:
             key = self.declaration_bindings.get(id(node))

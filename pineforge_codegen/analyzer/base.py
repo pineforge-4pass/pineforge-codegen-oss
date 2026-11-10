@@ -7769,6 +7769,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         f"Function '{callee.name}' cannot call itself.",
                         callee.loc,
                     )
+                from .callable_history_names import remap_callable_keywords
+                remap_callable_keywords(node, self._func_defs[func_name])
                 return self._handle_user_func_call(func_name, node)
 
             # A typed user method called in function syntax is the member
@@ -8035,7 +8037,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 if (key.rsplit(".", 1)[-1] != name or declaration is None
                         or not declaration.params):
                     continue
-                keyword = declaration.params[0]
+                from .callable_history_names import authored_callable_parameters
+                keyword = authored_callable_parameters(declaration)[0]
                 candidate = node.kwargs.get(keyword)
                 if candidate is None or self._receiver_method_key(
                         candidate, name) != key:
