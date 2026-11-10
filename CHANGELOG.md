@@ -26,6 +26,13 @@ supported as exact pairs; on the 0.x line they are independent. See the
   from a `ta.*` call or a built-in variable such as `strategy.position_size`,
   as TradingView does. Use a comparison such as `ta.change(t) != 0` for a bool
   condition. Bool overloads and Pine v5 libraries keep their existing behavior. (#361)
+- Direct retained record fields built from stable `var` arrays, and direct
+  plain `var` array aliases, stay live through their creation bar and then
+  keep their own copy of the array as it stood at the end of that bar; two
+  holders built from one array do not share it. `copy()` of such a record
+  keeps its existing compile error. Requested evaluations, collection
+  history, nested records and intrabar recalculations keep their previous
+  lowering. Regenerate C++ and relink affected strategies.
 - `str.format_time` now uses TradingView's documented defaults when arguments
   are omitted: `"yyyy-MM-dd'T'HH:mm:ssZ"` for the format and the exchange time
   zone (`syminfo.timezone`) for the timezone. Pass `"yyyy-MM-dd"` and `"UTC"`

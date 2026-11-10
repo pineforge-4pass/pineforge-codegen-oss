@@ -799,6 +799,10 @@ class ExprVisitor:
         # Function parameters are plain locals, never series members
         if name in self._current_func_param_types:
             return self._safe_name(name)
+        retained = getattr(self, "_retained_alias_plan", None)
+        if (retained and name in retained.aliases
+                and not self._known_var_is_lexically_shadowed(name)):
+            return f"(*{self._safe_name(name)})"
         if name in BAR_FIELDS and self._builtin_local_symbol(node) is None:
             return BAR_FIELDS[name]
         if self._reads_builtin_variable(node):

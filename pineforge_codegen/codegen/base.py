@@ -5225,6 +5225,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # suffix around every authored/callable identifier already frozen by
         # the passes above, never force an earlier callable to rename itself.
         self._prepare_udt_generated_names()
+        from .retained_alias import prepare as prepare_retained_aliases
+        prepare_retained_aliases(self)
         # Pre-scan for strategy series vars
         self._prescan_strategy_series()
         self._prescan_session_history()
@@ -5277,10 +5279,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         #
         # Pine UDT values are object IDs: ordinary assignment aliases the same
         # object, while ``copy()`` allocates one detached outer object and keeps
-        # nested UDT/map/matrix IDs shallow-shared. Direct array-valued fields
-        # still use std::vector value storage, so their built-in UDT copy path
-        # is rejected explicitly until arrays gain handle identity. Emit every
-        # authored type as a small nullable handle first, then its value record.
+        # nested UDT/map/matrix IDs shallow-shared. Retained array fields (the
+        # vector copy of an unproved lifetime, and the creation-bar binding of
+        # a proven one) retain their copy refusal; bar-local fields use shared
+        # handles. Emit every authored type as a small nullable handle first,
+        # then its value record.
         # The two-phase order also permits self/nested UDT fields without
         # embedding a C++ type recursively by value.
         for type_name in self._udt_defs:
@@ -5478,6 +5481,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # bar/TA expressions never leak into namespace-scope C++ initializers.
         if self._udt_has_array_fields():
             lines.append(UDT_ARRAY_FIELD_CPP)
+        if self._retained_alias_plan:
+            from .retained_alias import RUNTIME as retained_array_runtime
+            lines.append(retained_array_runtime.replace(
+                "@FIELD@", self._retained_alias_plan.cpp_name).replace(
+                "@MANAGER@", self._retained_alias_plan.manager_name))
         from .array_field_width import timestamp_array_fields
         timestamp_fields = timestamp_array_fields(self)
         for type_name, fields in self._udt_defs.items():
@@ -5504,7 +5512,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.append("")
 
         if (self._uses_map or self._uses_matrix or self._udt_defs
-                or self._uses_array_slice_views):
+                or self._uses_array_slice_views or self._retained_alias_plan):
             self._emit_handle_checkpoint_traits(lines)
 
         # 1c. Enum constants + string tables for str.tostring(enumVar)
@@ -5541,6 +5549,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         lines.append("class GeneratedStrategy : public pineforge::source::PineStrategyHost {")
         lines.append("public:")
         _script_state_decl_start = len(lines)
+        for source, member in self._retained_alias_plan.sources.items():
+            spec = self._widen_array_spec_for_name(
+                source, self._array_spec_for_name(source))
+            manager_cpp = self._retained_alias_plan.manager_cpp(self, spec)
+            lines.append(f"    {manager_cpp} {member};")
         if self._array_journal_members:
             lines.append(f"    {self._array_journal_cpp_name} {self._array_journal_member_name};")
 
@@ -5835,6 +5848,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 array_spec = self._widen_array_spec_for_name(
                     name, exact_member_spec or self._array_spec_for_name(name)
                 )
+                if name in self._retained_alias_plan.aliases:
+                    lines.append(
+                        f"    {self._retained_alias_plan.field_cpp(self, array_spec)} {safe};"
+                    )
+                    continue
                 lines.append(
                     f"    {self._type_spec_to_cpp(array_spec)} {safe};"
                 )
