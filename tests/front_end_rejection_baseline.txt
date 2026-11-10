@@ -10,6 +10,100 @@
 # sources, not strategies.
 # Merging codegen main a156a7d2 added 85 labels for fixtures rejected by its
 # new front-end diagnostics; the original baseline predates that merge.
+#
+# Added groups: group | labels | test key | status. Test paths are under tests/.
+# S = test_selection_value_grammar.py; also test_security_selection_blocks.py.
+# O = test_operator_typing.py; L = test_lexical_scope_agreement.py.
+# F = test_float_reassignment.py; D = test_diagnostic_notes.py.
+# C = test_call_argument_order.py; U = test_function_local_declaration_order.py.
+# B = test_loop_variable_scope.py. Evidence keys and details follow the status rows.
+# selection_values | 29 | S | 28 TV REFUSES (CE10013/CE10161/CE10133/CE10150); 1 NOT ESTABLISHED.
+# operator_history_tv | 20 | O | TV REFUSES: CE10123/CE10156/CE10290.
+# lexical_scope | 23 (15 block_scope, 8 name_resolution) | L | TV REFUSES: CE10272/CE10132.
+# for_counter_headers | 8 | F | TV REFUSES: CE10106.
+# diagnostic_notes | 2 | D | NOT ESTABLISHED: exact local diagnostic checks only.
+# call_argument_order | 1 | C | NOT ESTABLISHED: argument order and diagnostic span only.
+# function_definition_scope | 1 | U | NOT ESTABLISHED: local declaration order only.
+# loop_variable_scope | 1 | B | NOT ESTABLISHED: expired counter diagnostic only.
+#
+# Original _tv labels: short name | first reported diagnostic (abridged) | status/evidence.
+# The supplied report has no PF codes; a code in the diagnostic column comes from its text.
+# A/H/I/X/P/T/K name fixture READMEs below; a suffix is the cited line in that file.
+# ahist_bound_push | RE10051: Cannot modify the elements of a historical array | TV REFUSES A:134.
+# ahist_eq | Operator '==' cannot combine array<float> and array<float>. | TV REFUSES A:119.
+# ahist_field_noparen | CE10290: history-referencing operator on fields | TV REFUSES A:116.
+# ahist_field_paren | CE10290: history-referencing operator on fields | TV REFUSES A:117.
+# ahist_fn | x[1]: the history of an array parameter is not supported in PineForge | GAP A:28.
+# ahist_m_noparen | bar_index diverges from TradingView semantics in PineForge. | TV REFUSES A:115.
+# ahist_method | this[1]: the history of an array parameter is not supported | GAP A:29.
+# ahist_mfield | CE10290: history-referencing operator on fields | TV REFUSES A:118.
+# ahist_noparen | bar_index diverges from TradingView semantics in PineForge. | TV REFUSES A:114.
+# ahist_param_push | RE10051: Cannot modify the elements of a historical array | TV REFUSES A:139.
+# ahist_slice_set | RE10051: Cannot modify the elements of a historical array | TV REFUSES A:138.
+# udth_box_eq | Operator '!=' cannot combine box and box. | TV REFUSES H:154.
+# udth_eq | Operator '!=' cannot combine Cell and Cell. | TV REFUSES H:153.
+# udth_field_noparen | CE10290: history-referencing operator on fields | TV REFUSES H:161.
+# udth_field_paren | CE10290: history-referencing operator on fields | TV REFUSES H:161.
+# udth_method_noparen | bar_index diverges from TradingView semantics | TV REFUSES H:152.
+# udth_noparen | bar_index diverges from TradingView semantics in PineForge. | TV REFUSES H:151.
+# tuple_literal_decl | Syntax error at input '[', CE10156 | TV REFUSES I:59.
+# tuple_literal_ternary | A ternary cannot return a tuple | TV REFUSES I:61 (no TV code recorded).
+# tuple_literal_var | Syntax error at input '[', CE10156 | TV REFUSES I:60.
+# xc_v5_lib | PineForge supports PineScript v6 only (found //@version=5). | GAP X:26.
+# xc_v5_negindex | PineForge supports PineScript v6 only (found //@version=5). | TV REFUSES X:59.
+# lowertf_no_arm | request.security_lower_tf timeframe switch requires a default arm | GAP P:74.
+# tf_switch_na_arm | request.security timeframe switch arm is na | GAP P:67.
+# array_ref_args | an array a call returns is passed to parameter 'a' of 'addTwo' | GAP T:25.
+# w11-color-v5-eth15/strategy | supports PineScript v6 only (found //@version=5). | GAP K:39.
+#
+# The 85 labels recorded when main was merged are main's rejections as they are; this file makes
+# no claim about TradingView for a group marked not established.
+#
+# Group evidence (paths relative to tests/):
+# S: test_selection_value_grammar.py:38 names refusal tapes; :40 lists 19 CE10013 rows,
+# :105 lists 9 slot rows (4 CE10161, 3 CE10133, 2 CE10150). :141 is delimited-switch: its
+# name says CE10156, but it asserts only PF-E0025 at 5:5 and no tape is stored beside the
+# fixture, so that one label is NOT ESTABLISHED. test_security_selection_blocks.py:18
+# reads the same directory for accepted request block controls; those controls are not
+# these 29 rejected labels.
+# O: test_operator_typing.py:293 covers all 20: array/matrix/map x four operations
+# CE10123, udtfield x four CE10290, nested x four CE10156; :325 checks local refusals.
+# L: test_lexical_scope_agreement.py:25 loads fixtures/lexical_scope/verdicts.json;
+# :135 and :152 check local code, name, phase and span against its refused rows.
+# fixtures/lexical_scope/verdicts.json:5 records all 23 TradingView measurements:
+# :6 and :8 use CE10132 for field/parameter defaults; the other 21 use CE10272.
+# test_lexical_scope_agreement.py:190 compares archived-main C++ hashes; :199 checks compilation.
+# Recorded verdicts are present; raw TradingView refusal exports are not beside the fixtures.
+# F: test_float_reassignment.py:65 and :83 select all eight; :73 and :93 pin CE10106,
+# source hashes and spans from fixtures/for_counter_headers/tradingview_quantities.json:139.
+# _for_float_step.py:47 checks PF-E2079. _for_counter_type_source_cases.py:7 reads
+# type-source controls; test_e2e_for_end_rule.py:45 compares accepted loop entry quantities.
+# D: test_diagnostic_notes.py:389 checks Python/browser output against interfaces.json.
+# math_variadic_keyword: NOT ESTABLISHED (fixtures/diagnostic_notes/interfaces.json:12):
+# the diagnostic states that TradingView refuses; no test or tape pins it
+# For math_fixed_keyword, :27 pins unknown 'x' and accepted names, with no TV evidence.
+# C: test_call_argument_order.py:195 checks PF-E2074 at the late positional argument;
+# :221 checks JSON without C++; :248 checks a corrected source translates and compiles.
+# The fixture's call has a positional expression after a keyword; these local checks cite
+# no independent specification, TradingView code or refusal tape for that source.
+# U: test_function_local_declaration_order.py:125 checks PF-E2075 at the late local read;
+# :140 checks direct analysis; neither records a TradingView result for this fixture.
+# B: test_loop_variable_scope.py:57 checks PF-E2054 at the expired counter read;
+# :61 checks JSON. Its :303 CE10272 comment names a different counter-header fixture.
+#
+# Original-label evidence: A = tests/fixtures/array_history_tv/README.md;
+# H = tests/fixtures/udt_history_tv/README.md; I = tests/fixtures/open_items_tv/README.md;
+# X = tests/fixtures/xsym_lib_tv/README.md; P = tests/fixtures/popfix_tv/README.md;
+# T = tests/fixtures/tail_f_tv/README.md; K = tests/fixtures/color_tv/README.md.
+# TV REFUSES A:134/:138/:139 means a runtime stop RE10051, not a compiler refusal (A:127).
+# TV REFUSES X:59 means a v5 runtime stop RE10045 (X:61), not a compiler refusal.
+# Compiler codes absent from the first diagnostic are supplied by the cited evidence:
+# A:119 CE10123; A:114/:115 CE10011; H:153/:154 CE10123;
+# H:151 CE10011; H:152 CE10010. I:61 records text without a TradingView code.
+# GAP means TradingView ran the source with a retained trade tape, while this front end
+# rejects it. A:28/:29, X:26 and T:25 have matching *_tv_trades.csv files.
+# P:67 shares tf_switch_no_arm_tv_trades.csv as P:70 explains; P:74 has its own tape.
+# K:18 and K:39 bind the v5 strategy to its directory's tv_trades.csv.
 tests/fixtures/array_history_tv/ahist_bound_push.pine
 tests/fixtures/array_history_tv/ahist_eq.pine
 tests/fixtures/array_history_tv/ahist_field_noparen.pine

@@ -165,6 +165,6 @@ introduced by this change.
 
 The Test and Engine drift workflows are changed. The separate Pyodide Gate and
 Release workflows still need their own compile dependency; their workflow
-files were outside this lane's edit allowlist. Header-only CI also does not
+files are not changed by this pull request. Header-only CI also does not
 replace the engine-enabled runtime and corpus validation required by
 AGENTS.md and CONTRIBUTING.md before completion.
