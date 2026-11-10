@@ -78,6 +78,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
   (`int(strategy.equity)`) and a float field of a record (`int(b.v)`) count as
   floating values too. This changes generated C++ for scripts that use these
   forms: regenerate and relink affected strategies.
+- A float setting of a built-in indicator computed from an input now keeps
+  its fraction, as on TradingView: the multiplier of `ta.bb`, `ta.bbw`,
+  `ta.kc`, `ta.kcw` and the `ta.vwap` bands, the factor of `ta.supertrend`,
+  the arguments of `ta.sar`, and the offset and sigma of `ta.alma` (#362).
+  Regenerate C++ and relink affected strategies.
 - Repeated explicit input titles now have separate override keys: the first
   keeps the bare title, and later inputs use `<title>#<n>`, starting at 2 and
   skipping authored titles and keys already assigned. The manifest, effective
