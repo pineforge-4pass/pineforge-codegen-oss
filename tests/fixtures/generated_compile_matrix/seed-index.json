@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "inputSha256": "ea777c2c79898a26ab1767bd95ce16fcf5f321513bbdec69149087a5c775a350",
+  "sourceUrl": "https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/281",
+  "baselineCodegen": "b1ba934180665126ffd671709f39878e99838e1b",
+  "reportedRelease": "1.9.0",
+  "reportedEngine": "ec44968",
+  "header": "//@version=6\nstrategy('repro')\ntype Box\n    array<string> items\n",
+  "tail": "if bar_index == 5\n    strategy.entry('L', strategy.long)\n",
+  "validity": {
+    "classification": "issue_author_claim",
+    "basis": "Issue author says all three run on TradingView; independently unmeasured."
+  },
+  "expected": {
+    "classification": "valid_intended_supported",
+    "translation": "MUST_SUCCEED",
+    "compile": "MUST_SUCCEED",
+    "tv": "NOT_MEASURED"
+  },
+  "observed": {
+    "translation": "UNEXECUTED",
+    "compile": "UNEXECUTED",
+    "tv": "NOT_MEASURED"
+  },
+  "seeds": [
+    {
+      "id": "single_line_parameter_after_comma",
+      "file": "single_line_parameter_after_comma.pine",
+      "body": "var b = Box.new(array.new<string>())\nadd(Box x, string s) => array.push(x.items, s), x.items.size()\nadd(b, 'a')\n",
+      "sourceSha256": "0c42aca26fa0199fbd4547efb48fe08e4f2e789954aba075584731a2318c842d",
+      "reportedRedPhase": "front-end unknown parameter after comma",
+      "baselineFailureStage": "front_end",
+      "axes": {
+        "statement_kind": "function_definition",
+        "body_layout": "single_line",
+        "primitive_type": "string",
+        "value_shape": "udt_field_array",
+        "missing_value_position": "none",
+        "missing_predicate_target": "none",
+        "map_key_type": "none"
+      }
+    },
+    {
+      "id": "ternary_string_missing_branch",
+      "file": "ternary_string_missing_branch.pine",
+      "body": "var b = Box.new(array.new<string>())\ntake(Box x) => x.items.size() > 2 ? x.items.shift() : na\nb.items.push('a')\ntake(b)\n",
+      "sourceSha256": "9d9aac30e97db1448e8aeb392ecfb4e3ad3ce3be0ab535353acc7d4da74566c8",
+      "reportedRedPhase": "generated C++ string versus numeric return type",
+      "baselineFailureStage": "cpp_compile",
+      "axes": {
+        "statement_kind": "ternary",
+        "body_layout": "single_line",
+        "primitive_type": "string",
+        "value_shape": "udt_field_array",
+        "missing_value_position": "branch_order",
+        "missing_predicate_target": "none",
+        "map_key_type": "none"
+      }
+    },
+    {
+      "id": "array_string_field_missing_predicate",
+      "file": "array_string_field_missing_predicate.pine",
+      "body": "var b = Box.new()\nif na(b.items)\n    b.items := array.new<string>()\n",
+      "sourceSha256": "9cd4381f340e216579c6616108e77cf523ba625f2281b16fcde254a777911cac",
+      "reportedRedPhase": "generated C++ missing container predicate overload",
+      "baselineFailureStage": "cpp_compile",
+      "axes": {
+        "statement_kind": "if",
+        "body_layout": "indented",
+        "primitive_type": "string",
+        "value_shape": "udt_field_array",
+        "missing_value_position": "udt_field",
+        "missing_predicate_target": "udt_field_container",
+        "map_key_type": "none"
+      }
+    }
+  ]
+}
