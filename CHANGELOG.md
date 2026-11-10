@@ -22,6 +22,17 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Pine v6 now refuses an `if` or `while` condition whose numeric value comes
+  from a `ta.*` call or a built-in variable such as `strategy.position_size`,
+  as TradingView does. Use a comparison such as `ta.change(t) != 0` for a bool
+  condition. Bool overloads and Pine v5 libraries keep their existing behavior. (#361)
+- Direct retained record fields built from stable `var` arrays, and direct
+  plain `var` array aliases, stay live through their creation bar and then
+  keep their own copy of the array as it stood at the end of that bar; two
+  holders built from one array do not share it. `copy()` of such a record
+  keeps its existing compile error. Requested evaluations, collection
+  history, nested records and intrabar recalculations keep their previous
+  lowering. Regenerate C++ and relink affected strategies.
 - `str.format_time` now uses TradingView's documented defaults when arguments
   are omitted: `"yyyy-MM-dd'T'HH:mm:ssZ"` for the format and the exchange time
   zone (`syminfo.timezone`) for the timezone. Pass `"yyyy-MM-dd"` and `"UTC"`
@@ -31,11 +42,16 @@ supported as exact pairs; on the 0.x line they are independent. See the
   explaining that v6 removed the argument and recommending an `if` statement
   around the call. Other unknown keywords keep `PF-E2027`.
 - Pine identifiers spelled like generated state members or helpers use the C++ name allocator, including history-bearing locals in requested helpers.
-- A local declared in a function or method and spelled like a built-in variable now keeps its own type, history storage and reads. Exceptions: a string local spelled like a price field (`open`, `high`, `low`, `close`, `hl2`, `hlc3`, `hlcc4`, `ohlc4`, `volume`) that is read with history in a function requested through `request.security` is still refused, as before; a string local that is read with history and used in a concatenation still does not compile, for any name; the support check still warns that `bar_index`, `last_bar_index` and `timenow` diverge from TradingView at every read of a local with that name; a script that declares the same built-in name in several callable shapes is accepted where an ordinary name is refused by the shared-Series check; and the confirmed-bar request receipt of a request inside the declaring function names the local by its internal storage spelling.
+- A script variable spelled like one of the generator's tuple element bindings (`_tuple_result_0_elem_0`) now gets a private name instead of redeclaring the binding.
+- A local declared in a function or method and spelled like a built-in variable now keeps its own type, history storage and reads. Exceptions: a string local spelled like a price field (`open`, `high`, `low`, `close`, `hl2`, `hlc3`, `hlcc4`, `ohlc4`, `volume`) that is read with history in a function requested through `request.security` is still refused, as before; the support check still warns that `bar_index`, `last_bar_index` and `timenow` diverge from TradingView at every read of a local with that name; a script that declares the same built-in name in several callable shapes is accepted where an ordinary name is refused by the shared-Series check; and the confirmed-bar request receipt of a request inside the declaring function names the local by its internal storage spelling.
+- A function-local string read with history now keeps its string type in concatenations, so the emitted C++ joins the current and previous values without applying `std::to_string` to a string (#354).
 - `transpile_with_producer_metadata()` returns the C++ and its input manifest,
   strategy settings, request-feed inventory and flat diagnostics from one
   translation, bound by SHA-256. `producer_metadata_json()` returns canonical
   UTF-8 JSON bytes; invalid document values raise `ProducerMetadataError`.
+- A function or method parameter spelled like a built-in variable (`close`,
+  `high`, ...) now keeps its `[n]` history operator and gives the same values
+  as when the parameter has another name (#360).
 - History retention can be selected with keyword-only `history_capacity`
   in `transpile()`, `transpile_full()`, `transpile_with_request_inventory()`
   and `gate/glue.py::transpile_json()`. The JavaScript worker template does
@@ -62,6 +78,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
   option. Capacities outside the native int64 domain are refused even for
   scripts without drawings. Regenerate C++ and relink affected strategies.
 - Typed `array.from()` initializers now match their declared element type, including function-local `var` and `varip` arrays of timestamps.
+- A `var` declared in one block no longer shares storage with a plain variable
+  of the same name in a sibling block, so it keeps its value across runs (#359).
 - Variables initialized from `backadjustment.*`, `settlement_as_close.*` and
   `adjustment.*` constants now use integer storage in emitted C++.
 - `int(x)` of a floating value, and a stored `math.floor(x)`, `math.ceil(x)`
@@ -81,6 +99,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
   (`int(strategy.equity)`) and a float field of a record (`int(b.v)`) count as
   floating values too. This changes generated C++ for scripts that use these
   forms: regenerate and relink affected strategies.
+- A float setting of a built-in indicator computed from an input now keeps
+  its fraction, as on TradingView: the multiplier of `ta.bb`, `ta.bbw`,
+  `ta.kc`, `ta.kcw` and the `ta.vwap` bands, the factor of `ta.supertrend`,
+  the arguments of `ta.sar`, and the offset and sigma of `ta.alma` (#362).
+  Regenerate C++ and relink affected strategies.
 - Repeated explicit input titles now have separate override keys: the first
   keeps the bare title, and later inputs use `<title>#<n>`, starting at 2 and
   skipping authored titles and keys already assigned. The manifest, effective

@@ -9,8 +9,8 @@ a double transparency since the time/color handling changed, and the transpiler 
 it the transparency unrounded (``helpers.color_alpha_cast``); it used to
 truncate one to an int, so ``color.new(c, 10.5)`` read 10.
 
-The tape ``w11-color-v6-eth15`` (``fixtures/color_tv``, the engine's
-``lab tv`` export) spells what a synthetic probe read in every exit comment on
+The tape ``w11-color-v6-eth15`` (``fixtures/color_tv``) spells what a
+synthetic probe read in every exit comment on
 BINANCE:ETHUSDT.P 15: the r,g,b,t of the seventeen named constants and
 ``color.t`` of ``color.new`` / ``color.rgb`` over whole and half
 transparencies. The probe keys its readings on ``bar_index`` alone, so it
@@ -58,7 +58,7 @@ QUARTER_HOUR_MS = 900_000
 
 
 def _utc_ms(stamp: str) -> int:
-    """A tape time (UTC+8, lab tv's rendering) in UTC ms."""
+    """A fixture timestamp recorded in UTC+8, converted to UTC ms."""
     local = dt.datetime.strptime(stamp, "%Y-%m-%d %H:%M")
     return int((local - dt.timedelta(hours=8)).replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
 

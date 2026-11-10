@@ -211,7 +211,7 @@ def _utc_ms(stamp: str, offset_hours: int) -> int:
 
 def read_tape(slug: str) -> list[tuple[int, dict[str, bool]]]:
     """(the chart bar's open in UTC ms, TradingView's flags by letter) per
-    Entry row, in time order. ``lab tv`` renders times at UTC+8; a Signal is a
+    Entry row, in time order. Fixture times are recorded in UTC+8; a Signal is a
     letter and a digit per flag (``M1``, ``M1P0Q0F1L0f1l0``)."""
     with tape_file(slug, "tv_trades.csv").open(encoding="utf-8-sig") as fh:
         rows = [row for row in csv.DictReader(fh) if row["Type"].startswith("Entry")]

@@ -219,6 +219,7 @@ _NUMBERED_NAMES = {
     "_for_step_12": "visit_stmt.py:_visit_for",
     "_for_down_12": "visit_stmt.py:_visit_for",
     "_result__ta_macd_1": "visit_stmt.py:_visit_tuple_assign",
+    "_tuple_result_0_elem_0": "visit_stmt.py:_visit_tuple_assign",
     "_pf_selection__pf_var_init_value": "visit_stmt.py:Series selection temporary",
 }
 
@@ -303,4 +304,11 @@ def test_ordinary_names_keep_reference_cpp(position, string, reference, tmp_path
     pine.write_text(source, encoding="utf-8")
     before = transpile_json(pine, root=reference)
     assert before["ok"], before
-    assert transpile(source) == before["cpp"]
+    expected = before["cpp"]
+    if string:
+        from tests.test_string_local_history_concat import with_string_join_fixed
+
+        # The reference joined a string local with its previous value through
+        # std::to_string (issue #354); that one site is the whole difference.
+        expected = with_string_join_fixed(expected)
+    assert transpile(source) == expected

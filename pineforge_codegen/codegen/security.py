@@ -77,6 +77,9 @@ from ..ast_nodes import MethodDef
 from ..analyzer import (
     FuncInfo, TACallSite, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
 )
+from ..analyzer.callable_history_names import (
+    AUTHORED_LOCAL_NAMES, authored_callable_parameters,
+)
 from .. import signatures as sigs
 from ..errors import CompileError, Phase
 from ..external_requests import (
@@ -3275,7 +3278,7 @@ class SecurityEmitter:
         declaration = self.ctx.identifier_binding_nodes.get(id(read.object))
         if not isinstance(declaration, VarDecl) or declaration.is_var:
             return
-        authored = (declaration.annotations or {}).get("authored_local_names")
+        authored = (declaration.annotations or {}).get(AUTHORED_LOCAL_NAMES)
         if not authored or authored.get(declaration.name) not in SECURITY_PRICE_LOCAL_NAMES:
             return
         if self._budget is not None:
@@ -3594,6 +3597,17 @@ class SecurityEmitter:
         if not isinstance(owner, _SecurityHelperArgumentFrame) or owner.call is None:
             return None
         info = self._func_info_map[owner.call.callee.name]
+        # A string parameter authored as a price field keeps the composer's
+        # direct-binding refusal after its private name registers history.
+        if any(
+            parameter == read.object.name
+            and authored in SECURITY_PRICE_LOCAL_NAMES
+            and parameter_type == PineType.STRING
+            for parameter, authored, parameter_type in zip(
+                info.node.params, authored_callable_parameters(info.node), info.param_types,
+            )
+        ):
+            return None
         if read.object.name not in self.ctx.func_series_vars.get(info.name, ()):
             return None
         frames = [frame for frame in bindings or ()
