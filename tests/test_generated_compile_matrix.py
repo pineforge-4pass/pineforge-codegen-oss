@@ -856,6 +856,8 @@ def test_smaller_real_output_bound_withholds_the_entire_plan_and_exposes_uncover
     assert coverage["invalidInputFacts"]["uncovered"]
     assert any(issue["kind"] == "ordinary_case_cap_exceeded" and issue["limit"] == bound
                for issue in manifest["generation"]["issues"])
+    assert not any(issue["kind"] == "zero_positive_form_rows"
+                   for issue in manifest["generation"]["issues"])
     assert manifest["results"]["status"] == "INCOMPLETE"
 
 
@@ -938,6 +940,7 @@ def test_unknown_renderer_input_is_positive_and_stops_later_emission(scratch):
     assert all(row["expected"]["compile"] == "MUST_SUCCEED" for row in unknown)
     issues = manifest["generation"]["issues"]
     assert sum(issue["kind"] == "renderer_mismatch" for issue in issues) == 1
+    assert not any(issue["kind"] == "zero_positive_form_rows" for issue in issues)
     failed = next(issue["caseId"] for issue in issues if issue["kind"] == "renderer_mismatch")
     ordinary = [row for row in manifest["cases"] if row["renderFamily"] == "ordinary"]
     failed_index = next(index for index, row in enumerate(ordinary) if row["id"] == failed)
@@ -961,6 +964,82 @@ def test_zero_ordinary_rows_for_a_requested_form_cannot_complete(scratch):
     assert any(issue["kind"] == "zero_positive_form_rows" and issue["forms"] == ["method"]
                for issue in manifest["generation"]["issues"])
     assert coverage["positiveDomainStatus"] == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("constrained_forms,classification", [
+    ([], "unresolved"),
+    (["function_definition"], "unresolved"),
+    (["if"], "invalid"),
+    (["function_definition", "if"], "inapplicable"),
+    (["function_definition", "method", "if"], "unresolved"),
+    (["method"], "valid_unsupported"),
+])
+def test_form_absence_is_distinct_from_unrelated_global_withholding(
+    scratch, constrained_forms, classification,
+):
+    spec, _, spec_path, index_path = tiny_inputs(scratch)
+    forms = ["method", "if", "function_definition"]
+    for axis in spec["axes"]:
+        if axis["name"] == "statement_kind":
+            axis["levels"] = forms
+    spec["layoutApplicability"][0]["statementKinds"] = forms
+    if constrained_forms:
+        spec["constraints"].append(language_rule(
+            "whole_form_evidence", classification, {"statement_kind": constrained_forms},
+        ))
+    # This one core tuple is absent even when every form has other positive
+    # completions. Its conflict with declared applicability withholds all rows.
+    spec["constraints"].append(language_rule(
+        "partial_core_conflict", "inapplicable", {
+            "statement_kind": ["function_definition"], "body_layout": ["single_line"],
+            "primitive_type": ["string"],
+        },
+    ))
+    axes = {axis["name"]: axis["levels"] for axis in spec["axes"]}
+    reference = independent_groups(
+        axes, spec["constraints"], spec["enumerationPolicy"]["coreAxes"],
+        spec["enumerationPolicy"]["seed"],
+    )
+    eligible_forms = {row["statement_kind"] for row in reference["legal"]}
+    absent_forms = [form for form in forms if form not in eligible_forms]
+    write_json(spec_path, spec)
+    output = scratch / "withheld-forms"
+    actual_exit = invoke(spec_path, index_path, output)
+    assert actual_exit != 0
+    manifest = read_json(output / "manifest.json")
+    coverage = manifest["coverage"]
+    issues = manifest["generation"]["issues"]
+    assert any(issue["kind"] == "core_layout_contract_conflict"
+               and issue["missingApplicableCompletions"] for issue in issues)
+    zero_form_issues = [issue for issue in issues if issue["kind"] == "zero_positive_form_rows"]
+    assert zero_form_issues == (
+        [{"kind": "zero_positive_form_rows", "forms": absent_forms}] if absent_forms else []
+    )
+    assert {row["axes"]["statement_kind"] for row in manifest["candidates"]
+            if row["legality"] == "valid"} == eligible_forms
+    ordinary = [row for row in manifest["cases"] if row["renderFamily"] != "community_seed"]
+    assert ordinary and all(row["renderStatus"] == "WITHHELD_INPUT" for row in ordinary)
+    assert all(row["sourcePath"] is row["sourceSha256"] is None for row in ordinary)
+    assert coverage["formCounts"] == coverage["formPositiveCounts"] == dict.fromkeys(forms, 0)
+    assert all(count == 0 for layouts in coverage["layoutCounts"].values()
+               for count in layouts.values())
+    assert coverage["ordinaryEmittedCount"] == coverage["positiveEmittedCount"] == 0
+    assert coverage["totalEmittedCount"] == coverage["seedCount"]
+    assert coverage["achievedPairs"] == coverage["achievedInputFacts"] == []
+    assert coverage["uncoveredPairs"] == coverage["targetPairs"]
+    assert coverage["uncoveredInputFacts"] == coverage["targetInputFacts"]
+    assert {"form:" + form for form in forms} <= {
+        fact["id"] for fact in coverage["uncoveredInputFacts"]
+    }
+    assert coverage["core"]["achievedTuples"] == []
+    assert coverage["core"]["uncoveredTuples"] == coverage["core"]["targetTuples"]
+    assert any(issue["kind"] == "uncovered_requirements" for issue in issues)
+    assert coverage["positiveDomainStatus"] == coverage["status"] == "INCOMPLETE"
+    assert manifest["generation"]["exitCode"] == actual_exit
+    assert manifest["generation"]["status"] == manifest["generation"]["sourceStatus"] == "INCOMPLETE"
+    assert manifest["results"]["status"] == "INCOMPLETE"
+    assert all(result["translation"]["status"] == result["compile"]["status"] == "UNEXECUTED"
+               for result in manifest["results"]["cases"].values())
 
 
 def test_a_constraint_cannot_erase_a_declared_applicable_core_layout(scratch):

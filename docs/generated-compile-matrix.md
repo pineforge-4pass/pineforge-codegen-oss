@@ -178,6 +178,16 @@ deterministic two-way covering set over all seven axes. The fixed recorded seed
 is the UTF-8 string `2026-10-30.3`. Every requested statement form must have
 ordinary positive rows; missing completions are reported as incomplete.
 
+The `zero_positive_form_rows` diagnostic names requested forms with no
+eligible ordinary positive candidate under the declared constraints and
+resolved classifications. It does not name otherwise eligible forms merely
+withheld by another input issue. `formCounts`, `formPositiveCounts`,
+`layoutCounts` and achieved facts still count only emitted ordinary positives;
+candidate eligibility earns no emitted or compiled coverage. Withholding,
+selection, cap, renderer and storage failures retain their existing issues,
+uncovered requirements and incomplete outcomes. This diagnostic basis changes
+neither generation nor admission policy.
+
 For each core triple and each pair of levels from distinct axes, seek the first
 valid complete assignment in declared axis/level order, pruning incompatible
 partial assignments using the declarative constraints. The generator need not

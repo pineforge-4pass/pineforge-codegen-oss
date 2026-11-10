@@ -1861,6 +1861,13 @@ def build_matrix(
     records = [classify_candidate(row, spec["rules"]) for row in plan["candidateRows"]]
     for record in records:
         record["expected"] = expected_for(record["legality"], spec)
+    # Every extendable form has a canonical positive fact completion in this
+    # pool. Diagnose absent eligible forms independently of emission being
+    # withheld by another input issue; candidates earn no emitted coverage.
+    eligible_forms = {
+        row["axes"]["statement_kind"] for row in records if row["legality"] == "valid"
+    }
+    missing_forms = [form for form in axes["statement_kind"] if form not in eligible_forms]
     manifest["candidates"] = records
     manifest["inventory"] = {
         "axes": spec["raw"]["axes"], "constraints": spec["raw"]["constraints"],
@@ -2114,7 +2121,6 @@ def build_matrix(
         for form in axes["statement_kind"]
     }
     coverage["formPositiveCounts"] = dict(coverage["formCounts"])
-    missing_forms = [form for form, count in coverage["formCounts"].items() if not count]
     if missing_forms:
         record_issue(manifest, "zero_positive_form_rows", forms=missing_forms)
     if not records:
