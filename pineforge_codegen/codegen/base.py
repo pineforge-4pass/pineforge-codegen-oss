@@ -4838,18 +4838,22 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     _SHARED_MEMBER_TYPES = frozenset({"int", "int64_t", "double", "bool"})
 
     def _block_locals_needing_names(self) -> frozenset:
-        """The declarations in the script's top-level blocks whose type the
-        member of their name cannot hold (``block_locals``). The member has
-        the type of the name's direct top-level declaration, else of its
-        first declaration; a string, a collection or an object beside another
-        type did not compile. Numbers and bools share one member, as before."""
+        """Block declarations needing distinct storage (``block_locals``).
+
+        A persistent declaration cannot share a plain sibling's member.
+        Otherwise the member has the type of the name's direct top-level
+        declaration, else of its first declaration; incompatible types get
+        separate names. Numbers and bools share one member, as before.
+        """
+        from ..block_locals import persistent_plain_block_keys
+
         decls = [(decl, nested) for decl, nested in block_declarations(self.ctx.ast.body)
                  if not decl.is_var and not decl.is_varip and decl.value is not None]
         member: dict[str, str | None] = {}
         for decl, nested in decls:
             if not nested:
                 member.setdefault(decl.name, self._declared_cpp_type(decl))
-        needing: set = set()
+        needing: set = set(persistent_plain_block_keys(self.ctx.ast.body))
         for decl, nested in decls:
             if nested and id(decl) in self.ctx.primitive_block_shadow_types:
                 # This declaration has ordinary lexical C++ storage already.
@@ -6730,7 +6734,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             idx = start + len(rendered)
         return out, found
 
-    def _runtime_ctor_arg_for_reset(self, arg_str: str) -> str | None:
+    def _runtime_ctor_arg_for_reset(
+        self, arg_str: str, pine_type: PineType = PineType.INT,
+    ) -> str | None:
         """Convert a TA ctor-arg string into its runtime C++ expression.
 
         Returns the runtime expression (e.g.
@@ -6741,7 +6747,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         those. Returns None for pure literals or expressions that contain
         any unrecognised (potentially series) identifier, so the caller
         (the TA ctor guard) rejects them loudly instead of silently
-        emitting period 1.
+        emitting period 1. ``pine_type`` is the destination signature slot;
+        callers without signature metadata retain the integer rendering.
         """
         import re
         ident_re = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
@@ -6827,7 +6834,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Falls back to the legacy token-substitution renderer below only if
         # re-parse / lowering unexpectedly fails, so a working site is never
         # worse off than before this change.
-        lowered = self._lower_reset_expr_via_visitor(expanded)
+        lowered = (
+            self._lower_reset_expr_via_visitor(expanded)
+            if pine_type == PineType.INT
+            else self._lower_reset_expr_via_visitor(expanded, pine_type)
+        )
         if lowered is not None:
             return lowered
 
@@ -6894,18 +6905,22 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # (a literal that spells an input's or a constant's name stays as is).
         rewritten = sub_identifiers(expr, _sub)
 
-        # 5) Pine auto-converts floats to ints for TA lengths; C++ does not.
+        # 5) Preserve the base renderer's decision to narrow.
         # If any math.* function appears (returns double) OR a timeframe.*
         # boolean is part of a ternary whose branches are doubles, wrap the
         # whole expression in an explicit int cast so the TA ctor gets an
         # integer length.
         had_math = "std::" in rewritten or bool(re.search(r"\btimeframe\b", expanded))
         if had_math:
+            if pine_type == PineType.FLOAT:
+                return self._coerce_double_slot(rewritten, None)
             return na_preserving_int_cast(rewritten)
         return rewritten
 
-    def _lower_reset_expr_via_visitor(self, expanded: str) -> str | None:
-        """Re-parse a gate-approved, fully-expanded TA-length expression and
+    def _lower_reset_expr_via_visitor(
+        self, expanded: str, pine_type: PineType = PineType.INT,
+    ) -> str | None:
+        """Re-parse a gate-approved, fully-expanded TA constructor expression and
         lower it through the SAME expression visitor the statement path uses,
         so operator grouping and Pine numeric typing are preserved identically
         (Pine ``/`` always yields float; ``math.*`` returns double; branches are
@@ -6938,13 +6953,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if not rendered or "/* " in rendered:
             # Unknown/unhandled node leaked a placeholder — defer to legacy.
             return None
-        # A TA length must be int. Truncate when the lowered form is
-        # float-typed (a ``std::*`` call, a ``(double)`` division coercion, or a
-        # ``timeframe.*`` helper — all timeframe helpers reference script_tf_).
+        # Replace only the base renderer's narrowing of a float setting.
+        # Its test matches a ``std::*`` call, a ``(double)`` division coercion,
+        # or a ``timeframe.*`` helper (which references script_tf_).
         # A bare int / identifier length carries none of these and is left
         # unwrapped, so simple sites stay byte-identical to the legacy output.
         if ("std::" in rendered or "(double)" in rendered
                 or "script_tf_" in rendered):
+            if pine_type == PineType.FLOAT:
+                # Check an integer's sentinel before promoting it to double.
+                return self._coerce_double_slot(rendered, node)
             return na_preserving_int_cast(rendered)
         return rendered
 
@@ -6961,7 +6979,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         args: list[str] = []
         any_runtime = False
         for arg_pos, a in enumerate(site.ctor_args):
-            rt = self._runtime_ctor_arg_for_reset(a)
+            param = self._ta_ctor_param(site, arg_pos)
+            pine_type = param.pine_type if param is not None else PineType.INT
+            rt = self._runtime_ctor_arg_for_reset(a, pine_type)
             if rt is not None:
                 rendered = rt
                 any_runtime = True
@@ -7049,7 +7069,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     runtime_args = []
                     any_runtime = False
                     for arg_pos, a in enumerate(ctor_args):
-                        rt = self._runtime_ctor_arg_for_reset(a)
+                        param = self._ta_ctor_param(site, arg_pos)
+                        pine_type = param.pine_type if param is not None else PineType.INT
+                        rt = self._runtime_ctor_arg_for_reset(a, pine_type)
                         resolved = self._resolve_ta_ctor_arg(a)
                         lowered_variant = ctor_arg_stability is not None
                         stable_variant_arg = (
