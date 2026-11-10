@@ -77,7 +77,9 @@ from ..ast_nodes import MethodDef
 from ..analyzer import (
     FuncInfo, TACallSite, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
 )
-from ..analyzer.callable_history_names import AUTHORED_LOCAL_NAMES
+from ..analyzer.callable_history_names import (
+    AUTHORED_LOCAL_NAMES, authored_callable_parameters,
+)
 from .. import signatures as sigs
 from ..errors import CompileError, Phase
 from ..external_requests import (
@@ -3595,6 +3597,17 @@ class SecurityEmitter:
         if not isinstance(owner, _SecurityHelperArgumentFrame) or owner.call is None:
             return None
         info = self._func_info_map[owner.call.callee.name]
+        # A string parameter authored as a price field keeps the composer's
+        # direct-binding refusal after its private name registers history.
+        if any(
+            parameter == read.object.name
+            and authored in SECURITY_PRICE_LOCAL_NAMES
+            and parameter_type == PineType.STRING
+            for parameter, authored, parameter_type in zip(
+                info.node.params, authored_callable_parameters(info.node), info.param_types,
+            )
+        ):
+            return None
         if read.object.name not in self.ctx.func_series_vars.get(info.name, ()):
             return None
         frames = [frame for frame in bindings or ()

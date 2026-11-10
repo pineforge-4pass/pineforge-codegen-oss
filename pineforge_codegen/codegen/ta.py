@@ -796,7 +796,7 @@ class TaSiteHelper:
         if family in self.LAZY_PER_EXECUTION_TA:
             return (
                 "per-execution native: the reached-only inline compute is "
-                "TradingView's clock (lab tv 2026-09-03)"
+                "TradingView's clock (evidence dated 2026-09-03)"
             )
         if family in self.LAZY_SOURCE_CLOCK_TA:
             return "hold-last source-clock family with a non-numeric source"
@@ -1080,7 +1080,7 @@ class TaSiteHelper:
     # A pure user call's history below a lazy edge
     # ------------------------------------------------------------------
     #
-    # TradingView rule, pinned 2026-09-29 with ``lab tv`` on BINANCE:BTCUSDT
+    # TradingView rule, pinned 2026-09-29 on BINANCE:BTCUSDT
     # 15 (``tests/fixtures/lazy_call_history``): ``f(...)[k]`` on a user
     # function's call in the lazily evaluated right operand of ``and``/``or``
     # or in a ternary's arm reads the call's value k executions of its scope
@@ -1447,7 +1447,7 @@ class TaSiteHelper:
     #
     # A ``ta.*`` constructor argument that is neither a compile-time value nor
     # a runtime-resettable input/timeframe expression used to be refused. Its
-    # Pine qualifier decides TradingView's answer (lab tv, K-TA-DYNLEN
+    # Pine qualifier decides TradingView's answer (K-TA-DYNLEN evidence dated
     # 2026-09-26; the engine header pineforge/source/pine_ta_length.hpp states
     # every rule with its tape):
     #
@@ -1614,9 +1614,9 @@ class TaSiteHelper:
         string literals are spelled, that this module lowers instead
         (``_ta_length_literal_facts``): anything beside an input.string
         choice, and an input.string choice of a parameter that is not known
-        to be an int -- a float, or one ``_ta_ctor_param`` does not know (a
-        VWAP band multiplier, ``math.sum``'s length) -- since the runtime
-        reset casts its expression to a length."""
+        to be an int -- a float (a VWAP band multiplier among them), or one
+        ``_ta_ctor_param`` does not know (``math.sum``'s length) -- since the
+        runtime reset casts its expression to a length."""
         newly, outside = self._ta_length_literal_facts(arg, inline)
         if not newly:
             return False
@@ -1910,7 +1910,10 @@ class TaSiteHelper:
         from ..analyzer.tables import TA_MULTI_CTOR, TA_PERIOD_ARG
         from ..signatures import TA_FUNCTIONS
         family = self._ta_site_function(site)
-        if family in TA_MULTI_CTOR:
+        if site.class_name in ("ta::VWAPBands", "_PFAnchoredVWAPBands"):
+            # Both analyzer dispatches construct bands from stdev_mult only.
+            indices = list(TA_MULTI_CTOR["vwap_anchored_bands"])
+        elif family in TA_MULTI_CTOR:
             indices = list(TA_MULTI_CTOR[family])
             if family in ("pivothigh", "pivotlow") and len(site.ctor_args) == 2:
                 indices = [1, 2]
@@ -1948,7 +1951,9 @@ class TaSiteHelper:
             arg = site.ctor_args[position]
             # The live input first: a compile-time resolution of an input-backed
             # argument is only its default (the constructor's placeholder).
-            value = self._runtime_ctor_arg_for_reset(arg)
+            param = self._ta_ctor_param(site, position)
+            pine_type = param.pine_type if param is not None else PineType.INT
+            value = self._runtime_ctor_arg_for_reset(arg, pine_type)
             if value is None:
                 resolved = self._resolve_ta_ctor_arg(arg)
                 if self._is_compile_time_value(resolved):

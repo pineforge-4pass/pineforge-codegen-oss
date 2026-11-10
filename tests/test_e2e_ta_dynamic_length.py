@@ -3,7 +3,7 @@ input: each lowering replays a TradingView tape through transpile, compile and
 run.
 
 TradingView accepts a length the constructor cannot take. Its Pine qualifier
-decides the answer (lab tv, 2026-09-26; the engine header
+decides the answer (evidence dated 2026-09-26; the engine header
 ``pineforge/source/pine_ta_length.hpp`` states each rule with its tapes):
 
 * a series length for ta.highest / ta.lowest / ta.highestbars /
@@ -20,8 +20,8 @@ decides the answer (lab tv, 2026-09-26; the engine header
   request.security copy is lowered from the length its own call passes, and
   its ``timeframe.*`` reads the requested timeframe.
 
-Each fixture under ``fixtures/ta_dynamic_length/<probe>/`` is a ``lab tv
---no-note`` export of the synthetic ``strategy.pine`` beside it on
+Each fixture under ``fixtures/ta_dynamic_length/<probe>/`` pairs the
+synthetic ``strategy.pine`` beside it with its recorded tape on
 BINANCE:ETHUSDT.P 15 from 2025-04-01 (``metrics.json`` is its provenance). The
 probe enters on every bar with an id that spells the bar's values, so a trade
 is equal only when every recorded value is. The run starts the corpus 15m feed
