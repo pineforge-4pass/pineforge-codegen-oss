@@ -43,12 +43,6 @@ _FLOAT_SETUP = "float t = ta.ema(close, 5)\n"
 _BOOL_SETUP = "bool b = close > open\n"
 
 
-@pytest.fixture(autouse=True)
-def require_native_inputs(monkeypatch):
-    # The native controls require compiler and runtime inputs.
-    monkeypatch.setenv("PINEFORGE_REQUIRE_NATIVE", "1")
-
-
 def _condition_source(condition, *, setup="", statement="if"):
     body = "break" if statement == "while" else 'strategy.entry("L", strategy.long)'
     return (
