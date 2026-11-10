@@ -45,6 +45,8 @@ KNOWN_COMPILE_FAILURES = {
 }
 MATRIX_SCHEMA_VERSION = 1
 MATRIX_GENERATOR_VERSION = "3"
+KNOWN_MATRIX_FAILURES_PATH = ROOT / "tests/fixtures/generated_compile_matrix/known_failures.tsv"
+KNOWN_MATRIX_FAILURE_PHASES = frozenset({"translation-REJECTED", "compile-FAILED"})
 MATRIX_INPUT_PINS = {
     "generator": (
         "scripts/generate_compile_matrix.py",
@@ -647,6 +649,81 @@ def test_engine_corpus_ratchet_uses_root_relative_labels(tmp_path, monkeypatch):
     ]
 
 
+def read_known_matrix_failures(path: Path) -> dict[str, tuple[str, str, str]]:
+    """Read the strict, sorted debt register without changing its contents."""
+    def fail(problem):
+        pytest.fail("INCOMPLETE: known-failure table " + problem, pytrace=False)
+
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as error:
+        fail(f"must be readable UTF-8: {error}")
+    if re.search(r"[\r\v\f\x1c-\x1e\x85\u2028\u2029]", text):
+        fail("must use LF line ends only")
+    if not text.endswith("\n") or text.endswith("\n\n"):
+        fail("must end with exactly one LF")
+
+    known = {}
+    clusters = {}
+    signatures = {}
+    previous = None
+    for number, line in enumerate(text[:-1].split("\n"), 1):
+        if not line:
+            fail(f"has an empty line at row {number}")
+        if line.lstrip().startswith("#"):
+            fail(f"has a comment line at row {number}")
+        fields = line.split("\t")
+        if len(fields) != 4:
+            fail(f"row {number} must have exactly four tab-separated fields")
+        case_id, phase, cluster, reason = fields
+        if re.fullmatch(r"case-[0-9a-f]{64}", case_id) is None:
+            fail(f"row {number} has an invalid lowercase case id: {case_id}")
+        if case_id in known:
+            fail(f"has a duplicate case id: {case_id}")
+        if previous is not None and case_id <= previous:
+            fail(f"rows must be strictly sorted by case id: {case_id}")
+        if phase not in KNOWN_MATRIX_FAILURE_PHASES:
+            fail(f"{case_id} has an invalid phase: {phase}")
+        if re.fullmatch(r"K[0-9]{2}", cluster) is None:
+            fail(f"{case_id} has an invalid cluster id: {cluster}")
+        if not reason:
+            fail(f"{case_id} has an empty reason")
+        if len(reason) > 200:
+            fail(f"{case_id} reason exceeds 200 characters")
+        signature = (phase, reason)
+        clusters.setdefault(cluster, set()).add(signature)
+        signatures.setdefault(signature, set()).add(cluster)
+        known[case_id] = (phase, cluster, reason)
+        previous = case_id
+    for signature, ids in signatures.items():
+        if len(ids) != 1:
+            fail(f"one phase and reason has multiple cluster ids: {sorted(ids)}")
+    for cluster, values in clusters.items():
+        if len(values) != 1:
+            fail(f"cluster {cluster} has multiple phase and reason pairs")
+    if set(clusters) != {f"K{index:02d}" for index in range(1, len(clusters) + 1)}:
+        fail("cluster numbers must start at K01 with no gaps")
+    return known
+
+
+def compare_known_matrix_failures(observed, known, scope):
+    """Compare actual failures with table entries belonging to the attempted scope."""
+    observed_ids = set(observed)
+    scoped_known = set(known) & scope
+    new = sorted(observed_ids - set(known))
+    stale = sorted(scoped_known - observed_ids)
+    wrong_phase = sorted(
+        case_id for case_id in observed_ids & scoped_known
+        if observed[case_id] != known[case_id][0]
+    )
+    return new, stale, wrong_phase
+
+
+@pytest.fixture(scope="module")
+def known_matrix_failures():
+    return read_known_matrix_failures(KNOWN_MATRIX_FAILURES_PATH)
+
+
 def _matrix_group(case: dict) -> str:
     expected = case["expected"]
     diagnostics = (
@@ -845,7 +922,10 @@ def generated_matrix(tmp_path_factory, request):
         "shards": int(os.environ.get("PINEFORGE_COMPILE_SHARDS", "1")),
         "generator": {"exitCode": None, "stderr": None},
         "producer": None, "cases": [],
-        "consumer": {"status": "INCOMPLETE", "reasons": ["generation has not completed"]},
+        "consumer": {
+            "status": "INCOMPLETE", "reasons": ["generation has not completed"],
+            "knownFailureCount": 0, "newFailureCount": 0, "staleCount": 0,
+        },
     }
 
     def retain():
@@ -1007,13 +1087,18 @@ def test_generated_matrix_invalid_controls(generated_matrix_controls):
 
 @pytest.mark.parametrize("family", ["ordinary", "community_seed"])
 def test_generated_matrix_positive_translates_and_compiles(
-    family, generated_matrix_controls, sweep_results,
+    family, generated_matrix_controls, sweep_results, known_matrix_failures,
 ):
     matrix = generated_matrix_controls
+    known = known_matrix_failures
+    observed = {}
+    scope = set()
     failures = []
+    incomplete = []
     for case in matrix["positives"]:
         if case["renderFamily"] != family:
             continue
+        scope.add(case["id"])
         row = matrix["rows"][case["id"]]
         cpp = _matrix_translate(case, matrix)
         if cpp is not None:
@@ -1036,9 +1121,211 @@ def test_generated_matrix_positive_translates_and_compiles(
                 f"{row['translation']['firstDiagnostic']}; "
                 f"compile={row['compile']['outcome']} {row['compile']['firstDiagnostic']}"
             )
-            failures.append(row["failure"])
-    matrix["report"]["consumer"]["reasons"].extend(failures)
-    assert not failures, "\n".join(failures)
+            phase = (
+                "translation" if row["translation"]["outcome"] != "SUCCEEDED" else "compile"
+            )
+            label = phase + "-" + str(row[phase]["outcome"])
+            if label not in KNOWN_MATRIX_FAILURE_PHASES:
+                reason = "INCOMPLETE: " + row["failure"]
+                incomplete.append(reason)
+            else:
+                observed[case["id"]] = label
+                reason = row["failure"]
+                if case["id"] in known:
+                    reason = f"known failure {known[case['id']][1]}: " + reason
+            failures.append(reason)
+    new, stale, wrong_phase = compare_known_matrix_failures(observed, known, scope)
+    consumer = matrix["report"]["consumer"]
+    consumer["knownFailureCount"] += len(scope & set(known))
+    consumer["newFailureCount"] += len(new)
+    consumer["staleCount"] += len(stale)
+    consumer["reasons"].extend(failures)
+    if incomplete:
+        pytest.fail(
+            "INCOMPLETE: generated matrix execution has unavailable outcomes\n"
+            + "\n".join(incomplete), pytrace=False,
+        )
+    message = [f"new={new}", f"stale={stale}", f"wrong_phase={wrong_phase}"]
+    suggested_clusters = {(phase, reason): cluster for phase, cluster, reason in known.values()}
+    for case_id in new:
+        phase = observed[case_id].split("-", 1)[0]
+        diagnostic = matrix["rows"][case_id][phase]["firstDiagnostic"] or "diagnostic unavailable"
+        reason = " ".join(diagnostic.replace(case_id, "<case>").split())[:200]
+        signature = (observed[case_id], reason)
+        if signature not in suggested_clusters:
+            suggested_clusters[signature] = f"K{len(set(suggested_clusters.values())) + 1:02d}"
+        message.append(
+            "add table row: "
+            + "\t".join((case_id, observed[case_id], suggested_clusters[signature], reason))
+        )
+    message.extend(f"remove stale table id: {case_id}" for case_id in stale)
+    message.extend(
+        f"wrong phase {case_id}: table={known[case_id][0]}, observed={observed[case_id]}"
+        for case_id in wrong_phase
+    )
+    if new or stale or wrong_phase:
+        consumer["reasons"].extend(message)
+    assert not (new or stale or wrong_phase), "\n".join(message)
+
+
+def test_generated_matrix_known_failure_table_is_valid(known_matrix_failures):
+    assert len(known_matrix_failures) == len(KNOWN_MATRIX_FAILURES_PATH.read_bytes().splitlines())
+
+
+def test_generated_matrix_known_failure_ids_are_positive(generated_matrix, known_matrix_failures):
+    positive_ids = {
+        case["id"] for case in generated_matrix["manifest"]["cases"]
+        if _matrix_group(case) in {"ordinary", "community_seed"}
+    }
+    missing = sorted(set(known_matrix_failures) - positive_ids)
+    assert not missing, (
+        f"INCOMPLETE: known-failure table ids are not emitted positive cases: {missing}"
+    )
+
+
+@pytest.mark.parametrize("mutation,expected_problem", [
+    ("invalid-utf8", "must be readable UTF-8"),
+    ("crlf", "must use LF line ends only"),
+    ("no-final-lf", "must end with exactly one LF"),
+    ("extra-final-lf", "must end with exactly one LF"),
+    ("empty-line", "has an empty line"),
+    ("comment-line", "has a comment line"),
+    ("three-fields", "must have exactly four tab-separated fields"),
+    ("five-fields", "must have exactly four tab-separated fields"),
+    ("bad-id", "has an invalid lowercase case id"),
+    ("uppercase-hex-id", "has an invalid lowercase case id"),
+    ("unsorted", "rows must be strictly sorted by case id"),
+    ("duplicate-id", "has a duplicate case id"),
+    ("bad-phase", "has an invalid phase"),
+    ("bad-cluster", "has an invalid cluster id"),
+    ("empty-reason", "has an empty reason"),
+    ("long-reason", "reason exceeds 200 characters"),
+    ("reason-newline", "must use LF line ends only"),
+    ("cluster-two-reasons", "has multiple phase and reason pairs"),
+    ("cluster-two-phases", "has multiple phase and reason pairs"),
+    ("reason-two-clusters", "one phase and reason has multiple cluster ids"),
+    ("cluster-gap", "cluster numbers must start at K01 with no gaps"),
+])
+def test_generated_matrix_known_failure_table_mutations(
+    tmp_path, known_matrix_failures, mutation, expected_problem,
+):
+    text = KNOWN_MATRIX_FAILURES_PATH.read_bytes().decode("utf-8")
+    path = tmp_path / "known_failures.tsv"
+    path.write_bytes(text.encode("utf-8"))
+    # Every mutation has a positive control using the same reader and copied file.
+    assert read_known_matrix_failures(path) == known_matrix_failures
+    lines = text[:-1].split("\n")
+    rows = [line.split("\t") for line in lines]
+    if mutation == "invalid-utf8":
+        payload = b"\xff" + text.encode("utf-8")[1:]
+    elif mutation == "crlf":
+        payload = text.replace("\n", "\r\n", 1).encode("utf-8")
+    elif mutation == "no-final-lf":
+        payload = text[:-1].encode("utf-8")
+    elif mutation == "extra-final-lf":
+        payload = (text + "\n").encode("utf-8")
+    else:
+        if mutation == "empty-line":
+            rows.insert(1, [""])
+        elif mutation == "comment-line":
+            rows.insert(1, ["# comment"])
+        elif mutation == "three-fields":
+            rows[0].pop()
+        elif mutation == "five-fields":
+            rows[0].append("extra field")
+        elif mutation == "bad-id":
+            rows[0][0] = "invalid"
+        elif mutation == "uppercase-hex-id":
+            rows[0][0] = "case-" + rows[0][0][5:].upper()
+        elif mutation == "unsorted":
+            rows[0], rows[1] = rows[1], rows[0]
+        elif mutation == "duplicate-id":
+            rows.insert(1, rows[0].copy())
+        elif mutation == "bad-phase":
+            rows[0][1] = "compile-INCOMPLETE"
+        elif mutation == "bad-cluster":
+            rows[0][2] = "K1"
+        elif mutation == "empty-reason":
+            rows[0][3] = ""
+        elif mutation == "long-reason":
+            rows[0][3] = "a" * 201
+        elif mutation == "reason-newline":
+            rows[0][3] = "\u2028" + rows[0][3]
+        elif mutation in {"cluster-two-reasons", "cluster-two-phases"}:
+            cluster_counts = {}
+            for row in rows:
+                cluster_counts[row[2]] = cluster_counts.get(row[2], 0) + 1
+            row = next(row for row in rows if cluster_counts[row[2]] > 1)
+            if mutation == "cluster-two-reasons":
+                row[3] = "changed normalized diagnostic"
+            else:
+                row[1] = (
+                    "compile-FAILED" if row[1] == "translation-REJECTED"
+                    else "translation-REJECTED"
+                )
+        elif mutation == "reason-two-clusters":
+            donor = next(
+                row for row in rows if row[1] == rows[0][1] and row[2] != rows[0][2]
+            )
+            rows[0][3] = donor[3]
+        elif mutation == "cluster-gap":
+            last = max(row[2] for row in rows)
+            replacement = f"K{int(last[1:]) + 1:02d}"
+            for row in rows:
+                if row[2] == last:
+                    row[2] = replacement
+        else:
+            raise AssertionError(f"unknown table mutation: {mutation}")
+        payload = ("\n".join("\t".join(row) for row in rows) + "\n").encode("utf-8")
+    path.write_bytes(payload)
+    with pytest.raises(pytest.fail.Exception) as caught:
+        read_known_matrix_failures(path)
+    assert str(caught.value).startswith("INCOMPLETE: known-failure table")
+    assert expected_problem in str(caught.value)
+
+
+def test_generated_matrix_known_failure_table_is_required(tmp_path):
+    with pytest.raises(pytest.fail.Exception, match="^INCOMPLETE: known-failure table"):
+        read_known_matrix_failures(tmp_path / "missing.tsv")
+
+
+@pytest.mark.parametrize("scenario", [
+    "equal", "new", "stale", "outside-scope", "wrong-phase", "all-three", "empty",
+])
+def test_generated_matrix_compare_known_failures(scenario):
+    rejected = "translation-REJECTED"
+    failed = "compile-FAILED"
+    known = {
+        "alpha": (rejected, "K01", "translation diagnostic"),
+        "beta": (failed, "K02", "compiler diagnostic"),
+    }
+    observed = {"alpha": rejected, "beta": failed}
+    scope = {"alpha", "beta"}
+    expected = ([], [], [])
+    if scenario == "new":
+        observed.update({"delta": failed, "charlie": rejected})
+        scope.update({"delta", "charlie"})
+        expected = (["charlie", "delta"], [], [])
+    elif scenario == "stale":
+        observed = {}
+        expected = ([], ["alpha", "beta"], [])
+    elif scenario == "outside-scope":
+        observed = {"alpha": rejected}
+        scope = {"alpha"}
+    elif scenario == "wrong-phase":
+        observed = {"alpha": failed, "beta": rejected}
+        expected = ([], [], ["alpha", "beta"])
+    elif scenario == "all-three":
+        observed = {"alpha": failed, "delta": failed, "charlie": rejected}
+        scope.update({"delta", "charlie"})
+        expected = (["charlie", "delta"], ["beta"], ["alpha"])
+    elif scenario == "empty":
+        known, observed, scope = {}, {}, set()
+    elif scenario != "equal":
+        raise AssertionError(f"unknown comparison scenario: {scenario}")
+    before = copy.deepcopy((observed, known, scope))
+    assert compare_known_matrix_failures(observed, known, scope) == expected
+    assert (observed, known, scope) == before
 
 
 def test_generated_matrix_manifest_is_compatible(generated_matrix):

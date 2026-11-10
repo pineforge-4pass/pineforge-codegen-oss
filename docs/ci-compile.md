@@ -142,6 +142,19 @@ Producer coverage, inventory, results and generation statuses are preserved.
 The consumer status remains `INCOMPLETE`; positive execution cannot resolve
 the producer's unresolved inventory or establish complete verification.
 
+`tests/fixtures/generated_compile_matrix/known_failures.tsv` records case id,
+failing phase, cluster id and normalized reason in four tab-separated columns.
+The observed failure set must equal the table within each family's shard scope:
+a failure absent from the table fails the row; a table case that passes also
+fails the row. A changed failing phase fails the row.
+The table is a debt register, not a waiver: every case still undergoes public
+translation and, when translation succeeds, compilation.
+Failure messages list new failures, stale ids to remove and phase mismatches,
+with proposed table rows for new failures. Maintainers use an existing
+diagnostic's cluster or the next cluster number for a new diagnostic.
+Infrastructure failures remain incomplete and never suggest a table entry.
+Coverage and consumer results stay `INCOMPLETE`; inventory stays `UNRESOLVED`.
+
 The required `test-check` depends on the full pytest and compile matrices.
 An unexpected compile failure, strict XPASS, missing required input, or failed
 checkout therefore prevents that check from succeeding. A skipped compile job
