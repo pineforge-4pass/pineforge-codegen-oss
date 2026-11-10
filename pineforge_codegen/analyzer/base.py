@@ -6352,12 +6352,112 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 )
         return PineType.UNKNOWN
 
+    def _statement_condition_type(self, node: ASTNode) -> PineType:
+        """Prove statement conditions without changing binding or receiver facts."""
+        numeric = (PineType.INT, PineType.FLOAT)
+        if isinstance(node, (Identifier, NumberLiteral, NaLiteral)):
+            result = self._numeric_condition_type(node)
+            if result != PineType.UNKNOWN:
+                return result
+            if isinstance(node, Identifier):
+                symbol = self._symbols.resolve(node.name)
+                binding_scope = self._identifier_binding_scopes.get(id(node))
+                if (symbol is not None and binding_scope is not None
+                        and symbol.scope != binding_scope):
+                    return PineType.UNKNOWN
+                if getattr(symbol, "_pf_certain_declared", False):
+                    result = self._certain_scalar_type(node)
+                    return (
+                        result if result in (*numeric, PineType.BOOL)
+                        else PineType.UNKNOWN
+                    )
+        if isinstance(node, UnaryOp) and node.op == "-":
+            operand = self._statement_condition_type(node.operand)
+            return operand if operand in numeric else PineType.UNKNOWN
+        if isinstance(node, BinOp) and node.op in ("+", "-", "*", "/", "%"):
+            left = self._statement_condition_type(node.left)
+            right = self._statement_condition_type(node.right)
+            if left in numeric and right in numeric:
+                return (
+                    PineType.FLOAT if node.op == "/" or PineType.FLOAT in (left, right)
+                    else PineType.INT
+                )
+            return PineType.UNKNOWN
+        member = node.callee if isinstance(node, FuncCall) else node
+        if isinstance(member, MemberAccess) and isinstance(member.object, Identifier):
+            namespace = member.object.name
+            binding = self._symbols.resolve(namespace)
+            if binding is not None and (
+                hasattr(binding, "_pf_decl_node_id")
+                or getattr(binding, "_pf_parameter_owner", None)
+            ):
+                return PineType.UNKNOWN
+            if isinstance(node, MemberAccess):
+                result = sigs.get_variable_type(namespace, member.member)
+                return (
+                    result if result in (*numeric, PineType.BOOL)
+                    else PineType.UNKNOWN
+                )
+            if isinstance(node, FuncCall) and namespace == "ta":
+                intrinsic = sigs.get_intrinsic(namespace, member.member)
+                if intrinsic is None:
+                    return PineType.UNKNOWN
+                structured = self._type_spec_from_expr(node)
+                if structured is not None and structured.kind != "primitive":
+                    return PineType.UNKNOWN
+                # Compute each argument once, outside the overload loop: nested
+                # overloaded calls must not multiply the proof's traversal.
+                argument_types = {}
+                if len(intrinsic.signatures) > 1:
+                    argument_types = {
+                        id(arg): self._statement_condition_type(arg)
+                        for arg in (*node.args, *node.kwargs.values())
+                    }
+                    if PineType.UNKNOWN in argument_types.values():
+                        return PineType.UNKNOWN
+                results = set()
+                for signature in intrinsic.signatures:
+                    names = [param.name for param in signature.params]
+                    if (len(node.args) > len(names)
+                            or not node.kwargs.keys() <= set(names[len(node.args):])):
+                        continue
+                    arguments = dict(zip(names, node.args))
+                    arguments.update(node.kwargs)
+                    if any(
+                        param.default is None and param.name not in arguments
+                        for param in signature.params
+                    ):
+                        continue
+                    if argument_types and any(
+                        argument_types[id(arguments[param.name])] != param.pine_type
+                        and not (
+                            param.pine_type == PineType.FLOAT
+                            and argument_types[id(arguments[param.name])] == PineType.INT
+                        )
+                        for param in signature.params if param.name in arguments
+                    ):
+                        continue
+                    results.add(
+                        PineType.UNKNOWN if signature.returns_tuple
+                        else signature.return_type
+                    )
+                if len(results) == 1:
+                    result = next(iter(results))
+                    if result in (*numeric, PineType.BOOL):
+                        return result
+                return PineType.UNKNOWN
+        # Comparisons, logical expressions and explicit bool conversions can
+        # select a bool overload; their operands retain the operator checks.
+        if self._certain_scalar_type(node) == PineType.BOOL:
+            return PineType.BOOL
+        return PineType.UNKNOWN
+
     def _visit_IfStmt(self, node: IfStmt) -> PineType:
         old_global = self._global_scope
         self._global_scope = False
         try:
             self._visit(node.condition)
-            condition_type = self._numeric_condition_type(node.condition)
+            condition_type = self._statement_condition_type(node.condition)
             condition_spec = (
                 None if condition_type == PineType.UNKNOWN
                 else TypeSpec.primitive(condition_type.value)
@@ -6368,7 +6468,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._error(
                     "An if condition must have bool type; "
                     f"found {condition_type.value}.",
-                    node.condition.loc or node.loc,
+                    self._operator_operand_location(node.condition) or node.loc,
                 )
             body_type = PineType.VOID
             body_scoped = self._enter_top_level_branch_scope(
@@ -6561,7 +6661,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._block_node_stack.append(node)
         try:
             self._visit(node.condition)
-            condition_type = self._numeric_condition_type(node.condition)
+            condition_type = self._statement_condition_type(node.condition)
             if (
                 condition_type == PineType.UNKNOWN
                 and isinstance(node.condition, Identifier)
@@ -6583,7 +6683,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._error(
                     'The condition of the "while" statement must evaluate '
                     'to a "bool" value.',
-                    node.condition.loc or node.loc,
+                    self._operator_operand_location(node.condition) or node.loc,
                 )
             for stmt in node.body:
                 self._visit(stmt)
@@ -7669,6 +7769,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         f"Function '{callee.name}' cannot call itself.",
                         callee.loc,
                     )
+                from .callable_history_names import remap_callable_keywords
+                remap_callable_keywords(node, self._func_defs[func_name])
                 return self._handle_user_func_call(func_name, node)
 
             # A typed user method called in function syntax is the member
@@ -7935,7 +8037,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 if (key.rsplit(".", 1)[-1] != name or declaration is None
                         or not declaration.params):
                     continue
-                keyword = declaration.params[0]
+                from .callable_history_names import authored_callable_parameters
+                keyword = authored_callable_parameters(declaration)[0]
                 candidate = node.kwargs.get(keyword)
                 if candidate is None or self._receiver_method_key(
                         candidate, name) != key:

@@ -48,7 +48,7 @@ from ..ast_nodes import (
 from ..analyzer.value_bindings import ValueBindings
 from ..collection_history import history_annotation
 from ..cpp_names import cpp_identifier_fragment
-from ..errors import Phase
+from ..errors import CodegenInvariantError, Phase
 from ..external_requests import UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
 from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
@@ -234,12 +234,15 @@ class TypeInferer:
 
     def _udt_array_field_cpp(self, spec: TypeSpec | None,
                              type_name: str | None = None) -> str | None:
-        """The record type of an array field of the UDT ``type_name``
-        (``_PFArrayField<T>``, base.UDT_ARRAY_FIELD_CPP) when the type is
-        bar-local (``_udt_bar_local_types``), else None: its field stays the
-        ``std::vector<T>`` copy every earlier build stored."""
+        """The record storage type of a UDT array field.
+
+        Bar-local types keep ``_PFArrayField<T>``. Proven direct retained
+        bindings use the creation-bar handle; other fields retain vectors."""
         if spec is None or spec.kind != "array" or spec.element is None:
             return None
+        retained = getattr(self, "_retained_alias_plan", None)
+        if retained is not None and type_name in retained.types:
+            return retained.field_cpp(self, spec)
         if type_name not in self._udt_bar_local_types():
             return None
         return f"_PFArrayField<{self._type_spec_to_cpp(spec.element)}>"
@@ -250,6 +253,7 @@ class TypeInferer:
             self._udt_array_field_cpp(spec, type_name) is not None
             for type_name, specs in self._udt_field_type_specs.items()
             if type_name in self._udt_defs
+            and type_name in self._udt_bar_local_types()
             for name, spec in specs.items()
             if name not in self._udt_omitted_fields.get(type_name, set())
         )
@@ -320,7 +324,8 @@ class TypeInferer:
         through ``h.xs`` reaches ``a``; a record kept from the first bar reads
         one element forever). An object nothing keeps past its bar can alias
         the array it is built from, which is exact and copies nothing; any
-        other object keeps the copy every earlier build stored. A type escapes
+        other object needs a separate retained-lifetime decision (unproved
+        bindings keep the copy every earlier build stored). A type escapes
         its bar when a ``var`` / ``varip`` declaration can hold one, a
         collection's element type or another type's field is it, a history
         read reads one, or a ``var`` declaration of a type this cannot tell
@@ -441,12 +446,19 @@ class TypeInferer:
         """The ``_PFArrayField<T>`` a UDT array field takes from ``value_node``:
         an alias of a stable script ``var`` array (``_stable_var_array_names``)
         read at the script's level of names, else the value itself, moved or
-        copied in (the snapshot every earlier build stored)."""
+        copied in. A proven retained field takes a binding of its own from its
+        source's manager: it reads the live source until the creation bar
+        closes, then holds its own copy of it."""
         # Target-typed wide-array na can already look like an empty vector in
         # value_cpp. Preserve the authored missing ID before wrapping a value.
         if isinstance(value_node, NaLiteral) or value_cpp == "na<double>()":
             return f"{field_cpp}()"
         name = value_node.name if isinstance(value_node, Identifier) else None
+        retained = getattr(self, "_retained_alias_plan", None)
+        if retained and field_cpp.startswith(retained.cpp_name + "<"):
+            if name not in retained.sources:
+                raise CodegenInvariantError(value_node)
+            return retained.binding(self, name)
         if (name is not None
                 and name in self._stable_var_array_names()
                 and name not in (getattr(self, "_current_func_param_types", {}) or {})
@@ -461,16 +473,20 @@ class TypeInferer:
         """Direct array-valued fields whose UDT copy semantics are unsupported.
 
         Maps, matrices, nested UDTs and bar-local array fields hold handles,
-        so an outer record copy is shallow. Retained array fields still use
-        ``std::vector<T>`` and must retain the copy refusal.
+        so an outer record copy is shallow. Retained array fields (the vector
+        copy of earlier builds, and the creation-bar binding of a record type
+        the retained-alias plan selects) keep the copy refusal: TradingView
+        does not share the array between a record and its copy.
         """
+        retained = getattr(self, "_retained_alias_plan", None)
         return tuple(
             field_name
             for field_name, spec in self._udt_field_type_specs.get(
                 type_name, {}
             ).items()
             if spec is not None and spec.kind == "array"
-            and self._udt_array_field_cpp(spec, type_name) is None
+            and (self._udt_array_field_cpp(spec, type_name) is None
+                 or (retained is not None and type_name in retained.types))
         )
 
     def _reject_unsupported_udt_copy(self, type_name: str, node) -> None:
@@ -2523,6 +2539,12 @@ class TypeInferer:
         # spelling only after its VarDecl installs this active remap.
         if exact != name:
             return self._active_var_remap.get(safe, safe)
+        # A plain var alias that holds a retained binding reads through the
+        # handle, as its identifier lowering does (visit_expr._visit_ident).
+        retained = getattr(self, "_retained_alias_plan", None)
+        if (retained and name in retained.aliases
+                and not self._known_var_is_lexically_shadowed(name)):
+            return f"(*{safe})"
         return safe
 
     def _array_spec_for_name(self, name: str) -> TypeSpec:

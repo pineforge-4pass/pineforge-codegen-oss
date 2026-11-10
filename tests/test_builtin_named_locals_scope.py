@@ -311,7 +311,8 @@ def _reference_cpp(source, reference, tmp_path):
 
 @pytest.mark.parametrize("source", [
     pytest.param(_outer_binding_source(parameter=False), id="global-second-requested"),
-    pytest.param(_outer_binding_source(parameter=True), id="parameter-second-requested"),
+    pytest.param(_outer_binding_source(parameter=True).replace("second", "aa"),
+                 id="ordinary-parameter-requested"),
     pytest.param(_builtin_history_source(requested=True), id="requested-builtin-history"),
     pytest.param(_builtin_history_source(), id="chart-builtin-history"),
     pytest.param(

@@ -283,6 +283,9 @@ you delete or weaken the special case, the test will tell you.
    (`_collect_known_var`), where the reset read the alias's own member
    before the body set it, an EMA of length 0 for the whole run
    (`tests/test_e2e_alias_ta_length.py`, tapes `fixtures/alias_len_tv`).
+   Where a runtime constructor argument was narrowed to an integer, a float
+   signature slot instead retains its fraction, including VWAP band
+   multipliers; integer slots keep their narrowing and preserve `na`.
 14. **String escapes are the Pine manual's.** The lexer (`_read_quoted`)
    reads `\n` / `\t` as U+000A / U+0009 and `\\`, `\"`, `\'` as the
    character; any other `\X` reads as `X` ("the character's meaning does
@@ -362,7 +365,7 @@ you delete or weaken the special case, the test will tell you.
     `tests/test_e2e_cgint7_compositions.py`).
 16. **Every call argument is evaluated once.** Pine evaluates each argument
     of a call exactly once per execution; only `and` / `or` and the `?:` arms
-    are lazy (a lab tv counting-probe tape, `fixtures/w2_trio_tv/eval_counts`,
+    are lazy (a TradingView counting-probe tape, `fixtures/w2_trio_tv/eval_counts`,
     shows every builtin slot below once per bar). A lowering template that
     reads an argument twice, or once per loop iteration, re-runs its C++, so a
     stateful call in it (a `ta.*` compute(), a user function with state) runs
@@ -442,7 +445,7 @@ you delete or weaken the special case, the test will tell you.
     handle shapes.
 18. **A script variable read through history in a function body reads its
     call site's history.** TradingView builds the history of a series used
-    in a function through each call of it (`lab tv`, BINANCE:ETHUSDT.P 15,
+    in a function through each call of it (BINANCE:ETHUSDT.P 15,
     `tests/fixtures/function_global_history`): in a plain UDF, `x[k]` on a
     script variable (`var` or not) or on `bar_index` is `x` as that call site
     saw it at its latest call at or before `k` bars ago -- one slot per chart

@@ -1,4 +1,4 @@
-"""Private spellings for callable locals and colliding history storage."""
+"""Private spellings for callable bindings and colliding history storage."""
 
 from collections import defaultdict
 import re
@@ -15,12 +15,14 @@ from .tables import BUILTIN_VARS
 # The annotation key of the map from a private declaration spelling to the
 # spelling the script authored; the code generator and the analyzer read it.
 AUTHORED_LOCAL_NAMES = "authored_local_names"
+_AUTHORED_KEYWORDS = "authored_callable_keywords"
+_PARAMETER_ALIASES = "callable_parameter_aliases"
 _CLONE_SUFFIX = re.compile(r"_cs|__ni")
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
 
 def _builtin_callable_local_names() -> set[str]:
-    """Bare builtin variable spellings that can declare callable locals."""
+    """Bare builtin variable spellings that can declare callable bindings."""
     from .. import signatures as sigs
     from ..codegen.tables import BAR_BUILTINS, BAR_FIELDS, TIME_FIELD_EXPRS
     from ..codegen.visit_expr import _REALTIME_ONLY_VARS
@@ -33,17 +35,32 @@ def _builtin_callable_local_names() -> set[str]:
     ) - KEYWORDS.keys()
 
 
-def separate_builtin_callable_locals(program, bindings) -> bool:
-    """Give builtin-shadowing body declarations ordinary, private names.
+def _syntax_with_defaults(program):
+    """Visit syntax and the callable defaults stored outside syntax children."""
+    roots = [program]
+    while roots:
+        for node, _ in iter_ast_nodes(roots.pop()):
+            yield node
+            if isinstance(node, (FuncDef, MethodDef)):
+                roots.extend(
+                    value for value in
+                    (node.annotations or {}).get("param_defaults", ())
+                    if value is not None
+                )
 
-    Lexical bindings exclude parameters, globals and uses preceding a
-    declaration. Reuse that inventory for every declaration kind and block
-    depth, before any type or storage inventory consumes the raw spelling.
+
+def separate_builtin_callable_locals(program, bindings) -> bool:
+    """Give builtin-shadowing callable declarations ordinary, private names.
+
+    Lexical bindings distinguish parameters, body declarations, globals and
+    uses preceding a declaration. Reuse that inventory at every block depth,
+    before any type or storage inventory consumes the raw spelling.
     """
     from .value_bindings import _declared_names
 
     builtin_names = _builtin_callable_local_names()
     colliding = set()
+    parameter_owners = set()
     for scope in bindings.scopes:
         if bindings.budget is not None:
             bindings.budget.check(phase=Phase.ANALYZER)
@@ -57,8 +74,10 @@ def separate_builtin_callable_locals(program, bindings) -> bool:
             for declaration in declarations:
                 if bindings.budget is not None:
                     bindings.budget.check(phase=Phase.ANALYZER)
-                if declaration.kind in ("local", "loop"):
+                if declaration.kind in ("parameter", "local", "loop"):
                     colliding.add((declaration.declaration, name))
+                    if declaration.kind == "parameter":
+                        parameter_owners.add(declaration.declaration)
     if not colliding:
         return False
 
@@ -69,8 +88,11 @@ def separate_builtin_callable_locals(program, bindings) -> bool:
     taken = set()
     clone_bases = set()
     declarations = []
-    # One source-ordered syntax walk reserves authored names before allocation.
-    for node, _ in iter_ast_nodes(program):
+    # Preserve body declaration order; also reserve names and keyword labels
+    # in defaults when allocating private parameter spellings.
+    nodes = (_syntax_with_defaults(program) if parameter_owners
+             else (node for node, _ in iter_ast_nodes(program)))
+    for node in nodes:
         if bindings.budget is not None:
             bindings.budget.check(node.loc, Phase.ANALYZER)
         spellings = []
@@ -81,6 +103,8 @@ def separate_builtin_callable_locals(program, bindings) -> bool:
         for attr in ("params", "names", "vars", "members"):
             spellings.extend(value for value in (getattr(node, attr, None) or [])
                              if isinstance(value, str))
+        if parameter_owners and isinstance(node, FuncCall):
+            spellings.extend(node.kwargs)
         for spelling in spellings:
             taken.add(spelling)
             clone = private_clone.match(spelling)
@@ -123,7 +147,9 @@ def separate_builtin_callable_locals(program, bindings) -> bool:
             **(node.annotations or {}), AUTHORED_LOCAL_NAMES: originals,
         }
         authored.update(originals)
-        if isinstance(node, VarDecl):
+        if isinstance(node, (FuncDef, MethodDef)):
+            node.params = [names.get((id(node), name), name) for name in node.params]
+        elif isinstance(node, VarDecl):
             node.name = names[(id(node), node.name)]
         elif isinstance(node, TupleAssign):
             node.names = [names.get((id(node), name), name) for name in node.names]
@@ -137,7 +163,81 @@ def separate_builtin_callable_locals(program, bindings) -> bool:
     program.annotations = {
         **(program.annotations or {}), AUTHORED_LOCAL_NAMES: authored,
     }
+    if parameter_owners:
+        # Scalar overload identities have already been selected. Unsplit
+        # groups retain their existing lookup; binders can rebind the written
+        # keys when analysis and emission select different declarations.
+        groups = defaultdict(list)
+        for node in program.body:
+            if isinstance(node, FuncDef):
+                groups[node.name].append(node)
+        functions = {}
+        for name, definitions in groups.items():
+            if not any(id(node) in parameter_owners for node in definitions):
+                continue
+            aliases = {}
+            for node in definitions:
+                aliases.update(
+                    (node.annotations or {}).get(AUTHORED_LOCAL_NAMES, {})
+                )
+            functions[name] = definitions[-1], aliases
+        for node in _syntax_with_defaults(program):
+            if bindings.budget is not None:
+                bindings.budget.check(node.loc, Phase.ANALYZER)
+            if (not isinstance(node, FuncCall) or not node.kwargs
+                    or not isinstance(node.callee, Identifier)):
+                continue
+            selected = functions.get(node.callee.name)
+            if selected is None:
+                continue
+            definition, aliases = selected
+            node.annotations = {
+                **(node.annotations or {}), _PARAMETER_ALIASES: aliases,
+            }
+            remap_callable_keywords(node, definition)
     return True
+
+
+def authored_callable_parameters(definition):
+    """The public keyword spellings, in unchanged parameter order."""
+    names = (definition.annotations or {}).get(AUTHORED_LOCAL_NAMES, {})
+    return [names.get(name, name) for name in definition.params]
+
+
+def remap_callable_keywords(call, definition=None, *, param_names=None):
+    """Bind authored keywords to one selected callable's private parameters.
+
+    Methods call this only after receiver dispatch. Retain the written keys
+    across repeated analysis or a different typed specialization of the call.
+    Plain-function default binding supplies its parameter list and uses the
+    call's overload aliases, including when emission selects another definition.
+    Values and their recorded evaluation order keep their original identities.
+    Unknown keys retain their authored spelling for the existing binders.
+    """
+    if not call.kwargs:
+        return
+    previous = (call.annotations or {}).get(_AUTHORED_KEYWORDS, {})
+    known = (call.annotations or {}).get(_PARAMETER_ALIASES, {})
+    if definition is not None:
+        names = (definition.annotations or {}).get(AUTHORED_LOCAL_NAMES, {})
+        param_names = definition.params
+    else:
+        names = known
+    if not names and not previous:
+        return
+    aliases = {names.get(name, name): name for name in param_names}
+    rewritten = {}
+    authored = {}
+    for keyword, value in call.kwargs.items():
+        original = previous.get(keyword, keyword)
+        private = aliases.get(original, original)
+        rewritten[private] = value
+        authored[private] = original
+    call.kwargs = rewritten
+    call.annotations = {
+        **(call.annotations or {}), _AUTHORED_KEYWORDS: authored,
+        _PARAMETER_ALIASES: {**known, **names},
+    }
 
 
 def authored_callable_text(program, text):

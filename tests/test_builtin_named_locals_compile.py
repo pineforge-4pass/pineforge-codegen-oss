@@ -1,9 +1,8 @@
 """Compile the same callable-local sources used by the scope comparisons.
 
-The string-with-history shapes do not compile for any name because of a
-separate known std::to_string defect, so those rows pin only that renaming
-preserves the compile outcome, and no row here checks a value. The exception
-is a price-field name (here close) in the shapes typed, nested and two-sites:
+The string-with-history rows require successful compilation for neutral and
+built-in spellings, and no row here checks a value. The exception is a
+price-field name (here close) in the shapes typed, nested and two-sites:
 those rows pin the base's refusal instead of a compile outcome.
 """
 
@@ -133,6 +132,7 @@ def test_string_history_compile_outcome_matches_neutral_control(shape):
     control_ok, control_error = _compile_outcome(
         transpile(_string_history_source("aa", shape)), f"string-{shape}-aa",
     )
+    assert control_ok, (shape, control_error)
     for name in _STRING_HISTORY_NAMES:
         if _keeps_the_base_refusal(shape, name):
             continue  # Pinned without a compiler by the refusal test above.

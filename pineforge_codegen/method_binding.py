@@ -181,6 +181,8 @@ def bind_function_defaults(
     established binding) or omits one that has no default (TradingView
     rejects that call).
     """
+    from .analyzer.callable_history_names import remap_callable_keywords
+    remap_callable_keywords(call, param_names=param_names)
     names = list(param_names)
     bound: list[ASTNode | None] = [None] * len(names)
     for index, value in enumerate(call.args):
@@ -207,6 +209,11 @@ def bind_method_call(
 ) -> BoundMethodArgs:
     """Bind one method call strictly, excluding the receiver argument."""
 
+    from .analyzer.callable_history_names import remap_callable_keywords
+    if signature.declaration is not None:
+        remap_callable_keywords(call, signature.declaration)
+    else:
+        remap_callable_keywords(call, param_names=signature.param_names)
     names = signature.param_names
     if len(call.args) > len(names):
         raise MethodBindError(

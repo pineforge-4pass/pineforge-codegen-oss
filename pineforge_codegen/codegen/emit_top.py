@@ -166,6 +166,8 @@ class TopLevelEmitter:
         lines.append("#include <vector>")
         if getattr(self, "_uses_array_slice_views", False):
             lines.extend(("#include <stdexcept>", "#include <utility>"))
+        if self._retained_alias_plan:
+            lines.append("#include <utility>")
         if getattr(self, "_array_journal_members", {}):
             lines.extend(("#include <functional>", "#include <limits>",
                           "#include <stdexcept>", "#include <utility>"))
@@ -880,6 +882,10 @@ class TopLevelEmitter:
                 "",
             ])
 
+        if self._retained_alias_plan:
+            from .retained_alias import checkpoint_traits as retained_checkpoint_traits
+            lines.append(retained_checkpoint_traits(self))
+
         # Snapshot backing records field-by-field.  A nested UDT field is only
         # a numeric handle, so the primary trait copies its ID without recursing
         # into another record.  This makes self/cyclic object graphs finite;
@@ -1015,6 +1021,7 @@ class TopLevelEmitter:
             or getattr(self, "_uses_matrix", False)
             or getattr(self, "_udt_defs", {})
             or getattr(self, "_uses_array_slice_views", False)
+            or getattr(self, "_retained_alias_plan", None)
         )
         journal_members = getattr(self, "_array_journal_members", {})
         journal = (f"this->{self._array_journal_member_name}" if journal_members else None)
@@ -1851,6 +1858,11 @@ class TopLevelEmitter:
                         and runtime_spec.kind in {"map", "matrix"}):
                     continue
                 if name in self._array_vars:
+                    retained_source = self._retained_alias_plan.aliases.get(name)
+                    if retained_source is not None:
+                        value = self._retained_alias_plan.binding(self, retained_source)
+                        lines.append(f"            {safe} = {value};")
+                        continue
                     for stmt in self.ctx.ast.body:
                         if isinstance(stmt, VarDecl) and stmt.name == name:
                             previous_expected = getattr(
@@ -2029,8 +2041,10 @@ class TopLevelEmitter:
             finally:
                 self._clear_lazy_edge_ta_hoists()
 
-        # d2. The bar's end: each array or matrix variable whose history the
-        #     script reads keeps a copy of the value it ends the bar with.
+        # d2. Close pending retained bindings after all authored statements.
+        #     Collection history then keeps its established end-of-bar value.
+        for member in self._retained_alias_plan.sources.values():
+            lines.append(f"        {member}.close();")
         self._emit_collection_history_closes(lines, "        ")
 
         # e. ``// @pf-trace`` pragma block — emitted last so trace values
