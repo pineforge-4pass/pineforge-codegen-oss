@@ -121,6 +121,7 @@ CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E5093",  # max_bars_back(): num must resolve to a positive compile-time integer.
                      "PF-E5094",  # A capacity option must be an integer of at least its minimum, or None.
                      "PF-E5095",  # A constant history offset cannot fit history_capacity.
+                     "PF-E5096",  # A string input's variable default cannot be resolved to one constant string.
                      "PF-E5097",  # history_capacity is outside the native Series constructor's range.
                      "PF-E5098",  # drawing_capacity is outside the native int64 limit argument's range.
                      "PF-E5080", "PF-E5081", "PF-E5082", "PF-E5083", "PF-W1553"} | set(CATALOG_ENTRY_ADDITIONS)

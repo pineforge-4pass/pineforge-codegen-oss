@@ -22,6 +22,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- `input.string`, `input.timeframe`, `input.symbol`, `input.session` and
+  `input.text_area` carry never-reassigned global string literals into defaults
+  and options, including var declarations; an unproven variable default is now
+  a located error instead of a silent empty default, while an option that
+  cannot be proven keeps the existing unsupported marker in the manifest.
 - Pine v6 now refuses an `if` or `while` condition whose numeric value comes
   from a `ta.*` call or a built-in variable such as `strategy.position_size`,
   as TradingView does. Use a comparison such as `ta.change(t) != 0` for a bool
