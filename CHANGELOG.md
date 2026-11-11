@@ -301,8 +301,18 @@ supported as exact pairs; on the 0.x line they are independent. See the
   only when its code calls one of the three functions (a call that is only a
   plot argument emits nothing), so every other script keeps the text it had;
   the engine is not involved. A cut between the two units of an emoji keeps
-  each half as its own three-byte sequence (the length of a half is one unit);
-  joining the two halves again does not give back the original four bytes.
+  each half as its own three-byte sequence (the length of a half is one unit),
+  the form `str.split` gives its parts. Such a half never occurs inside a text
+  that holds the whole character, so three things differ from TradingView:
+  joining the two halves again, with `+` or `array.join`, does not give back
+  the original four bytes, so the joined text does not equal the original text;
+  a search for a half in the text it was cut from finds nothing (`str.pos`
+  returns -1, where the one byte the old cut gave was found at the same
+  position, and `str.contains` returns false); and a half is not equal to, or
+  at the start or end of, a part of that text that holds the whole character.
+  A begin position that lies inside the bytes of a text but past its units
+  (5 on "a", an emoji, "b") now stops the run; before, it returned the bytes
+  after that position.
 
 ## 1.9.1 — 2026-10-31
 
