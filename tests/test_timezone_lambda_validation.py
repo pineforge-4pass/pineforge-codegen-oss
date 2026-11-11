@@ -29,14 +29,6 @@ ZONE_CASES = [
     ("EST5EDT,M3.2.0/2,M11.1.0/2", "133200000 133200000 3 3 8 UTC\n"),
     # Empty selects UTC: 32h in ms, hour 8, and no environment writes.
     ("", "115200000 115200000 8 8 0 UTC\n"),
-    # An unknown name falls back to UTC without exposing that name to setenv.
-    ("Invalid/Timezone", "115200000 115200000 8 8 0 UTC\n"),
-    # An absolute tzfile path is rejected: 32h in ms, hour 8, and no writes.
-    ("/usr/share/zoneinfo/Asia/Taipei", "115200000 115200000 8 8 0 UTC\n"),
-    # Parent traversal is rejected before libc: the UTC fields and TZ stay intact.
-    ("../UTC", "115200000 115200000 8 8 0 UTC\n"),
-    # A 24-hour offset exceeds the accepted range and takes the UTC fallback.
-    ("UTC+24:00", "115200000 115200000 8 8 0 UTC\n"),
     # UTC retains its short-circuit path: 32h in ms, hour 8, no writes.
     ("UTC", "115200000 115200000 8 8 0 UTC\n"),
     # Etc/UTC retains the same short-circuit conversion and untouched TZ.
@@ -113,11 +105,6 @@ def _render_lambdas(
 
 def _assert_guarded(lambdas: list[str]) -> None:
     for body in lambdas:
-        # Rejection joins the UTC branch, so it cannot enter the environment block.
-        assert (
-            'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC" || '
-            '!pineforge::native_calendar::timezone_accepted(_tz)) { '
-        ) in body
         # The first write is the script zone; the later write restores the old TZ.
         assert body.index(
             "pineforge::native_calendar::timezone_accepted(_tz)"
@@ -125,10 +112,20 @@ def _assert_guarded(lambdas: list[str]) -> None:
             '::setenv("TZ", _tz.c_str(), 1)'
         )
         if "-> int64_t" in body:
-            # Rejected calendar fields use the existing UTC conversion.
-            assert "_res = (int64_t)timegm(&t) * 1000; } else { " in body
+            # Rejected timestamp zones stop before entering the sealed branch.
+            assert (
+                'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC") { '
+                '_res = (int64_t)timegm(&t) * 1000; '
+                '} else if (!pineforge::native_calendar::timezone_accepted(_tz)) { '
+                '_PF_TIMEZONE_STOP("timestamp", _tz.c_str(), '
+            ) in body
+            assert ').c_str()); } else { static std::mutex _pf_ts_mu; ' in body
         else:
-            # Rejected time fields decompose the instant in UTC.
+            # The retained time-field template still decomposes rejected zones in UTC.
+            assert (
+                'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC" || '
+                '!pineforge::native_calendar::timezone_accepted(_tz)) { '
+            ) in body
             assert "gmtime_r(&_secs, &tm_buf); } else { " in body
 
 
@@ -137,6 +134,7 @@ def _assert_guarded(lambdas: list[str]) -> None:
     *sorted({row[0] for row in ACCEPTED_ZONE_CASES}),
 ])
 def test_zone_classes_guard_both_lambdas_and_overloads(zone):
+    """Pin timestamp stops and retained time-field UTC guards for both overloads."""
     cpp, lambdas = _render_lambdas(zone)
     _assert_guarded(lambdas)
     # The class's actual string reaches both explicit forms before validation.
@@ -179,13 +177,9 @@ def test_timezone_acceptance_precedes_first_environment_write():
     "Etc/UTC",  # Etc/UTC satisfies the third term without calling the validator.
 ])
 def test_utc_short_circuit_stays_before_timezone_acceptance(zone):
+    """Pin all three UTC shortcuts ahead of each template's acceptance check."""
     _cpp, bodies = _render_lambdas(zone)
-    for body in bodies:
-        # The original three terms still short-circuit before the new last term.
-        assert (
-            'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC" || '
-            '!pineforge::native_calendar::timezone_accepted(_tz)) { '
-        ) in body
+    _assert_guarded(bodies)
 
 
 def _skip_unless_zoneinfo(alternatives: tuple[str, ...]) -> None:

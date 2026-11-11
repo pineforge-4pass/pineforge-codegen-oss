@@ -1,7 +1,9 @@
 """Compare frozen lowering bytes without additive settings/capabilities/stop ABIs."""
 import re
 
-from pineforge_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP
+from pineforge_codegen.codegen.run_stops import (
+    RUN_STOP_SHIMS_CPP, TIMEZONE_STOP_SHIM_CPP,
+)
 from tests._cpp_tokens import code_only, regions
 
 
@@ -107,6 +109,16 @@ def without_id_sites_receipt(cpp: str) -> str:
         '', cpp, flags=re.MULTILINE | re.DOTALL)
 
 
+def without_timezone_stop_macros(cpp: str) -> str:
+    """Remove the additive macro block emitted only for timestamp calendar scripts.
+
+    The block defines one macro and changes no other line, so
+    whole-C++ fixtures and reference builds that predate it compare without it.
+    Its own rows live in test_timestamp_zone_switch.py.
+    """
+    return cpp.replace(TIMEZONE_STOP_SHIM_CPP, '')
+
+
 def without_trade_history_policy(cpp: str) -> str:
     """Remove the additive policy block/export and normalize ctor lookup.
 
@@ -116,8 +128,10 @@ def without_trade_history_policy(cpp: str) -> str:
     existing configure call with ``this->``; normalize only that statement
     when comparing historical lowering. Raw constructor compile/spelling
     coverage lives in test_cr150_constructor_names.py. The id-sites receipt
-    exports are removed as well (``without_id_sites_receipt``).
+    exports are removed as well (``without_id_sites_receipt``), and so is the
+    conditional timezone stop macro block (``without_timezone_stop_macros``).
     """
+    cpp = without_timezone_stop_macros(cpp)
     cpp = without_id_sites_receipt(cpp)
     cpp = cpp.replace(
         '        this->configure_pine_strategy(cfg);\n',
@@ -160,11 +174,16 @@ def legacy_cpp(cpp: str) -> str:
     # additive. Historical lowering oracles intentionally ignore both so the
     # feature's ABI shape is covered by its own raw-output tests.
     cpp = without_trade_history_policy(cpp)
-    # The zone acceptance term of the timestamp and time-field lambdas is
-    # additive too: a zone the engine rejects now takes the UTC path, which
-    # historical lowering oracles do not model; its own rows pin it.
+    # A rejected timestamp zone now stops the run, which historical lowering
+    # oracles do not model; its own rows pin it. The retained time-field
+    # template still adds a zone acceptance term to its UTC branch.
     cpp = cpp.replace(
         ' || !pineforge::native_calendar::timezone_accepted(_tz)', '')
+    cpp = re.sub(
+        r'\} else if \(!pineforge::native_calendar::timezone_accepted\(_tz\)\) '
+        r'\{ _PF_TIMEZONE_STOP\(.*?\); \} else \{ ',
+        '} else { ', cpp,
+    )
     cpp = cpp.replace(
         '#if __has_include(<pineforge/checked_settings.hpp>)\n'
         '#include <pineforge/checked_settings.hpp>\n#endif\n', '')
