@@ -1488,7 +1488,9 @@ def _str_split_expr(args: list[str]) -> str:
     UTF-8, so a character of one to three bytes is one unit and a character of
     four bytes (outside the Basic Multilingual Plane) is two, a high and a low
     surrogate; each surrogate is kept as its own three-byte part, the form in
-    which the length of such a part is one unit."""
+    which the length of such a part is one unit. The empty text has one part,
+    the empty text: TradingView's split of it gives an array of size 1 (the size
+    was read; what the part holds is the engine's own answer, kept)."""
     return (
         "[&](){ "
         f"const std::string __pf_s = ({args[0]}); "
@@ -1512,6 +1514,7 @@ def _str_split_expr(args: list[str]) -> str:
         "__pf_r.push_back(__pf_p); } "
         "} else { __pf_r.push_back(__pf_s.substr(__pf_i, __pf_n)); } "
         "__pf_i += __pf_n; } "
+        "if (__pf_r.empty()) __pf_r.push_back(std::string()); "
         "return __pf_r; }()"
     )
 
