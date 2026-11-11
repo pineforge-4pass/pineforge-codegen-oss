@@ -240,7 +240,10 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
                         option = emitter._string_input_argument(option, refuse_unproven=False)
                     option_cpp = _visit_setting_arg(emitter, option)
                     if getter == "get_input_string":
-                        option_cpp = _string_setting_arg(option, option_cpp)
+                        # An input's options stay C strings: they stop at the
+                        # first NUL, as the default does.
+                        option_cpp = _string_setting_arg(
+                            option, emitter._unsized_std_string(option_cpp))
                         if option_cpp is None:
                             supported = "false"
                         else:
