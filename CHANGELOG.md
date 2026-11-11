@@ -44,7 +44,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   input title, and the timeframe and footprint-column literals. One comparison
   changes with it: a string input whose default holds a NUL no longer equals
   the literal it was given, because the default is cut and the literal is not
-  (the two were equal before only because both were cut).
+  (the two were equal before only because both were cut). A `var` that is read
+  with history and starts from a literal with a NUL was refused (its first
+  value put the NUL byte itself into the generated code); it now translates
+  and keeps the whole literal.
 - Direct retained record fields built from stable `var` arrays, and direct
   plain `var` array aliases, stay live through their creation bar and then
   keep their own copy of the array as it stood at the end of that bar; two

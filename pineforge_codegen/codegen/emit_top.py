@@ -1107,8 +1107,10 @@ class TopLevelEmitter:
         """The string literal a top-level ``var`` starts from, when it holds a NUL.
 
         The first-bar block pushes a history-read ``var``'s initializer from
-        its Pine spelling. Only a literal with a NUL needs another spelling
-        there, so every other push keeps its text."""
+        its Pine spelling, which carries a NUL as the byte itself: generated
+        C++ may not hold that byte, so such a script was refused. Only a
+        literal with a NUL needs another spelling there, so every other push
+        keeps its text."""
         for stmt in self.ctx.ast.body:
             if (isinstance(stmt, VarDecl) and stmt.name == name
                     and (stmt.is_var or stmt.is_varip)):
@@ -1967,8 +1969,9 @@ class TopLevelEmitter:
                     cpp_val = self._typed_na_init(cpp_val, name, ptype)
                     nul_literal = self._first_bar_nul_literal(name)
                     if nul_literal is not None:
-                        # The initializer text is the literal's Pine spelling,
-                        # a C string here: it would end at the NUL.
+                        # The initializer text is the literal's Pine spelling
+                        # and carries the NUL byte itself, which generated
+                        # C++ may not hold: the script would be refused.
                         cpp_val = self._cpp_std_string(nul_literal)
                     lines.append(f"            {safe}.push({cpp_val});")
                     # Also init cloned copies for per-call-site function variants
