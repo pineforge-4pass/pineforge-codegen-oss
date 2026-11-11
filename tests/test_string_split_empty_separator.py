@@ -72,6 +72,12 @@ EMPTY_SEPARATOR_ROWS = [
         'std::cout << strategy.n << " " << strategy.f << " " << strategy.l << "\\n";',
         "4 1 1\n", id="an-emoji-is-two-parts",
     ),
+    # TradingView splits "abc" by a string variable that holds na into three
+    # parts (read): a string na is the empty text, so it is an empty separator.
+    pytest.param(
+        'string sep = na\np = str.split("abc", sep)\nn = array.size(p)\nplot(n)\n',
+        COUNT, "3\n", id="measured-a-string-variable-holding-na-splits-per-unit",
+    ),
 ]
 
 
