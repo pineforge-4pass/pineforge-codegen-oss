@@ -213,7 +213,14 @@ Checked settings string defaults and options use only known C++ string literals
 from the existing builtin lowering, never inert visual integer codes. Only the
 `currency.*` and `format.*` members inventoried in `NAME_ECHO_STRING_MEMBERS`
 may publish their own names, matching the body's existing lowering; unlisted
-members remain unsupported even when the body echoes their names. An unknown
+members remain unsupported even when the body echoes their names. A default or
+option held by a global variable, declared with or without `var`, is published
+as its string when that variable is declared once, before the input, with a
+string literal (or a constant expression of literals) and is never reassigned;
+this applies to `input.string`, `input.timeframe`, `input.symbol`,
+`input.session` and `input.text_area`. A default held by a variable that cannot
+be proven this way is refused with PF-E5096 instead of becoming an empty
+default; an option that cannot be proven keeps the rule below. An unknown
 string default or option marks the
 input `supported=false` and publishes no choices; its unavailable default is
 empty. Transpile-time input manifests reuse that descriptor's `supported`

@@ -5,14 +5,28 @@ from dataclasses import dataclass, replace
 
 from ..ast_nodes import (
     ASTNode, BoolLiteral, ColorLiteral, FuncCall, Identifier, MemberAccess,
-    NumberLiteral, Ternary, VarDecl,
+    NumberLiteral, StringLiteral, Ternary, VarDecl,
 )
 from ..limits import MAX_NESTING_DEPTH, TimeBudget, iter_ast_nodes
+from ..library_v5 import _CONSTANT_NAMESPACES
 from ..security_contexts import ScriptIndex
 from ..signatures import INPUT_FUNCTIONS, MATH_CONSTANTS
 from ..symbols import PineType
 from .color_constants import COLOR_PARAMETERS, color_arguments, literal_color_value
 from .constant_fold import fold_constant_expression
+from .strategy_declaration import _NAMED_CONSTANTS
+from .tables import (
+    ALERT_FREQ_VALUES, DRAWING_STYLE_NS, NAME_ECHO_STRING_MEMBERS,
+    ORDER_DIRECTION_MAP,
+)
+
+
+_STRING_INPUT_CONSTANT_MEMBERS = {
+    **NAME_ECHO_STRING_MEMBERS,
+    "alert": ALERT_FREQ_VALUES,
+    "order": ORDER_DIRECTION_MAP,
+    "session": frozenset({"regular", "extended"}),
+}
 
 
 @dataclass(frozen=True)
@@ -31,11 +45,12 @@ def input_default_contract(call):
 
 
 class ConstantResolver:
-    """Resolve preceding explicit const declarations on this exact AST.
+    """Resolve lexical constants and immutable global string input arguments.
 
     Binding identity, rather than a variable's spelling, owns the cache.
-    Reassignment is deliberately unproven: a declaration's initial value is
-    insufficient evidence of its value at a later argument use.
+    General expression proofs require explicit const declarations. String
+    input arguments also admit global literal initializers after checking
+    every write: persistence alone does not make such a binding mutable.
     """
 
     def __init__(self, program, budget=None):
@@ -59,6 +74,56 @@ class ConstantResolver:
         self.cache = {}
         self.active = set()
         self.ambiguous = {binding for binding, count in declarations.items() if count > 1}
+        self.string_declarations = Counter(self.index.decl_binding.values())
+        self.string_cache = {}
+
+    def string_input_argument(self, read):
+        """Prove a preceding, uniquely declared global's string literal or builtin."""
+        self.budget.check(read.loc)
+        binding = self.index.refs.get(id(read))
+        declaration = self.index.decls.get(binding)
+        if (declaration is None or binding[0] != "global"
+                or binding in self.index.reassigned
+                or self.string_declarations[binding] != 1
+                or declaration.is_varip
+                or self.order[id(declaration)] >= self.order[id(read)]):
+            return None
+        if binding not in self.string_cache:
+            initializer = declaration.value
+            result = None
+            if isinstance(initializer, MemberAccess):
+                root = initializer
+                members = []
+                while isinstance(root, MemberAccess):
+                    self.budget.check(root.loc)
+                    members.append(root.member)
+                    root = root.object
+                if isinstance(root, Identifier) and id(root) not in self.index.refs:
+                    # Strategy has runtime fields as well as named constants.
+                    constant_namespaces = (_CONSTANT_NAMESPACES - {"strategy"}) | DRAWING_STYLE_NS
+                    spelling = ".".join([root.name, *reversed(members)])
+                    if (isinstance(initializer.object, Identifier)
+                            and initializer.member in
+                            _STRING_INPUT_CONSTANT_MEMBERS.get(root.name, ())):
+                        result = initializer
+                    elif (spelling in _NAMED_CONSTANTS
+                            or (isinstance(initializer.object, Identifier)
+                                and root.name in constant_namespaces)):
+                        result = read
+            else:
+                literal_only = True
+                for node, _ in iter_ast_nodes(initializer):
+                    self.budget.check(node.loc)
+                    if isinstance(node, (Identifier, MemberAccess, FuncCall)):
+                        literal_only = False
+                        break
+                if literal_only:
+                    value, proven = fold_constant_expression(initializer, {}, {})
+                    if proven and isinstance(value, str):
+                        result = StringLiteral(value=value, loc=read.loc)
+            self.string_cache[binding] = result
+        result = self.string_cache[binding]
+        return read if isinstance(result, Identifier) else result
 
     def input_default(self, call):
         contract = input_default_contract(call)

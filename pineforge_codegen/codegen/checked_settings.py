@@ -4,10 +4,8 @@ import re
 
 from ..ast_nodes import Identifier, MemberAccess
 from ..errors import CompileError
-from .tables import (
-    ALERT_FREQ_VALUES, NAME_ECHO_STRING_MEMBERS, ORDER_DIRECTION_MAP,
-    STRATEGY_DIRECTION_VALUES,
-)
+from .constant_values import _STRING_INPUT_CONSTANT_MEMBERS
+from .tables import STRATEGY_DIRECTION_VALUES
 
 
 _QUOTED_STRING = r'"(?:[^"\\\x00\r\n]|\\(?:["\\nrt]|000))*"'
@@ -28,12 +26,7 @@ def _string_setting_arg(expr, lowered: str) -> str | None:
     if isinstance(expr, MemberAccess):
         if isinstance(expr.object, Identifier):
             namespace = expr.object.name
-            known = (
-                namespace == "alert" and expr.member in ALERT_FREQ_VALUES
-                or namespace == "order" and expr.member in ORDER_DIRECTION_MAP
-                or namespace == "session" and expr.member in ("regular", "extended")
-                or expr.member in NAME_ECHO_STRING_MEMBERS.get(namespace, ())
-            )
+            known = expr.member in _STRING_INPUT_CONSTANT_MEMBERS.get(namespace, ())
         else:
             known = (
                 isinstance(expr.object, MemberAccess)
@@ -243,6 +236,8 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
             declared = getattr(arguments.get("options"), "elements", None)
             if declared:
                 for option in declared:
+                    if namespace == "input" and getter == "get_input_string":
+                        option = emitter._string_input_argument(option, refuse_unproven=False)
                     option_cpp = _visit_setting_arg(emitter, option)
                     if getter == "get_input_string":
                         option_cpp = _string_setting_arg(option, option_cpp)

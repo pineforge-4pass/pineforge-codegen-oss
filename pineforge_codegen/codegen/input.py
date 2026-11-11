@@ -389,6 +389,12 @@ class InputHelper:
         copy of the default. Unfoldable colors retain their previous metadata.
         """
         default = self._get_input_default(node)
+        func_name, namespace = self._resolve_callee(node.callee)
+        string_input = (namespace == "input"
+                        and self._input_getter_for_call(node, func_name, namespace)
+                        == "get_input_string")
+        if string_input:
+            default = self._string_input_argument(default)
         contract = input_default_contract(node)
         if (contract is not None and contract.pine_type == PineType.COLOR
                 and isinstance(default, (Identifier, FuncCall))):
@@ -400,10 +406,33 @@ class InputHelper:
             if proof is not None:
                 return f"0x{proof.value:08X}LL", proof.value
         cpp = self._visit_expr(default) if default is not None else "0"
-        func_name, namespace = self._resolve_callee(node.callee)
         color = (self._literal_color_value(default)
                  if namespace == "input" and func_name == "color" else None)
         return cpp, color
+
+    def _string_input_argument(self, expr, *, refuse_unproven: bool = True):
+        """Carry proven strings; only an unproven default requires a refusal."""
+        if not isinstance(expr, Identifier):
+            return expr
+        lowered = self._visit_expr(expr).strip()
+        if lowered.startswith(("std::string(", '"')):
+            return expr
+        resolver = getattr(self, "_constant_default_resolver", None)
+        if resolver is None:
+            resolver = self._constant_default_resolver = ConstantResolver(
+                self.ctx.ast, getattr(self, "_budget", None))
+        resolved = resolver.string_input_argument(expr)
+        if resolved is not None:
+            return resolved
+        if not refuse_unproven:
+            return expr
+        self._codegen_error(
+            expr,
+            "The default of a string input is a variable that PineForge "
+            "cannot resolve to one constant string when it reads the input.",
+            hint="Declare the variable once with a string literal and never assign to it, "
+                 "or write the literal in the call.",
+        )
 
     def _literal_color_value(self, node) -> int | None:
         """The unchanged literal evaluator, also used by constant proofs."""
