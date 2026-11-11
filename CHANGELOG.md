@@ -41,7 +41,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   cut at the first NUL as before: the default and the options of the string
   inputs (`input.string`, `input.symbol`, `input.session`, `input.timeframe`,
   `input.text_area`), which the settings receipt and the manifest equal, an
-  input title, and the timeframe and footprint-column literals.
+  input title, and the timeframe and footprint-column literals. One comparison
+  changes with it: a string input whose default holds a NUL no longer equals
+  the literal it was given, because the default is cut and the literal is not
+  (the two were equal before only because both were cut).
 - Direct retained record fields built from stable `var` arrays, and direct
   plain `var` array aliases, stay live through their creation bar and then
   keep their own copy of the array as it stood at the end of that bar; two
