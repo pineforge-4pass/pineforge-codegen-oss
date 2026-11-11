@@ -91,6 +91,22 @@ ROWS = [
         'n = str.length("abc")\nplot(n)\n',
         'std::cout << strategy.n << "\\n";', "3\n", id="control-ascii-length",
     ),
+    # A history-read ``var`` takes its first value in the first-bar block, not
+    # at its declaration: that push must keep the whole literal too.
+    pytest.param(
+        f'var string t = "a{NUL}b"\np = t[1]\nn = str.length(t)\nplot(n)\n',
+        'std::cout << strategy.n << "\\n";', "3\n",
+        id="length-of-a-history-read-var-set-from-a-literal",
+    ),
+    # A known limit, pinned so that a change of it is seen: the default of a
+    # string input is still cut at its first NUL, so the input no longer equals
+    # the literal it was given (the two were equal only while both were cut).
+    pytest.param(
+        f'm = input.string("a{NUL}b", "Text")\nu = m == "a{NUL}b" ? 1 : 0\n'
+        'k = str.length(m)\nplot(u + k)\n',
+        'std::cout << strategy.u << " " << strategy.k << "\\n";', "0 1\n",
+        id="known-limit-an-input-default-is-cut-and-differs-from-its-literal",
+    ),
 ]
 
 
