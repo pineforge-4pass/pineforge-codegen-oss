@@ -241,10 +241,10 @@ def test_fixed_builtin_arguments_keep_their_registered_family(
         pytest.param("value[1]", "close > open", "bool", id="inherited_bool"),
     ],
 )
-def test_user_call_arguments_keep_the_exact_variant_return(
+def test_user_call_arguments_keep_the_proven_variant_return(
     expression, argument, primitive,
 ):
-    """A nested stateful call contributes its own int or bool result."""
+    """A nested stateful call contributes the family its body proves."""
     source = (
         '//@version=6\nstrategy("nested primitive history")\n'
         "previous(sample) => sample[1]\n"
@@ -258,6 +258,39 @@ def test_user_call_arguments_keep_the_exact_variant_return(
     assert transpile(source) == transpile(control)
 
 
+def test_nested_history_result_waits_for_its_local_argument():
+    """A nested variant resolves its local input before supplying a result."""
+    source = """//@version=6
+strategy("nested local history")
+previous(sample) => sample[1]
+measured(value) => value[1]
+relay(value) =>
+    saved = value
+    previous(measured(saved))
+observed = relay(bar_index)
+plot(observed)
+"""
+    control = source.replace("previous(sample)", "previous(int sample)")
+    assert transpile(source) == transpile(control)
+
+
+def test_nested_fixed_builtin_does_not_retype_an_unrelated_function():
+    """Body proof leaves an unrelated variant's stored return unchanged."""
+    source = """//@version=6
+strategy("frac")
+frac(x) => x - math.floor(x)
+g = frac(4)
+h = frac(close)
+plot(g + h)
+"""
+    # Two call sites, as in the accepted silent2_tv/cgs2_untyped_params.pine: the
+    # definition-wide return type is float, and the integer variant keeps it.
+    cpp = transpile(source)
+    assert "    double frac_cs0(int64_t x) {" in cpp
+    assert "    double frac_cs1(double x) {" in cpp
+    assert "int64_t frac_cs0(int64_t x)" not in cpp
+
+
 def test_chained_local_initializers_follow_declaration_bindings():
     """A second immutable alias follows the first alias's variant type."""
     source = LOCAL_SCRIPT.replace("    s = x\n", "    first = x\n    s = first\n")
@@ -265,19 +298,169 @@ def test_chained_local_initializers_follow_declaration_bindings():
     assert transpile(source) == transpile(control)
 
 
-def _assert_refusal(source, message, line, column):
+def _assert_refusal(source, message, line, column, *, filename="typing.pine"):
     """Pin the whole refusal and its authored source position."""
     with pytest.raises(
         CompileError,
-        match="^" + re.escape(f"typing.pine:{line}:{column}: {message}") + "$",
+        match="^" + re.escape(f"{filename}:{line}:{column}: {message}") + "$",
     ) as caught:
-        transpile(source, filename="typing.pine")
+        transpile(source, filename=filename)
     (diagnostic,) = caught.value.diagnostics
     assert diagnostic.level is Level.ERROR
     assert diagnostic.phase is Phase.ANALYZER
     assert diagnostic.message == message
-    assert diagnostic.location.file == "typing.pine"
+    assert diagnostic.location.file == filename
     assert (diagnostic.location.line, diagnostic.location.col) == (line, column)
+
+
+@pytest.mark.parametrize(
+    "body,argument,plot_expression",
+    [
+        pytest.param(
+            "ta.valuewhen(true, value, 0)", "bar_index", "a + b",
+            id="valuewhen_int",
+        ),
+        pytest.param(
+            "ta.valuewhen(true, value, 0)", "close > open", "a ? b : 0.0",
+            id="valuewhen_bool",
+        ),
+        pytest.param("ta.change(value)", "bar_index", "a + b", id="change_int"),
+        pytest.param("nz(value[1])", "bar_index", "a + b", id="nz_int"),
+    ],
+)
+def test_unproven_nested_results_keep_the_located_refusal(
+    body, argument, plot_expression,
+):
+    """A definition-wide fallback supplies no history argument proof."""
+    source = (
+        '//@version=6\nstrategy("nested unproven")\n'
+        "previous(sample) => sample[1]\n"
+        f"held(value) => {body}\n"
+        "relay(value) => previous(held(value))\n"
+        f"a = relay({argument})\n"
+        "b = held(close)\n"
+        f"plot({plot_expression})\n"
+    )
+    _assert_refusal(
+        source,
+        "Cannot infer the per-callsite primitive type of history parameter "
+        "'sample' in callable 'previous' variant cs0; declare its type explicitly.",
+        3, 1, filename="<input>",
+    )
+
+
+def test_integer_na_selection_keeps_the_located_refusal():
+    """An integer selection with na keeps its unresolved body inference."""
+    source = """//@version=6
+strategy("nested unproven")
+previous(sample) => sample[1]
+held(value) => bar_index > 0 ? value : na
+relay(value) => previous(held(value))
+a = relay(bar_index)
+b = held(close)
+plot(a + b)
+"""
+    _assert_refusal(
+        source,
+        "Cannot infer the per-callsite primitive type of history parameter "
+        "'sample' in callable 'previous' variant cs0; declare its type explicitly.",
+        3, 1, filename="<input>",
+    )
+
+
+def test_unproven_result_inside_a_second_argument_keeps_the_refusal():
+    """A second history call cannot turn a fallback into a primitive proof."""
+    source = """//@version=6
+strategy("nested argument proof")
+previous(sample) => sample[1]
+held(value) => ta.valuewhen(true, value, 0)
+measured(value) => value[1]
+relay(value) => previous(measured(held(value)))
+a = relay(bar_index)
+b = held(close)
+plot(a + b)
+"""
+    _assert_refusal(
+        source,
+        "Cannot infer the per-callsite primitive type of history parameter "
+        "'sample' in callable 'previous' variant cs0; declare its type explicitly.",
+        3, 1, filename="<input>",
+    )
+
+
+def test_local_declared_in_two_scopes_keeps_the_located_refusal():
+    """A repeated local name supplies no new declaration-bound type proof."""
+    source = """//@version=6
+strategy("scoped local history")
+previous(sample) => sample[1]
+relay(value) =>
+    if value > 0
+        saved = value
+        previous(saved)
+    else
+        saved = value
+        saved
+observed = relay(bar_index)
+plot(observed)
+"""
+    _assert_refusal(
+        source,
+        "Cannot infer the per-callsite primitive type of history parameter "
+        "'sample' in callable 'previous' variant cs0; declare its type explicitly.",
+        3, 1, filename="<input>",
+    )
+
+
+@pytest.mark.parametrize(
+    "preamble,body,primitive",
+    [
+        pytest.param(
+            "",
+            "    total = 0\n"
+            "    for index = 0 to 2\n"
+            "        total += previous(index)\n"
+            "    total + value\n",
+            "int", id="for_counter",
+        ),
+        pytest.param(
+            "",
+            "    total = 0\n"
+            "    for item in array.from(0, 1, 2)\n"
+            "        total += previous(item)\n"
+            "    total + value\n",
+            "int", id="for_in_element",
+        ),
+        pytest.param(
+            "",
+            "    float saved = bar_index\n"
+            "    previous(saved)\n",
+            "float", id="widened_local",
+        ),
+        pytest.param(
+            "", "    previous(input.int(2))\n", "int", id="input_result",
+        ),
+        pytest.param(
+            "", "    previous(str.length(str.tostring(value)))\n", "int",
+            id="string_length",
+        ),
+    ],
+)
+def test_lexically_typed_arguments_match_their_explicit_controls(
+    preamble, body, primitive,
+):
+    """Known lexical families survive exclusions from local alias inference."""
+    source = (
+        '//@version=6\nstrategy("lexical argument history")\n'
+        "previous(sample) => sample[1]\n"
+        + preamble
+        + "relay(value) =>\n"
+        + body
+        + "observed = relay(bar_index)\nplot(observed)\n"
+    )
+    control = source.replace(
+        "previous(sample)", f"previous({primitive} sample)",
+    )
+    assert transpile(source) == transpile(control)
 
 
 @pytest.mark.parametrize(
