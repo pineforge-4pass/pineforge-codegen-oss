@@ -22,6 +22,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- `str.split(source, "")` with an empty separator now returns one part per
+  UTF-16 unit, as TradingView does: "axb" gives three parts, an accent or a CJK
+  character between two letters three, an emoji between two letters four (an
+  emoji is a high and a low surrogate, each kept as its own three-byte part).
+  It returned the whole string as one part, even for plain ASCII. A separator
+  that is not empty splits as before, through the engine.
 - `input.string`, `input.timeframe`, `input.symbol`, `input.session` and
   `input.text_area` carry never-reassigned global string literals into defaults
   and options, including var declarations; an unproven variable default is now

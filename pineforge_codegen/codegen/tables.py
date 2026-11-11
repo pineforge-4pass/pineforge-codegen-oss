@@ -1478,6 +1478,44 @@ MATH_FUNC_MAP = {
     "avg": "(({0} + {1}) / 2.0)",
 }
 
+
+def _str_split_expr(args: list[str]) -> str:
+    """``str.split(source, separator)``.
+
+    A non-empty separator is split by the engine as it always was. An empty
+    separator gives one part per UTF-16 unit, as TradingView does: the engine
+    returned the whole string as one part, even for plain ASCII. The source is
+    UTF-8, so a character of one to three bytes is one unit and a character of
+    four bytes (outside the Basic Multilingual Plane) is two, a high and a low
+    surrogate; each surrogate is kept as its own three-byte part, the form in
+    which the length of such a part is one unit."""
+    return (
+        "[&](){ "
+        f"const std::string __pf_s = ({args[0]}); "
+        f"const std::string __pf_t = ({args[1]}); "
+        "if (!__pf_t.empty()) return pine_str_split(__pf_s, __pf_t); "
+        "std::vector<std::string> __pf_r; "
+        "for (size_t __pf_i = 0; __pf_i < __pf_s.size();) { "
+        "const unsigned char __pf_c = (unsigned char)__pf_s[__pf_i]; "
+        "size_t __pf_n = __pf_c < 0xC0 ? 1 : __pf_c < 0xE0 ? 2 : __pf_c < 0xF0 ? 3 : 4; "
+        "if (__pf_n > __pf_s.size() - __pf_i) __pf_n = __pf_s.size() - __pf_i; "
+        "if (__pf_n == 4) { "
+        "const unsigned __pf_v = (((__pf_c & 0x07u) << 18) "
+        "| (((unsigned char)__pf_s[__pf_i + 1] & 0x3Fu) << 12) "
+        "| (((unsigned char)__pf_s[__pf_i + 2] & 0x3Fu) << 6) "
+        "| ((unsigned char)__pf_s[__pf_i + 3] & 0x3Fu)) - 0x10000u; "
+        "for (const unsigned __pf_u : {0xD800u + (__pf_v >> 10), 0xDC00u + (__pf_v & 0x3FFu)}) { "
+        "std::string __pf_p; "
+        "__pf_p += (char)(0xE0u | (__pf_u >> 12)); "
+        "__pf_p += (char)(0x80u | ((__pf_u >> 6) & 0x3Fu)); "
+        "__pf_p += (char)(0x80u | (__pf_u & 0x3Fu)); "
+        "__pf_r.push_back(__pf_p); } "
+        "} else { __pf_r.push_back(__pf_s.substr(__pf_i, __pf_n)); } "
+        "__pf_i += __pf_n; } "
+        "return __pf_r; }()"
+    )
+
+
 STR_FUNC_MAP = {
     "tostring":    None,  # handled separately (already works)
     "tonumber":    lambda args: (
@@ -1504,7 +1542,7 @@ STR_FUNC_MAP = {
         f"[&](){{ std::string __pf_r; for(int __pf_i=0;__pf_i<{na_preserving_int_cast(args[1])};__pf_i++){{ if(__pf_i>0) __pf_r+={args[2]}; __pf_r+={args[0]}; }} return __pf_r; }}()"
     ),
     "match":       lambda args: f'pine_str_match({args[0]}, {args[1]})',
-    "split":       lambda args: f'pine_str_split({args[0]}, {args[1]})',
+    "split":       _str_split_expr,
     "format":      None,  # handled separately
 }
 # The STR_FUNC_MAP arguments a template reads more than once, or once per
