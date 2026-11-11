@@ -153,6 +153,13 @@ class Parser:
         node.loc = self._loc(tok)
         return node
 
+    def _retain_declaration_names(self, node: ASTNode, *tokens: Token) -> None:
+        """Keep authored declaration names and spans through later renaming."""
+        node.annotations = {
+            **(node.annotations or {}),
+            "declaration_names": tuple((tok.value, self._loc(tok)) for tok in tokens),
+        }
+
     @contextmanager
     def _expression_slot(self, role: str):
         """Parse authored values under their parent's expression grammar."""
@@ -661,6 +668,7 @@ class Parser:
         # Parentheses disappear from the AST; retain only bare-token provenance.
         if isinstance(value, NaLiteral) and self.tokens[self.pos - 1].type == TokenType.NA:
             first.annotations = {"bare_na_initializer": True}
+        self._retain_declaration_names(first, name_tok)
         self._set_loc(first, start_tok)
 
         # Check for comma-separated additional declarations: x=1, y=2, z=3.
@@ -692,6 +700,7 @@ class Parser:
             d = VarDecl(name=n.value, value=v)
             if isinstance(v, NaLiteral) and self.tokens[self.pos - 1].type == TokenType.NA:
                 d.annotations = {"bare_na_initializer": True}
+            self._retain_declaration_names(d, n)
             decls.append(self._set_loc(d, st))
         return decls
 
@@ -864,6 +873,7 @@ class Parser:
             name=name_tok.value, value=value,
             is_var=is_var, is_varip=is_varip, type_hint=type_hint,
         )
+        self._retain_declaration_names(node, name_tok)
         return self._set_loc(node, start_tok)
 
     def _parse_typed_decl(self) -> VarDecl:
@@ -874,6 +884,7 @@ class Parser:
         self._consume(TokenType.EQUALS)
         value = self._parse_expression()
         node = VarDecl(name=name_tok.value, value=value, type_hint=type_hint)
+        self._retain_declaration_names(node, name_tok)
         return self._set_loc(node, start_tok)
 
     def _is_tuple_assign(self) -> bool:
@@ -905,18 +916,22 @@ class Parser:
         start_tok = self._current()
         self._consume(TokenType.LBRACKET)
         names = []
+        name_tokens = []
         while not self._check(TokenType.RBRACKET):
             # Allow underscore as discard placeholder
             if self._check(TokenType.IDENT):
-                names.append(self._consume(TokenType.IDENT).value)
+                name_tok = self._consume(TokenType.IDENT)
             else:
                 # Handle _ for tuple discard — lexer produces IDENT for _
-                names.append(self._advance().value)
+                name_tok = self._advance()
+            names.append(name_tok.value)
+            name_tokens.append(name_tok)
             self._match(TokenType.COMMA)
         self._consume(TokenType.RBRACKET)
         self._consume(TokenType.EQUALS)
         value = self._parse_expression()
         node = TupleAssign(names=names, value=value)
+        self._retain_declaration_names(node, *name_tokens)
         return self._set_loc(node, start_tok)
 
     # -- Function definition --
@@ -976,7 +991,8 @@ class Parser:
     def _parse_func_def(self) -> FuncDef:
         """Parse: name(param1, param2) => expr_or_block"""
         start_tok = self._current()
-        name = self._consume(TokenType.IDENT).value
+        name_tok = self._consume(TokenType.IDENT)
+        name = name_tok.value
         self._consume(TokenType.LPAREN)
         params = []
         param_type_hints: list = []
@@ -1031,6 +1047,7 @@ class Parser:
             # string``); ``library_inline`` picks the overload by them. Script
             # definitions also retain qualifiers for signature comparisons.
             node.annotations["param_qualifiers"] = param_qualifiers
+        self._retain_declaration_names(node, name_tok)
         return self._set_loc(node, start_tok)
 
     def _param_qualifier_ahead(self) -> str | None:
@@ -1102,7 +1119,8 @@ class Parser:
     def _parse_method_def(self):
         """Parse: method name(TypeName self, params...) => body"""
         start_tok = self._advance()  # consume 'method'
-        name = self._consume(TokenType.IDENT).value
+        name_tok = self._consume(TokenType.IDENT)
+        name = name_tok.value
         self._consume(TokenType.LPAREN)
         # First param is the required receiver type + self name.  Receiver
         # types use the same complete Pine hint grammar as ordinary typed
@@ -1167,6 +1185,7 @@ class Parser:
             # Keep method contracts separate from the library linker's
             # established qualifier-only overload-selection metadata.
             node.annotations["method_param_qualifiers"] = param_qualifiers
+        self._retain_declaration_names(node, name_tok)
         return self._set_loc(node, start_tok)
 
     # -- Control flow --

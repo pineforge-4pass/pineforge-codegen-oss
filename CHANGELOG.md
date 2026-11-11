@@ -22,6 +22,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Pine v6 reports located errors for a missing `color.new` transparency,
+  `fill(transp=...)`, calendar-number timestamp defaults in `input.time` with
+  a time zone string as the first timestamp argument or a `timezone` keyword,
+  literal plot widths below one, and variable or function declarations named
+  `range`.
 - `input.string`, `input.timeframe`, `input.symbol`, `input.session` and
   `input.text_area` carry never-reassigned global string literals into defaults
   and options, including var declarations; an unproven variable default is now
