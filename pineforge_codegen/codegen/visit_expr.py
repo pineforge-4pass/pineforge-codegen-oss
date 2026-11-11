@@ -1708,7 +1708,9 @@ class ExprVisitor:
         escaped = f'"{self._cpp_string_escape(literal.value)}"'
         helper = _CLOSED_TRADE_TEXT_EQUALS[call.callee.member]
         # sizeof counts the emitted bytes, including UTF-8 and escaped bytes.
-        # A NUL literal keeps std::string(const char*)'s existing truncation.
+        # A literal that holds a NUL is not lowered here (the operand check
+        # takes NUL-free literals only): it takes the general path, which
+        # builds the string with its byte count.
         comparison = (
             f"{helper}({index}, std::string_view({escaped}, "
             f"sizeof({escaped}) - 1))"

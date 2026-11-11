@@ -5,6 +5,11 @@ generated code used to build a literal with std::string("...") from a C string,
 which ends at the first NUL, so the string was cut there. Each row transpiles a
 small script, builds the emitted translation unit with the engine headers and
 library, runs the strategy on three bars and reads the script's own variables.
+
+The length rows follow that reading. The rows that compare strings (two literals
+that differ after the NUL; a string that equals itself and not its prefix) are
+design rows: what a string that keeps its NUL must do, not separate TradingView
+readings.
 """
 
 import re
