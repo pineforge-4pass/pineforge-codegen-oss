@@ -122,6 +122,9 @@ pineforge_codegen/
     │                               enum is too coarse for.
     ├── tv_number_format.py         TU-local numeric formatter emitted for
     │                               str.tostring / str.format / log.*.
+    ├── tv_string_units.py          TU-local UTF-16 unit counting and cutting
+    │                               emitted for str.length / str.pos /
+    │                               str.substring.
     ├── session_market.py           session.ismarket of a chart bar in a run
     │                               without a timeframe: the engine's session
     │                               calendar asked at the bar's open time,

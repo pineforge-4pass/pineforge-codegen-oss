@@ -108,6 +108,7 @@ from .tables import (
 from ..limits import iter_ast_nodes
 from .drawing import DRAWING_LIFETIME_CPP
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
+from .tv_string_units import TV_STRING_UNITS_CPP, TV_STRING_UNITS_MARKER
 
 
 # Keep the late-selected include beside the headers the C++ allowlist reads.
@@ -256,6 +257,12 @@ class TopLevelEmitter:
         if self._uses_tv_number_format:
             lines.append(TV_NUMBER_FORMAT_CPP)
             lines.append("")
+        # str.length, str.pos and str.substring count and cut in UTF-16 units
+        # through the helpers of tv_string_units. Whether the body emits one of
+        # those calls is known only after it is generated, so this place holds a
+        # marker that ``_settle_tv_string_units`` resolves.
+        lines.append(TV_STRING_UNITS_MARKER)
+        lines.append("")
         # Syminfo derivation helpers (_pf_derive_main_tickerid, _pf_derive_country)
         from .helpers_syminfo import emit_syminfo_helpers
         lines.extend(emit_syminfo_helpers())
@@ -2123,6 +2130,23 @@ class TopLevelEmitter:
             "        this->set_trade_history_streamable(true);",
             "#endif",
         ]
+
+    def _settle_tv_string_units(self, lines: list[str]) -> None:
+        """Resolve the marker that holds the place of the UTF-16 unit helpers.
+
+        The block takes the marker's place when the body emitted a call of one of
+        the helpers. Otherwise the marker and the blank line after it go, so a
+        script that emits no such call has the text it had before."""
+        try:
+            marker = lines.index(TV_STRING_UNITS_MARKER)
+        except ValueError as exc:  # pragma: no cover - generation invariant
+            raise AssertionError(
+                "generated file lost the place of its UTF-16 unit helpers"
+            ) from exc
+        if self._uses_tv_string_units:
+            lines[marker] = TV_STRING_UNITS_CPP
+        else:
+            del lines[marker:marker + 2]
 
     def _emit_extern_c(self, lines: list[str]) -> None:
         lines.append('extern "C" {')

@@ -293,6 +293,16 @@ supported as exact pairs; on the 0.x line they are independent. See the
   TradingView accepts a namespace call after an expired block local with the
   same name; PineForge's analysis no longer refuses it, but code generation
   still rejects some such calls (a known gap).
+- `str.length`, `str.pos` and `str.substring` now count and cut text in UTF-16
+  code units, as TradingView does: an emoji is two units and every other
+  character one. They counted UTF-8 bytes, so an accent counted 2, a CJK
+  character 3 and an emoji 4, and a position or a cut after such a character
+  was off by the extra bytes. The helpers are emitted into the generated file
+  only when its code calls one of the three functions (a call that is only a
+  plot argument emits nothing), so every other script keeps the text it had;
+  the engine is not involved. A cut between the two units of an emoji keeps
+  each half as its own three-byte sequence (the length of a half is one unit);
+  joining the two halves again does not give back the original four bytes.
 
 ## 1.9.1 — 2026-10-31
 

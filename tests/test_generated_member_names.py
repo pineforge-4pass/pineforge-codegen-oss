@@ -17,6 +17,7 @@ from pineforge_codegen.codegen.helpers import (
 from pineforge_codegen.lexer import KEYWORDS, Lexer
 from pineforge_codegen.parser import Parser
 from tests._e2e import reference_codegen, transpile_json
+from tests._older_codegen import with_utf16_units
 from tests.test_helper_series_words import helper_source
 
 
@@ -311,4 +312,6 @@ def test_ordinary_names_keep_reference_cpp(position, string, reference, tmp_path
         # The reference joined a string local with its previous value through
         # std::to_string (issue #354); that one site is the whole difference.
         expected = with_string_join_fixed(expected)
+        # It also counted str.length in bytes, through no unit helper.
+        expected = with_utf16_units(expected)
     assert transpile(source) == expected
