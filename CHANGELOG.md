@@ -22,6 +22,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- A zone name the engine rejects now makes `timestamp()` stop the run at its
+  first evaluation with TradingView's message, instead of reading UTC silently.
+  Accepted zones and UTC are unchanged; the single
+  `TIMESTAMP_REJECTED_ZONE_STOPS_RUN` switch restores the old behavior.
 - `input.string`, `input.timeframe`, `input.symbol`, `input.session` and
   `input.text_area` carry never-reassigned global string literals into defaults
   and options, including var declarations; an unproven variable default is now

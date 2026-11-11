@@ -87,7 +87,7 @@ from __future__ import annotations
 
 import re
 
-from .run_stops import RUN_STOP_SHIMS_CPP
+from .run_stops import RUN_STOP_SHIMS_CPP, TIMEZONE_STOP_SHIM_CPP
 
 from ..ast_nodes import (
     BoolLiteral, ExprStmt, ForInStmt, ForStmt, FuncCall, Identifier, IfStmt,
@@ -134,6 +134,14 @@ class TopLevelEmitter:
             or (namespace is None and func_name == "tostring")
             or (namespace == "log" and func_name in {"info", "warning", "error"}
                 and len(node.args) > 1)
+            for root in roots
+            for node, _depth in iter_ast_nodes(root)
+            if isinstance(node, FuncCall)
+            for func_name, namespace in [self._resolve_callee(node.callee)]
+        )
+        self._uses_timestamp_calendar = any(
+            namespace is None and func_name == "timestamp"
+            and len(node.args) + len(node.kwargs) >= 2
             for root in roots
             for node, _depth in iter_ast_nodes(root)
             if isinstance(node, FuncCall)
@@ -250,6 +258,8 @@ class TopLevelEmitter:
             lines.append("inline constexpr int kLoopTimeLimitMs = 2000;")
             lines.append("")
         lines.append(RUN_STOP_SHIMS_CPP)
+        if self._uses_timestamp_calendar:
+            lines.append(TIMEZONE_STOP_SHIM_CPP)
         self._emit_ta_compat_shims(lines)
         if getattr(self, "_uses_drawing", False):
             lines.append(DRAWING_LIFETIME_CPP)
