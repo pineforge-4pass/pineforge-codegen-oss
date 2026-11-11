@@ -423,7 +423,7 @@ CPP_EMITTER_NAMES = frozenset("""
     pine_runtime_error pine_enum_str_at pine_session_ismarket
     pine_no_data_stop pine_other_symbol_stop pine_array_stop pine_collection_stop
     pine_na_stop pine_limit_stop pine_unsupported_stop pine_string_stop
-    pine_engine_invariant note_run_failure note_run_failure_unknown
+    pine_timezone_stop pine_engine_invariant note_run_failure note_run_failure_unknown
     pine_session_ispostmarket pine_session_ispremarket _PFSessionMarket
     _pf_session_market_ script_tf_
     tf_change tf_is_daily tf_is_intraday tf_is_monthly tf_is_seconds
