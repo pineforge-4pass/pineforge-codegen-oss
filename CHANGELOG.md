@@ -23,8 +23,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
 ## Unreleased (next release)
 
 - Untyped history parameters now infer the enclosing call's primitive type
-  through immutable plain locals, fixed-result builtins and known user-call
-  variants, matching explicit parameter declarations.
+  through immutable plain locals, fixed-result builtins and user-call variants
+  whose result the callee body proves, to the same type family as an explicit
+  parameter declaration.
 - `input.string`, `input.timeframe`, `input.symbol`, `input.session` and
   `input.text_area` carry never-reassigned global string literals into defaults
   and options, including var declarations; an unproven variable default is now

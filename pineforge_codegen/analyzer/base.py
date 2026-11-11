@@ -411,6 +411,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_callsite_return_types: dict[
             tuple[str, int], PineType
         ] = {}
+        self._func_callsite_return_proof: dict[tuple[str, int], PineType] = {}
         # Textual nested calls whose identity is inherited from the active
         # parent clone rather than assigned a fixed source-level cs index.
         # Kept separately so a second propagation pass (security TF cloning)
@@ -961,7 +962,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if not pending:
             return
 
-        # One new exact result can unlock one earlier direct dependency per
+        # One newly resolved result can unlock one earlier direct dependency per
         # pass.  Cycles retain their existing fail-closed fallback.
         for _ in range(len(pending) + 1):
             changed = False
@@ -3344,6 +3345,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                                 self._func_callsite_return_types.pop(
                                     (sub, 0), None
                                 )
+                                self._func_callsite_return_proof.pop(
+                                    (sub, 0), None
+                                )
                         for cs_idx in range(current, count):
                             parent_ta_targets = _edge_ta_variant_target_map(
                                 fname,
@@ -3874,6 +3878,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 if invalidated:
                     self._func_callsite_param_types[key] = current
                     self._func_callsite_return_types.pop(key, None)
+                    self._func_callsite_return_proof.pop(key, None)
 
         def unresolved_history_parameters():
             for name, series_names in self._func_series_vars.items():
@@ -3919,7 +3924,26 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         owner, owner_cs, nested_callee, nested_call
                     )
                     nested_info = func_info_by_name.get(nested_callee)
-                    if nested_cs is None or nested_info is None:
+                    if (
+                        nested_cs is None
+                        or nested_info is None
+                        or nested_info.node is None
+                    ):
+                        continue
+                    nested_declared = declared_types(
+                        nested_callee, len(nested_info.node.params)
+                    )
+                    nested_profile = self._func_callsite_param_types.get(
+                        (nested_callee, nested_cs), []
+                    )
+                    if any(
+                        declared == PineType.UNKNOWN
+                        and (
+                            index >= len(nested_profile)
+                            or nested_profile[index] == PineType.UNKNOWN
+                        )
+                        for index, declared in enumerate(nested_declared)
+                    ):
                         continue
                     spec = nested_info.return_type_spec
                     if (
@@ -3928,7 +3952,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         or (spec is not None and spec.kind != "primitive")
                     ):
                         continue
-                    result = self._func_callsite_return_types.get(
+                    result = self._func_callsite_return_proof.get(
                         (nested_callee, nested_cs), PineType.UNKNOWN
                     )
                     if result in self._ARGUMENT_FAMILIES:
@@ -4013,9 +4037,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     if merge_profile(callee, callee_cs, incoming, call):
                         changed = True
 
-            # Recompute each variant's primitive return. A direct terminal
-            # wrapper call uses the exact callee variant return rather than the
-            # shared definition-level cache.
+            # Recompute each variant's primitive return and its body proof.
+            # A nested call contributes its result only when the callee's body
+            # proves it; direct terminal wrappers inherit that proof.
             for key, profile in list(
                 self._func_callsite_param_types.items()
             ):
@@ -4025,6 +4049,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     continue
                 ret = self._callsite_callable_return_type(
                     info.node, list(profile), info.return_type
+                )
+                proof = self._callsite_callable_return_inferred(
+                    info.node, list(profile), call_return_types={},
                 )
                 terminal = self._direct_terminal_return_expr(info.node)
                 if isinstance(terminal, FuncCall):
@@ -4041,8 +4068,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             )
                             if nested_ret != PineType.UNKNOWN:
                                 ret = nested_ret
+                            proof = self._func_callsite_return_proof.get(
+                                (terminal_callee, terminal_cs),
+                                PineType.UNKNOWN,
+                            )
                 if self._func_callsite_return_types.get(key) != ret:
                     self._func_callsite_return_types[key] = ret
+                    changed = True
+                if self._func_callsite_return_proof.get(key) != proof:
+                    self._func_callsite_return_proof[key] = proof
                     changed = True
             if not changed:
                 if (

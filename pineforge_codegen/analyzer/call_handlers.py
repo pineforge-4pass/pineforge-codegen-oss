@@ -127,8 +127,9 @@ class CallHandlers:
         family needed by history-preserving identity/wrapper functions without
         attempting to monomorphize collections or reference types here.
 
-        The late call-graph reconciliation supplies declaration-bound locals
-        and exact variant returns. Other callers retain their lexical query.
+        The late call-graph reconciliation supplies declaration-bound locals.
+        A nested call contributes its result only when the callee's body
+        proves it. Other callers retain their lexical query.
         """
         def infer(value):
             return self._callsite_primitive_expr_type(
@@ -225,12 +226,12 @@ class CallHandlers:
                     return PineType.FLOAT
                 if callee.name == "bool":
                     return PineType.BOOL
-                # Without an exact variant fact, a user callable's
+                # Without a body-proven variant result, a user callable's
                 # definition-wide return cache is not a call-site fact.
                 # In particular, a pure untyped transform
                 # nested inside a polymorphic history wrapper may have been
                 # analyzed first as FLOAT even when this path carries an
-                # int64 timestamp or bool.  Exact direct-wrapper call edges are
+                # int64 timestamp or bool. Direct-wrapper call edges are
                 # reconciled later; arbitrary nested transforms stay UNKNOWN
                 # and therefore fail closed instead of source-order coercing.
                 return PineType.UNKNOWN
@@ -256,6 +257,8 @@ class CallHandlers:
         self,
         stmt: ASTNode,
         local_types: dict[str, PineType],
+        *,
+        call_return_types: dict[int, PineType] | None = None,
     ) -> None:
         """Flow one statement's primitive local writes into ``local_types``.
 
@@ -281,7 +284,7 @@ class CallHandlers:
                 hinted
                 if hinted != PineType.UNKNOWN
                 else self._callsite_primitive_expr_type(
-                    stmt.value, local_types
+                    stmt.value, local_types, call_return_types=call_return_types,
                 )
             )
             return
@@ -290,7 +293,7 @@ class CallHandlers:
             and isinstance(stmt.target, Identifier)
         ):
             rhs = self._callsite_primitive_expr_type(
-                stmt.value, local_types
+                stmt.value, local_types, call_return_types=call_return_types,
             )
             if stmt.op == ":=":
                 # Pine variables retain their declaration/inferred primitive
@@ -320,7 +323,9 @@ class CallHandlers:
             for body in (stmt.body, stmt.else_body):
                 branch = dict(before)
                 for child in body:
-                    self._apply_callsite_local_type_effects(child, branch)
+                    self._apply_callsite_local_type_effects(
+                        child, branch, call_return_types=call_return_types,
+                    )
                 branch_envs.append(branch)
             all_names = set().union(*(env.keys() for env in branch_envs))
             for name in all_names:
@@ -342,7 +347,9 @@ class CallHandlers:
             for body in bodies:
                 branch = dict(before)
                 for child in body:
-                    self._apply_callsite_local_type_effects(child, branch)
+                    self._apply_callsite_local_type_effects(
+                        child, branch, call_return_types=call_return_types,
+                    )
                 branch_envs.append(branch)
             all_names = set().union(*(env.keys() for env in branch_envs))
             for name in all_names:
@@ -357,18 +364,22 @@ class CallHandlers:
         self,
         body: list[ASTNode],
         parameter_types: dict[str, PineType],
+        *,
+        call_return_types: dict[int, PineType] | None = None,
     ) -> PineType:
         if not body:
             return PineType.UNKNOWN
         local_types = dict(parameter_types)
         for stmt in body[:-1]:
-            self._apply_callsite_local_type_effects(stmt, local_types)
+            self._apply_callsite_local_type_effects(
+                stmt, local_types, call_return_types=call_return_types,
+            )
         terminal = body[-1]
         if isinstance(terminal, ExprStmt):
             terminal = terminal.expr
         if isinstance(terminal, VarDecl):
             return self._callsite_primitive_expr_type(
-                terminal.value, local_types
+                terminal.value, local_types, call_return_types=call_return_types,
             )
         if isinstance(terminal, IfStmt):
             if not terminal.body:
@@ -381,7 +392,8 @@ class CallHandlers:
             return self._join_callsite_primitive_types(
                 [
                     self._callsite_body_return_type(
-                        branch, dict(local_types)
+                        branch, dict(local_types),
+                        call_return_types=call_return_types,
                     )
                     for branch in branches
                 ]
@@ -395,20 +407,25 @@ class CallHandlers:
             return self._join_callsite_primitive_types(
                 [
                     self._callsite_body_return_type(
-                        branch, dict(local_types)
+                        branch, dict(local_types),
+                        call_return_types=call_return_types,
                     )
                     for branch in bodies
                 ]
             )
-        return self._callsite_primitive_expr_type(terminal, local_types)
+        return self._callsite_primitive_expr_type(
+            terminal, local_types, call_return_types=call_return_types,
+        )
 
-    def _callsite_callable_return_type(
+    def _callsite_callable_return_inferred(
         self,
         func_def,
         param_types: list[PineType],
-        fallback: PineType,
+        *,
+        call_return_types: dict[int, PineType] | None = None,
     ) -> PineType:
-        inferred = self._callsite_body_return_type(
+        """Return body inference without a definition-wide fallback."""
+        return self._callsite_body_return_type(
             func_def.body,
             {
                 name: (
@@ -418,6 +435,17 @@ class CallHandlers:
                 )
                 for index, name in enumerate(func_def.params)
             },
+            call_return_types=call_return_types,
+        )
+
+    def _callsite_callable_return_type(
+        self,
+        func_def,
+        param_types: list[PineType],
+        fallback: PineType,
+    ) -> PineType:
+        inferred = self._callsite_callable_return_inferred(
+            func_def, param_types,
         )
         return inferred if inferred != PineType.UNKNOWN else fallback
 
@@ -2035,6 +2063,7 @@ class CallHandlers:
                     effective_param_types
                 )
                 self._func_callsite_return_types[key] = return_type
+                self._func_callsite_return_proof.pop(key, None)
 
         # Create or update FuncInfo
         is_tuple = self._func_returns_tuple.get(func_name, False)
