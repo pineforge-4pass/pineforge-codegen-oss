@@ -2,8 +2,9 @@
 
 TradingView splits "axb" with "" into three parts, an accent or a CJK character
 between two letters into three, and an emoji between two letters into four (an
-emoji is two UTF-16 units; measured). The generated code used to return the
-whole string as one part, even for plain ASCII. Each row transpiles a small
+emoji is two UTF-16 units; measured). The empty text split by an empty separator
+gives one part (the array has size 1; measured). The generated code used to
+return the whole string as one part, even for plain ASCII. Each row transpiles a small
 script, builds the emitted translation unit with the engine headers and library,
 runs the strategy on three bars and reads the script's own variables.
 """
@@ -76,6 +77,31 @@ EMPTY_SEPARATOR_ROWS = [
 
 @pytest.mark.parametrize("script, observe, expected", EMPTY_SEPARATOR_ROWS)
 def test_an_empty_separator_splits_into_utf16_units(script, observe, expected):
+    assert _run(script, observe) == expected
+
+
+EMPTY_TEXT_ROWS = [
+    # TradingView's own str.split("", "") returns an array of size 1 (read).
+    pytest.param(
+        'p = str.split("", "")\nn = array.size(p)\nplot(n)\n',
+        COUNT, "1\n", id="measured-the-empty-text-gives-one-part",
+    ),
+    # What that one part holds was not read on TradingView: the engine's own
+    # split gave the empty text for it and the choice is kept.
+    pytest.param(
+        'p = str.split("", "")\nn = str.length(array.get(p, 0))\nplot(n)\n',
+        COUNT, "0\n", id="design-the-part-is-the-empty-text",
+    ),
+    # The engine's own split, for a separator that is not empty: unchanged.
+    pytest.param(
+        'p = str.split("", ",")\nn = array.size(p)\nplot(n)\n',
+        COUNT, "1\n", id="control-the-empty-text-split-at-a-comma",
+    ),
+]
+
+
+@pytest.mark.parametrize("script, observe, expected", EMPTY_TEXT_ROWS)
+def test_the_empty_text_gives_one_part(script, observe, expected):
     assert _run(script, observe) == expected
 
 
