@@ -33,13 +33,33 @@ def _callee_name(node: FuncCall) -> str | None:
     return None
 
 
-def _check_call(node: FuncCall, filename: str) -> None:
+def _declared_callable_names(program: Program, budget: TimeBudget | None) -> set[str]:
+    names: set[str] = set()
+    stack = [program]
+    while stack:
+        node = stack.pop()
+        if budget is not None:
+            budget.check(node.loc, Phase.ANALYZER)
+        notes = node.annotations or {}
+        if notes.get("pine_version") == 5:
+            continue
+        if isinstance(node, (FuncDef, MethodDef)):
+            names.add(node.name)
+            stack.extend(
+                value for value in notes.get("param_defaults", ())
+                if isinstance(value, ASTNode)
+            )
+        stack.extend(syntax_children(node))
+    return names
+
+
+def _check_call(node: FuncCall, filename: str, declared_callables: set[str]) -> None:
     name = _callee_name(node)
     if (name == "color.new"
             and len(node.args) + len(node.kwargs) == 1
             and "transp" not in node.kwargs):
         _refuse("PF-E2088", expr_start(node), filename)
-    if name == "fill" and "transp" in node.kwargs:
+    if name == "fill" and name not in declared_callables and "transp" in node.kwargs:
         argument = node.kwargs["transp"]
         _refuse(
             "PF-E2089", argument, filename,
@@ -49,11 +69,12 @@ def _check_call(node: FuncCall, filename: str) -> None:
         default = node.kwargs.get("defval", node.args[0] if node.args else None)
         if (isinstance(default, FuncCall)
                 and _callee_name(default) == "timestamp"
+                and "timestamp" not in declared_callables
                 and len(default.args) + len(default.kwargs) > 1
                 and ("timezone" in default.kwargs
                      or (default.args and isinstance(default.args[0], StringLiteral)))):
             _refuse("PF-E2090", expr_start(default), filename)
-    if name == "plot":
+    if name == "plot" and name not in declared_callables:
         width = node.kwargs.get("linewidth", node.args[3] if len(node.args) > 3 else None)
         literal = width
         sign = 1
@@ -71,6 +92,7 @@ def validate_v6_forms(program: Program, filename: str,
     """Inspect every written value, including ignored visual arguments."""
     if program.version != 6:
         return
+    declared_callables = _declared_callable_names(program, budget)
     stack = [program]
     while stack:
         node = stack.pop()
@@ -84,7 +106,7 @@ def validate_v6_forms(program: Program, filename: str,
                 if name == "range":
                     _refuse("PF-E2092", node, filename, location)
         if isinstance(node, FuncCall):
-            _check_call(node, filename)
+            _check_call(node, filename, declared_callables)
         stack.extend(syntax_children(node))
         if isinstance(node, (FuncDef, MethodDef)):
             # Parameter defaults live in annotations rather than syntax fields.
