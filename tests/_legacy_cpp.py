@@ -114,9 +114,10 @@ def without_timezone_stop_macros(cpp: str) -> str:
 
     The block defines one macro and changes no other line, so
     whole-C++ fixtures and reference builds that predate it compare without it.
-    Its own rows live in test_timestamp_zone_switch.py.
+    It goes together with the newline that joins it to the next line, as the
+    run-stop shim does. Its own rows live in test_timestamp_zone_switch.py.
     """
-    return cpp.replace(TIMEZONE_STOP_SHIM_CPP, '')
+    return cpp.replace(TIMEZONE_STOP_SHIM_CPP + '\n', '')
 
 
 def without_trade_history_policy(cpp: str) -> str:

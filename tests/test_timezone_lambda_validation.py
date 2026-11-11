@@ -91,7 +91,8 @@ def _render_lambdas(
         r"\[&\]\(\) -> int64_t \{ .*?return _res; \}\(\)", cpp, re.DOTALL,
     )
     assert len(calendars) == 2  # Each timestamp overload emits one calendar lambda.
-    # Time fields now use engine helpers; exercise both retained template forms.
+    # Time fields now use engine helpers, so the retained time-field templates are
+    # not emitted: the rows below that run them are test-only.
     fields = [
         tz_time_field_lambda(
             "tm_buf.tm_hour", f"{instant}LL", f"std::string({literal})",
