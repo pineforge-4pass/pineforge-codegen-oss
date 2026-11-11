@@ -12,10 +12,9 @@ script's own variables.
 Row names say where the expected value comes from:
 
 * ``measured-*``: the script text and the value TradingView returned for it
-  (the probe families na-len, na-pos, na-subtail and na-subhead, read on
-  2026-11-12 with the strings "a" + one character + "b"; and the probes ss-a-*
-  and ss-m-* of str.substring at its edges on "abc" and on a, an emoji, b, read
-  the same day: TradingView refuses those two begin positions when it compiles
+  (str.length, str.pos and str.substring on the strings "a" + one character +
+  "b"; and str.substring at its edges on "abc" and on a, an emoji, b:
+  TradingView refuses the two begin positions outside the text when it compiles
   a script whose arguments are constants, where the engine stops the run);
 * ``derived-*``: arithmetic on the same unit (an emoji counts two), not a
   separate reading;
@@ -187,18 +186,18 @@ def test_a_substring_to_the_end_starts_at_a_utf16_unit(text, begin, expected_hex
 # The begin must lie in 0..length (a begin equal to the length gives the empty
 # text); an end beyond the length is cut to the length.
 EDGE_ROWS = [
-    pytest.param("abc", 3, None, 0, id="measured-ss-a-begin-len"),
-    pytest.param("abc", 1, 9, 2, id="measured-ss-a-end-beyond"),
-    pytest.param("abc", 3, 3, 0, id="measured-ss-a-begin-len-end"),
-    pytest.param("abc", 3, 9, 0, id="measured-ss-a-begin-len-endbeyond"),
-    pytest.param(f"a{EMOJI}b", 4, None, 0, id="measured-ss-m-begin-len"),
-    pytest.param(f"a{EMOJI}b", 1, 9, 3, id="measured-ss-m-end-beyond"),
-    pytest.param(f"a{EMOJI}b", 4, 4, 0, id="measured-ss-m-begin-len-end"),
-    pytest.param(f"a{EMOJI}b", 4, 9, 0, id="measured-ss-m-begin-len-endbeyond"),
-    pytest.param(f"a{EMOJI}b", 2, None, 2, id="measured-ss-m-begin-between"),
-    pytest.param(f"a{EMOJI}b", 0, 2, 2, id="measured-ss-m-end-between"),
-    pytest.param(f"a{EMOJI}b", 2, 3, 1, id="measured-ss-m-pair-low"),
-    pytest.param(f"a{EMOJI}b", 1, 2, 1, id="measured-ss-m-pair-high"),
+    pytest.param("abc", 3, None, 0, id="measured-ascii-begin-at-length"),
+    pytest.param("abc", 1, 9, 2, id="measured-ascii-end-beyond-length"),
+    pytest.param("abc", 3, 3, 0, id="measured-ascii-begin-and-end-at-length"),
+    pytest.param("abc", 3, 9, 0, id="measured-ascii-begin-at-length-end-beyond"),
+    pytest.param(f"a{EMOJI}b", 4, None, 0, id="measured-emoji-begin-at-length"),
+    pytest.param(f"a{EMOJI}b", 1, 9, 3, id="measured-emoji-end-beyond-length"),
+    pytest.param(f"a{EMOJI}b", 4, 4, 0, id="measured-emoji-begin-and-end-at-length"),
+    pytest.param(f"a{EMOJI}b", 4, 9, 0, id="measured-emoji-begin-at-length-end-beyond"),
+    pytest.param(f"a{EMOJI}b", 2, None, 2, id="measured-emoji-begin-between-its-units"),
+    pytest.param(f"a{EMOJI}b", 0, 2, 2, id="measured-emoji-end-between-its-units"),
+    pytest.param(f"a{EMOJI}b", 2, 3, 1, id="measured-emoji-low-half"),
+    pytest.param(f"a{EMOJI}b", 1, 2, 1, id="measured-emoji-high-half"),
 ]
 
 
@@ -280,9 +279,9 @@ def test_a_substring_past_the_end_stops_the_run_and_names_the_units():
 
 REFUSED_ROWS = [
     pytest.param(4, "(which is 4) > this->size() (which is 3)",
-                 id="measured-ss-a-begin-beyond"),
+                 id="measured-ascii-begin-beyond-length-stops"),
     pytest.param(-1, "(which is 18446744073709551615) > this->size() (which is 3)",
-                 id="measured-ss-a-begin-negative"),
+                 id="measured-ascii-begin-negative-stops"),
 ]
 
 
