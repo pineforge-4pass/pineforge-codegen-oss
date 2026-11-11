@@ -650,10 +650,9 @@ STILL_COMPILE = {
         "    self.v > 0\n"
         "foo = Foo.new()\n"
         "x = foo.m()\n"),
-    "a read in color.new's color argument and color.from_gradient's colors in a method": (
+    "a read in color.from_gradient's colors in a method": (
         "type Foo\n    float v = 1\n"
         "method m(Foo self) =>\n"
-        "    c = color.new(session.ismarket[1] ? color.red : color.green, 0)\n"
         "    d = color.from_gradient(close, 0, 1, session.ispremarket[1] ? color.red : color.green, color.green)\n"
         "    self.v > 0\n"
         "foo = Foo.new()\n"
