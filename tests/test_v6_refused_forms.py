@@ -120,7 +120,7 @@ MESSAGES = {
     ),
     "PF-E2090": (
         "input.time() needs a constant default in Pine v6: "
-        "timestamp() with calendar numbers is not a constant. "
+        "timestamp() with a time zone and calendar numbers is not a constant. "
         'Use the date-string form, for example timestamp("01 Jan 2023 00:00 +0000").'
     ),
     "PF-E2091": (
@@ -245,6 +245,14 @@ def test_fill_reported_control():
     transpile(FILL_CONTROL)
 
 
+def test_user_function_named_fill_is_not_the_builtin():
+    """A script's own fill function translates, as it does without the refusals."""
+    transpile(_source(
+        "fill(a, b, transp) => a + b + transp\n"
+        "x = fill(1, 2, transp = 3)\nplot(x)"
+    ))
+
+
 def test_fill_transparency_not_last():
     """The removed fill keyword is refused even before the color argument."""
     _assert_refused(
@@ -321,6 +329,15 @@ def test_time_reported_call():
 def test_time_reported_control():
     """The full strategy translates with a constant date-string timestamp."""
     transpile(TIME_CONTROL)
+
+
+def test_user_function_named_timestamp_is_not_the_builtin():
+    """A script's own timestamp function translates, as it does without the refusals."""
+    transpile(_source(
+        "timestamp(zone, a, b, c, d) => a + b\n"
+        'cutoff = input.time(timestamp("UTC", 2, 3, 4, 5), "cutoff")\n'
+        "plot(cutoff)"
+    ))
 
 
 def test_time_numeric_calendar():
@@ -421,7 +438,7 @@ def test_calendar_timestamp_without_input():
 
 def test_time_in_older_library():
     """A v5 library retains a calendar timestamp default for input.time."""
-    _older_library("    cutoff = input.time(timestamp(2024, 2, 3, 4, 5))\n    x\n")
+    _older_library('    cutoff = input.time(timestamp("UTC", 2024, 2, 3, 4, 5))\n    x\n')
 
 
 def test_width_reported_call():
@@ -432,6 +449,14 @@ def test_width_reported_call():
 def test_width_reported_control():
     """The full strategy translates with a plot width of one."""
     transpile(WIDTH_CONTROL)
+
+
+def test_user_function_named_plot_is_not_the_builtin():
+    """A script's own plot function translates, as it does without the refusals."""
+    transpile(_source(
+        "plot(a, b, c, d) => a + b + c + d\n"
+        "x = plot(1, 2, 3, 0)"
+    ))
 
 
 def test_width_negative_literal():
