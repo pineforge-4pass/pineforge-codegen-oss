@@ -411,6 +411,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_callsite_return_types: dict[
             tuple[str, int], PineType
         ] = {}
+        self._func_callsite_return_proof: dict[tuple[str, int], PineType] = {}
         # Textual nested calls whose identity is inherited from the active
         # parent clone rather than assigned a fixed source-level cs index.
         # Kept separately so a second propagation pass (security TF cloning)
@@ -961,7 +962,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if not pending:
             return
 
-        # One new exact result can unlock one earlier direct dependency per
+        # One newly resolved result can unlock one earlier direct dependency per
         # pass.  Cycles retain their existing fail-closed fallback.
         for _ in range(len(pending) + 1):
             changed = False
@@ -3344,6 +3345,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                                 self._func_callsite_return_types.pop(
                                     (sub, 0), None
                                 )
+                                self._func_callsite_return_proof.pop(
+                                    (sub, 0), None
+                                )
                         for cs_idx in range(current, count):
                             parent_ta_targets = _edge_ta_variant_target_map(
                                 fname,
@@ -3739,6 +3743,51 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return owner_cs if owner_cs < callee_count else None
             return None
 
+        # Retain declaration identities, including unsafe locals as UNKNOWN.
+        # A raw-name environment would let a shadowing declaration borrow a
+        # parameter's type, or let a reassignment reuse its initializer's type.
+        local_declarations = {}
+        safe_local_bindings = {}
+        calls_by_owner = {}
+        for owner, callee, call in call_edges:
+            calls_by_owner.setdefault(owner, []).append((callee, call))
+        for name, info in func_info_by_name.items():
+            if info.node is None:
+                continue
+            if self._budget is not None:
+                self._budget.check(phase=Phase.ANALYZER)
+            declarations = []
+            counts = {}
+            unsafe_names = set()
+            for node, _depth in iter_ast_nodes(info.node):
+                if isinstance(node, VarDecl):
+                    declarations.append(node)
+                    counts[node.name] = counts.get(node.name, 0) + 1
+                elif isinstance(node, Assignment) and isinstance(
+                    node.target, Identifier
+                ):
+                    unsafe_names.add(node.target.name)
+                elif isinstance(node, TupleAssign):
+                    unsafe_names.update(node.names)
+                elif isinstance(node, ForStmt):
+                    unsafe_names.add(node.var)
+                elif isinstance(node, ForInStmt):
+                    unsafe_names.update(node.vars or [node.var])
+            declarations.sort(
+                key=lambda node: (
+                    (node.loc.line, node.loc.col) if node.loc else (0, 0)
+                )
+            )
+            local_declarations[name] = declarations
+            safe_local_bindings[name] = {
+                (id(node), node.name)
+                for node in declarations
+                if counts[node.name] == 1
+                and node.name not in unsafe_names
+                and not node.is_var
+                and not node.is_varip
+            }
+
         def mentions_owner_parameter(value, names: set[str]) -> bool:
             if value is None:
                 return False
@@ -3829,11 +3878,107 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 if invalidated:
                     self._func_callsite_param_types[key] = current
                     self._func_callsite_return_types.pop(key, None)
+                    self._func_callsite_return_proof.pop(key, None)
 
-        # Resolve parameter forwarding and direct-wrapper returns together.
-        # The graph is finite and primitive types only move UNKNOWN -> known.
-        for _ in range(64):
+        def unresolved_history_parameters():
+            for name, series_names in self._func_series_vars.items():
+                info = func_info_by_name.get(name)
+                if info is None or info.node is None:
+                    continue
+                count = self._func_call_site_count.get(name, 0)
+                declared = declared_types(name, len(info.node.params))
+                for cs_idx in range(count):
+                    profile = self._func_callsite_param_types.get(
+                        (name, cs_idx), []
+                    )
+                    for index, param in enumerate(info.node.params):
+                        if param not in series_names:
+                            continue
+                        if declared[index] != PineType.UNKNOWN:
+                            continue
+                        if (
+                            index >= len(profile)
+                            or profile[index] == PineType.UNKNOWN
+                        ):
+                            yield info, param, cs_idx
+
+        # Settle the existing forwarding/return fixed point first. Accepted
+        # scripts keep those exact profiles. Only a remaining history refusal
+        # needs the additional declaration and variant-return proofs.
+        remaining = 64
+        derive_missing = False
+        while remaining:
+            remaining -= 1
             changed = False
+            variant_contexts = {}
+
+            def variant_context(owner, owner_cs, param_map):
+                key = (owner, owner_cs)
+                if key in variant_contexts:
+                    return variant_contexts[key]
+                if self._budget is not None:
+                    self._budget.check(phase=Phase.ANALYZER)
+                returns = {}
+                for nested_callee, nested_call in calls_by_owner.get(owner, ()):
+                    nested_cs = target_variant(
+                        owner, owner_cs, nested_callee, nested_call
+                    )
+                    nested_info = func_info_by_name.get(nested_callee)
+                    if (
+                        nested_cs is None
+                        or nested_info is None
+                        or nested_info.node is None
+                    ):
+                        continue
+                    nested_declared = declared_types(
+                        nested_callee, len(nested_info.node.params)
+                    )
+                    nested_profile = self._func_callsite_param_types.get(
+                        (nested_callee, nested_cs), []
+                    )
+                    if any(
+                        declared == PineType.UNKNOWN
+                        and (
+                            index >= len(nested_profile)
+                            or nested_profile[index] == PineType.UNKNOWN
+                        )
+                        for index, declared in enumerate(nested_declared)
+                    ):
+                        continue
+                    spec = nested_info.return_type_spec
+                    if (
+                        nested_info.returns_tuple
+                        or nested_info.udt_return_type is not None
+                        or (spec is not None and spec.kind != "primitive")
+                    ):
+                        continue
+                    result = self._func_callsite_return_proof.get(
+                        (nested_callee, nested_cs), PineType.UNKNOWN
+                    )
+                    if result in self._ARGUMENT_FAMILIES:
+                        returns[id(nested_call)] = result
+                locals_map = {
+                    (id(declaration), declaration.name): PineType.UNKNOWN
+                    for declaration in local_declarations.get(owner, ())
+                }
+                for declaration in local_declarations.get(owner, ()):
+                    binding = (id(declaration), declaration.name)
+                    if binding not in safe_local_bindings[owner]:
+                        continue
+                    inferred = self._callsite_primitive_expr_type(
+                        declaration.value, param_map,
+                        local_types=locals_map, call_return_types=returns,
+                    )
+                    if inferred not in self._ARGUMENT_FAMILIES:
+                        continue
+                    if declaration.type_hint:
+                        inferred = self._primitive_pine_type_from_spec(
+                            self._type_spec_from_hint(declaration.type_hint)
+                        )
+                    locals_map[binding] = inferred
+                variant_contexts[key] = (locals_map, returns)
+                return locals_map, returns
+
             for owner, callee, call in call_edges:
                 if owner is None:
                     continue
@@ -3877,13 +4022,24 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             and index < len(recorded)
                         ):
                             inferred = recorded[index]
+                        if derive_missing and inferred == PineType.UNKNOWN:
+                            # Enrich only missing facts. Existing lexical
+                            # profiles keep the C++ of accepted scripts.
+                            locals_map, returns = variant_context(
+                                owner, owner_cs, param_map
+                            )
+                            inferred = self._callsite_primitive_expr_type(
+                                actual, param_map,
+                                local_types=locals_map,
+                                call_return_types=returns,
+                            )
                         incoming.append(inferred)
                     if merge_profile(callee, callee_cs, incoming, call):
                         changed = True
 
-            # Recompute each variant's primitive return. A direct terminal
-            # wrapper call uses the exact callee variant return rather than the
-            # shared definition-level cache.
+            # Recompute each variant's primitive return and its body proof.
+            # A nested call contributes its result only when the callee's body
+            # proves it; direct terminal wrappers inherit that proof.
             for key, profile in list(
                 self._func_callsite_param_types.items()
             ):
@@ -3893,6 +4049,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     continue
                 ret = self._callsite_callable_return_type(
                     info.node, list(profile), info.return_type
+                )
+                proof = self._callsite_callable_return_inferred(
+                    info.node, list(profile), call_return_types={},
                 )
                 terminal = self._direct_terminal_return_expr(info.node)
                 if isinstance(terminal, FuncCall):
@@ -3909,42 +4068,35 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             )
                             if nested_ret != PineType.UNKNOWN:
                                 ret = nested_ret
+                            proof = self._func_callsite_return_proof.get(
+                                (terminal_callee, terminal_cs),
+                                PineType.UNKNOWN,
+                            )
                 if self._func_callsite_return_types.get(key) != ret:
                     self._func_callsite_return_types[key] = ret
                     changed = True
+                if self._func_callsite_return_proof.get(key) != proof:
+                    self._func_callsite_return_proof[key] = proof
+                    changed = True
             if not changed:
-                break
+                if (
+                    derive_missing
+                    or next(unresolved_history_parameters(), None) is None
+                ):
+                    break
+                derive_missing = True
+                remaining = 64
 
         # A live untyped history parameter without a variant type cannot be
         # emitted faithfully. Reject it rather than falling back to the first
         # call's global FuncInfo type and reintroducing source-order coercion.
-        for name, series_names in self._func_series_vars.items():
-            info = func_info_by_name.get(name)
-            if info is None or info.node is None:
-                continue
-            count = self._func_call_site_count.get(name, 0)
-            declared = declared_types(name, len(info.node.params))
-            for cs_idx in range(count):
-                profile = self._func_callsite_param_types.get(
-                    (name, cs_idx), []
-                )
-                for index, param in enumerate(info.node.params):
-                    if param not in series_names:
-                        continue
-                    if declared[index] != PineType.UNKNOWN:
-                        continue
-                    resolved = (
-                        profile[index]
-                        if index < len(profile)
-                        else PineType.UNKNOWN
-                    )
-                    if resolved == PineType.UNKNOWN:
-                        self._error(
-                            "Cannot infer the per-callsite primitive type of "
-                            f"history parameter '{param}' in callable '{name}' "
-                            f"variant cs{cs_idx}; declare its type explicitly.",
-                            info.node.loc,
-                        )
+        for info, param, cs_idx in unresolved_history_parameters():
+            self._error(
+                "Cannot infer the per-callsite primitive type of "
+                f"history parameter '{param}' in callable '{info.name}' "
+                f"variant cs{cs_idx}; declare its type explicitly.",
+                info.node.loc,
+            )
 
     # ------------------------------------------------------------------
     # Per-call-site request.security contexts of a helper.

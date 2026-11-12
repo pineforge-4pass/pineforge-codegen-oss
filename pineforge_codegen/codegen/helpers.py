@@ -460,6 +460,7 @@ CPP_EMITTER_NAMES = frozenset("""
     _pf_derive_prefix _pf_derive_main_tickerid _pf_derive_country
     _pf_tv_trim _pf_tv_increment_digits _pf_tv_decimal _pf_tv_pattern
     _pf_tv_number_style
+    _pf_u16_length _pf_u16_pos _pf_u16_decode _pf_u16_encode _pf_u16_substr
     _security_helper_series_ _security_helper_series_str_
     _use_precalc _var_initialized _ta_initialized_ _inputs_initialized_
     _pf_lines_ _pf_boxes_ _pf_labels_ _pf_linefills_
@@ -624,6 +625,39 @@ class NamingHelper:
             .replace("\t", "\\t")
             .replace("\0", "\\000")
         )
+
+    @staticmethod
+    def _cpp_std_string(s: str) -> str:
+        """A ``std::string`` expression for the Pine string ``s``.
+
+        A literal without a NUL is spelled as it always was. ``std::string("...")``
+        is built from a C string, which ends at the first NUL, so a literal that
+        holds one is built with its own length: the number of bytes the string
+        stands for, UTF-8 bytes included (the ASCII pass spells each non-ASCII
+        character as the octal escapes of those bytes), and the string keeps
+        everything after the NUL. The length is written as a number, not as a
+        ``sizeof`` of the literal, so the literal still appears once: the
+        readers of the emitted text (checked settings, the inertness tests) see
+        one literal per authored string."""
+        escaped = NamingHelper._cpp_string_escape(s)
+        if "\0" in s:
+            return f'std::string("{escaped}", {len(s.encode("utf-8"))})'
+        return f'std::string("{escaped}")'
+
+    # ``_cpp_std_string``'s spelling of a literal that holds a NUL; group 1 is
+    # the quoted literal.
+    _SIZED_STD_STRING = re.compile(r'std::string\(("(?:[^"\\\r\n]|\\.)*"), \d+\)')
+
+    @staticmethod
+    def _unsized_std_string(cpp: str) -> str:
+        """``cpp`` with the byte count of a lowered NUL literal left out.
+
+        The default and the options of an input stay C strings: the settings
+        receipt and the getter's default stop at the first NUL, as they are
+        documented to, and the manifest must equal both. A text that is not a
+        counted literal is returned as it is."""
+        sized = NamingHelper._SIZED_STD_STRING.fullmatch(cpp.strip())
+        return f"std::string({sized.group(1)})" if sized else cpp
 
     @staticmethod
     def _cpp_comment_escape(s: str) -> str:

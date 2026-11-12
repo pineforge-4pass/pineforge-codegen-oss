@@ -4285,13 +4285,14 @@ class CallVisitor:
                 def checked_substring(bound):
                     return (
                         f"[&](const std::string& _pf_substring_text, auto _pf_substring_begin{end_parameter}){{ "
-                        "try { return _pf_substring_text.substr(_pf_substring_begin"
+                        "try { return _pf_u16_substr(_pf_substring_text, _pf_substring_begin"
                         f"{count}); }} catch (const std::out_of_range& _pf_substring_error) {{ "
                         '_PF_STRING_STOP("substring_out_of_range", _pf_substring_error.what()); '
                         "return std::string(); } "
                         "}(" + ", ".join(f"({arg})" for arg in bound) + ")"
                     )
 
+                self._uses_tv_string_units = True
                 return evaluate_args_once(
                     args, range(len(args)), checked_substring, "_pf_substring_arg")
             return 'std::string("")'
@@ -4326,6 +4327,9 @@ class CallVisitor:
             return 'std::string("")'
 
         if func_name in STR_FUNC_MAP and STR_FUNC_MAP[func_name] is not None:
+            if func_name in ("length", "pos"):
+                # These two count in UTF-16 units through tv_string_units.
+                self._uses_tv_string_units = True
             return evaluate_args_once(
                 args, STR_ARGS_READ_REPEATEDLY.get(func_name, ()),
                 STR_FUNC_MAP[func_name], "_pf_str_a")
