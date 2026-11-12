@@ -31,6 +31,23 @@ supported as exact pairs; on the 0.x line they are independent. See the
   from a `ta.*` call or a built-in variable such as `strategy.position_size`,
   as TradingView does. Use a comparison such as `ta.change(t) != 0` for a bool
   condition. Bool overloads and Pine v5 libraries keep their existing behavior. (#361)
+- A Pine string literal that holds a NUL now keeps its whole length. Codegen
+  built every string literal with `std::string("...")`, which is made from a C
+  string and ends at the first NUL, so "a", NUL, "b" had length 1 (TradingView
+  gives 3), equalled its own one-letter prefix, and two literals that differed
+  only after the NUL compared equal. A literal with a NUL is now built with the
+  number of bytes it stands for; a literal without one is spelled as before, so
+  the generated code of every other script is unchanged. Not covered, and still
+  cut at the first NUL as before: the default and the options of the string
+  inputs (`input.string`, `input.symbol`, `input.session`, `input.timeframe`,
+  `input.text_area`), which the settings receipt and the manifest equal, an
+  input title, and the timeframe and footprint-column literals. One comparison
+  changes with it: a string input whose default holds a NUL no longer equals
+  the literal it was given, because the default is cut and the literal is not
+  (the two were equal before only because both were cut). A `var` that is read
+  with history and starts from a literal with a NUL was refused (its first
+  value put the NUL byte itself into the generated code); it now translates
+  and keeps the whole literal.
 - Direct retained record fields built from stable `var` arrays, and direct
   plain `var` array aliases, stay live through their creation bar and then
   keep their own copy of the array as it stood at the end of that bar; two
