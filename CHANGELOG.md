@@ -32,6 +32,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   and options, including var declarations; an unproven variable default is now
   a located error instead of a silent empty default, while an option that
   cannot be proven keeps the existing unsupported marker in the manifest.
+- Untyped history parameters now infer the enclosing call's primitive type
+  through immutable plain locals, fixed-result builtins and user-call variants
+  whose result the callee body proves, to the same type family as an explicit
+  parameter declaration.
 - Pine v6 now refuses an `if` or `while` condition whose numeric value comes
   from a `ta.*` call or a built-in variable such as `strategy.position_size`,
   as TradingView does. Use a comparison such as `ta.change(t) != 0` for a bool
