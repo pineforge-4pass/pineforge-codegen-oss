@@ -22,17 +22,6 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
-- A zone name the engine rejects now makes `timestamp()` stop the run at its
-  first evaluation with TradingView's message, instead of reading UTC silently.
-  The engine's typed helper adds the message's bar prefix; an engine without
-  that helper prints the text without it, an arm that paired releases do not
-  meet. Accepted zones and UTC are unchanged; the single
-  `TIMESTAMP_REJECTED_ZONE_STOPS_RUN` switch restores the old behavior (the
-  compatibility macros stay in the output of a script that calls `timestamp()`
-  with a calendar). Not covered: the unchecked `setenv("TZ", ...)` of the sealed
-  branch and the restoring `setenv` or `unsetenv` in the same lambda; on ENOMEM
-  the environment stays unchanged and the conversion silently uses the previous
-  zone.
 - `input.string`, `input.timeframe`, `input.symbol`, `input.session` and
   `input.text_area` carry never-reassigned global string literals into defaults
   and options, including var declarations; an unproven variable default is now
@@ -49,6 +38,17 @@ supported as exact pairs; on the 0.x line they are independent. See the
   keeps its existing compile error. Requested evaluations, collection
   history, nested records and intrabar recalculations keep their previous
   lowering. Regenerate C++ and relink affected strategies.
+- A zone name the engine rejects now makes `timestamp()` stop the run at its
+  first evaluation with TradingView's message, instead of reading UTC silently.
+  The engine's typed helper adds the message's bar prefix; an engine without
+  that helper prints the text without it, an arm that paired releases do not
+  meet. Accepted zones and UTC are unchanged; the single
+  `TIMESTAMP_REJECTED_ZONE_STOPS_RUN` switch restores the old behavior (the
+  compatibility macros stay in the output of a script that calls `timestamp()`
+  with a calendar). Not covered: the unchecked `setenv("TZ", ...)` of the sealed
+  branch and the restoring `setenv` or `unsetenv` in the same lambda; on ENOMEM
+  the environment stays unchanged and the conversion silently uses the previous
+  zone.
 - `str.format_time` now uses TradingView's documented defaults when arguments
   are omitted: `"yyyy-MM-dd'T'HH:mm:ssZ"` for the format and the exchange time
   zone (`syminfo.timezone`) for the timezone. Pass `"yyyy-MM-dd"` and `"UTC"`
