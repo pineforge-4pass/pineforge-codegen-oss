@@ -5525,9 +5525,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 )
             strs = self._enum_member_strings.get(enum_name)
             if strs and len(strs) == len(members):
-                parts = ", ".join(
-                    f'std::string("{self._cpp_string_escape(s)}")' for s in strs
-                )
+                parts = ", ".join(self._cpp_std_string(s) for s in strs)
                 lines.append(
                     f"static const std::string {safe_enum_name}_str_values[] = {{{parts}}};"
                 )

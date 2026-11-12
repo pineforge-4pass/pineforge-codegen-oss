@@ -91,7 +91,8 @@ from .run_stops import RUN_STOP_SHIMS_CPP
 
 from ..ast_nodes import (
     BoolLiteral, ExprStmt, ForInStmt, ForStmt, FuncCall, Identifier, IfStmt,
-    MemberAccess, SwitchStmt, TupleAssign, TupleLiteral, VarDecl, WhileStmt,
+    MemberAccess, StringLiteral, SwitchStmt, TupleAssign, TupleLiteral, VarDecl,
+    WhileStmt,
 )
 from ..analyzer import FuncInfo
 from ..cpp_names import cpp_identifier_fragment
@@ -1109,6 +1110,23 @@ class TopLevelEmitter:
         lines.append("        snapshot_script_state();")
         lines.append("    }")
 
+    def _first_bar_nul_literal(self, name: str) -> str | None:
+        """The string literal a top-level ``var`` starts from, when it holds a NUL.
+
+        The first-bar block pushes a history-read ``var``'s initializer from
+        its Pine spelling, which carries a NUL as the byte itself: generated
+        C++ may not hold that byte, so such a script was refused. Only a
+        literal with a NUL needs another spelling there, so every other push
+        keeps its text."""
+        for stmt in self.ctx.ast.body:
+            if (isinstance(stmt, VarDecl) and stmt.name == name
+                    and (stmt.is_var or stmt.is_varip)):
+                value = stmt.value
+                if isinstance(value, StringLiteral) and "\0" in value.value:
+                    return value.value
+                return None
+        return None
+
     def _typed_na_init(self, cpp_val: str, name: str, ptype) -> str:
         """Re-type a bare ``na<double>()`` initializer to match a non-double
         member's C++ type. A ``var int x = na`` resolves its RHS to
@@ -1956,6 +1974,12 @@ class TopLevelEmitter:
                 if self._binding_is_series(name, safe):
                     cpp_val = self._resolve_known(init_expr)
                     cpp_val = self._typed_na_init(cpp_val, name, ptype)
+                    nul_literal = self._first_bar_nul_literal(name)
+                    if nul_literal is not None:
+                        # The initializer text is the literal's Pine spelling
+                        # and carries the NUL byte itself, which generated
+                        # C++ may not hold: the script would be refused.
+                        cpp_val = self._cpp_std_string(nul_literal)
                     lines.append(f"            {safe}.push({cpp_val});")
                     # Also init cloned copies for per-call-site function variants
                     init_emitted: set[str] = set()
