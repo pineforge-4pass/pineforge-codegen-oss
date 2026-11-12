@@ -22,6 +22,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Pine v6 reports located errors for a missing `color.new` transparency,
+  `fill(transp=...)`, calendar-number timestamp defaults in `input.time` with
+  a time zone string as the first timestamp argument or a `timezone` keyword,
+  literal plot widths below one, and variable or function declarations named
+  `range`.
 - `input.string`, `input.timeframe`, `input.symbol`, `input.session` and
   `input.text_area` carry never-reassigned global string literals into defaults
   and options, including var declarations; an unproven variable default is now
@@ -35,6 +40,23 @@ supported as exact pairs; on the 0.x line they are independent. See the
   from a `ta.*` call or a built-in variable such as `strategy.position_size`,
   as TradingView does. Use a comparison such as `ta.change(t) != 0` for a bool
   condition. Bool overloads and Pine v5 libraries keep their existing behavior. (#361)
+- A Pine string literal that holds a NUL now keeps its whole length. Codegen
+  built every string literal with `std::string("...")`, which is made from a C
+  string and ends at the first NUL, so "a", NUL, "b" had length 1 (TradingView
+  gives 3), equalled its own one-letter prefix, and two literals that differed
+  only after the NUL compared equal. A literal with a NUL is now built with the
+  number of bytes it stands for; a literal without one is spelled as before, so
+  the generated code of every other script is unchanged. Not covered, and still
+  cut at the first NUL as before: the default and the options of the string
+  inputs (`input.string`, `input.symbol`, `input.session`, `input.timeframe`,
+  `input.text_area`), which the settings receipt and the manifest equal, an
+  input title, and the timeframe and footprint-column literals. One comparison
+  changes with it: a string input whose default holds a NUL no longer equals
+  the literal it was given, because the default is cut and the literal is not
+  (the two were equal before only because both were cut). A `var` that is read
+  with history and starts from a literal with a NUL was refused (its first
+  value put the NUL byte itself into the generated code); it now translates
+  and keeps the whole literal.
 - Direct retained record fields built from stable `var` arrays, and direct
   plain `var` array aliases, stay live through their creation bar and then
   keep their own copy of the array as it stood at the end of that bar; two
@@ -47,6 +69,13 @@ supported as exact pairs; on the 0.x line they are independent. See the
   zone (`syminfo.timezone`) for the timezone. Pass `"yyyy-MM-dd"` and `"UTC"`
   explicitly to restore the previous output. Regenerate C++ and relink
   affected strategies.
+- `str.split(source, "")` with an empty separator now returns one part per
+  UTF-16 unit, as TradingView does: "axb" gives three parts, an accent or a CJK
+  character between two letters three, an emoji between two letters four (an
+  emoji is a high and a low surrogate, each kept as its own three-byte part).
+  It returned the whole string as one part, even for plain ASCII. The empty
+  text still has one part, as in TradingView. A separator that is not empty
+  splits as before, through the engine.
 - A `when` argument on a strategy order call in Pine v6 now reports `PF-E2081`,
   explaining that v6 removed the argument and recommending an `if` statement
   around the call. Other unknown keywords keep `PF-E2027`.
@@ -297,6 +326,26 @@ supported as exact pairs; on the 0.x line they are independent. See the
   TradingView accepts a namespace call after an expired block local with the
   same name; PineForge's analysis no longer refuses it, but code generation
   still rejects some such calls (a known gap).
+- `str.length`, `str.pos` and `str.substring` now count and cut text in UTF-16
+  code units, as TradingView does: an emoji is two units and every other
+  character one. They counted UTF-8 bytes, so an accent counted 2, a CJK
+  character 3 and an emoji 4, and a position or a cut after such a character
+  was off by the extra bytes. The helpers are emitted into the generated file
+  only when its code calls one of the three functions (a call that is only a
+  plot argument emits nothing), so every other script keeps the text it had;
+  the engine is not involved. A cut between the two units of an emoji keeps
+  each half as its own three-byte sequence (the length of a half is one unit),
+  the form `str.split` gives its parts. Such a half never occurs inside a text
+  that holds the whole character, so three things differ from TradingView:
+  joining the two halves again, with `+` or `array.join`, does not give back
+  the original four bytes, so the joined text does not equal the original text;
+  a search for a half in the text it was cut from finds nothing (`str.pos`
+  returns -1, where the one byte the old cut gave was found at the same
+  position, and `str.contains` returns false); and a half is not equal to, or
+  at the start or end of, a part of that text that holds the whole character.
+  A begin position that lies inside the bytes of a text but past its units
+  (5 on "a", an emoji, "b") now stops the run; before, it returned the bytes
+  after that position.
 
 ## 1.9.1 — 2026-10-31
 

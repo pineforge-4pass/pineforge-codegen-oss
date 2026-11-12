@@ -1478,6 +1478,47 @@ MATH_FUNC_MAP = {
     "avg": "(({0} + {1}) / 2.0)",
 }
 
+
+def _str_split_expr(args: list[str]) -> str:
+    """``str.split(source, separator)``.
+
+    A non-empty separator is split by the engine as it always was. An empty
+    separator gives one part per UTF-16 unit, as TradingView does: the engine
+    returned the whole string as one part, even for plain ASCII. The source is
+    UTF-8, so a character of one to three bytes is one unit and a character of
+    four bytes (outside the Basic Multilingual Plane) is two, a high and a low
+    surrogate; each surrogate is kept as its own three-byte part, the form in
+    which the length of such a part is one unit. The empty text has one part,
+    the empty text: TradingView's split of it gives an array of size 1 (the size
+    was read; what the part holds is the engine's own answer, kept)."""
+    return (
+        "[&](){ "
+        f"const std::string __pf_s = ({args[0]}); "
+        f"const std::string __pf_t = ({args[1]}); "
+        "if (!__pf_t.empty()) return pine_str_split(__pf_s, __pf_t); "
+        "std::vector<std::string> __pf_r; "
+        "for (size_t __pf_i = 0; __pf_i < __pf_s.size();) { "
+        "const unsigned char __pf_c = (unsigned char)__pf_s[__pf_i]; "
+        "size_t __pf_n = __pf_c < 0xC0 ? 1 : __pf_c < 0xE0 ? 2 : __pf_c < 0xF0 ? 3 : 4; "
+        "if (__pf_n > __pf_s.size() - __pf_i) __pf_n = __pf_s.size() - __pf_i; "
+        "if (__pf_n == 4) { "
+        "const unsigned __pf_v = (((__pf_c & 0x07u) << 18) "
+        "| (((unsigned char)__pf_s[__pf_i + 1] & 0x3Fu) << 12) "
+        "| (((unsigned char)__pf_s[__pf_i + 2] & 0x3Fu) << 6) "
+        "| ((unsigned char)__pf_s[__pf_i + 3] & 0x3Fu)) - 0x10000u; "
+        "for (const unsigned __pf_u : {0xD800u + (__pf_v >> 10), 0xDC00u + (__pf_v & 0x3FFu)}) { "
+        "std::string __pf_p; "
+        "__pf_p += (char)(0xE0u | (__pf_u >> 12)); "
+        "__pf_p += (char)(0x80u | ((__pf_u >> 6) & 0x3Fu)); "
+        "__pf_p += (char)(0x80u | (__pf_u & 0x3Fu)); "
+        "__pf_r.push_back(__pf_p); } "
+        "} else { __pf_r.push_back(__pf_s.substr(__pf_i, __pf_n)); } "
+        "__pf_i += __pf_n; } "
+        "if (__pf_r.empty()) __pf_r.push_back(std::string()); "
+        "return __pf_r; }()"
+    )
+
+
 STR_FUNC_MAP = {
     "tostring":    None,  # handled separately (already works)
     "tonumber":    lambda args: (
@@ -1487,11 +1528,12 @@ STR_FUNC_MAP = {
         f"catch (const std::out_of_range&) {{ return na<double>(); }} "
         f"}}(({args[0]}))"
     ),
-    "length":      lambda args: f"(int){args[0]}.length()",
+    "length":      lambda args: f"_pf_u16_length({args[0]})",
     "contains":    lambda args: f"({args[0]}.find({args[1]}) != std::string::npos)",
     "startswith":  lambda args: f"({args[0]}.substr(0, {args[1]}.length()) == {args[1]})",
     "endswith":    lambda args: f"({args[0]}.length() >= {args[1]}.length() && {args[0]}.compare({args[0]}.length() - {args[1]}.length(), {args[1]}.length(), {args[1]}) == 0)",
-    "pos":         lambda args: f"[&](){{ auto __pf_p={args[0]}.find({args[1]}); return __pf_p!=std::string::npos?(int)__pf_p:-1; }}()",
+    # The two statements keep the source before the needle in evaluation order.
+    "pos":         lambda args: f"[&](){{ const std::string __pf_s = ({args[0]}); const std::string __pf_t = ({args[1]}); return _pf_u16_pos(__pf_s, __pf_t); }}()",
     "substring":   None,  # handled separately (2 vs 3 args)
     "replace_all": lambda args: f"[&](){{ std::string __pf_s={args[0]}; size_t __pf_p=0; while((__pf_p=__pf_s.find({args[1]},__pf_p))!=std::string::npos){{ __pf_s.replace(__pf_p,{args[1]}.length(),{args[2]}); __pf_p+={args[2]}.length(); }} return __pf_s; }}()",
     "replace":     None,  # handled separately (3 vs 4 args)
@@ -1504,7 +1546,7 @@ STR_FUNC_MAP = {
         f"[&](){{ std::string __pf_r; for(int __pf_i=0;__pf_i<{na_preserving_int_cast(args[1])};__pf_i++){{ if(__pf_i>0) __pf_r+={args[2]}; __pf_r+={args[0]}; }} return __pf_r; }}()"
     ),
     "match":       lambda args: f'pine_str_match({args[0]}, {args[1]})',
-    "split":       lambda args: f'pine_str_split({args[0]}, {args[1]})',
+    "split":       _str_split_expr,
     "format":      None,  # handled separately
 }
 # The STR_FUNC_MAP arguments a template reads more than once, or once per

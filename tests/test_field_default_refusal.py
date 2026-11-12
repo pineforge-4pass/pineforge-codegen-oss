@@ -10,6 +10,7 @@ from pineforge_codegen import transpile
 from pineforge_codegen.diagnostic_codes import render_diagnostic
 from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._e2e import reference_codegen, transpile_json
+from tests._older_codegen import with_utf16_units
 
 
 CPP_REFERENCE = "7d7681dcef6918f0cb304831320e5d8e5b545285"
@@ -112,7 +113,8 @@ def _assert_unchanged(source, reference, tmp_path):
     pine.write_text(source, encoding="utf-8")
     before = transpile_json(pine, root=reference)
     assert before["ok"], before
-    assert transpile(source) == before["cpp"]
+    # The reference counted str.length in bytes, through no unit helper.
+    assert transpile(source) == with_utf16_units(before["cpp"])
 
 
 @pytest.mark.parametrize("source,control,position", _CASES)

@@ -257,7 +257,7 @@ class ExprVisitor:
         if isinstance(node, NumberLiteral):
             return str(node.value)
         if isinstance(node, StringLiteral):
-            return f'std::string("{self._cpp_string_escape(node.value)}")'
+            return self._cpp_std_string(node.value)
         if isinstance(node, BoolLiteral):
             return "true" if node.value else "false"
         if isinstance(node, NaLiteral):
@@ -825,7 +825,7 @@ class ExprVisitor:
             if isinstance(val, (int, float)):
                 return str(val)
             if isinstance(val, str):
-                return f'std::string("{self._cpp_string_escape(val)}")'
+                return self._cpp_std_string(val)
         # TA runtime-reset lowering: an input-backed var renders as its
         # override-aware getter (not the member name), because the reset may
         # run before the input members are initialised (evaluate_security path).
@@ -1708,7 +1708,9 @@ class ExprVisitor:
         escaped = f'"{self._cpp_string_escape(literal.value)}"'
         helper = _CLOSED_TRADE_TEXT_EQUALS[call.callee.member]
         # sizeof counts the emitted bytes, including UTF-8 and escaped bytes.
-        # A NUL literal keeps std::string(const char*)'s existing truncation.
+        # A literal that holds a NUL is not lowered here (the operand check
+        # takes NUL-free literals only): it takes the general path, which
+        # builds the string with its byte count.
         comparison = (
             f"{helper}({index}, std::string_view({escaped}, "
             f"sizeof({escaped}) - 1))"
