@@ -22,6 +22,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Since 1.10.0, identifiers and import paths in Pine v6 scripts must be ASCII:
+  a non-ASCII character in a name is refused at that character (`no viable
+  alternative at character ...`); 1.9.1 encoded such names. Strings and
+  comments keep non-ASCII text, spelled as octal escapes in the generated C++
+  (#290).
 - Pine v6 reports located errors for a missing `color.new` transparency,
   `fill(transp=...)`, calendar-number timestamp defaults in `input.time` with
   a time zone string as the first timestamp argument or a `timezone` keyword,
