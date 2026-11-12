@@ -5210,6 +5210,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
     def _generate_cpp(self) -> str:
         self._uses_enum_string_lookup = False
+        self._uses_tv_string_units = False
         # Titles already carry assigned declaration keys. Refuse an unproved
         # title first, then flag any remaining shared fallback/suffix keys.
         self._check_input_titles()
@@ -6365,6 +6366,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Function bodies and security evaluators can select the enum lookup.
         if self._uses_enum_string_lookup:
             lines.insert(0, ENUM_STRING_INCLUDE)
+        # The same for the UTF-16 unit helpers of str.length, str.pos and
+        # str.substring: any body or evaluator may emit one of those calls.
+        self._settle_tv_string_units(lines)
         cpp = "\n".join(lines)
         if self._uses_array_slice_views:
             from .array_slice import lower_storage

@@ -1528,11 +1528,12 @@ STR_FUNC_MAP = {
         f"catch (const std::out_of_range&) {{ return na<double>(); }} "
         f"}}(({args[0]}))"
     ),
-    "length":      lambda args: f"(int){args[0]}.length()",
+    "length":      lambda args: f"_pf_u16_length({args[0]})",
     "contains":    lambda args: f"({args[0]}.find({args[1]}) != std::string::npos)",
     "startswith":  lambda args: f"({args[0]}.substr(0, {args[1]}.length()) == {args[1]})",
     "endswith":    lambda args: f"({args[0]}.length() >= {args[1]}.length() && {args[0]}.compare({args[0]}.length() - {args[1]}.length(), {args[1]}.length(), {args[1]}) == 0)",
-    "pos":         lambda args: f"[&](){{ auto __pf_p={args[0]}.find({args[1]}); return __pf_p!=std::string::npos?(int)__pf_p:-1; }}()",
+    # The two statements keep the source before the needle in evaluation order.
+    "pos":         lambda args: f"[&](){{ const std::string __pf_s = ({args[0]}); const std::string __pf_t = ({args[1]}); return _pf_u16_pos(__pf_s, __pf_t); }}()",
     "substring":   None,  # handled separately (2 vs 3 args)
     "replace_all": lambda args: f"[&](){{ std::string __pf_s={args[0]}; size_t __pf_p=0; while((__pf_p=__pf_s.find({args[1]},__pf_p))!=std::string::npos){{ __pf_s.replace(__pf_p,{args[1]}.length(),{args[2]}); __pf_p+={args[2]}.length(); }} return __pf_s; }}()",
     "replace":     None,  # handled separately (3 vs 4 args)
