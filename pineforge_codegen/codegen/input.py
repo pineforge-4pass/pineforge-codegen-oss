@@ -390,9 +390,8 @@ class InputHelper:
         """
         default = self._get_input_default(node)
         func_name, namespace = self._resolve_callee(node.callee)
-        string_input = (namespace == "input"
-                        and self._input_getter_for_call(node, func_name, namespace)
-                        == "get_input_string")
+        getter = self._input_getter_for_call(node, func_name, namespace)
+        string_input = namespace == "input" and getter == "get_input_string"
         if string_input:
             default = self._string_input_argument(default)
         contract = input_default_contract(node)
@@ -406,6 +405,10 @@ class InputHelper:
             if proof is not None:
                 return f"0x{proof.value:08X}LL", proof.value
         cpp = self._visit_expr(default) if default is not None else "0"
+        if getter == "get_input_string":
+            # An input's default stays a C string, cut at its first NUL as the
+            # settings receipt documents; the manifest equals both.
+            cpp = self._unsized_std_string(cpp)
         color = (self._literal_color_value(default)
                  if namespace == "input" and func_name == "color" else None)
         return cpp, color

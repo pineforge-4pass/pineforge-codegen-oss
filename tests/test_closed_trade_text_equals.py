@@ -229,26 +229,23 @@ def test_authored_comparison_member_names_are_escaped(
 
 
 _FALLBACKS = [
-    # The owning constructor still truncates this literal at its first NUL.
-    # Preserves existing behaviour; this makes no claim about Pine semantics.
+    # A literal with a NUL keeps its whole length: the owning constructor is
+    # given the emitted byte count (L, NUL and tail are six bytes), so the
+    # string is not cut at the NUL.
     ('strategy.closedtrades.entry_id(0) == "L\0tail"',
-     r'(closed_trade_entry_id(0) == std::string("L\000tail"))'),
-    # The same NUL truncation remains when the literal is on the left.
-    # Preserves existing behaviour; this makes no claim about Pine semantics.
+     r'(closed_trade_entry_id(0) == std::string("L\000tail", 6))'),
+    # The same holds when the literal is on the left.
     ('"L\0tail" != strategy.closedtrades.entry_id(0)',
-     r'(std::string("L\000tail") != closed_trade_entry_id(0))'),
+     r'(std::string("L\000tail", 6) != closed_trade_entry_id(0))'),
     # Exit IDs with NUL literals still use their owning getter.
-    # Preserves existing behaviour; this makes no claim about Pine semantics.
     ('strategy.closedtrades.exit_id(0) == "\0"',
-     r'(closed_trade_exit_id(0) == std::string("\000"))'),
+     r'(closed_trade_exit_id(0) == std::string("\000", 1))'),
     # Entry comments with NUL literals still use their owning getter.
-    # Preserves existing behaviour; this makes no claim about Pine semantics.
     ('strategy.closedtrades.entry_comment(0) != "\0"',
-     r'(closed_trade_entry_comment(0) != std::string("\000"))'),
+     r'(closed_trade_entry_comment(0) != std::string("\000", 1))'),
     # Exit comments with NUL literals still use their owning getter.
-    # Preserves existing behaviour; this makes no claim about Pine semantics.
     ('"\0" == strategy.closedtrades.exit_comment(0)',
-     r'(std::string("\000") == closed_trade_exit_comment(0))'),
+     r'(std::string("\000", 1) == closed_trade_exit_comment(0))'),
     # Two getters must both retain their independently owned strings.
     ('strategy.closedtrades.entry_id(0) == strategy.closedtrades.exit_id(1)',
      '(closed_trade_entry_id(0) == closed_trade_exit_id(1))'),
@@ -348,9 +345,10 @@ _RUNTIME_ROWS = [
     ('std::string("L")', '"L"', "1", "0101 0101 0101 0101\n"),
     # Truncation toward zero makes 0.75 read the one stored row at index 0.
     ('std::string("L")', '"L"', "0.75", "1010 1010 1010 1010\n"),
-    # The unchanged owning NUL literal truncates to L, which equals the stored L.
-    # Preserves existing behaviour; this makes no claim about Pine semantics.
-    ('std::string("L")', '"L\0tail"', "0", "1010 1010 1010 1010\n"),
+    # A literal with a NUL keeps its six bytes, so it differs from the stored L.
+    ('std::string("L")', '"L\0tail"', "0", "0101 0101 0101 0101\n"),
+    # The six stored bytes equal the literal that keeps its NUL and its tail.
+    (r'std::string("L\0tail", 6)', '"L\0tail"', "0", "1010 1010 1010 1010\n"),
 ]
 
 _FIELDS = ("entry_id", "exit_id", "entry_comment", "exit_comment")

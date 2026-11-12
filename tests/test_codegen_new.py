@@ -801,7 +801,8 @@ def test_str_upper():
 def test_str_length():
     src = 'x = str.length("hello")\n'
     cpp = _generate(src)
-    assert ".length()" in cpp
+    # The length is counted in UTF-16 units, through the unit helper.
+    assert "_pf_u16_length(std::string(\"hello\"))" in cpp
 
 
 def test_str_startswith():

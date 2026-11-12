@@ -55,7 +55,8 @@ def test_timeframe_period_stays_string_in_string_functions():
             'periodName = timeframe.period\n'
             'periodSize = str.length(periodName)\nplot(periodSize)\n')
     cpp = transpile(pine)
-    # Preservation pin: STRING storage and str.length's table use .length().
+    # Preservation pin: STRING storage, and str.length reads that string
+    # through its unit-counting helper.
     assert re.search(r"\bstd::string periodName\s*=", cpp)
     assert "periodName = script_tf_;" in cpp
-    assert "(int)periodName.length()" in cpp
+    assert "_pf_u16_length(periodName)" in cpp

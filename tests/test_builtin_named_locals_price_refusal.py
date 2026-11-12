@@ -21,6 +21,7 @@ import pytest
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._e2e import reference_codegen, transpile_json
+from tests._older_codegen import with_utf16_units
 from tests._pine_libraries import Layout
 from tests.test_builtin_named_locals_scope import (
     _LOCAL_NAMES, _chart_local_source, _normalize_local, _program,
@@ -123,12 +124,15 @@ def _assert_keeps_the_base_outcome(source, reference, tmp_path, libraries=None,
     same diagnostics where it refuses it. ``string_join_fixed`` repairs, in the
     reference's C++, the one join of a string local with its previous value
     that the reference wrapped in std::to_string (issue #354); that site is
-    then the whole difference that is allowed."""
+    then the whole difference that is allowed, with one other: the reference
+    counted ``str.length`` in bytes, through no unit helper."""
     expected = _reference_outcome(source, reference, tmp_path, libraries)
     if string_join_fixed and expected[0] == "accepted":
         from tests.test_string_local_history_concat import with_string_join_fixed
 
         expected = ("accepted", with_string_join_fixed(expected[1]))
+    if expected[0] == "accepted":
+        expected = ("accepted", with_utf16_units(expected[1]))
     try:
         cpp = transpile(source, libraries=libraries)
     except CompileError as error:
