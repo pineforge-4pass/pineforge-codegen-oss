@@ -60,6 +60,13 @@ supported as exact pairs; on the 0.x line they are independent. See the
   zone (`syminfo.timezone`) for the timezone. Pass `"yyyy-MM-dd"` and `"UTC"`
   explicitly to restore the previous output. Regenerate C++ and relink
   affected strategies.
+- `str.split(source, "")` with an empty separator now returns one part per
+  UTF-16 unit, as TradingView does: "axb" gives three parts, an accent or a CJK
+  character between two letters three, an emoji between two letters four (an
+  emoji is a high and a low surrogate, each kept as its own three-byte part).
+  It returned the whole string as one part, even for plain ASCII. The empty
+  text still has one part, as in TradingView. A separator that is not empty
+  splits as before, through the engine.
 - A `when` argument on a strategy order call in Pine v6 now reports `PF-E2081`,
   explaining that v6 removed the argument and recommending an `if` statement
   around the call. Other unknown keywords keep `PF-E2027`.
