@@ -1282,18 +1282,59 @@ def replace_once(text, before, after):
     return text.replace(before, after, 1)
 
 
-def four_part_workflow(original):
-    """The real workflow with its pytest job cut into four parts, by exact replacements."""
+# The two lines that cut the pytest job into four parts, spelled as the rule above
+# reads them: it compares the written text of the list and of the value.
+SHARD_AXIS_LINE = "        shard: [1, 2, 3, 4]\n"
+SHARD_VARIABLE_LINE = '      PF_TEST_SHARD: "${{ matrix.shard }}/4"\n'
+
+
+def pytest_job_is_four_part(workflow):
+    """Which shape the pytest job of a real workflow has, from its two exact lines.
+
+    Both lines absent is the one-part shape and both present exactly once is the
+    four-part shape. Any other count is neither, and is refused here, so that
+    no helper below starts from a text that is half cut.
+    """
+    body = jobs(workflow)["pytest"]
+    axis, variable = body.count(SHARD_AXIS_LINE), body.count(SHARD_VARIABLE_LINE)
+    assert (axis, variable) in {(0, 0), (1, 1)}, (
+        "the pytest job must have its shard matrix line and its PF_TEST_SHARD line "
+        f"both absent or both present exactly once, not {axis} and {variable} times"
+    )
+    return axis == 1
+
+
+def one_part_workflow(original):
+    """The real workflow with its pytest job in one part per Python version.
+
+    It takes the real text in either shape: a text that has the two lines loses
+    them by exact replacements, and one that has not is returned as it is.
+    """
+    if not pytest_job_is_four_part(original):
+        return original
     body = jobs(original)["pytest"]
+    plain = replace_once(body, SHARD_AXIS_LINE, "")
+    plain = replace_once(plain, SHARD_VARIABLE_LINE, "")
+    return replace_once(original, body, plain)
+
+
+def four_part_workflow(original):
+    """The real workflow with its pytest job cut into four parts, whichever shape it has.
+
+    It starts from the one-part text, which also decides the shape of the given text,
+    so the two lines are inserted by the same exact replacements whether the real
+    workflow has them yet or not, and they land where the rule expects them.
+    """
+    plain = one_part_workflow(original)
+    body = jobs(plain)["pytest"]
     cut = replace_once(
         body, '        python-version: ["3.11", "3.12", "3.13", "3.14"]\n',
-        '        python-version: ["3.11", "3.12", "3.13", "3.14"]\n        shard: [1, 2, 3, 4]\n',
+        '        python-version: ["3.11", "3.12", "3.13", "3.14"]\n' + SHARD_AXIS_LINE,
     )
     cut = replace_once(
-        cut, '      PYTHONHASHSEED: "0"\n',
-        '      PYTHONHASHSEED: "0"\n      PF_TEST_SHARD: "${{ matrix.shard }}/4"\n',
+        cut, '      PYTHONHASHSEED: "0"\n', '      PYTHONHASHSEED: "0"\n' + SHARD_VARIABLE_LINE,
     )
-    return replace_once(original, body, cut)
+    return replace_once(plain, body, cut)
 
 
 def test_four_part_pytest_job_is_accepted():
@@ -1301,8 +1342,39 @@ def test_four_part_pytest_job_is_accepted():
     sources = read_sources(root, workflow_paths(root))
     path = ".github/workflows/gke-pr.yml"
     four_part = four_part_workflow(sources[path])
-    assert four_part != sources[path]
+    assert four_part != one_part_workflow(sources[path])
     check_workflows({**sources, path: four_part})
+
+
+def test_real_pr_workflow_has_exactly_one_of_the_two_pytest_shapes():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    path = ".github/workflows/gke-pr.yml"
+    real = sources[path]
+    one_part, four_part = one_part_workflow(real), four_part_workflow(real)
+    assert one_part != four_part
+    for shape in (one_part, four_part):
+        check_workflows({**sources, path: shape})
+    assert [real == one_part, real == four_part].count(True) == 1
+
+    def in_pytest_job(workflow, before, after):
+        body = jobs(workflow)["pytest"]
+        return replace_once(workflow, body, replace_once(body, before, after))
+
+    # The shape decision of both helpers refuses every other count of the two lines.
+    versions = '        python-version: ["3.11", "3.12", "3.13", "3.14"]\n'
+    hashseed = '      PYTHONHASHSEED: "0"\n'
+    for half_cut in (
+        in_pytest_job(one_part, versions, versions + SHARD_AXIS_LINE),
+        in_pytest_job(one_part, hashseed, hashseed + SHARD_VARIABLE_LINE),
+        in_pytest_job(four_part, SHARD_AXIS_LINE, SHARD_AXIS_LINE * 2),
+        in_pytest_job(four_part, SHARD_VARIABLE_LINE, SHARD_VARIABLE_LINE * 2),
+    ):
+        for helper in (one_part_workflow, four_part_workflow):
+            with pytest.raises(AssertionError, match="both absent or both present exactly once"):
+                helper(half_cut)
 
 
 def test_every_other_pytest_shard_shape_is_refused_with_one_message():
@@ -1340,7 +1412,7 @@ def test_differential_job_never_accepts_the_shard_variable():
     sources = read_sources(root, workflow_paths(root))
     path = ".github/workflows/gke-pr.yml"
     original = sources[path]
-    for workflow in (original, four_part_workflow(original)):
+    for workflow in (one_part_workflow(original), four_part_workflow(original)):
         body = jobs(workflow)["differential"]
         changed = replace_once(
             body, '      PYTHONHASHSEED: "0"\n',
@@ -1356,8 +1428,8 @@ def test_pytest_matrix_has_exactly_its_known_keys():
     root = Path(__file__).resolve().parents[1]
     sources = read_sources(root, workflow_paths(root))
     path = ".github/workflows/gke-pr.yml"
-    original = sources[path]
-    four_part = four_part_workflow(original)
+    one_part = one_part_workflow(sources[path])
+    four_part = four_part_workflow(sources[path])
     # The message that a wrong shard axis is already refused with: the refusals below
     # must give that very message.
     with pytest.raises(ValueError, match="matrix shard axis and PF_TEST_SHARD") as known:
@@ -1365,7 +1437,7 @@ def test_pytest_matrix_has_exactly_its_known_keys():
             four_part, "        shard: [1, 2, 3, 4]\n", "        shard: [1, 2, 3]\n")})
     messages = set()
     for workflow, last_key in (
-        (original, '        python-version: ["3.11", "3.12", "3.13", "3.14"]\n'),
+        (one_part, '        python-version: ["3.11", "3.12", "3.13", "3.14"]\n'),
         (four_part, "        shard: [1, 2, 3, 4]\n"),
     ):
         body = jobs(workflow)["pytest"]
@@ -2012,6 +2084,11 @@ def test_native_driver_pin_uses_complete_bytes_against_the_real_base_policy():
 
     root = Path(__file__).resolve().parents[1]
     sources = read_sources(root, workflow_paths(root))
+    # The pinned policy below predates the four-part pytest job and accepts only the
+    # one-part shape, which the current rules accept too. This test is about the driver
+    # pin, so both policies judge the same graphs, with the pytest job in one part.
+    pr_workflow = ".github/workflows/gke-pr.yml"
+    sources = {**sources, pr_workflow: one_part_workflow(sources[pr_workflow])}
     old = bootstrap_fixture(sources, native=False)
     new = bootstrap_fixture(sources, native=True)
     installed_driver = old[NATIVE_DRIVER]
