@@ -1252,6 +1252,80 @@ def test_real_workflow_mutations():
                              trigger + "\njobs:\n  hosted:\n    runs-on: ubuntu-24.04\n"})
 
 
+def replace_once(text, before, after):
+    """Replace a text that must occur exactly once, so no replacement is a silent no-op."""
+    assert text.count(before) == 1, before
+    return text.replace(before, after, 1)
+
+
+def four_part_workflow(original):
+    """The real workflow with its pytest job cut into four parts, by exact replacements."""
+    body = jobs(original)["pytest"]
+    cut = replace_once(
+        body, '        python-version: ["3.11", "3.12", "3.13", "3.14"]\n',
+        '        python-version: ["3.11", "3.12", "3.13", "3.14"]\n        shard: [1, 2, 3, 4]\n',
+    )
+    cut = replace_once(
+        cut, '      PYTHONHASHSEED: "0"\n',
+        '      PYTHONHASHSEED: "0"\n      PF_TEST_SHARD: "${{ matrix.shard }}/4"\n',
+    )
+    return replace_once(original, body, cut)
+
+
+def test_four_part_pytest_job_is_accepted():
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    path = ".github/workflows/gke-pr.yml"
+    four_part = four_part_workflow(sources[path])
+    assert four_part != sources[path]
+    check_workflows({**sources, path: four_part})
+
+
+def test_every_other_pytest_shard_shape_is_refused_with_one_message():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    path = ".github/workflows/gke-pr.yml"
+    four_part = four_part_workflow(sources[path])
+    axis, variable = "        shard: [1, 2, 3, 4]\n", '"${{ matrix.shard }}/4"'
+    messages = set()
+    for before, after in [
+        (axis, "        shard: [1, 2, 3]\n"),
+        (axis, "        shard: [1, 2, 3, 4, 5]\n"),
+        (variable, '"${{ matrix.shard }}/5"'),
+        (variable, '"${{ matrix.shard }}/3"'),
+        ("      PF_TEST_SHARD: " + variable + "\n", ""),
+        (axis, ""),
+        ("PF_TEST_SHARD:", "PF_TEST_PART:"),
+        (variable, '"1/4"'),
+        # A second axis that differs only by case counts as a second shard entry.
+        (axis, axis + "        Shard: [1, 1, 1, 1]\n"),
+    ]:
+        mutant = replace_once(four_part, before, after)
+        with pytest.raises(ValueError, match="matrix shard axis and PF_TEST_SHARD") as error:
+            check_workflows({**sources, path: mutant})
+        messages.add(str(error.value))
+    assert len(messages) == 1
+
+
+def test_differential_job_never_accepts_the_shard_variable():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    path = ".github/workflows/gke-pr.yml"
+    original = sources[path]
+    for workflow in (original, four_part_workflow(original)):
+        body = jobs(workflow)["differential"]
+        changed = replace_once(
+            body, '      PYTHONHASHSEED: "0"\n',
+            '      PYTHONHASHSEED: "0"\n      PF_TEST_SHARD: "${{ matrix.shard }}/4"\n',
+        )
+        with pytest.raises(ValueError, match="differential: pod environment differs"):
+            check_workflows({**sources, path: replace_once(workflow, body, changed)})
+
+
 def test_native_admission_pins_the_only_call_callee_driver_and_result_dependency():
     import pytest
 
