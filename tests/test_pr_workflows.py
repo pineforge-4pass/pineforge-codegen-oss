@@ -437,6 +437,16 @@ def test_cut_check_refuses_two_equal_texts_that_are_not_cut_as_expected():
     ]:
         changed = [replace_once(text, before, after) for text in four_part]
         assert_cut_refused(*changed, reason, f"{label} in both workflows")
+    # The install line stands in more than one job, so it is changed inside the pytest
+    # job alone. Changed in both workflows alike, the two jobs stay equal, and only the
+    # assertion on the commands themselves can refuse them.
+    install = 'python -m pip install -e ".[dev]"'
+    changed = []
+    for text in four_part:
+        body = job_blocks(text)["pytest"]
+        without_extras = replace_once(body, install, "python -m pip install -e .")
+        changed.append(replace_once(text, body, without_extras))
+    assert_cut_refused(*changed, "commands", "the install line changed in both workflows")
 
 
 @dataclass(frozen=True)
