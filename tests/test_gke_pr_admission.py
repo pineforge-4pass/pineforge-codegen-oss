@@ -18,6 +18,7 @@ import textwrap
 POD_JOBS = {"workflow-lint", "package-files", "pytest", "differential"}
 TEST_POD_JOBS = {"workflow-lint", "package-files", "pytest"}
 POD_RUNNER = "ubuntu-24.04"
+PYTEST_SHARDS = 4
 BOTS = {"dependabot[bot]", "pineforge-app[bot]"}
 CHECKER = "python3 -I tests/test_gke_pr_admission.py"
 TRIGGER = """on:
@@ -694,7 +695,24 @@ def check_workflows(sources):
                 "PF_CI_LABELS": "'[\"ubuntu-24.04\"]'",
                 "PYTHONHASHSEED": '"0"',
             } if name in {"pytest", "differential"} else {})
-            require(mapping_at(body, "env", 4) == expected_env, f"{name}: pod environment differs")
+            if name == "pytest":
+                # Exactly two shapes: no shard axis and no PF_TEST_SHARD, or the
+                # axis [1, ..., PYTEST_SHARDS] with PF_TEST_SHARD set to the matrix
+                # value over PYTEST_SHARDS. One constant gives both the list and
+                # the divisor, so they cannot drift apart.
+                shard_axis = "[" + ", ".join(str(part) for part in range(1, PYTEST_SHARDS + 1)) + "]"
+                shard_env = '"${{ matrix.shard }}/' + str(PYTEST_SHARDS) + '"'
+                matrix = mapping_at(body, "matrix", 6)
+                shards = [key for key in matrix if key.lower() == "shard"]
+                pod_env = mapping_at(body, "env", 4)
+                require((not shards and pod_env == expected_env)
+                        or (shards == ["shard"] and matrix["shard"] == shard_axis
+                            and pod_env == {**expected_env, "PF_TEST_SHARD": shard_env}),
+                        f"{name}: pod environment differs: matrix shard axis and PF_TEST_SHARD "
+                        f"must be absent together or be shard: {shard_axis} and "
+                        f"PF_TEST_SHARD: {shard_env}")
+            else:
+                require(mapping_at(body, "env", 4) == expected_env, f"{name}: pod environment differs")
             for step in step_blocks(body):
                 require(not step_env(step), f"{name}: step environment refused")
                 for depth, key, value in yaml_records(step):
