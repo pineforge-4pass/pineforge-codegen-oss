@@ -22,11 +22,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
-- Since 1.10.0, identifiers and import paths in Pine v6 scripts must be ASCII:
-  a non-ASCII character in a name is refused at that character (`no viable
-  alternative at character ...`); 1.9.1 encoded such names. Strings and
-  comments keep non-ASCII text, spelled as octal escapes in the generated C++
-  (#290).
+## 1.12.0 — 2026-11-12
+
 - Pine v6 reports located errors for a missing `color.new` transparency,
   `fill(transp=...)`, calendar-number timestamp defaults in `input.time` with
   a time zone string as the first timestamp argument or a `timezone` keyword,
@@ -69,11 +66,6 @@ supported as exact pairs; on the 0.x line they are independent. See the
   keeps its existing compile error. Requested evaluations, collection
   history, nested records and intrabar recalculations keep their previous
   lowering. Regenerate C++ and relink affected strategies.
-- `str.format_time` now uses TradingView's documented defaults when arguments
-  are omitted: `"yyyy-MM-dd'T'HH:mm:ssZ"` for the format and the exchange time
-  zone (`syminfo.timezone`) for the timezone. Pass `"yyyy-MM-dd"` and `"UTC"`
-  explicitly to restore the previous output. Regenerate C++ and relink
-  affected strategies.
 - `str.split(source, "")` with an empty separator now returns one part per
   UTF-16 unit, as TradingView does: "axb" gives three parts, an accent or a CJK
   character between two letters three, an emoji between two letters four (an
@@ -81,16 +73,51 @@ supported as exact pairs; on the 0.x line they are independent. See the
   It returned the whole string as one part, even for plain ASCII. The empty
   text still has one part, as in TradingView. A separator that is not empty
   splits as before, through the engine.
-- A `when` argument on a strategy order call in Pine v6 now reports `PF-E2081`,
-  explaining that v6 removed the argument and recommending an `if` statement
-  around the call. Other unknown keywords keep `PF-E2027`.
-- Pine identifiers spelled like generated state members or helpers use the C++ name allocator, including history-bearing locals in requested helpers.
 - A script variable spelled like one of the generator's tuple element bindings (`_tuple_result_0_elem_0`) now gets a private name instead of redeclaring the binding.
 - A local declared in a function or method and spelled like a built-in variable now keeps its own type, history storage and reads. Exceptions: a string local spelled like a price field (`open`, `high`, `low`, `close`, `hl2`, `hlc3`, `hlcc4`, `ohlc4`, `volume`) that is read with history in a function requested through `request.security` is still refused, as before; the support check still warns that `bar_index`, `last_bar_index` and `timenow` diverge from TradingView at every read of a local with that name; a script that declares the same built-in name in several callable shapes is accepted where an ordinary name is refused by the shared-Series check; and the confirmed-bar request receipt of a request inside the declaring function names the local by its internal storage spelling.
 - A function-local string read with history now keeps its string type in concatenations, so the emitted C++ joins the current and previous values without applying `std::to_string` to a string (#354).
 - A function or method parameter spelled like a built-in variable (`close`,
   `high`, ...) now keeps its `[n]` history operator and gives the same values
   as when the parameter has another name (#360).
+- A `var` declared in one block no longer shares storage with a plain variable
+  of the same name in a sibling block, so it keeps its value across runs (#359).
+- A float setting of a built-in indicator computed from an input now keeps
+  its fraction, as on TradingView: the multiplier of `ta.bb`, `ta.bbw`,
+  `ta.kc`, `ta.kcw` and the `ta.vwap` bands, the factor of `ta.supertrend`,
+  the arguments of `ta.sar`, and the offset and sigma of `ta.alma` (#362).
+  Regenerate C++ and relink affected strategies.
+- `str.length`, `str.pos` and `str.substring` now count and cut text in UTF-16
+  code units, as TradingView does: an emoji is two units and every other
+  character one. They counted UTF-8 bytes, so an accent counted 2, a CJK
+  character 3 and an emoji 4, and a position or a cut after such a character
+  was off by the extra bytes. The helpers are emitted into the generated file
+  only when its code calls one of the three functions (a call that is only a
+  plot argument emits nothing), so every other script keeps the text it had;
+  the engine is not involved. A cut between the two units of an emoji keeps
+  each half as its own three-byte sequence (the length of a half is one unit),
+  the form `str.split` gives its parts. Such a half never occurs inside a text
+  that holds the whole character, so three things differ from TradingView:
+  joining the two halves again, with `+` or `array.join`, does not give back
+  the original four bytes, so the joined text does not equal the original text;
+  a search for a half in the text it was cut from finds nothing (`str.pos`
+  returns -1, where the one byte the old cut gave was found at the same
+  position, and `str.contains` returns false); and a half is not equal to, or
+  at the start or end of, a part of that text that holds the whole character.
+  A begin position that lies inside the bytes of a text but past its units
+  (5 on "a", an emoji, "b") now stops the run; before, it returned the bytes
+  after that position.
+
+## 1.11.0 — 2026-11-09
+
+- `str.format_time` now uses TradingView's documented defaults when arguments
+  are omitted: `"yyyy-MM-dd'T'HH:mm:ssZ"` for the format and the exchange time
+  zone (`syminfo.timezone`) for the timezone. Pass `"yyyy-MM-dd"` and `"UTC"`
+  explicitly to restore the previous output. Regenerate C++ and relink
+  affected strategies.
+- A `when` argument on a strategy order call in Pine v6 now reports `PF-E2081`,
+  explaining that v6 removed the argument and recommending an `if` statement
+  around the call. Other unknown keywords keep `PF-E2027`.
+- Pine identifiers spelled like generated state members or helpers use the C++ name allocator, including history-bearing locals in requested helpers.
 - History retention can be selected with keyword-only `history_capacity`
   in `transpile()`, `transpile_full()`, `transpile_with_request_inventory()`
   and `gate/glue.py::transpile_json()`. The JavaScript worker template does
@@ -117,8 +144,6 @@ supported as exact pairs; on the 0.x line they are independent. See the
   option. Capacities outside the native int64 domain are refused even for
   scripts without drawings. Regenerate C++ and relink affected strategies.
 - Typed `array.from()` initializers now match their declared element type, including function-local `var` and `varip` arrays of timestamps.
-- A `var` declared in one block no longer shares storage with a plain variable
-  of the same name in a sibling block, so it keeps its value across runs (#359).
 - Variables initialized from `backadjustment.*`, `settlement_as_close.*` and
   `adjustment.*` constants now use integer storage in emitted C++.
 - `int(x)` of a floating value, and a stored `math.floor(x)`, `math.ceil(x)`
@@ -138,11 +163,6 @@ supported as exact pairs; on the 0.x line they are independent. See the
   (`int(strategy.equity)`) and a float field of a record (`int(b.v)`) count as
   floating values too. This changes generated C++ for scripts that use these
   forms: regenerate and relink affected strategies.
-- A float setting of a built-in indicator computed from an input now keeps
-  its fraction, as on TradingView: the multiplier of `ta.bb`, `ta.bbw`,
-  `ta.kc`, `ta.kcw` and the `ta.vwap` bands, the factor of `ta.supertrend`,
-  the arguments of `ta.sar`, and the offset and sigma of `ta.alma` (#362).
-  Regenerate C++ and relink affected strategies.
 - Repeated explicit input titles now have separate override keys: the first
   keeps the bare title, and later inputs use `<title>#<n>`, starting at 2 and
   skipping authored titles and keys already assigned. The manifest, effective
@@ -257,6 +277,17 @@ supported as exact pairs; on the 0.x line they are independent. See the
   seeds. Migration: none; undeclared runs are unchanged. The diagnostic stays
   an unconditional note at each `ta.ema` call; this text change leaves generated
   C++ unchanged.
+- Missing integer values remain `na` in float writes, numeric selections,
+  float arguments and arithmetic. Explicit float declarations keep fractional
+  values after integer initialization. Regenerate C++ and relink strategies.
+
+## 1.10.0 — 2026-11-03
+
+- Since 1.10.0, identifiers and import paths in Pine v6 scripts must be ASCII:
+  a non-ASCII character in a name is refused at that character (`no viable
+  alternative at character ...`); 1.9.1 encoded such names. Strings and
+  comments keep non-ASCII text, spelled as octal escapes in the generated C++
+  (#290).
 - An affine chart loop proved endless is stopped with the loop-time error when
   its result reaches an effect. Omission is limited to an unused loop statement
   with no calls, whose writes have no readers except self-updates, a break
@@ -265,10 +296,6 @@ supported as exact pairs; on the 0.x line they are independent. See the
   may drop them. Endless loops in functions, methods and `request.security`
   still never end here while TradingView stops them; data-dependent endless
   loops still hang.
-- Missing integer values remain `na` in float writes, numeric selections,
-  float arguments and arithmetic. Explicit float declarations keep fractional
-  values after integer initialization. Regenerate C++ and relink strategies.
-
 - Pine v6 calls refuse a positional argument after a named argument with
   `PF-E2074` at that positional expression. The check also covers strategy
   declarations, unused functions and v6 library bodies before lowering.
@@ -331,26 +358,6 @@ supported as exact pairs; on the 0.x line they are independent. See the
   TradingView accepts a namespace call after an expired block local with the
   same name; PineForge's analysis no longer refuses it, but code generation
   still rejects some such calls (a known gap).
-- `str.length`, `str.pos` and `str.substring` now count and cut text in UTF-16
-  code units, as TradingView does: an emoji is two units and every other
-  character one. They counted UTF-8 bytes, so an accent counted 2, a CJK
-  character 3 and an emoji 4, and a position or a cut after such a character
-  was off by the extra bytes. The helpers are emitted into the generated file
-  only when its code calls one of the three functions (a call that is only a
-  plot argument emits nothing), so every other script keeps the text it had;
-  the engine is not involved. A cut between the two units of an emoji keeps
-  each half as its own three-byte sequence (the length of a half is one unit),
-  the form `str.split` gives its parts. Such a half never occurs inside a text
-  that holds the whole character, so three things differ from TradingView:
-  joining the two halves again, with `+` or `array.join`, does not give back
-  the original four bytes, so the joined text does not equal the original text;
-  a search for a half in the text it was cut from finds nothing (`str.pos`
-  returns -1, where the one byte the old cut gave was found at the same
-  position, and `str.contains` returns false); and a half is not equal to, or
-  at the start or end of, a part of that text that holds the whole character.
-  A begin position that lies inside the bytes of a text but past its units
-  (5 on "a", an emoji, "b") now stops the run; before, it returned the bytes
-  after that position.
 
 ## 1.9.1 — 2026-10-31
 
