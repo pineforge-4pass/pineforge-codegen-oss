@@ -81,6 +81,7 @@ def test_timestamp_numeric_form_works():
 
 
 def test_timestamp_numeric_form_defaults_to_syminfo_timezone():
+    """Pin exchange-zone conversion with UTC shortcuts and a rejected-zone stop."""
     # Pine v6: "If the timezone argument is not specified, the function uses
     # the exchange time zone (syminfo.timezone)". The numeric overload must
     # resolve its calendar fields through syminfo_.timezone (UTC fast path
@@ -92,8 +93,11 @@ def test_timestamp_numeric_form_defaults_to_syminfo_timezone():
     assert "timegm" in lam and "mktime" in lam
     assert "t.tm_isdst = -1" in lam
     assert (
-        'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC" || '
-        '!pineforge::native_calendar::timezone_accepted(_tz))'
+        'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC")'
+    ) in lam
+    assert (
+        '} else if (!pineforge::native_calendar::timezone_accepted(_tz)) { '
+        '_PF_TIMEZONE_STOP("timestamp", '
     ) in lam
 
 

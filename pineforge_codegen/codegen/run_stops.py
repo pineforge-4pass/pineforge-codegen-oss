@@ -37,6 +37,16 @@ decltype(auto) _pf_invariant_at(Container& container, Index index) {
 """
 
 
+# Emitted only for scripts that call timestamp() with a calendar
+# or a zone; other scripts retain the original run-stop shim.
+TIMEZONE_STOP_SHIM_CPP = r"""#ifdef PINEFORGE_HAS_TIMEZONE_STOP_V1
+#define _PF_TIMEZONE_STOP(function, zone, english) ::pineforge::pine_timezone_stop(function, zone, english)
+#else
+#define _PF_TIMEZONE_STOP(function, zone, english) pine_runtime_error(std::string(english))
+#endif
+"""
+
+
 def history_offset_guard(offset: str, line: int) -> str:
     """Check an already evaluated numeric offset without narrowing it."""
     return (

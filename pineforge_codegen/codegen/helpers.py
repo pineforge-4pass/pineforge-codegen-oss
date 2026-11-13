@@ -284,12 +284,12 @@ CPP_STANDARD_MACROS = frozenset("""
     PINEFORGE_HAS_NATIVE_LOWERING_V1 PINEFORGE_HAS_NATIVE_LIVE_V1
     PINEFORGE_HAS_AUX_SECURITY_FEED_V1 PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1
     PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1
-    PINEFORGE_HAS_RUN_FAILURE_CODES_V1
+    PINEFORGE_HAS_RUN_FAILURE_CODES_V1 PINEFORGE_HAS_TIMEZONE_STOP_V1
     PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1
     PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1
     PINEFORGE_HAS_RUNTIME_CONTEXT_SERVICE_V1
     _PF_NO_DATA_STOP _PF_OTHER_SYMBOL_STOP _PF_ARRAY_STOP _PF_COLLECTION_STOP
-    _PF_NA_STOP _PF_LIMIT_STOP _PF_UNSUPPORTED_STOP _PF_STRING_STOP
+    _PF_NA_STOP _PF_LIMIT_STOP _PF_UNSUPPORTED_STOP _PF_STRING_STOP _PF_TIMEZONE_STOP
     _PF_ENGINE_INVARIANT _PF_INVARIANT_AT _PF_SETTING_FAILURE
     PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1
     PINEFORGE_NO_STRATEGY_DECLS PF_PINE_TIME_HAS_SESSION_DAY
@@ -423,7 +423,7 @@ CPP_EMITTER_NAMES = frozenset("""
     pine_runtime_error pine_enum_str_at pine_session_ismarket
     pine_no_data_stop pine_other_symbol_stop pine_array_stop pine_collection_stop
     pine_na_stop pine_limit_stop pine_unsupported_stop pine_string_stop
-    pine_engine_invariant note_run_failure note_run_failure_unknown
+    pine_timezone_stop pine_engine_invariant note_run_failure note_run_failure_unknown
     pine_session_ispostmarket pine_session_ispremarket _PFSessionMarket
     _pf_session_market_ script_tf_
     tf_change tf_is_daily tf_is_intraday tf_is_monthly tf_is_seconds
