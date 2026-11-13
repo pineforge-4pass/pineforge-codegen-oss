@@ -74,6 +74,12 @@ publication failure also fails the job.
 | Native tests absent from the matrix | GKE PR / engine-main calls shared changes/native jobs; consumed by the same `gate` writer |
 
 The shared pytest matrix runs the same command as both former PR matrices.
+Each Python version runs the suite as four jobs, one per part. Each job sets
+`PF_TEST_SHARD` to its part, for example `2/4`, and `tests/conftest.py` keeps
+the tests whose id hashes to that part, so the four jobs of a Python version
+together run every test exactly once. The pytest job of the push and dispatch
+workflow, `test.yml`, is cut the same way, and a test holds the matrix,
+environment and commands of the two jobs equal.
 The differential leg retains Python 3.14, Node 22, the Pyodide selftest,
 dependency audit and full gate. Package metadata and entity checks run on every
 admitted diff, as does the workflow/App-environment guard.
