@@ -812,6 +812,83 @@ def check_workflows(sources):
         require(runs(bodies[name]) == commands, f"{name}: proof commands differ")
     require(value_at(bodies["pytest"], 8, "python-version") == '["3.11", "3.12", "3.13", "3.14"]',
             "pytest matrix versions differ")
+    # The pytest job of the push and dispatch workflow runs on every push to main with no
+    # admission step in front of it, so it is judged here, after the pull request job above,
+    # whose admitted shape it must equal. Whatever could let a green job run less than the
+    # whole suite is refused: an env or an if on a step, a shell, a working directory,
+    # continue-on-error, another cut, other commands, another step, another checkout. The
+    # actions are compared with those of the pull request job, with no commit id pinned
+    # here, so that one pull request can bump both files together.
+    push_jobs = jobs(sources[".github/workflows/test.yml"])
+    require("pytest" in push_jobs, "test.yml pytest: the job is missing")
+    push_body = push_jobs["pytest"]
+    push_records = yaml_records(push_body)
+    # The scanner gives no record to a line without a key, such as a deeper line that starts
+    # with a dash, which the YAML reader joins to the value above it, and runs() reads the
+    # first line of a command only. So "run: python -m pytest -q -n auto" with a line
+    # "- || true" under it would read as the pinned command and run as another one. Every
+    # line of the job must therefore give one record, and the records below are the job.
+    content = [line for line in push_body.splitlines()
+               if line.strip() and not line.lstrip().startswith("#")]
+    require(len(content) == len(push_records),
+            "test.yml pytest: every line of the job must be a comment, a blank line or a key with its value")
+    # First of the rules on keys, so that continue-on-error on the job itself is refused for
+    # this reason and not as one more job key. A key in another letter case is refused the
+    # same way.
+    require(not any(key.lower() in {"continue-on-error", "timeout-minutes", "shell", "working-directory"}
+                    for _, key, _ in push_records),
+            "test.yml pytest: continue-on-error, timeout-minutes, shell and working-directory are refused")
+    require(sorted(key for depth, key, _ in push_records if depth == 4)
+            == sorted(["needs", "if", "runs-on", "strategy", "env", "steps"]),
+            "test.yml pytest: the job keys must be exactly needs, if, runs-on, strategy, env and steps")
+    require(value_at(push_body, 4, "needs") == "[authz, changes]"
+            and value_at(push_body, 4, "if") == "needs.changes.outputs.code == 'true'",
+            "test.yml pytest: needs must be [authz, changes] and if must be needs.changes.outputs.code == 'true'")
+    require(mapping_at(push_body, "strategy", 4) == {"fail-fast": "false", "matrix": ""},
+            "test.yml pytest: strategy must be exactly fail-fast: false and a matrix")
+    # The pull request job was judged above: its matrix has python-version and its env has
+    # PF_CI_LABELS and PYTHONHASHSEED. Both are still required to be non-empty here, so two
+    # empty mappings can never count as equal.
+    pr_body = bodies["pytest"]
+    pr_matrix, pr_env = mapping_at(pr_body, "matrix", 6), mapping_at(pr_body, "env", 4)
+    require(bool(pr_matrix) and mapping_at(push_body, "matrix", 6) == pr_matrix,
+            "test.yml pytest: the matrix differs from that of the pytest job of gke-pr.yml")
+    require(bool(pr_env) and mapping_at(push_body, "env", 4) == pr_env,
+            "test.yml pytest: the env differs from that of the pytest job of gke-pr.yml")
+    # The shape of the steps comes first: two steps that use an action, then two that run a
+    # command. The actions and the commands themselves are judged after it.
+    push_steps = step_blocks(push_body)
+    step_actions = [[value for _, key, value in yaml_records(step) if key == "uses"]
+                    for step in push_steps]
+    step_commands = [runs(step) for step in push_steps]
+    require(len(push_steps) == 4
+            and [len(found) for found in step_actions] == [1, 1, 0, 0]
+            and [len(found) for found in step_commands] == [0, 0, 1, 1]
+            and step_actions[0][0].startswith("actions/checkout@")
+            and step_actions[1][0].startswith("actions/setup-python@"),
+            "test.yml pytest: the steps must be the checkout, the Python setup, the install line and the test line")
+    # The two actions of the steps above are two non-empty references, so an empty list
+    # on the pull request side cannot equal them.
+    require([found[0] for found in step_actions[:2]]
+            == [value for _, key, value in yaml_records(pr_body) if key == "uses"],
+            "test.yml pytest: the actions differ from those of the pytest job of gke-pr.yml")
+    require(step_mapping(push_steps[0], "with") == {
+                "ref": '"${{ github.event.pull_request.head.sha || github.sha }}"',
+                "fetch-depth": "0", "persist-credentials": "false",
+            },
+            "test.yml pytest: the checkout must take exactly ref, fetch-depth: 0 and persist-credentials: false")
+    require(step_mapping(push_steps[1], "with") == {"python-version": "${{ matrix.python-version }}"},
+            "test.yml pytest: the Python setup must take exactly python-version: ${{ matrix.python-version }}")
+    require(runs(push_body) == expected_commands["pytest"],
+            "test.yml pytest: the run lines differ from the pinned commands of the pytest job")
+    # The first key of a step sits next to its dash, one level above the others, so the
+    # keys of a step are read from depth 6 on.
+    require(not any(key.lower() == "env" and depth >= 6
+                    for step in push_steps for depth, key, _ in yaml_records(step)),
+            "test.yml pytest: no step may have an env")
+    require(not any(key.lower() == "if" and depth >= 6
+                    for step in push_steps for depth, key, _ in yaml_records(step)),
+            "test.yml pytest: no step may have an if")
 
 
 def step_blocks(body):
