@@ -10,6 +10,12 @@ integer, modulo N, plus 1. Every test is therefore in exactly one of the N parts
 whatever the collection order or the number of xdist workers.
 
 Any other value is a pytest usage error, raised before collection.
+
+The variable is consumed when pytest starts: it is read once and then removed from
+the environment of the process, so no child process that a test starts (a nested
+pytest run, for example) can see it, and such a run collects the whole suite. Under
+pytest-xdist the controller passes the value on to each worker through the worker
+input that xdist provides, and a worker never reads the environment variable.
 """
 import hashlib
 import os
@@ -20,6 +26,11 @@ import pytest
 SHARD_VARIABLE = "PF_TEST_SHARD"
 MAX_PARTS = 64
 _SHARD = re.compile(r"([1-9][0-9]?)/([1-9][0-9]?)")
+# The value of this run, (I, N) or None, kept on the pytest config.
+SHARD_STASH = pytest.StashKey()
+# Where an xdist controller puts the value for its workers: the text I/N, or the
+# empty text when there is no value.
+WORKER_INPUT_KEY = "pf_test_shard"
 
 
 def parse_shard(value):
@@ -44,11 +55,30 @@ def part_of(nodeid, parts):
 
 
 def pytest_configure(config):
-    parse_shard(os.environ.get(SHARD_VARIABLE))
+    if hasattr(config, "workerinput"):
+        # An xdist worker takes the value from its controller, never from the
+        # environment.
+        value = config.workerinput[WORKER_INPUT_KEY]
+    else:
+        # Read the variable once and remove it, so that no child process of this
+        # run, an xdist worker included, inherits it. A malformed value is refused
+        # here, before collection.
+        value = os.environ.pop(SHARD_VARIABLE, None)
+    config.stash[SHARD_STASH] = parse_shard(value)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_configure_node(node):
+    """Hook of pytest-xdist, optional so that this file loads without xdist.
+
+    Hands a worker the value that its controller took from the environment.
+    """
+    shard = node.config.stash[SHARD_STASH]
+    node.workerinput[WORKER_INPUT_KEY] = "" if shard is None else "%d/%d" % shard
 
 
 def pytest_collection_modifyitems(config, items):
-    shard = parse_shard(os.environ.get(SHARD_VARIABLE))
+    shard = config.stash[SHARD_STASH]
     if shard is None:
         return
     index, parts = shard

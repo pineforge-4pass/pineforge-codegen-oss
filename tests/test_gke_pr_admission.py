@@ -696,20 +696,26 @@ def check_workflows(sources):
                 "PYTHONHASHSEED": '"0"',
             } if name in {"pytest", "differential"} else {})
             if name == "pytest":
-                # Exactly two shapes: no shard axis and no PF_TEST_SHARD, or the
-                # axis [1, ..., PYTEST_SHARDS] with PF_TEST_SHARD set to the matrix
-                # value over PYTEST_SHARDS. One constant gives both the list and
-                # the divisor, so they cannot drift apart.
+                # Exactly two shapes. Today's: the matrix keys are python-version
+                # only and the environment has no PF_TEST_SHARD. The four-part one:
+                # the matrix keys are python-version and shard, the shard axis is
+                # [1, ..., PYTEST_SHARDS] and PF_TEST_SHARD is the matrix value over
+                # PYTEST_SHARDS. One constant gives both the list and the divisor, so
+                # they cannot drift apart. Matrix keys are compared exactly as they
+                # are written, so a key in another letter case (Exclude, or Shard
+                # beside shard) or another axis (os) makes a third shape, which is
+                # refused.
                 shard_axis = "[" + ", ".join(str(part) for part in range(1, PYTEST_SHARDS + 1)) + "]"
                 shard_env = '"${{ matrix.shard }}/' + str(PYTEST_SHARDS) + '"'
                 matrix = mapping_at(body, "matrix", 6)
-                shards = [key for key in matrix if key.lower() == "shard"]
                 pod_env = mapping_at(body, "env", 4)
-                require((not shards and pod_env == expected_env)
-                        or (shards == ["shard"] and matrix["shard"] == shard_axis
+                require((set(matrix) == {"python-version"} and pod_env == expected_env)
+                        or (set(matrix) == {"python-version", "shard"}
+                            and matrix["shard"] == shard_axis
                             and pod_env == {**expected_env, "PF_TEST_SHARD": shard_env}),
-                        f"{name}: pod environment differs: matrix shard axis and PF_TEST_SHARD "
-                        f"must be absent together or be shard: {shard_axis} and "
+                        f"{name}: pod environment differs: the matrix keys must be exactly "
+                        f"python-version, or exactly python-version and shard; matrix shard axis "
+                        f"and PF_TEST_SHARD must be absent together or be shard: {shard_axis} and "
                         f"PF_TEST_SHARD: {shard_env}")
             else:
                 require(mapping_at(body, "env", 4) == expected_env, f"{name}: pod environment differs")
