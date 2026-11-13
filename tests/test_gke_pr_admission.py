@@ -1341,9 +1341,12 @@ def test_four_part_pytest_job_is_accepted():
     root = Path(__file__).resolve().parents[1]
     sources = read_sources(root, workflow_paths(root))
     path = ".github/workflows/gke-pr.yml"
+    push_path = ".github/workflows/test.yml"
     four_part = four_part_workflow(sources[path])
     assert four_part != one_part_workflow(sources[path])
-    check_workflows({**sources, path: four_part})
+    # The pytest job of the push workflow is held to the cut of this one, so the push
+    # workflow is given in four parts too, whatever its real text is today.
+    check_workflows({**sources, path: four_part, push_path: four_part_workflow(sources[push_path])})
 
 
 def test_real_pr_workflow_has_exactly_one_of_the_two_pytest_shapes():
@@ -1352,11 +1355,17 @@ def test_real_pr_workflow_has_exactly_one_of_the_two_pytest_shapes():
     root = Path(__file__).resolve().parents[1]
     sources = read_sources(root, workflow_paths(root))
     path = ".github/workflows/gke-pr.yml"
+    push_path = ".github/workflows/test.yml"
     real = sources[path]
     one_part, four_part = one_part_workflow(real), four_part_workflow(real)
     assert one_part != four_part
-    for shape in (one_part, four_part):
-        check_workflows({**sources, path: shape})
+    # The pytest job of the push workflow is held to the cut of this one, so each shape
+    # of the pull request workflow is given together with the same shape of the other.
+    for shape, push_shape in (
+        (one_part, one_part_workflow(sources[push_path])),
+        (four_part, four_part_workflow(sources[push_path])),
+    ):
+        check_workflows({**sources, path: shape, push_path: push_shape})
     assert [real == one_part, real == four_part].count(True) == 1
 
     def in_pytest_job(workflow, before, after):
@@ -1629,6 +1638,257 @@ def test_test_workflow_hosted_runner_admission_and_mutations():
         with pytest.raises(ValueError) as error:
             check_workflows({**sources, path: mutant})
         assert str(error.value) == "test.yml must not have a pull_request trigger"
+
+
+def test_test_workflow_pytest_job_is_held_to_the_admitted_shape():
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    path = ".github/workflows/test.yml"
+    real = sources[path]
+    # Every control starts from an accepted text: the real files pass as they are.
+    check_workflows(sources)
+    body = jobs(real)["pytest"]
+    assert real.count(body) == 1
+    steps = step_blocks(body)
+    assert len(steps) == 4
+    checkout_action, setup_action = [
+        value for _, key, value in yaml_records(body) if key == "uses"
+    ]
+
+    def in_job(before, after):
+        """The real text with one change inside its pytest job, which must hold `before` once."""
+        return replace_once(real, body, replace_once(body, before, after))
+
+    # What each refusal says, complete. A row below is held to the message of the one rule
+    # that it targets, so that no row passes because another rule refused it first.
+    refusal = {
+        "missing": "test.yml pytest: the job is missing",
+        "lines": "test.yml pytest: every line of the job must be a comment, a blank line or a key with its value",
+        "forbidden": "test.yml pytest: continue-on-error, timeout-minutes, shell and working-directory are refused",
+        "job keys": "test.yml pytest: the job keys must be exactly needs, if, runs-on, strategy, env and steps",
+        "needs": "test.yml pytest: needs must be [authz, changes] and if must be needs.changes.outputs.code == 'true'",
+        "strategy": "test.yml pytest: strategy must be exactly fail-fast: false and a matrix",
+        "matrix": "test.yml pytest: the matrix differs from that of the pytest job of gke-pr.yml",
+        "env": "test.yml pytest: the env differs from that of the pytest job of gke-pr.yml",
+        "steps": "test.yml pytest: the steps must be the checkout, the Python setup, the install line and the test line",
+        "actions": "test.yml pytest: the actions differ from those of the pytest job of gke-pr.yml",
+        "checkout": "test.yml pytest: the checkout must take exactly ref, fetch-depth: 0 and persist-credentials: false",
+        "python": "test.yml pytest: the Python setup must take exactly python-version: ${{ matrix.python-version }}",
+        "runs": "test.yml pytest: the run lines differ from the pinned commands of the pytest job",
+        "step env": "test.yml pytest: no step may have an env",
+        "step if": "test.yml pytest: no step may have an if",
+    }
+    runs_on = "    runs-on: ubuntu-24.04\n"
+    needs_line = "    needs: [authz, changes]\n"
+    if_line = "    if: needs.changes.outputs.code == 'true'\n"
+    fail_fast_line = "      fail-fast: false\n"
+    versions_line = '        python-version: ["3.11", "3.12", "3.13", "3.14"]\n'
+    env_lines = (
+        "      PF_CI_LABELS: '[\"ubuntu-24.04\"]'\n"
+        '      PYTHONHASHSEED: "0"\n' + SHARD_VARIABLE_LINE
+    )
+    ref_line = '          ref: "${{ github.event.pull_request.head.sha || github.sha }}"\n'
+    depth_line = "          fetch-depth: 0\n"
+    credentials_line = "          persist-credentials: false\n"
+    setup_input = "          python-version: ${{ matrix.python-version }}\n"
+    install_line = '        run: python -m pip install -e ".[dev]"\n'
+    test_line = "        run: python -m pytest -q -n auto\n"
+    another_commit = "e" * 40
+    rows = [
+        ("the pytest job removed", replace_once(real, "  pytest:" + body, ""), refusal["missing"]),
+        # A line without a key, such as a deeper line that starts with a dash, goes on the
+        # value of the line above it for the YAML reader, while the check of the run lines
+        # reads the first line of a command only. The shell then runs "-n auto - || true".
+        ("a line after the test line that goes on its command",
+         in_job(test_line, test_line + "          - || true\n"), refusal["lines"]),
+        ("a line after the install line that goes on its command",
+         in_job(install_line, install_line + "          - || true\n"), refusal["lines"]),
+        # Keys that can make a green job run less, anywhere in the job. They are judged
+        # before the job keys, so that continue-on-error on the job itself is refused for
+        # this reason and not as one more job key.
+        ("continue-on-error on the job",
+         in_job(runs_on, runs_on + "    continue-on-error: true\n"), refusal["forbidden"]),
+        ("timeout-minutes on the job",
+         in_job(runs_on, runs_on + "    timeout-minutes: 1\n"), refusal["forbidden"]),
+        ("a default shell for the whole job",
+         in_job(runs_on, runs_on + "    defaults:\n      run:\n        shell: bash\n"),
+         refusal["forbidden"]),
+        ("continue-on-error on the test step",
+         in_job(test_line, test_line + "        continue-on-error: true\n"), refusal["forbidden"]),
+        ("continue-on-error in another letter case on the test step",
+         in_job(test_line, test_line + "        Continue-On-Error: true\n"), refusal["forbidden"]),
+        ("timeout-minutes on the test step",
+         in_job(test_line, test_line + "        timeout-minutes: 1\n"), refusal["forbidden"]),
+        ("a shell that runs nothing on the test step",
+         in_job(test_line, test_line + '        shell: "true {0}"\n'), refusal["forbidden"]),
+        ("working-directory on the test step",
+         in_job(test_line, test_line + "        working-directory: docs\n"), refusal["forbidden"]),
+        # The keys of the job
+        ("an extra job key: permissions",
+         in_job(runs_on, runs_on + "    permissions: {contents: read}\n"), refusal["job keys"]),
+        ("the job condition removed", in_job(if_line, ""), refusal["job keys"]),
+        # needs and the job condition
+        ("needs without changes", in_job(needs_line, "    needs: [authz]\n"), refusal["needs"]),
+        ("another job condition", in_job(if_line, "    if: always()\n"), refusal["needs"]),
+        # strategy
+        ("fail-fast true", in_job(fail_fast_line, "      fail-fast: true\n"), refusal["strategy"]),
+        ("max-parallel under strategy",
+         in_job(fail_fast_line, fail_fast_line + "      max-parallel: 1\n"), refusal["strategy"]),
+        # The matrix against the matrix of the pull request job
+        ("the shard list 1 to 3",
+         in_job(SHARD_AXIS_LINE, "        shard: [1, 2, 3]\n"), refusal["matrix"]),
+        ("the shard list 1 to 5",
+         in_job(SHARD_AXIS_LINE, "        shard: [1, 2, 3, 4, 5]\n"), refusal["matrix"]),
+        ("the shard line removed", in_job(SHARD_AXIS_LINE, ""), refusal["matrix"]),
+        ("an exclude entry under matrix",
+         in_job(SHARD_AXIS_LINE, SHARD_AXIS_LINE + "        exclude:\n          - shard: 4\n"),
+         refusal["matrix"]),
+        ("another matrix axis",
+         in_job(SHARD_AXIS_LINE, SHARD_AXIS_LINE + "        os: [ubuntu-24.04]\n"), refusal["matrix"]),
+        ("one Python version removed",
+         in_job(versions_line, '        python-version: ["3.11", "3.12", "3.13"]\n'),
+         refusal["matrix"]),
+        # An empty matrix must not equal the matrix of the pull request job either.
+        ("a matrix without entries", in_job(versions_line + SHARD_AXIS_LINE, ""), refusal["matrix"]),
+        # The env against the env of the pull request job
+        ("the divisor 5",
+         in_job(SHARD_VARIABLE_LINE, '      PF_TEST_SHARD: "${{ matrix.shard }}/5"\n'), refusal["env"]),
+        ("PF_TEST_SHARD fixed to one part",
+         in_job(SHARD_VARIABLE_LINE, '      PF_TEST_SHARD: "1/4"\n'), refusal["env"]),
+        ("the PF_TEST_SHARD line removed", in_job(SHARD_VARIABLE_LINE, ""), refusal["env"]),
+        ("an extra env entry",
+         in_job(SHARD_VARIABLE_LINE, SHARD_VARIABLE_LINE + '      PF_EXTRA_ENTRY: "1"\n'),
+         refusal["env"]),
+        ("pytest options in the env",
+         in_job(SHARD_VARIABLE_LINE, SHARD_VARIABLE_LINE + '      PYTEST_ADDOPTS: "-k never_matches"\n'),
+         refusal["env"]),
+        ("PYTHONHASHSEED changed",
+         in_job('      PYTHONHASHSEED: "0"\n', '      PYTHONHASHSEED: "1"\n'), refusal["env"]),
+        ("an env without entries", in_job(env_lines, ""), refusal["env"]),
+        # The steps
+        ("a fifth step before the test line",
+         in_job(steps[3], "      - name: Show the environment\n        run: env\n" + steps[3]),
+         refusal["steps"]),
+        ("a fifth step after the test line",
+         in_job(test_line, test_line + "      - name: Report\n        run: echo done\n"),
+         refusal["steps"]),
+        ("the install step removed", in_job(steps[2], ""), refusal["steps"]),
+        ("the test step removed", in_job(steps[3], ""), refusal["steps"]),
+        ("the checkout and the Python setup swapped",
+         in_job(steps[0] + steps[1], steps[1] + steps[0]), refusal["steps"]),
+        ("another action in place of the Python setup",
+         in_job(setup_action, "actions/upload-artifact@" + another_commit), refusal["steps"]),
+        # The shape of the steps counts the actions and the commands of each step.
+        ("a second action in the inputs of the checkout step",
+         in_job(credentials_line, credentials_line + "          uses: actions/checkout@" + another_commit + "\n"),
+         refusal["steps"]),
+        ("a command in the Python setup step",
+         in_job(setup_input, setup_input + "        run: echo done\n"), refusal["steps"]),
+        # The actions against those of the pull request job, with no commit id pinned
+        ("the checkout at another commit",
+         in_job(checkout_action, checkout_action.split("@")[0] + "@" + another_commit),
+         refusal["actions"]),
+        ("the Python setup at another commit",
+         in_job(setup_action, setup_action.split("@")[0] + "@" + another_commit),
+         refusal["actions"]),
+        # The checkout
+        ("the ref changed to a fixed commit id",
+         in_job(ref_line, '          ref: "' + another_commit + '"\n'), refusal["checkout"]),
+        ("the ref line removed", in_job(ref_line, ""), refusal["checkout"]),
+        ("persist-credentials true",
+         in_job(credentials_line, "          persist-credentials: true\n"), refusal["checkout"]),
+        ("a shallow checkout", in_job(depth_line, "          fetch-depth: 1\n"), refusal["checkout"]),
+        ("an extra checkout input",
+         in_job(depth_line, depth_line + "          sparse-checkout: tests\n"), refusal["checkout"]),
+        # The Python setup
+        ("a fixed Python version",
+         in_job(setup_input, '          python-version: "3.11"\n'), refusal["python"]),
+        ("an extra Python setup input",
+         in_job(setup_input, setup_input + "          allow-prereleases: true\n"), refusal["python"]),
+        ("the Python version input removed",
+         in_job("        with:\n" + setup_input, ""), refusal["python"]),
+        # The run lines
+        ("-n auto changed to -n 2", in_job("-n auto", "-n 2"), refusal["runs"]),
+        ("the install line changed",
+         in_job('python -m pip install -e ".[dev]"', "python -m pip install -e ."), refusal["runs"]),
+        ("a deselect option",
+         in_job("python -m pytest -q -n auto",
+                "python -m pytest -q -n auto --deselect tests/test_parser.py"), refusal["runs"]),
+        ("the test line made to pass",
+         in_job("python -m pytest -q -n auto", "python -m pytest -q -n auto || true"), refusal["runs"]),
+        ("the install and test steps swapped",
+         in_job(steps[2] + steps[3], steps[3].rstrip("\n") + "\n" + steps[2] + "\n"), refusal["runs"]),
+        # No step has an env: the hole that a step env on the test step opens, in block form
+        # and in flow form, on the first step and on a later one.
+        ("an env with PF_TEST_SHARD on the test step",
+         in_job(test_line, test_line + '        env:\n          PF_TEST_SHARD: "1/4"\n'),
+         refusal["step env"]),
+        ("an env on the checkout step",
+         in_job(credentials_line,
+                credentials_line + '        env:\n          PYTEST_ADDOPTS: "-k never_matches"\n'),
+         refusal["step env"]),
+        ("a flow-style env on the install step",
+         in_job(install_line, install_line + '        env: {PYTEST_ADDOPTS: "-k never_matches"}\n'),
+         refusal["step env"]),
+        # No step has an if: the hole that an if on the test step opens, also as the first
+        # key of a step, next to its dash.
+        ("an if with matrix.shard != 4 on the test step",
+         in_job(test_line, test_line + "        if: matrix.shard != 4\n"), refusal["step if"]),
+        ("an if on the checkout step",
+         in_job(credentials_line, credentials_line + "        if: always()\n"), refusal["step if"]),
+        ("an if as the first key of the test step",
+         in_job(steps[3], "      - if: matrix.shard != 4\n        " + steps[3][len("      - "):]),
+         refusal["step if"]),
+    ]
+    assert len(set(refusal.values())) == len(refusal)
+    assert {message for _, _, message in rows} == set(refusal.values())
+
+    def refusal_of(workflow):
+        """The message that the rules refuse the workflow with, or None when they accept it."""
+        try:
+            check_workflows({**sources, path: workflow})
+        except ValueError as error:
+            return str(error)
+        except Exception as error:  # a crash fails its row too, and the row is named below
+            return f"{type(error).__name__}: {error}"
+        return None
+
+    problems = []
+    for label, mutant, message in rows:
+        refused_with = refusal_of(mutant)
+        if refused_with != message:
+            problems.append(
+                f"{label}: " + ("accepted" if refused_with is None else f"refused with {refused_with!r}")
+            )
+    assert not problems, "\n" + "\n".join(problems)
+
+
+def test_test_workflow_pytest_job_must_be_cut_like_the_pull_request_job():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    pr_path, push_path = ".github/workflows/gke-pr.yml", ".github/workflows/test.yml"
+    # The other direction of the comparison: the pull request workflow is the one that
+    # changes, so the push workflow has to differ from it, and not from a fixed text.
+    for label, pr_cut, push_cut in (
+        ("the pull request workflow in one part, the push workflow cut in four",
+         one_part_workflow, four_part_workflow),
+        ("the pull request workflow cut in four, the push workflow in one part",
+         four_part_workflow, one_part_workflow),
+    ):
+        mutant = {
+            **sources,
+            pr_path: pr_cut(sources[pr_path]), push_path: push_cut(sources[push_path]),
+        }
+        try:
+            check_workflows(mutant)
+        except ValueError as error:
+            assert str(error) == (
+                "test.yml pytest: the matrix differs from that of the pytest job of gke-pr.yml"
+            ), label
+        else:
+            pytest.fail(f"{label}: accepted")
 
 
 def test_workflow_lint_guard_cannot_be_removed_or_pointed_at_candidate():
@@ -2086,9 +2346,16 @@ def test_native_driver_pin_uses_complete_bytes_against_the_real_base_policy():
     sources = read_sources(root, workflow_paths(root))
     # The pinned policy below predates the four-part pytest job and accepts only the
     # one-part shape, which the current rules accept too. This test is about the driver
-    # pin, so both policies judge the same graphs, with the pytest job in one part.
+    # pin, so both policies judge the same graphs, with the pytest job in one part. The
+    # current rules hold the pytest job of the push workflow to the cut of the pull
+    # request workflow, so both workflows are given in one part.
     pr_workflow = ".github/workflows/gke-pr.yml"
-    sources = {**sources, pr_workflow: one_part_workflow(sources[pr_workflow])}
+    push_workflow = ".github/workflows/test.yml"
+    sources = {
+        **sources,
+        pr_workflow: one_part_workflow(sources[pr_workflow]),
+        push_workflow: one_part_workflow(sources[push_workflow]),
+    }
     old = bootstrap_fixture(sources, native=False)
     new = bootstrap_fixture(sources, native=True)
     installed_driver = old[NATIVE_DRIVER]
