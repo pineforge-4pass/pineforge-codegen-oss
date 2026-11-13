@@ -18,6 +18,7 @@ import textwrap
 POD_JOBS = {"workflow-lint", "package-files", "pytest", "differential"}
 TEST_POD_JOBS = {"workflow-lint", "package-files", "pytest"}
 POD_RUNNER = "ubuntu-24.04"
+PYTEST_SHARDS = 4
 BOTS = {"dependabot[bot]", "pineforge-app[bot]"}
 CHECKER = "python3 -I tests/test_gke_pr_admission.py"
 TRIGGER = """on:
@@ -694,7 +695,30 @@ def check_workflows(sources):
                 "PF_CI_LABELS": "'[\"ubuntu-24.04\"]'",
                 "PYTHONHASHSEED": '"0"',
             } if name in {"pytest", "differential"} else {})
-            require(mapping_at(body, "env", 4) == expected_env, f"{name}: pod environment differs")
+            if name == "pytest":
+                # Exactly two shapes. Today's: the matrix keys are python-version
+                # only and the environment has no PF_TEST_SHARD. The four-part one:
+                # the matrix keys are python-version and shard, the shard axis is
+                # [1, ..., PYTEST_SHARDS] and PF_TEST_SHARD is the matrix value over
+                # PYTEST_SHARDS. One constant gives both the list and the divisor, so
+                # they cannot drift apart. Matrix keys are compared exactly as they
+                # are written, so a key in another letter case (Exclude, or Shard
+                # beside shard) or another axis (os) makes a third shape, which is
+                # refused.
+                shard_axis = "[" + ", ".join(str(part) for part in range(1, PYTEST_SHARDS + 1)) + "]"
+                shard_env = '"${{ matrix.shard }}/' + str(PYTEST_SHARDS) + '"'
+                matrix = mapping_at(body, "matrix", 6)
+                pod_env = mapping_at(body, "env", 4)
+                require((set(matrix) == {"python-version"} and pod_env == expected_env)
+                        or (set(matrix) == {"python-version", "shard"}
+                            and matrix["shard"] == shard_axis
+                            and pod_env == {**expected_env, "PF_TEST_SHARD": shard_env}),
+                        f"{name}: pod environment differs: the matrix keys must be exactly "
+                        f"python-version, or exactly python-version and shard; matrix shard axis "
+                        f"and PF_TEST_SHARD must be absent together or be shard: {shard_axis} and "
+                        f"PF_TEST_SHARD: {shard_env}")
+            else:
+                require(mapping_at(body, "env", 4) == expected_env, f"{name}: pod environment differs")
             for step in step_blocks(body):
                 require(not step_env(step), f"{name}: step environment refused")
                 for depth, key, value in yaml_records(step):
@@ -1250,6 +1274,112 @@ def test_real_workflow_mutations():
         with pytest.raises(ValueError, match="target trigger outside admission"):
             check_workflows({**sources, ".github/workflows/extra.yml":
                              trigger + "\njobs:\n  hosted:\n    runs-on: ubuntu-24.04\n"})
+
+
+def replace_once(text, before, after):
+    """Replace a text that must occur exactly once, so no replacement is a silent no-op."""
+    assert text.count(before) == 1, before
+    return text.replace(before, after, 1)
+
+
+def four_part_workflow(original):
+    """The real workflow with its pytest job cut into four parts, by exact replacements."""
+    body = jobs(original)["pytest"]
+    cut = replace_once(
+        body, '        python-version: ["3.11", "3.12", "3.13", "3.14"]\n',
+        '        python-version: ["3.11", "3.12", "3.13", "3.14"]\n        shard: [1, 2, 3, 4]\n',
+    )
+    cut = replace_once(
+        cut, '      PYTHONHASHSEED: "0"\n',
+        '      PYTHONHASHSEED: "0"\n      PF_TEST_SHARD: "${{ matrix.shard }}/4"\n',
+    )
+    return replace_once(original, body, cut)
+
+
+def test_four_part_pytest_job_is_accepted():
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    path = ".github/workflows/gke-pr.yml"
+    four_part = four_part_workflow(sources[path])
+    assert four_part != sources[path]
+    check_workflows({**sources, path: four_part})
+
+
+def test_every_other_pytest_shard_shape_is_refused_with_one_message():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    path = ".github/workflows/gke-pr.yml"
+    four_part = four_part_workflow(sources[path])
+    axis, variable = "        shard: [1, 2, 3, 4]\n", '"${{ matrix.shard }}/4"'
+    messages = set()
+    for before, after in [
+        (axis, "        shard: [1, 2, 3]\n"),
+        (axis, "        shard: [1, 2, 3, 4, 5]\n"),
+        (variable, '"${{ matrix.shard }}/5"'),
+        (variable, '"${{ matrix.shard }}/3"'),
+        ("      PF_TEST_SHARD: " + variable + "\n", ""),
+        (axis, ""),
+        ("PF_TEST_SHARD:", "PF_TEST_PART:"),
+        (variable, '"1/4"'),
+        # A second axis that differs only by case counts as a second shard entry.
+        (axis, axis + "        Shard: [1, 1, 1, 1]\n"),
+    ]:
+        mutant = replace_once(four_part, before, after)
+        with pytest.raises(ValueError, match="matrix shard axis and PF_TEST_SHARD") as error:
+            check_workflows({**sources, path: mutant})
+        messages.add(str(error.value))
+    assert len(messages) == 1
+
+
+def test_differential_job_never_accepts_the_shard_variable():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    path = ".github/workflows/gke-pr.yml"
+    original = sources[path]
+    for workflow in (original, four_part_workflow(original)):
+        body = jobs(workflow)["differential"]
+        changed = replace_once(
+            body, '      PYTHONHASHSEED: "0"\n',
+            '      PYTHONHASHSEED: "0"\n      PF_TEST_SHARD: "${{ matrix.shard }}/4"\n',
+        )
+        with pytest.raises(ValueError, match="differential: pod environment differs"):
+            check_workflows({**sources, path: replace_once(workflow, body, changed)})
+
+
+def test_pytest_matrix_has_exactly_its_known_keys():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    path = ".github/workflows/gke-pr.yml"
+    original = sources[path]
+    four_part = four_part_workflow(original)
+    # The message that a wrong shard axis is already refused with: the refusals below
+    # must give that very message.
+    with pytest.raises(ValueError, match="matrix shard axis and PF_TEST_SHARD") as known:
+        check_workflows({**sources, path: replace_once(
+            four_part, "        shard: [1, 2, 3, 4]\n", "        shard: [1, 2, 3]\n")})
+    messages = set()
+    for workflow, last_key in (
+        (original, '        python-version: ["3.11", "3.12", "3.13", "3.14"]\n'),
+        (four_part, "        shard: [1, 2, 3, 4]\n"),
+    ):
+        body = jobs(workflow)["pytest"]
+        for added in (
+            # A capitalised Exclude is not one of the keys that the rule on matrix rows
+            # refuses, and another axis adds jobs: no key beyond the known ones is allowed.
+            '        Exclude:\n          - python-version: "3.14"\n',
+            "        os: [ubuntu-24.04, ubuntu-22.04]\n",
+        ):
+            mutant = replace_once(workflow, body, replace_once(body, last_key, last_key + added))
+            with pytest.raises(ValueError, match="matrix keys must be exactly python-version") as error:
+                check_workflows({**sources, path: mutant})
+            messages.add(str(error.value))
+    assert messages == {str(known.value)}
 
 
 def test_native_admission_pins_the_only_call_callee_driver_and_result_dependency():
