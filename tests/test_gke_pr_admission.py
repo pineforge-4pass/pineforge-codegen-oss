@@ -1344,6 +1344,38 @@ def test_differential_job_never_accepts_the_shard_variable():
             check_workflows({**sources, path: replace_once(workflow, body, changed)})
 
 
+def test_pytest_matrix_has_exactly_its_known_keys():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    path = ".github/workflows/gke-pr.yml"
+    original = sources[path]
+    four_part = four_part_workflow(original)
+    # The message that a wrong shard axis is already refused with: the refusals below
+    # must give that very message.
+    with pytest.raises(ValueError, match="matrix shard axis and PF_TEST_SHARD") as known:
+        check_workflows({**sources, path: replace_once(
+            four_part, "        shard: [1, 2, 3, 4]\n", "        shard: [1, 2, 3]\n")})
+    messages = set()
+    for workflow, last_key in (
+        (original, '        python-version: ["3.11", "3.12", "3.13", "3.14"]\n'),
+        (four_part, "        shard: [1, 2, 3, 4]\n"),
+    ):
+        body = jobs(workflow)["pytest"]
+        for added in (
+            # A capitalised Exclude is not one of the keys that the rule on matrix rows
+            # refuses, and another axis adds jobs: no key beyond the known ones is allowed.
+            '        Exclude:\n          - python-version: "3.14"\n',
+            "        os: [ubuntu-24.04, ubuntu-22.04]\n",
+        ):
+            mutant = replace_once(workflow, body, replace_once(body, last_key, last_key + added))
+            with pytest.raises(ValueError, match="matrix keys must be exactly python-version") as error:
+                check_workflows({**sources, path: mutant})
+            messages.add(str(error.value))
+    assert messages == {str(known.value)}
+
+
 def test_native_admission_pins_the_only_call_callee_driver_and_result_dependency():
     import pytest
 

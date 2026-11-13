@@ -227,3 +227,129 @@ def test_hook_selects_the_same_part_under_xdist(tmp_path):
     assert plain.returncode == 0, plain.stdout + plain.stderr
     assert parallel.returncode == 0, parallel.stdout + parallel.stderr
     assert count_of(parallel.stdout, "passed") == count_of(plain.stdout, "passed") == expected
+
+
+# How the selector reaches the runs that a test starts and the xdist workers.
+
+REPORT_PASSED = ("--color=no", "-rp")
+SPAWNER_ID = "test_spawn.py::test_child_run_collects_the_whole_suite"
+# A test module that starts a pytest run of its own, as a test of this suite may do:
+# the child gets the environment of this process unchanged and only collects the
+# 40-test module next to it. The node ids the child collected, one per line, go to the
+# file that PF_CHILD_IDS names; whether PF_TEST_SHARD was in the environment of this
+# process goes to the file that PF_CHILD_ENVIRONMENT names.
+SPAWNER_SOURCE = '''\
+import os
+import subprocess
+import sys
+
+
+def test_child_run_collects_the_whole_suite():
+    with open(os.environ["PF_CHILD_ENVIRONMENT"], "w", encoding="utf-8") as report:
+        print("present" if "PF_TEST_SHARD" in os.environ else "absent", file=report)
+    child = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--collect-only",
+         "test_generated.py"],
+        cwd=os.path.dirname(os.path.abspath(__file__)), env=dict(os.environ),
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300,
+    )
+    assert child.returncode == 0, child.stdout + child.stderr
+    with open(os.environ["PF_CHILD_IDS"], "w", encoding="utf-8") as report:
+        for line in child.stdout.splitlines():
+            if line.startswith("test_generated.py::"):
+                print(line, file=report)
+'''
+# A test module that writes the file that PF_IMPORT_MARKER names when it is imported.
+MARKER_SOURCE = '''\
+import os
+from pathlib import Path
+
+Path(os.environ["PF_IMPORT_MARKER"]).write_text("imported", encoding="utf-8")
+
+
+def test_only():
+    assert True
+'''
+
+
+def passed_ids(output):
+    """The node ids that a run given REPORT_PASSED lists as passed, sorted."""
+    return sorted(line[len("PASSED "):] for line in output.splitlines()
+                  if line.startswith("PASSED "))
+
+
+def test_a_child_run_started_by_a_test_keeps_the_whole_suite(tmp_path, monkeypatch):
+    # Catches a selector that leaves PF_TEST_SHARD in the environment: a pytest run that
+    # a test starts would collect one part of the suite instead of all of it.
+    selector = load_selector()
+    write_suite(tmp_path, "test_generated.py", generated_module())
+    (tmp_path / "test_spawn.py").write_text(SPAWNER_SOURCE, encoding="utf-8")
+    everything = generated_ids()
+    # The part that holds the test which starts the child run, so that this test runs.
+    index = selector.part_of(SPAWNER_ID, 4)
+    expected = sorted(nodeid for nodeid in everything + [SPAWNER_ID]
+                      if selector.part_of(nodeid, 4) == index)
+    for label, mode in (("plain", PLAIN), ("xdist", ("-n", "2"))):
+        ids_file = tmp_path / (label + "-child-ids.txt")
+        environment_file = tmp_path / (label + "-child-environment.txt")
+        monkeypatch.setenv("PF_CHILD_IDS", str(ids_file))
+        monkeypatch.setenv("PF_CHILD_ENVIRONMENT", str(environment_file))
+        result = run_pytest(tmp_path, str(index) + "/4", *mode, *REPORT_PASSED,
+                            "test_spawn.py", "test_generated.py")
+        # The run itself is cut to its part, and the test that starts the child is in it.
+        assert result.returncode == 0, label + result.stdout + result.stderr
+        assert passed_ids(result.stdout) == expected, label
+        # The child run got the environment of its parent unchanged and saw every test,
+        assert sorted(ids_file.read_text(encoding="utf-8").splitlines()) == sorted(everything), label
+        # because PF_TEST_SHARD was no longer in that environment.
+        assert environment_file.read_text(encoding="utf-8").strip() == "absent", label
+
+
+def test_hook_refuses_a_malformed_value_before_any_test_module_is_imported(tmp_path, monkeypatch):
+    # Catches a refusal that comes after collection: the test module is imported by then.
+    selector = load_selector()
+    write_suite(tmp_path, "test_marker.py", MARKER_SOURCE)
+    marker = tmp_path / "imported.marker"
+    monkeypatch.setenv("PF_IMPORT_MARKER", str(marker))
+    holder = selector.part_of("test_marker.py::test_only", 4)
+    for mode in (PLAIN, ("-n", "2")):
+        marker.unlink(missing_ok=True)
+        refused = run_pytest(tmp_path, "5/4", *mode)
+        assert refused.returncode == pytest.ExitCode.USAGE_ERROR, refused.stdout + refused.stderr
+        assert not marker.exists(), mode
+        # The same module is imported when the value is accepted, so the file is a
+        # working detector of collection.
+        accepted = run_pytest(tmp_path, str(holder) + "/4", *mode)
+        assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+        assert marker.exists(), mode
+
+
+def test_hook_does_not_report_an_empty_part_as_a_success_under_xdist(tmp_path):
+    # Catches an empty part that exits with 0 under xdist: a part that ran nothing would
+    # then look like a part that passed.
+    selector = load_selector()
+    write_suite(tmp_path, "test_single.py", "def test_only():\n    assert True\n")
+    holder = selector.part_of("test_single.py::test_only", 2)
+    empty = 3 - holder
+    held = run_pytest(tmp_path, str(holder) + "/2", "-n", "2")
+    assert held.returncode == 0 and count_of(held.stdout, "passed") == 1, held.stdout + held.stderr
+    result = run_pytest(tmp_path, str(empty) + "/2", "-n", "2")
+    # Only "not a success" is pinned here, not the exact code xdist gives for no tests.
+    assert result.returncode != 0, result.stdout + result.stderr
+
+
+def test_xdist_workers_run_exactly_the_part_the_controller_was_given(tmp_path):
+    # Catches workers that do not cut the suite as their controller was told to: a test
+    # outside the part would be reported as passed, or a test of the part would be missing.
+    selector = load_selector()
+    write_suite(tmp_path, "test_generated.py", generated_module())
+    everything = generated_ids()
+    union = []
+    for index in range(1, 5):
+        expected = sorted(nodeid for nodeid in everything if selector.part_of(nodeid, 4) == index)
+        result = run_pytest(tmp_path, str(index) + "/4", "-n", "2", *REPORT_PASSED)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert passed_ids(result.stdout) == expected
+        assert count_of(result.stdout, "passed") == len(expected)
+        union += expected
+    assert sorted(union) == sorted(everything)
