@@ -81,8 +81,8 @@ def test_nested_no_repaint_helper_reads_each_global():
         'lookahead = barmerge.lookahead_on)\n'
         'reso(_x, _use, _r) => _use ? nr(syminfo.tickerid, _r, _x) : _x\n'
         'x = reso(fast, true, "60") - reso(slow, true, "60")\n') + TRADE)
-    assert _registrations(cpp) == ['0, "60", input_tf_, true, false',
-                                   '1, "60", input_tf_, true, false']
+    assert _registrations(cpp) == ['0, "60", input_tf_, true, false, false, true',
+                                   '1, "60", input_tf_, true, false, false, true']
     evaluators = _evaluators(cpp)
     assert "_sec0__ta_sma_" in evaluators[0] and "_sec1__ta_sma_" in evaluators[1]
     assert not any("_e[1]" in e for e in evaluators)

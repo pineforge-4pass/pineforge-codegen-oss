@@ -87,6 +87,7 @@ from ..external_requests import (
 )
 from ..external_requests import _nodes as walk_request_nodes
 from ..limits import iter_ast_nodes, syntax_children
+from .constant_fold import fold_constant_expression
 from .helpers import (
     _CPP_COMMENT_OR_LITERAL as _SECURITY_CPP_LITERALS,
     na_preserving_int_cast, unary_sign_cpp,
@@ -1153,6 +1154,37 @@ class SecurityEmitter:
         if isinstance(value, MemberAccess):
             return "true" if value.member == "lookahead_on" else "false"
         return f"static_cast<bool>({self._security_tf_runtime_expr(value)})"
+
+    def _security_historical_projection_arg(self, info: dict, tf_expr: str) -> str:
+        """Opt an ordinary chart registration into historical HTF projection.
+
+        The host checks the resolved timeframe against the chart at run time.
+        Payload offsets and their requested-bar history stay in the evaluator.
+        """
+        if (info.get("gaps_on") or info.get("heikinashi")
+                or tf_expr in ("input_tf_", "script_tf_")):
+            return ""
+        value = info.get("lookahead_value")
+        if value is None:
+            return ", false, true" if info["lookahead_on"] else ""
+        pending = [value]
+        seen = set()
+        while pending:
+            value = pending.pop()
+            if id(value) in seen:
+                continue
+            seen.add(id(value))
+            if self._budget is not None:
+                self._budget.check(value.loc, Phase.CODEGEN)
+            if isinstance(value, Ternary):
+                condition, proven = fold_constant_expression(value.condition, {}, {})
+                if proven and type(condition) is bool:
+                    pending.append(value.true_val if condition else value.false_val)
+                else:
+                    pending.extend((value.true_val, value.false_val))
+            elif isinstance(value, MemberAccess) and value.member == "lookahead_on":
+                return ", false, true"
+        return ""
 
     def _security_tf_unresolved(self, tf_node, what: str) -> None:
         """Refuse a request.security timeframe registration cannot compute."""

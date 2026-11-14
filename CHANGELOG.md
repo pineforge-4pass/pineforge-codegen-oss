@@ -85,6 +85,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   replacement evaluations. Constant and input-stable lengths keep the existing
   fixed-length SMA implementation. Regenerate C++ and relink with an engine
   release that includes the series SMA primitive.
+- Eligible chart-symbol `request.security` registrations with `lookahead_on`
+  and `gaps_off` now explicitly request historical higher-timeframe projection.
+  Affected generated C++ requires the matching engine headers and library with
+  the seven-argument same-symbol registration overload; regenerate and relink.
 
 - A zone name the engine rejects now makes calendar-form `timestamp()` stop the
   run at its first evaluation, instead of silently calculating a UTC value.

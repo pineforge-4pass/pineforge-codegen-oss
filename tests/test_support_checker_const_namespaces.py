@@ -134,7 +134,7 @@ def test_request_security_lookahead_on_now_supported():
         "lookahead=barmerge.lookahead_on)\n"
     )
     out = transpile(src)
-    assert "input_tf_, true, false)" in out
+    assert "input_tf_, true, false, false, true)" in out
 
 
 def test_request_security_bad_gaps_still_rejected():

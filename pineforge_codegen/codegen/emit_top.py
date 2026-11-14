@@ -1526,9 +1526,8 @@ class TopLevelEmitter:
                     la = info.get("lookahead_expr") or (
                         "true" if info["lookahead_on"] else "false")
                     go = "true" if info.get("gaps_on") else "false"
-                    # Heikin-Ashi same-symbol read: emit the 6th arg only when set
-                    # so every non-HA strategy's generated code stays byte-identical
-                    # (the engine param defaults to false).
+                    # Preserve the explicit Heikin-Ashi option and omit its
+                    # default except when a later registration option needs it.
                     ha_arg = ", true" if info.get("heikinashi") else ""
                     sec_id = info["sec_id"]
                     # The runtime registration function is named in tables.py
@@ -1544,10 +1543,11 @@ class TopLevelEmitter:
                     elif info.get("foreign"):
                         self._emit_foreign_security_registration(info, tf_expr, la, go, lines)
                     else:
+                        projection_arg = self._security_historical_projection_arg(info, tf_expr)
                         lines.append(
                             f"        {RUNTIME_REGISTER_SECURITY_EVAL_FN}"
                             f"({sec_id}, {tf_expr}, "
-                            f"input_tf_, {la}, {go}{ha_arg});")
+                            f"input_tf_, {la}, {go}{ha_arg}{projection_arg});")
             lines.append("    }")
 
     def _emit_foreign_security_lookups(self, lines: list[str]) -> None:
@@ -1629,9 +1629,11 @@ class TopLevelEmitter:
             ignore = f"static_cast<bool>({self._security_tf_runtime_expr(ignore_node)})"
         # A footprint is read from a feed's column, which the chart's bars do
         # not carry: its site reads a feed even for the chart's own symbol.
+        projection_arg = "" if column else self._security_historical_projection_arg(info, tf_expr)
         chart = [] if column else [
             "            if (_pf_symbol_is_chart(_pf_symbol)) {",
-            f"                {RUNTIME_REGISTER_SECURITY_EVAL_FN}({sec_id}, {tf_expr}, input_tf_, {la}, {go});",
+            f"                {RUNTIME_REGISTER_SECURITY_EVAL_FN}({sec_id}, {tf_expr}, "
+            f"input_tf_, {la}, {go}{projection_arg});",
             f"                _pf_sec_missing_{sec_id} = false;",
         ]
         feed = f"if (_pf_symbol_data_installed(_pf_symbol, {tf_expr}{column})) {{"

@@ -69,8 +69,8 @@ def test_nested_helper_inputs_register_their_getters():
         'h(tf) => g(tf)\n'
         'a = h(tfA)\nb = h(tfB)\n') + TAIL)
     assert _registrations(cpp) == [
-        '0, get_input_string("A", std::string("60")), input_tf_, true, false',
-        '1, get_input_string("B", std::string("240")), input_tf_, true, false',
+        '0, get_input_string("A", std::string("60")), input_tf_, true, false, false, true',
+        '1, get_input_string("B", std::string("240")), input_tf_, true, false, false, true',
     ]
     compile_cpp(cpp, label="nested-inputs")
 
@@ -351,7 +351,7 @@ def test_lookahead_aliases_register_their_value(selection):
     if "useLookahead" in selection:
         assert 'get_input_bool("Lookahead", true)' in registration
     else:
-        assert registration == '0, "D", input_tf_, true, false'
+        assert registration == '0, "D", input_tf_, true, false, false, true'
     compile_cpp(cpp, label="lookahead alias registration")
 
 
