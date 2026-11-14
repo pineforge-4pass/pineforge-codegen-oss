@@ -636,15 +636,19 @@ class TypeHelper:
             # duplicate/unknown keyword forms do not acquire a type by
             # accident.
             if (ns == "array"
-                    and func in ("copy", "slice", "get", "first", "last",
+                    and func in ("copy", "slice", "sort_indices", "get", "first", "last",
                                  "pop", "shift", "remove")):
                 receiver = None
                 if func == "copy":
                     receiver = self._direct_namespace_array_copy_source(value)
                 elif value.args:
                     receiver = value.args[0]
+                elif func == "sort_indices":
+                    receiver = value.kwargs.get("id")
                 arg_spec = self._type_spec_from_expr(receiver)
                 if arg_spec is not None and arg_spec.kind == "array":
+                    if func == "sort_indices":
+                        return TypeSpec.array(TypeSpec.primitive("int"))
                     if func in ("copy", "slice"):
                         return arg_spec
                     return arg_spec.element
@@ -709,6 +713,8 @@ class TypeHelper:
             if isinstance(cal, MemberAccess):
                 recv_spec = self._type_spec_from_expr(cal.object)
                 if recv_spec is not None and recv_spec.kind == "array":
+                    if func == "sort_indices":
+                        return TypeSpec.array(TypeSpec.primitive("int"))
                     if func in ("get", "first", "last", "pop", "shift", "remove"):
                         return recv_spec.element
                     if func in ("copy", "slice"):

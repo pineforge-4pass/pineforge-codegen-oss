@@ -1039,6 +1039,35 @@ V5_ARRAY_INDEX_METHODS = {
 }
 
 
+def _array_sort_indices(a: str, args: list[str]) -> str:
+    """Return integer indices without changing the source, with numeric NA last
+    in ascending order and first in descending order.
+
+    Bind the order before taking any size/iterators, even for an empty source.
+    The shared receiver wrapper establishes an expression receiver first.
+    Strings retain ordinary lexical ordering, including the empty string.
+    """
+    order = args[0] if args else 'std::string("ascending")'
+    return (
+        f"[&](){{ const bool _pf_sort_descending=(({order})==\"descending\"); "
+        f"using _pf_sort_element=typename std::decay_t<decltype({a})>::value_type; "
+        f"std::vector<int> _pf_sort_indices({a}.size()); "
+        "std::iota(_pf_sort_indices.begin(),_pf_sort_indices.end(),0); "
+        "std::stable_sort(_pf_sort_indices.begin(),_pf_sort_indices.end(),"
+        "[&](int _pf_sort_i,int _pf_sort_j){ "
+        f"const _pf_sort_element _pf_sort_left={a}[_pf_sort_i]; "
+        f"const _pf_sort_element _pf_sort_right={a}[_pf_sort_j]; "
+        "if constexpr(std::is_arithmetic_v<_pf_sort_element>){ "
+        "const bool _pf_sort_left_na=is_na(_pf_sort_left); "
+        "const bool _pf_sort_right_na=is_na(_pf_sort_right); "
+        "if(_pf_sort_left_na||_pf_sort_right_na) "
+        "return _pf_sort_descending ? _pf_sort_left_na&&!_pf_sort_right_na "
+        ": !_pf_sort_left_na&&_pf_sort_right_na; } "
+        "return _pf_sort_descending ? _pf_sort_right<_pf_sort_left "
+        ": _pf_sort_left<_pf_sort_right; }); return _pf_sort_indices; }()"
+    )
+
+
 # Methods called as ``array.method(arr, ...)`` or ``arr.method(...)``.
 ARRAY_METHODS = {
     "get":       _checked_array_get,
@@ -1101,7 +1130,7 @@ ARRAY_METHODS = {
     "binary_search": lambda a, args: f"[&](){{ auto __pf_it=std::lower_bound({a}.begin(),{a}.end(),{args[0]}); return (__pf_it!={a}.end()&&*__pf_it=={args[0]})?(double)(__pf_it-{a}.begin()):-1.0; }}()",
     "binary_search_leftmost": lambda a, args: f"[&](){{ auto __pf_it=std::lower_bound({a}.begin(),{a}.end(),{args[0]}); return (__pf_it!={a}.end()&&*__pf_it=={args[0]})?(double)(__pf_it-{a}.begin()):(double)(__pf_it-{a}.begin()-1); }}()",
     "binary_search_rightmost": lambda a, args: f"[&](){{ auto __pf_it=std::upper_bound({a}.begin(),{a}.end(),{args[0]}); return (__pf_it!={a}.begin()&&*(__pf_it-1)=={args[0]})?(double)(__pf_it-{a}.begin()-1):(double)(__pf_it-{a}.begin()); }}()",
-    "sort_indices": lambda a, args: f"[&](){{ std::vector<double> __pf_idx({a}.size()); std::iota(__pf_idx.begin(),__pf_idx.end(),0); std::sort(__pf_idx.begin(),__pf_idx.end(),[&](int __pf_i,int __pf_j){{return {a}[__pf_i]<{a}[__pf_j];}}); return __pf_idx; }}()",
+    "sort_indices": _array_sort_indices,
 }
 
 # Closed coverage for stable primitive roots. Unknown operations must retain
@@ -1183,6 +1212,7 @@ CHECKED_ARRAY_METHOD_KWARGS: dict[str, list[str]] = {
     "pop": [],
     "shift": [],
     "sort": ["order"],
+    "sort_indices": ["order"],
     "indexof": ["value"],
     "unshift": ["value"],
 }
