@@ -1,0 +1,186 @@
+//@version=6
+strategy("Empty timeframe arguments", currency = currency.NONE)
+frameInput = input.timeframe("", "Frame input")
+frameString = input.string("", "String input")
+frameVariable = frameString
+_pf_timeframe_arg = frameString
+pf_safe__pf_timeframe_arg = "240"
+plainVariable = ""
+var string persistentFrame = ""
+emptyFrame() => ""
+returnedFrame(string frameArg) => frameArg
+secondsPos(string frameArg) => timeframe.in_seconds(frameArg)
+secondsNamed(string frameArg) => timeframe.in_seconds(timeframe = frameArg)
+changePos(string frameArg) => timeframe.change(frameArg)
+changeNamed(string frameArg) => timeframe.change(timeframe = frameArg)
+secondsCapturedPos(string _pf_timeframe_arg) => timeframe.in_seconds(_pf_timeframe_arg)
+secondsCapturedNamed(string _pf_timeframe_arg) => timeframe.in_seconds(timeframe = _pf_timeframe_arg)
+changeCapturedPos(string _pf_timeframe_arg) => timeframe.change(_pf_timeframe_arg)
+changeCapturedNamed(string _pf_timeframe_arg) => timeframe.change(timeframe = _pf_timeframe_arg)
+secondsStatefulPos(string frameArg) =>
+    var string savedFrame = frameArg
+    timeframe.in_seconds(savedFrame)
+secondsStatefulNamed(string frameArg) =>
+    var string savedFrame = frameArg
+    timeframe.in_seconds(timeframe = savedFrame)
+changeStatefulPos(string frameArg) =>
+    var string savedFrame = frameArg
+    timeframe.change(savedFrame)
+changeStatefulNamed(string frameArg) =>
+    var string savedFrame = frameArg
+    timeframe.change(timeframe = savedFrame)
+countedFrame(array<int> counter, string frameArg) =>
+    array.set(counter, 0, array.get(counter, 0) + 1)
+    frameArg
+S_literal_pos = timeframe.in_seconds("")
+S_literal_named = timeframe.in_seconds(timeframe = "")
+S_input_pos = timeframe.in_seconds(frameInput)
+S_input_named = timeframe.in_seconds(timeframe = frameInput)
+S_string_input_pos = timeframe.in_seconds(frameString)
+S_string_input_named = timeframe.in_seconds(timeframe = frameString)
+S_variable_pos = timeframe.in_seconds(frameVariable)
+S_variable_named = timeframe.in_seconds(timeframe = frameVariable)
+S_temporary_name_pos = timeframe.in_seconds(_pf_timeframe_arg)
+S_temporary_name_named = timeframe.in_seconds(timeframe = _pf_timeframe_arg)
+S_parameter_name_pos = secondsCapturedPos(frameString)
+S_parameter_name_named = secondsCapturedNamed(frameString)
+S_occupied_escape_pos = timeframe.in_seconds(pf_safe__pf_timeframe_arg)
+S_occupied_escape_named = timeframe.in_seconds(timeframe = pf_safe__pf_timeframe_arg)
+S_plain_variable_pos = timeframe.in_seconds(plainVariable)
+S_plain_variable_named = timeframe.in_seconds(timeframe = plainVariable)
+S_persistent_pos = timeframe.in_seconds(persistentFrame)
+S_persistent_named = timeframe.in_seconds(timeframe = persistentFrame)
+S_return_pos = timeframe.in_seconds(emptyFrame())
+S_return_named = timeframe.in_seconds(timeframe = emptyFrame())
+S_return_input_pos = timeframe.in_seconds(returnedFrame(frameInput))
+S_return_input_named = timeframe.in_seconds(timeframe = returnedFrame(frameInput))
+S_period_pos = timeframe.in_seconds(timeframe.period)
+S_period_named = timeframe.in_seconds(timeframe = timeframe.period)
+S_explicit_pos = timeframe.in_seconds("240")
+S_explicit_named = timeframe.in_seconds(timeframe = "240")
+S_helper_empty_pos = secondsPos("")
+S_helper_explicit_pos = secondsPos("240")
+S_helper_empty_named = secondsNamed("")
+S_helper_explicit_named = secondsNamed("240")
+S_stateful_empty_pos = secondsStatefulPos("")
+S_stateful_explicit_pos = secondsStatefulPos("240")
+S_stateful_empty_named = secondsStatefulNamed("")
+S_stateful_explicit_named = secondsStatefulNamed("240")
+S_omitted = timeframe.in_seconds()
+C_literal_pos = timeframe.change("") ? 1 : 0
+C_literal_named = timeframe.change(timeframe = "") ? 1 : 0
+C_input_pos = timeframe.change(frameInput) ? 1 : 0
+C_input_named = timeframe.change(timeframe = frameInput) ? 1 : 0
+C_string_input_pos = timeframe.change(frameString) ? 1 : 0
+C_string_input_named = timeframe.change(timeframe = frameString) ? 1 : 0
+C_variable_pos = timeframe.change(frameVariable) ? 1 : 0
+C_variable_named = timeframe.change(timeframe = frameVariable) ? 1 : 0
+C_temporary_name_pos = timeframe.change(_pf_timeframe_arg) ? 1 : 0
+C_temporary_name_named = timeframe.change(timeframe = _pf_timeframe_arg) ? 1 : 0
+C_parameter_name_pos = changeCapturedPos(frameString) ? 1 : 0
+C_parameter_name_named = changeCapturedNamed(frameString) ? 1 : 0
+C_occupied_escape_pos = timeframe.change(pf_safe__pf_timeframe_arg) ? 1 : 0
+C_occupied_escape_named = timeframe.change(timeframe = pf_safe__pf_timeframe_arg) ? 1 : 0
+C_plain_variable_pos = timeframe.change(plainVariable) ? 1 : 0
+C_plain_variable_named = timeframe.change(timeframe = plainVariable) ? 1 : 0
+C_persistent_pos = timeframe.change(persistentFrame) ? 1 : 0
+C_persistent_named = timeframe.change(timeframe = persistentFrame) ? 1 : 0
+C_return_pos = timeframe.change(emptyFrame()) ? 1 : 0
+C_return_named = timeframe.change(timeframe = emptyFrame()) ? 1 : 0
+C_return_input_pos = timeframe.change(returnedFrame(frameInput)) ? 1 : 0
+C_return_input_named = timeframe.change(timeframe = returnedFrame(frameInput)) ? 1 : 0
+C_period_pos = timeframe.change(timeframe.period) ? 1 : 0
+C_period_named = timeframe.change(timeframe = timeframe.period) ? 1 : 0
+C_explicit_pos = timeframe.change("240") ? 1 : 0
+C_explicit_named = timeframe.change(timeframe = "240") ? 1 : 0
+C_helper_empty_pos = changePos("") ? 1 : 0
+C_helper_explicit_pos = changePos("240") ? 1 : 0
+C_helper_empty_named = changeNamed("") ? 1 : 0
+C_helper_explicit_named = changeNamed("240") ? 1 : 0
+C_stateful_empty_pos = changeStatefulPos("") ? 1 : 0
+C_stateful_explicit_pos = changeStatefulPos("240") ? 1 : 0
+C_stateful_empty_named = changeStatefulNamed("") ? 1 : 0
+C_stateful_explicit_named = changeStatefulNamed("240") ? 1 : 0
+C_omitted = timeframe.change() ? 1 : 0
+dynamicFrame = bar_index % 2 == 0 ? "" : "240"
+C_dynamic_pos = timeframe.change(dynamicFrame) ? 1 : 0
+C_dynamic_named = timeframe.change(timeframe = dynamicFrame) ? 1 : 0
+var calls = array.new_int(1, 0)
+C_once_pos = timeframe.change(countedFrame(calls, frameInput)) ? 1 : 0
+C_once_named = timeframe.change(timeframe = countedFrame(calls, frameInput)) ? 1 : 0
+callCount = array.get(calls, 0)
+// @pf-trace S_literal_pos=S_literal_pos
+// @pf-trace S_literal_named=S_literal_named
+// @pf-trace S_input_pos=S_input_pos
+// @pf-trace S_input_named=S_input_named
+// @pf-trace S_string_input_pos=S_string_input_pos
+// @pf-trace S_string_input_named=S_string_input_named
+// @pf-trace S_variable_pos=S_variable_pos
+// @pf-trace S_variable_named=S_variable_named
+// @pf-trace S_temporary_name_pos=S_temporary_name_pos
+// @pf-trace S_temporary_name_named=S_temporary_name_named
+// @pf-trace S_parameter_name_pos=S_parameter_name_pos
+// @pf-trace S_parameter_name_named=S_parameter_name_named
+// @pf-trace S_occupied_escape_pos=S_occupied_escape_pos
+// @pf-trace S_occupied_escape_named=S_occupied_escape_named
+// @pf-trace S_plain_variable_pos=S_plain_variable_pos
+// @pf-trace S_plain_variable_named=S_plain_variable_named
+// @pf-trace S_persistent_pos=S_persistent_pos
+// @pf-trace S_persistent_named=S_persistent_named
+// @pf-trace S_return_pos=S_return_pos
+// @pf-trace S_return_named=S_return_named
+// @pf-trace S_return_input_pos=S_return_input_pos
+// @pf-trace S_return_input_named=S_return_input_named
+// @pf-trace S_period_pos=S_period_pos
+// @pf-trace S_period_named=S_period_named
+// @pf-trace S_explicit_pos=S_explicit_pos
+// @pf-trace S_explicit_named=S_explicit_named
+// @pf-trace S_helper_empty_pos=S_helper_empty_pos
+// @pf-trace S_helper_explicit_pos=S_helper_explicit_pos
+// @pf-trace S_helper_empty_named=S_helper_empty_named
+// @pf-trace S_helper_explicit_named=S_helper_explicit_named
+// @pf-trace S_stateful_empty_pos=S_stateful_empty_pos
+// @pf-trace S_stateful_explicit_pos=S_stateful_explicit_pos
+// @pf-trace S_stateful_empty_named=S_stateful_empty_named
+// @pf-trace S_stateful_explicit_named=S_stateful_explicit_named
+// @pf-trace S_omitted=S_omitted
+// @pf-trace C_literal_pos=C_literal_pos
+// @pf-trace C_literal_named=C_literal_named
+// @pf-trace C_input_pos=C_input_pos
+// @pf-trace C_input_named=C_input_named
+// @pf-trace C_string_input_pos=C_string_input_pos
+// @pf-trace C_string_input_named=C_string_input_named
+// @pf-trace C_variable_pos=C_variable_pos
+// @pf-trace C_variable_named=C_variable_named
+// @pf-trace C_temporary_name_pos=C_temporary_name_pos
+// @pf-trace C_temporary_name_named=C_temporary_name_named
+// @pf-trace C_parameter_name_pos=C_parameter_name_pos
+// @pf-trace C_parameter_name_named=C_parameter_name_named
+// @pf-trace C_occupied_escape_pos=C_occupied_escape_pos
+// @pf-trace C_occupied_escape_named=C_occupied_escape_named
+// @pf-trace C_plain_variable_pos=C_plain_variable_pos
+// @pf-trace C_plain_variable_named=C_plain_variable_named
+// @pf-trace C_persistent_pos=C_persistent_pos
+// @pf-trace C_persistent_named=C_persistent_named
+// @pf-trace C_return_pos=C_return_pos
+// @pf-trace C_return_named=C_return_named
+// @pf-trace C_return_input_pos=C_return_input_pos
+// @pf-trace C_return_input_named=C_return_input_named
+// @pf-trace C_period_pos=C_period_pos
+// @pf-trace C_period_named=C_period_named
+// @pf-trace C_explicit_pos=C_explicit_pos
+// @pf-trace C_explicit_named=C_explicit_named
+// @pf-trace C_helper_empty_pos=C_helper_empty_pos
+// @pf-trace C_helper_explicit_pos=C_helper_explicit_pos
+// @pf-trace C_helper_empty_named=C_helper_empty_named
+// @pf-trace C_helper_explicit_named=C_helper_explicit_named
+// @pf-trace C_stateful_empty_pos=C_stateful_empty_pos
+// @pf-trace C_stateful_explicit_pos=C_stateful_explicit_pos
+// @pf-trace C_stateful_empty_named=C_stateful_empty_named
+// @pf-trace C_stateful_explicit_named=C_stateful_explicit_named
+// @pf-trace C_omitted=C_omitted
+// @pf-trace C_dynamic_pos=C_dynamic_pos
+// @pf-trace C_dynamic_named=C_dynamic_named
+// @pf-trace C_once_pos=C_once_pos
+// @pf-trace C_once_named=C_once_named
+// @pf-trace callCount=callCount

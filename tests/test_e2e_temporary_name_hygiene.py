@@ -117,8 +117,14 @@ def test_every_temporary_the_emitter_declares_is_reserved():
     # Temporaries derived from emitted C++: every underscore-prefixed local
     # declared inside a generated lambda that is not a name of the script.
     names = set()
-    for name in TAPES:
-        source = (FIXTURES / f"{name}.pine").read_text()
+    sources = [(FIXTURES / f"{name}.pine").read_text() for name in TAPES]
+    sources.append(
+        HEAD + 'frameChoice = input.timeframe("")\n'
+        'secondsValue = timeframe.in_seconds(frameChoice)\n'
+        'changedValue = timeframe.change(timeframe = frameChoice)\n'
+        'plot(secondsValue)\nplot(changedValue ? 1 : 0)\n'
+    )
+    for source in sources:
         authored = {t.value for t in Lexer(source).tokenize() if t.type.name == "IDENT"}
         for line in transpile(source).splitlines():
             if "[&]" in line:

@@ -3211,22 +3211,35 @@ class CallVisitor:
                 return f'{log_funcs[func_name]}({self._visit_expr(message)})'
             return '"" /* unsupported log */'
 
-        # timeframe.* calls (e.g., timeframe.change) — not supported in single-TF backtest
+        # An empty timeframe argument denotes the chart period, whether it
+        # comes from a literal, an input or a user call. Bind by parameter
+        # name and resolve the evaluated string, not the argument's AST form.
         if namespace == "timeframe":
-            if func_name == "change":
-                tf_arg = self._visit_expr(node.args[0]) if node.args else 'script_tf_'
-                # Symbol-clock overload: D/W/M boundaries fall on the SYMBOL's
-                # session day (17:00 ET on OANDA forex, 09:30 ET RTH on
-                # equities), intraday buckets on the session-open grid — the
-                # same clock request.security aggregation uses. UTC/24x7
-                # syminfo reduces to the tz-less epoch math bit-for-bit.
-                return (
-                    f'tf_change(prev_bar_timestamp_, current_bar_.timestamp, {tf_arg}, '
-                    'syminfo_.timezone, syminfo_.session)'
+            if func_name in ("change", "in_seconds"):
+                argument = self._resolve_func_args(
+                    node, f"timeframe.{func_name}",
+                ).get("timeframe")
+                tf_arg = (
+                    "script_tf_" if argument is None else
+                    "(_pf_timeframe_arg.empty() ? script_tf_ : _pf_timeframe_arg)"
                 )
-            if func_name == "in_seconds":
-                tf_arg = self._visit_expr(node.args[0]) if node.args else 'script_tf_'
-                return f'tf_to_seconds({tf_arg})'
+                if func_name == "change":
+                    # Keep the symbol-clock overload for calendar and
+                    # session-anchored intraday boundaries.
+                    call = (
+                        f'tf_change(prev_bar_timestamp_, current_bar_.timestamp, {tf_arg}, '
+                        'syminfo_.timezone, syminfo_.session)'
+                    )
+                else:
+                    call = f'tf_to_seconds({tf_arg})'
+                if argument is None:
+                    return call
+                # A function-return argument can carry state. Evaluate it
+                # once before testing emptiness and passing the chosen value.
+                return (
+                    '([&]() { const std::string _pf_timeframe_arg = '
+                    f'({self._visit_expr(argument)}); return {call}; }}())'
+                )
             # Defensive: support_checker.NOT_YET_FUNC should already have rejected
             # any unhandled timeframe.* call. Reaching here implies the checker was
             # bypassed.
