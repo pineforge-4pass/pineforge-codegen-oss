@@ -34,6 +34,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
   in the same lambda; on ENOMEM the environment stays unchanged and the conversion
   silently uses the previous zone.
 
+- `array.sort_indices` returns integer indices, accepts typed `array<int>`
+  results and honors ascending/default or descending order in namespace and
+  method calls, including named arguments. Numeric `na` values sort last in
+  ascending order and first in descending order; string arrays use lexical
+  ordering. The source array is unchanged. (#392)
+
 ## 1.12.0 — 2026-11-12
 
 - Pine v6 reports located errors for a missing `color.new` transparency,

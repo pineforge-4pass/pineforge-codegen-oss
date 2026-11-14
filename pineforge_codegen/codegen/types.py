@@ -115,9 +115,11 @@ _BOOL_RESULT_BINOPS = frozenset({
 })
 
 
-# Array methods whose result is a new array (a vector of doubles, as their
-# ``ARRAY_METHODS`` templates emit it).
-ARRAY_RESULT_METHODS = frozenset({"abs", "standardize", "sort_indices"})
+# Element types of methods that build a new array. Sort indices are integers,
+# independent of the source array's element type.
+ARRAY_RESULT_METHODS = {
+    "abs": "float", "standardize": "float", "sort_indices": "int",
+}
 
 class TypeInferer:
     """Type-spec / C++-type inference helpers shared across visitor mixins.
@@ -3229,13 +3231,12 @@ class TypeInferer:
                     if func_name == "eigenvalues":
                         return TypeSpec.array(TypeSpec.primitive("float"))
                     return TypeSpec.array(receiver_spec.element)
-            # array.abs / standardize / sort_indices build a new array, which
-            # their templates (``ARRAY_METHODS``) emit as a vector of doubles.
+            # These methods build a new array with a fixed element type.
             if namespace == "array" and func_name in ARRAY_RESULT_METHODS:
                 receiver_node = node.args[0] if node.args else node.kwargs.get("id")
                 receiver_spec = self._type_spec_from_expr(receiver_node)
                 if receiver_spec is not None and receiver_spec.kind == "array":
-                    return TypeSpec.array(TypeSpec.primitive("float"))
+                    return TypeSpec.array(TypeSpec.primitive(ARRAY_RESULT_METHODS[func_name]))
             if namespace == "map" and func_name == "new":
                 key = self._type_spec_from_hint_name(targs[0]) if len(targs) > 0 else TypeSpec.primitive("string")
                 val = self._type_spec_from_hint_name(targs[1]) if len(targs) > 1 else TypeSpec.primitive("float")
@@ -3276,7 +3277,7 @@ class TypeInferer:
                     if member_name in ("copy", "slice"):
                         return recv_spec
                     if member_name in ARRAY_RESULT_METHODS:
-                        return TypeSpec.array(TypeSpec.primitive("float"))
+                        return TypeSpec.array(TypeSpec.primitive(ARRAY_RESULT_METHODS[member_name]))
                 if recv_spec is not None and recv_spec.kind == "map":
                     if member_name in ("put", "get", "remove"):
                         return recv_spec.value
@@ -3559,7 +3560,8 @@ class TypeInferer:
                 "percentrank", "abs", "standardize", "covariance", "binary_search",
                 "binary_search_leftmost", "binary_search_rightmost", "sort_indices",
             }
-            if method in numeric_only and elem_cpp not in ("double", "int", "int64_t"):
+            if (method in numeric_only and elem_cpp not in ("double", "int", "int64_t")
+                    and not (method == "sort_indices" and elem_cpp == "std::string")):
                 self._codegen_error(
                     None,
                     f"array.{method} requires a numeric array",

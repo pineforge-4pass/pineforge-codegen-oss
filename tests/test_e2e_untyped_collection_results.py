@@ -7,8 +7,8 @@ namespace forms ``matrix.row(m, 0)``, ``matrix.col`` and
 ``_type_spec_from_expr`` to the scalar default: ``double r`` then took a
 vector and the TU did not compile (earlier open findings: matrix.row).
 Each now yields an array spec -- a row or column of the matrix's element
-type, eigenvalues and the new arrays of the array methods as the vectors of
-doubles their templates build.
+type, eigenvalues and the numeric transforms as vectors of doubles, and
+sort_indices as a vector of integers.
 
 TradingView's tape of ``fixtures/open_items_tv/untyped_collections`` (lab tv
 --no-note) spells a read of each binding on every exit bar; the replay
@@ -67,6 +67,7 @@ def _script(call: str, local: bool) -> str:
 @pytest.mark.parametrize("shape", sorted(CALLS))
 def test_an_untyped_array_result_is_declared_an_array(shape, local):
     cpp = transpile(_script(CALLS[shape], local))
-    assert "std::vector<double> r" in cpp
+    element = "int" if shape in {"array_sort_indices", "array_sort_indices_method"} else "double"
+    assert f"std::vector<{element}> r" in cpp
     assert "double r = 0.0;" not in cpp
     compile_env.compile_cpp(cpp, label=f"untyped {shape}")
