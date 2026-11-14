@@ -7,10 +7,11 @@ import re
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.codegen.run_stops import TIMEZONE_STOP_SHIM_CPP
 from tests._e2e import reference_codegen, transpile_json
-from tests._legacy_cpp import legacy_cpp
 from tests.test_e2e_series_var_init import _SHAPES as _SERIES_INITIALIZERS
 from tests.test_runtime_var_initialization import _RUNTIME_PINE, _compile_and_run
+from tests.test_timestamp_zone_switch import OLD_BRANCH_HEADER, STOP_BRANCH_HEADER
 from tests.test_udf_series_parameter_history import _SOURCE as _ARGUMENT_HISTORY
 
 
@@ -282,11 +283,6 @@ if close <= open
         id="two-vars",
     ),
     pytest.param(
-        _SOURCE.replace("    var float sp = close\n", "    sp = close\n"),
-        id="two-plain-doubles",
-    ),
-    pytest.param(_CONTROL, id="different-names"),
-    pytest.param(
         """//@version=6
 strategy("nested declaration shadow")
 var float kept = na
@@ -298,6 +294,14 @@ if close > 0
 """,
         id="shadow-within-one-outer-block",
     ),
+]
+
+_TIMESTAMP_PAIRS = [
+    pytest.param(
+        _SOURCE.replace("    var float sp = close\n", "    sp = close\n"),
+        id="two-plain-doubles",
+    ),
+    pytest.param(_CONTROL, id="different-names"),
 ]
 
 _UNCHANGED_DIRECT_DECLARATIONS = [
@@ -403,9 +407,47 @@ def test_unaffected_scripts_keep_complete_cpp(source, reference, tmp_path):
     pine.write_text(source, encoding="utf-8")
     before = transpile_json(pine, root=reference)
     assert before["ok"], before
-    # A script that calls timestamp() carries the timezone stop block and arm:
-    # compare through the legacy normalizer, which models them.
-    assert legacy_cpp(transpile(source)) == legacy_cpp(before["cpp"])
+    assert transpile(source) == before["cpp"]
+
+
+def _undo_timestamp_stop(cpp: str) -> str:
+    """Undo only the timezone shim insertion and the pinned branch header."""
+    assert cpp.count(TIMEZONE_STOP_SHIM_CPP) == 1, (
+        "expected exactly one timezone stop shim"
+    )
+    # The emitter joins its sections with a newline in addition to the
+    # trailing newline in the shim. Remove only that insertion's separator.
+    emitted_shim = TIMEZONE_STOP_SHIM_CPP + "\n"
+    assert cpp.count(emitted_shim) == 1, (
+        "expected exactly one timezone stop shim with its separator"
+    )
+    assert cpp.count(STOP_BRANCH_HEADER) == 1, (
+        "expected exactly one rejected-zone stop branch header"
+    )
+    cpp = cpp.replace(emitted_shim, "", 1)
+    return cpp.replace(STOP_BRANCH_HEADER, OLD_BRANCH_HEADER, 1)
+
+
+@pytest.mark.parametrize("source", _TIMESTAMP_PAIRS)
+def test_timestamp_scripts_keep_compatible_cpp(source, reference, tmp_path):
+    pine = tmp_path / "strategy.pine"
+    pine.write_text(source, encoding="utf-8")
+    before = transpile_json(pine, root=reference)
+    assert before["ok"], before
+    assert before["cpp"].count(OLD_BRANCH_HEADER) == 1
+    assert TIMEZONE_STOP_SHIM_CPP not in before["cpp"]
+    assert STOP_BRANCH_HEADER not in before["cpp"]
+    cpp = transpile(source)
+    assert _undo_timestamp_stop(cpp) == before["cpp"]
+
+    # Exercise both missing-input refusals on the real complete output.
+    # The successful inverse above establishes each replacement's count.
+    with pytest.raises(AssertionError, match="expected exactly one timezone stop shim"):
+        _undo_timestamp_stop(cpp.replace(TIMEZONE_STOP_SHIM_CPP + "\n", "", 1))
+    with pytest.raises(
+        AssertionError, match="expected exactly one rejected-zone stop branch header",
+    ):
+        _undo_timestamp_stop(cpp.replace(STOP_BRANCH_HEADER, OLD_BRANCH_HEADER, 1))
 
 
 @pytest.mark.parametrize("source", _UNCHANGED_DIRECT_DECLARATIONS)
