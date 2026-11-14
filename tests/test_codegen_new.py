@@ -717,7 +717,7 @@ x = obj.price
     ast = Parser(tokens, source=src).parse()
     ctx = Analyzer(ast).analyze()
     cpp = CodeGen(ctx).generate()
-    assert "struct PriceLevel" in cpp
+    assert "struct pf_safe_PriceLevel" in cpp
     assert ".price = " in cpp
 
 
@@ -1116,7 +1116,7 @@ dd = strategy.max_drawdown
     cpp = CodeGen(ctx).generate()
 
     # Verify key features are present
-    assert "struct PriceLevel" in cpp
+    assert "struct pf_safe_PriceLevel" in cpp
     assert "Signal_Buy" in cpp or "Signal" in cpp
     assert "OBV" in cpp
     assert "Dev" in cpp

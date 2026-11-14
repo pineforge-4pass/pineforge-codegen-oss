@@ -22,6 +22,15 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- User-defined object types receive collision-aware generated names, so a Pine
+  type such as `Trade` cannot collide with a type imported from the engine.
+- `ta.sma` accepts a changing series length through the paired engine's
+  `pineforge::source::SeriesSma` implementation. Each written call and requested
+  context retains its own history, including repeated loop/helper reaches and
+  replacement evaluations. Constant and input-stable lengths keep the existing
+  fixed-length SMA implementation. Regenerate C++ and relink with an engine
+  release that includes the series SMA primitive.
+
 ## 1.12.0 — 2026-11-12
 
 - Pine v6 reports located errors for a missing `color.new` transparency,

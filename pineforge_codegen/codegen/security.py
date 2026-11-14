@@ -8630,6 +8630,7 @@ class SecurityEmitter:
             ]
 
         lines.append(f"    void _eval_security_{sec_id}(const Bar& bar, bool is_complete) {{")
+        self._emit_series_sma_begin(lines, sec_id)
         if sec_id in self._security_bar_index_secs:
             member = self._security_bar_index_member(sec_id)
             if self._security_foreign(sec_id):

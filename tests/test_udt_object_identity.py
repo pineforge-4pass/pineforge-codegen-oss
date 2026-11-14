@@ -66,18 +66,18 @@ def test_udt_handle_source_rejects_parameter_reassignment() -> None:
 
 def test_udt_local_rebind_emits_nullable_handles_records_and_arenas() -> None:
     cpp = transpile(_LOCAL_ALIAS_COPY_SOURCE)
-    assert "struct Item {\n    int32_t __pf_id = -1;" in cpp
+    assert "struct pf_safe_Item {\n    int32_t __pf_id = -1;" in cpp
     assert "struct _PFUdtRecord_Item" in cpp
     assert (
-        "_PFUdtArena<Item, _PFUdtRecord_Item> "
+        "_PFUdtArena<pf_safe_Item, _PFUdtRecord_Item> "
         "_pf_udt_Item{&_pf_udt_undo};"
     ) in cpp
     assert "alias = original;" in cpp
     assert "detached = _pf_udt_Item.copy(original);" in cpp
     assert "functional = _pf_udt_Item.copy(original);" in cpp
     assert "_pf_udt_Item.get(alias).value += 5.0;" in cpp
-    assert "Item& alias" not in cpp
-    assert "Item* alias" not in cpp
+    assert "pf_safe_Item& alias" not in cpp
+    assert "pf_safe_Item* alias" not in cpp
     compile_cpp(cpp, label="udt-object-handles")
 
 
@@ -219,7 +219,7 @@ if barstate.isfirst
 def test_udt_checkpoint_restores_arena_topology_cycle_safely_runtime() -> None:
     cpp = transpile(_COOF_CYCLE_SOURCE)
     assert "struct _PFCheckpointTraits<_PFUdtRecord_Node>" in cpp
-    assert "struct _PFCheckpointTraits<_PFUdtArena<Node, _PFUdtRecord_Node>>" in cpp
+    assert "struct _PFCheckpointTraits<_PFUdtArena<pf_safe_Node, _PFUdtRecord_Node>>" in cpp
     driver = r'''
 #include <iostream>
 int main() {
@@ -380,7 +380,7 @@ observed = current.value
 '''
     cpp = transpile(source)
     arena_trait = cpp.split(
-        "struct _PFCheckpointTraits<_PFUdtArena<Item, _PFUdtRecord_Item>>",
+        "struct _PFCheckpointTraits<_PFUdtArena<pf_safe_Item, _PFUdtRecord_Item>>",
         1,
     )[1].split("};", 1)[0]
     assert "using snapshot_type = typename arena_type::Snapshot;" in arena_trait
@@ -816,7 +816,7 @@ observed = item.value + authored.other
 '''
     cpp = transpile(source)
     assert "struct _PFUdtRecord_Item__pf2" in cpp
-    assert "struct _PFUdtRecord_Item {\n    int32_t __pf_id" in cpp
+    assert "struct pf_safe__PFUdtRecord_Item {\n    int32_t __pf_id" in cpp
     compile_cpp(cpp, label="udt-record-name-collision")
 
 
@@ -832,10 +832,10 @@ observed = _pf_udt_Item.value
 '''
     cpp = transpile(source)
     assert (
-        "_PFUdtArena<Item, _PFUdtRecord_Item> "
+        "_PFUdtArena<pf_safe_Item, _PFUdtRecord_Item> "
         "_pf_udt_Item__pf2{&_pf_udt_undo};"
     ) in cpp
-    assert "Item _pf_udt_Item;" in cpp
+    assert "pf_safe_Item _pf_udt_Item;" in cpp
     assert "_pf_udt_Item__pf2.get(alias).value = 3.0;" in cpp
     compile_cpp(cpp, label="udt-arena-member-collision")
 
@@ -854,7 +854,7 @@ observed = first.value + checkpoint_obj.value
     cpp = transpile(source)
     assert "class _PFUdtArena__pf2" in cpp
     assert "struct _PFCheckpointTraits__pf2" in cpp
-    assert "_PFUdtArena__pf2<_PFUdtArena," in cpp
+    assert "_PFUdtArena__pf2<pf_safe__PFUdtArena," in cpp
     assert "_PFCheckpointTraits__pf2<decltype(" in cpp
     compile_cpp(cpp, label="udt-support-template-collisions")
 
@@ -875,7 +875,7 @@ labelText = str.tostring(choice)
     assert "struct _PFUdtRecord_X_str_values__pf2" in cpp
     assert "static const std::string _PFUdtRecord_X_str_values[]" in cpp
     assert (
-        "_PFUdtArena<X_str_values, _PFUdtRecord_X_str_values__pf2>"
+        "_PFUdtArena<pf_safe_X_str_values, _PFUdtRecord_X_str_values__pf2>"
         in cpp
     )
     compile_cpp(cpp, label="udt-record-enum-table-collision")
@@ -913,7 +913,7 @@ observed = _PFUdtRecord_Item(item.value)
 '''
     cpp = transpile(source)
     assert "struct _PFUdtRecord_Item__pf2" in cpp
-    assert "_PFUdtArena<Item, _PFUdtRecord_Item__pf2>" in cpp
+    assert "_PFUdtArena<pf_safe_Item, _PFUdtRecord_Item__pf2>" in cpp
     assert "double _PFUdtRecord_Item(double value)" in cpp
     compile_cpp(cpp, label="udt-record-udf-hiding")
 
@@ -972,7 +972,7 @@ observed = item.value + a + b
     cpp = transpile(source)
     assert "double _pf_udt_X_cs1()" in cpp
     assert (
-        "_PFUdtArena<X_cs1, _PFUdtRecord_X_cs1> "
+        "_PFUdtArena<pf_safe_X_cs1, _PFUdtRecord_X_cs1> "
         "_pf_udt_X_cs1__pf2{&_pf_udt_undo};"
     ) in cpp
     compile_cpp(cpp, label="udt-arena-natural-clone-collision")
@@ -996,7 +996,7 @@ observed = item.value + a + b + c
     cpp = transpile(source)
     assert "double _pf_udt_X__ni1(int size)" in cpp
     assert (
-        "_PFUdtArena<X__ni1, _PFUdtRecord_X__ni1> "
+        "_PFUdtArena<pf_safe_X__ni1, _PFUdtRecord_X__ni1> "
         "_pf_udt_X__ni1__pf2{&_pf_udt_undo};"
     ) in cpp
     compile_cpp(cpp, label="udt-arena-fresh-instance-collision")

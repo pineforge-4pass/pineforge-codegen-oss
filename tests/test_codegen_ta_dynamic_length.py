@@ -11,6 +11,8 @@ rules and their tapes are in the engine header
   ``pineforge::source::Series*``, the length passed on every call;
 * series length, ta.percentile_nearest_rank:
   ``pineforge::source::SeriesPercentileNearestRank`` appends on every call;
+* series length, ta.sma: the engine's ``SeriesSma`` with a caller-owned
+  checkpoint covering every invocation in one chart/requested evaluation;
 * ta.supertrend: ``pineforge::source::PineSupertrend``, factor and atrPeriod
   passed on the call and read on its first execution;
 * simple length (fixed for the run) of any family:
@@ -89,15 +91,8 @@ plot(acc)
     assert 'get_input_int("Length"' not in line
 
 
-def test_series_percentile_keeps_sma_and_ema_refusals() -> None:
+def test_series_percentile_keeps_the_ema_refusal() -> None:
     cases = (
-        (
-            "ta.sma(close, length)",
-            "PF-E5092",
-            "ta.sma",
-            "TradingView accepts a series length for ta.sma(); "
-            "PineForge does not support it yet.",
-        ),
         (
             "ta.ema(close, length)",
             "PF-E5009",
@@ -127,6 +122,26 @@ def test_series_percentile_keeps_sma_and_ema_refusals() -> None:
         if suffix:
             expected += f" {suffix}"
         assert diagnostic.message == expected
+
+
+@pytest.mark.parametrize("counter", ["len", "length"])
+def test_series_sma_loop_length_uses_the_written_counter(counter) -> None:
+    src = (
+        '//@version=6\nstrategy("series SMA loop")\n'
+        'length = input.int(20, "Length")\n'
+        "float acc = 0.0\n"
+        f"for {counter} = 2 to 4\n"
+        f"    acc += ta.sma(close, {counter})\n"
+        "plot(acc)\n"
+    )
+    cpp = transpile(src)
+    [member] = _members(cpp, "_PFSeriesSma")
+    line = _compute_line(cpp, member)
+    assert f"pineforge::source::ta_number({counter})" in line
+    assert 'get_input_int("Length"' not in line
+    assert f"{member}.begin_evaluation(history_advances_new_bar());" in cpp
+    assert f"_precalc_{member}" not in cpp
+    compile_cpp(cpp, label=f"series_sma_counter_{counter}")
 
 
 def test_series_length_extremes_take_the_series_classes() -> None:
@@ -318,7 +333,7 @@ if out + acc > top
     compile_cpp(cpp, label="shadowed_lengths")
 
 
-def test_a_series_length_shadowed_in_a_block_keeps_the_refusal() -> None:
+def test_a_series_sma_length_shadowed_in_a_block_reads_the_block() -> None:
     src = """//@version=6
 strategy("shadowed sma")
 n = syminfo.type == "crypto" ? 10 : 20
@@ -328,8 +343,11 @@ if close > open
     out := ta.sma(close, n)
 plot(out)
 """
-    with pytest.raises(CompileError, match="Unsupported TA constructor length 'n'"):
-        transpile(src)
+    cpp = transpile(src)
+    [member] = _members(cpp, "_PFSeriesSma")
+    assert "ta_number(n)" in _compute_line(cpp, member)
+    assert '"crypto"' not in _compute_line(cpp, member)
+    compile_cpp(cpp, label="shadowed_series_sma")
 
 
 def test_an_explicit_series_declaration_is_rewindowed() -> None:
@@ -425,7 +443,7 @@ plot(a + b)
 
 
 @pytest.mark.parametrize("call", [
-    "ta.sma(close, n)", "ta.wma(close, n)", "ta.stdev(close, n)",
+    "ta.wma(close, n)", "ta.stdev(close, n)",
     "ta.rsi(close, n)", "ta.ema(close, n)", "ta.atr(n)",
 ])
 def test_other_series_lengths_stay_refused(call: str) -> None:

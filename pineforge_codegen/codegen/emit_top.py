@@ -253,6 +253,10 @@ class TopLevelEmitter:
             lines.append("")
         lines.append(RUN_STOP_SHIMS_CPP)
         self._emit_ta_compat_shims(lines)
+        if self._ta_uses_series_sma():
+            from .series_sma import SERIES_SMA_CPP
+            lines.append("#include <utility>")
+            lines.append(SERIES_SMA_CPP)
         if getattr(self, "_uses_drawing", False):
             lines.append(DRAWING_LIFETIME_CPP)
         if self._uses_tv_number_format:
@@ -1686,6 +1690,7 @@ class TopLevelEmitter:
         self._lexical_series_bindings = {}
         self._lexical_known_var_tombstones = set()
         lines.append("    void on_source_bar(const Bar& bar) override {")
+        self._emit_series_sma_begin(lines)
 
         # A GeneratedStrategy handle may execute multiple batch runs or
         # streaming lifecycles. BacktestEngine resets broker/base state, but
