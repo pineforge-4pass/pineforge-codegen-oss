@@ -34,6 +34,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
   in the same lambda; on ENOMEM the environment stays unchanged and the conversion
   silently uses the previous zone.
 
+- User functions retain array, object and string result types through branch
+  returns and history clones. Untyped arguments retain collection element
+  types through nested calls and tuple bindings, and reassigned matrix locals
+  keep their initializer's matrix type. (#391)
+
 ## 1.12.0 — 2026-11-12
 
 - Pine v6 reports located errors for a missing `color.new` transparency,

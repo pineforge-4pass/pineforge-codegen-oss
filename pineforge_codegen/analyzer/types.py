@@ -294,7 +294,7 @@ class TypeHelper:
         *,
         nullable: bool | None = None,
     ) -> TypeSpec | None:
-        """Keep exact collection joins; extend other families only around ``na``."""
+        """A selection of identical value types retains that exact type."""
         if nullable is None:
             nullable = any(self._selection_contains_na(node) for node, _ in branches)
         result: TypeSpec | None = None
@@ -306,8 +306,6 @@ class TypeHelper:
                     and self._is_color_constructor(node)):
                 spec = TypeSpec.primitive("color")
             if spec is None:
-                return None
-            if not nullable and spec.kind not in {"map", "matrix"}:
                 return None
             result = (
                 spec
@@ -522,6 +520,11 @@ class TypeHelper:
             ))
             return self._selection_type_spec(branches)
         if isinstance(value, FuncCall):
+            exact = getattr(
+                self, "_callable_bound_return_specs_by_node", {}
+            ).get(id(value))
+            if exact is not None:
+                return exact
             cal = value.callee
             if (isinstance(cal, Identifier) and cal.name in ("line", "box")
                     and len(value.args) == 1 and not value.kwargs
@@ -865,6 +868,27 @@ class TypeHelper:
             return OperatorTypeQuery(
                 self, parameter_specs,
             )._type_spec_from_expr(self._direct_terminal_return_expr(func_def))
+        finally:
+            self._current_top_level_stmt = previous_owner
+            self._symbols.current_scope = previous_scope
+
+    def _callable_value_return_spec(self, func_def, parameter_specs):
+        """Read a callable's value with its lexical locals and concrete inputs.
+
+        This query never revisits the analyzer or allocates stateful call sites.
+        Each branch gets its own environment, so an expired local cannot borrow
+        the type of a same-named global or another branch's declaration.
+        """
+        previous_owner = self._current_top_level_stmt
+        previous_scope = self._symbols.current_scope
+        self._symbols.current_scope = self._operator_definition_scopes.get(
+            id(func_def), self._symbols.global_scope,
+        )
+        self._current_top_level_stmt = func_def
+        try:
+            return OperatorTypeQuery(self, dict(parameter_specs)).body_value_spec(
+                func_def.body
+            )
         finally:
             self._current_top_level_stmt = previous_owner
             self._symbols.current_scope = previous_scope
@@ -1442,6 +1466,79 @@ class OperatorTypeQuery(TypeHelper):
         for node in body:
             self._check_node(node)
 
+    def body_value_spec(self, body):
+        """Infer declaration and terminal value types without checking operators."""
+        result = None
+        for node in body or ():
+            if self._analyzer._budget is not None:
+                self._analyzer._budget.check(node.loc, Phase.ANALYZER)
+            if isinstance(node, VarDecl):
+                result = (
+                    self._type_spec_from_hint(node.type_hint)
+                    if node.type_hint else self._value_spec(node.value)
+                )
+                self._parameter_types[node.name] = result
+            elif isinstance(node, Assignment):
+                result = (
+                    self._parameter_types.get(node.target.name)
+                    if isinstance(node.target, Identifier)
+                    else self._value_spec(node.target)
+                )
+                if result is None:
+                    result = self._value_spec(node.value)
+            elif isinstance(node, TupleAssign):
+                # Tuple elements are independent value bindings.
+                specs = ()
+                if isinstance(node.value, FuncCall) and isinstance(
+                    node.value.callee, Identifier
+                ):
+                    specs = getattr(
+                        self._analyzer, "_func_tuple_element_specs", {}
+                    ).get(node.value.callee.name, ())
+                for index, name in enumerate(node.names):
+                    self._parameter_types[name] = (
+                        specs[index] if index < len(specs) else None
+                    )
+                result = None
+            elif isinstance(node, IfStmt):
+                branches = [
+                    OperatorTypeQuery(
+                        self._analyzer, dict(self._parameter_types)
+                    ).body_value_spec(branch)
+                    for branch in (node.body, node.else_body)
+                ]
+                result = unify_type_specs(
+                    *branches,
+                    left_is_na=not node.body,
+                    right_is_na=not node.else_body,
+                )
+            elif isinstance(node, SwitchStmt):
+                result = None
+                first = True
+                for branch in [
+                    *(body for _, body in node.cases), node.default_body
+                ]:
+                    spec = OperatorTypeQuery(
+                        self._analyzer, dict(self._parameter_types)
+                    ).body_value_spec(branch)
+                    result = spec if first else unify_type_specs(
+                        result, spec, right_is_na=not branch,
+                    )
+                    first = False
+            elif isinstance(node, ExprStmt):
+                result = self._value_spec(node.expr)
+            else:
+                result = self._value_spec(node)
+        return result
+
+    def _value_spec(self, value):
+        spec = self._type_spec_from_expr(value)
+        if spec is None:
+            spec = self._analyzer._operator_operand_type(
+                value, self._parameter_types
+            )
+        return spec
+
     def _check_node(self, node):
         if not isinstance(node, ASTNode):
             if isinstance(node, (tuple, list)):
@@ -1538,6 +1635,23 @@ class OperatorTypeQuery(TypeHelper):
             return self._analyzer._operator_operand_type(
                 value, self._parameter_types,
             )
+        if (isinstance(value, FuncCall)
+                and isinstance(value.callee, Identifier)
+                and value.callee.name in self._analyzer._func_defs):
+            name = value.callee.name
+            definition = self._analyzer._func_defs[name]
+            args = self._analyzer._bind_callable_args(
+                value, list(definition.params)
+            )
+            profile = tuple(
+                self._value_spec(arg) if arg is not None else None
+                for arg in args
+            )
+            exact = self._analyzer._callable_return_specs_by_profile.get(
+                (name, profile)
+            )
+            if exact is not None:
+                return exact
         return super()._type_spec_from_expr(value, **kwargs)
 
     def _visit(self, node):
