@@ -64,6 +64,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   endpoints are ordered before computing the count; an end before the start
   stops the run. UTF-16 slicing, end clamping and invalid-begin stops use the
   existing helper. The oracle is the reporter's #382 item 9 readings.
+- `str.substring` refuses a provably negative constant `begin_pos` during
+  analysis, including integer arithmetic, constant aliases and named arguments.
+  Dynamic negative starts retain their runtime error, and missing positions
+  retain their existing handling.
 - `str.trim` additionally removes VT (U+000B), FF (U+000C), U+00A0, U+1680,
   U+2003, U+2028, U+3000 and U+FEFF from the ends. Interior bytes and kept
   characters are preserved; other Unicode spaces remain unchanged (#382, item 8).

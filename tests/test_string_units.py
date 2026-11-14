@@ -13,9 +13,10 @@ Row names say where the expected value comes from:
 
 * ``measured-*``: the script text and the value TradingView returned for it
   (str.length, str.pos and str.substring on the strings "a" + one character +
-  "b"; and str.substring at its edges on "abc" and on a, an emoji, b:
-  TradingView refuses the two begin positions outside the text when it compiles
-  a script whose arguments are constants, where the engine stops the run);
+  "b"; and str.substring at its edges on "abc" and on a, an emoji, b).
+  A constant negative begin has a separate compiler-refusal assertion below;
+  the positive out-of-range constant still exercises the native runtime guard
+  and does not establish compiler agreement;
 * ``derived-*``: arithmetic on the same unit (an emoji counts two), not a
   separate reading;
 * ``design-*``: a choice the measurement does not decide. A cut between the two
@@ -34,6 +35,11 @@ import json
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.analyzer import Analyzer
+from pineforge_codegen.diagnostic_codes import UNCATALOGUED
+from pineforge_codegen.errors import CompileError, Level, Phase, SourceLocation
+from pineforge_codegen.lexer import Lexer
+from pineforge_codegen.parser import Parser
 from tests._compile import run_emitted_tu
 
 HEADER = '//@version=6\nstrategy("string units")\n'
@@ -532,25 +538,159 @@ def test_a_substring_past_the_end_stops_the_run_and_names_the_units():
     assert "(which is 5) > this->size() (which is 4)" in stopped
 
 
-REFUSED_ROWS = [
+RUNTIME_BEGIN_ROWS = [
     pytest.param(4, "(which is 4) > this->size() (which is 3)",
                  id="measured-ascii-begin-beyond-length-stops"),
-    pytest.param(-1, "(which is 18446744073709551615) > this->size() (which is 3)",
-                 id="measured-ascii-begin-negative-stops"),
+    pytest.param('input.int(-1, "Begin")',
+                 "(which is 18446744073709551615) > this->size() (which is 3)",
+                 id="dynamic-ascii-begin-negative-stops"),
 ]
 
 
-@pytest.mark.parametrize("begin, detail", REFUSED_ROWS)
+@pytest.mark.parametrize("begin, detail", RUNTIME_BEGIN_ROWS)
 def test_a_begin_outside_the_text_stops_the_run(begin, detail):
     """Pin the existing native boundary guard and its diagnostic detail.
 
-    A native runtime stop does not establish agreement with a TradingView
-    compile-time refusal. That acceptance rule needs its separate real record.
+    A negative input remains a runtime value. The separate constant-argument
+    test below checks the compiler refusal; a runtime stop cannot satisfy it.
+    The positive out-of-range constant retains its existing runtime behavior.
     """
     cpp = transpile(HEADER + f't = str.substring("abc", {begin})\nplot(close)\n')
     stopped = run_emitted_tu(cpp, STOP_DRIVER, opt="-O2", label="substring begin outside")
     assert "basic_string::substr" in stopped
     assert detail in stopped
+
+
+SUBSTRING_CALLS = [
+    pytest.param('result_value = str.substring("abc", {begin})', id="positional"),
+    pytest.param('result_value = str.substring("abc", {begin}, 3)', id="positional-end"),
+    pytest.param('result_value = str.substring(source="abc", begin_pos={begin})',
+                 id="named"),
+    pytest.param('result_value = str.substring(end_pos=3, begin_pos={begin}, source="abc")',
+                 id="named-reordered"),
+    pytest.param('result_value = str.substring("abc", end_pos=3, begin_pos={begin})',
+                 id="mixed-reordered"),
+]
+
+
+@pytest.mark.parametrize("check_support", [True, False])
+@pytest.mark.parametrize("call_template", SUBSTRING_CALLS)
+@pytest.mark.parametrize("declarations, begin, first_token", [
+    pytest.param("", "-1", "-", id="literal"),
+    pytest.param("", "-(2 + 1)", "-", id="negated-expression"),
+    pytest.param("", "1 - 4", "1", id="folded-subtraction"),
+    pytest.param("", "-8 / 2", "-", id="folded-exact-division"),
+    pytest.param("", "-8 % 3", "-", id="folded-remainder"),
+    pytest.param("begin = -2\n", "begin", "begin", id="inferred-constant"),
+    pytest.param("int start = -3\nbegin = start\n", "begin", "begin",
+                 id="typed-alias"),
+    pytest.param("const int origin = 2\nconst int begin = origin - 5\n",
+                 "begin", "begin", id="const-alias-chain"),
+])
+def test_constant_negative_substring_begin_is_refused(
+    declarations, begin, first_token, call_template, check_support,
+):
+    # TradingView CE10276 refuses the preserved constant-negative source at
+    # its begin argument. These are unit cases for the general constant rule,
+    # not additional TradingView measurements or a trade-value oracle.
+    source = HEADER + declarations + call_template.format(begin=begin) + "\nplot(close)\n"
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="substring.pine", check_support=check_support)
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.message == (
+        "str.substring() requires 'begin_pos' to be greater than or equal to 0."
+    )
+    column = call_template.index("{begin}") + 1
+    assert diagnostic.location == SourceLocation(
+        "substring.pine", 3 + declarations.count("\n"),
+        column, column + len(first_token),
+    )
+    # Allocation belongs to the catalog generator. Require registration without
+    # assigning an unreserved code in this test or in the diagnostic emitter.
+    assert diagnostic.code not in UNCATALOGUED.values()
+    assert diagnostic.args == {}
+
+
+@pytest.mark.parametrize("body", [
+    pytest.param('unused() => str.substring("abc", -1)\nplot(close)\n',
+                 id="unused-body"),
+    pytest.param('plot(close, title=str.substring("abc", -1))\n',
+                 id="visual-keyword"),
+])
+def test_constant_negative_substring_is_checked_before_ignored_calls_are_lowered(body):
+    source = HEADER + body
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="substring.pine")
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.message == (
+        "str.substring() requires 'begin_pos' to be greater than or equal to 0."
+    )
+    column = body.splitlines()[0].index("-1") + 1
+    assert diagnostic.location == SourceLocation("substring.pine", 3, column, column + 1)
+
+
+def test_direct_analyzer_checks_constant_negative_substring_arguments():
+    source = HEADER + 'result_value = str.substring("abc", -1)\n'
+    program = Parser(
+        Lexer(source, filename="substring.pine").tokenize(),
+        source=source, filename="substring.pine",
+    ).parse()
+    with pytest.raises(CompileError) as caught:
+        Analyzer(program, filename="substring.pine").analyze()
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.phase is Phase.ANALYZER
+    assert diagnostic.message == (
+        "str.substring() requires 'begin_pos' to be greater than or equal to 0."
+    )
+    column = source.splitlines()[2].index("-1") + 1
+    assert diagnostic.location == SourceLocation("substring.pine", 3, column, column + 1)
+
+
+@pytest.mark.parametrize("declarations, begin", [
+    pytest.param('begin = input.int(-1, "Begin")\n', "begin", id="input"),
+    pytest.param("begin = bar_index - 1\n", "begin", id="series"),
+    pytest.param("begin = -1\nbegin := 0\n", "begin", id="reassigned"),
+    pytest.param("var int begin = -1\n", "begin", id="persistent"),
+    pytest.param("int begin = na\n", "begin", id="missing-alias"),
+    pytest.param("", "int(na) + 1", id="missing-expression"),
+    pytest.param("", "0", id="zero"),
+    pytest.param("", "2", id="positive"),
+])
+def test_substring_begin_without_negative_constant_proof_keeps_its_lowering(
+    declarations, begin,
+):
+    # Acceptance and emitted runtime checking only; native value/stop assertions
+    # remain in the existing missing, edge and runtime-boundary tests.
+    cpp = transpile(
+        HEADER + declarations
+        + f'result_value = str.substring(end_pos=3, source="abc", begin_pos={begin})\n'
+        + "plot(close)\n"
+    )
+    assert '_PF_STRING_STOP("substring_out_of_range"' in cpp
+
+
+def test_substring_constant_proof_respects_parameter_bindings_and_authored_overloads():
+    source = HEADER + (
+        "const int begin = -2\n"
+        'cut(int begin) => str.substring("abc", begin)\n'
+        "substring(int begin) => begin + 3\n"
+        "method substring(int self, int begin) => self + begin\n"
+        "base = 4\n"
+        "result_value = cut(1)\n"
+        "n = substring(-2) + base.substring(-3)\n"
+        "plot(n)\n"
+    )
+    cpp = transpile(source)
+    assert '_PF_STRING_STOP("substring_out_of_range"' in cpp
+
+
+def test_substring_negative_end_retains_runtime_validation():
+    # This change has no compiler evidence for an end-domain refusal.
+    cpp = transpile(HEADER + 'result_value = str.substring("abc", 0, -1)\nplot(close)\n')
+    assert "str.substring: end_pos is less than begin_pos" in cpp
 
 
 @pytest.mark.parametrize("opt", NATIVE_OPTS)
