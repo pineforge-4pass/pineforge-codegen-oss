@@ -8,6 +8,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from tests._e2e import reference_codegen, transpile_json
+from tests._legacy_cpp import legacy_cpp
 from tests.test_e2e_series_var_init import _SHAPES as _SERIES_INITIALIZERS
 from tests.test_runtime_var_initialization import _RUNTIME_PINE, _compile_and_run
 from tests.test_udf_series_parameter_history import _SOURCE as _ARGUMENT_HISTORY
@@ -402,7 +403,9 @@ def test_unaffected_scripts_keep_complete_cpp(source, reference, tmp_path):
     pine.write_text(source, encoding="utf-8")
     before = transpile_json(pine, root=reference)
     assert before["ok"], before
-    assert transpile(source) == before["cpp"]
+    # A script that calls timestamp() carries the timezone stop block and arm:
+    # compare through the legacy normalizer, which models them.
+    assert legacy_cpp(transpile(source)) == legacy_cpp(before["cpp"])
 
 
 @pytest.mark.parametrize("source", _UNCHANGED_DIRECT_DECLARATIONS)
