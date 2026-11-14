@@ -120,8 +120,9 @@ def test_every_temporary_the_emitter_declares_is_reserved():
     sources = [(FIXTURES / f"{name}.pine").read_text() for name in TAPES]
     sources.append(
         HEAD + 'frameChoice = input.timeframe("")\n'
-        'secondsValue = timeframe.in_seconds(frameChoice)\n'
-        'changedValue = timeframe.change(timeframe = frameChoice)\n'
+        'chosenFrame() => frameChoice\n'
+        'secondsValue = timeframe.in_seconds(chosenFrame())\n'
+        'changedValue = timeframe.change(timeframe = chosenFrame())\n'
         'plot(secondsValue)\nplot(changedValue ? 1 : 0)\n'
     )
     for source in sources:
@@ -131,4 +132,5 @@ def test_every_temporary_the_emitter_declares_is_reserved():
                 names |= {n for n in DECL.findall(line)
                           if n not in authored and not n.startswith("pf_safe_")}
     assert names, "the tapes' C++ declares no temporary"
+    assert "_pf_timeframe_arg" in names
     assert sorted(n for n in names if not is_emitter_temporary(n)) == []

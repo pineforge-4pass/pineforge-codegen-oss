@@ -26,7 +26,30 @@ SYM_TAIL = "syminfo_.timezone, syminfo_.session)"
 
 def _calls(cpp: str, symbol: str) -> list[str]:
     """Every `symbol(...)` call expression in the generated C++ (one line each)."""
-    return [m.group(0) for m in re.finditer(rf"\b{re.escape(symbol)}\([^;]*", cpp)]
+    calls = []
+    for match in re.finditer(rf"\b{re.escape(symbol)}\(", cpp):
+        depth, quote, escaped = 0, None, False
+        for index in range(match.end() - 1, len(cpp)):
+            char = cpp[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+            elif char in ("\"", "'"):
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append(cpp[match.start():index + 1])
+                    break
+        else:
+            raise AssertionError("Unclosed generated call: " + symbol)
+    return calls
 
 
 def test_timeframe_change_uses_symbol_clock_overload():
