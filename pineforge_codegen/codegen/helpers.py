@@ -543,7 +543,7 @@ CPP_TEMPORARY_NAMES = frozenset("""
     _pf_number_text
     _pf_substring_text _pf_substring_begin _pf_substring_end _pf_substring_error
     _pf_array_new_size _pf_array_new_value _pf_array_new_size_type _pf_array_new_error
-    _pf_read _pf_v5_l _pf_v5_r _pf_wide_l _pf_wide_r
+    _pf_read _pf_v5_l _pf_v5_r _pf_wide_l _pf_wide_r _pf_w
     _pf_symbol _pf_colon _pf_color _pf_bar_back _pf_ema_seeding
     _pf_history_array _pf_history_offset _pf_matrix_target
     _pf_array_index_type
@@ -551,7 +551,8 @@ CPP_TEMPORARY_NAMES = frozenset("""
     _pf_sort_left _pf_sort_right _pf_sort_left_na _pf_sort_right_na
 """.split())
 # These numbered members and locals keep their source-order spelling rather
-# than allocating against authored names. Reserve their complete spellings,
+# than allocating against authored names. Double coercions append underscores
+# to _pf_w to distinguish nested temporaries. Reserve their complete spellings,
 # just as for fixed temporaries, without reserving ordinary underscore names.
 _CPP_TEMPORARY_PATTERN = re.compile(
     r"_v\d+|_secval_\d+(?:_v\d+)?|_tuple_result_\d+(?:_elem_\d+)?|_tuple_unused_\d+|__switch_val_\d+"
@@ -561,6 +562,7 @@ _CPP_TEMPORARY_PATTERN = re.compile(
     r"|_pf_every_bar_ta_\d+|_pf_shared_\d+_\d+|__pf_array\w*|__pf_raw_\w+"
     r"|_pf_collection_hist_\w+"
     r"|_pf_substring_arg\d+"
+    r"|_pf_w_+"
     r"|_req_sec_(?:lower_tf_)?\d+(?:_\d+)?|_precalc_\w+|_sec\d+_\w+"
     r"|_pf_(?:sec|rec)_missing_\d+|_eval_security_\d+"
     r"|_RuntimeSec\d+|_runtime_(?:feed|request)_\d+"
