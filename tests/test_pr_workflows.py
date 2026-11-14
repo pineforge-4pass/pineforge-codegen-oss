@@ -300,6 +300,155 @@ def test_pytest_checks_out_the_pull_request_head():
     assert "ref: ${{ github.sha }}" not in pytest_job
 
 
+# What each assertion of assert_pytest_jobs_are_cut_the_same_way says when it fails.
+# The controls below compare against these, so that every control is held to the one
+# assertion that it targets and not to another one that happens to fail as well.
+PYTEST_CUT_MESSAGES = {
+    "matrix": "the matrix of the two pytest jobs differs",
+    "env": "the env of the two pytest jobs differs",
+    "runs": "the run lines of the two pytest jobs differ",
+    "commands": (
+        "the run lines of the two pytest jobs are not the install line "
+        "and python -m pytest -q -n auto"
+    ),
+    "axis": "the matrix of the two pytest jobs has no shard key with the list 1 to PYTEST_SHARDS",
+    "variable": (
+        "the env of the two pytest jobs has no PF_TEST_SHARD "
+        "of the matrix shard over PYTEST_SHARDS"
+    ),
+}
+
+
+def assert_pytest_jobs_are_cut_the_same_way(pr_workflow, push_workflow):
+    """The pytest job of the pull request workflow and that of the push and dispatch workflow.
+
+    The admission rules read the pull request workflow only. This is the check that the
+    push and dispatch workflow runs the same parts, with the same environment and the
+    same commands, so that neither of them can silently run less than the whole suite.
+    """
+    from tests.test_gke_pr_admission import PYTEST_SHARDS, mapping_at, runs
+
+    pr_job = job_blocks(pr_workflow)["pytest"]
+    push_job = job_blocks(push_workflow)["pytest"]
+    matrix = mapping_at(pr_job, "matrix", 6)
+    assert matrix == mapping_at(push_job, "matrix", 6), PYTEST_CUT_MESSAGES["matrix"]
+    env = mapping_at(pr_job, "env", 4)
+    assert env == mapping_at(push_job, "env", 4), PYTEST_CUT_MESSAGES["env"]
+    commands = runs(pr_job)
+    assert commands == runs(push_job), PYTEST_CUT_MESSAGES["runs"]
+    assert commands == ['python -m pip install -e ".[dev]"', "python -m pytest -q -n auto"], (
+        PYTEST_CUT_MESSAGES["commands"]
+    )
+    # Both expected texts come from the constant that the admission rule uses, written
+    # the way that rule reads them.
+    axis = "[" + ", ".join(str(part) for part in range(1, PYTEST_SHARDS + 1)) + "]"
+    assert matrix.get("shard") == axis, PYTEST_CUT_MESSAGES["axis"]
+    variable = '"${{ matrix.shard }}/' + str(PYTEST_SHARDS) + '"'
+    assert env.get("PF_TEST_SHARD") == variable, PYTEST_CUT_MESSAGES["variable"]
+
+
+def assert_cut_refused(pr_workflow, push_workflow, reason, label):
+    """The check must refuse these two texts with the message of the assertion named by reason."""
+    try:
+        assert_pytest_jobs_are_cut_the_same_way(pr_workflow, push_workflow)
+    except AssertionError as error:
+        refusal = str(error).splitlines()[0]
+        assert refusal == PYTEST_CUT_MESSAGES[reason], (
+            f"{label}: refused with {refusal!r}, not with the {reason} message"
+        )
+    else:
+        pytest.fail(f"{label}: the check accepted the changed workflows")
+
+
+def real_workflows_in_shape(shape):
+    """The texts of the real pull request and push workflows, each put in one shape.
+
+    The shape is one of the two helpers of the admission tests, which work on the
+    real text whichever shape it has.
+    """
+    return [
+        shape((WORKFLOWS / name).read_text(encoding="utf-8"))
+        for name in ("gke-pr.yml", "test.yml")
+    ]
+
+
+def shard_axis_line(count):
+    return "        shard: [" + ", ".join(str(part) for part in range(1, count + 1)) + "]\n"
+
+
+def shard_variable_line(divisor):
+    return '      PF_TEST_SHARD: "${{ matrix.shard }}/' + str(divisor) + '"\n'
+
+
+def test_both_real_workflows_are_cut_into_four_parts():
+    assert_pytest_jobs_are_cut_the_same_way(
+        (WORKFLOWS / "gke-pr.yml").read_text(encoding="utf-8"),
+        (WORKFLOWS / "test.yml").read_text(encoding="utf-8"),
+    )
+
+
+def test_cut_check_holds_for_the_four_part_texts_and_refuses_a_change_to_one_of_them():
+    from tests.test_gke_pr_admission import PYTEST_SHARDS, four_part_workflow, replace_once
+
+    texts = real_workflows_in_shape(four_part_workflow)
+    assert_pytest_jobs_are_cut_the_same_way(*texts)
+    for label, before, after, reason in [
+        (f"the list 1 to {PYTEST_SHARDS - 1}", shard_axis_line(PYTEST_SHARDS),
+         shard_axis_line(PYTEST_SHARDS - 1), "matrix"),
+        (f"the list 1 to {PYTEST_SHARDS + 1}", shard_axis_line(PYTEST_SHARDS),
+         shard_axis_line(PYTEST_SHARDS + 1), "matrix"),
+        (f"the divisor {PYTEST_SHARDS + 1}", shard_variable_line(PYTEST_SHARDS),
+         shard_variable_line(PYTEST_SHARDS + 1), "env"),
+        ("the PF_TEST_SHARD line removed", shard_variable_line(PYTEST_SHARDS), "", "env"),
+        ("the shard line removed", shard_axis_line(PYTEST_SHARDS), "", "matrix"),
+        ("-n auto changed to -n 2", "-n auto", "-n 2", "runs"),
+        ("one Python version removed", '["3.11", "3.12", "3.13", "3.14"]',
+         '["3.11", "3.12", "3.13"]', "matrix"),
+        ("one more env entry", shard_variable_line(PYTEST_SHARDS),
+         shard_variable_line(PYTEST_SHARDS) + '      PF_EXTRA_ENTRY: "1"\n', "env"),
+    ]:
+        for position, name in enumerate(("gke-pr.yml", "test.yml")):
+            changed = list(texts)
+            changed[position] = replace_once(changed[position], before, after)
+            assert_cut_refused(*changed, reason, f"{label} in {name}")
+
+
+def test_cut_check_refuses_two_equal_texts_that_are_not_cut_as_expected():
+    from tests.test_gke_pr_admission import (
+        PYTEST_SHARDS, four_part_workflow, one_part_workflow, replace_once,
+    )
+
+    # Both workflows as they are today, in one part: no shard entry and no variable.
+    assert_cut_refused(*real_workflows_in_shape(one_part_workflow), "axis",
+                       "both workflows in one part")
+    four_part = real_workflows_in_shape(four_part_workflow)
+    # The same change in both texts keeps them equal, so only the assertions on the
+    # expected content can refuse them.
+    for label, before, after, reason in [
+        (f"the list 1 to {PYTEST_SHARDS - 1}", shard_axis_line(PYTEST_SHARDS),
+         shard_axis_line(PYTEST_SHARDS - 1), "axis"),
+        (f"the list 1 to {PYTEST_SHARDS + 1}", shard_axis_line(PYTEST_SHARDS),
+         shard_axis_line(PYTEST_SHARDS + 1), "axis"),
+        ("the shard line removed", shard_axis_line(PYTEST_SHARDS), "", "axis"),
+        (f"the divisor {PYTEST_SHARDS + 1}", shard_variable_line(PYTEST_SHARDS),
+         shard_variable_line(PYTEST_SHARDS + 1), "variable"),
+        ("the PF_TEST_SHARD line removed", shard_variable_line(PYTEST_SHARDS), "", "variable"),
+        ("-n auto changed to -n 2", "-n auto", "-n 2", "commands"),
+    ]:
+        changed = [replace_once(text, before, after) for text in four_part]
+        assert_cut_refused(*changed, reason, f"{label} in both workflows")
+    # The install line stands in more than one job, so it is changed inside the pytest
+    # job alone. Changed in both workflows alike, the two jobs stay equal, and only the
+    # assertion on the commands themselves can refuse them.
+    install = 'python -m pip install -e ".[dev]"'
+    changed = []
+    for text in four_part:
+        body = job_blocks(text)["pytest"]
+        without_extras = replace_once(body, install, "python -m pip install -e .")
+        changed.append(replace_once(text, body, without_extras))
+    assert_cut_refused(*changed, "commands", "the install line changed in both workflows")
+
+
 @dataclass(frozen=True)
 class AuthzCase:
     name: str
