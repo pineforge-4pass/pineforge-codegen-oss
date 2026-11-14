@@ -22,6 +22,18 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- A zone name the engine rejects now makes calendar-form `timestamp()` stop the
+  run at its first evaluation, instead of silently calculating a UTC value.
+  The paired engine reports a typed timezone error identifying the failed bar.
+  An engine without the typed helper prints the text without the bar prefix, an
+  arm that paired releases do not meet. Accepted zones and UTC are unchanged;
+  the single `TIMESTAMP_REJECTED_ZONE_STOPS_RUN` switch restores the old behavior
+  (the compatibility macros stay in the output of a script that calls
+  `timestamp()` with a calendar). Not covered: the unchecked
+  `setenv("TZ", ...)` of the sealed branch and the restoring `setenv` or `unsetenv`
+  in the same lambda; on ENOMEM the environment stays unchanged and the conversion
+  silently uses the previous zone.
+
 ## 1.12.0 — 2026-11-12
 
 - Pine v6 reports located errors for a missing `color.new` transparency,
