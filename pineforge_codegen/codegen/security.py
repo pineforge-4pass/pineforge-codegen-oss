@@ -89,7 +89,7 @@ from ..external_requests import _nodes as walk_request_nodes
 from ..limits import iter_ast_nodes, syntax_children
 from .helpers import (
     _CPP_COMMENT_OR_LITERAL as _SECURITY_CPP_LITERALS,
-    na_preserving_int_cast, unary_sign_cpp,
+    na_preserving_int_cast, pine_index_int_cast, unary_sign_cpp,
 )
 from ..security_contexts import (
     GLOBAL_ANNOTATION, TIMEFRAME_SOURCES_ANNOTATION, UNREACHED_ANNOTATION,
@@ -9613,6 +9613,23 @@ class SecurityEmitter:
                         )
                     finally:
                         self._security_history_offset_overrides = saved_offsets
+                # Requested state has its own storage identity; the chart's
+                # expression visitor must not choose this history receiver.
+                if (self._security_identifier_is_global_binding(expr_node.object)
+                        and expr_node.object.name in security_mutable_names):
+                    info = self._global_mutable_infos.get(expr_node.object.name)
+                    if info is not None and info.is_series:
+                        index_cpp = self._build_security_expr(
+                            sec_id, expr_node.index, ta_range, ta_results, resolving,
+                            security_mutable_names, helper_binding_stack, emitted_lines,
+                        )
+                        index_cpp = self._checked_history_offset_cpp(
+                            index_cpp, expr_node.index,
+                            constant=self._resolve_security_index_literal(
+                                expr_node.index, helper_binding_stack) is not None,
+                        )
+                        state = self._security_state_name(sec_id, expr_node.object.name)
+                        return f"{state}[{pine_index_int_cast(index_cpp)}]"
                 field = self._security_bar_history_field(expr_node.object)
                 if field is not None:
                     idx_lit = self._resolve_security_index_literal(

@@ -39,6 +39,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   method calls, including named arguments. Numeric `na` values sort last in
   ascending order and first in descending order; string arrays use lexical
   ordering. The source array is unchanged. (#392)
+- `request.security` keeps requested-bar history for plain scalar copies of
+  persistent accumulators, including chained copies. Copies retain their
+  declaration-time values when the source is updated later. (#393)
 
 ## 1.12.0 — 2026-11-12
 
