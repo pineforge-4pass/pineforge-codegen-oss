@@ -7,7 +7,9 @@ import pytest
 from pineforge_codegen import transpile
 from tests._compile import run_emitted_tu
 from tests.test_timestamp_rejected_zone import MISSPELLED_ZONE_MESSAGE
-from tests.test_timestamp_strategy_stop import _STRATEGY_DRIVER, _STRATEGY_SOURCE
+from tests.test_timestamp_strategy_stop import (
+    _STRATEGY_DRIVER, _STRATEGY_SOURCE, _paired_engine_sha,
+)
 
 
 @pytest.mark.parametrize("raw_zone, echoed_zone", [
@@ -43,7 +45,7 @@ def test_rejected_offset_echo_observes_current_behavior(raw_zone, echoed_zone):
     )
     print(output, end="")
     lines = output.splitlines()
-    assert lines[:2] == ["ARM typed", "HEADER_ENGINE 16f4496"], output
+    assert lines[:2] == ["ARM typed", f"HEADER_ENGINE {_paired_engine_sha()}"], output
     assert "ARM fallback" not in output, output
 
     keys = (
