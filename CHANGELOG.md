@@ -25,7 +25,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - `timeframe.in_seconds` and `timeframe.change` resolve an evaluated empty
   string to the chart period, including input, variable, function-return and
   named arguments. The argument is evaluated once, and nonempty strings keep
-  their explicit period. (#394)
+  their explicit period. Dotted builtin signatures retain supplied arguments,
+  including escaped string literals and VWAP anchors. (#394)
+- Script identifiers spelled like integer-to-float conversion temporaries,
+  including the underscore suffixes of nested conversions, now use the
+  generator's reserved-name escaping.
 - A zone name the engine rejects now makes calendar-form `timestamp()` stop the
   run at its first evaluation, instead of silently calculating a UTC value.
   The paired engine reports a typed timezone error identifying the failed bar.

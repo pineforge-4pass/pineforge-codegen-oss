@@ -3219,26 +3219,36 @@ class CallVisitor:
                 argument = self._resolve_func_args(
                     node, f"timeframe.{func_name}",
                 ).get("timeframe")
-                tf_arg = (
-                    "script_tf_" if argument is None else
-                    "(_pf_timeframe_arg.empty() ? script_tf_ : _pf_timeframe_arg)"
-                )
-                if func_name == "change":
-                    # Keep the symbol-clock overload for calendar and
-                    # session-anchored intraday boundaries.
-                    call = (
-                        f'tf_change(prev_bar_timestamp_, current_bar_.timestamp, {tf_arg}, '
-                        'syminfo_.timezone, syminfo_.session)'
-                    )
-                else:
-                    call = f'tf_to_seconds({tf_arg})'
+
+                def timeframe_call(tf_arg: str) -> str:
+                    if func_name == "change":
+                        # Keep the symbol-clock overload for calendar and
+                        # session-anchored intraday boundaries.
+                        return (
+                            f'tf_change(prev_bar_timestamp_, current_bar_.timestamp, {tf_arg}, '
+                            'syminfo_.timezone, syminfo_.session)'
+                        )
+                    return f'tf_to_seconds({tf_arg})'
+
                 if argument is None:
-                    return call
+                    return timeframe_call("script_tf_")
+                argument_cpp = self._visit_expr(argument)
+                if cpp_is_plain_read(argument_cpp):
+                    # Keep resolved locals and parameters as direct engine
+                    # arguments when nonempty. Stable reads can be checked
+                    # without introducing another binding.
+                    return (
+                        f'(({argument_cpp}).empty() ? {timeframe_call("script_tf_")} : '
+                        f'{timeframe_call(argument_cpp)})'
+                    )
                 # A function-return argument can carry state. Evaluate it
                 # once before testing emptiness and passing the chosen value.
+                call = timeframe_call(
+                    "(_pf_timeframe_arg.empty() ? script_tf_ : _pf_timeframe_arg)"
+                )
                 return (
                     '([&]() { const std::string _pf_timeframe_arg = '
-                    f'({self._visit_expr(argument)}); return {call}; }}())'
+                    f'({argument_cpp}); return {call}; }}())'
                 )
             # Defensive: support_checker.NOT_YET_FUNC should already have rejected
             # any unhandled timeframe.* call. Reaching here implies the checker was
@@ -4418,18 +4428,20 @@ class CallVisitor:
 
         Uses the PineScript parameter ordering from signatures registry.
         """
-        # sig_key is like "strategy.entry" -> namespace="strategy", func_name="entry"
+        # Namespace records use their short name; dotted builtin records use
+        # the complete key in BUILTIN_FUNCTIONS (e.g. timeframe.change).
         parts = sig_key.split(".", 1)
+        intrinsic = (
+            sigs.get_intrinsic(parts[0], parts[1]) if len(parts) == 2 else None
+        )
+        if intrinsic is None:
+            intrinsic = sigs.get_intrinsic(None, sig_key)
         validate_intrinsic_keywords(
-            sigs.get_intrinsic(parts[0], parts[1]) if len(parts) == 2
-            else sigs.get_intrinsic(None, sig_key),
+            intrinsic,
             node.kwargs,
             pine_version=self.ctx.ast.version,
         )
-        if len(parts) == 2:
-            param_names = sigs.get_param_names(parts[0], parts[1]) or []
-        else:
-            param_names = sigs.get_param_names(None, sig_key) or []
+        param_names = intrinsic.param_names if intrinsic is not None else []
         result: dict = {}
         # Map positional args by parameter name
         for i, arg in enumerate(node.args):
