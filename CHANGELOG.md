@@ -22,6 +22,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Reference-typed UDT fields keep their type when initialized or reassigned
+  with `na`, including array defaults. Drawing handles cross user-function
+  and tuple boundaries by value, and `label(na)` produces a missing label
+  handle. Polyline locals, arrays, fields and delete methods retain opaque
+  handles and argument evaluation while rendering remains a visual no-op.
+
 - A zone name the engine rejects now makes calendar-form `timestamp()` stop the
   run at its first evaluation, instead of silently calculating a UTC value.
   The paired engine reports a typed timezone error identifying the failed bar.

@@ -48,6 +48,7 @@ from ..ast_nodes import (
 from ..errors import Phase
 from ..limits import iter_ast_nodes
 from ..matrix_overloads import matrix_sum_has_rhs
+from ..reference_casts import na_reference_cast_kind
 from ..symbols import (
     PineType,
     TypeSpec,
@@ -59,7 +60,9 @@ from .operators import join_value_types, reference_value_type
 # Drawing-objects-as-data type names (spec §4.1). Defined locally — the
 # analyzer must not import from ``codegen`` (codegen imports analyzer, so the
 # reverse would be a cycle). Mirrors codegen.tables.DRAWING_TYPE_TO_CPP keys.
-_DRAWING_TYPE_NAMES = frozenset({"line", "box", "label", "linefill", "chart.point"})
+_DRAWING_TYPE_NAMES = frozenset({
+    "line", "box", "label", "linefill", "chart.point", "polyline",
+})
 _DRAWING_NS = frozenset({"line", "box", "label", "linefill"})
 _DIRECT_ARRAY_VALUE_PRODUCERS = frozenset({
     "from",
@@ -588,6 +591,10 @@ class TypeHelper:
                     return typed_receiver_spec
             # Drawing-objects-as-data return typing: *.new / *.copy -> handle of
             # the self-type; linefill.get_line* -> line; chart.point.* -> point.
+            if cast_kind := na_reference_cast_kind(value):
+                return TypeSpec.udt(cast_kind)
+            if ns == "polyline" and func == "new":
+                return TypeSpec.udt("polyline")
             if ns in _DRAWING_NS:
                 if func in ("new", "copy"):
                     return TypeSpec.udt(ns)

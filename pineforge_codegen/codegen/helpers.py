@@ -464,6 +464,7 @@ CPP_EMITTER_NAMES = frozenset("""
     _security_helper_series_ _security_helper_series_str_
     _use_precalc _var_initialized _ta_initialized_ _inputs_initialized_
     _pf_lines_ _pf_boxes_ _pf_labels_ _pf_linefills_
+    _PFPolyline _pf_polyline_next_id_
     _pf_script_state_checkpoint_ _PFScriptState _PFForeignEmaSeeding
     _PFALMA _PFKC _PFKCW _PFAnchoredVWAP _PFAnchoredVWAPBands
     _PFPivotPointLevels _PFArrayField _PFTvFormatValue

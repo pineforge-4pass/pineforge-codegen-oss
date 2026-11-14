@@ -20,6 +20,12 @@ lowering. Structural mutation, collection reassignment/escape, history and
 pair-binder iteration retain PF-E5086 pending TV evidence/provenance support;
 declaration tails yielding collections as callable/selection values are refused.
 `polyline.all` retains PF-E5085 until the engine has a Polyline handle/arena.
+Polyline locals, array elements and UDT fields retain opaque typed handles;
+default construction and bare `na` use a missing handle, and copies retain
+its identity. `polyline.new` and functional or method-form `delete` keep the
+existing visual-only rendering contract, while evaluating their arguments
+once in parameter order. Opaque ID allocation joins script reset and rollback
+state. This does not supply the live arena required by `polyline.all`.
 `var`/`varip` aliases retain PF-E5086 until a TradingView capture establishes
 their lifetime semantics. Whether a later creation in the same bar is visible
 through the alias is not yet measured against TradingView.

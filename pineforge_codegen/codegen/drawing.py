@@ -1,15 +1,15 @@
 """Drawing-objects-as-data dispatch for the codegen.
 
 Spec: ``docs/drawing-objects-as-data.md`` §4.3 (the 4-form call dispatch),
-§L (handle lifecycle) and §U (UDT × drawing). Everything here only ever
-runs for a strategy whose ``self._uses_drawing`` is True (the dispatch is
-reached solely when a ``line``/``box``/``label``/``linefill``/``chart.point``
-call or a drawing-typed receiver is present), so non-drawing strategies emit
-byte-identical C++.
+§L (handle lifecycle) and §U (UDT × drawing). Engine-backed drawing support is
+emitted when ``self._uses_drawing`` is True; opaque polyline value support is
+emitted when that type is used. Non-drawing strategies need neither block.
 
 The geometry of a drawing object becomes REAL C++ state (per-type arena in
 ``pineforge/drawing.hpp``); every VISUAL kwarg/method (color / style / width /
 bgcolor / text_* / extend-as-visual / force_overlay) is accepted-and-DROPPED.
+Polyline geometry remains visual-only; its typed IDs and argument effects
+survive assignments, collections and calls.
 
 ``DrawingVisitor`` is mixed into ``CodeGen``; it owns no state of its own and
 reads only attributes established by ``CodeGen.__init__`` (``_uses_drawing``,
@@ -23,6 +23,7 @@ import re
 
 from .. import signatures as sigs
 from ..ast_nodes import FuncCall, Identifier, MemberAccess
+from ..errors import CodegenInvariantError
 from ..symbols import method_receiver_type_name
 from .tables import (
     ARRAY_VOID_METHODS as _ARRAY_VOID_METHODS,
@@ -32,6 +33,30 @@ from .tables import (
 )
 
 _MAP_VOID_METHODS = frozenset({"clear", "put_all"})
+
+POLYLINE_HANDLE_CPP = """\
+// Polyline rendering remains visual-only. Its opaque ID is still a value:
+// copies preserve identity, default construction is na, and no numeric
+// conversion exists. IDs are allocated by checkpointed per-strategy state.
+struct _PFPolyline {
+    uint64_t id = 0;
+    bool is_na() const { return id == 0; }
+    friend bool operator==(const _PFPolyline& _pf_left, const _PFPolyline& _pf_right) {
+        return _pf_left.id == _pf_right.id;
+    }
+    friend bool operator!=(const _PFPolyline& _pf_left, const _PFPolyline& _pf_right) {
+        return !(_pf_left == _pf_right);
+    }
+};
+"""
+
+_POLYLINE_PARAMS = {
+    "new": (
+        "points", "curved", "closed", "xloc", "line_color", "fill_color",
+        "line_style", "line_width", "force_overlay",
+    ),
+    "delete": ("id",),
+}
 
 # Largest declared line, box or label count the native arena factory accepts: its int32
 # domain minus the observed-slack it adds (drawing_bound_from_declared_count in
@@ -323,6 +348,39 @@ class DrawingVisitor:
     def _emit_drawing_ctor(self, dtype: str, node: FuncCall) -> str:
         return self._collected(dtype, self._emit_drawing_alloc(dtype, node))
 
+    def _emit_polyline_call(self, method: str, node: FuncCall, receiver=None) -> str:
+        """Keep opaque handle flow and evaluate every supplied argument once.
+
+        These calls have no renderer or live arena. Binding by parameter order
+        still matters: points/style expressions can call user functions or
+        mutate collections, and delete's receiver can itself shift an array.
+        """
+        params = _POLYLINE_PARAMS.get(method)
+        if params is None:
+            raise CodegenInvariantError(node)
+        args = ([receiver] if receiver is not None else []) + list(node.args)
+        if (len(args) > len(params)
+                or any(name not in params or name in params[:len(args)]
+                       for name in node.kwargs)):
+            raise CodegenInvariantError(node)
+        values = dict(zip(params, args))
+        values.update(node.kwargs)
+        if params[0] not in values:
+            raise CodegenInvariantError(node)
+        if method == "delete":
+            value = self._visit_rhs_value(
+                values["id"], target_cpp_type=DRAWING_TYPE_TO_CPP["polyline"],
+            )
+            return f"static_cast<void>({value})"
+        statements = " ".join(
+            f"static_cast<void>({self._visit_expr(values[name])});"
+            for name in params if name in values
+        )
+        return (
+            f"([&]() {{ {statements} "
+            "return _PFPolyline{++this->_pf_polyline_next_id_}; }())"
+        )
+
     def _emit_drawing_alloc(self, dtype: str, node: FuncCall) -> str:
         arena = DRAWING_ARENA[dtype]
         if dtype == "linefill":
@@ -447,6 +505,8 @@ class DrawingVisitor:
 
         ``recv_node`` is the handle receiver; ``arg_nodes`` the remaining args.
         """
+        if dtype == "polyline":
+            return self._emit_polyline_call(method, node, receiver=recv_node)
         arena = DRAWING_ARENA[dtype]
         recv = self._visit_expr(recv_node)
         geometry, noop = DRAWING_METHODS_BY_TYPE[dtype]
@@ -572,7 +632,7 @@ class DrawingVisitor:
         _fn, ns = self._resolve_callee(callee)
         from .tables import DRAWING_NS
         dtype = None
-        if ns in DRAWING_NS:
+        if ns in DRAWING_NS or ns == "polyline":
             dtype = ns
         else:
             recv_spec = self._type_spec_from_expr(callee.object)
@@ -597,7 +657,7 @@ class DrawingVisitor:
         _fn, ns = self._resolve_callee(node.callee)
         from .tables import DRAWING_NS
         dtype = None
-        if ns in DRAWING_NS:
+        if ns in DRAWING_NS or ns == "polyline":
             dtype = ns
         else:
             recv_spec = self._type_spec_from_expr(node.callee.object)
@@ -606,6 +666,8 @@ class DrawingVisitor:
                 dtype = recv_spec.name
         if dtype is None:
             return False
+        if dtype == "polyline":
+            return method == "delete"
         if method in ("new", "copy"):
             return False                      # constructors / copy return a handle
         if (dtype, method) in _DRAWING_GETTER_RET:
@@ -792,57 +854,82 @@ class DrawingVisitor:
     # ------------------------------------------------------------------
     # _uses_drawing detection + arena caps
     # ------------------------------------------------------------------
-    def _spec_mentions_drawing(self, spec) -> bool:
+    def _spec_mentions_drawing(self, spec, kinds=None) -> bool:
+        kinds = DRAWING_TYPE_TO_CPP if kinds is None else kinds
         if spec is None:
             return False
-        if spec.kind == "udt" and spec.name in DRAWING_TYPE_TO_CPP:
+        if spec.kind == "udt" and spec.name in kinds:
             return True
         if spec.kind == "array":
-            return self._spec_mentions_drawing(spec.element)
+            return self._spec_mentions_drawing(spec.element, kinds)
         if spec.kind == "map":
-            return self._spec_mentions_drawing(spec.key) or self._spec_mentions_drawing(spec.value)
+            return (self._spec_mentions_drawing(spec.key, kinds)
+                    or self._spec_mentions_drawing(spec.value, kinds))
         if spec.kind == "matrix":
-            return self._spec_mentions_drawing(spec.element)
+            return self._spec_mentions_drawing(spec.element, kinds)
         return False
 
-    def _detect_drawing_usage(self) -> bool:
-        """True iff emitted C++ needs pineforge/drawing.hpp + the arenas.
+    def _detect_drawing_usage(self, kinds=None) -> bool:
+        """Whether declarations or calls require any of the given handle kinds.
 
-        Mirrors ``_detect_matrix_usage``: any var/field/array of a drawing type
-        OR any line/box/label/linefill namespace call OR any chart.point call.
+        The same type walk selects real engine drawing support and opaque
+        polyline support independently, including unused typed parameters.
         """
+        kinds = DRAWING_TYPE_TO_CPP if kinds is None else kinds
         for t in self._udt_var_types.values():
-            if t in DRAWING_TYPE_TO_CPP:
+            if t in kinds:
                 return True
         for spec in self._collection_types.values():
-            if self._spec_mentions_drawing(spec):
+            if self._spec_mentions_drawing(spec, kinds):
                 return True
         for specs in self._func_collection_types.values():
             for spec in specs.values():
-                if self._spec_mentions_drawing(spec):
+                if self._spec_mentions_drawing(spec, kinds):
                     return True
         for specs in self._block_collection_types.values():
             for spec in specs.values():
-                if self._spec_mentions_drawing(spec):
+                if self._spec_mentions_drawing(spec, kinds):
                     return True
         for fields in self._udt_field_type_specs.values():
             for spec in fields.values():
-                if self._spec_mentions_drawing(spec):
+                if self._spec_mentions_drawing(spec, kinds):
                     return True
         for _tname, _fields in self._udt_defs.items():
             for f in _fields:
-                if self._spec_mentions_drawing(self._type_spec_from_hint_name(f.type_name)):
+                if self._spec_mentions_drawing(
+                    self._type_spec_from_hint_name(f.type_name), kinds,
+                ):
                     return True
-        from .tables import DRAWING_NS
         from ..drawing_all import drawing_all_kind
         for node in self._walk_ast(self.ctx.ast):
-            if drawing_all_kind(node) in DRAWING_NS:
+            if drawing_all_kind(node) in kinds:
                 return True
-            if isinstance(node, FuncCall):
-                _fn, ns = self._resolve_callee(node.callee)
-                if ns in DRAWING_NS:
+            hint = getattr(node, "type_hint", None)
+            if hint and self._spec_mentions_drawing(
+                self._type_spec_from_hint_name(hint), kinds,
+            ):
+                return True
+            for hint in ((getattr(node, "annotations", None) or {}).get(
+                "param_type_hints",
+            ) or ()):
+                if hint and self._spec_mentions_drawing(
+                    self._type_spec_from_hint_name(hint), kinds,
+                ):
                     return True
-                if self._is_chart_point_callee(node.callee):
+            if isinstance(node, FuncCall):
+                for hint in self._template_args_from_call(node):
+                    if self._spec_mentions_drawing(
+                        self._type_spec_from_hint_name(hint), kinds,
+                    ):
+                        return True
+                _fn, ns = self._resolve_callee(node.callee)
+                if ns in kinds:
+                    return True
+                if (isinstance(node.callee, Identifier)
+                        and node.callee.name in kinds):
+                    return True
+                if ("chart.point" in kinds
+                        and self._is_chart_point_callee(node.callee)):
                     return True
         return False
 

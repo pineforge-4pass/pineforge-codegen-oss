@@ -107,7 +107,7 @@ from .tables import (
     RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN,
 )
 from ..limits import iter_ast_nodes
-from .drawing import DRAWING_LIFETIME_CPP
+from .drawing import DRAWING_LIFETIME_CPP, POLYLINE_HANDLE_CPP
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 from .tv_string_units import TV_STRING_UNITS_CPP, TV_STRING_UNITS_MARKER
 
@@ -265,6 +265,8 @@ class TopLevelEmitter:
         self._emit_ta_compat_shims(lines)
         if getattr(self, "_uses_drawing", False):
             lines.append(DRAWING_LIFETIME_CPP)
+        if self._uses_polyline:
+            lines.append(POLYLINE_HANDLE_CPP)
         if self._uses_tv_number_format:
             lines.append(TV_NUMBER_FORMAT_CPP)
             lines.append("")
@@ -2522,6 +2524,7 @@ class TopLevelEmitter:
                         or (
                             recv_spec.kind == "udt"
                             and recv_spec.name not in self._udt_defs
+                            and recv_spec.name not in DRAWING_TYPE_TO_CPP
                         )
                     ):
                         cpp_t = f"{cpp_t}&"
@@ -2537,7 +2540,8 @@ class TopLevelEmitter:
                     )
                     cpp_t = (
                         recv_cpp
-                        if fi.udt_type_name in self._udt_defs
+                        if (fi.udt_type_name in self._udt_defs
+                            or fi.udt_type_name in DRAWING_TYPE_TO_CPP)
                         else f"{recv_cpp}&"
                     )
                     safe_p = self._safe_name(p)
@@ -2596,7 +2600,8 @@ class TopLevelEmitter:
                 if spec.kind == "udt":
                     self._udt_param_udt[p] = spec.name
                     self._udt_param_udt[self._safe_name(p)] = spec.name
-                    if spec.name not in self._udt_defs:
+                    if (spec.name not in self._udt_defs
+                            and spec.name not in DRAWING_TYPE_TO_CPP):
                         cpp_t = f"{cpp_t}&"
                 elif spec.kind in ("array", "map"):
                     elem = spec.element if spec.kind == "array" else spec.value
