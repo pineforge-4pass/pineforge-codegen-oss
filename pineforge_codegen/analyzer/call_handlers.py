@@ -18,10 +18,9 @@ Mixin contract -- host class must provide the following attributes
   index used to mint unique ``_ta_<func>_<n>`` member names.
 - ``self._series_bar_fields`` (``set[str]``): bar-field identifiers
   used as TA inputs anywhere in the program.
-- ``self._security_calls`` (``list[SecurityCallInfo]``): created on
-  first ``request.security(...)`` via ``getattr(..., "_security_calls",
-  [])`` and stored back on ``self`` -- the analyzer also reads this
-  attribute via ``getattr`` in ``analyze()``.
+- ``self._security_calls`` (``list[SecurityCallInfo]``): a per-analyzer
+  inventory initialized empty by the host constructor. Both security
+  handlers append to it; final analysis also consumes the empty inventory.
 - ``self._fixnan_counter`` / ``self._fixnan_sites``: ``fixnan(...)``
   member-name counter + site list.
 - ``self._symbols`` (``SymbolTable``): consulted by
@@ -856,7 +855,6 @@ class CallHandlers:
             security_ta_range = (ta_start, ta_end) if ta_end > ta_start else None
 
             # Assign ID and record the call
-            self._security_calls = getattr(self, "_security_calls", [])
             sec_id = len(self._security_calls)
 
             returns_tuple = isinstance(expr_node, TupleLiteral)
@@ -1075,7 +1073,6 @@ class CallHandlers:
                 node.loc,
             )
 
-        self._security_calls = getattr(self, "_security_calls", [])
         sec_id = len(self._security_calls)
 
         mutable_globals = tuple(sorted(self._collect_security_mutable_globals(expr_node)))
