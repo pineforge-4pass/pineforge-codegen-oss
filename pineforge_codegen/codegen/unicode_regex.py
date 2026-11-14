@@ -3,13 +3,14 @@
 The runtime regex accepts bytes. A Unicode character is represented by its one
 to four byte encoding, retaining an isolated surrogate as three bytes. Each
 regex atom is a noncapturing group over those encodings, so a quantifier
-repeats characters and new groups do not renumber captures. Class unions, ranges and
-complements use the entire character domain, not an inventory of Unicode letters.
+repeats characters. Class unions, ranges and complements use the entire
+character domain, not an inventory of Unicode letters.
 
-Matching still goes through the runtime's string helper, retaining its capture
-selection and coded regex errors. Only the matched units are joined back into
-ordinary UTF-8. Valid surrogate pairs form one regex character; string lengths
-and substring offsets continue to use the unchanged UTF-16 codec.
+The engine selects its first capture. An outer capture therefore selects the
+whole match, with user captures retained and decimal backreferences shifted by
+one. Matching and coded regex errors still use the runtime string helper.
+Valid surrogate pairs form one regex character; lengths and substring offsets
+continue to use the UTF-16 codec.
 """
 
 
@@ -94,9 +95,7 @@ inline std::vector<uint32_t> _pf_bytes(uint32_t _pf_unit) {
             0x80u | ((_pf_unit >> 6) & 63), 0x80u | (_pf_unit & 63)};
 }
 
-// The endpoints have the same encoding width. Split at differing prefixes;
-// complete intervening prefixes share all their continuation-byte ranges.
-// This builds a bounded trie for a range instead of enumerating its members.
+// Split ranges at differing encoding prefixes instead of enumerating members.
 inline void _pf_byte_trie(const std::vector<uint32_t>& _pf_low,
                          const std::vector<uint32_t>& _pf_high,
                          std::size_t _pf_at, const std::string& _pf_prefix,
@@ -247,8 +246,25 @@ class _pf_pattern {
         return 0x10000u + ((_pf_high - 0xD800u) << 10) + (_pf_low - 0xDC00u);
     }
 
-    // Retain the existing byte engine's named/collating class syntax too.
-    // Its classic-locale classes are sets of ASCII units.
+    // The synthetic whole-match group shifts every user capture by one.
+    // Add in decimal text so an invalid oversized reference cannot overflow
+    // into a valid group number before the engine checks it.
+    std::string _pf_backreference(uint32_t _pf_first) {
+        std::string _pf_digits(1, static_cast<char>(_pf_first));
+        while (_pf_at < _pf_units.size() && _pf_units[_pf_at] >= '0'
+                && _pf_units[_pf_at] <= '9')
+            _pf_digits += static_cast<char>(_pf_take());
+        bool _pf_carry = true;
+        for (std::size_t _pf_i = _pf_digits.size(); _pf_i > 0 && _pf_carry;) {
+            --_pf_i;
+            if (_pf_digits[_pf_i] == '9') _pf_digits[_pf_i] = '0';
+            else { ++_pf_digits[_pf_i]; _pf_carry = false; }
+        }
+        if (_pf_carry) _pf_digits.insert(_pf_digits.begin(), '1');
+        return "\\" + _pf_digits;
+    }
+
+    // Classic-locale named/collating classes are sets of ASCII characters.
     _pf_member _pf_named_member(uint32_t _pf_delimiter) {
         std::string _pf_name;
         for (;;) {
@@ -337,7 +353,8 @@ public:
     explicit _pf_pattern(const std::vector<uint32_t>& _pf_value) : _pf_units(_pf_value) {}
 
     std::string _pf_compile() {
-        std::string _pf_result;
+        std::string _pf_result = "(";
+        std::size_t _pf_depth = 0;
         while (_pf_at < _pf_units.size()) {
             auto _pf_code = _pf_take();
             if (_pf_code == '[') {
@@ -352,24 +369,27 @@ public:
                 } else if (_pf_code == 'u' || _pf_code == 'x' || _pf_code > 127) {
                     const auto _pf_unit = _pf_pair(_pf_character_escape(_pf_code));
                     _pf_result += _pf_atom({{_pf_unit, _pf_unit}});
+                } else if (_pf_code >= '1' && _pf_code <= '9') {
+                    _pf_result += _pf_backreference(_pf_code);
                 } else {
-                    // Assertions, backreferences and ASCII character escapes
-                    // retain the byte engine's grammar and capture numbering.
+                    // Assertions and ASCII character escapes keep their grammar.
                     _pf_result += '\\';
                     _pf_result += static_cast<char>(_pf_code);
                     if (_pf_code == 'c') _pf_result += static_cast<char>(_pf_take());
-                    if (_pf_code >= '1' && _pf_code <= '9')
-                        while (_pf_at < _pf_units.size() && _pf_units[_pf_at] >= '0'
-                                && _pf_units[_pf_at] <= '9')
-                            _pf_result += static_cast<char>(_pf_take());
                 }
             } else if (_pf_code == '(') {
+                ++_pf_depth;
                 _pf_result += '(';
                 if (_pf_at < _pf_units.size() && _pf_units[_pf_at] == '?') {
                     _pf_result += static_cast<char>(_pf_take());
                     if (_pf_at < _pf_units.size() && _pf_units[_pf_at] < 128)
                         _pf_result += static_cast<char>(_pf_take());
                 }
+            } else if (_pf_code == ')') {
+                // The wrapper must not repair an unmatched user parenthesis.
+                if (_pf_depth == 0) throw _pf_invalid{};
+                --_pf_depth;
+                _pf_result += ')';
             } else if (_pf_code == '{') {
                 _pf_result += '{';
                 while (_pf_at < _pf_units.size()
@@ -378,7 +398,7 @@ public:
                     _pf_result += static_cast<char>(_pf_take());
                 if (_pf_at < _pf_units.size() && _pf_units[_pf_at] == '}')
                     _pf_result += static_cast<char>(_pf_take());
-            } else if (_pf_code == ')' || _pf_code == '|' || _pf_code == '^'
+            } else if (_pf_code == '|' || _pf_code == '^'
                        || _pf_code == '$' || _pf_code == '*' || _pf_code == '+'
                        || _pf_code == '?' || _pf_code == '}') {
                 _pf_result += static_cast<char>(_pf_code);
@@ -387,7 +407,8 @@ public:
                 _pf_result += _pf_atom({{_pf_code, _pf_code}});
             }
         }
-        return _pf_result;
+        if (_pf_depth != 0) throw _pf_invalid{};
+        return _pf_result + ")";
     }
 };
 
@@ -398,9 +419,8 @@ inline std::string _pf_match(const std::string& _pf_source,
     try {
         _pf_pattern_bytes = _pf_pattern(_pf_pattern_units)._pf_compile();
     } catch (const _pf_invalid&) {
-        // If the byte grammar already rejects this spelling, retain its
-        // exact runtime reason/context. A range invalid only in characters still
-        // needs the same coded invalid-pattern stop.
+        // Retain the engine's exact reason/context for byte-invalid patterns.
+        // A range invalid only in characters needs the same coded stop.
         (void)::pineforge::pine_str_match(_pf_source, _pf_regex);
         const std::string _pf_message = "Error on bar " + std::to_string(_pf_bar)
             + ": Invalid regex pattern in the 'str.match' function.";

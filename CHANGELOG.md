@@ -35,14 +35,17 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - Array joins retain string return types through helper and method forwarding.
   Named, mixed and reordered receiver/separator arguments use their declared
   slots; an omitted separator keeps the default.
-- `str.upper` and `str.lower` use full Unicode default mappings, including
-  supplementary letters, expansions and contextual final sigma. Generated
-  tables record the translating Python's Unicode version and do not depend
-  on the native locale. Locale tailoring and normalization are not applied.
+- `str.upper` and `str.lower` use pinned Unicode 14.0.0 mappings and properties,
+  including supplementary letters, expansions and contextual final sigma.
+  Translating Python versions and the native locale do not select the data.
+  The context crosses decimal runs; locale tailoring and normalization are
+  not applied. The data pin does not identify TradingView's whole dialect.
 - `str.match` lowers its literals, character classes, ranges and repeated
   atoms as Unicode characters, including complete supplementary characters,
   so matches no longer depend on UTF-8 byte lengths. Word classes remain ASCII;
   string lengths and substring offsets still count UTF-16 units.
+  Matches return the complete match while preserving user captures and
+  backreferences for pattern evaluation.
   Regenerate C++ and relink affected strategies to use this correction.
 - String input defaults, options and titles preserve embedded NUL bytes in
   getters, metadata and checked receipts. Internal timeframe and footprint

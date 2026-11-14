@@ -1,48 +1,76 @@
-"""Emit Unicode default casing over runtime UTF-8 strings.
+"""Emit Unicode casing over runtime UTF-8 strings.
 
-Generate complete, sorted case tables from Python's standard Unicode database,
-including expansions and supplementary letters. The emitted comment records
-that database's version; the compiled strategy needs no Unicode library.
-Locale-specific tailoring and normalization are not default casing.
+Mappings and properties come only from the generated, checked-in Unicode
+14.0.0 data module. scripts/gen_unicode_case_data.py binds the three exact
+official UCD inputs; no host Unicode database or locale supplies data.
+The data pin identifies this implementation, not TradingView's whole dialect.
+Locale-specific casing and normalization are not applied.
 
-Default lowercase has one contextual rule, Final_Sigma. Cased is the union of
-Lowercase, Uppercase and General_Category=Lt. Obtain Case_Ignorable from the
-same database through that rule: after A+SIGMA, a cased character is ignorable
-iff SIGMA stays final; an uncased character is ignorable iff following it with
-A makes SIGMA nonfinal. Ignoring takes precedence for overlapping properties.
+DerivedCoreProperties supplies Cased and Case_Ignorable. UnicodeData supplies
+Nd. SpecialCasing supplies full expansions and the Final_Sigma override.
+Ignoring takes precedence for overlapping properties. The cased context also
+crosses decimal-number runs without making digits cased or case-ignorable.
 
 The captureless lambda receives its argument outside its local scope, once.
-Adjacent WTF-8 high/low surrogates form one code point before casing, just as
-they do in UTF-16. NUL, isolated surrogate pieces and malformed bytes survive.
+Adjacent WTF-8 high/low surrogates form one code point before casing. NUL,
+isolated surrogate pieces and malformed bytes survive.
 """
 
 from __future__ import annotations
 
 from functools import lru_cache
-import unicodedata
+
+
+_DATA_VERSION = "14.0.0"
+_SOURCE_SHA256 = (
+    ("UnicodeData.txt", "36018e68657fdcb3485f636630ffe8c8532e01c977703d2803f5b89d6c5feafb"),
+    ("SpecialCasing.txt", "c667b45908fd269af25fd55d2fc5bbc157fb1b77675936e25c513ce32e080334"),
+    ("DerivedCoreProperties.txt", "e3eddd7d469cd1b0feed7528defad1a1cc7c6a9ceb0ae4446a6d10921ed2e7bc"),
+)
+_SOURCE_BYTE_COUNTS = (
+    ("UnicodeData.txt", 1897793),
+    ("SpecialCasing.txt", 16830),
+    ("DerivedCoreProperties.txt", 1040794),
+)
+
+
+@lru_cache(maxsize=1)
+def _case_data():
+    # Keep unrelated translation paths importable while regenerating data.
+    # A missing/mismatched module is a build defect, never a host fallback.
+    from . import _unicode_case_data as data
+
+    if (data.DATA_FORMAT != 1 or data.DATA_VERSION != _DATA_VERSION
+            or data.SOURCE_SHA256 != _SOURCE_SHA256
+            or data.SOURCE_BYTE_COUNTS != _SOURCE_BYTE_COUNTS):
+        raise RuntimeError("regenerate Unicode casing data from the pinned UCD inputs")
+    return data
+
+
+def _context_flags(char: str) -> int:
+    point = ord(char)
+    ranges = _context_ranges()
+    low, high = 0, len(ranges)
+    while low < high:
+        mid = low + (high - low) // 2
+        if ranges[mid][1] < point:
+            low = mid + 1
+        else:
+            high = mid
+    if low < len(ranges) and ranges[low][0] <= point:
+        return ranges[low][2]
+    return 0
 
 
 @lru_cache(maxsize=1)
 def _context_ranges() -> tuple[tuple[int, int, int], ...]:
-    ranges: list[tuple[int, int, int]] = []
-    for code in range(0x110000):
-        char = chr(code)
-        cased = char.islower() or char.isupper() or char.istitle()
-        if cased:
-            ignorable = ("A\u03a3" + char).lower()[1] == "\u03c2"
-        else:
-            ignorable = ("A\u03a3" + char + "A").lower()[1] == "\u03c3"
-        flags = int(cased) | (int(ignorable) << 1)
-        if flags:
-            if ranges and ranges[-1][1] + 1 == code and ranges[-1][2] == flags:
-                start, _, _ = ranges[-1]
-                ranges[-1] = (start, code, flags)
-            else:
-                ranges.append((code, code, flags))
-    return tuple(ranges)
+    return _case_data().CONTEXT_RANGES
 
 
 _CONTEXT_CPP = r"""
+    static constexpr uint32_t _pf_tolower_final_map[][@FINAL_WIDTH@] = {
+@FINAL_MAPPINGS@
+    };
     static constexpr uint32_t _pf_case_properties[][3] = {
 @PROPERTIES@
     };
@@ -67,24 +95,33 @@ _CONTEXT_CPP = r"""
         --_pf_case_i;
         _pf_case_after[_pf_case_i] = static_cast<unsigned char>(_pf_case_next_cased);
         const unsigned _pf_case_props = _pf_case_flags(_pf_case_codes[_pf_case_i]);
-        if (!(_pf_case_props & 2u)) _pf_case_next_cased = (_pf_case_props & 1u) != 0;
+        if (!(_pf_case_props & 6u)) _pf_case_next_cased = (_pf_case_props & 1u) != 0;
     }
     bool _pf_case_before = false;
 """
 
 _CONTEXT_SELECT_CPP = r"""
-        if (_pf_case_code == 0x3A3u && _pf_case_before && !_pf_case_after[_pf_case_i]) {
-            _pf_case_append(0x3C2u);
-        } else
+        bool _pf_case_contextual = false;
+        if (_pf_case_before && !_pf_case_after[_pf_case_i]) {
+            for (const auto& _pf_case_row : _pf_tolower_final_map) {
+                if (_pf_case_row[0] != _pf_case_code) continue;
+                for (uint32_t _pf_case_k = 0; _pf_case_k < _pf_case_row[1]; ++_pf_case_k)
+                    _pf_case_append(_pf_case_row[_pf_case_k + 2]);
+                _pf_case_contextual = true;
+                break;
+            }
+        }
+        if (!_pf_case_contextual)
 """
 
 _CONTEXT_ADVANCE_CPP = r"""
         const unsigned _pf_case_props = _pf_case_flags(_pf_case_code);
-        if (!(_pf_case_props & 2u)) _pf_case_before = (_pf_case_props & 1u) != 0;
+        if (!(_pf_case_props & 6u)) _pf_case_before = (_pf_case_props & 1u) != 0;
 """
 
 _BODY_CPP = r"""[](const std::string& _pf_case_text) {
-    // Unicode @VERSION@ default @DIRECTION@, independent of the C locale.
+    // Unicode @VERSION@ casing, independent of the C locale.
+@PROVENANCE@
     static constexpr uint32_t @TABLE@[][@WIDTH@] = {
 @MAPPINGS@
     };
@@ -110,8 +147,6 @@ _BODY_CPP = r"""[](const std::string& _pf_case_text) {
                 : _pf_case_width == 2 ? 0x80u : _pf_case_width == 3 ? 0x800u : 0x10000u;
             _pf_case_valid = _pf_case_valid && _pf_case_code >= _pf_case_min && _pf_case_code <= 0x10FFFFu;
         }
-        // WTF-8 encodes isolated surrogate units as three bytes; keep them.
-        // Preserve each malformed byte with a value outside the Unicode range.
         if (!_pf_case_valid) {
             _pf_case_code = 0x110000u + _pf_case_lead;
             _pf_case_width = 1;
@@ -175,13 +210,8 @@ _BODY_CPP = r"""[](const std::string& _pf_case_text) {
 
 @lru_cache(maxsize=2)
 def _case_lambda(upper: bool) -> str:
-    mapping = str.upper if upper else str.lower
-    rows = []
-    for code in range(0x110000):
-        char = chr(code)
-        converted = mapping(char)
-        if converted != char:
-            rows.append((code, len(converted), *(ord(part) for part in converted)))
+    data = _case_data()
+    rows = data.UPPER_ROWS if upper else data.LOWER_ROWS
     width = max(len(row) for row in rows)
     mappings = "\n".join(
         "        {" + ", ".join(f"0x{value:X}u" for value in row) + "},"
@@ -193,11 +223,20 @@ def _case_lambda(upper: bool) -> str:
             f"        {{0x{start:X}u, 0x{end:X}u, {flags}u}},"
             for start, end, flags in _context_ranges()
         )
-        context = _CONTEXT_CPP.replace("@PROPERTIES@", properties)
+        final_rows = data.LOWER_FINAL_SIGMA_ROWS
+        final_mappings = "\n".join(
+            "        {" + ", ".join(f"0x{value:X}u" for value in row) + "},"
+            for row in final_rows
+        )
+        context = (_CONTEXT_CPP.replace("@PROPERTIES@", properties)
+                   .replace("@FINAL_WIDTH@", str(max(len(row) for row in final_rows)))
+                   .replace("@FINAL_MAPPINGS@", final_mappings))
     result = _BODY_CPP
     for key, value in (
-        ("@VERSION@", unicodedata.unidata_version),
-        ("@DIRECTION@", "uppercase" if upper else "lowercase"),
+        ("@VERSION@", data.DATA_VERSION),
+        ("@PROVENANCE@", "\n".join(
+            f"    // {name} SHA-256 {digest}" for name, digest in data.SOURCE_SHA256
+        )),
         ("@TABLE@", "_pf_toupper_map" if upper else "_pf_tolower_map"),
         ("@WIDTH@", str(width)),
         ("@MAPPINGS@", mappings),

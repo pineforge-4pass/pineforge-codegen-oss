@@ -554,6 +554,7 @@ CPP_TEMPORARY_NAMES = frozenset("""
     _pf_case_next_cased _pf_case_i _pf_case_props _pf_case_before _pf_case_lead
     _pf_case_width _pf_case_valid _pf_case_k _pf_case_byte _pf_case_min
     _pf_case_out _pf_case_append _pf_toupper_map _pf_tolower_map
+    _pf_tolower_final_map _pf_case_contextual _pf_case_row
     _pf_trim_text _pf_trim_size _pf_trim_first _pf_trim_last
     _pf_trim_i _pf_trim_c _pf_trim_width _pf_trim_second _pf_trim_third
     _pf_array_new_size _pf_array_new_value _pf_array_new_size_type _pf_array_new_error
