@@ -7589,6 +7589,31 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 visited_member_arg_types[id(arg)] = self._visit(arg)
             for val in node.kwargs.values():
                 visited_member_arg_types[id(val)] = self._visit(val)
+            if (self._pine_version == 6
+                    and not self._in_v5_library_definition(node)
+                    and isinstance(obj, Identifier) and obj.name == "timeframe"
+                    and self._value_bindings.declaration_bindings.get(id(obj)) is None):
+                intrinsic = sigs.BUILTIN_FUNCTIONS.get(f"{obj.name}.{member}")
+                if intrinsic is not None:
+                    bound = self._bind_callable_args(node, intrinsic.param_names)
+                    for parameter, value in zip(intrinsic.primary.params, bound):
+                        if value is None or parameter.pine_type != PineType.STRING:
+                            continue
+                        # An untyped helper's provisional float is not proof
+                        # that the caller supplies a numeric value.
+                        actual_type = self._certain_scalar_type(value)
+                        if actual_type in (PineType.INT, PineType.FLOAT):
+                            # Generic na adopts the parameter's string type;
+                            # a numeric value cannot satisfy that signature.
+                            function_name = intrinsic.name
+                            argument_type = actual_type.value
+                            parameter_type = parameter.pine_type.value
+                            name = parameter.name
+                            self._error(
+                                f"Cannot call '{function_name}' with a {argument_type} "
+                                f"argument for {parameter_type} parameter '{name}'.",
+                                value.loc,
+                            )
             # UDT method call-site typing.  Method definitions may contain an
             # untyped parameter history read; resolve receiver + args here and
             # apply the same deferred map-history gate as regular UDFs before

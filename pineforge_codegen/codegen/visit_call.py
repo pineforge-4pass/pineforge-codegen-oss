@@ -3232,7 +3232,9 @@ class CallVisitor:
 
                 if argument is None:
                     return timeframe_call("script_tf_")
-                argument_cpp = self._visit_expr(argument)
+                argument_cpp = self._visit_rhs_value(
+                    argument, target_cpp_type="std::string",
+                )
                 if cpp_is_plain_read(argument_cpp):
                     # Keep resolved locals and parameters as direct engine
                     # arguments when nonempty. Stable reads can be checked
