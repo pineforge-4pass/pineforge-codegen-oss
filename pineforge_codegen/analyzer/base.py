@@ -2531,7 +2531,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         primitive = {PineType.FLOAT, PineType.INT, PineType.BOOL,
                      PineType.STRING, PineType.COLOR}
         for name, info in self._global_binding_infos.items():
-            self._budget.check(phase=Phase.ANALYZER)
+            if self._budget is not None:
+                self._budget.check(phase=Phase.ANALYZER)
             last_write[name] = max(
                 (positions.get(id(stmt), -1) for stmt in info.source_stmts),
                 default=-1,
@@ -2556,7 +2557,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             path, seen = [], set()
             current = name
             while current in aliases and current not in rooted and current not in seen:
-                self._budget.check(phase=Phase.ANALYZER)
+                if self._budget is not None:
+                    self._budget.check(phase=Phase.ANALYZER)
                 seen.add(current)
                 path.append(current)
                 current = aliases[current]
@@ -2576,7 +2578,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         for call in self._security_calls:
             pending, seen, names = [call.expression], set(), set()
             while pending:
-                self._budget.check(phase=Phase.ANALYZER)
+                if self._budget is not None:
+                    self._budget.check(phase=Phase.ANALYZER)
                 node = pending.pop()
                 if not isinstance(node, ASTNode) or id(node) in seen:
                     continue
