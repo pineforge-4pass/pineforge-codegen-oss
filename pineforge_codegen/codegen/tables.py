@@ -16,6 +16,7 @@ consumers should never reach for them directly.
 
 from __future__ import annotations
 
+import json
 import re
 
 from ..intrinsic_binding import validate_intrinsic_keywords
@@ -82,37 +83,66 @@ TIME_FIELD_EXPRS = {
 # These suffixes contain only emitter-owned code. Keep the argument
 # initializers outside them so requested-context rewrites still reach the
 # user's expressions without capturing the lambdas' local bindings.
-# Rejected zones use the existing UTC path before any environment access.
-TIMESTAMP_CALENDAR_BODY = (
-    "static thread_local std::string _last_tz; "
-    "static thread_local int _last_yr = -1, _last_mo = -1, _last_dy = -1, _last_hr = -1, _last_min = -1, _last_sc = -1; "
-    "static thread_local int64_t _last_res = -1; "
-    "if (_last_res != -1 && _last_tz == _tz && _last_yr == _yr && _last_mo == _mo && _last_dy == _dy && _last_hr == _hr && _last_min == _min && _last_sc == _sc) { "
-    "return _last_res; "
-    "} "
-    "struct tm t = {}; "
-    "t.tm_year = _yr - 1900; t.tm_mon = _mo - 1; "
-    "t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
-    "t.tm_isdst = -1; "
-    "int64_t _res; "
-    "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\" || "
-    "!pineforge::native_calendar::timezone_accepted(_tz)) { "
-    "_res = (int64_t)timegm(&t) * 1000; "
-    "} else { "
-    "static std::mutex _pf_ts_mu; "
-    "std::lock_guard<std::mutex> _pf_ts_mu_lock(_pf_ts_mu); "
-    "const char* _old = std::getenv(\"TZ\"); "
-    "std::string _old_tz = _old ? _old : \"\"; bool _had_old = (_old != nullptr); "
-    "::setenv(\"TZ\", _tz.c_str(), 1); ::tzset(); "
-    "_res = (int64_t)mktime(&t) * 1000; "
-    "if (_had_old) { ::setenv(\"TZ\", _old_tz.c_str(), 1); } "
-    "else { ::unsetenv(\"TZ\"); } ::tzset(); "
-    "} "
-    "_last_tz = _tz; _last_yr = _yr; _last_mo = _mo; _last_dy = _dy; _last_hr = _hr; _last_min = _min; _last_sc = _sc; "
-    "_last_res = _res; "
-    "return _res; "
-    "}()"
-)
+# True stops the run at the call's first evaluation when timezone_accepted refuses a zone.
+# False emits the earlier behavior: silently interpret that zone as UTC.
+TIMESTAMP_REJECTED_ZONE_STOPS_RUN = True
+
+
+def build_timestamp_calendar_body(stops_run: bool) -> str:
+    """Select the rejected-zone branch without changing the calendar suffix."""
+    body = (
+        "static thread_local std::string _last_tz; "
+        "static thread_local int _last_yr = -1, _last_mo = -1, _last_dy = -1, _last_hr = -1, _last_min = -1, _last_sc = -1; "
+        "static thread_local int64_t _last_res = -1; "
+        "if (_last_res != -1 && _last_tz == _tz && _last_yr == _yr && _last_mo == _mo && _last_dy == _dy && _last_hr == _hr && _last_min == _min && _last_sc == _sc) { "
+        "return _last_res; "
+        "} "
+        "struct tm t = {}; "
+        "t.tm_year = _yr - 1900; t.tm_mon = _mo - 1; "
+        "t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
+        "t.tm_isdst = -1; "
+        "int64_t _res; "
+        "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\" || "
+        "!pineforge::native_calendar::timezone_accepted(_tz)) { "
+        "_res = (int64_t)timegm(&t) * 1000; "
+        "} else { "
+        "static std::mutex _pf_ts_mu; "
+        "std::lock_guard<std::mutex> _pf_ts_mu_lock(_pf_ts_mu); "
+        "const char* _old = std::getenv(\"TZ\"); "
+        "std::string _old_tz = _old ? _old : \"\"; bool _had_old = (_old != nullptr); "
+        "::setenv(\"TZ\", _tz.c_str(), 1); ::tzset(); "
+        "_res = (int64_t)mktime(&t) * 1000; "
+        "if (_had_old) { ::setenv(\"TZ\", _old_tz.c_str(), 1); } "
+        "else { ::unsetenv(\"TZ\"); } ::tzset(); "
+        "} "
+        "_last_tz = _tz; _last_yr = _yr; _last_mo = _mo; _last_dy = _dy; _last_hr = _hr; _last_min = _min; _last_sc = _sc; "
+        "_last_res = _res; "
+        "return _res; "
+        "}()"
+    )
+    if not stops_run:
+        return body
+    before = json.dumps('Incorrect `timezone` value for the timestamp() function: "')
+    after = json.dumps(
+        '". The value must be a string in either UTC/GMT notation '
+        '(e.g. "UTC-5", "GMT+0530") or an IANA time zone database name '
+        '(e.g. "America/New_York").'
+    )
+    return body.replace(
+        'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC" || '
+        '!pineforge::native_calendar::timezone_accepted(_tz)) { '
+        '_res = (int64_t)timegm(&t) * 1000; } else { ',
+        'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC") { '
+        '_res = (int64_t)timegm(&t) * 1000; '
+        '} else if (!pineforge::native_calendar::timezone_accepted(_tz)) { '
+        '_PF_TIMEZONE_STOP("timestamp", _tz.c_str(), '
+        f'(std::string({before}) + _tz + {after}).c_str()); '
+        '} else { ',
+        1,
+    )
+
+
+TIMESTAMP_CALENDAR_BODY = build_timestamp_calendar_body(TIMESTAMP_REJECTED_ZONE_STOPS_RUN)
 
 _TZ_TIME_FIELD_BODY = (
     "struct tm tm_buf; "
@@ -1009,6 +1039,35 @@ V5_ARRAY_INDEX_METHODS = {
 }
 
 
+def _array_sort_indices(a: str, args: list[str]) -> str:
+    """Return integer indices without changing the source, with numeric NA last
+    in ascending order and first in descending order.
+
+    Bind the order before taking any size/iterators, even for an empty source.
+    The shared receiver wrapper establishes an expression receiver first.
+    Strings retain ordinary lexical ordering, including the empty string.
+    """
+    order = args[0] if args else 'std::string("ascending")'
+    return (
+        f"[&](){{ const bool _pf_sort_descending=(({order})==\"descending\"); "
+        f"using _pf_sort_element=typename std::decay_t<decltype({a})>::value_type; "
+        f"std::vector<int> _pf_sort_indices({a}.size()); "
+        "std::iota(_pf_sort_indices.begin(),_pf_sort_indices.end(),0); "
+        "std::stable_sort(_pf_sort_indices.begin(),_pf_sort_indices.end(),"
+        "[&](int _pf_sort_i,int _pf_sort_j){ "
+        f"const _pf_sort_element _pf_sort_left={a}[_pf_sort_i]; "
+        f"const _pf_sort_element _pf_sort_right={a}[_pf_sort_j]; "
+        "if constexpr(std::is_arithmetic_v<_pf_sort_element>){ "
+        "const bool _pf_sort_left_na=is_na(_pf_sort_left); "
+        "const bool _pf_sort_right_na=is_na(_pf_sort_right); "
+        "if(_pf_sort_left_na||_pf_sort_right_na) "
+        "return _pf_sort_descending ? _pf_sort_left_na&&!_pf_sort_right_na "
+        ": !_pf_sort_left_na&&_pf_sort_right_na; } "
+        "return _pf_sort_descending ? _pf_sort_right<_pf_sort_left "
+        ": _pf_sort_left<_pf_sort_right; }); return _pf_sort_indices; }()"
+    )
+
+
 # Methods called as ``array.method(arr, ...)`` or ``arr.method(...)``.
 ARRAY_METHODS = {
     "get":       _checked_array_get,
@@ -1071,7 +1130,7 @@ ARRAY_METHODS = {
     "binary_search": lambda a, args: f"[&](){{ auto __pf_it=std::lower_bound({a}.begin(),{a}.end(),{args[0]}); return (__pf_it!={a}.end()&&*__pf_it=={args[0]})?(double)(__pf_it-{a}.begin()):-1.0; }}()",
     "binary_search_leftmost": lambda a, args: f"[&](){{ auto __pf_it=std::lower_bound({a}.begin(),{a}.end(),{args[0]}); return (__pf_it!={a}.end()&&*__pf_it=={args[0]})?(double)(__pf_it-{a}.begin()):(double)(__pf_it-{a}.begin()-1); }}()",
     "binary_search_rightmost": lambda a, args: f"[&](){{ auto __pf_it=std::upper_bound({a}.begin(),{a}.end(),{args[0]}); return (__pf_it!={a}.begin()&&*(__pf_it-1)=={args[0]})?(double)(__pf_it-{a}.begin()-1):(double)(__pf_it-{a}.begin()); }}()",
-    "sort_indices": lambda a, args: f"[&](){{ std::vector<double> __pf_idx({a}.size()); std::iota(__pf_idx.begin(),__pf_idx.end(),0); std::sort(__pf_idx.begin(),__pf_idx.end(),[&](int __pf_i,int __pf_j){{return {a}[__pf_i]<{a}[__pf_j];}}); return __pf_idx; }}()",
+    "sort_indices": _array_sort_indices,
 }
 
 # Closed coverage for stable primitive roots. Unknown operations must retain
@@ -1153,6 +1212,7 @@ CHECKED_ARRAY_METHOD_KWARGS: dict[str, list[str]] = {
     "pop": [],
     "shift": [],
     "sort": ["order"],
+    "sort_indices": ["order"],
     "indexof": ["value"],
     "unshift": ["value"],
 }

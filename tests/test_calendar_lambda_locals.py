@@ -28,9 +28,15 @@ CALENDAR_BODY = (
     "t.tm_year = _yr - 1900; t.tm_mon = _mo - 1; "
     "t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
     "t.tm_isdst = -1; int64_t _res; "
-    'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC" || '
-    '!pineforge::native_calendar::timezone_accepted(_tz)) { '
-    "_res = (int64_t)timegm(&t) * 1000; } else { "
+    'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC") { '
+    "_res = (int64_t)timegm(&t) * 1000; "
+    '} else if (!pineforge::native_calendar::timezone_accepted(_tz)) { '
+    '_PF_TIMEZONE_STOP("timestamp", _tz.c_str(), '
+    r'(std::string("Incorrect `timezone` value for the timestamp() function: \"") '
+    r'+ _tz + "\". The value must be a string in either UTC/GMT notation '
+    r'(e.g. \"UTC-5\", \"GMT+0530\") or an IANA time zone database name '
+    r'(e.g. \"America/New_York\").").c_str()); '
+    "} else { "
     "static std::mutex _pf_ts_mu; "
     "std::lock_guard<std::mutex> _pf_ts_mu_lock(_pf_ts_mu); "
     'const char* _old = std::getenv("TZ"); '
