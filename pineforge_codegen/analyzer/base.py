@@ -7084,6 +7084,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         parameter_types: dict[str, PineType | TypeSpec] | None = None,
     ) -> TypeSpec | None:
         """Use lexical type facts and written-call facts, never a float fallback."""
+        return OperatorTypeQuery(self, parameter_types)._operand_type(node)
+
+    def _operator_operand_type_uncached(
+        self, node: ASTNode,
+        parameter_types: dict[str, PineType | TypeSpec] | None,
+        query: OperatorTypeQuery,
+    ) -> TypeSpec | None:
+        """Resolve an operand using the current expression query's memo."""
         if isinstance(node, Identifier) and parameter_types is not None:
             if node.name in parameter_types:
                 ptype = parameter_types[node.name]
@@ -7138,7 +7146,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         arguments.append(node.kwargs.get(name))
                     result = source_builtin_result(
                         ns, callee.member, tuple(
-                            self._operator_operand_type(arg, parameter_types)
+                            query._operand_type(arg)
                             if arg is not None else None for arg in arguments
                         ),
                     )
@@ -7146,7 +7154,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         return result
                     # The structured return contract can prove a collection
                     # even when no scalar result rule applies.
-                    result = OperatorTypeQuery(self, parameter_types)._type_spec_from_expr(node)
+                    result = query._type_spec_from_expr(node)
                     return result if result is not None and result.kind != "primitive" else None
             if isinstance(callee, Identifier) and callee.name in {"nz", "fixnan", "input"}:
                 return None
@@ -7154,7 +7162,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if isinstance(node.object, Subscript):
                 # Nested history is decided by the subscript checker.
                 return None
-            receiver = self._operator_operand_type(node.object, parameter_types)
+            receiver = query._operand_type(node.object)
             if receiver is None:
                 return None
             if receiver.kind in {"array", "matrix", "map"}:
@@ -7176,7 +7184,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 terminal = self._selection_terminal_expr(body)
                 if terminal is None:
                     continue
-                arm = self._operator_operand_type(terminal, parameter_types)
+                arm = query._operand_type(terminal)
                 if arm is None:
                     return None
                 if result is None:
@@ -7198,7 +7206,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             else:
                 op, operands = "?:", (node.condition, node.true_val, node.false_val)
             result, _ = resolve_operator(op, tuple(
-                self._operator_operand_type(expr, parameter_types)
+                query._operand_type(expr)
                 for expr in operands
             ))
             return result
@@ -7236,7 +7244,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         or getattr(sym, "_pf_parameter_owner", None)):
                     result = sym.type_spec
         if result is None and isinstance(node, (MemberAccess, FuncCall, Subscript)):
-            result = OperatorTypeQuery(self, parameter_types)._type_spec_from_expr(node)
+            result = query._type_spec_from_expr(node)
             if isinstance(node, FuncCall) and result is not None and result.kind == "primitive":
                 # A definition-wide callable result is legacy inference.
                 # Collection accessors instead have a declared element slot.
@@ -7249,7 +7257,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         else callee.object
                     )
                 receiver_type = (
-                    self._operator_operand_type(receiver, parameter_types)
+                    query._operand_type(receiver)
                     if receiver is not None else None
                 )
                 accessors = {

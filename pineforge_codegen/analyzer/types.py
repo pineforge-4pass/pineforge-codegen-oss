@@ -1464,9 +1464,40 @@ class OperatorTypeQuery(TypeHelper):
     def __init__(self, analyzer, parameter_types):
         self._analyzer = analyzer
         self._parameter_types = parameter_types
+        self._type_query_memo = None
 
     def __getattr__(self, name):
         return getattr(self._analyzer, name)
+
+    def _memoized_type(self, node, kind, context, infer):
+        # Share successful and unresolved results across the value/operand
+        # fallback paths of one read-only query. Drop the entire memo when
+        # that query returns, before any declaration, scope or callable facts
+        # can change. A later query, even on this object, starts fresh.
+        memo = self._type_query_memo
+        root = memo is None
+        if root:
+            memo = self._type_query_memo = {}
+        try:
+            key = (kind, id(node), context)
+            if key not in memo:
+                if self._analyzer._budget is not None:
+                    self._analyzer._budget.check(
+                        getattr(node, "loc", None), Phase.ANALYZER,
+                    )
+                memo[key] = infer()
+            return memo[key]
+        finally:
+            if root:
+                self._type_query_memo = None
+
+    def _operand_type(self, node):
+        return self._memoized_type(
+            node, "operand", None,
+            lambda: self._analyzer._operator_operand_type_uncached(
+                node, self._parameter_types, self,
+            ),
+        )
 
     def check_body(self, body):
         for node in body:
@@ -1538,11 +1569,14 @@ class OperatorTypeQuery(TypeHelper):
         return result
 
     def _value_spec(self, value):
+        return self._memoized_type(
+            value, "value", None, lambda: self._value_spec_uncached(value),
+        )
+
+    def _value_spec_uncached(self, value):
         spec = self._type_spec_from_expr(value)
         if spec is None:
-            spec = self._analyzer._operator_operand_type(
-                value, self._parameter_types
-            )
+            spec = self._operand_type(value)
         return spec
 
     def _check_node(self, node):
@@ -1636,11 +1670,17 @@ class OperatorTypeQuery(TypeHelper):
             return
         self._analyzer._check_operator_operands(node, op, operands, self._parameter_types)
 
-    def _type_spec_from_expr(self, value, **kwargs):
+    def _type_spec_from_expr(self, value, *, _ternary_arms=None):
+        return self._memoized_type(
+            value, "spec", _ternary_arms,
+            lambda: self._type_spec_from_expr_uncached(
+                value, _ternary_arms=_ternary_arms,
+            ),
+        )
+
+    def _type_spec_from_expr_uncached(self, value, **kwargs):
         if isinstance(value, Identifier):
-            return self._analyzer._operator_operand_type(
-                value, self._parameter_types,
-            )
+            return self._operand_type(value)
         if (isinstance(value, FuncCall)
                 and isinstance(value.callee, Identifier)
                 and value.callee.name in self._analyzer._func_defs):
@@ -1663,7 +1703,7 @@ class OperatorTypeQuery(TypeHelper):
     def _visit(self, node):
         # TypeHelper's array.from fallback normally visits its arguments.
         # Here it asks for facts only, so no TA or request is registered again.
-        spec = self._analyzer._operator_operand_type(node, self._parameter_types)
+        spec = self._operand_type(node)
         if spec is not None and spec.kind == "primitive":
             return next((ptype for ptype in PineType if ptype.value == spec.name),
                         PineType.UNKNOWN)
@@ -1672,7 +1712,7 @@ class OperatorTypeQuery(TypeHelper):
     def _array_from_element_spec(self, value):
         # Array construction must not recover a coarse symbol/call result
         # after the operator query deliberately left its source unresolved.
-        return self._analyzer._operator_operand_type(value, self._parameter_types)
+        return self._operand_type(value)
 
     @staticmethod
     def _pine_type_to_spec(pine_type):

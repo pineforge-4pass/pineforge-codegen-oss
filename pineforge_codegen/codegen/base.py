@@ -2551,6 +2551,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # final state and can already contain an invalid later reassignment's
         # element type. The original declaration must remain the compatibility
         # baseline used to reject matrix<int> := matrix<float>.
+        gem = getattr(self.ctx, "global_expr_map", {}) or {}
         for stmt, _in_loop in self._walk_global_scope_with_loopflag(
             getattr(self.ctx.ast, "body", []), False
         ):
@@ -2572,11 +2573,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     self._array_vars.add(stmt.name)
                     self._collection_types.setdefault(stmt.name, declared_spec)
                     continue
-            else:
+            elif stmt.name not in gem:
                 # Reassignment removes a binding from global_expr_map. Its
                 # initializer still establishes its matrix handle type, also
                 # for declarations inside top-level control-flow blocks.
                 declared_spec = self._type_spec_from_expr(stmt.value)
+            else:
+                # An available initializer still uses the established member
+                # inference and default initialization below.
+                continue
             if (from_selection and declared_spec is not None
                     and declared_spec.kind == "array"):
                 # ``a = switch mode ...`` whose every arm is an array of one
@@ -2591,7 +2596,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._matrix_specs.setdefault(stmt.name, declared_spec)
             self._collection_types[stmt.name] = self._matrix_specs[stmt.name]
 
-        gem = getattr(self.ctx, "global_expr_map", {}) or {}
         for name, _ptype in self.ctx.global_var_decls:
             expr = gem.get(name)
             if expr is None or not isinstance(expr, FuncCall):
