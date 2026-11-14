@@ -537,6 +537,10 @@ def check_workflows(sources):
         if not path.endswith((".yml", ".yaml")):
             continue
         records = yaml_records(text)
+        if path == ".github/workflows/test.yml":
+            require({key for depth, key, _ in records if depth == 0}
+                    == {"name", "on", "permissions", "concurrency", "jobs"},
+                    "test.yml top-level keys must be exactly name, on, permissions, concurrency and jobs")
         if path.startswith(".github/workflows/"):
             header = text.split("\njobs:\n", 1)[0]
             if path == ".github/workflows/test.yml":
@@ -1663,6 +1667,34 @@ def test_test_workflow_pull_request_trigger_mutation_is_refused():
     assert mutant != original
     with pytest.raises(ValueError, match="test.yml must not have a pull_request trigger"):
         check_workflows({**sources, path: mutant})
+
+
+def test_test_workflow_top_level_keys_are_exact():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    path = ".github/workflows/test.yml"
+    original = sources[path]
+    refusal = "test.yml top-level keys must be exactly name, on, permissions, concurrency and jobs"
+
+    # The real workflow remains the positive control; every row below mutates that text.
+    check_workflows(sources)
+    rows = [
+        ("added top-level env", replace_once(
+            original, "\njobs:\n", "\nenv:\n  CI: true\n\njobs:\n")),
+        ("added top-level defaults", replace_once(
+            original, "\njobs:\n", "\ndefaults:\n  run:\n    shell: bash\n\njobs:\n")),
+        ("missing required permissions key", replace_once(
+            original, "permissions:\n  contents: read\n\n", "")),
+        ("unrelated extra top-level key", replace_once(
+            original, "name: Test\n", "name: Test\nx-extra: true\n")),
+    ]
+    for label, mutant in rows:
+        assert mutant != original, label
+        with pytest.raises(ValueError) as error:
+            check_workflows({**sources, path: mutant})
+        assert str(error.value) == refusal, label
 
 
 def test_test_workflow_hosted_runner_admission_and_mutations():
