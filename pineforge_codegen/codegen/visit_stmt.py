@@ -263,6 +263,11 @@ class StmtVisitor:
             ).get(id(node))
             if metadata is not None:
                 member_name = metadata[1]
+                if metadata[4] and metadata[2] == PineType.STRING:
+                    # Persistent callable locals bypass ordinary scalar
+                    # declarations. Activate their member's string family only
+                    # after the initializer, for later reads and write targets.
+                    self._current_func_local_types[node.name] = "std::string"
                 if member_name != node.name:
                     # The declaration RHS was emitted against the inherited
                     # binding.  Only now activate the collision-safe member for
@@ -1152,6 +1157,7 @@ class StmtVisitor:
 
     def _compound_assign_rhs(self, target_read: str, op: str, val_cpp: str,
                              target_node=None, value_node=None, *,
+                             target_cpp_type: str | None = None,
                              target_is_double: bool = False,
                              value_is_double: bool = False) -> str | None:
         """RHS for a compound assignment that must NOT lower to the C++
@@ -1161,10 +1167,18 @@ class StmtVisitor:
         fmod-like — the binary-operator lowering in visit_expr casts both
         sides to double / uses std::fmod. ``a /= b`` and ``a %= b`` must
         match those semantics (C++ ``/=`` would do integer division on int
-        operands; ``%=`` does not even compile for doubles). Returns None
-        for operators where the native C++ compound form is correct
-        (+=, -=, *=).
+        operands; ``%=`` does not even compile for doubles). String ``+=``
+        rejoins UTF-16 halves like string ``+``. The caller can supply its
+        emitted storage type when a requested binding differs from the chart
+        AST's type. Returns None when the native compound form is correct.
         """
+        if (op == "+="
+                and (target_cpp_type or self._concat_type(target_node)) == "std::string"):
+            # A bare na takes the string slot's type; other values keep the
+            # assignment writer's already-rendered RHS.
+            if self._is_na_expr(value_node):
+                val_cpp = "na<std::string>()"
+            return self._string_concat_cpp(target_read, val_cpp)
         # Requested helper state already stores numeric values as doubles.
         # Its caller supplies the emitted operand families after converting
         # the RHS; the chart AST's int hint cannot type those series reads.

@@ -26,6 +26,8 @@ from .helpers import (
     evaluate_args_once, na_preserving_int_cast, pine_index_int_cast,
     pine_truth_cast,
 )
+from .unicode_case import _unicode_case_expr
+from .unicode_regex import _str_match_expr
 
 
 _PROVEN_INT_ARG = re.compile(
@@ -1196,7 +1198,7 @@ ARRAY_ARGS_READ_REPEATEDLY = {
     "concat": (0,),
 }
 
-# Pine parameter order for the checked-index subset. Keeping the receiver
+# Pine parameter order for keyword-aware array lowerings. Keeping the receiver
 # (``id``) separate lets method syntax merge ``a.get(index = i)`` while the
 # namespace-functional path merges ``array.get(id = a, index = i)``.
 CHECKED_ARRAY_METHOD_KWARGS: dict[str, list[str]] = {
@@ -1215,6 +1217,7 @@ CHECKED_ARRAY_METHOD_KWARGS: dict[str, list[str]] = {
     "sort_indices": ["order"],
     "indexof": ["value"],
     "unshift": ["value"],
+    "join": ["separator"],
 }
 
 MAP_METHODS = {
@@ -1579,6 +1582,59 @@ def _str_split_expr(args: list[str]) -> str:
     )
 
 
+def _str_trim_expr(args: list[str]) -> str:
+    """Trim the measured whitespace at the ends, keeping the original bytes."""
+    # Match only complete admitted UTF-8 sequences. Every other byte,
+    # including NUL or malformed UTF-8, extends the retained byte bounds.
+    return (
+        "[](const std::string _pf_trim_text) { "
+        "const std::size_t _pf_trim_size = _pf_trim_text.size(); "
+        "std::size_t _pf_trim_first = _pf_trim_size; "
+        "std::size_t _pf_trim_last = 0; "
+        "for (std::size_t _pf_trim_i = 0; _pf_trim_i < _pf_trim_size;) { "
+        "const unsigned char _pf_trim_c = "
+        "static_cast<unsigned char>(_pf_trim_text[_pf_trim_i]); "
+        "std::size_t _pf_trim_width = 0; "
+        "if (_pf_trim_c == 0x20u || "
+        "(_pf_trim_c >= 0x09u && _pf_trim_c <= 0x0Du)) { "
+        "_pf_trim_width = 1; "
+        "} else if (_pf_trim_size - _pf_trim_i >= 2 && "
+        "_pf_trim_c == 0xC2u && "
+        "static_cast<unsigned char>(_pf_trim_text[_pf_trim_i + 1]) == 0xA0u) { "
+        "_pf_trim_width = 2; "
+        "} else if (_pf_trim_size - _pf_trim_i >= 3) { "
+        "const unsigned char _pf_trim_second = "
+        "static_cast<unsigned char>(_pf_trim_text[_pf_trim_i + 1]); "
+        "const unsigned char _pf_trim_third = "
+        "static_cast<unsigned char>(_pf_trim_text[_pf_trim_i + 2]); "
+        "if ((_pf_trim_c == 0xE1u && _pf_trim_second == 0x9Au && "
+        "_pf_trim_third == 0x80u) || "
+        "(_pf_trim_c == 0xE2u && _pf_trim_second == 0x80u && "
+        "(_pf_trim_third == 0x83u || _pf_trim_third == 0xA8u)) || "
+        "(_pf_trim_c == 0xE3u && _pf_trim_second == 0x80u && "
+        "_pf_trim_third == 0x80u) || "
+        "(_pf_trim_c == 0xEFu && _pf_trim_second == 0xBBu && "
+        "_pf_trim_third == 0xBFu)) { "
+        "_pf_trim_width = 3; } } "
+        "if (_pf_trim_width != 0) { _pf_trim_i += _pf_trim_width; } "
+        "else { "
+        "if (_pf_trim_first == _pf_trim_size) _pf_trim_first = _pf_trim_i; "
+        "_pf_trim_last = ++_pf_trim_i; } } "
+        "return _pf_trim_first == _pf_trim_size ? std::string() "
+        ": _pf_trim_text.substr(_pf_trim_first, _pf_trim_last - _pf_trim_first); "
+        f"}}(({args[0]}))"
+    )
+
+
+def _str_u16_search_expr(function: str, args: list[str]) -> str:
+    """Bind source, then needle, once each in parameter order."""
+    return (
+        f"[&](){{ const std::string _pf_search_source = ({args[0]}); "
+        f"const std::string _pf_search_needle = ({args[1]}); "
+        f"return _pf_u16_{function}(_pf_search_source, _pf_search_needle); }}()"
+    )
+
+
 STR_FUNC_MAP = {
     "tostring":    None,  # handled separately (already works)
     "tonumber":    lambda args: (
@@ -1589,31 +1645,28 @@ STR_FUNC_MAP = {
         f"}}(({args[0]}))"
     ),
     "length":      lambda args: f"_pf_u16_length({args[0]})",
-    "contains":    lambda args: f"({args[0]}.find({args[1]}) != std::string::npos)",
-    "startswith":  lambda args: f"({args[0]}.substr(0, {args[1]}.length()) == {args[1]})",
-    "endswith":    lambda args: f"({args[0]}.length() >= {args[1]}.length() && {args[0]}.compare({args[0]}.length() - {args[1]}.length(), {args[1]}.length(), {args[1]}) == 0)",
-    # The two statements keep the source before the needle in evaluation order.
-    "pos":         lambda args: f"[&](){{ const std::string __pf_s = ({args[0]}); const std::string __pf_t = ({args[1]}); return _pf_u16_pos(__pf_s, __pf_t); }}()",
+    "contains":    lambda args: _str_u16_search_expr("contains", args),
+    "startswith":  lambda args: _str_u16_search_expr("startswith", args),
+    "endswith":    lambda args: _str_u16_search_expr("endswith", args),
+    "pos":         lambda args: _str_u16_search_expr("pos", args),
     "substring":   None,  # handled separately (2 vs 3 args)
     "replace_all": lambda args: f"[&](){{ std::string __pf_s={args[0]}; size_t __pf_p=0; while((__pf_p=__pf_s.find({args[1]},__pf_p))!=std::string::npos){{ __pf_s.replace(__pf_p,{args[1]}.length(),{args[2]}); __pf_p+={args[2]}.length(); }} return __pf_s; }}()",
     "replace":     None,  # handled separately (3 vs 4 args)
-    "lower":       lambda args: f"[&](){{ std::string __pf_s={args[0]}; std::transform(__pf_s.begin(),__pf_s.end(),__pf_s.begin(),::tolower); return __pf_s; }}()",
-    "upper":       lambda args: f"[&](){{ std::string __pf_s={args[0]}; std::transform(__pf_s.begin(),__pf_s.end(),__pf_s.begin(),::toupper); return __pf_s; }}()",
-    "trim":        lambda args: f'[&](){{ std::string __pf_s={args[0]}; __pf_s.erase(0,__pf_s.find_first_not_of(" \\t\\n\\r")); __pf_s.erase(__pf_s.find_last_not_of(" \\t\\n\\r")+1); return __pf_s; }}()',
+    "lower":       lambda args: _unicode_case_expr(args[0], upper=False),
+    "upper":       lambda args: _unicode_case_expr(args[0], upper=True),
+    "trim":        _str_trim_expr,
     "repeat":      lambda args: (
         f"[&](){{ std::string __pf_r; for(int __pf_i=0;__pf_i<{na_preserving_int_cast(args[1])};__pf_i++) __pf_r+={args[0]}; return __pf_r; }}()"
         if len(args) < 3 else
         f"[&](){{ std::string __pf_r; for(int __pf_i=0;__pf_i<{na_preserving_int_cast(args[1])};__pf_i++){{ if(__pf_i>0) __pf_r+={args[2]}; __pf_r+={args[0]}; }} return __pf_r; }}()"
     ),
-    "match":       lambda args: f'pine_str_match({args[0]}, {args[1]})',
+    "match":       _str_match_expr,
     "split":       _str_split_expr,
     "format":      None,  # handled separately
 }
 # The STR_FUNC_MAP arguments a template reads more than once, or once per
 # loop iteration: evaluate_args_once binds each that is not a plain read.
 STR_ARGS_READ_REPEATEDLY = {
-    "startswith": (1,),
-    "endswith": (0, 1),
     "replace_all": (1, 2),
     "repeat": (0, 1, 2),
 }

@@ -3547,11 +3547,15 @@ class TypeInferer:
                 view_function=view_function,
             )
         elif method == "join" and elem_cpp == "std::string":
-            join_args = list(args) or ['std::string(",")']
-            lower_receiver = lambda recv: evaluate_args_once(
-                join_args, ARRAY_ARGS_READ_REPEATEDLY["join"],
-                lambda a: f"[&](){{ std::string __pf_r; for(size_t __pf_i=0;__pf_i<{recv}.size();__pf_i++){{ if(__pf_i>0)__pf_r+={a[0]}; __pf_r+={recv}[__pf_i]; }} return __pf_r; }}()",
-                "_pf_array_a",
+            self._uses_tv_string_units = True
+            separator = args[0] if args else 'std::string(",")'
+            # Bind the receiver before the separator even when the shared
+            # receiver wrapper sees only one use. A const reference also
+            # keeps a temporary array alive throughout the join.
+            lower_receiver = lambda recv: (
+                f"[&](){{ const auto& _pf_join_parts = ({recv}); "
+                f"const std::string _pf_join_separator = ({separator}); "
+                "return _pf_u16_join(_pf_join_parts, _pf_join_separator); }()"
             )
         else:
             numeric_only = {
@@ -3942,12 +3946,12 @@ class TypeInferer:
                 _dret = self._drawing_call_return_cpp(node.value)
                 if _dret is not None:
                     return _dret
-        local = self._builtin_local_symbol(node)
-        if local is not None:
-            if local.type_spec is not None:
-                return promote_wide_int(self._type_spec_to_cpp(local.type_spec))
-            if local.pine_type not in (PineType.UNKNOWN, PineType.VOID):
-                return promote_wide_int(PINE_TYPE_TO_CPP[local.pine_type])
+        declared = self._builtin_declaration_symbol(node)
+        if declared is not None:
+            if declared.type_spec is not None:
+                return promote_wide_int(self._type_spec_to_cpp(declared.type_spec))
+            if declared.pine_type not in (PineType.UNKNOWN, PineType.VOID):
+                return promote_wide_int(PINE_TYPE_TO_CPP[declared.pine_type])
         # Analyzer scopes are popped before codegen, so ctx.symbols.resolve may
         # find a same-named global instead of this active callable's plain
         # local.  The local binding is known from the emitted body inventory;
@@ -4052,32 +4056,45 @@ class TypeInferer:
             return None
         return DRAWING_TYPE_TO_CPP.get(udt, udt)
 
-    def _builtin_local_symbol(self, node):
-        """Recover a builtin-shadowing declaration from its own callable scope."""
+    def _builtin_declaration_symbol(self, node):
+        """Recover this builtin-named variable's exact authored declaration."""
         if node.name not in sigs.BUILTIN_VARIABLES:
             return None
-        declaration = (
-            node if isinstance(node, VarDecl)
-            else self.ctx.identifier_binding_nodes.get(id(node))
-        )
-        if declaration is None:
-            return None
-        symbols = getattr(self, "_builtin_local_symbols", None)
+        if isinstance(node, VarDecl):
+            declaration = id(node)
+        else:
+            binding = (
+                self.ctx.identifier_decl_bindings[id(node)]
+                if id(node) in self.ctx.identifier_decl_bindings
+                else ValueBindings.declaration_of(node)
+            )
+            if binding is None:
+                return None
+            declaration = binding[0]
+        symbols = getattr(self, "_builtin_declaration_symbols", None)
         if symbols is None:
-            symbols = self._builtin_local_symbols = {}
+            symbols = self._builtin_declaration_symbols = {}
+            local_symbols = self._builtin_local_symbols = {}
             for scope in self.ctx.symbols.all_scopes:
                 owner = scope
                 while (owner is not None
                        and not owner.name.startswith(("func_", "method_"))):
                     owner = owner.parent
-                if owner is None:
-                    continue
                 for symbol in scope.symbols.values():
                     declared = getattr(symbol, "_pf_decl_node", None)
                     if (symbol.name in sigs.BUILTIN_VARIABLES
                             and isinstance(declared, VarDecl)):
                         symbols[id(declared)] = symbol
-        return symbols.get(id(declaration))
+                        if owner is not None:
+                            local_symbols[id(declared)] = symbol
+        return symbols.get(declaration)
+
+    def _builtin_local_symbol(self, node):
+        """Recover a builtin-shadowing declaration from its own callable scope."""
+        symbol = self._builtin_declaration_symbol(node)
+        if symbol is None:
+            return None
+        return self._builtin_local_symbols.get(id(symbol._pf_decl_node))
 
     def _variable_symbol(self, name: str):
         """The symbol the variable ``name`` resolves to.
@@ -6276,9 +6293,9 @@ class TypeInferer:
             lexical_tuple_type = self._lexical_tuple_cpp_type(node)
             if lexical_tuple_type is not None:
                 return lexical_tuple_type
-            local = self._builtin_local_symbol(node)
-            if local is not None:
-                return self._type_for_decl(local._pf_decl_node)
+            declared = self._builtin_declaration_symbol(node)
+            if declared is not None:
+                return self._type_for_decl(declared._pf_decl_node)
             binding = self.ctx.identifier_decl_bindings.get(id(node))
             if (binding is not None
                     and binding[0] in self.ctx.primitive_block_shadow_types):
@@ -6292,10 +6309,10 @@ class TypeInferer:
             )
             if tuple_type is not None:
                 return tuple_type
-            if not tuple_binding and node.name in ("time", "time_close", "timenow"):
+            builtin_read = self._reads_builtin_variable(node)
+            if builtin_read and node.name in ("time", "time_close", "timenow"):
                 return "int64_t"
-            if (node.name in BAR_FIELDS
-                    or (node.name in BAR_BUILTINS and not tuple_binding)):
+            if builtin_read:
                 return "double"
             if (node.name in self._known_vars
                     and not self._known_var_is_lexically_shadowed(node.name)):

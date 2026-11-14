@@ -100,6 +100,31 @@ result = values.get(0)
     compile_cpp(cpp, label="array-method-builtin-collision")
 
 
+@pytest.mark.parametrize(
+    "receiver_type, receiver",
+    [
+        pytest.param("array<string>", 'array.from("alpha", "beta")', id="array"),
+        pytest.param("int", "7", id="namespace-shadow"),
+    ],
+)
+def test_authored_join_return_precedes_fixed_builtin_result(receiver_type, receiver):
+    source = f'''//@version=6
+strategy("authored join return")
+method join({receiver_type} self, string separator) =>
+    self
+    str.length(separator)
+relay({receiver_type} array, string separator) =>
+    array.join(separator)
+parts = {receiver}
+result = relay(parts, "|")
+plot(close)
+'''
+    cpp = transpile(source)
+    assert "int relay(" in cpp
+    assert re.search(r"\bint result\s*[=;]", cpp), cpp
+    compile_cpp(cpp, label="authored-array-join-return")
+
+
 def test_map_receiver_keeps_shared_id_value_handle() -> None:
     source = '''//@version=6
 strategy("map builtin collision")

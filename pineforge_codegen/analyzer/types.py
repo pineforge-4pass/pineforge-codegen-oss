@@ -54,7 +54,7 @@ from ..symbols import (
     method_receiver_type_name,
     unify_type_specs,
 )
-from .operators import join_value_types, reference_value_type
+from .operators import fixed_builtin_result, join_value_types, reference_value_type
 
 # Drawing-objects-as-data type names (spec §4.1). Defined locally — the
 # analyzer must not import from ``codegen`` (codegen imports analyzer, so the
@@ -172,6 +172,29 @@ class TypeHelper:
         ann = getattr(callee, "annotations", None) or {}
         raw = ann.get("template_args") or []
         return [str(x).replace(" ", "") for x in raw]
+
+    def _fixed_array_call_result(
+        self, call: FuncCall, receiver_spec: TypeSpec | None,
+    ) -> TypeSpec | None:
+        """Read a fixed array result after authored-method resolution."""
+        callee = call.callee
+        if not isinstance(callee, MemberAccess):
+            return None
+        namespace_call = (
+            isinstance(callee.object, Identifier)
+            and callee.object.name == "array"
+            and self._symbols.resolve("array") is None
+            and self._value_bindings.declaration_bindings.get(
+                id(callee.object)
+            ) is None
+        )
+        if not namespace_call and (
+            receiver_spec is None or receiver_spec.kind != "array"
+        ):
+            return None
+        return fixed_builtin_result(
+            "array", callee.member, len(call.args) + len(call.kwargs),
+        )
 
     def _array_from_element_spec(self, value: ASTNode | None) -> TypeSpec | None:
         """Exact scalar element type for one ``array.from`` argument.
@@ -579,6 +602,11 @@ class TypeHelper:
                     # Its body-derived return type is not available yet, but a
                     # same-named builtin must not lend it a false type.
                     return None
+                fixed_array_result = self._fixed_array_call_result(
+                    value, typed_receiver_spec,
+                )
+                if fixed_array_result is not None:
+                    return fixed_array_result
                 if (
                     typed_receiver_spec is not None
                     and typed_receiver_spec.kind == "udt"

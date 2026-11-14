@@ -6,6 +6,7 @@ from ..symbols import TypeSpec
 # Only argument-independent scalar results belong here. The signature
 # registry also contains storage-oriented approximations of polymorphic calls.
 _FIXED_RESULT_CALLS = {
+    "array": frozenset({"join"}),
     "str": frozenset({
         "tostring", "format", "format_time", "length", "contains", "startswith",
         "endswith", "pos", "substring", "replace", "replace_all", "lower",
@@ -53,6 +54,8 @@ def fixed_builtin_result(namespace: str, name: str, arity: int) -> TypeSpec | No
             else "int" if name in {"barssince", "highestbars", "lowestbars"}
             else "float"
         )
+    elif namespace == "array":
+        result = "string"
     elif namespace == "str":
         result = (
             "bool" if name in {"contains", "startswith", "endswith"}

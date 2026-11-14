@@ -22,7 +22,14 @@ Row names say where the expected value comes from:
   units of an emoji keeps each half as its own three-byte sequence, the form
   str.split gives its parts, so the length of the half is one unit;
 * ``control-*``: a case in which bytes, code points and UTF-16 units agree.
+
+For issue #382 item 8, ``measured-*`` trim rows repeat the issue's four exact
+examples. ``contract-derived-*`` rows compose only its supplied removed/kept
+characters with other text, interior characters, empty text and runtime inputs;
+they are not separate TradingView measurements or a full Unicode whitespace set.
 """
+
+import json
 
 import pytest
 
@@ -50,6 +57,7 @@ int main() {
         bars[i].timestamp = 1704067200000LL + static_cast<long long>(i) * 60000LL;
     }
     GeneratedStrategy strategy;
+    // INPUTS
     strategy.run(bars.data(), bars.size(), "1", "1");
     if (!strategy.last_error().empty()) {
         std::cerr << strategy.last_error() << "\n";
@@ -66,10 +74,18 @@ EMOJI = "\U0001F600"
 FEFF = "\U0000feff"
 
 
-def _run(script: str, observe: str) -> str:
+def _run(script: str, observe: str, *, opt: str = "-O0",
+         inputs: dict[str, str] | None = None, setup: str = "") -> str:
     cpp = transpile(HEADER + script)
+    input_setup = "\n".join(
+        f"strategy.set_input({json.dumps(name)}, {json.dumps(value, ensure_ascii=False)});"
+        for name, value in (inputs or {}).items()
+    )
+    driver = DRIVER.replace(
+        "// INPUTS", input_setup + ("\n" + setup if setup else ""),
+    ).replace("// OBSERVE", observe)
     return run_emitted_tu(
-        cpp, DRIVER.replace("// OBSERVE", observe), opt="-O0", label="string units",
+        cpp, driver, opt=opt, label="string units",
     )
 
 
@@ -103,15 +119,159 @@ POS_ROWS = [
     pytest.param("aab", "b", 2, id="measured-after-an-ascii-letter"),
     pytest.param(f"{EMOJI}{EMOJI}b", "b", 4, id="derived-after-two-emoji"),
     pytest.param(f"a{EMOJI}b", EMOJI, 1, id="derived-the-emoji-itself"),
-    pytest.param(f"a{EMOJI}b", "x", -1, id="control-not-found"),
+    # Issue #382 item 5: an absent match is na, including after non-ASCII text.
+    pytest.param(f"a{EMOJI}b", "x", "na", id="control-not-found"),
     pytest.param(f"a{CJK}b", CJK, 1, id="control-the-bmp-character-itself"),
 ]
 
 
 @pytest.mark.parametrize("text, needle, expected", POS_ROWS)
 def test_pos_counts_utf16_units(text, needle, expected):
-    script = f'p = str.pos("{text}", "{needle}")\nplot(p)\n'
-    assert _run(script, 'std::cout << strategy.p << "\\n";') == f"{expected}\n"
+    script = (f'p = str.pos("{text}", "{needle}")\n'
+              'missing = na(p)\nplot(p)\n')
+    observe = (
+        'if (strategy.missing) std::cout << "na\\n"; '
+        'else std::cout << strategy.p << "\\n";'
+    )
+    assert _run(script, observe) == f"{expected}\n"
+
+
+# Retain the original module selection and run these
+# boundary/consumer rows at both optimisation levels. These are native lowering
+# checks of the behavior described by the public string fixture.
+NATIVE_OPTS = [
+    pytest.param("-O0", id="O0"),
+    pytest.param("-O2", id="O2"),
+]
+
+MISSING_POS_CONSUMERS = [
+    pytest.param('nz(str.pos("abc", "x"), 0)', "0\n", id="nz"),
+    pytest.param('str.tostring(str.pos("abc", "x"))', "NaN\n", id="tostring"),
+]
+
+
+@pytest.mark.parametrize("opt", NATIVE_OPTS)
+@pytest.mark.parametrize("expression, expected", MISSING_POS_CONSUMERS)
+def test_missing_pos_literal_consumers(expression, expected, opt):
+    # Keep the reported public expressions intact, including direct nesting.
+    script = f"observed = {expression}\nplot(close)\n"
+    assert _run(script, 'std::cout << strategy.observed << "\\n";', opt=opt) == expected
+
+
+RUNTIME_POS_ROWS = [
+    pytest.param("abc", "x", True, 0, "NaN", id="missing-ascii"),
+    pytest.param("seed42", "?", True, 0, "NaN", id="missing-distinct"),
+    pytest.param("abc", "b", False, 1, "1", id="found-middle"),
+    pytest.param("abc", "a", False, 0, "0", id="found-zero"),
+    pytest.param("abc", "", False, 0, "0", id="empty-needle"),
+    pytest.param("", "x", True, 0, "NaN", id="empty-haystack"),
+    pytest.param("", "", False, 0, "0", id="both-empty"),
+    pytest.param("ab", "abc", True, 0, "NaN", id="longer-needle"),
+    pytest.param(f"a{EMOJI}b", "b", False, 3, "3", id="found-utf16"),
+    pytest.param(f"{CJK}{EMOJI}tail", "l", False, 6, "6", id="found-distinct"),
+]
+
+
+@pytest.mark.parametrize("opt", NATIVE_OPTS)
+@pytest.mark.parametrize("text, needle, missing, replaced, rendered", RUNTIME_POS_ROWS)
+def test_pos_consumers_use_runtime_inputs(text, needle, missing, replaced, rendered, opt):
+    # Every row emits the same Pine source. Only the native input overrides
+    # change; expected positions/strings are never injected into that source.
+    script = (
+        'source_value = input.string("unused text", "Text")\n'
+        'needle = input.string("unused needle", "Needle")\n'
+        'p = str.pos(source_value, needle)\n'
+        'missing = na(p)\n'
+        'replaced = nz(p, 0)\n'
+        'rendered = str.tostring(p)\n'
+        'plot(p)\n'
+    )
+    observe = (
+        'std::cout << strategy.missing << "|" << strategy.replaced '
+        '<< "|" << strategy.rendered << "\\n";'
+    )
+    assert _run(script, observe, opt=opt, inputs={"Text": text, "Needle": needle}) == (
+        f"{int(missing)}|{replaced}|{rendered}\n"
+    )
+
+
+@pytest.mark.parametrize("opt", NATIVE_OPTS)
+def test_substring_after_absent_delimiter_completes(opt):
+    # An unexpected run stop remains a failing native execution in DRIVER,
+    # never an expected-stop assertion.
+    script = (
+        't = str.substring("abc", str.pos("abc", ":") + 1)\n'
+        'missing = na(t)\n'
+        'completed = true\n'
+        'plot(close)\n'
+    )
+    observe = (
+        'std::cout << strategy.completed << " " << strategy.missing << "\\n"; '
+        'hex(strategy.t);'
+    )
+    assert _run(script, observe, opt=opt) == "1 0\n616263\n"
+
+
+MISSING_START_ROWS = [
+    pytest.param("abcdef", "int(na)", id="ascii-int-na"),
+    pytest.param(f"a{EMOJI}b", "int(na) + 1", id="unicode-wide-na"),
+]
+
+
+@pytest.mark.parametrize("opt", NATIVE_OPTS)
+@pytest.mark.parametrize("text, begin", MISSING_START_ROWS)
+def test_substring_missing_start_returns_whole_text(text, begin, opt):
+    script = (
+        'source_value = input.string("unused text", "Text")\n'
+        f't = str.substring(source_value, {begin})\n'
+        'missing = na(t)\n'
+        'completed = true\n'
+        'plot(close)\n'
+    )
+    observe = (
+        'std::cout << strategy.completed << " " << strategy.missing << "\\n"; '
+        'hex(strategy.t);'
+    )
+    assert _run(script, observe, opt=opt, inputs={"Text": text}) == (
+        f"1 0\n{text.encode('utf-8').hex()}\n"
+    )
+
+
+MISSING_END_ROWS = [
+    pytest.param(
+        't = str.substring("abc", 0, str.pos("abc", ":"))\n', {},
+        id="literal-zero-begin",
+    ),
+    pytest.param(
+        't = str.substring("abc", 1, str.pos("abc", ":"))\n', {},
+        id="literal-nonzero-begin",
+    ),
+    pytest.param(
+        'source_value = input.string("unused text", "Text")\n'
+        'needle = input.string("unused needle", "Needle")\n'
+        'begin = input.int(1, "Begin")\n'
+        't = str.substring(source_value, begin, str.pos(source_value, needle))\n',
+        {"Text": f"r{EMOJI}tail", "Needle": "!", "Begin": "2"},
+        id="runtime-utf16-nonzero-begin",
+    ),
+]
+
+
+@pytest.mark.parametrize("opt", NATIVE_OPTS)
+@pytest.mark.parametrize("script, inputs", MISSING_END_ROWS)
+def test_substring_missing_end_returns_string_na(script, inputs, opt):
+    # The zero-begin row isolates the wrong value without signed overflow.
+    # Check a missing end before subtracting begin. A stop or undefined
+    # conversion cannot satisfy the value assertion.
+    script += 'missing = na(t)\ncompleted = true\nplot(close)\n'
+    # visit_call.py lowers Pine na(string) as .empty(); the engine has no
+    # is_na(std::string) overload. Compare the actual result with its canonical
+    # na<std::string>() too, without hard-coding empty bytes or a numeric NA.
+    observe = (
+        'std::cout << strategy.completed << " " << strategy.missing << " " '
+        '<< (strategy.t == na<std::string>()) << "\\n";'
+    )
+    assert _run(script, observe, opt=opt, inputs=inputs) == "1 1 1\n"
 
 
 TAIL_ROWS = [
@@ -241,19 +401,114 @@ EMISSION_ROWS = [
                  id="str-substring-alone"),
     pytest.param('p = str.pos("abc", "b")\nplot(close)\n', True, id="str-pos-alone"),
     pytest.param('n = str.length("abc")\nplot(close)\n', True, id="str-length-alone"),
+    pytest.param('t = str.match("aéb", "a.b")\nplot(close)\n', True,
+                 id="str-match-alone"),
+    pytest.param('n = str.contains("abc", "b")\nplot(close)\n', True,
+                 id="str-contains-alone"),
+    pytest.param('n = str.startswith("abc", "a")\nplot(close)\n', True,
+                 id="str-startswith-alone"),
+    pytest.param('n = str.endswith("abc", "c")\nplot(close)\n', True,
+                 id="str-endswith-alone"),
+    pytest.param('s = "a" + "b"\nplot(close)\n', True, id="string-plus-alone"),
+    pytest.param('s = "a"\ns += "b"\nplot(close)\n', True, id="string-append-alone"),
+    pytest.param("n = 1\nn += 2\nplot(close)\n", False,
+                 id="control-numeric-append"),
+    pytest.param(
+        'parts = array.from("a", "b")\n'
+        'joined = array.join(parts, "")\nplot(close)\n',
+        True, id="string-array-namespace-join-alone",
+    ),
+    pytest.param(
+        'parts = array.from("a", "b")\njoined = parts.join()\nplot(close)\n',
+        True, id="string-array-method-join-default-separator",
+    ),
+    pytest.param(
+        'joined = array.from("a", "b").join("")\nplot(close)\n',
+        True, id="string-array-temporary-join-alone",
+    ),
+    pytest.param(
+        'collect_join(array<string> parts, array<string> results) =>\n'
+        '    array.push(results, parts.join(""))\n'
+        '    array.size(parts)\n'
+        'results = array.new_string(0)\n'
+        'counted = collect_join(array.from("a", "b"), results)\nplot(close)\n',
+        True, id="string-array-forwarded-join-alone",
+    ),
     pytest.param('t = str.upper("abc")\nplot(close)\n', False,
                  id="control-another-string-function"),
     pytest.param("plot(close)\n", False, id="control-no-string-function"),
     # A plot argument is not emitted, so the call emits nothing and needs no helper.
     pytest.param('plot(str.length("abc"))\n', False,
                  id="control-a-call-that-is-only-a-plot-argument"),
+    pytest.param('plot(str.match("aéb", "a.b"))\n', False,
+                 id="control-a-match-that-is-only-a-plot-argument"),
 ]
 
 
 @pytest.mark.parametrize("script, emitted", EMISSION_ROWS)
 def test_the_helpers_are_emitted_only_for_a_call_that_uses_them(script, emitted):
     cpp = transpile(HEADER + script)
-    assert (HELPER_DEFINITION in cpp) is emitted
+    assert cpp.count(HELPER_DEFINITION) == int(emitted)
+
+
+@pytest.mark.parametrize("operation", ("pos", "contains", "startswith", "endswith"))
+@pytest.mark.parametrize("named", (False, True), ids=("positional", "named"))
+def test_search_arguments_bind_once_in_parameter_order(operation, named):
+    arguments = 'read_value("abc", calls, 1), read_value("b", calls, 2)'
+    if named:
+        arguments = 'str=read_value("b", calls, 2), source=read_value("abc", calls, 1)'
+    cpp = transpile(
+        HEADER
+        + "read_value(string payload, array<int> calls, int tag) =>\n"
+        + "    array.push(calls, tag)\n    payload\n"
+        + "calls = array.new_int(0)\n"
+        + f"observed = str.{operation}({arguments})\nplot(close)\n"
+    )
+    line = next(line for line in cpp.splitlines() if line.strip().startswith("observed ="))
+    source = 'const std::string _pf_search_source = (read_value(std::string("abc"), calls, 1));'
+    needle = 'const std::string _pf_search_needle = (read_value(std::string("b"), calls, 2));'
+    searched = f"return _pf_u16_{operation}(_pf_search_source, _pf_search_needle);"
+    assert line.count(source) == line.count(needle) == line.count(searched) == 1
+    assert line.index(source) < line.index(needle) < line.index(searched)
+    assert line.count("read_value(") == 2
+
+
+@pytest.mark.parametrize("persistent, history", ((False, False), (True, False), (False, True)))
+@pytest.mark.parametrize("string", (False, True), ids=("numeric", "string"))
+@pytest.mark.parametrize("parameters", (False, True), ids=("literals", "parameters"))
+def test_requested_compound_assignment_uses_its_storage_family(
+    persistent, history, string, parameters,
+):
+    from tests.test_security_series_timeframe import requested_body
+
+    kind, first, last = ("string", '"a"', '"b"') if string else ("float", "2.5", "1.25")
+    signature = f"{kind} first, {kind} last" if parameters else ""
+    initial, appended = ("first", "last") if parameters else (first, last)
+    arguments = f"{first}, {last}" if parameters else ""
+    cpp = transpile(
+        HEADER + f"combine({signature}) =>\n"
+        + f"    {'var ' if persistent else ''}{kind} accumulated = {initial}\n"
+        + f"    accumulated += {appended}\n"
+        + ("    previous = accumulated[1]\n" if history else "")
+        + "    accumulated\n"
+        + f'joined = request.security(syminfo.tickerid, "60", combine({arguments}))\n'
+        + "plot(close)\n"
+    )
+    body = requested_body(cpp, 0)
+    assert ("_pf_u16_concat(" in body) is string
+    assert (HELPER_DEFINITION in cpp) is string
+    if string:
+        assert 'std::string("b")' in body
+        # The chart helper is emitted too, even when only a request calls it.
+        # Both bodies must keep the persistent/local string out of arithmetic.
+        assert "_pf_u16_concat(std::to_string(" not in cpp
+        for line in body.splitlines():
+            if "_pf_u16_concat(" in line:
+                assert "std::to_string(" not in line
+                assert "is_na(" not in line
+                assert "(double)" not in line
+    else:
+        assert "1.25" in body
 
 
 STOP_DRIVER = r'''
@@ -287,10 +542,179 @@ REFUSED_ROWS = [
 
 @pytest.mark.parametrize("begin, detail", REFUSED_ROWS)
 def test_a_begin_outside_the_text_stops_the_run(begin, detail):
-    """TradingView refuses these two scripts when it compiles them (their
-    arguments are constants); the engine stops the run, with the text
-    std::string::substr gives. Both refuse; the moment is not compared."""
+    """Pin the existing native boundary guard and its diagnostic detail.
+
+    A native runtime stop does not establish agreement with a TradingView
+    compile-time refusal. That acceptance rule needs its separate real record.
+    """
     cpp = transpile(HEADER + f't = str.substring("abc", {begin})\nplot(close)\n')
     stopped = run_emitted_tu(cpp, STOP_DRIVER, opt="-O2", label="substring begin outside")
     assert "basic_string::substr" in stopped
     assert detail in stopped
+
+
+@pytest.mark.parametrize("opt", NATIVE_OPTS)
+def test_substring_finite_end_before_start_stops_the_run(opt):
+    # Issue #382 item 9: a finite end before begin stops the run.
+    # Retain actual native values and errors in stdout for diagnosis.
+    script = (
+        'j = input.int(1, "End")\n'
+        'completed = false\n'
+        't = str.substring("abc", 2, j)\n'
+        'completed := true\n'
+        'plot(close)\n'
+    )
+    cpp = transpile(HEADER + script)
+    driver = r'''
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    strategy.set_input("End", "1");
+    Bar bars[3]{
+        {1.0, 1.0, 1.0, 1.0, 1.0, 1704067200000LL},
+        {1.0, 1.0, 1.0, 1.0, 1.0, 1704067260000LL},
+        {1.0, 1.0, 1.0, 1.0, 1.0, 1704067320000LL},
+    };
+    strategy.run(bars, 3, "1", "1");
+    std::cout << "j=" << strategy.j << "\n"
+              << "completed=" << strategy.completed << "\n"
+              << "value=" << strategy.t << "\n"
+              << "error=" << strategy.last_error() << "\n";
+    return 0;
+}
+'''
+    # Compile/link failures and unexpected process exits propagate unchanged.
+    # Only the native run's own last_error() can satisfy the stop assertion.
+    observed = run_emitted_tu(
+        cpp, driver, opt=opt, label="substring finite end before start",
+    )
+    print(f"native stdout at {opt}:\n{observed}", end="")
+    position, completed, value, error = observed.split("\n", 3)
+    assert position == "j=1", observed
+    assert value.startswith("value="), observed
+    assert error.startswith("error="), observed
+    assert "end_pos is less than begin_pos" in error, observed
+    assert completed == "completed=0", observed
+
+
+def _assert_trim_cases(cases: list[tuple[str, str]], input_shape: str) -> None:
+    """Observe both the actual Pine source value and its trim result as bytes."""
+    script = []
+    setup = []
+    observe = []
+    expected = []
+    for index, (text, trimmed) in enumerate(cases):
+        source = f"trim_source_{index}"
+        result = f"trim_result_{index}"
+        if input_shape == "runtime-input":
+            title = f"Trim text {index}"
+            # A distinct default makes an ignored override observable. Counted
+            # UTF-8 bytes keep NUL intact without exercising the known input-
+            # default truncation defect from item 6.
+            script.append(f'{source} = input.string("unused default", "{title}")\n')
+            encoded = text.encode("utf-8")
+            octets = "".join(f"\\{byte:03o}" for byte in encoded)
+            setup.append(
+                f'strategy.set_input("{title}", '
+                f'std::string("{octets}", {len(encoded)}));'
+            )
+        else:
+            assert input_shape == "literal"
+            # Pine supports \n and \t; \r spells the letter r. Keep a raw CR
+            # inside the quotes, where the lexer preserves it as string data.
+            literal = (text.replace("\\", "\\\\").replace('"', '\\"')
+                       .replace("\n", "\\n").replace("\t", "\\t"))
+            script.append(f'{source} = "{literal}"\n')
+        script.append(f"{result} = str.trim({source})\n")
+        observe.append(f"hex(strategy.{source}); hex(strategy.{result});")
+        expected.extend((text.encode("utf-8").hex() + "\n",
+                         trimmed.encode("utf-8").hex() + "\n"))
+    script.append("plot(close)\n")
+    # hex() iterates std::string's bytes, including NUL. Only ASCII reaches
+    # stdout, so invalid UTF-8 cannot be hidden by decoding or replacement.
+    # Compare every line, including empty ones and the final newline.
+    assert _run("".join(script), "\n".join(observe),
+                setup="\n".join(setup)) == "".join(expected)
+
+
+TRIM_MEASURED_ROWS = [
+    pytest.param("\u00a0a\u00a0", "a", id="measured-nbsp-both-ends"),
+    pytest.param("\u2003a\u2003", "a", id="measured-em-space-both-ends"),
+    pytest.param("\ufeffa", "a", id="measured-feff-left-end"),
+    pytest.param("\va\f", "a", id="measured-vertical-tab-and-form-feed"),
+]
+
+
+@pytest.mark.parametrize("text, expected", TRIM_MEASURED_ROWS)
+def test_trim_measured_end_whitespace(text, expected):
+    _assert_trim_cases([(text, expected)], "literal")
+
+
+# The issue's explicit classification, not Python's isspace()/strip() or a
+# guessed Unicode category. The test shapes below are contract compositions.
+TRIM_CHARACTER_ROWS = [
+    pytest.param("\u00a0", True, id="removes-u00a0-nbsp"),
+    pytest.param("\u2003", True, id="removes-u2003-em-space"),
+    pytest.param("\u3000", True, id="removes-u3000-ideographic-space"),
+    pytest.param("\u1680", True, id="removes-u1680-ogham-space-mark"),
+    pytest.param("\u2028", True, id="removes-u2028-line-separator"),
+    pytest.param("\ufeff", True, id="removes-ufeff-zero-width-no-break-space"),
+    pytest.param("\v", True, id="removes-u000b-vertical-tab"),
+    pytest.param("\f", True, id="removes-u000c-form-feed"),
+    pytest.param(" ", True, id="removes-u0020-space"),
+    pytest.param("\t", True, id="removes-u0009-tab"),
+    pytest.param("\n", True, id="removes-u000a-line-feed"),
+    pytest.param("\r", True, id="removes-u000d-carriage-return"),
+    pytest.param("\u0085", False, id="keeps-u0085-next-line"),
+    pytest.param("\u001f", False, id="keeps-u001f-unit-separator"),
+    pytest.param("\u200b", False, id="keeps-u200b-zero-width-space"),
+    pytest.param("\u180e", False, id="keeps-u180e-mongolian-vowel-separator"),
+]
+
+TRIM_INPUT_SHAPES = [
+    pytest.param("literal", id="contract-derived-literal"),
+    pytest.param("runtime-input", id="contract-derived-runtime-input"),
+]
+
+
+@pytest.mark.parametrize("input_shape", TRIM_INPUT_SHAPES)
+@pytest.mark.parametrize("character, remove_at_ends", TRIM_CHARACTER_ROWS)
+def test_trim_contract_characters_at_ends_and_inside(character, remove_at_ends, input_shape):
+    cases = []
+    # Two different interiors, one with a NUL followed by an emoji and more
+    # text: neither a constant "a" nor a C-string prefix can satisfy all rows.
+    for left, right in (("left", "right"), (f"{CJK}\0", f"{EMOJI}tail")):
+        body = left + right
+        interior = left + character + right
+        for prefix, suffix in ((character * 2, ""), ("", character * 3),
+                               (character * 2, character * 3)):
+            text = prefix + body + suffix
+            cases.append((text, body if remove_at_ends else text))
+        cases.append((interior, interior))
+        text = character + interior + character
+        cases.append((text, interior if remove_at_ends else text))
+        text = " \t" + character + body + character + "\n\r"
+        cases.append((text, body if remove_at_ends else character + body + character))
+    blank_only = character * 3
+    cases.append((blank_only, "" if remove_at_ends else blank_only))
+    _assert_trim_cases(cases, input_shape)
+
+
+@pytest.mark.parametrize("input_shape", TRIM_INPUT_SHAPES)
+def test_trim_contract_mixed_boundaries_and_empty(input_shape):
+    removed = "\u00a0\u2003\u3000\u1680\u2028\ufeff\v\f \t\n\r"
+    kept = "\u0085\u001f\u200b\u180e"
+    body = f"head{removed}tail{CJK}\0{EMOJI}"
+    cases = [
+        ("", ""),
+        ("plain words", "plain words"),
+        (removed, ""),
+        (removed + body + removed, body),
+        (removed + kept + removed, kept),
+    ]
+    for boundary in kept:
+        # A kept character stops trimming: removable characters behind it are
+        # interior text and must survive along with every byte after the NUL.
+        interior = boundary + removed + body + removed + boundary
+        cases.append((removed + interior + removed, interior))
+    _assert_trim_cases(cases, input_shape)

@@ -864,11 +864,11 @@ class CallVisitor:
         ]
 
     def _array_method_arg_nodes(self, method: str, node: FuncCall) -> list:
-        """Merge checked-array method kwargs into Pine signature order."""
+        """Merge registered array method kwargs into Pine signature order."""
         return self._collection_arg_nodes("array", method, node, False)
 
     def _collection_arg_nodes(self, namespace, method, node, functional):
-        """The arguments of a matrix or checked-array method call in Pine's
+        """The arguments of a matrix or registered array method call in Pine's
         parameter order (the receiver first in the namespace form).
 
         A keyword argument binds to its parameter's own slot, never shifted
@@ -877,7 +877,7 @@ class CallVisitor:
         receiver's own extent, which the method's template reads). A keyword
         the lowering does not consume -- an unknown name, a parameter given
         twice -- is refused, as is a gap before a required parameter. A call
-        without keywords, and an array method outside the checked-index
+        without keywords, and an array method outside the keyword signature
         table, keep their arguments as written."""
         if not node.kwargs:
             return list(node.args)
@@ -4212,8 +4212,14 @@ class CallVisitor:
     def _visit_str_call(self, func_name: str, node) -> str:
         if func_name == "format_time":
             return self._visit_format_time_call(node)
+        visit_arg = self._visit_expr
+        if func_name == "split":
+            # Both parameters are strings; use their contextual type for na
+            # just as for a string declaration or assignment.
+            visit_arg = lambda arg: self._visit_rhs_value(
+                arg, target_cpp_type="std::string")
         args = _merge_kwargs(node.args, node.kwargs,
-                             sigs.get_param_names("str", func_name), self._visit_expr,
+                             sigs.get_param_names("str", func_name), visit_arg,
                              intrinsic=sigs.get_intrinsic("str", func_name))
         arg_nodes = _merge_kwargs(
             node.args, node.kwargs,
@@ -4280,12 +4286,44 @@ class CallVisitor:
         if func_name == "substring":
             if len(args) in (2, 3):
                 end_parameter = ", auto _pf_substring_end" if len(args) == 3 else ""
-                count = ", _pf_substring_end - _pf_substring_begin" if len(args) == 3 else ""
+                # Test sentinels in their original types: arithmetic can carry
+                # an int64_t na even when str.pos itself returned an int na.
+                end_guard = (
+                    "if (is_na(_pf_substring_end)) return na<std::string>(); "
+                    if len(args) == 3 else ""
+                )
+                begin = na_preserving_int_cast("_pf_substring_begin", "int64_t")
+                count = ""
+                count_guard = ""
+                if len(args) == 3:
+                    # Byte length bounds UTF-16 length from above. Beyond it,
+                    # use the existing helper's end clamp without converting
+                    # the end. Otherwise ordered nonnegative size_t operands
+                    # give a count without signed overflow or unsigned wrap.
+                    count_guard = (
+                        "if (_pf_substring_end < _pf_substring_start) "
+                        'throw std::out_of_range("str.substring: end_pos is less than begin_pos"); '
+                        "const std::size_t _pf_substring_count = "
+                        "_pf_substring_end > _pf_substring_text.size() ? std::string::npos : "
+                        "static_cast<std::size_t>(_pf_substring_end) - "
+                        "static_cast<std::size_t>(_pf_substring_start); "
+                    )
+                    count = ", _pf_substring_count"
 
                 def checked_substring(bound):
                     return (
                         f"[&](const std::string& _pf_substring_text, auto _pf_substring_begin{end_parameter}){{ "
-                        "try { return _pf_u16_substr(_pf_substring_text, _pf_substring_begin"
+                        f"{end_guard}"
+                        "const int64_t _pf_substring_start = "
+                        f"is_na(_pf_substring_begin) ? int64_t{{0}} : {begin}; "
+                        "try { "
+                        # Preserve the helper's existing invalid-begin stop,
+                        # including its unsigned position and UTF-16 size.
+                        "if (_pf_substring_start < 0) return _pf_u16_substr("
+                        "_pf_substring_text, static_cast<std::size_t>(_pf_substring_start)); "
+                        f"{count_guard}"
+                        "return _pf_u16_substr(_pf_substring_text, "
+                        "static_cast<std::size_t>(_pf_substring_start)"
                         f"{count}); }} catch (const std::out_of_range& _pf_substring_error) {{ "
                         '_PF_STRING_STOP("substring_out_of_range", _pf_substring_error.what()); '
                         "return std::string(); } "
@@ -4327,9 +4365,11 @@ class CallVisitor:
             return 'std::string("")'
 
         if func_name in STR_FUNC_MAP and STR_FUNC_MAP[func_name] is not None:
-            if func_name in ("length", "pos"):
-                # These two count in UTF-16 units through tv_string_units.
+            if func_name in ("length", "pos", "contains", "startswith", "endswith", "match"):
+                # Measurement/searches use units; matching decodes characters.
                 self._uses_tv_string_units = True
+            if func_name == "match":
+                self._uses_unicode_regex = True
             return evaluate_args_once(
                 args, STR_ARGS_READ_REPEATEDLY.get(func_name, ()),
                 STR_FUNC_MAP[func_name], "_pf_str_a")

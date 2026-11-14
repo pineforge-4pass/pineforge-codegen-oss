@@ -5211,6 +5211,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     def _generate_cpp(self) -> str:
         self._uses_enum_string_lookup = False
         self._uses_tv_string_units = False
+        self._uses_unicode_regex = False
         # Titles already carry assigned declaration keys. Refuse an unproved
         # title first, then flag any remaining shared fallback/suffix keys.
         self._check_input_titles()
@@ -6533,7 +6534,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if isinstance(val, (int, float)):
                 return str(val)
             if isinstance(val, str):
-                return f'std::string("{self._cpp_string_escape(val)}")'
+                return self._cpp_std_string(val)
         # Also resolve bar field references
         if arg_str in BAR_FIELDS:
             return BAR_FIELDS[arg_str]
@@ -6900,7 +6901,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     return "true" if val else "false"
                 if isinstance(val, (int, float)):
                     return str(val)
-                return f'std::string("{self._cpp_string_escape(val)}")'
+                return self._cpp_std_string(val)
             return name
 
         # Identifier tokens only: a string literal's text is not identifiers
