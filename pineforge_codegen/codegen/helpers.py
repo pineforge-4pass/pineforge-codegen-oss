@@ -546,6 +546,8 @@ CPP_TEMPORARY_NAMES = frozenset("""
     _pf_symbol _pf_colon _pf_color _pf_bar_back _pf_ema_seeding
     _pf_history_array _pf_history_offset _pf_matrix_target
     _pf_array_index_type
+    _pf_sort_descending _pf_sort_element _pf_sort_indices _pf_sort_i _pf_sort_j
+    _pf_sort_left _pf_sort_right _pf_sort_left_na _pf_sort_right_na
 """.split())
 # These numbered members and locals keep their source-order spelling rather
 # than allocating against authored names. Reserve their complete spellings,
