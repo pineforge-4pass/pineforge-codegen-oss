@@ -181,6 +181,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._session_unresolved_method_calls: dict[int, set[str]] = {}
         self._symbols = SymbolTable()
         self._ta_call_sites: list[TACallSite] = []
+        # Final analysis consumes this inventory even when no request was seen.
+        self._security_calls: list[SecurityCallInfo] = []
         self._series_vars: set[str] = set()
         self._series_var_members: set[str] = set()
         self._series_decl_nodes: set[int] = set()
