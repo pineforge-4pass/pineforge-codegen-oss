@@ -16,13 +16,12 @@ MISSPELLED_ZONE_MESSAGE = (
     '(e.g. "America/New_York").'
 )
 
-# An engine that defines the typed timezone stop (PINEFORGE_HAS_TIMEZONE_STOP_V1)
-# puts its own bar prefix before the text that the generated code passes:
+# These tests require the typed timezone stop (PINEFORGE_HAS_TIMEZONE_STOP_V1).
+# The engine puts its own bar prefix before the text that the generated code passes:
 # "Error on bar N: " while a bar is running, "Error before the first bar: " when
 # none is. The generated code passes the text without it. The driver prints which
-# arm it was built with; only in the typed arm does a thrown line drop exactly one
-# of these two forms from its start, and in the fallback arm the text is compared
-# as it is.
+# arm it was built with; require the typed marker and one complete prefix on every
+# thrown line before dropping exactly one prefix for message comparison.
 _ENGINE_BAR_PREFIX = re.compile(r"Error on bar [0-9]+: |Error before the first bar: ")
 
 _ARM_MARKER = r'''
@@ -35,17 +34,16 @@ static const char* const arm_marker = "ARM fallback\n";
 
 
 def _drop_engine_prefix(text: str) -> str:
-    """Drop one engine bar prefix from the start of a text, and nothing else."""
+    """Require and drop one complete engine bar prefix, and nothing else."""
     match = _ENGINE_BAR_PREFIX.match(text)
-    return text[match.end():] if match else text
+    assert match is not None, f"missing complete engine bar prefix: {text!r}"
+    return text[match.end():]
 
 
 def _compare_form(output: str) -> str:
-    """Remove the arm marker line and, in the typed arm only, the engine prefixes."""
+    """Require the typed arm and one engine prefix per throw before comparison."""
     marker, _, body = output.partition("\n")
-    assert marker in ("ARM typed", "ARM fallback"), marker
-    if marker == "ARM fallback":
-        return body
+    assert marker == "ARM typed", output
     lines = []
     for line in body.splitlines():
         if line.startswith("THROWN "):
@@ -100,6 +98,7 @@ int main() {
     output = run_emitted_tu(
         cpp, _ARM_MARKER + driver, opt="-O0", label="timestamp rejected zone",
     )
+    print(output, end="")
     return _compare_form(output)
 
 
@@ -167,6 +166,7 @@ def test_the_two_engine_prefix_forms_are_dropped(prefix):
 
 
 @pytest.mark.parametrize("prefix", [
+    "",
     "Warning on bar 7: ",
     "Error on bar x: ",
     "Error on bar : ",
@@ -175,13 +175,20 @@ def test_the_two_engine_prefix_forms_are_dropped(prefix):
     "Error: ",
     " Error on bar 7: ",
     "Runtime Error on bar 7: ",
+    "Error on bar 7:",
+    "Error before the first bar:",
 ], ids=[
-    "other-word", "bar-not-digits", "no-bar-number", "no-colon", "other-case",
-    "no-bar", "not-at-the-start", "text-before-it",
+    "missing-prefix", "other-word", "bar-not-digits", "no-bar-number", "no-colon",
+    "other-case", "no-bar", "not-at-the-start", "text-before-it",
+    "bar-no-trailing-space", "before-first-bar-no-trailing-space",
 ])
-def test_another_prefix_is_not_dropped(prefix):
+def test_missing_or_other_prefix_is_rejected(prefix):
     text = prefix + MISSPELLED_ZONE_MESSAGE
-    assert _drop_engine_prefix(text) == text
+    with pytest.raises(AssertionError, match="missing complete engine bar prefix"):
+        _compare_form(
+            "ARM typed\nTHROWN Error on bar 3: " + MISSPELLED_ZONE_MESSAGE + "\n"
+            "THROWN " + text + "\nWRITES 0\n"
+        )
 
 
 def test_only_one_prefix_is_dropped():
@@ -194,4 +201,5 @@ def test_the_prefix_is_dropped_only_in_the_typed_arm():
     assert _compare_form("ARM typed\n" + thrown) == (
         "THROWN " + MISSPELLED_ZONE_MESSAGE + "\nWRITES 0\n"
     )
-    assert _compare_form("ARM fallback\n" + thrown) == thrown
+    with pytest.raises(AssertionError, match="ARM fallback"):
+        _compare_form("ARM fallback\n" + thrown)
