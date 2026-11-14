@@ -46,8 +46,10 @@ from ..ast_nodes import (
     SwitchStmt, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..errors import Phase
+from ..intrinsic_binding import array_method_domain_error
 from ..limits import iter_ast_nodes
 from ..matrix_overloads import matrix_sum_has_rhs
+from ..pine_spelling import expr_start
 from ..symbols import (
     PineType,
     TypeSpec,
@@ -176,7 +178,7 @@ class TypeHelper:
     def _fixed_array_call_result(
         self, call: FuncCall, receiver_spec: TypeSpec | None,
     ) -> TypeSpec | None:
-        """Read a fixed array result after authored-method resolution."""
+        """Validate a builtin receiver and read its fixed result after methods."""
         callee = call.callee
         if not isinstance(callee, MemberAccess):
             return None
@@ -192,6 +194,25 @@ class TypeHelper:
             receiver_spec is None or receiver_spec.kind != "array"
         ):
             return None
+        if callee.member == "join":
+            receiver = (
+                call.args[0] if call.args else call.kwargs.get("id")
+            ) if namespace_call else callee.object
+            # A namespace receiver can be a constructor containing TA or
+            # request calls already visited above. Read its type without
+            # registering those calls again; preserve call-site type overlays.
+            query = (self if isinstance(self, OperatorTypeQuery)
+                     else OperatorTypeQuery(self, {}))
+            actual_spec = (
+                query._type_spec_from_expr(receiver)
+                if namespace_call else receiver_spec
+            )
+            problem = array_method_domain_error(callee.member, actual_spec)
+            if problem is not None:
+                self._error(
+                    problem[0], expr_start(receiver).loc or call.loc,
+                    hint=problem[1],
+                )
         return fixed_builtin_result(
             "array", callee.member, len(call.args) + len(call.kwargs),
         )

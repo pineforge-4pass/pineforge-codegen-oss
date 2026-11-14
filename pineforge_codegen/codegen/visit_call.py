@@ -918,7 +918,14 @@ class CallVisitor:
             if slots[index] not in optional:
                 self._collection_argument_error(node, namespace, method, "missing", slots[index])
             default = optional[slots[index]]
-            arguments[index] = None if default is None else NumberLiteral(value=default)
+            if default is None:
+                arguments[index] = None
+            elif isinstance(default, str):
+                arguments[index] = StringLiteral(value=default)
+            elif isinstance(default, bool):
+                arguments[index] = BoolLiteral(value=default)
+            else:
+                arguments[index] = NumberLiteral(value=default)
         return arguments
 
     def _collection_argument_error(self, node, namespace, method, problem, name):

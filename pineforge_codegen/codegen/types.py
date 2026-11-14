@@ -50,6 +50,7 @@ from ..collection_history import history_annotation
 from ..cpp_names import cpp_identifier_fragment
 from ..errors import CodegenInvariantError, Phase
 from ..external_requests import UNPINNED_ANNOTATION
+from ..intrinsic_binding import array_method_domain_error
 from ..limits import iter_ast_nodes
 from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
 from ..matrix_overloads import matrix_sum_has_rhs
@@ -82,6 +83,7 @@ from .tables import (
     PINE_TYPE_TO_CPP,
     STRATEGY_DIRECTION_VALUES,
     TA_RETURNS_BOOL,
+    _array_join,
     _matrix_functional_receiver,
     checked_array_slice,
     ARRAY_JOURNAL_DELTA_METHODS,
@@ -3515,6 +3517,9 @@ class TypeInferer:
             if method in ("covariance", "concat") and args:
                 args = [f"_pf_array_id({args[0]})", *args[1:]]
         spec = spec or TypeSpec.array(TypeSpec.primitive("float"))
+        problem = array_method_domain_error(method, spec)
+        if problem is not None:
+            self._codegen_error(node, problem[0], hint=problem[1])
         arr_cpp_type = self._type_spec_to_cpp(spec)
         elem_cpp = self._type_spec_to_cpp(spec.element) if spec.element is not None else "double"
         if method == "copy":
@@ -3546,17 +3551,14 @@ class TypeInferer:
                 recv, args, result_type=arr_cpp_type,
                 view_function=view_function,
             )
-        elif method == "join" and elem_cpp == "std::string":
+        elif method == "join":
             self._uses_tv_string_units = True
-            separator = args[0] if args else 'std::string(",")'
-            # Bind the receiver before the separator even when the shared
-            # receiver wrapper sees only one use. A const reference also
-            # keeps a temporary array alive throughout the join.
-            lower_receiver = lambda recv: (
-                f"[&](){{ const auto& _pf_join_parts = ({recv}); "
-                f"const std::string _pf_join_separator = ({separator}); "
-                "return _pf_u16_join(_pf_join_parts, _pf_join_separator); }()"
+            stringify = (
+                None if elem_cpp == "std::string"
+                else "pine_str_tostring_tv" if elem_cpp in ("double", "int", "int64_t")
+                else "std::to_string"
             )
+            lower_receiver = lambda recv: _array_join(recv, args, stringify=stringify)
         else:
             numeric_only = {
                 "sum", "avg", "min", "max", "range", "stdev", "variance", "median",

@@ -1071,6 +1071,46 @@ def _array_sort_indices(a: str, args: list[str]) -> str:
 
 
 # Methods called as ``array.method(arr, ...)`` or ``arr.method(...)``.
+def _array_join(a: str, args: list[str], *, stringify: str | None = "pine_str_tostring_tv") -> str:
+    """Join after binding receiver and separator once, in parameter order.
+
+    String elements retain the UTF-16 join, including adjacent surrogate
+    halves. Numeric elements use the existing Pine formatter; other element
+    families keep their previous conversion until their domains are measured.
+    """
+    default = ARRAY_OPTIONAL_PARAMS["join"]["separator"]
+    separator = args[0] if args else f'std::string("{default}")'
+    if stringify is None:
+        result = "return _pf_u16_join(_pf_join_parts, _pf_join_separator); "
+    else:
+        formatter = ""
+        if stringify == "pine_str_tostring_tv":
+            # Keep every integer digit rather than passing a present int64
+            # through the formatter's double overload. Test the sentinel in
+            # its original type; missing integers and floats share Pine's
+            # existing missing-number spelling.
+            formatter = (
+                "const auto _pf_join_number = [](const auto _pf_join_value) { "
+                "if constexpr (std::is_integral_v<decltype(_pf_join_value)>) { "
+                "if (!is_na(_pf_join_value)) return std::to_string(_pf_join_value); "
+                "} return pine_str_tostring_tv(_pf_join_value); }; "
+            )
+            stringify = "_pf_join_number"
+        result = (
+            f"{formatter}std::string _pf_join_result; "
+            "for (std::size_t _pf_join_i = 0; _pf_join_i < _pf_join_parts.size(); "
+            "++_pf_join_i) { "
+            "if (_pf_join_i != 0) _pf_join_result += _pf_join_separator; "
+            f"_pf_join_result += {stringify}(_pf_join_parts[_pf_join_i]); "
+            "} return _pf_u16_normalize(_pf_join_result); "
+        )
+    return (
+        f"[&](){{ const auto& _pf_join_parts = ({a}); "
+        f"const std::string _pf_join_separator = ({separator}); "
+        f"{result}}}()"
+    )
+
+
 ARRAY_METHODS = {
     "get":       _checked_array_get,
     "set":       _checked_array_set,
@@ -1126,7 +1166,7 @@ ARRAY_METHODS = {
     "percentile_nearest_rank": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto __pf_c={a}; std::sort(__pf_c.begin(),__pf_c.end()); double __pf_p=({args[0]}); if(is_na(__pf_p)) return (double)__pf_c.front(); double __pf_rank=std::ceil((__pf_p/100.0)*__pf_c.size()); if(!std::isfinite(__pf_rank)) return na<double>(); int __pf_r=(int)std::clamp(__pf_rank,1.0,(double)__pf_c.size()); return (double)__pf_c[__pf_r-1]; }}()",
     "percentrank": _checked_array_percentrank,
     "abs":       lambda a, args: f"[&](){{ std::vector<double> __pf_r; for(auto v:{a})__pf_r.push_back(std::abs(v)); return __pf_r; }}()",
-    "join":      lambda a, args: "[&](){{ std::string __pf_r; for(size_t __pf_i=0;__pf_i<{arr}.size();__pf_i++){{ if(__pf_i>0)__pf_r+={sep}; __pf_r+=std::to_string({arr}[__pf_i]); }} return __pf_r; }}()".format(arr=a, sep=args[0] if args else 'std::string(",")'),
+    "join":      _array_join,
     "standardize": lambda a, args: f"[&](){{ double __pf_m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double __pf_s=0; for(auto v:{a})__pf_s+=(v-__pf_m)*(v-__pf_m); __pf_s=std::sqrt(__pf_s/{a}.size()); std::vector<double> __pf_r; for(auto v:{a})__pf_r.push_back(__pf_s==0?1.0:(v-__pf_m)/__pf_s); return __pf_r; }}()",
     "covariance": lambda a, args: f"[&](){{ auto&&__pf_b=({args[0]}); int __pf_n=std::min({a}.size(),__pf_b.size()); if(__pf_n<=0) return na<double>(); double __pf_ma=0,__pf_mb=0; for(int __pf_i=0;__pf_i<__pf_n;__pf_i++){{__pf_ma+={a}[__pf_i];__pf_mb+=__pf_b[__pf_i];}} __pf_ma/=__pf_n;__pf_mb/=__pf_n; double __pf_c=0; for(int __pf_i=0;__pf_i<__pf_n;__pf_i++)__pf_c+=({a}[__pf_i]-__pf_ma)*(__pf_b[__pf_i]-__pf_mb); return __pf_c/__pf_n; }}()",
     "binary_search": lambda a, args: f"[&](){{ auto __pf_it=std::lower_bound({a}.begin(),{a}.end(),{args[0]}); return (__pf_it!={a}.end()&&*__pf_it=={args[0]})?(double)(__pf_it-{a}.begin()):-1.0; }}()",
@@ -1371,9 +1411,11 @@ MATRIX_OPTIONAL_PARAMS: dict[str, dict[str, int | None]] = {
     "sum": {"id2": None},
     "concat": {"vertical": None},
 }
-ARRAY_OPTIONAL_PARAMS: dict[str, dict[str, int | None]] = {
+ARRAY_OPTIONAL_PARAMS: dict[str, dict[str, int | str | None]] = {
     "fill": {"index_from": 0, "index_to": None},
     "sort": {"order": None},
+    # Independently measured namespace and method calls omit the separator.
+    "join": {"separator": ""},
 }
 
 # Matrix mutators whose established C++ lowering returns ``void``.  A Pine

@@ -7521,6 +7521,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if isinstance(obj, Identifier) and obj.name == "str":
                 for arg in node.args:
                     self._visit(arg)
+                for value in node.kwargs.values():
+                    self._visit(value)
                 # Most str.* return a string, but predicates and index helpers
                 # are scalar. Keep this aligned with signatures.py and the C++
                 # emitter's _infer_type path.

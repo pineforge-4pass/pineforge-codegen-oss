@@ -34,7 +34,13 @@ supported as exact pairs; on the 0.x line they are independent. See the
   storage type in compound assignments and `request.security()` expressions.
 - Array joins retain string return types through helper and method forwarding.
   Named, mixed and reordered receiver/separator arguments use their declared
-  slots; an omitted separator keeps the default.
+  slots; an omitted separator is empty. Numeric elements use Pine number
+  formatting without fixed trailing zeros, and receiver and separator are
+  evaluated once in parameter order, including for empty arrays.
+  Builtin joins refuse boolean arrays during translation; authored methods
+  retain their own overloads and defaults.
+- `str.length` validates named arguments against its declared `string`
+  parameter; unknown names produce the standard located argument diagnostic.
 - `str.upper` and `str.lower` use pinned Unicode 14.0.0 mappings and properties,
   including supplementary letters, expansions and contextual final sigma.
   Translating Python versions and the native locale do not select the data.

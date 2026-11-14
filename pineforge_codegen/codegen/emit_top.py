@@ -138,6 +138,9 @@ class TopLevelEmitter:
         self._uses_tv_number_format = any(
             (namespace == "str" and func_name in {"format", "tostring"})
             or (namespace is None and func_name == "tostring")
+            # Namespace and method joins can render numeric elements without
+            # an explicit str.tostring call, including in callable bodies.
+            or (isinstance(node.callee, MemberAccess) and node.callee.member == "join")
             or (namespace == "log" and func_name in {"info", "warning", "error"}
                 and len(node.args) > 1)
             for root in roots

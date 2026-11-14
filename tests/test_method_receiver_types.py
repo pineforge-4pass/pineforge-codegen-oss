@@ -104,6 +104,7 @@ result = values.get(0)
     "receiver_type, receiver",
     [
         pytest.param("array<string>", 'array.from("alpha", "beta")', id="array"),
+        pytest.param("array<bool>", "array.from(true, false)", id="bool-array"),
         pytest.param("int", "7", id="namespace-shadow"),
     ],
 )
