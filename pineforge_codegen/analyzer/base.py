@@ -9095,9 +9095,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if ns == "currency":
                 return PineType.STRING
 
-            # order.* constants
+            # Sort-direction constants use string storage, including when
+            # propagated through helper parameters and return values.
             if ns == "order":
-                return PineType.INT
+                return PineType.STRING
 
             # format.* constants — Pine ``const string`` ("mintick",
             # "percent", ...). Codegen emits them as std::string literals
