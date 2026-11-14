@@ -34,6 +34,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   in the same lambda; on ENOMEM the environment stays unchanged and the conversion
   silently uses the previous zone.
 
+- `request.security` keeps requested-bar history for plain scalar copies of
+  persistent accumulators, including chained copies. Copies retain their
+  declaration-time values when the source is updated later. (#393)
+
 ## 1.12.0 — 2026-11-12
 
 - Pine v6 reports located errors for a missing `color.new` transparency,
