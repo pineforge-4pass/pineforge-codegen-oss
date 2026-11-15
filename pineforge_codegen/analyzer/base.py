@@ -27,6 +27,7 @@ from ..symbols import (
     SymbolTable,
     TypeSpec,
     method_receiver_type_name,
+    public_type_name,
     unify_pine_types,
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
@@ -7479,7 +7480,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 # call supplies a type. Bare na adopts the string signature.
                 continue
             function_name = intrinsic.name
-            argument_type = method_receiver_type_name(actual) or str(actual)
+            argument_type = public_type_name(actual) or str(actual)
             parameter_type = parameter.pine_type.value
             name = parameter.name
             from ..pine_spelling import expr_start
@@ -8990,6 +8991,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if drawing_all_kind(node) not in {None, "polyline"}:
             # Collections use TypeSpec for their shape; PineType stays scalar.
             return PineType.FLOAT
+        if self._builtin_sizing_constant(node) is not None:
+            return PineType.STRING
         # Handle specific namespaces
         if isinstance(node.object, Identifier):
             ns = node.object.name
@@ -8998,9 +9001,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if ns == "strategy":
                 # Direction constants
                 if node.member in ("long", "short"):
-                    return PineType.INT
-                # Qty type constants
-                if node.member in ("percent_of_equity", "fixed", "cash"):
                     return PineType.INT
                 # Commission type constants
                 if node.member in ("commission",):

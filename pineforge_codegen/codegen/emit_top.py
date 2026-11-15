@@ -87,6 +87,7 @@ from __future__ import annotations
 
 import re
 
+from ..signatures import STRATEGY_SIZING_CONSTANTS
 from .run_stops import RUN_STOP_SHIMS_CPP, TIMEZONE_STOP_SHIM_CPP
 
 from ..ast_nodes import (
@@ -1353,9 +1354,8 @@ class TopLevelEmitter:
 
         # default_qty_type: strategy.fixed / strategy.percent_of_equity / strategy.cash
         qty_type_map = {
-            "strategy.fixed": "QtyType::FIXED",
-            "strategy.percent_of_equity": "QtyType::PERCENT_OF_EQUITY",
-            "strategy.cash": "QtyType::CASH",
+            name: f"QtyType::{item.host_name}"
+            for name, item in STRATEGY_SIZING_CONSTANTS.items()
         }
         qty_type = declared_or_v6_default("default_qty_type")
         if qty_type in qty_type_map:
@@ -1446,9 +1446,13 @@ class TopLevelEmitter:
         lines.append('        } else if (key == "close_entries_rule") {')
         lines.append('            overrides.close_entries_rule = (value == "ANY" || value == "any" || value == "1");')
         lines.append('        } else if (key == "default_qty_type") {')
-        lines.append('            if (value == "fixed" || value == "strategy.fixed" || value == "0") overrides.default_qty_type = static_cast<int>(QtyType::FIXED);')
-        lines.append('            else if (value == "percent_of_equity" || value == "strategy.percent_of_equity" || value == "1") overrides.default_qty_type = static_cast<int>(QtyType::PERCENT_OF_EQUITY);')
-        lines.append('            else if (value == "cash" || value == "strategy.cash" || value == "2") overrides.default_qty_type = static_cast<int>(QtyType::CASH);')
+        for index, (name, item) in enumerate(STRATEGY_SIZING_CONSTANTS.items()):
+            branch = "if" if index == 0 else "else if"
+            lines.append(
+                f'            {branch} (value == "{item.value}" || value == "{name}" '
+                f'|| value == "{item.host_value}") overrides.default_qty_type = '
+                f'static_cast<int>(QtyType::{item.host_name});'
+            )
         lines.append("            else return;")
         lines.append('        } else if (key == "commission_type") {')
         lines.append('            if (value == "percent" || value == "strategy.commission.percent" || value == "0") overrides.commission_type = static_cast<int>(CommissionType::PERCENT);')

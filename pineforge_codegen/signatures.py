@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .symbols import PineType
+from .symbols import PineType, TypeSpec
 
 
 @dataclass
@@ -694,6 +694,39 @@ MATH_CONSTANTS = {
 # Built-in variables (not functions)
 # ============================================================================
 
+@dataclass(frozen=True)
+class _StorageOnlyType:
+    """Legacy host representation without a proven scalar Pine type."""
+
+    storage_type: PineType
+
+
+@dataclass(frozen=True)
+class SizingConstant:
+    """A Pine string value and its conversion at a host sizing boundary."""
+
+    value: str
+    host_value: int
+    host_name: str
+
+
+# The complete strategy sizing constant class. Its numeric codes belong only
+# to the host API; an ordinary expression reads the string value.
+STRATEGY_SIZING_CONSTANTS = {
+    "strategy.fixed": SizingConstant("fixed", 0, "FIXED"),
+    "strategy.percent_of_equity": SizingConstant("percent_of_equity", 1, "PERCENT_OF_EQUITY"),
+    "strategy.cash": SizingConstant("cash", 2, "CASH"),
+}
+
+
+def _variable_storage_type(value: PineType | _StorageOnlyType | SizingConstant) -> PineType:
+    if isinstance(value, _StorageOnlyType):
+        return value.storage_type
+    if isinstance(value, SizingConstant):
+        return PineType.STRING
+    return value
+
+
 BUILTIN_VARIABLES: dict[str, PineType] = {
     # Price series
     "open": F, "high": F, "low": F, "close": F, "volume": F,
@@ -735,7 +768,7 @@ SESSION_FLAG_MEMBERS = frozenset(
 )
 
 # Strategy variables (read-only properties, not function calls)
-STRATEGY_VARIABLES: dict[str, PineType] = {
+_STRATEGY_VARIABLE_DECLARATIONS: dict[str, PineType | _StorageOnlyType | SizingConstant] = {
     "strategy.position_size": F,
     "strategy.position_avg_price": F,
     "strategy.position_entry_name": S,
@@ -771,24 +804,26 @@ STRATEGY_VARIABLES: dict[str, PineType] = {
     "strategy.account_currency": S,
     "strategy.opentrades.capital_held": F,
     # Direction constants
-    "strategy.long": B,
-    "strategy.short": B,
+    "strategy.long": _StorageOnlyType(B),
+    "strategy.short": _StorageOnlyType(B),
     # Qty type constants
-    "strategy.fixed": I,
-    "strategy.cash": I,
-    "strategy.percent_of_equity": I,
+    **STRATEGY_SIZING_CONSTANTS,
     # Commission type constants
-    "strategy.commission.percent": I,
-    "strategy.commission.cash_per_contract": I,
-    "strategy.commission.cash_per_order": I,
+    "strategy.commission.percent": _StorageOnlyType(I),
+    "strategy.commission.cash_per_contract": _StorageOnlyType(I),
+    "strategy.commission.cash_per_order": _StorageOnlyType(I),
     # OCA constants
-    "strategy.oca.cancel": I,
-    "strategy.oca.reduce": I,
-    "strategy.oca.none": I,
+    "strategy.oca.cancel": _StorageOnlyType(I),
+    "strategy.oca.reduce": _StorageOnlyType(I),
+    "strategy.oca.none": _StorageOnlyType(I),
     # Direction constants
     "strategy.direction.all": S,
     "strategy.direction.long": S,
     "strategy.direction.short": S,
+}
+STRATEGY_VARIABLES: dict[str, PineType] = {
+    name: _variable_storage_type(value)
+    for name, value in _STRATEGY_VARIABLE_DECLARATIONS.items()
 }
 
 # Barstate variables
@@ -866,13 +901,17 @@ TIMEFRAME_VARIABLES: dict[str, PineType] = {
 }
 
 # display.* plot_display constants (PineScript v6 — values for C++ codegen)
+_DISPLAY_VARIABLE_DECLARATIONS: dict[str, _StorageOnlyType] = {
+    "display.all": _StorageOnlyType(I),
+    "display.none": _StorageOnlyType(I),
+    "display.pane": _StorageOnlyType(I),
+    "display.data_window": _StorageOnlyType(I),
+    "display.status_line": _StorageOnlyType(I),
+    "display.price_scale": _StorageOnlyType(I),
+}
 DISPLAY_VARIABLES: dict[str, PineType] = {
-    "display.all": I,
-    "display.none": I,
-    "display.pane": I,
-    "display.data_window": I,
-    "display.status_line": I,
-    "display.price_scale": I,
+    name: value.storage_type
+    for name, value in _DISPLAY_VARIABLE_DECLARATIONS.items()
 }
 
 
@@ -1040,18 +1079,46 @@ def is_intrinsic_function(namespace: str | None, func_name: str) -> bool:
     return False
 
 
-def get_variable_type(namespace: str | None, name: str) -> PineType:
-    """Return a builtin variable's declared type, or UNKNOWN for other names."""
+def _variable_declaration(
+    namespace: str | None, name: str,
+) -> PineType | _StorageOnlyType | SizingConstant:
     if namespace is None:
         return BUILTIN_VARIABLES.get(name, PineType.UNKNOWN)
     full = f"{namespace}.{name}"
     for table in (
-        STRATEGY_VARIABLES, BARSTATE_VARIABLES, SYMINFO_VARIABLES,
-        TIMEFRAME_VARIABLES, BUILTIN_VARIABLES, DISPLAY_VARIABLES,
+        _STRATEGY_VARIABLE_DECLARATIONS, BARSTATE_VARIABLES, SYMINFO_VARIABLES,
+        TIMEFRAME_VARIABLES, BUILTIN_VARIABLES, _DISPLAY_VARIABLE_DECLARATIONS,
     ):
         if full in table:
             return table[full]
     return PineType.UNKNOWN
+
+
+def get_variable_type(namespace: str | None, name: str) -> PineType:
+    """Return a builtin's legacy storage type, not an operator-domain proof."""
+    return _variable_storage_type(_variable_declaration(namespace, name))
+
+
+def get_sizing_constant(namespace: str | None, name: str) -> SizingConstant | None:
+    """Return a sizing constant's Pine value and host conversion together."""
+    return STRATEGY_SIZING_CONSTANTS.get(f"{namespace}.{name}")
+
+
+def get_variable_type_spec(
+    namespace: str | None, name: str,
+) -> TypeSpec | None:
+    """Return a builtin variable's semantic Pine type specification.
+
+    The variable tables also serve storage and lowering consumers, so this
+    lookup carries only the semantic facts that are safe for operator proofs.
+    """
+    declaration = _variable_declaration(namespace, name)
+    if isinstance(declaration, _StorageOnlyType):
+        return None
+    primitive = _variable_storage_type(declaration)
+    if primitive in (PineType.UNKNOWN, PineType.VOID):
+        return None
+    return TypeSpec.primitive(primitive.value)
 
 
 def is_intrinsic_variable(namespace: str | None, name: str) -> bool:

@@ -12,6 +12,7 @@ from ..ast_nodes import (
     TupleAssign, UnaryOp, VarDecl, WhileStmt,
 )
 from ..limits import iter_ast_nodes, syntax_children
+from ..signatures import STRATEGY_SIZING_CONSTANTS
 from .capabilities import READ_ONLY_STRATEGY_CALLS, _expression
 from .host_members import HOST_MEMBER_NAMES
 
@@ -23,7 +24,7 @@ NUMERIC_PARAMETERS = frozenset((
 FINITE_BAR_VALUES = frozenset(("open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4"))
 ENUM_VALUES = {
     "strategy.oca.none": 0, "strategy.oca.cancel": 1, "strategy.oca.reduce": 2,
-    "strategy.fixed": 0, "strategy.percent_of_equity": 1, "strategy.cash": 2,
+    **{name: item.host_value for name, item in STRATEGY_SIZING_CONSTANTS.items()},
 }
 SETTING_DEFAULTS = {
     "initial_capital": 10000.0, "default_qty_type": "fixed", "default_qty_value": 1.0,

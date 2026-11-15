@@ -997,6 +997,9 @@ class ExprVisitor:
                 # call reaches the array it holds.
                 return f"(*{field})"
             return field
+        sizing = self._builtin_sizing_constant(node)
+        if sizing is not None:
+            return self._visit_expr(StringLiteral(value=sizing.value))
         if isinstance(node.object, Identifier):
             ns = node.object.name
             if ns == "alert" and node.member in ALERT_FREQ_VALUES:
@@ -1085,13 +1088,6 @@ class ExprVisitor:
                     return "avg_losing_trade_percent()"
                 if node.member == "margin_liquidation_price":
                     return "margin_liquidation_price()"
-                # Qty type / commission constants
-                if node.member == "fixed":
-                    return "0"
-                if node.member == "percent_of_equity":
-                    return "1"
-                if node.member == "cash":
-                    return "2"
                 if node.member == "account_currency":
                     return self._strategy_account_currency_expr()
                 # Sub-namespaces (oca, direction, risk, commission) handled below

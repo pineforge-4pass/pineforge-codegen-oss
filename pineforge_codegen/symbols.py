@@ -123,6 +123,32 @@ def method_receiver_type_name(spec: TypeSpec | None) -> str | None:
     return None
 
 
+def public_type_name(spec: TypeSpec | None) -> str | None:
+    """Return a Pine type name suitable for a public diagnostic.
+
+    An unresolved numeric domain retains its uncertainty; it is not evidence
+    for either concrete Pine scalar type. Structured specs keep their spelling.
+    """
+    if spec is None:
+        return None
+    name = method_receiver_type_name(spec)
+    if name is not None:
+        return name
+    return str(spec)
+
+
+def public_cpp_type_name(cpp_type: str) -> str:
+    """Map the scalar C++ fallbacks used by codegen to Pine names."""
+    return {
+        "bool": "bool",
+        "int": "int",
+        "int64_t": "int",
+        "float": "float",
+        "double": "float",
+        "std::string": "string",
+    }.get(cpp_type, "unknown")
+
+
 def method_receiver_cpp_token(
     spec: TypeSpec | None,
     fallback_name: str | None = None,

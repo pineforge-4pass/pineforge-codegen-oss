@@ -91,6 +91,26 @@ class TypeHelper:
     docstring above.
     """
 
+    def _builtin_sizing_constant(self, value):
+        if not (isinstance(value, MemberAccess)
+                and isinstance(value.object, Identifier)):
+            return None
+        receiver = value.object
+        constant = sigs.get_sizing_constant(receiver.name, value.member)
+        if constant is None:
+            return None
+        parameters = getattr(self, "_parameter_types", None)
+        bindings = self._value_bindings.declaration_bindings
+        if ((self._pine_version == 6 and id(receiver) not in bindings)
+                or self._value_bindings.binding_of(receiver) is not None
+                or (self._pine_version != 6
+                    and self._symbols.resolve(receiver.name) is not None)
+                or (parameters is not None and receiver.name in parameters)
+                or receiver.name in self._udt_fields
+                or receiver.name in self._enum_defs):
+            return None
+        return constant
+
     def _split_top_level_type_args(self, text: str) -> list[str]:
         args: list[str] = []
         cur: list[str] = []
@@ -807,6 +827,8 @@ class TypeHelper:
             owner = self._type_spec_from_expr(value.object)
             if owner is not None and owner.kind == "udt" and owner.name:
                 return (self._udt_field_type_specs.get(owner.name) or {}).get(value.member)
+            if self._builtin_sizing_constant(value) is not None:
+                return TypeSpec.primitive("string")
         return None
 
     @staticmethod
@@ -1561,9 +1583,7 @@ class OperatorTypeQuery(TypeHelper):
                          or receiver.name not in self._parameter_types)
                     and receiver.name not in self._udt_fields
                     and receiver.name not in self._enum_defs):
-                spec = self._pine_type_to_spec(
-                    sigs.get_variable_type(receiver.name, value.member),
-                )
+                spec = sigs.get_variable_type_spec(receiver.name, value.member)
                 if spec is not None:
                     return spec
         return super()._type_spec_from_expr(value, **kwargs)

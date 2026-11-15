@@ -3061,6 +3061,8 @@ class TypeInferer:
                 plan = getattr(self, "_array_widths", None)
                 return (plan.widen(spec, {("field", owner.name, node.member)})
                         if plan is not None else spec)
+            if self._builtin_sizing_constant(node) is not None:
+                return TypeSpec.primitive("string")
             return None
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
@@ -6137,6 +6139,26 @@ class TypeInferer:
         if inferred.startswith("std::vector"):
             return "std::vector<double>"
         return "double"
+
+    def _builtin_sizing_constant(self, node):
+        """Resolve registered constants only through an unshadowed namespace."""
+        if not (isinstance(node, MemberAccess)
+                and isinstance(node.object, Identifier)):
+            return None
+        receiver = node.object
+        name = receiver.name
+        constant = sigs.get_sizing_constant(name, node.member)
+        if constant is None:
+            return None
+        if (self.ctx.identifier_decl_bindings.get(id(receiver)) is not None
+                or ValueBindings.declaration_of(receiver) is not None
+                or name in self._current_func_param_types
+                or name in self._current_func_locals
+                or name in self._current_loop_vars
+                or name in self._udt_defs
+                or name in self._enum_defs):
+            return None
+        return constant
 
     def _text_type(self, node) -> str:
         """Pine bool provenance is consumed only by explicit text conversion."""

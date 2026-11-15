@@ -22,6 +22,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Strategy sizing constants retain their string values in expressions, aliases
+  and helper calls. Host order and risk settings convert these values to their
+  numeric representation only at the setting boundary.
+
 - `timeframe.in_seconds` and `timeframe.change` resolve an evaluated empty
   string to the chart period, including input, variable, function-return and
   named arguments. The argument is evaluated once, and nonempty strings keep

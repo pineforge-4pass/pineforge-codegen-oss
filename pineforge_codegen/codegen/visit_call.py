@@ -158,7 +158,13 @@ from ..external_requests import RECORDED_KEY_ANNOTATION, request_stop_marker
 from ..intrinsic_binding import bind_intrinsic_arguments, validate_intrinsic_keywords
 from ..limits import iter_ast_nodes
 from ..security_contexts import ticker_symbol_arg
-from ..symbols import PineType, TypeSpec, method_receiver_type_name
+from ..symbols import (
+    PineType,
+    TypeSpec,
+    method_receiver_type_name,
+    public_cpp_type_name,
+    public_type_name,
+)
 from ..analyzer.value_bindings import ValueBindings
 from ..method_binding import (
     MethodBindError,
@@ -3238,11 +3244,11 @@ class CallVisitor:
                         and isinstance(argument.object, Identifier)
                         and self.ctx.identifier_decl_bindings.get(id(argument.object)) is None
                         and ValueBindings.declaration_of(argument.object) is None):
-                    variable_type = sigs.get_variable_type(
+                    variable_spec = sigs.get_variable_type_spec(
                         argument.object.name, argument.member,
                     )
-                    if variable_type != PineType.UNKNOWN:
-                        actual = TypeSpec.primitive(variable_type.value)
+                    if variable_spec is not None:
+                        actual = variable_spec
                 actual_cpp_type = self._text_type(argument)
                 argument_is_string = (
                     actual == TypeSpec.primitive("string")
@@ -3254,12 +3260,9 @@ class CallVisitor:
                     # analysis. Check before bool-to-text compatibility can
                     # turn a non-string value into a C++ string.
                     argument_type = (
-                        "bool" if actual_cpp_type == "bool" else
-                        (method_receiver_type_name(actual) or str(actual))
-                        if actual is not None else
-                        {"int": "int", "int64_t": "int", "double": "float"}.get(
-                            actual_cpp_type, actual_cpp_type,
-                        )
+                        public_type_name(actual)
+                        if actual is not None
+                        else public_cpp_type_name(actual_cpp_type)
                     )
                     intrinsic = sigs.BUILTIN_FUNCTIONS[f"{namespace}.{func_name}"]
                     parameter = intrinsic.primary.params[0]
@@ -3820,6 +3823,28 @@ class CallVisitor:
         """A missing Pine string uses the host's empty-string sentinel."""
         return '""' if node is None or isinstance(node, NaLiteral) else self._visit_expr(node)
 
+    def _strategy_qty_type_arg(self, node) -> str:
+        """Convert a Pine sizing string only where the host expects its code."""
+        if node is None:
+            return "-1"
+        constant = self._builtin_sizing_constant(node)
+        if constant is not None:
+            return str(constant.host_value)
+        value = self._visit_expr(node)
+        if self._infer_type(node) != "std::string":
+            # Retain the legacy numeric host API, including its -1 sentinel.
+            return value
+        cases = " ".join(
+            f"if (_pf_qty_type == {self._visit_expr(StringLiteral(value=item.value))}) "
+            f"return {item.host_value};"
+            for item in sigs.STRATEGY_SIZING_CONSTANTS.values()
+        )
+        return (
+            "([&]() -> int { const std::string _pf_qty_type = "
+            f"({value}); {cases} "
+            'throw std::invalid_argument("Unknown strategy sizing value"); }())'
+        )
+
     def _visit_strategy_call(self, func_name: str, node: FuncCall) -> str:
         from .order_shapes import record_order_call
         if func_name in ("convert_to_account", "convert_to_symbol"):
@@ -3855,7 +3880,7 @@ class CallVisitor:
             comment_val = self._strategy_string_arg(comment)
             oca_name_val = self._strategy_string_arg(oca_name)
             oca_type_val = self._visit_expr(oca_type) if oca_type else "0"
-            qty_type_val = self._visit_expr(qty_type) if qty_type else "-1"
+            qty_type_val = self._strategy_qty_type_arg(qty_type)
             qty_val = self._visit_float_arg(qty)
             if stop is not None or limit is not None or qty is not None or oca_name is not None or oca_type is not None or qty_type is not None:
                 limit_val = self._visit_float_arg(limit)
