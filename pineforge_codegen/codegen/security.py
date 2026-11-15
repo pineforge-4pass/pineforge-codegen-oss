@@ -10638,7 +10638,8 @@ class SecurityEmitter:
                     and self._security_identifier_is_global_binding(n.object)
                     and n.object.name in self._direct_program_tuple_binding_names
                     and n.object.name not in self._global_mutable_infos
-                    and not self._security_reads_global_history(sec_id, n)
+                    and not (self._security_reads_global_history(sec_id, n)
+                             and self._security_fallback_owns(n, bindings or (), sec_id))
                     and self._resolve_security_index_literal(n.index, bindings) != 0):
                 name = n.object.name
                 site = self._get_ta_site(global_expr_map.get(name))
@@ -11428,7 +11429,12 @@ class SecurityEmitter:
                 and self._security_expr_hist_by_node.get(
                     (sec_id, id(node)), {},
                 ).get("tuple_global")
-                and self._security_reads_global_history(sec_id, node)):
+                and self._security_reads_global_history(sec_id, node)
+                # TA tuple history under a visitor-rendered builtin keeps
+                # the chart's series and its warning. A requested slot also
+                # serves direct builder reads; its existence alone does not
+                # transfer ownership of this fallback read.
+                and self._security_ta_tuple_element_field(node.object.name) is None):
             return True
         selection = getattr(self, "_security_selection_context", None)
         if selection is not None:

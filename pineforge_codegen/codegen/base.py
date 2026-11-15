@@ -6436,7 +6436,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 # Emit one variant per call site
                 for cs_idx in range(total_cs):
                     if (self._live_func_instances is not None
-                            and f"{self._func_cpp_base_name(fi.name)}_cs{cs_idx}"
+                            and self._func_variant_name(fi.name, cs_idx)
                             not in self._live_func_instances):
                         continue
                     self._emit_func_def(fi, lines, call_site_idx=cs_idx)

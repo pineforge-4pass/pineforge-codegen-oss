@@ -50,7 +50,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
   that overlap collection-history or requested-context storage. Persistent
   declarations in sibling blocks also retain distinct storage when a script
   uses their generated spelling. Declarations, calls and history storage use
-  the same allocated identities. Regenerate C++ and relink affected strategies.
+  the same allocated identities, including when selecting reachable variants
+  for emission. Regenerate C++ and relink affected strategies.
 - Persistent declarations accept a type qualifier after `var` or `varip`.
   Lower-timeframe requests return independently typed arrays for inline and
   helper-returned tuple payloads.
@@ -58,7 +59,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `na`/`nz` helper parameters retain their bindings beside time operations;
   global tuple declarations and their member histories share one requested
   sample. Uncalled forwarding helpers no longer allocate unresolved TA buffers
-  for their unreachable call variants (#372).
+  for their unreachable call variants (#372). Built-in TA tuple histories
+  rendered through the expression visitor retain their chart-series warning.
 
 - A zone name the engine rejects now makes calendar-form `timestamp()` stop the
   run at its first evaluation, instead of silently calculating a UTC value.
