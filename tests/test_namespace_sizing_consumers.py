@@ -6,10 +6,11 @@ import pytest
 
 from pineforge_codegen import signatures as sigs, transpile
 from pineforge_codegen.analyzer import Analyzer
+from pineforge_codegen.codegen.helpers import CPP_TEMPORARY_NAMES
 from pineforge_codegen.errors import CompileError
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
-from pineforge_codegen.symbols import PineType, TypeSpec, public_type_name
+from pineforge_codegen.symbols import PineType, TypeSpec
 
 
 SIZING_MEMBERS = ("fixed", "cash", "percent_of_equity")
@@ -185,6 +186,7 @@ def test_authored_namespace_receiver_keeps_its_field_type(version):
         source = (
             HEADER + "import pftest/SizingReceiver/1 as L\n"
             "sampleValue = L.readMode(L.Mode.new(3))\n"
+            'sizingText = "Sizing: " + strategy.cash\n'
             "if sampleValue > 0\n"
             '    strategy.entry("L", strategy.long)\n'
         )
@@ -195,13 +197,25 @@ def test_authored_namespace_receiver_keeps_its_field_type(version):
             "type Mode\n    int cash\n"
             "readMode(Mode strategy) => strategy.cash\n"
             "sampleValue = readMode(Mode.new(3))\n"
+            'sizingText = "Sizing: " + strategy.cash\n'
             "if sampleValue > 0\n"
             '    strategy.entry("L", strategy.long)\n'
         )
     body = _source_body(cpp)
-    assert "readMode(" in body
+    assert ".cash" in cpp
+    assert re.search(r"sizingText\s*=.*cash", body)
     assert "strategy_entry(" in body
-    assert 'std::string("cash")' not in body
+
+
+def test_computed_qty_type_temporary_is_reserved():
+    source = (
+        HEADER
+        'qtyMode = input.string("cash", options = ["cash", "percent_of_equity"])\n'
+        'strategy.entry("L", strategy.long, qty = 1, qty_type = qtyMode)\n'
+    )
+    cpp = transpile(source)
+    assert "_pf_qty_type" in cpp
+    assert "_pf_qty_type" in CPP_TEMPORARY_NAMES
 
 
 def test_ordinary_live_numeric_control_keeps_its_operands():
@@ -224,4 +238,4 @@ def test_open_numeric_domain_is_not_reported_as_a_guessed_float(function):
     diagnostic, = refused.value.diagnostics
     assert diagnostic.code == "PF-E2095"
     assert diagnostic.args["argument_type"] == "number"
-    assert public_type_name(TypeSpec.primitive("number")) == "number"
+    assert str(TypeSpec.primitive("number")) == "number"

@@ -125,6 +125,10 @@ def test_every_temporary_the_emitter_declares_is_reserved():
         'changedValue = timeframe.change(timeframe = chosenFrame())\n'
         'plot(secondsValue)\nplot(changedValue ? 1 : 0)\n'
     )
+    sources.append(
+        HEAD + 'qtyMode = input.string("cash", options = ["cash", "percent_of_equity"])\n'
+        'strategy.entry("L", strategy.long, qty = 1, qty_type = qtyMode)\n'
+    )
     for source in sources:
         authored = {t.value for t in Lexer(source).tokenize() if t.type.name == "IDENT"}
         for line in transpile(source).splitlines():
