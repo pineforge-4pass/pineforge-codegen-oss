@@ -1088,12 +1088,12 @@ DIAGNOSTIC_PRESENTATION = {
         "Supply a literal or an expression over earlier constants.",
         "Strategy setting ''{name}'' must be a compile-time constant.",
     ),
-    "Cannot call ''{function_name}'' with a {argument_type} argument for "
+    "Cannot call ''{function_name}'' with an argument of type {argument_type} for "
     "{parameter_type} parameter ''{name}''.": (
-        "A numeric value cannot be used for a string parameter. Pass a string value "
+        "A non-string value cannot be used for a string parameter. Pass a string value "
         "of the declared parameter type; a permitted generic na adopts that type.",
-        "Argument ''{name}'' of ''{function_name}'' has type {argument_type}; "
-        "expected {parameter_type}.",
+        "Argument ''{name}'' of ''{function_name}'' has type {argument_type}, "
+        "but requires {parameter_type}.",
     ),
 }
 

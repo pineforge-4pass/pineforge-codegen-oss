@@ -7499,8 +7499,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             parameter_type = parameter.pine_type.value
             name = parameter.name
             self._error(
-                f"Cannot call '{function_name}' with a {argument_type} "
-                f"argument for {parameter_type} parameter '{name}'.",
+                f"Cannot call '{function_name}' with an argument of type {argument_type} "
+                f"for {parameter_type} parameter '{name}'.",
                 value.loc,
             )
 

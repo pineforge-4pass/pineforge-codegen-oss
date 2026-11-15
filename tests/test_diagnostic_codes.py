@@ -143,13 +143,13 @@ def test_classify_reads_arguments_raw():
 
 @pytest.mark.parametrize("message, expected_code, expected_args", [
     (
-        "Cannot call 'timeframe.change' with a int argument for string parameter 'timeframe'.",
+        "Cannot call 'timeframe.change' with an argument of type int for string parameter 'timeframe'.",
         "PF-E2095",
         {"function_name": "timeframe.change", "name": "timeframe",
          "argument_type": "int", "parameter_type": "string"},
     ),
     (
-        "Cannot call 'chooseFrame' with a float argument for string parameter 'candidate'.",
+        "Cannot call 'chooseFrame' with an argument of type float for string parameter 'candidate'.",
         "PF-E2095",
         {"function_name": "chooseFrame", "name": "candidate",
          "argument_type": "float", "parameter_type": "string"},

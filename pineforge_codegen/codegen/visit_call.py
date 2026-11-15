@@ -3268,8 +3268,8 @@ class CallVisitor:
                     name = parameter.name
                     self._codegen_error(
                         argument,
-                        f"Cannot call '{function_name}' with a {argument_type} "
-                        f"argument for {parameter_type} parameter '{name}'.",
+                        f"Cannot call '{function_name}' with an argument of type {argument_type} "
+                        f"for {parameter_type} parameter '{name}'.",
                     )
                 argument_cpp = self._visit_rhs_value(
                     argument, target_cpp_type="std::string",

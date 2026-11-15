@@ -117,8 +117,8 @@ def test_numeric_timeframe_is_refused_during_analysis(function, named, argument,
         "parameter_type": "string",
     }
     assert diagnostic.message == (
-        f"Cannot call 'timeframe.{function}' with a {pine_type} "
-        "argument for string parameter 'timeframe'."
+        f"Cannot call 'timeframe.{function}' with an argument of type {pine_type} "
+        "for string parameter 'timeframe'."
     )
     assert diagnostic.hint is None
     assert render_diagnostic(diagnostic.code, diagnostic.args) == (
