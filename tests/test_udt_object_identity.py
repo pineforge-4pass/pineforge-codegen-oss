@@ -303,7 +303,7 @@ int main() {
     if (strategy._pf_udt_Holder.get(strategy.second).data.contains("value")) return 5;
 
     strategy.snapshot_script_state();
-    const Holder speculative = strategy._pf_udt_Holder.copy(strategy.first);
+    const pf_safe_Holder speculative = strategy._pf_udt_Holder.copy(strategy.first);
     strategy._pf_udt_Holder.get(speculative).data.put("new-record", 7);
     if (!strategy._pf_udt_Holder.get(strategy.first).data.contains("new-record")) return 6;
     strategy.restore_script_state();
@@ -704,8 +704,9 @@ var Holder holder = Holder.new(1.0)
 result = holder.outer()
 '''
     cpp = transpile(source)
-    assert "std::string _udt_Holder_outer(Holder self)" in cpp
-    assert "std::string _udt_Holder_inner(Holder self)" in cpp
+    # The handle type is escaped; authored method names retain their spelling.
+    assert "std::string _udt_Holder_outer(pf_safe_Holder self)" in cpp
+    assert "std::string _udt_Holder_inner(pf_safe_Holder self)" in cpp
     driver = r'''
 #include <iostream>
 int main() {
@@ -930,7 +931,8 @@ observed = read_value(item, 3.0)
 '''
     cpp = transpile(source)
     assert "_pf_udt_Item__pf2{&_pf_udt_undo};" in cpp
-    assert "double read_value(Item item, double _pf_udt_Item)" in cpp
+    # Escape the handle type while retaining the parameter that hides the arena.
+    assert "double read_value(pf_safe_Item item, double _pf_udt_Item)" in cpp
     assert (
         "_pf_udt_Item__pf2.read(item).value + _pf_udt_Item"
         in cpp

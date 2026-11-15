@@ -4827,7 +4827,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._all_member_names.add(self._udt_undo_coordinator_member_name)
         self._udt_arena_member_names: dict[str, str] = {}
         for type_name in self._udt_defs:
-            preferred = f"_pf_udt_{self._safe_name(type_name)}"
+            preferred = self._udt_arena_member_name(type_name)
             allocated = self._allocate_generated_cpp_name(
                 preferred, member_used
             )
