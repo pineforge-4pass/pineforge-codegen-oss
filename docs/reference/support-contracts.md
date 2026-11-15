@@ -1,5 +1,29 @@
 ## Support contracts
 
+Persistent typed declarations parse their storage prefix separately from their
+qualifier: `var const float`, `varip const int`, and the corresponding `simple`
+and `series` forms retain both annotations and their existing initialization.
+
+`request.security_lower_tf` tuple payloads, written inline or returned by a
+helper, produce one array per element. Each intrabar evaluates the tuple once
+before distributing values to the independently typed arrays; clearing the
+request clears every array together. Tuple-bound arrays retain collection
+metadata in global and callable scopes.
+
+A global tuple declaration read by `request.security` is sampled once in the
+requested evaluator, in declaration order. Scalar and history reads share that
+sample, including stateful helper results. Member history commits on completed
+requested bars even when a lazy payload does not read the member on that bar.
+Helper parameter bindings remain active through `na`/`nz` builtin emission in
+both evaluator modes. These rules supersede the older tuple refusal limitations
+described in the historical helper row below.
+
+Complete mixed tab/space nested block prefixes use four columns per tab plus
+the spaces. Previously accepted incomplete mixed prefixes, skipped first-body
+widths and pending logical-line continuations retain their earlier handling
+pending additional TradingView observations; they are not newly refused as part
+of the nested-block correction.
+
 Builtin `array.slice` on a resolved typed array in the script, a function or
 method parameter, or a callable-local array opens the view gate and lowers the
 script's array storage to typed handles:

@@ -22,6 +22,15 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Persistent declarations accept a type qualifier after `var` or `varip`.
+  Lower-timeframe requests return independently typed arrays for inline and
+  helper-returned tuple payloads.
+- Complete nested indentation levels can combine tabs and spaces. Requested
+  `na`/`nz` helper parameters retain their bindings beside time operations;
+  global tuple declarations and their member histories share one requested
+  sample. Uncalled forwarding helpers no longer allocate unresolved TA buffers
+  for their unreachable call variants (#372).
+
 - A zone name the engine rejects now makes calendar-form `timestamp()` stop the
   run at its first evaluation, instead of silently calculating a UTC value.
   The paired engine reports a typed timezone error identifying the failed bar.
