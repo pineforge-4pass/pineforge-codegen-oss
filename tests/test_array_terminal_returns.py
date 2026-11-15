@@ -23,7 +23,7 @@ from tests._legacy_cpp import without_source_rename
         pytest.param(
             "values.join(separator=separator)", "separator", id="method-named",
         ),
-        pytest.param("values.join()", 'std::string(",")', id="method-default"),
+        pytest.param("values.join()", 'std::string("")', id="method-default"),
         pytest.param(
             "array.join(values, separator)", "separator", id="namespace-positional",
         ),
@@ -43,10 +43,10 @@ from tests._legacy_cpp import without_source_rename
             "values.copy().join(separator)", "separator", id="temporary-receiver",
         ),
         pytest.param(
-            "array.join(values)", 'std::string(",")', id="namespace-default",
+            "array.join(values)", 'std::string("")', id="namespace-default",
         ),
         pytest.param(
-            "array.join(id=values)", 'std::string(",")', id="namespace-named-default",
+            "array.join(id=values)", 'std::string("")', id="namespace-named-default",
         ),
     ],
 )
@@ -75,11 +75,13 @@ plot(close)
         assert re.search(rf"\bstd::string {name}\s*[=;]", cpp), cpp
     # A string signature alone still compiles when a named join emits
     # ``return 0`` (a null C string), or silently takes the default separator.
+    assert f"const std::string _pf_join_separator = ({separator_cpp});" in cpp, cpp
     if element_type == "string":
-        assert f"const std::string _pf_join_separator = ({separator_cpp});" in cpp, cpp
         assert "_pf_u16_join(_pf_join_parts, _pf_join_separator)" in cpp, cpp
     else:
-        assert f"__pf_r+={separator_cpp};" in cpp, cpp
+        assert "if (_pf_join_i != 0) _pf_join_result += _pf_join_separator;" in cpp, cpp
+        assert "_pf_join_result += _pf_join_number(_pf_join_parts[_pf_join_i]);" in cpp, cpp
+        assert "return _pf_u16_normalize(_pf_join_result);" in cpp, cpp
     compile_cpp(cpp, label="array-join-return-types")
 
 

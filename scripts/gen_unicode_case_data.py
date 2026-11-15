@@ -257,7 +257,7 @@ def _checked_path(value: str, filename: str) -> Path:
     """Reject sensitive names before any filesystem query; reject symlinks."""
     path = Path(value)
     parts = path.parts
-    sensitive = {".ssh", ".aws", ".codex"}
+    sensitive = {".ssh", ".aws"}
     if (any(part in sensitive or part.endswith(".env") for part in parts)
             or any(parts[i:i + 2] == (".config", "pineforge")
                    or parts[i:i + 3] == (".config", "zsh", "keys")

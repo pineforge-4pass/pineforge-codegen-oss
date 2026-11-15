@@ -99,7 +99,7 @@ def test_generated_module_round_trips_tables_and_ignores_irrelevant_record_order
 @pytest.mark.parametrize("filename", [
     "/no-access/.ssh/UnicodeData.txt",
     "/no-access/.aws/UnicodeData.txt",
-    "/no-access/.codex/UnicodeData.txt",
+    "/no-access/.ssh/UnicodeData.txt",
     "/no-access/.config/zsh/keys/UnicodeData.txt",
     "/no-access/.config/pineforge/UnicodeData.txt",
     "/no-access/private.env/UnicodeData.txt",

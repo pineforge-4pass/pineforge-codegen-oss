@@ -58,7 +58,9 @@ def test_mutating_operand_is_evaluated_after_the_left_operand_is_bound():
     assert s6.index("return (__pf_array[(size_t)__pf_array_index]);") < before_remove
     assert s6.index(".erase(") > before_remove
     # array.join(a, ",") reads the array after the outer binding.
-    assert s6.index("std::to_string(a[") > before_join
+    join_receiver = s6.index("const auto& _pf_join_parts = (a);")
+    assert join_receiver > before_join
+    assert s6.index("_pf_join_number(_pf_join_parts[_pf_join_i])") > join_receiver
     # Operands no other operand changes need no order binding: s4's two
     # reads, and every entry id's concatenation.
     assert "__pf_binop_lhs_" not in _assignment(cpp, "s4")
