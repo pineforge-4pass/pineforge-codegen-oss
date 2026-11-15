@@ -45,7 +45,8 @@ class DiagnosticsHelper:
     the diagnostic surface easy to audit.
     """
 
-    def _error(self, message: str, loc: SourceLocation | None = None) -> None:
+    def _error(self, message: str, loc: SourceLocation | None = None,
+               *, hint: str | None = None) -> None:
         """Raise a compile error."""
         if loc is None:
             loc = SourceLocation(file=self._filename, line=1, col=1, end_col=1)
@@ -54,6 +55,7 @@ class DiagnosticsHelper:
             phase=Phase.ANALYZER,
             location=loc,
             message=message,
+            hint=hint,
         )
         raise CompileError([diag])
 

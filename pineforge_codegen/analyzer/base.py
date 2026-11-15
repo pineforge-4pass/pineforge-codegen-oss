@@ -6474,24 +6474,26 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _top_level_branch_needs_lexical_scope(
         self, body: list[ASTNode]
     ) -> bool:
-        """Whether a top-level branch declares over a direct script binding.
+        """Whether a top-level branch declares over a script binding or builtin.
 
         Functions already own a symbol-table scope and ``for``/``for in``
         create one explicitly.  Top-level if/while/switch branches historically
         reused the global Scope, so a local declaration could overwrite the
         analyzer's outer Symbol even though codegen emits a C++ lexical local.
-        Add a child scope only for the collision shape handled by this change;
-        every unrelated program keeps the established analysis path.
+        Builtins need the same child scope as authored outer bindings, so
+        leaving a branch restores the builtin and its type.
         """
         if self._collection_scope_stack:
             return False
         for stmt in body:
             if (isinstance(stmt, VarDecl)
-                    and stmt.name in self._direct_program_binding_names):
+                    and (stmt.name in self._direct_program_binding_names
+                         or stmt.name in BUILTIN_VARS)):
                 return True
             if (isinstance(stmt, TupleAssign)
                     and any(
                         name in self._direct_program_binding_names
+                        or name in BUILTIN_VARS
                         for name in stmt.names
                         if name != "_"
                     )):
@@ -7696,6 +7698,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if isinstance(obj, Identifier) and obj.name == "str":
                 for arg in node.args:
                     self._visit(arg)
+                for value in node.kwargs.values():
+                    self._visit(value)
                 # Most str.* return a string, but predicates and index helpers
                 # are scalar. Keep this aligned with signatures.py and the C++
                 # emitter's _infer_type path.
@@ -8015,6 +8019,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         )
                         return PineType.UNKNOWN
                     return receiver_pine_type
+            # Preserve fixed scalar array results in the coarse return-type
+            # visitor as well as TypeSpec inference. Authored methods above
+            # retain precedence over builtin names.
+            fixed_array_result = self._fixed_array_call_result(node, receiver_spec)
+            if fixed_array_result is not None:
+                return self._element_pine_type(fixed_array_result)
             # Matrix method dispatch: ``m.get(0, 0)`` on ``matrix<int>`` must
             # type as INT, not VOID, so ``v = m.get(...)`` propagates the
             # element PineType. ``_type_spec_from_expr`` already carries the

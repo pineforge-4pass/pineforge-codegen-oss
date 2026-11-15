@@ -1,8 +1,9 @@
-"""Exact primitive UDF return typing for direct terminal array ``get`` calls."""
+"""Primitive UDF return typing for terminal array calls and forwarding."""
 
 from __future__ import annotations
 
 from itertools import product
+import re
 
 import pytest
 
@@ -13,6 +14,147 @@ from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from tests._compile import compile_cpp
 from tests._legacy_cpp import without_source_rename
+
+
+@pytest.mark.parametrize(
+    "expression, separator_cpp",
+    [
+        pytest.param("values.join(separator)", "separator", id="method-positional"),
+        pytest.param(
+            "values.join(separator=separator)", "separator", id="method-named",
+        ),
+        pytest.param("values.join()", 'std::string("")', id="method-default"),
+        pytest.param(
+            "array.join(values, separator)", "separator", id="namespace-positional",
+        ),
+        pytest.param(
+            "array.join(values, separator=separator)", "separator",
+            id="namespace-mixed",
+        ),
+        pytest.param(
+            "array.join(id=values, separator=separator)", "separator",
+            id="namespace-named",
+        ),
+        pytest.param(
+            "array.join(separator=separator, id=values)", "separator",
+            id="namespace-reordered",
+        ),
+        pytest.param(
+            "values.copy().join(separator)", "separator", id="temporary-receiver",
+        ),
+        pytest.param(
+            "array.join(values)", 'std::string("")', id="namespace-default",
+        ),
+        pytest.param(
+            "array.join(id=values)", 'std::string("")', id="namespace-named-default",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "element_type, elements",
+    [("string", '"alpha", "beta"'), ("int", "2, 7")],
+)
+def test_join_helpers_and_forwarded_results_keep_string_signatures(
+    expression, separator_cpp, element_type, elements,
+):
+    source = f'''//@version=6
+strategy("array join return types")
+combine(array<{element_type}> values, string separator) =>
+    {expression}
+relay(array<{element_type}> values, string separator) =>
+    combine(values=values, separator=separator)
+parts = array.from({elements})
+first_result = relay(parts, "|")
+second_result = relay(separator=":", values=parts)
+plot(close)
+'''
+    cpp = transpile(source)
+    for name in ("combine", "relay"):
+        assert f"std::string {name}(" in cpp, cpp
+    for name in ("first_result", "second_result"):
+        assert re.search(rf"\bstd::string {name}\s*[=;]", cpp), cpp
+    # A string signature alone still compiles when a named join emits
+    # ``return 0`` (a null C string), or silently takes the default separator.
+    assert f"const std::string _pf_join_separator = ({separator_cpp});" in cpp, cpp
+    if element_type == "string":
+        assert "_pf_u16_join(_pf_join_parts, _pf_join_separator)" in cpp, cpp
+    else:
+        assert "if (_pf_join_i != 0) _pf_join_result += _pf_join_separator;" in cpp, cpp
+        assert "_pf_join_result += _pf_join_number(_pf_join_parts[_pf_join_i]);" in cpp, cpp
+        assert "return _pf_u16_normalize(_pf_join_result);" in cpp, cpp
+    compile_cpp(cpp, label="array-join-return-types")
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        pytest.param(
+            "array.join(make_parts(), make_separator())", id="namespace-positional",
+        ),
+        pytest.param(
+            "array.join(make_parts(), separator=make_separator())",
+            id="namespace-mixed",
+        ),
+        pytest.param(
+            "array.join(id=make_parts(), separator=make_separator())",
+            id="namespace-named",
+        ),
+        pytest.param(
+            "array.join(separator=make_separator(), id=make_parts())",
+            id="namespace-reordered",
+        ),
+        pytest.param(
+            "make_parts().join(make_separator())", id="method-positional",
+        ),
+        pytest.param(
+            "make_parts().join(separator=make_separator())", id="method-named",
+        ),
+    ],
+)
+def test_join_argument_emission_binds_receiver_then_separator_once(expression):
+    source = f'''//@version=6
+strategy("array join argument bindings")
+events = array.new_int()
+make_parts() =>
+    events.push(1)
+    array.from("alpha", "beta")
+make_separator() =>
+    events.push(2)
+    "|"
+result = {expression}
+plot(close)
+'''
+    cpp = transpile(source)
+    assignment, = (
+        line for line in cpp.splitlines()
+        if line.strip().startswith("result =")
+    )
+    assert assignment.count("make_parts()") == 1, assignment
+    assert assignment.count("make_separator()") == 1, assignment
+    assert assignment.index("make_parts()") < assignment.index("make_separator()")
+    assert "const auto& _pf_join_parts = (" in assignment, assignment
+    assert "const std::string _pf_join_separator = (make_separator());" in assignment, assignment
+    assert "_pf_u16_join(_pf_join_parts, _pf_join_separator)" in assignment, assignment
+    compile_cpp(cpp, label="array-join-argument-bindings")
+
+
+def test_join_result_keeps_string_type_through_local_and_method_returns():
+    source = '''//@version=6
+strategy("array join local and method returns")
+method combine(array<string> values, string separator) =>
+    joined_value = values.join(separator)
+    joined_value
+relay(array<string> values, string separator) =>
+    values.combine(separator)
+parts = array.from("alpha", "beta")
+result = relay(parts, "|")
+plot(close)
+'''
+    cpp = transpile(source)
+    assert re.search(r"\bstd::string _udt_array_string_+combine\(", cpp), cpp
+    assert "std::string relay(" in cpp
+    assert re.search(r"\bstd::string result\s*[=;]", cpp), cpp
+    compile_cpp(cpp, label="array-join-local-method-return")
 
 
 _GET_SHAPES_SOURCE = r'''//@version=6

@@ -25,7 +25,8 @@ import pytest
 
 from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.errors import CompileError
-from tests._compile import compile_cpp
+from tests._compile import compile_cpp, run_emitted_tu
+from tests._cpp_tokens import string_values
 from tests._e2e import chart_feed_head, skip_unless_e2e_env
 from tests._requests import build, hourly, run, same, write_root
 
@@ -135,3 +136,116 @@ def test_footprint_of_the_charts_own_symbol_reads_its_feed(tmp_path_factory):
         assert same(result.trace[chart_open]["pf_d"], deltas[visible[-1]]), chart_open
     result = run(engine, work, feed_path, None, tag="none")
     assert not result.ok and PINNED in result.error
+
+
+@pytest.mark.parametrize("names", [
+    ("fp\0left", "fp\0right", "fp"),
+    ("fp\x01left", "fp\x01right", "fp"),
+    ("fpleft", "fpright", "fp"),
+    ("é\0中😀left", "é\0中😀right", "é"),
+    ("", "suffix", "missing"),
+], ids=["nul", "other-control", "ascii", "unicode-nul", "empty-name"])
+def test_generated_column_helpers_compare_whole_names(names):
+    """Internal serializer/lookup contract; public Pine produces ASCII names."""
+    from pineforge_codegen import CodeGen, _generate
+    from pineforge_codegen.external_requests import FOOTPRINT_COLUMN_ANNOTATION
+
+    # Supply an internal annotation as serializer input, after normal checking.
+    # No Pine source or public footprint-name producer is changed or bypassed.
+    _, context, _, _, _ = _generate(HEAD + REQUEST + "d = fp.delta()\n", True, "<input>")
+    (site,) = context.security_calls
+    assert site.expression.annotations[FOOTPRINT_COLUMN_ANNOTATION] == "fp_delta_100_70"
+    site.expression.annotations[FOOTPRINT_COLUMN_ANNOTATION] = names[0]
+    cpp = CodeGen(context).generate()
+    registration = next(line for line in cpp.splitlines()
+                        if "if (_pf_symbol_data_installed(" in line)
+    payload = next(line for line in cpp.splitlines() if "_req_sec_0 = _pf_symbol_column(" in line)
+    for line in (registration, payload):
+        assert names[0] in string_values(line)
+        if "\0" in names[0]:
+            counted = re.findall(r'std::string\(("(?:[^"\\]|\\.)*"), (\d+)\)', line)
+            assert any(
+                string_values(literal) == [names[0]]
+                and int(count) == len(names[0].encode("utf-8"))
+                for literal, count in counted
+            ), line
+
+    def native_bytes(value):
+        return "std::string{" + ", ".join(
+            f"static_cast<char>({byte})" for byte in value.encode("utf-8")
+        ) + "}"
+
+    body = "\n".join(
+        f'check("name{index}", probe._pf_symbol_data_installed("PF:A", "15", '
+        f'{native_bytes(name)}));'
+        for index, name in enumerate(names)
+    )
+    driver = r'''
+#include <cmath>
+#include <iostream>
+#include <stdexcept>
+#include <type_traits>
+#include <vector>
+
+class ColumnProbe : public GeneratedStrategy {
+public:
+    using GeneratedStrategy::_pf_symbol_data_installed;
+    using GeneratedStrategy::_pf_symbol_column;
+
+    void install(const std::string& left, const std::string& right,
+                 const std::vector<pineforge::Bar>& bars,
+                 const std::vector<int64_t>& closes) {
+        if (!set_symbol_feed("PF:A", "15", bars.data(), closes.data(), bars.size()))
+            throw std::runtime_error("could not install column test feed");
+        auto& feed = symbol_feeds_.back();
+        feed.columns.emplace_back();
+        feed.columns.back().name = left;
+        feed.columns.back().values = {1.25, -4.5, 19.75};
+        feed.columns.emplace_back();
+        feed.columns.back().name = right;
+        feed.columns.back().values = {7.0, 11.0, -23.5};
+    }
+};
+
+static_assert(std::is_invocable_r_v<double, decltype(&ColumnProbe::_pf_symbol_column),
+                                   const ColumnProbe&, int, const std::string&>);
+
+void check(const char* name, bool found) {
+    std::cout << name << "=" << found << "\n";
+}
+
+int main() {
+    std::vector<pineforge::Bar> bars(3);
+    std::vector<int64_t> closes;
+    for (std::size_t i = 0; i < bars.size(); ++i) {
+        bars[i].open = bars[i].low = 90.0 + double(i);
+        bars[i].high = 110.0 + double(i);
+        bars[i].close = 100.0 + double(i);
+        bars[i].volume = 1.0;
+        bars[i].timestamp = 1704067200000LL + static_cast<int64_t>(i) * 900000LL;
+        closes.push_back(bars[i].timestamp + 900000LL);
+    }
+    ColumnProbe probe;
+    probe.install(LEFT, RIGHT, bars, closes);
+    // BODY
+    check("no-column-filter", probe._pf_symbol_data_installed("PF:A", "15"));
+    check("empty-name", probe._pf_symbol_data_installed("PF:A", "15", std::string{}));
+    check("other-symbol", probe._pf_symbol_data_installed("PF:B", "15", LEFT));
+    check("other-timeframe", probe._pf_symbol_data_installed("PF:A", "60", LEFT));
+    check("unknown-context-na", std::isnan(probe._pf_symbol_column(-1, LEFT)));
+    probe.run(bars.data(), bars.size(), "15", "15");
+    if (!probe.last_error().empty()) throw std::runtime_error(probe.last_error());
+    std::cout << "payload=" << probe.d << "\n";
+    std::cout << "left=" << probe._pf_symbol_column(0, LEFT) << "\n";
+    std::cout << "right=" << probe._pf_symbol_column(0, RIGHT) << "\n";
+    check("unknown-column-na", std::isnan(probe._pf_symbol_column(0, MISSING)));
+}
+'''.replace("LEFT", native_bytes(names[0])).replace("RIGHT", native_bytes(names[1]))
+    driver = driver.replace("MISSING", native_bytes(names[2])).replace("// BODY", body)
+    output = run_emitted_tu(cpp, driver, opt="-O0", label="complete column names")
+    assert output.splitlines() == [
+        "name0=1", "name1=1", "name2=0", "no-column-filter=1",
+        f"empty-name={int(names[0] == '')}", "other-symbol=0", "other-timeframe=0",
+        "unknown-context-na=1", "payload=19.75", "left=19.75", "right=-23.5",
+        "unknown-column-na=1",
+    ]

@@ -461,6 +461,9 @@ CPP_EMITTER_NAMES = frozenset("""
     _pf_tv_trim _pf_tv_increment_digits _pf_tv_decimal _pf_tv_pattern
     _pf_tv_number_style
     _pf_u16_length _pf_u16_pos _pf_u16_decode _pf_u16_encode _pf_u16_substr
+    _pf_u16_find _pf_u16_contains _pf_u16_startswith _pf_u16_endswith _pf_u16_join
+    _pf_u16_normalize _pf_u16_concat
+    _pf_regex
     _security_helper_series_ _security_helper_series_str_
     _use_precalc _var_initialized _ta_initialized_ _inputs_initialized_
     _pf_lines_ _pf_boxes_ _pf_labels_ _pf_linefills_
@@ -543,6 +546,19 @@ CPP_TEMPORARY_NAMES = frozenset("""
     __pf_idx __pf_occ
     _pf_number_text
     _pf_substring_text _pf_substring_begin _pf_substring_end _pf_substring_error
+    _pf_substring_start _pf_substring_count
+    _pf_match_source _pf_match_pattern
+    _pf_search_source _pf_search_needle _pf_join_parts _pf_join_separator
+    _pf_StringArray _pf_text _pf_needle _pf_text_units _pf_needle_units _pf_at
+    _pf_parts _pf_separator _pf_separator_units _pf_join_units _pf_part_units _pf_i
+    _pf_case_text _pf_case_properties _pf_case_flags _pf_case_code
+    _pf_case_lo _pf_case_hi _pf_case_mid _pf_case_after _pf_case_codes
+    _pf_case_next_cased _pf_case_i _pf_case_props _pf_case_before _pf_case_lead
+    _pf_case_width _pf_case_valid _pf_case_k _pf_case_byte _pf_case_min
+    _pf_case_out _pf_case_append _pf_toupper_map _pf_tolower_map
+    _pf_tolower_final_map _pf_case_contextual _pf_case_row
+    _pf_trim_text _pf_trim_size _pf_trim_first _pf_trim_last
+    _pf_trim_i _pf_trim_c _pf_trim_width _pf_trim_second _pf_trim_third
     _pf_array_new_size _pf_array_new_value _pf_array_new_size_type _pf_array_new_error
     _pf_read _pf_v5_l _pf_v5_r _pf_wide_l _pf_wide_r _pf_w
     _pf_symbol _pf_colon _pf_color _pf_bar_back _pf_ema_seeding
@@ -650,20 +666,18 @@ class NamingHelper:
             return f'std::string("{escaped}", {len(s.encode("utf-8"))})'
         return f'std::string("{escaped}")'
 
-    # ``_cpp_std_string``'s spelling of a literal that holds a NUL; group 1 is
-    # the quoted literal.
-    _SIZED_STD_STRING = re.compile(r'std::string\(("(?:[^"\\\r\n]|\\.)*"), \d+\)')
-
     @staticmethod
-    def _unsized_std_string(cpp: str) -> str:
-        """``cpp`` with the byte count of a lowered NUL literal left out.
+    def _cpp_string_literal(s: str) -> str:
+        """A literal for a length-aware C++ string consumer.
 
-        The default and the options of an input stay C strings: the settings
-        receipt and the getter's default stop at the first NUL, as they are
-        documented to, and the manifest must equal both. A text that is not a
-        counted literal is returned as it is."""
-        sized = NamingHelper._SIZED_STD_STRING.fullmatch(cpp.strip())
-        return f"std::string({sized.group(1)})" if sized else cpp
+        Keep the bare literal spelling when C-string conversion is lossless;
+        otherwise carry the UTF-8 byte count through a std::string. Consumers
+        must accept that string directly, without a const-char intermediate.
+        This does not change a public NUL-terminated C interface.
+        """
+        if "\0" in s:
+            return NamingHelper._cpp_std_string(s)
+        return f'"{NamingHelper._cpp_string_escape(s)}"'
 
     @staticmethod
     def _cpp_comment_escape(s: str) -> str:

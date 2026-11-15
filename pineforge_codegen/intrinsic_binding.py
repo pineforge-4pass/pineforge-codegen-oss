@@ -1,4 +1,4 @@
-"""Keyword validation and positional binding from intrinsic records."""
+"""Intrinsic binding and proven builtin argument-domain diagnostics."""
 
 from __future__ import annotations
 
@@ -7,12 +7,35 @@ from .diagnostic_codes import render_diagnostic
 from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from .pine_spelling import expr_start
 from .signatures import IntrinsicFunc, Param
+from .symbols import TypeSpec
 
 
 _STRATEGY_ORDER_FUNCTIONS = frozenset({
     "strategy.entry", "strategy.order", "strategy.exit", "strategy.close",
     "strategy.close_all", "strategy.cancel", "strategy.cancel_all",
 })
+
+
+def array_method_domain_error(
+    method: str, receiver: TypeSpec | None,
+) -> tuple[str, str | None] | None:
+    """Return a proven builtin receiver mismatch, leaving other domains open.
+
+    Join independently admits string, int and float arrays and refuses bool
+    arrays. The bool refusal does not prove any other array domain invalid.
+    Callers resolve authored methods before applying this builtin contract.
+    """
+    if (method != "join" or receiver is None or receiver.kind != "array"
+            or receiver.element is None or receiver.element.kind != "primitive"
+            or receiver.element.name != "bool"):
+        return None
+    return render_diagnostic(
+        "PF-E1088", {
+            "name": "array.join",
+            "message": "cannot accept an array<bool> argument for parameter 'id'",
+            "spelled": "CE10123",
+        },
+    )
 
 
 def intrinsic_keyword_diagnostics(

@@ -7,9 +7,14 @@ import pytest
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError, Phase
 from tests._compile import compile_cpp, run_emitted_tu
+from tests._older_codegen import with_utf16_units
 
 
-_REFERENCE_JOIN = re.compile(r"std::to_string\((\w+)\[0\]\) \+ (\w+)\)")
+_REFERENCE_JOIN = re.compile(r"\(std::to_string\((\w+)\[0\]\) \+ (\w+)\)")
+_REFERENCE_REQUESTED_JOIN = re.compile(
+    r'\((\(_security_helper_series_str_\.[A-Za-z_][A-Za-z_0-9]*\('
+    r'"(?:\\.|[^"\\])*", [0-9]+\)[^()\n;]*\)\[0\]) \+ (\w+)\)'
+)
 
 
 def with_string_join_fixed(cpp):
@@ -17,11 +22,15 @@ def with_string_join_fixed(cpp):
 
     The older emission wrapped the current value of a string local read with
     history in std::to_string when joining it with its previous value (issue
-    #354), which does not compile. A test that compares a new emission with an
-    older one passes only when that single site is the whole difference.
+    #354), which does not compile. Both that join and the corresponding
+    requested join now use UTF-16 concatenation. The comparison still checks
+    the complete C++, allowing only these joins and the shared helper block.
     """
     assert len(_REFERENCE_JOIN.findall(cpp)) == 1, cpp
-    return _REFERENCE_JOIN.sub(r"\1[0] + \2)", cpp)
+    cpp = _REFERENCE_JOIN.sub(r"_pf_u16_concat(\1[0], \2)", cpp)
+    cpp, requested = _REFERENCE_REQUESTED_JOIN.subn(r"_pf_u16_concat(\1, \2)", cpp)
+    assert requested <= 1, cpp
+    return with_utf16_units(cpp)
 
 
 _REPRODUCTION = """//@version=6
@@ -141,7 +150,8 @@ def test_history_string_operands_compile_and_return_the_join(
     for member in members:
         assert f"std::to_string({member}" not in cpp
         expression = (
-            f"(bb + {member}[0])" if swapped else f"({member}[0] + bb)"
+            f"_pf_u16_concat(bb, {member}[0])" if swapped
+            else f"_pf_u16_concat({member}[0], bb)"
         )
         assert expression in cpp
     # Bar 0 executes to seed history. Only bars with an existing previous
