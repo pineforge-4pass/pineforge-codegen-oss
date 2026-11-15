@@ -2156,6 +2156,26 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 owns_non_ta_state = bool(
                     g_var_originals or fixnan_originals(g_name)
                 )
+                owner_info = self._func_info_map.get(inst["fname"])
+                owner_profile = inst.get("param_specs")
+                if owner_profile is None and owner_info is not None:
+                    owner_profile = getattr(
+                        ctx, "func_callsite_param_specs", {}
+                    ).get(
+                        (inst["fname"], inst.get("type_call_site_idx",
+                                                inst.get("call_site_idx"))),
+                        tuple(owner_info.param_type_specs),
+                    )
+                incoming = getattr(ctx, "func_value_call_edges", {}).get(
+                    (inst["fname"], owner_profile, id(callnode))
+                )
+                natural_profile = getattr(
+                    ctx, "func_callsite_param_specs", {}
+                ).get((g_name, j))
+                different_value_type = (
+                    incoming is not None and natural_profile is not None
+                    and incoming != natural_profile
+                )
                 # Every non-cs0 enclosing variant is a distinct Pine written
                 # call path. Even a pure wrapper can reach var/fixnan state
                 # farther down the graph, so preserve the path identity here
@@ -2166,6 +2186,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 )
                 if (
                     not path_requires_fresh_state
+                    and not different_value_type
                     and composed_ta == natural_ta
                     and composed_var == natural_var
                     and composed_fixnan == natural_fixnan
@@ -2185,6 +2206,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     frozenset(composed_var.items()),
                     frozenset(composed_fixnan.items()),
                     path_identity,
+                    incoming,
                 )
                 ginst = interned.get(key)
                 if ginst is None:
@@ -2232,6 +2254,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         # takes the argument that call passes, as the
                         # call's own cs{j} clone does.
                         "type_call_site_idx": j,
+                        "param_specs": incoming,
+                        "return_spec": getattr(
+                            ctx, "func_value_return_specs", {}
+                        ).get((g_name, incoming)),
                         "ta_remap": composed_ta,
                         "var_remap": fvar_remap,
                         "fixnan_remap": ffixnan_remap,
@@ -2547,6 +2573,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # final state and can already contain an invalid later reassignment's
         # element type. The original declaration must remain the compatibility
         # baseline used to reject matrix<int> := matrix<float>.
+        gem = getattr(self.ctx, "global_expr_map", {}) or {}
         for stmt, _in_loop in self._walk_global_scope_with_loopflag(
             getattr(self.ctx.ast, "body", []), False
         ):
@@ -2568,7 +2595,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     self._array_vars.add(stmt.name)
                     self._collection_types.setdefault(stmt.name, declared_spec)
                     continue
+            elif stmt.name not in gem:
+                # Reassignment removes a binding from global_expr_map. Its
+                # initializer still establishes its matrix handle type, also
+                # for declarations inside top-level control-flow blocks.
+                declared_spec = self._type_spec_from_expr(stmt.value)
             else:
+                # An available initializer still uses the established member
+                # inference and default initialization below.
                 continue
             if (from_selection and declared_spec is not None
                     and declared_spec.kind == "array"):
@@ -2584,7 +2618,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._matrix_specs.setdefault(stmt.name, declared_spec)
             self._collection_types[stmt.name] = self._matrix_specs[stmt.name]
 
-        gem = getattr(self.ctx, "global_expr_map", {}) or {}
         for name, _ptype in self.ctx.global_var_decls:
             expr = gem.get(name)
             if expr is None or not isinstance(expr, FuncCall):

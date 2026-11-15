@@ -2422,6 +2422,37 @@ class TopLevelEmitter:
             call_site_idx if call_site_idx is not None
             else (instance or {}).get("type_call_site_idx")
         )
+        if type_call_site_idx is not None:
+            from dataclasses import replace
+            incoming = getattr(
+                self.ctx, "func_callsite_param_specs", {}
+            ).get((fi.name, type_call_site_idx), ())
+            if (instance or {}).get("param_specs") is not None:
+                incoming = instance["param_specs"]
+            declared = getattr(
+                self.ctx, "func_declared_param_type_specs", {}
+            ).get(fi.name, ())
+            specs = list(fi.param_type_specs)
+            while len(specs) < len(node.params):
+                specs.append(None)
+            for index, spec in enumerate(incoming):
+                if (index < len(specs) and spec is not None
+                        and (spec.kind != "primitive" or spec.name == "string")
+                        and (index >= len(declared) or declared[index] is None)):
+                    specs[index] = spec
+            exact_return = getattr(
+                self.ctx, "func_callsite_return_specs", {}
+            ).get((fi.name, type_call_site_idx), fi.return_type_spec)
+            if (instance or {}).get("return_spec") is not None:
+                exact_return = instance["return_spec"]
+            fi = replace(
+                fi, param_type_specs=specs, return_type_spec=exact_return,
+                udt_return_type=(
+                    exact_return.name
+                    if exact_return is not None and exact_return.kind == "udt"
+                    else fi.udt_return_type
+                ),
+            )
 
         # Collection registries historically used raw variable names for the
         # whole translation unit.  Emit each callable against copy-on-write
@@ -2669,6 +2700,11 @@ class TopLevelEmitter:
             ret_type = "int64_t"
         elif ("return", fi.name) in self._array_widths.wide:
             ret_type = self._type_spec_to_cpp(self._array_return_spec(fi))
+        elif (getattr(fi, "return_type_spec", None) is not None
+                and fi.return_type_spec.kind != "primitive"):
+            # Exact value types also apply to history/stateful clones. Their
+            # coarse primitive profile cannot represent a collection result.
+            ret_type = self._type_spec_to_cpp(self._array_return_spec(fi))
         elif (
             type_call_site_idx is not None
             and self._callsite_callable_return_pine_type(
@@ -2682,8 +2718,6 @@ class TopLevelEmitter:
                 "double",
             )
         elif getattr(fi, "return_type_spec", None) is not None:
-            # Exact return TypeSpec (collections plus narrowly cached primitive
-            # terminal reads) takes precedence over the coarse PineType slot.
             ret_type = self._type_spec_to_cpp(self._array_return_spec(fi))
         else:
             ret_type = PINE_TYPE_TO_CPP.get(fi.return_type, "double")

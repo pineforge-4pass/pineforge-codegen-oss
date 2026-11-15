@@ -293,6 +293,12 @@ class AnalyzerContext:
     # helper called with both ``bar_index`` and ``close``).
     func_callsite_param_types: dict = field(default_factory=dict)
     func_callsite_return_types: dict = field(default_factory=dict)
+    # Exact argument/return value types retain collection element types, object
+    # identities and strings independently of the coarse primitive profiles.
+    func_callsite_param_specs: dict = field(default_factory=dict)
+    func_callsite_return_specs: dict = field(default_factory=dict)
+    func_value_call_edges: dict = field(default_factory=dict)
+    func_value_return_specs: dict = field(default_factory=dict)
     # Declaration-time parameter specs, before any call-site inference fills
     # untyped slots on the legacy FuncInfo record.  Codegen uses this to apply
     # variant overrides only to genuinely untyped parameters.
