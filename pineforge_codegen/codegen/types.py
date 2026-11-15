@@ -53,6 +53,7 @@ from ..external_requests import UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
 from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
 from ..matrix_overloads import matrix_sum_has_rhs
+from ..reference_casts import na_reference_cast_kind
 from ..symbols import (
     PineType,
     TypeSpec,
@@ -3145,6 +3146,11 @@ class TypeInferer:
             targs = self._template_args_from_call(node)
             # Drawing-objects-as-data return typing (spec §4.5 DRAWING_RETURN_SPECS):
             # *.new / *.copy -> handle of the self-type; linefill.get_line* -> line.
+            if (func_name not in getattr(self, "_func_info_map", {})
+                    and (cast_kind := na_reference_cast_kind(node))):
+                return TypeSpec.udt(cast_kind)
+            if namespace == "polyline" and func_name == "new":
+                return TypeSpec.udt("polyline")
             if namespace in DRAWING_NS:
                 if func_name in ("new", "copy"):
                     return TypeSpec.udt(namespace)
@@ -5308,6 +5314,12 @@ class TypeInferer:
         primitive_global = self._primitive_block_shadow_globals.get(name)
         if primitive_global is not None:
             return self._type_for_decl(primitive_global)
+        drawing_cpp_type = self._drawing_target_cpp_type(name, None)
+        if drawing_cpp_type is not None:
+            # The coarse PineType of an ID is not numeric storage. In
+            # particular a tuple's drawing value must never enter a double
+            # conversion merely because the destination is a var member.
+            return drawing_cpp_type
         for vname, ptype, _init in self.ctx.var_members:
             if vname == name:
                 if self._numeric_na_member(name):
@@ -6362,6 +6374,11 @@ class TypeInferer:
             return "double"
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            if (func_name not in getattr(self, "_func_info_map", {})
+                    and (cast_kind := na_reference_cast_kind(node))):
+                return DRAWING_TYPE_TO_CPP[cast_kind]
+            if namespace == "polyline" and func_name == "new":
+                return DRAWING_TYPE_TO_CPP["polyline"]
             if namespace == "color":
                 return "int64_t" if func_name in {"new", "rgb", "from_gradient"} else "int"
             if (namespace == "request" and func_name == "security"

@@ -1297,6 +1297,7 @@ class StmtVisitor:
                 selection_cpp_type = self._drawing_target_cpp_type(
                     target_name,
                     None,
+                    target_node=node.target if target_name is None else None,
                 )
             if selection_cpp_type is None:
                 selection_cpp_type = self._int_slot_cpp_type(target_name)
@@ -1325,14 +1326,9 @@ class StmtVisitor:
 
         # Get target name
         if target_name is None:
-            # Assignment to a UDT field that was dropped from the emitted
-            # struct because it had a drawing-only type (label/line/box/
-            # linefill/polyline/table/chart.point). The struct has no such
-            # member, so emit a placeholder comment instead of a real C++
-            # assignment. We intentionally do NOT visit the RHS here: drawing
-            # constructors (label.new / line.new / ...) live in
-            # SKIP_NAMESPACES, so they have no observable side effects in
-            # the backtest runtime. See: pineforge-codegen issue #10.
+            # Retain the existing omission of visual-only table fields.
+            # Drawing and opaque polyline handles are real record members and
+            # follow the typed assignment path below.
             if self._is_omitted_udt_field(node.target):
                 recv = self._visit_expr(node.target.object)
                 omitted = self._cpp_comment_escape(f"{recv}.{node.target.member} {node.op}")
@@ -1347,6 +1343,14 @@ class StmtVisitor:
                 target_cpp_type = self._udt_target_cpp_type(
                     target_node=node.target,
                 )
+            if target_cpp_type is None:
+                target_cpp_type = self._drawing_target_cpp_type(
+                    None, None, target_node=node.target,
+                )
+            if target_cpp_type is None:
+                field_spec = self._type_spec_from_expr(node.target)
+                if field_spec is not None and field_spec.kind == "array":
+                    target_cpp_type = self._type_spec_to_cpp(field_spec)
             if (target_cpp_type is None and self._is_na_expr(node.value)
                     and self._udt_field_is_string(node.target)):
                 # A bare na assigned to a string field is the typed string na,

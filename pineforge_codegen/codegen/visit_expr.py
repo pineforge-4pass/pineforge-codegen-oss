@@ -506,6 +506,8 @@ class ExprVisitor:
         self,
         target_name: str | None,
         target_cpp_type: str | None,
+        *,
+        target_node=None,
     ) -> str | None:
         """Resolve a drawing target without leaking a shadowed global type.
 
@@ -520,6 +522,11 @@ class ExprVisitor:
                 if target_cpp_type in DRAWING_TYPE_TO_CPP.values()
                 else None
             )
+        if target_node is not None:
+            spec = self._type_spec_from_expr(target_node)
+            if (spec is not None and spec.kind == "udt"
+                    and spec.name in DRAWING_TYPE_TO_CPP):
+                return DRAWING_TYPE_TO_CPP[spec.name]
         if not target_name:
             return None
         if target_name in self._lexical_drawing_types:
@@ -547,7 +554,7 @@ class ExprVisitor:
         # later local declaration pre-shadow earlier statements.  Exact
         # top-level types are captured separately because the analyzer's flat
         # raw-name registry can be overwritten by a same-named local.
-        return self._global_drawing_cpp_types.get(target_name)
+        return getattr(self, "_global_drawing_cpp_types", {}).get(target_name)
 
     def _udt_target_cpp_type(
         self,

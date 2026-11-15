@@ -5,9 +5,13 @@ import pytest
 from pineforge_codegen import transpile
 
 
-@pytest.mark.parametrize("kind,cpp_type", [("line", "Line"), ("box", "Box")])
+@pytest.mark.parametrize(
+    "kind,cpp_type",
+    [("line", "Line"), ("box", "Box"), ("label", "Label"), ("linefill", "Linefill")],
+)
 @pytest.mark.parametrize("name", ["handle", "guide"])
-def test_na_drawing_cast_matches_typed_na_declaration(kind, cpp_type, name):
+@pytest.mark.parametrize("named", [False, True], ids=["positional", "named"])
+def test_na_drawing_cast_matches_typed_na_declaration(kind, cpp_type, name, named):
     def source(value):
         return (
             '//@version=6\nstrategy("Drawing casts", overlay=true)\n'
@@ -15,7 +19,8 @@ def test_na_drawing_cast_matches_typed_na_declaration(kind, cpp_type, name):
             f'{kind}.delete({name})\nplot(close)\n'
         )
 
-    cpp = transpile(source(f"{kind}(na)"))
+    argument = "x=na" if named else "na"
+    cpp = transpile(source(f"{kind}({argument})"))
     control = transpile(source("na"))
     initializers = lambda text: [
         line.strip() for line in text.splitlines()

@@ -6,7 +6,8 @@ struct — it lowers to a plain handle struct member (``Line ln;`` /
 ``std::vector<Line> upln;``), and ``m.tag := label.new(...)`` / ``x = m.tag``
 become real field read/writes against the shared per-type arena.
 
-(``table``/``polyline`` fields are still dropped — they have no C++ type.)
+``polyline`` fields retain opaque handles without rendering; ``table`` fields
+are still dropped.
 """
 from pineforge_codegen import transpile
 

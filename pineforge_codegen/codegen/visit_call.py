@@ -157,6 +157,7 @@ from ..diagnostic_codes import render_diagnostic
 from ..external_requests import RECORDED_KEY_ANNOTATION, request_stop_marker
 from ..intrinsic_binding import bind_intrinsic_arguments, validate_intrinsic_keywords
 from ..limits import iter_ast_nodes
+from ..reference_casts import na_reference_cast_kind
 from ..security_contexts import ticker_symbol_arg
 from ..symbols import (
     PineType,
@@ -2580,6 +2581,8 @@ class CallVisitor:
             return self._emit_drawing_namespace_call(namespace, func_name, node)
         if self._is_chart_point_callee(callee):
             return self._emit_chart_point(func_name, node)
+        if namespace == "polyline" and func_name in {"new", "delete"}:
+            return self._emit_polyline_call(func_name, node)
 
         # Skip visual/unsupported namespace calls
         if namespace in SKIP_NAMESPACES or namespace in SKIP_VAR_TYPES:
@@ -2997,10 +3000,8 @@ class CallVisitor:
             )
 
         # Drawing casts of na use the same missing handle as a typed binding.
-        if (namespace is None and func_name in ("line", "box")
-                and len(node.args) == 1 and not node.kwargs
-                and self._is_na_expr(node.args[0])):
-            return f"{DRAWING_TYPE_TO_CPP[func_name]}{{}}"
+        if cast_kind := na_reference_cast_kind(node):
+            return f"{DRAWING_TYPE_TO_CPP[cast_kind]}{{}}"
 
         # Type cast functions: int(x), float(x), bool(x), string(x)
         if func_name == "int" and namespace is None and node.args:
@@ -3346,20 +3347,7 @@ class CallVisitor:
                     try:
                         val = self._visit_rhs_value(
                             value_node,
-                            target_cpp_type=(
-                                f_cpp_type
-                                if (self._is_nullable_collection_cpp_type(f_cpp_type)
-                                    or (f_cpp_type == "std::vector<int64_t>"
-                                        and ("field", namespace, f.name)
-                                            in self._array_widths.wide)
-                                    or f_cpp_type in self._udt_defs
-                                    or f_cpp_type in DRAWING_TYPE_TO_CPP.values()
-                                    # A bare na for a string field is the typed
-                                    # string na, not the numeric ``na<double>()``.
-                                    or (f_cpp_type == "std::string"
-                                        and self._is_na_expr(value_node)))
-                                else None
-                            ),
+                            target_cpp_type=f_cpp_type,
                         )
                     finally:
                         self._array_ctor_expected = previous_expected
