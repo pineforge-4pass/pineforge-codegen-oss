@@ -39,6 +39,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `setenv("TZ", ...)` of the sealed branch and the restoring `setenv` or `unsetenv`
   in the same lambda; on ENOMEM the environment stays unchanged and the conversion
   silently uses the previous zone.
+  Setting the switch to `False` restores behavior, not the original emitted
+  bytes: the timezone macro block and newly reserved names remain.
+  Regenerate C++ and relink affected strategies.
 
 - `array.sort_indices` returns integer indices, accepts typed `array<int>`
   results and honors ascending/default or descending order in namespace and

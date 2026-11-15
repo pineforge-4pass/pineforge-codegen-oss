@@ -21,6 +21,7 @@ POD_RUNNER = "ubuntu-24.04"
 PYTEST_SHARDS = 4
 BOTS = {"dependabot[bot]", "pineforge-app[bot]"}
 CHECKER = "python3 -I tests/test_gke_pr_admission.py"
+PYTEST_COMMAND = "python -m pytest -q -n auto -rs --junitxml=pytest-results.xml"
 TRIGGER = """on:
   pull_request_target:
     branches: [main]
@@ -521,6 +522,22 @@ def runs(body, key="run"):
     return result
 
 
+def is_pytest_junit_upload(step):
+    """Recognize the complete upload schema and refuse unrecorded YAML lines."""
+    records = yaml_records(step)
+    content = [line for line in step.splitlines()
+               if line.strip() and not line.lstrip().startswith("#")]
+    return len(content) == len(records) and records == [
+        (6, "name", "Retain pytest diagnostics"),
+        (8, "if", "always()"),
+        (8, "uses", "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"),
+        (8, "with", ""),
+        (10, "name", "pytest-${{ matrix.python-version }}-shard-${{ matrix.shard }}-${{ github.run_attempt }}"),
+        (10, "path", "pytest-results.xml"),
+        (10, "if-no-files-found", "error"),
+    ]
+
+
 def check_workflows(sources):
     driver = sources.get(NATIVE_DRIVER)
     require(isinstance(driver, str),
@@ -727,9 +744,10 @@ def check_workflows(sources):
                 require(not step_env(step), f"{name}: step environment refused")
                 for depth, key, value in yaml_records(step):
                     if key == "if":
-                        require(name == "differential" and value == "always()"
-                                and any(k == "uses" and v.startswith("actions/upload-artifact@")
-                                        for _, k, v in yaml_records(step)),
+                        require((name == "pytest" and is_pytest_junit_upload(step))
+                                or (name == "differential" and value == "always()"
+                                    and any(k == "uses" and v.startswith("actions/upload-artifact@")
+                                            for _, k, v in yaml_records(step))),
                                 f"{name}: proof steps must not be skipped")
         if name in {"admit", "result"}:
             require(not any(k in {"if", "shell"} and depth >= 6
@@ -806,7 +824,7 @@ def check_workflows(sources):
             'python -m pip install -e ".[dev]"',
             "python -m pytest -q tests/test_license_entity.py",
         ],
-        "pytest": ['python -m pip install -e ".[dev]"', "python -m pytest -q -n auto"],
+        "pytest": ['python -m pip install -e ".[dev]"', PYTEST_COMMAND],
         "differential": [
             "set -euo pipefail\npython -m pip install -e .\nnpm ci",
             "npm run gate:selftest", "npm audit --audit-level=high", "npm run gate:full",
@@ -816,20 +834,24 @@ def check_workflows(sources):
         require(runs(bodies[name]) == commands, f"{name}: proof commands differ")
     require(value_at(bodies["pytest"], 8, "python-version") == '["3.11", "3.12", "3.13", "3.14"]',
             "pytest matrix versions differ")
+    pr_steps = step_blocks(bodies["pytest"])
+    require(len(pr_steps) == 5 and runs(pr_steps[3]) == [PYTEST_COMMAND]
+            and is_pytest_junit_upload(pr_steps[4]),
+            "pytest: exact JUnit upload must immediately follow pytest")
     # The pytest job of the push and dispatch workflow runs on every push to main with no
     # admission step in front of it, so it is judged here, after the pull request job above,
     # whose admitted shape it must equal. Whatever could let a green job run less than the
-    # whole suite is refused: an env or an if on a step, a shell, a working directory,
+    # whole suite is refused: an env or an if on an executable step, a shell, a working directory,
     # continue-on-error, another cut, other commands, another step, another checkout. The
-    # actions are compared with those of the pull request job, with no commit id pinned
-    # here, so that one pull request can bump both files together.
+    # checkout and setup pins are compared with those of the pull request job, so that one
+    # pull request can bump both files together. The new upload has its own exact pin.
     push_jobs = jobs(sources[".github/workflows/test.yml"])
     require("pytest" in push_jobs, "test.yml pytest: the job is missing")
     push_body = push_jobs["pytest"]
     push_records = yaml_records(push_body)
     # The scanner gives no record to a line without a key, such as a deeper line that starts
     # with a dash, which the YAML reader joins to the value above it, and runs() reads the
-    # first line of a command only. So "run: python -m pytest -q -n auto" with a line
+    # first line of a command only. So a pinned pytest command with a line
     # "- || true" under it would read as the pinned command and run as another one. Every
     # line of the job must therefore give one record, and the records below are the job.
     content = [line for line in push_body.splitlines()
@@ -859,21 +881,22 @@ def check_workflows(sources):
             "test.yml pytest: the matrix differs from that of the pytest job of gke-pr.yml")
     require(bool(pr_env) and mapping_at(push_body, "env", 4) == pr_env,
             "test.yml pytest: the env differs from that of the pytest job of gke-pr.yml")
-    # The shape of the steps comes first: two steps that use an action, then two that run a
-    # command. The actions and the commands themselves are judged after it.
+    # The shape comes first: checkout, setup, install, pytest, then the one exact upload.
+    # The actions and the commands themselves are judged after it.
     push_steps = step_blocks(push_body)
     step_actions = [[value for _, key, value in yaml_records(step) if key == "uses"]
                     for step in push_steps]
     step_commands = [runs(step) for step in push_steps]
-    require(len(push_steps) == 4
-            and [len(found) for found in step_actions] == [1, 1, 0, 0]
-            and [len(found) for found in step_commands] == [0, 0, 1, 1]
+    require(len(push_steps) == 5
+            and [len(found) for found in step_actions] == [1, 1, 0, 0, 1]
+            and [len(found) for found in step_commands] == [0, 0, 1, 1, 0]
             and step_actions[0][0].startswith("actions/checkout@")
             and step_actions[1][0].startswith("actions/setup-python@"),
-            "test.yml pytest: the steps must be the checkout, the Python setup, the install line and the test line")
-    # The two actions of the steps above are two non-empty references, so an empty list
-    # on the pull request side cannot equal them.
-    require([found[0] for found in step_actions[:2]]
+            "test.yml pytest: the steps must be the checkout, the Python setup, the install line, the test line and the JUnit upload")
+    require(is_pytest_junit_upload(push_steps[4]), "test.yml pytest: JUnit upload differs")
+    # All three actions are non-empty references. Comparing the whole ordered list
+    # also refuses extra actions on the pull request side.
+    require([found[0] for found in step_actions if found]
             == [value for _, key, value in yaml_records(pr_body) if key == "uses"],
             "test.yml pytest: the actions differ from those of the pytest job of gke-pr.yml")
     require(step_mapping(push_steps[0], "with") == {
@@ -891,8 +914,8 @@ def check_workflows(sources):
                     for step in push_steps for depth, key, _ in yaml_records(step)),
             "test.yml pytest: no step may have an env")
     require(not any(key.lower() == "if" and depth >= 6
-                    for step in push_steps for depth, key, _ in yaml_records(step)),
-            "test.yml pytest: no step may have an if")
+                    for step in push_steps[:4] for depth, key, _ in yaml_records(step)),
+            "test.yml pytest: executable steps must not have an if")
 
 
 def step_blocks(body):
@@ -1285,6 +1308,165 @@ def test_plain_if_boolean_operators_are_not_yaml_anchor_tokens():
     assert (6, "AUTH", "value") in inline
 
 
+def test_pytest_evidence_admission_requires_the_exact_upload():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    # This is the real candidate, judged by the actual admission entry point.
+    check_workflows(sources)
+    for path in (".github/workflows/gke-pr.yml", ".github/workflows/test.yml"):
+        real = sources[path]
+        body = jobs(real)["pytest"]
+        steps = step_blocks(body)
+        assert len(steps) == 5
+        suite, upload = steps[3:]
+        command = runs(suite)[0]
+        assert command == "python -m pytest -q -n auto -rs --junitxml=pytest-results.xml"
+        action = value_at(upload, 8, "uses")
+        inputs = step_mapping(upload, "with")
+        is_pr = path.endswith("/gke-pr.yml")
+        proof = ("pytest: proof commands differ" if is_pr else
+                 "test.yml pytest: the run lines differ from the pinned commands of the pytest job")
+        conditional = ("pytest: proof steps must not be skipped" if is_pr else
+                       "test.yml pytest: JUnit upload differs")
+        shape = ("pytest: exact JUnit upload must immediately follow pytest" if is_pr else
+                 "test.yml pytest: the steps must be the checkout, the Python setup, "
+                 "the install line, the test line and the JUnit upload")
+        absent_condition = ("pytest: exact JUnit upload must immediately follow pytest"
+                            if is_pr else conditional)
+        rows = [
+            ("no skip reasons", suite, " -rs", "", proof),
+            ("no JUnit output", suite, " --junitxml=pytest-results.xml", "", proof),
+            ("empty JUnit destination", suite, "--junitxml=pytest-results.xml",
+             "--junitxml=", proof),
+            ("another JUnit destination", suite, "--junitxml=pytest-results.xml",
+             "--junitxml=other-results.xml", proof),
+            ("flags in a comment", suite, command,
+             "python -m pytest -q -n auto # -rs --junitxml=pytest-results.xml", proof),
+            ("echoed pytest", suite, command, "echo " + command, proof),
+            ("missing upload", upload, upload, "", shape),
+            ("duplicate upload", upload, upload, upload + upload, shape),
+            ("no failure condition", upload, "        if: always()\n", "", absent_condition),
+            ("success-only upload", upload, "if: always()", "if: success()", conditional),
+            ("conditional always", upload, "if: always()",
+             "if: always() && matrix.shard != 4", conditional),
+            ("another pinned action", upload, action, action.split("@")[0] + "@" + "e" * 40,
+             conditional),
+            ("another action", upload, action, "actions/download-artifact@" + "e" * 40,
+             conditional),
+            ("no artifact name", upload, "          name: " + inputs["name"] + "\n", "",
+             conditional),
+            ("fixed Python version", upload, "${{ matrix.python-version }}", "3.11", conditional),
+            ("fixed shard", upload, "${{ matrix.shard }}", "1", conditional),
+            ("missing run attempt", upload, "-${{ github.run_attempt }}", "", conditional),
+            ("fixed run attempt", upload, "${{ github.run_attempt }}", "1", conditional),
+            ("run attempt only in a comment", upload, "-${{ github.run_attempt }}",
+             " # ${{ github.run_attempt }}", conditional),
+            ("no upload path", upload, "          path: " + inputs["path"] + "\n", "", conditional),
+            ("wrong upload path", upload, "path: " + inputs["path"], "path: other-results.xml",
+             conditional),
+            ("wildcard upload path", upload, "path: " + inputs["path"], "path: '*.xml'", conditional),
+            ("no missing-file policy", upload, "          if-no-files-found: error\n", "",
+             conditional),
+            ("ignored missing XML", upload, "if-no-files-found: error", "if-no-files-found: ignore",
+             conditional),
+            ("extra upload input", upload, "          if-no-files-found: error\n",
+             "          if-no-files-found: error\n          overwrite: true\n", conditional),
+            ("extra upload command", upload, "        with:\n",
+             "        run: echo done\n        with:\n", conditional if is_pr else shape),
+            ("unrecorded path continuation", upload, "          path: " + inputs["path"] + "\n",
+             "          path: " + inputs["path"] + "\n            - other-results.xml\n",
+             conditional if is_pr else
+             "test.yml pytest: every line of the job must be a comment, a blank line or a key with its value"),
+        ]
+        for label, step, before, after, message in rows:
+            changed = replace_once(step, before, after)
+            mutant = replace_once(real, body, replace_once(body, step, changed))
+            assert mutant != real, label
+            with pytest.raises(ValueError, match=re.escape(message)):
+                check_workflows({**sources, path: mutant})
+        # The upload is permitted only after the real pytest invocation.
+        moved = replace_once(body, suite + upload, upload.rstrip("\n") + "\n" + suite + "\n")
+        with pytest.raises(ValueError, match=re.escape(shape)):
+            check_workflows({**sources, path: replace_once(real, body, moved)})
+        for step in steps[:4]:
+            lines = step.splitlines(keepends=True)
+            changed = lines[0] + "        if: always()\n" + "".join(lines[1:])
+            mutant = replace_once(real, body, replace_once(body, step, changed))
+            message = ("pytest: proof steps must not be skipped" if is_pr else
+                       "test.yml pytest: executable steps must not have an if")
+            with pytest.raises(ValueError, match=re.escape(message)):
+                check_workflows({**sources, path: mutant})
+
+
+def test_matching_pytest_upload_mutations_do_not_expand_trusted_policy():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    check_workflows(sources)
+    paths = (".github/workflows/gke-pr.yml", ".github/workflows/test.yml")
+    for before, after in [
+        ("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+         "actions/upload-artifact@" + "e" * 40),
+        ("${{ matrix.python-version }}", "3.11"),
+        ("${{ matrix.shard }}", "1"),
+        ("-${{ github.run_attempt }}", ""),
+        ("${{ github.run_attempt }}", "1"),
+        ("-${{ github.run_attempt }}", " # ${{ github.run_attempt }}"),
+        ("path: pytest-results.xml", "path: release.json"),
+        ("if-no-files-found: error", "if-no-files-found: ignore"),
+    ]:
+        mutant = dict(sources)
+        for path in paths:
+            real = sources[path]
+            body = jobs(real)["pytest"]
+            upload = step_blocks(body)[4]
+            changed = replace_once(upload, before, after)
+            mutant[path] = replace_once(real, body, replace_once(body, upload, changed))
+        # Equal action lists and inputs are insufficient: the trusted pin and fields
+        # must still be checked when both workflows carry the same unapproved value.
+        with pytest.raises(ValueError, match="pytest: proof steps must not be skipped"):
+            check_workflows(mutant)
+
+
+def test_pytest_upload_condition_does_not_apply_to_other_pod_jobs():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    check_workflows(sources)
+    path = ".github/workflows/gke-pr.yml"
+    real = sources[path]
+    bodies = jobs(real)
+    upload = step_blocks(bodies["pytest"])[4]
+    for name in ("workflow-lint", "package-files"):
+        body = bodies[name]
+        changed = body.rstrip("\n") + "\n" + upload
+        mutant = replace_once(real, body, changed)
+        with pytest.raises(ValueError, match=name + ": proof steps must not be skipped"):
+            check_workflows({**sources, path: mutant})
+
+
+def test_pytest_admission_rejects_the_real_parent_without_evidence():
+    import pytest
+
+    root = Path(__file__).resolve().parents[1]
+    sources = read_sources(root, workflow_paths(root))
+    check_workflows(sources)
+    parent_sources = dict(sources)
+    for path in (".github/workflows/gke-pr.yml", ".github/workflows/test.yml"):
+        parent = subprocess.run(
+            ["git", "show", "ecbbfe392f993e8ce6d4cf12067f44b1b95dcf51:" + path],
+            cwd=root, capture_output=True, text=True,
+        )
+        assert parent.returncode == 0, parent.stdout + parent.stderr
+        parent_sources[path] = parent.stdout
+    with pytest.raises(ValueError, match="pytest: proof commands differ"):
+        check_workflows(parent_sources)
+
+
 def test_real_workflow_mutations():
     import pytest
 
@@ -1317,7 +1499,8 @@ def test_real_workflow_mutations():
         ("        run: npm run gate:full", "        run: timeout 30 npm run gate:full", "time limit"),
         ("    runs-on: ubuntu-24.04", "    runs-on: ubuntu-24.04\n    timeout-minutes: 15", "time limit"),
         ("        run: npm run gate:full", "        run: true", "proof commands"),
-        ("        run: python -m pytest -q -n auto\n", "        run: echo pytest\n", "proof commands"),
+        ("        run: python -m pytest -q -n auto -rs --junitxml=pytest-results.xml\n",
+         "        run: echo pytest\n", "proof commands"),
         ('      PYTHONHASHSEED: "0"', '      PYTHONHASHSEED: ${{ toJSON(github) }}', "pod environment"),
         ("      - name: Run the test suite\n", "      - name: Run the test suite\n"
          "        env:\n          AUTH: ${{ toJSON(github) }}\n", "step environment"),
@@ -1759,10 +1942,11 @@ def test_test_workflow_pytest_job_is_held_to_the_admitted_shape():
     body = jobs(real)["pytest"]
     assert real.count(body) == 1
     steps = step_blocks(body)
-    assert len(steps) == 4
-    checkout_action, setup_action = [
+    assert len(steps) == 5
+    checkout_action, setup_action, upload_action = [
         value for _, key, value in yaml_records(body) if key == "uses"
     ]
+    assert upload_action == "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
 
     def in_job(before, after):
         """The real text with one change inside its pytest job, which must hold `before` once."""
@@ -1779,13 +1963,13 @@ def test_test_workflow_pytest_job_is_held_to_the_admitted_shape():
         "strategy": "test.yml pytest: strategy must be exactly fail-fast: false and a matrix",
         "matrix": "test.yml pytest: the matrix differs from that of the pytest job of gke-pr.yml",
         "env": "test.yml pytest: the env differs from that of the pytest job of gke-pr.yml",
-        "steps": "test.yml pytest: the steps must be the checkout, the Python setup, the install line and the test line",
+        "steps": "test.yml pytest: the steps must be the checkout, the Python setup, the install line, the test line and the JUnit upload",
         "actions": "test.yml pytest: the actions differ from those of the pytest job of gke-pr.yml",
         "checkout": "test.yml pytest: the checkout must take exactly ref, fetch-depth: 0 and persist-credentials: false",
         "python": "test.yml pytest: the Python setup must take exactly python-version: ${{ matrix.python-version }}",
         "runs": "test.yml pytest: the run lines differ from the pinned commands of the pytest job",
         "step env": "test.yml pytest: no step may have an env",
-        "step if": "test.yml pytest: no step may have an if",
+        "step if": "test.yml pytest: executable steps must not have an if",
     }
     runs_on = "    runs-on: ubuntu-24.04\n"
     needs_line = "    needs: [authz, changes]\n"
@@ -1801,7 +1985,8 @@ def test_test_workflow_pytest_job_is_held_to_the_admitted_shape():
     credentials_line = "          persist-credentials: false\n"
     setup_input = "          python-version: ${{ matrix.python-version }}\n"
     install_line = '        run: python -m pip install -e ".[dev]"\n'
-    test_line = "        run: python -m pytest -q -n auto\n"
+    test_command = "python -m pytest -q -n auto -rs --junitxml=pytest-results.xml"
+    test_line = "        run: " + test_command + "\n"
     another_commit = "e" * 40
     rows = [
         ("the pytest job removed", replace_once(real, "  pytest:" + body, ""), refusal["missing"]),
@@ -1875,10 +2060,10 @@ def test_test_workflow_pytest_job_is_held_to_the_admitted_shape():
          in_job('      PYTHONHASHSEED: "0"\n', '      PYTHONHASHSEED: "1"\n'), refusal["env"]),
         ("an env without entries", in_job(env_lines, ""), refusal["env"]),
         # The steps
-        ("a fifth step before the test line",
+        ("an extra execution step before the test line",
          in_job(steps[3], "      - name: Show the environment\n        run: env\n" + steps[3]),
          refusal["steps"]),
-        ("a fifth step after the test line",
+        ("an extra execution step after the test line",
          in_job(test_line, test_line + "      - name: Report\n        run: echo done\n"),
          refusal["steps"]),
         ("the install step removed", in_job(steps[2], ""), refusal["steps"]),
@@ -1921,10 +2106,9 @@ def test_test_workflow_pytest_job_is_held_to_the_admitted_shape():
         ("the install line changed",
          in_job('python -m pip install -e ".[dev]"', "python -m pip install -e ."), refusal["runs"]),
         ("a deselect option",
-         in_job("python -m pytest -q -n auto",
-                "python -m pytest -q -n auto --deselect tests/test_parser.py"), refusal["runs"]),
+         in_job(test_command, test_command + " --deselect tests/test_parser.py"), refusal["runs"]),
         ("the test line made to pass",
-         in_job("python -m pytest -q -n auto", "python -m pytest -q -n auto || true"), refusal["runs"]),
+         in_job(test_command, test_command + " || true"), refusal["runs"]),
         ("the install and test steps swapped",
          in_job(steps[2] + steps[3], steps[3].rstrip("\n") + "\n" + steps[2] + "\n"), refusal["runs"]),
         # No step has an env: the hole that a step env on the test step opens, in block form
@@ -1939,8 +2123,8 @@ def test_test_workflow_pytest_job_is_held_to_the_admitted_shape():
         ("a flow-style env on the install step",
          in_job(install_line, install_line + '        env: {PYTEST_ADDOPTS: "-k never_matches"}\n'),
          refusal["step env"]),
-        # No step has an if: the hole that an if on the test step opens, also as the first
-        # key of a step, next to its dash.
+        # No executable step has an if: the hole that an if on the test step opens,
+        # also as the first key of a step, next to its dash.
         ("an if with matrix.shard != 4 on the test step",
          in_job(test_line, test_line + "        if: matrix.shard != 4\n"), refusal["step if"]),
         ("an if on the checkout step",
@@ -2453,11 +2637,10 @@ def test_native_driver_pin_uses_complete_bytes_against_the_real_base_policy():
 
     root = Path(__file__).resolve().parents[1]
     sources = read_sources(root, workflow_paths(root))
-    # The pinned policy below predates the four-part pytest job and accepts only the
-    # one-part shape, which the current rules accept too. This test is about the driver
-    # pin, so both policies judge the same graphs, with the pytest job in one part. The
-    # current rules hold the pytest job of the push workflow to the cut of the pull
-    # request workflow, so both workflows are given in one part.
+    # Both policies accept one-part pytest graphs. The pinned policy also predates
+    # JUnit retention, so each policy needs its own canonical pytest metadata. Only
+    # that unrelated context differs: both still judge identical native graphs,
+    # installed/approved driver bytes and every byte/pin mutant below.
     pr_workflow = ".github/workflows/gke-pr.yml"
     push_workflow = ".github/workflows/test.yml"
     sources = {
@@ -2479,17 +2662,55 @@ def test_native_driver_pin_uses_complete_bytes_against_the_real_base_policy():
     # Both policy and candidate contexts resolve the real installed base files.
     policy = {"__name__": "baseline_gke_pr_admission", "__file__": __file__}
     exec(compile(workflow_text(baseline.stdout), __file__, "exec"), policy)
-    for checker, admitted_driver, refused_driver in (
-        (policy["check_workflows"], installed_driver, approved_driver),
-        (check_workflows, approved_driver, installed_driver),
+    # Fixture projection must not imply that the real old policy admits new uploads.
+    with pytest.raises(ValueError, match="^pytest: proof steps must not be skipped$"):
+        policy["check_workflows"](old)
+
+    historical_old, historical_new = dict(old), dict(new)
+    for path in (pr_workflow, push_workflow):
+        historical = subprocess.run(
+            ["git", "show", "e6dc2c01cc719bcd88b4416a085f5a07873da2fd:" + path],
+            cwd=root, check=True, capture_output=True,
+        )
+        historical_body = jobs(workflow_text(historical.stdout))["pytest"]
+        current_body = jobs(sources[path])["pytest"]
+        historical_steps, current_steps = step_blocks(historical_body), step_blocks(current_body)
+        assert len(historical_steps) == 4 and len(current_steps) == 5
+        assert historical_steps[:3] == current_steps[:3]
+        assert is_pytest_junit_upload(current_steps[4])
+        historical_run, current_run = runs(historical_steps[3]), runs(current_steps[3])
+        assert historical_run == ["python -m pytest -q -n auto"]
+        assert current_run == ["python -m pytest -q -n auto -rs --junitxml=pytest-results.xml"]
+        # The historical final step includes the blank line before the next job.
+        # Validate the entire suite step before replacing just it and the exact upload.
+        assert current_steps[3] + "\n" == replace_once(
+            historical_steps[3], historical_run[0], current_run[0],
+        )
+        projected = replace_once(
+            current_body, current_steps[3] + current_steps[4], historical_steps[3],
+        )
+        assert projected == historical_body
+        for original, fixture in ((old, historical_old), (new, historical_new)):
+            assert jobs(original[path])["pytest"] == current_body
+            fixture[path] = replace_once(original[path], current_body, projected)
+            # Nothing outside the pytest job, including the native caller, may move.
+            assert replace_once(fixture[path], projected, current_body) == original[path]
+    for original, fixture in ((old, historical_old), (new, historical_new)):
+        assert {path for path in original if fixture[path] != original[path]} == {
+            pr_workflow, push_workflow,
+        }
+
+    for checker, checker_old, checker_new, admitted_driver, refused_driver in (
+        (policy["check_workflows"], historical_old, historical_new, installed_driver, approved_driver),
+        (check_workflows, old, new, approved_driver, installed_driver),
     ):
-        checker(old)
-        checker({**new, NATIVE_DRIVER: admitted_driver})
+        checker(checker_old)
+        checker({**checker_new, NATIVE_DRIVER: admitted_driver})
         with pytest.raises(ValueError, match="native implementation differs"):
-            checker({**new, NATIVE_DRIVER: refused_driver})
+            checker({**checker_new, NATIVE_DRIVER: refused_driver})
         with pytest.raises(ValueError, match="native implementation differs"):
-            checker({**old, NATIVE_DRIVER: approved_driver})
-        for graph in (old, new):
+            checker({**checker_old, NATIVE_DRIVER: approved_driver})
+        for graph in (checker_old, checker_new):
             with pytest.raises(ValueError, match="native implementation differs"):
                 checker({path: text for path, text in graph.items() if path != NATIVE_DRIVER})
 
@@ -2506,7 +2727,7 @@ def test_native_driver_pin_uses_complete_bytes_against_the_real_base_policy():
         ):
             assert mutant != approved_driver
             with pytest.raises(ValueError, match="native implementation differs"):
-                checker({**new, NATIVE_DRIVER: mutant})
+                checker({**checker_new, NATIVE_DRIVER: mutant})
 
     # Invalid direct-call types must retain the native-implementation refusal,
     # rather than failing in size accounting or treating metadata as authority.
