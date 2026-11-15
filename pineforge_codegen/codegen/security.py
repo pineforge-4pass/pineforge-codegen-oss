@@ -4572,6 +4572,14 @@ class SecurityEmitter:
         helpers: list[str] = []
 
         def add(n: Subscript) -> None:
+            if (n is node
+                    and self._security_global_history_value(n) is n.object
+                    and self._resolve_security_index_literal(n.index) != 0):
+                # A bare tuple-element history payload keeps its located
+                # refusal; offset zero reads the current element. Tuple slots
+                # also serve reads inside builder expressions, without
+                # widening the bare-history payload boundary.
+                return
             key = id(n)
             if helpers:
                 in_helper.add(key)
@@ -10570,12 +10578,17 @@ class SecurityEmitter:
             emitted_lines,
         )
         self._security_warn_chart_call(expr_node)
-        self._security_check_tuple_element_history(expr_node, sec_id, helper_binding_stack)
+        tuple_history = self._security_check_tuple_element_history(
+            expr_node, sec_id, helper_binding_stack,
+        )
         chart: set[int] = set()
         if self._security_requested_calls:
             self._security_warn_global_history(expr_node, helper_binding_stack, sec_id)
-            chart_read = self._security_root_chart_read(
-                expr_node, helper_binding_stack, sec_id, security_mutable_names
+            chart_read = (
+                f"the history of '{tuple_history.object.name}'"
+                if tuple_history is not None else self._security_root_chart_read(
+                    expr_node, helper_binding_stack, sec_id, security_mutable_names,
+                )
             )
             if chart_read is not None:
                 if self._security_requested_used:
@@ -10600,7 +10613,7 @@ class SecurityEmitter:
 
     def _security_check_tuple_element_history(
         self, root, sec_id: int, helper_binding_stack=None
-    ) -> None:
+    ) -> Subscript | None:
         """History of a tuple declaration's element read under a node the
         expression visitor renders, directly or through a global's value,
         reads the chart's series: warned. Refused, as the builder refuses the
@@ -10608,12 +10621,14 @@ class SecurityEmitter:
         tuple's element outside a user call's arguments, its site in the
         requested history and reached by no multi-statement helper, whose
         struct result the evaluator then pushed into a ``Series<double>``
-        (``_emit_security_ta_hist_pushes`` skips it)."""
+        (``_emit_security_ta_hist_pushes`` skips it). Return the first chart
+        history read so a global referring to it keeps the same fallback."""
         global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
         info = self._security_info_without_methods(self._security_eval_info[sec_id])
         hist = self._security_ta_hist_idx_by_sec.get(sec_id, ())
         helper_reached = {key[0] for key in info.get("inline_helper_ta_indices", [])}
         followed: set[tuple[str, bool]] = set()
+        chart_history = None
         stack = [(root, False, helper_binding_stack)]
         while stack:
             n, in_call, bindings = stack.pop()
@@ -10651,6 +10666,8 @@ class SecurityEmitter:
                         f"request.security payload reads the history of "
                         f"'{name}', an element of a tuple declaration",
                     )
+                if chart_history is None:
+                    chart_history = n
                 warned = getattr(self, "_security_warned_tuple_history", None)
                 if warned is None:
                     warned = self._security_warned_tuple_history = set()
@@ -10668,6 +10685,7 @@ class SecurityEmitter:
             stack.extend(
                 (v, in_call, bindings) for k, v in vars(n).items() if k != "annotations"
             )
+        return chart_history
 
     def _security_note_chart_read(self, node, reason: str) -> None:
         """Record the first thing the evaluator being emitted reads on the
@@ -11420,22 +11438,6 @@ class SecurityEmitter:
             )
             if binding is not None and self._security_bound_is_scalar(*binding):
                 return True
-        if (isinstance(node, Identifier)
-                and self._security_identifier_is_global_binding(node)
-                and node.name in self._security_arg_global_values):
-            return True
-        if (isinstance(node, Subscript)
-                and isinstance(node.object, Identifier)
-                and self._security_expr_hist_by_node.get(
-                    (sec_id, id(node)), {},
-                ).get("tuple_global")
-                and self._security_reads_global_history(sec_id, node)
-                # TA tuple history under a visitor-rendered builtin keeps
-                # the chart's series and its warning. A requested slot also
-                # serves direct builder reads; its existence alone does not
-                # transfer ownership of this fallback read.
-                and self._security_ta_tuple_element_field(node.object.name) is None):
-            return True
         selection = getattr(self, "_security_selection_context", None)
         if selection is not None:
             if id(node) in selection["reads"]:
@@ -11465,6 +11467,13 @@ class SecurityEmitter:
                  and node.name in self._input_backed_vars)
                 or self._security_source_input_call(node) is not None
             )
+        # Cached current values belong to requested evaluation. A chart
+        # fallback still needs its global Series as a history receiver, even
+        # when the evaluator has also sampled that declaration's tuple.
+        if (isinstance(node, Identifier)
+                and self._security_identifier_is_global_binding(node)
+                and node.name in self._security_arg_global_values):
+            return True
         if self._get_ta_site(node) is not None:
             return True
         if isinstance(node, FuncCall):

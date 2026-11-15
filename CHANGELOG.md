@@ -59,8 +59,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `na`/`nz` helper parameters retain their bindings beside time operations;
   global tuple declarations and their member histories share one requested
   sample. Uncalled forwarding helpers no longer allocate unresolved TA buffers
-  for their unreachable call variants (#372). Built-in TA tuple histories
-  rendered through the expression visitor retain their chart-series warning.
+  for their unreachable call variants (#372). Bare tuple-element history
+  payloads retain their located refusal. Tuple histories rendered through the
+  expression visitor, including reads through globals, retain their chart
+  series and warning.
 
 - A zone name the engine rejects now makes calendar-form `timestamp()` stop the
   run at its first evaluation, instead of silently calculating a UTC value.
