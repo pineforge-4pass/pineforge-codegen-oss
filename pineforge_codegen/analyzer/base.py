@@ -7157,15 +7157,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     or authored_method
                 ):
                     result = None
-        if result is None and isinstance(node, MemberAccess):
-            if isinstance(node.object, Identifier):
-                ns = node.object.name
-                if ns == "syminfo":
-                    ptype = sigs.SYMINFO_VARIABLES.get(f"syminfo.{node.member}")
-                    if ptype is not None:
-                        result = TypeSpec.primitive(ptype.value)
-                elif ns == "timeframe" and node.member == "period":
-                    result = TypeSpec.primitive("string")
         if result is None and isinstance(node, FuncCall):
             callee = node.callee
             if isinstance(callee, Identifier):
@@ -7481,13 +7472,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if value is None or parameter.pine_type != PineType.STRING:
                 continue
             actual = self._operator_operand_type(value, parameter_types)
-            if (actual is None and isinstance(value, MemberAccess)
-                    and isinstance(value.object, Identifier)
-                    and self._value_bindings.declaration_bindings.get(id(value.object)) is None
-                    and (parameter_types is None or value.object.name not in parameter_types)):
-                variable_type = sigs.get_variable_type(value.object.name, value.member)
-                if variable_type != PineType.UNKNOWN:
-                    actual = TypeSpec.primitive(variable_type.value)
             if actual is None or actual in {
                 TypeSpec.primitive("string"), TypeSpec.primitive("na"),
             }:
@@ -7498,10 +7482,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             argument_type = method_receiver_type_name(actual) or str(actual)
             parameter_type = parameter.pine_type.value
             name = parameter.name
+            from ..pine_spelling import expr_start
+
             self._error(
                 f"Cannot call '{function_name}' with an argument of type {argument_type} "
                 f"for {parameter_type} parameter '{name}'.",
-                value.loc,
+                expr_start(value).loc or value.loc,
             )
 
     def _visit_FuncCall(self, node: FuncCall) -> PineType:

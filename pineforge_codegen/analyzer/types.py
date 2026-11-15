@@ -1547,6 +1547,25 @@ class OperatorTypeQuery(TypeHelper):
             return self._analyzer._operator_operand_type(
                 value, self._parameter_types,
             )
+        if (isinstance(value, MemberAccess)
+                and isinstance(value.object, Identifier)
+                and self._pine_version == 6
+                and not self._in_v5_library_definition(value)):
+            receiver = value.object
+            bindings = self._value_bindings.declaration_bindings
+            # Require the receiver's recorded lexical namespace use. A
+            # missing record is not proof, and even an unresolved parameter
+            # or local in the written-call environment shadows a namespace.
+            if (id(receiver) in bindings and bindings[id(receiver)] is None
+                    and (self._parameter_types is None
+                         or receiver.name not in self._parameter_types)
+                    and receiver.name not in self._udt_fields
+                    and receiver.name not in self._enum_defs):
+                spec = self._pine_type_to_spec(
+                    sigs.get_variable_type(receiver.name, value.member),
+                )
+                if spec is not None:
+                    return spec
         return super()._type_spec_from_expr(value, **kwargs)
 
     def _visit(self, node):

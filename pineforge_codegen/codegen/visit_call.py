@@ -3266,8 +3266,10 @@ class CallVisitor:
                     function_name = intrinsic.name
                     parameter_type = parameter.pine_type.value
                     name = parameter.name
+                    from ..pine_spelling import expr_start
+
                     self._codegen_error(
-                        argument,
+                        expr_start(argument),
                         f"Cannot call '{function_name}' with an argument of type {argument_type} "
                         f"for {parameter_type} parameter '{name}'.",
                     )
