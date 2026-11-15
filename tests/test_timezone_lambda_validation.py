@@ -35,6 +35,16 @@ ZONE_CASES = [
     ("Etc/UTC", "115200000 115200000 8 8 0 UTC\n"),
 ]
 
+# These four rows previously shared the calendar UTC fallback. Calendar calls
+# now throw; both retained time-field forms must still read 08:00 UTC without
+# writing TZ, and the process zone must remain UTC.
+REJECTED_TIME_FIELD_CASES = [
+    ("Invalid/Timezone", "8 8 0 UTC\n"),
+    ("/usr/share/zoneinfo/Asia/Taipei", "8 8 0 UTC\n"),
+    ("../UTC", "8 8 0 UTC\n"),
+    ("UTC+24:00", "8 8 0 UTC\n"),
+]
+
 # Each instant is 08:00 UTC on the calendar date; stamps use 08:00 local time.
 ACCEPTED_ZONE_CASES = [
     # UTC+3 flips its sign to UTC-3: 32h - 3h = 29h; 08:00 UTC becomes 11:00.
@@ -132,6 +142,7 @@ def _assert_guarded(lambdas: list[str]) -> None:
 
 @pytest.mark.parametrize("zone", [
     *[zone for zone, _expected in ZONE_CASES],
+    *[zone for zone, _expected in REJECTED_TIME_FIELD_CASES],
     *sorted({row[0] for row in ACCEPTED_ZONE_CASES}),
 ])
 def test_zone_classes_guard_both_lambdas_and_overloads(zone):
@@ -229,22 +240,23 @@ int main() {
     prime_timezone();
     struct { std::string timezone; } syminfo_{ZONE};
     std::cout << pineforge::normalize_timezone_for_posix(syminfo_.timezone) << "\n";
-    auto explicit_stamp = (EXPLICIT_STAMP);
-    auto exchange_stamp = (EXCHANGE_STAMP);
-    auto explicit_hour = (EXPLICIT_HOUR);
-    auto exchange_hour = (EXCHANGE_HOUR);
-    std::cout << explicit_stamp << " " << exchange_stamp << " "
-              << explicit_hour << " " << exchange_hour << " "
-              << observed_writes << " " << std::getenv("TZ") << "\n";
+    EVALUATE_LAMBDAS
+    std::cout << observed_writes << " " << std::getenv("TZ") << "\n";
 }
 #undef setenv
 '''
     driver = driver.replace("ZONE", f"std::string({json.dumps(zone)})")
-    for marker, body in zip(
-        ("EXPLICIT_STAMP", "EXCHANGE_STAMP", "EXPLICIT_HOUR", "EXCHANGE_HOUR"),
-        bodies,
-    ):
-        driver = driver.replace(marker, body)
+    # The accepted rows evaluate all four expressions. Rejected rows execute
+    # only the two time fields; their calendar throws have separate assertions.
+    evaluations = [
+        f"const auto observed_value_{index} = ({body});"
+        for index, body in enumerate(bodies)
+    ]
+    evaluations.extend(
+        f'std::cout << observed_value_{index} << " ";'
+        for index in range(len(bodies))
+    )
+    driver = driver.replace("EVALUATE_LAMBDAS", "\n    ".join(evaluations))
     normalized, values = run_emitted_tu(
         cpp, driver, opt="-O0", label="timezone validation",
     ).split("\n", 1)
@@ -257,6 +269,17 @@ def test_timezone_values_and_environment_writes_in_engine(zone, expected):
     _assert_guarded(bodies)
     _skip_unless_zoneinfo(("Asia/Taipei",) if zone == "Asia/Taipei" else ())
     _normalized, values = _execute_lambdas(cpp, bodies, zone)
+    assert values == expected
+
+
+@pytest.mark.parametrize(
+    "zone, expected", REJECTED_TIME_FIELD_CASES,
+    ids=[zone for zone, _expected in REJECTED_TIME_FIELD_CASES],
+)
+def test_rejected_time_fields_keep_utc_without_environment_writes(zone, expected):
+    cpp, bodies = _render_lambdas(zone)
+    _assert_guarded(bodies)
+    _normalized, values = _execute_lambdas(cpp, bodies[2:], zone)
     assert values == expected
 
 
