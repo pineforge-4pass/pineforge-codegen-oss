@@ -88,6 +88,8 @@ int main() {
         }
     }
     std::cout << "WRITES " << observed_writes << "\n";
+    const char* const final_timezone = std::getenv("TZ");
+    std::cout << "TZ " << (final_timezone ? final_timezone : "<unset>") << "\n";
 }
 #undef setenv
 '''
@@ -118,14 +120,26 @@ def test_rejected_explicit_zone_throws(zone):
     )
     if zone == "America/Newyork":
         assert lines[0] == f"THROWN {MISSPELLED_ZONE_MESSAGE}"
-    assert lines[1:] == ["WRITES 0"]
+    assert lines[1:] == ["WRITES 0", "TZ UTC"]
 
 
-def test_rejected_exchange_zone_throws():
-    """Pin the same complete error for a rejected exchange timezone."""
-    assert _execute_timestamp("America/Newyork", exchange=True) == (
-        f"THROWN {MISSPELLED_ZONE_MESSAGE}\nWRITES 0\n"
+@pytest.mark.parametrize("zone", [
+    "America/Newyork",
+    "Invalid/Timezone",
+    "/usr/share/zoneinfo/Asia/Taipei",
+    "../UTC",
+    "UTC+24:00",
+])
+def test_rejected_exchange_zone_throws(zone):
+    """Pin rejected exchange throws, zero writes and the final process zone."""
+    output = _execute_timestamp(zone, exchange=True)
+    lines = output.splitlines()
+    assert lines[0].startswith(
+        'THROWN Incorrect `timezone` value for the timestamp() function: "'
     )
+    if zone == "America/Newyork":
+        assert output == f"THROWN {MISSPELLED_ZONE_MESSAGE}\nWRITES 0\nTZ UTC\n"
+    assert lines[1:] == ["WRITES 0", "TZ UTC"]
 
 
 @pytest.mark.parametrize("exchange", [False, True], ids=["explicit", "exchange"])
@@ -135,7 +149,7 @@ def test_rejected_tuple_is_not_memoized(exchange):
         "America/Newyork", exchange=exchange, repetitions=2,
     ) == (
         f"THROWN {MISSPELLED_ZONE_MESSAGE}\n"
-        f"THROWN {MISSPELLED_ZONE_MESSAGE}\nWRITES 0\n"
+        f"THROWN {MISSPELLED_ZONE_MESSAGE}\nWRITES 0\nTZ UTC\n"
     )
 
 
@@ -148,14 +162,14 @@ def test_accepted_zone_preserves_value_and_environment_writes(exchange, calendar
     """Pin New York winter and summer values and their two environment writes."""
     assert _execute_timestamp(
         "America/New_York", calendar, exchange=exchange,
-    ) == expected
+    ) == expected + "TZ UTC\n"
 
 
 @pytest.mark.parametrize("exchange", [False, True], ids=["explicit", "exchange"])
 @pytest.mark.parametrize("zone", ["", "UTC", "Etc/UTC"])
 def test_utc_shortcuts_preserve_value_without_environment_writes(exchange, zone):
     """Pin UTC conversion and zero environment writes for all three shortcuts."""
-    assert _execute_timestamp(zone, exchange=exchange) == "VALUE 115200000\nWRITES 0\n"
+    assert _execute_timestamp(zone, exchange=exchange) == "VALUE 115200000\nWRITES 0\nTZ UTC\n"
 
 
 @pytest.mark.parametrize("prefix", [

@@ -1,6 +1,7 @@
 """Protect workflow concurrency, the trusted gate status and promotion authz."""
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -300,6 +301,213 @@ def test_pytest_checks_out_the_pull_request_head():
     assert "ref: ${{ github.sha }}" not in pytest_job
 
 
+def workflow_step_fields(step):
+    """Read fields on the step itself, excluding nested action inputs and comments."""
+    from tests.test_gke_pr_admission import yaml_records
+
+    return {key: value for depth, key, value in yaml_records(step) if depth in {6, 8}}
+
+
+def pytest_evidence_steps(workflow):
+    from tests.test_gke_pr_admission import step_blocks
+
+    steps = step_blocks(job_blocks(workflow)["pytest"])
+    suites = [step for step in steps if workflow_step_fields(step).get("name") in {
+        "Run test suite", "Run the test suite",
+    }]
+    assert len(suites) == 1, "pytest evidence: one suite step is required"
+    uploads = [step for step in steps if workflow_step_fields(step).get("uses", "").startswith(
+        "actions/upload-artifact@"
+    )]
+    return steps, suites[0], uploads
+
+
+def assert_hosted_pytest_evidence(workflow):
+    from tests.test_gke_pr_admission import mapping_at, runs, step_mapping
+
+    steps, suite, uploads = pytest_evidence_steps(workflow)
+    commands = runs(suite)
+    assert len(commands) == 1, "pytest evidence: one pytest invocation is required"
+    arguments = shlex.split(commands[0], comments=True)
+    assert arguments[:3] == ["python", "-m", "pytest"], (
+        "pytest evidence: suite must invoke pytest"
+    )
+    assert "-rs" in arguments, "pytest evidence: per-test skip reasons require -rs"
+    destinations = [argument.partition("=")[2] for argument in arguments
+                    if argument.startswith("--junitxml=")]
+    assert len(destinations) == 1 and re.fullmatch(
+        r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\.xml", destinations[0]
+    ), "pytest evidence: pytest must write one real JUnit XML path"
+    assert arguments[:6] == ["python", "-m", "pytest", "-q", "-n", "auto"] and sorted(
+        arguments[6:]
+    ) == sorted(["-rs", "--junitxml=" + destinations[0]]), (
+        "pytest evidence: report flags must belong to the direct pytest invocation"
+    )
+    assert len(uploads) == 1, "pytest evidence: one JUnit upload is required"
+    upload = uploads[0]
+    fields = workflow_step_fields(upload)
+    assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", fields["uses"]), (
+        "pytest evidence: upload action must use a commit pin"
+    )
+    assert steps.index(upload) > steps.index(suite), "pytest evidence: upload must follow pytest"
+    assert fields.get("if") in {"always()", "${{ always() }}"}, (
+        "pytest evidence: upload must run even when pytest fails"
+    )
+    inputs = step_mapping(upload, "with")
+    assert inputs.get("path") == destinations[0], (
+        "pytest evidence: upload path must equal pytest's JUnit XML path"
+    )
+    assert inputs.get("if-no-files-found") == "error", (
+        "pytest evidence: missing XML must be an explicit error"
+    )
+    name = inputs.get("name", "")
+    python_axis = r"\$\{\{\s*matrix\.python-version\s*\}\}"
+    shard_axis = r"\$\{\{\s*matrix\.shard\s*\}\}"
+    attempt_axis = r"\$\{\{\s*github\.run_attempt\s*\}\}"
+    assert re.search(python_axis, name), "pytest evidence: artifact name must include Python version"
+    assert re.search(shard_axis, name), "pytest evidence: artifact name must include shard"
+    assert re.search(attempt_axis, name), "pytest evidence: artifact name must include run attempt"
+    matrix = mapping_at(job_blocks(workflow)["pytest"], "matrix", 6)
+    names = [
+        re.sub(
+            attempt_axis, str(attempt),
+            re.sub(shard_axis, str(shard), re.sub(python_axis, version, name)),
+        )
+        for attempt in (1, 2)
+        for version in json.loads(matrix["python-version"])
+        for shard in json.loads(matrix["shard"])
+    ]
+    assert names and all("${{" not in name for name in names) and len(names) == len(set(names)), (
+        "pytest evidence: artifact names must be unique across the actual matrix and run attempts"
+    )
+
+
+@pytest.mark.parametrize("filename", ["gke-pr.yml", "test.yml"])
+def test_hosted_pytest_retains_its_actual_junit_and_skip_reasons(filename):
+    from tests.test_gke_pr_admission import step_blocks
+
+    workflow = (WORKFLOWS / filename).read_text(encoding="utf-8")
+    assert_hosted_pytest_evidence(workflow)
+    # Keep the existing release-json upload and reuse its actual action pin.
+    pr_workflow = (WORKFLOWS / "gke-pr.yml").read_text(encoding="utf-8")
+    diagnostics = [
+        workflow_step_fields(step)["uses"]
+        for step in step_blocks(job_blocks(pr_workflow)["differential"])
+        if workflow_step_fields(step).get("name") == "Retain differential diagnostics"
+    ]
+    assert len(diagnostics) == 1
+    assert workflow_step_fields(pytest_evidence_steps(workflow)[2][0])["uses"] == diagnostics[0]
+
+
+@pytest.mark.parametrize("filename", ["gke-pr.yml", "test.yml"])
+def test_pytest_evidence_rejects_the_real_parent_workflow(filename):
+    parent = subprocess.run(
+        ["git", "show", "ecbbfe392f993e8ce6d4cf12067f44b1b95dcf51:.github/workflows/" + filename],
+        cwd=WORKFLOWS.parent.parent, capture_output=True, text=True,
+    )
+    assert parent.returncode == 0, parent.stdout + parent.stderr
+    with pytest.raises(AssertionError, match="per-test skip reasons"):
+        assert_hosted_pytest_evidence(parent.stdout)
+
+
+@pytest.mark.parametrize("filename", ["gke-pr.yml", "test.yml"])
+@pytest.mark.parametrize("omission", [
+    "skip-reasons", "junit-option", "empty-junit-path", "upload", "upload-pin",
+    "failure-condition", "success-only", "missing-file-policy", "ignored-missing-file",
+    "upload-path", "wrong-upload-path", "artifact-name", "python-version", "shard",
+    "run-attempt", "fixed-run-attempt", "run-attempt-in-comment",
+    "upload-before-pytest", "flags-in-comment", "echoed-pytest", "echoed-flags",
+])
+def test_pytest_evidence_omissions_are_rejected(filename, omission):
+    from tests.test_gke_pr_admission import replace_once, runs, step_mapping
+
+    workflow = (WORKFLOWS / filename).read_text(encoding="utf-8")
+    assert_hosted_pytest_evidence(workflow)
+    _, suite, uploads = pytest_evidence_steps(workflow)
+    upload = uploads[0]
+    command = runs(suite)[0]
+    fields = workflow_step_fields(upload)
+    inputs = step_mapping(upload, "with")
+    junit_option = next(token for token in shlex.split(command) if token.startswith("--junitxml="))
+    changes = {
+        "skip-reasons": (suite, " -rs", "", "per-test skip reasons"),
+        "junit-option": (suite, " " + junit_option, "", "real JUnit XML path"),
+        "empty-junit-path": (suite, junit_option, "--junitxml=", "real JUnit XML path"),
+        "upload": (upload, upload, "", "one JUnit upload"),
+        "upload-pin": (upload, fields["uses"], "actions/upload-artifact@v7", "commit pin"),
+        "failure-condition": (upload, "        if: " + fields["if"] + "\n", "",
+                              "even when pytest fails"),
+        "success-only": (upload, fields["if"], "success()", "even when pytest fails"),
+        "missing-file-policy": (upload, "          if-no-files-found: error\n", "",
+                                "missing XML"),
+        "ignored-missing-file": (upload, "if-no-files-found: error", "if-no-files-found: ignore",
+                                 "missing XML"),
+        "upload-path": (upload, "          path: " + inputs["path"] + "\n", "", "upload path"),
+        "wrong-upload-path": (upload, "path: " + inputs["path"], "path: other-results.xml",
+                              "upload path"),
+        "artifact-name": (upload, "          name: " + inputs["name"] + "\n", "",
+                          "include Python version"),
+        "python-version": (upload, "${{ matrix.python-version }}", "3.11", "include Python version"),
+        "shard": (upload, "${{ matrix.shard }}", "1", "include shard"),
+        "run-attempt": (upload, "-${{ github.run_attempt }}", "", "include run attempt"),
+        "fixed-run-attempt": (upload, "${{ github.run_attempt }}", "1", "include run attempt"),
+        "run-attempt-in-comment": (upload, "-${{ github.run_attempt }}",
+                                   " # ${{ github.run_attempt }}", "include run attempt"),
+        "upload-before-pytest": (suite, suite, upload + suite, "upload must follow pytest"),
+        "flags-in-comment": (suite, command, "python -m pytest -q -n auto # -rs " + junit_option,
+                             "per-test skip reasons"),
+        "echoed-pytest": (suite, command, "echo " + command, "suite must invoke pytest"),
+        "echoed-flags": (suite, command, "python -m pytest -q -n auto; echo -rs " + junit_option,
+                         "direct pytest invocation"),
+    }
+    step, before, after, reason = changes[omission]
+    changed = replace_once(step, before, after)
+    mutant = replace_once(workflow, step, changed)
+    if omission == "upload-before-pytest":
+        # Remove the original upload, leaving exactly one before the suite.
+        assert mutant.count(upload) == 2
+        position = mutant.rfind(upload)
+        mutant = mutant[:position] + mutant[position + len(upload):]
+    assert mutant != workflow
+    with pytest.raises(AssertionError, match=reason):
+        assert_hosted_pytest_evidence(mutant)
+
+
+@pytest.mark.parametrize("filename", ["gke-pr.yml", "test.yml"])
+@pytest.mark.parametrize("omission,reason", [
+    ("skip-reasons", "per-test skip reasons"),
+    ("junit-option", "real JUnit XML path"),
+    ("upload", "one JUnit upload"),
+    ("run-attempt", "include run attempt"),
+])
+def test_pytest_evidence_cannot_come_from_an_unrelated_step(filename, omission, reason):
+    from tests.test_gke_pr_admission import replace_once, runs
+
+    workflow = (WORKFLOWS / filename).read_text(encoding="utf-8")
+    assert_hosted_pytest_evidence(workflow)
+    _, suite, uploads = pytest_evidence_steps(workflow)
+    if omission == "upload":
+        mutant = replace_once(workflow, uploads[0], "")
+    elif omission == "run-attempt":
+        mutant = replace_once(
+            workflow, uploads[0], replace_once(uploads[0], "-${{ github.run_attempt }}", ""),
+        )
+    else:
+        command = runs(suite)[0]
+        option = "-rs" if omission == "skip-reasons" else next(
+            token for token in shlex.split(command) if token.startswith("--junitxml=")
+        )
+        mutant = replace_once(workflow, suite, replace_once(suite, " " + option, ""))
+    mutant += (
+        "\n  unrelated:\n    runs-on: ubuntu-24.04\n    steps:\n"
+        "      - name: Evidence mentioned elsewhere\n"
+        "        run: echo 'python -m pytest -rs --junitxml=pytest-results.xml'\n"
+        + uploads[0]
+    )
+    with pytest.raises(AssertionError, match=reason):
+        assert_hosted_pytest_evidence(mutant)
+
+
 # What each assertion of assert_pytest_jobs_are_cut_the_same_way says when it fails.
 # The controls below compare against these, so that every control is held to the one
 # assertion that it targets and not to another one that happens to fail as well.
@@ -309,7 +517,7 @@ PYTEST_CUT_MESSAGES = {
     "runs": "the run lines of the two pytest jobs differ",
     "commands": (
         "the run lines of the two pytest jobs are not the install line "
-        "and python -m pytest -q -n auto"
+        "and python -m pytest -q -n auto -rs --junitxml=pytest-results.xml"
     ),
     "axis": "the matrix of the two pytest jobs has no shard key with the list 1 to PYTEST_SHARDS",
     "variable": (
@@ -336,9 +544,10 @@ def assert_pytest_jobs_are_cut_the_same_way(pr_workflow, push_workflow):
     assert env == mapping_at(push_job, "env", 4), PYTEST_CUT_MESSAGES["env"]
     commands = runs(pr_job)
     assert commands == runs(push_job), PYTEST_CUT_MESSAGES["runs"]
-    assert commands == ['python -m pip install -e ".[dev]"', "python -m pytest -q -n auto"], (
-        PYTEST_CUT_MESSAGES["commands"]
-    )
+    assert commands == [
+        'python -m pip install -e ".[dev]"',
+        "python -m pytest -q -n auto -rs --junitxml=pytest-results.xml",
+    ], PYTEST_CUT_MESSAGES["commands"]
     # Both expected texts come from the constant that the admission rule uses, written
     # the way that rule reads them.
     axis = "[" + ", ".join(str(part) for part in range(1, PYTEST_SHARDS + 1)) + "]"
