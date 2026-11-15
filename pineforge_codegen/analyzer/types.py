@@ -41,8 +41,8 @@ from typing import Any
 
 from .. import signatures as sigs
 from ..ast_nodes import (
-    ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall, Identifier, IfStmt,
-    MemberAccess, NaLiteral, NumberLiteral, StringLiteral, Subscript, Ternary,
+    ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall, FuncDef,
+    Identifier, IfStmt, MemberAccess, MethodDef, NaLiteral, NumberLiteral, StringLiteral, Subscript, Ternary,
     SwitchStmt, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..errors import Phase
@@ -294,7 +294,7 @@ class TypeHelper:
         *,
         nullable: bool | None = None,
     ) -> TypeSpec | None:
-        """A selection of identical value types retains that exact type."""
+        """Keep exact callable joins and the established script selection policy."""
         if nullable is None:
             nullable = any(self._selection_contains_na(node) for node, _ in branches)
         result: TypeSpec | None = None
@@ -306,6 +306,13 @@ class TypeHelper:
                     and self._is_color_constructor(node)):
                 spec = TypeSpec.primitive("color")
             if spec is None:
+                return None
+            if (not nullable and spec.kind not in {"map", "matrix"}
+                    and not isinstance(
+                        self._current_top_level_stmt, (FuncDef, MethodDef),
+                    )):
+                # Callable value inference must not promote unresolved script
+                # selections into collection-history bindings.
                 return None
             result = (
                 spec
