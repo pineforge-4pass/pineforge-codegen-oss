@@ -209,7 +209,7 @@ def test_authored_namespace_receiver_keeps_its_field_type(version):
 
 def test_computed_qty_type_temporary_is_reserved():
     source = (
-        HEADER
+        HEADER +
         'qtyMode = input.string("cash", options = ["cash", "percent_of_equity"])\n'
         'strategy.entry("L", strategy.long, qty = 1, qty_type = qtyMode)\n'
     )

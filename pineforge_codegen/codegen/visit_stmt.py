@@ -493,7 +493,7 @@ class StmtVisitor:
                             if is_pct is None:
                                 # Mutable aliases and computed enums must use
                                 # the value at this call, not an initializer.
-                                type_value = self._visit_expr(type_arg)
+                                type_value = self._strategy_qty_type_arg(type_arg)
                                 percent_flag = (
                                     f"(({type_value}) == "
                                     "static_cast<int>(QtyType::PERCENT_OF_EQUITY))"
