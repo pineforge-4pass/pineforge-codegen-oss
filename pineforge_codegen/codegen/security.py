@@ -786,6 +786,24 @@ class SecurityEmitter:
                 "    };",
             ))
 
+    @staticmethod
+    def _lower_tf_tuple_cpp_types(element_types) -> list[str]:
+        return [
+            "int64_t" if item == PineType.INT
+            else PINE_TYPE_TO_CPP.get(item, "double")
+            for item in element_types
+        ]
+
+    @staticmethod
+    def _lower_tf_clear_cpp(item: dict) -> str:
+        name = f"_req_sec_lower_tf_{item['sec_id']}"
+        if item.get("returns_tuple"):
+            return (
+                "std::apply([](auto&... _pf_arrays) { "
+                f"(_pf_arrays.clear(), ...); }}, {name});"
+            )
+        return f"{name}.clear();"
+
     def _runtime_security_result(self, item: dict, prefix: str) -> str:
         sec_id = item["sec_id"]
         if item.get("is_lower_tf_array"):
@@ -4604,7 +4622,11 @@ class SecurityEmitter:
                             walk(x)
 
         walk(node)
-        return [n for n in out if id(n) not in in_helper or reached[id(n)] == 1]
+        return [
+            n for n in out
+            if id(n) not in in_helper or reached[id(n)] == 1
+            or self._security_global_history_value(n) is n.object
+        ]
 
     def _security_global_history_value(self, node) -> ASTNode | None:
         """The value of ``g`` in a payload's ``g[k]`` when ``g`` is a global
@@ -4623,6 +4645,10 @@ class SecurityEmitter:
             return None
         name = node.object.name
         global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        if (self._security_identifier_is_global_binding(node.object)
+                and name in self._direct_program_tuple_bindings
+                and name not in self._global_mutable_infos):
+            return node.object
         if (
             not self._security_identifier_is_global_binding(node.object)
             or name not in global_expr_map
@@ -4634,6 +4660,10 @@ class SecurityEmitter:
         seen = {name}
         while isinstance(value, Identifier):
             name = value.name
+            if (self._security_identifier_is_global_binding(value)
+                    and name in self._direct_program_tuple_bindings
+                    and name not in self._global_mutable_infos):
+                return node.object
             if (not self._security_identifier_is_global_binding(value)
                     or name not in global_expr_map or name in seen
                     or name in self._direct_program_tuple_binding_names
@@ -4803,6 +4833,8 @@ class SecurityEmitter:
             value = self._security_global_history_value(node)
             if self._is_session_flag(node.object):
                 cpp_t = "bool"
+            elif value is node.object:
+                cpp_t = self._infer_type(value)
             elif value is not None:
                 # A global's history is a double (a bool's a bool): its na
                 # reads na, where typed from the global's ``int`` the first
@@ -4812,12 +4844,14 @@ class SecurityEmitter:
                 cpp_t = "bool" if self._infer_type(value) == "bool" else "double"
             else:
                 cpp_t = self._infer_type(node.object)
-            if cpp_t not in ("double", "int", "bool"):
+            if cpp_t not in ("double", "int", "int64_t", "bool", "std::string"):
                 cpp_t = "double"
             name = f"_sec{sec_id}_expr_hist_{idx}"
             self._security_expr_hist_by_node[(sec_id, id(node))] = {
                 "name": name,
                 "type": cpp_t,
+                "object": node.object,
+                "tuple_global": value is node.object,
             }
             lines.append(f"    Series<{cpp_t}> {name}{mbb_suffix};")
 
@@ -6103,6 +6137,10 @@ class SecurityEmitter:
         requested bar at each read: its value, through the globals it reads,
         calls no multi-statement user function, whose statements -- and TA
         state -- the evaluator would emit again at every read."""
+        if name in self._direct_program_tuple_bindings:
+            # The declaration is evaluated once in the evaluator prologue,
+            # including a multi-statement tuple helper.
+            return True
         cache = getattr(self, "_security_global_value_cache", None)
         if cache is None:
             cache = self._security_global_value_cache = {}
@@ -6186,6 +6224,79 @@ class SecurityEmitter:
         return (info is not None and info.node is not None
                 and len(node.args) == len(info.node.params)
                 and self._security_pure_body(info.node))
+
+    def _security_needed_global_tuples(self, root) -> set[int]:
+        """Tuple declarations reached through the payload's resolved bindings."""
+        needed: set[int] = set()
+        seen: set[int] = set()
+        pending = [root]
+        globals_ = getattr(self.ctx, "global_expr_map", {}) or {}
+        while pending:
+            if getattr(self, "_budget", None) is not None:
+                self._budget.check(phase=Phase.CODEGEN)
+            node = pending.pop()
+            if isinstance(node, (list, tuple)):
+                pending.extend(node)
+                continue
+            if not isinstance(node, ASTNode) or id(node) in seen:
+                continue
+            seen.add(id(node))
+            if isinstance(node, Identifier) and self._security_identifier_is_global_binding(node):
+                binding = self._direct_program_tuple_bindings.get(node.name)
+                if binding is not None:
+                    needed.add(id(binding[0]))
+                value = globals_.get(node.name)
+                if value is not None:
+                    pending.append(value)
+            if isinstance(node, FuncCall):
+                key = self._security_user_call_key(node)
+                info = self._func_info_map.get(key)
+                if info is not None and info.node is not None:
+                    pending.extend(info.node.body)
+            pending.extend(syntax_children(node))
+        return needed
+
+    def _security_global_tuple_element(
+        self, sec_id, name, ta_results, resolving, mutable_names, lines,
+    ) -> str:
+        """Sample a declaration once; all member reads share its tuple value."""
+        cached = self._security_arg_global_values
+        if name in cached:
+            return cached[name]
+        declaration, _index = self._direct_program_tuple_bindings[name]
+        key = f"tuple:{id(declaration)}"
+        if key in resolving:
+            raise AssertionError("cyclic resolved tuple declaration")
+        if lines is None:
+            element = self._security_pure_user_tuple_element(name, declaration.value)
+            if element is not None:
+                _info, stack = self._security_bind_helper_args(declaration.value, ())
+                return self._build_security_expr(
+                    sec_id, element, None, ta_results, resolving,
+                    mutable_names, stack, lines,
+                )
+            raise AssertionError("tuple declaration requires a statement context")
+        resolving.add(key)
+        try:
+            value = self._build_security_expr(
+                sec_id, declaration.value, None, ta_results, resolving,
+                mutable_names, (), lines,
+            )
+        finally:
+            resolving.remove(key)
+        temp = "_pf" + self._security_next_inline_name(sec_id, "tuple", "value")
+        lines.append(f"        const auto {temp} = {value};")
+        site = self._get_ta_site(declaration.value)
+        fields = TA_TUPLE_FIELDS.get(
+            self._ta_name_from_site(site) if site is not None else "", (),
+        )
+        for slot, target in enumerate(declaration.names):
+            if target != "_":
+                cached[target] = (
+                    f"{temp}.{fields[slot]}" if slot < len(fields)
+                    else f"std::get<{slot}>({temp})"
+                )
+        return cached[name]
 
     def _security_pure_user_tuple_element(self, name: str, call):
         """The element expression a payload reads when it reads ``name``, a
@@ -8712,6 +8823,40 @@ class SecurityEmitter:
 
         self._emit_security_rebinds(sec_id, info, lines, ta_results, indent=2, emitted_lines=lines)
         emit_security_ta(post_rebind_ta_indices)
+        needed_tuples = self._security_needed_global_tuples(expr_node)
+        for declaration in self.ctx.ast.body:
+            if isinstance(declaration, TupleAssign) and id(declaration) in needed_tuples:
+                target = next((name for name in declaration.names if name != "_"), None)
+                if target is not None:
+                    self._security_global_tuple_element(
+                        sec_id, target, ta_results, set(), security_mutable_names, lines,
+                    )
+        # Global tuple declarations run on every requested bar, even when
+        # a lazy payload does not read their history on that bar.
+        for (sid, _node_id), meta in self._security_expr_hist_by_node.items():
+            obj = meta.get("object")
+            if (sid != sec_id or not isinstance(obj, Identifier)
+                    or not meta.get("tuple_global")):
+                continue
+            value = self._security_arg_global_values.get(obj.name)
+            if value is None:
+                value = self._build_security_expr(
+                    sec_id, obj, None, ta_results, set(),
+                    security_mutable_names, (), lines,
+                )
+            hist, cpp_t = meta["name"], meta["type"]
+            if cpp_t in ("int", "int64_t"):
+                value = na_preserving_int_cast(value, cpp_t)
+            elif cpp_t == "double":
+                value = (
+                    "[](auto _pf_v) { return is_na(_pf_v) ? na<double>() "
+                    f": static_cast<double>(_pf_v); }}({value})"
+                )
+            if (hist, cpp_t) not in self._security_global_hist_pushes:
+                self._security_global_hist_pushes.append((hist, cpp_t))
+            lines.append(
+                f"        if (is_complete) {{ {hist}_next = {value}; {hist}_set = true; }}"
+            )
         # A global is an unconditional statement of the requested context,
         # even when the payload reads it only in an untaken selection arm.
         # Its sampled dependencies keep declaration order and one value.
@@ -8727,6 +8872,7 @@ class SecurityEmitter:
             and tuple_size
             and tuple_size > 0
             and isinstance(expr_node, TupleLiteral)
+            and not item.get("is_lower_tf_array")
         ):
             # A tuple body destructures into per-element scalar members
             # ``_req_sec_{sec_id}_{i}`` (declared in ``base.py`` and reset in
@@ -8773,6 +8919,41 @@ class SecurityEmitter:
             emitted_lines=lines,
         )
         if item.get("is_lower_tf_array"):
+            if returns_tuple:
+                # Evaluate the tuple once per intrabar, then distribute its
+                # elements to arrays of their own types. A stateful helper
+                # must not run once for every destructured element.
+                temp = f"_pf_lower_tuple_{sec_id}"
+                lines.append(f"        const auto {temp} = {expr_cpp};")
+                lines.append(
+                    f"        if (security_lower_tf_sub_bar_index({sec_id}) == 0) "
+                    f"{{ {self._lower_tf_clear_cpp(item)} }}"
+                )
+                site = self._get_ta_site(expr_node)
+                fields = TA_TUPLE_FIELDS.get(
+                    self._ta_name_from_site(site) if site is not None else "", (),
+                )
+                for index, ctype in enumerate(self._lower_tf_tuple_cpp_types(
+                        item["tuple_element_types"])):
+                    value = (
+                        f"{temp}.{fields[index]}" if index < len(fields)
+                        else f"std::get<{index}>({temp})"
+                    )
+                    if ctype in ("int", "int64_t"):
+                        value = na_preserving_int_cast(value, ctype)
+                    elif ctype == "double":
+                        value = (
+                            "[](auto _pf_v) { return is_na(_pf_v) ? na<double>() "
+                            f": static_cast<double>(_pf_v); }}({value})"
+                        )
+                    lines.append(
+                        f"        std::get<{index}>(_req_sec_lower_tf_{sec_id})"
+                        f".push_back({value});"
+                    )
+                self._emit_security_ohlc_hist_pushes(sec_id, lines)
+                self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
+                lines.extend(("    }", ""))
+                return
             # Match the accumulator's element type before adapting its value.
             # An integer sentinel must not pass through a floating NaN.
             ctype = self._infer_cpp_type_for_security_elem(expr_node)
@@ -8906,7 +9087,7 @@ class SecurityEmitter:
                 # gaps mode flushes between completions). Clearing the
                 # vector is the right fallback.
                 lines.append(f"            case {sec_id}:")
-                lines.append(f"                _req_sec_lower_tf_{sec_id}.clear();")
+                lines.append(f"                {self._lower_tf_clear_cpp(item)}")
                 for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):
                     lines.append(
                         f"                {self._security_ohlc_hist_series_cpp(sec_id, field)}.clear();"
@@ -9357,19 +9538,11 @@ class SecurityEmitter:
                 if expr_node.name in self._security_arg_global_values:
                     return self._security_arg_global_values[expr_node.name]
                 value = global_expr_map[expr_node.name]
-                if (expr_node.name in self._direct_program_tuple_binding_names
-                        and self._security_ta_tuple_element_field(expr_node.name) is None):
-                    # An element of a tuple declaration whose call is a pure
-                    # user function: only that element is lowered, on the
-                    # requested bar, with the call's arguments bound to the
-                    # function's parameters.
-                    element = self._security_pure_user_tuple_element(
-                        expr_node.name, value)
-                    if element is not None:
-                        _info, bound_stack = self._security_bind_helper_args(value, ())
-                        return self._build_security_expr(
-                            sec_id, element, ta_range, ta_results, resolving,
-                            security_mutable_names, bound_stack, emitted_lines)
+                if expr_node.name in self._direct_program_tuple_bindings:
+                    return self._security_global_tuple_element(
+                        sec_id, expr_node.name, ta_results, resolving,
+                        security_mutable_names, emitted_lines,
+                    )
                 # A global bound to a user call is one value per requested
                 # bar, however many reads the payload makes (``g - g[1]``):
                 # every read inlined the call again, which advanced its TA
@@ -9679,6 +9852,7 @@ class SecurityEmitter:
                     self._security_identifier_is_global_binding(expr_node.object)
                     and expr_node.object.name in self._direct_program_tuple_binding_names
                     and expr_node.object.name not in self._global_mutable_infos
+                    and not self._security_reads_global_history(sec_id, expr_node)
                 ):
                     # Its value is the whole tuple: every earlier build
                     # emitted the tuple's history, which did not compile.
@@ -9752,7 +9926,8 @@ class SecurityEmitter:
                     # builtin keeps the chart's series and never gets here):
                     # a double, which an integer slot of this evaluator
                     # narrows na-preserving (``_security_emits_double``).
-                    if self._infer_type(expr_node.object) == "std::string":
+                    if (self._infer_type(expr_node.object) == "std::string"
+                            and not meta.get("tuple_global")):
                         # No string history on the requested clock; every
                         # earlier build refused the read.
                         self._codegen_error(
@@ -10463,6 +10638,7 @@ class SecurityEmitter:
                     and self._security_identifier_is_global_binding(n.object)
                     and n.object.name in self._direct_program_tuple_binding_names
                     and n.object.name not in self._global_mutable_infos
+                    and not self._security_reads_global_history(sec_id, n)
                     and self._resolve_security_index_literal(n.index, bindings) != 0):
                 name = n.object.name
                 site = self._get_ta_site(global_expr_map.get(name))
@@ -11233,6 +11409,27 @@ class SecurityEmitter:
         history (re-evaluating ``g`` on the requested bar would pair it with
         the chart's ``g[1]``), and ``timeframe.*`` (beside the chart's
         ``timeframe.in_seconds()``)."""
+        # A helper's parameter is bound in both evaluator modes. The legacy
+        # fallback may keep a surrounding builtin's rendering, but it cannot
+        # resolve that parameter in the chart function's lexical scope.
+        if (isinstance(node, Identifier)
+                and not self._security_identifier_is_global_binding(node)):
+            binding = self._security_lookup_helper_binding_context(
+                node.name, helper_binding_stack,
+            )
+            if binding is not None and self._security_bound_is_scalar(*binding):
+                return True
+        if (isinstance(node, Identifier)
+                and self._security_identifier_is_global_binding(node)
+                and node.name in self._security_arg_global_values):
+            return True
+        if (isinstance(node, Subscript)
+                and isinstance(node.object, Identifier)
+                and self._security_expr_hist_by_node.get(
+                    (sec_id, id(node)), {},
+                ).get("tuple_global")
+                and self._security_reads_global_history(sec_id, node)):
+            return True
         selection = getattr(self, "_security_selection_context", None)
         if selection is not None:
             if id(node) in selection["reads"]:

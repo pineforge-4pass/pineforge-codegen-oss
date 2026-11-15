@@ -1711,7 +1711,7 @@ class StmtVisitor:
         # User-defined function returning a tuple: use C++17 structured bindings
         if isinstance(node.value, FuncCall):
             func_name, namespace = self._resolve_callee(node.value.callee)
-            if namespace == "request" and func_name == "security":
+            if namespace == "request" and func_name in ("security", "security_lower_tf"):
                 # A request whose names are reassigned is read where it is
                 # evaluated (external_requests): its data-missing stop.
                 if UNPINNED_ANNOTATION in (node.value.annotations or {}):
@@ -1768,6 +1768,14 @@ class StmtVisitor:
     def _tuple_binding_cpp_types(self, node: TupleAssign) -> list[str]:
         """Exact supported tuple element types for later lexical operations."""
         count = len(node.names)
+        lower_types = (node.value.annotations or {}).get(
+            "lower_tf_tuple_element_types", (),
+        )
+        if lower_types:
+            return [
+                f"std::vector<{ctype}>"
+                for ctype in self._lower_tf_tuple_cpp_types(lower_types)
+            ]
         if isinstance(node.value, (IfStmt, SwitchStmt)):
             return self._infer_selection_tuple_types(node.value, count)
         if not isinstance(node.value, FuncCall):
