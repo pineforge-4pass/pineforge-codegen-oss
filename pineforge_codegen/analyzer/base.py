@@ -5745,10 +5745,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     node.loc or node.target.loc,
                 )
             else:
-                # Retain the target's lexical binding just like a read.
-                # A compound store may have no other read of its target
-                # to expose the dependency to a requested expression.
-                self._visit(node.target)
+                # A compound store can have no RHS read of its target.
+                # Retain its scope for request dependencies without visiting
+                # the destination as a read; ValueBindings already retains
+                # the write's authored declaration identity.
+                self._identifier_binding_scopes.setdefault(id(node.target), sym.scope)
                 if (node.op in (":=", "+=", "-=", "*=", "/=", "%=")
                         and self._pine_version == 6
                         and not self._in_v5_library_definition(node)
