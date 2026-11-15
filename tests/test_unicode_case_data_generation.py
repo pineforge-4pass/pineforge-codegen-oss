@@ -2,6 +2,7 @@
 
 import ast
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -99,9 +100,8 @@ def test_generated_module_round_trips_tables_and_ignores_irrelevant_record_order
 @pytest.mark.parametrize("filename", [
     "/no-access/.ssh/UnicodeData.txt",
     "/no-access/.aws/UnicodeData.txt",
-    "/no-access/.ssh/UnicodeData.txt",
-    "/no-access/.config/zsh/keys/UnicodeData.txt",
     "/no-access/.config/pineforge/UnicodeData.txt",
+    "/no-access/.hidden-tool/UnicodeData.txt",
     "/no-access/private.env/UnicodeData.txt",
 ])
 def test_sensitive_paths_are_refused_by_name_before_any_filesystem_query(monkeypatch, filename):
@@ -111,3 +111,18 @@ def test_sensitive_paths_are_refused_by_name_before_any_filesystem_query(monkeyp
     monkeypatch.setattr(Path, "is_symlink", no_filesystem_query)
     with pytest.raises(gen.DataError, match="protected file path"):
         gen._checked_path(filename, "UnicodeData.txt")
+
+
+def test_symlink_input_is_refused_without_rejecting_a_regular_input():
+    # A neutral temporary root reaches the symlink check even when the
+    # checkout and pytest's own temporary directory have hidden components.
+    with TemporaryDirectory(prefix="unicode-case-path-", dir=Path("/tmp").resolve()) as directory:
+        root = Path(directory)
+        source = root / "source" / "UnicodeData.txt"
+        source.parent.mkdir()
+        source.touch()
+        assert gen._checked_path(str(source), "UnicodeData.txt") == source
+        link = root / "UnicodeData.txt"
+        link.symlink_to(source)
+        with pytest.raises(gen.DataError, match="symlink path"):
+            gen._checked_path(str(link), "UnicodeData.txt")

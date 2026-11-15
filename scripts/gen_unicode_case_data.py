@@ -257,11 +257,8 @@ def _checked_path(value: str, filename: str) -> Path:
     """Reject sensitive names before any filesystem query; reject symlinks."""
     path = Path(value)
     parts = path.parts
-    sensitive = {".ssh", ".aws"}
-    if (any(part in sensitive or part.endswith(".env") for part in parts)
-            or any(parts[i:i + 2] == (".config", "pineforge")
-                   or parts[i:i + 3] == (".config", "zsh", "keys")
-                   for i in range(len(parts)))):
+    if any((part.startswith(".") and part not in {".", ".."})
+           or part.endswith(".env") for part in parts):
         raise DataError("refused protected file path by name")
     if not path.is_absolute() or ".." in parts or path.name != filename:
         raise DataError(f"expected an absolute path ending in {filename}")
