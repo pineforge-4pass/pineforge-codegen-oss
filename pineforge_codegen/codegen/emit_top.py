@@ -2358,13 +2358,18 @@ class TopLevelEmitter:
             allocated = {}
             for key, name in methods:
                 encoded = cpp_identifier_fragment(name)
-                preferred = (
-                    name if encoded == name else
-                    self._allocate_generated_cpp_name(encoded, used)
-                )
-                allocated[key] = self._generated_class_name(
-                    ("typed-method", key), preferred
-                )
+                if encoded == name and name in self._all_member_names:
+                    # Let the function channel separate an authored value
+                    # binding from its established typed-method spelling.
+                    allocated[key] = name
+                else:
+                    preferred = (
+                        name if encoded == name else
+                        self._allocate_generated_cpp_name(encoded, used)
+                    )
+                    allocated[key] = self._generated_class_name(
+                        ("typed-method", key), preferred
+                    )
                 used.add(allocated[key])
             self._escaped_method_cpp_names = allocated
         return self._func_safe_name(allocated[fi.name])
