@@ -26,8 +26,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   string to the chart period, including input, variable, function-return and
   named arguments. The argument is evaluated once, and nonempty strings keep
   their explicit period. A generic `na` argument also selects the chart period;
-  numeric timeframe arguments are refused during analysis with a source
-  location. Dotted builtin signatures retain supplied arguments,
+  numeric timeframe arguments are refused during analysis with the stable
+  `PF-E2095` type diagnostic and a source location. Equally specific diagnostic
+  templates distinguish primitive types from qualifiers using their catalog
+  argument kinds. Dotted builtin signatures retain supplied arguments,
   including escaped string literals and VWAP anchors. (#394)
 - Script identifiers spelled like integer-to-float conversion temporaries,
   including the underscore suffixes of nested conversions, now use the

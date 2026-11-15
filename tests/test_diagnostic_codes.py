@@ -141,6 +141,44 @@ def test_classify_reads_arguments_raw():
     assert render_diagnostic(code, args) == ("Undefined variable: 'rsiLen'", None)
 
 
+@pytest.mark.parametrize("message, expected_code, expected_args", [
+    (
+        "Cannot call 'timeframe.change' with a int argument for string parameter 'timeframe'.",
+        "PF-E2095",
+        {"function_name": "timeframe.change", "name": "timeframe",
+         "argument_type": "int", "parameter_type": "string"},
+    ),
+    (
+        "Cannot call 'chooseFrame' with a float argument for string parameter 'candidate'.",
+        "PF-E2095",
+        {"function_name": "chooseFrame", "name": "candidate",
+         "argument_type": "float", "parameter_type": "string"},
+    ),
+    (
+        "Cannot call 'strategy.risk.allow_entry_in' with a series argument for simple parameter 'value'.",
+        "PF-E2080",
+        {"function_name": "strategy.risk.allow_entry_in", "name": "value",
+         "argument_qualifier": "series", "parameter_qualifier": "simple"},
+    ),
+    (
+        "Cannot call 'keep' with a input argument for const parameter 'amount'.",
+        "PF-E2080",
+        {"function_name": "keep", "name": "amount",
+         "argument_qualifier": "input", "parameter_qualifier": "const"},
+    ),
+    (
+        "matrix<array<int>>: nested collection element types not supported in v1.",
+        "PF-E1004",
+        {"element_type": "array<int>"},
+    ),
+])
+def test_catalog_argument_kinds_disambiguate_matching_templates(
+    message, expected_code, expected_args,
+):
+    assert classify("error", message) == (expected_code, expected_args)
+    assert render_diagnostic(expected_code, expected_args) == (message, None)
+
+
 def test_uncatalogued_text_keeps_a_code():
     diagnostic = Diagnostic(Level.ERROR, Phase.ANALYZER,
                             SourceLocation("t.pine", 1, 1, 1), "boom")

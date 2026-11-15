@@ -4,7 +4,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen.analyzer import Analyzer
-from pineforge_codegen.diagnostic_codes import UNCATALOGUED
+from pineforge_codegen.diagnostic_codes import render_diagnostic
 from pineforge_codegen.errors import CompileError, Level, Phase
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
@@ -109,11 +109,21 @@ def test_numeric_timeframe_is_refused_during_analysis(function, named, argument,
     diagnostic, = refused.value.diagnostics
     assert diagnostic.level == Level.ERROR
     assert diagnostic.phase == Phase.ANALYZER
-    assert diagnostic.code.startswith("PF-E")
-    assert diagnostic.code not in UNCATALOGUED.values()
-    assert f"timeframe.{function}" in diagnostic.message
-    assert pine_type in diagnostic.message
-    assert "string" in diagnostic.message
+    assert diagnostic.code == "PF-E2095"
+    assert diagnostic.args == {
+        "function_name": f"timeframe.{function}",
+        "name": "timeframe",
+        "argument_type": pine_type,
+        "parameter_type": "string",
+    }
+    assert diagnostic.message == (
+        f"Cannot call 'timeframe.{function}' with a {pine_type} "
+        "argument for string parameter 'timeframe'."
+    )
+    assert diagnostic.hint is None
+    assert render_diagnostic(diagnostic.code, diagnostic.args) == (
+        diagnostic.message, diagnostic.hint,
+    )
     assert diagnostic.location.line == 3
     assert diagnostic.location.col == source.splitlines()[2].index(argument) + 1
 

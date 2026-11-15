@@ -14,6 +14,11 @@ literal text must equal the message's around its arguments, so a code is
 never guessed: a text no template renders gets the uncatalogued code of its
 severity (``PF-E0000`` / ``PF-W0000``), which the test suite refuses.
 
+For templates with the same amount of literal text, recognized Pine primitive
+types in catalog-declared type arguments take precedence over open string
+arguments. Remaining ties keep the stable code order; every candidate still
+renders the same text.
+
 The match never backtracks over the text's characters: each literal segment
 of a template goes to its leftmost place after the previous one, the last to
 the text's end, and every argument is the text between its literals -- the
@@ -37,6 +42,8 @@ import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from .symbols import PineType
 
 CATALOG_PATH = Path(__file__).with_name("diagnostics_catalog.json")
 CATALOG_SCHEMA = "pineforge-diagnostics-catalog/v1"
@@ -178,6 +185,7 @@ def render_diagnostic(code: str, args: dict) -> tuple[str, str | None]:
 
 _CANONICAL_INT = re.compile(r"-?(?:0|[1-9][0-9]*)")
 _CANONICAL_FLOAT = re.compile(r"-?(?:0|[1-9][0-9]*)\.[0-9]+")
+_PINE_TYPE_NAMES = frozenset(pine_type.value for pine_type in PineType)
 
 
 def _segments(parts: list) -> tuple[str, tuple[tuple[str, str], ...]]:
@@ -313,6 +321,15 @@ class _Matcher:
             args[name] = value
         return args
 
+    def type_specificity(self, args: dict) -> int:
+        """Count recognized primitive types in this template's type arguments.
+
+        Other spellings stay raw: this only breaks a literal-specificity tie,
+        without rejecting identifiers, composite types or open diagnostic text.
+        """
+        return sum(value in _PINE_TYPE_NAMES for name, value in args.items()
+                   if self._kinds.get(name) == "type")
+
 
 @lru_cache(maxsize=1)
 def _matchers() -> dict[str, list[_Matcher]]:
@@ -322,8 +339,8 @@ def _matchers() -> dict[str, list[_Matcher]]:
             continue
         by_severity[entry["severity"]].append(_Matcher(code, entry))
     for matchers in by_severity.values():
-        # The template with the most literal text wins: a message two templates
-        # render reads as the more specific one (both render it byte for byte).
+        # Prefer literal text first. Argument types can resolve equal literal
+        # specificity in classify; remaining ties keep this stable code order.
         matchers.sort(key=lambda m: (-m.specificity, m.code))
     return by_severity
 
@@ -336,14 +353,25 @@ def classify(severity: str, message: str, hint: str | None = None) -> tuple[str,
     no template renders gets ``PF-E0000`` for an error or ``PF-W0000`` for
     a warning/note, with its text as ``args`` and no new fallback identity.
     """
+    best: tuple[str, dict] | None = None
+    best_specificity = -1
+    best_types = -1
     for matcher in _matchers().get(severity, ()):
+        if best is not None and matcher.specificity < best_specificity:
+            break
         if matcher.has_hint != (hint is not None):
             continue
         if not message.startswith(matcher.prefix) or not message.endswith(matcher.suffix):
             continue
         args = matcher.match(message, hint)
         if args is not None:
-            return matcher.code, args
+            types = matcher.type_specificity(args)
+            if best is None or types > best_types:
+                best = (matcher.code, args)
+                best_specificity = matcher.specificity
+                best_types = types
+    if best is not None:
+        return best
     args = {"message": message}
     if hint is not None:
         args["hint"] = hint
