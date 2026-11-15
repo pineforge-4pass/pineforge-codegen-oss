@@ -310,6 +310,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Probe: data/validation/udt-method-probe-20-udt-return-from-func.
         self._func_udt_return_types: dict[str, str] = {}
         self._func_return_type_specs: dict[str, "TypeSpec"] = {}
+        self._func_tuple_element_specs: dict[str, tuple] = {}
+        self._callable_bound_param_specs_by_node: dict[int, tuple] = {}
+        self._callable_bound_return_specs_by_node: dict[int, TypeSpec] = {}
+        self._callable_edge_specs: dict = {}
+        self._callable_return_specs_by_profile: dict = {}
+        self._func_callsite_param_specs: dict = {}
+        self._func_callsite_return_specs: dict = {}
         self._func_param_type_specs: dict[str, list] = {}
         # Direct terminal gets on an unshadowed built-in temporary are
         # registered while their lexical scope is live.  A later-defined UDF
@@ -770,6 +777,24 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             func_callsite_return_types=dict(
                 self._func_callsite_return_types
             ),
+            func_callsite_param_specs={
+                **{
+                    key: self._callable_bound_param_specs_by_node[node_id]
+                    for node_id, key in self._func_call_cs_map.items()
+                    if node_id in self._callable_bound_param_specs_by_node
+                },
+                **self._func_callsite_param_specs,
+            },
+            func_callsite_return_specs={
+                **{
+                    key: self._callable_bound_return_specs_by_node[node_id]
+                    for node_id, key in self._func_call_cs_map.items()
+                    if node_id in self._callable_bound_return_specs_by_node
+                },
+                **self._func_callsite_return_specs,
+            },
+            func_value_call_edges=dict(self._callable_edge_specs),
+            func_value_return_specs=dict(self._callable_return_specs_by_profile),
             func_declared_param_type_specs={
                 name: tuple(specs)
                 for name, specs in self._func_param_type_specs.items()
@@ -3371,6 +3396,52 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             func_info_by_name,
             _bound_user_call_args,
         )
+        self._resolve_callable_callsite_value_specs(call_edges, func_info_by_name)
+
+    def _resolve_callable_callsite_value_specs(self, call_edges, infos):
+        """Bind exact value profiles to the variants the emitter actually uses."""
+        profiles = self._func_callsite_param_specs
+        for owner, callee, call in call_edges:
+            target = self._func_call_cs_map.get(id(call))
+            if owner is None and target is not None:
+                profile = self._callable_bound_param_specs_by_node.get(id(call))
+                if profile is not None:
+                    profiles[target] = profile
+        for _ in range(len(call_edges) + 1):
+            changed = False
+            for owner, callee, call in call_edges:
+                if owner is None or owner not in infos:
+                    continue
+                info = infos[owner]
+                if info.node is None:
+                    continue
+                count = self._func_call_site_count.get(owner, 0)
+                for owner_cs in range(count) if count else (None,):
+                    profile = profiles.get(
+                        (owner, owner_cs), tuple(info.param_type_specs),
+                    )
+                    incoming = self._callable_edge_specs.get(
+                        (owner, profile, id(call))
+                    )
+                    if incoming is None:
+                        continue
+                    target = self._func_call_cs_map.get(id(call))
+                    if target is None:
+                        callee_count = self._func_call_site_count.get(callee, 0)
+                        if owner_cs is None or owner_cs >= callee_count:
+                            continue
+                        target = (callee, owner_cs)
+                    if target not in profiles:
+                        profiles[target] = incoming
+                        changed = True
+            if not changed:
+                break
+            if self._budget is not None:
+                self._budget.check(phase=Phase.ANALYZER)
+        for (name, cs), profile in profiles.items():
+            exact = self._callable_return_specs_by_profile.get((name, profile))
+            if exact is not None:
+                self._func_callsite_return_specs[(name, cs)] = exact
 
     # The primitive families a written call can pass an untyped parameter.
     _ARGUMENT_FAMILIES = frozenset({
@@ -3444,6 +3515,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             owner_params = set(untyped_params(owner).values())
             actuals = bound_args(callee, call)
             recorded = self._callable_bound_param_types_by_node.get(id(call), [])
+            recorded_specs = self._callable_bound_param_specs_by_node.get(
+                id(call), ()
+            )
             for index in params:
                 if (index >= len(actuals) or index >= len(recorded)
                         or actuals[index] is None
@@ -3451,6 +3525,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     continue
                 family = recorded[index]
                 shared = shared_family(callee, index)
+                info_specs = func_info_by_name[callee].param_type_specs
+                incoming_spec = (
+                    recorded_specs[index] if index < len(recorded_specs) else None
+                )
+                shared_spec = info_specs[index] if index < len(info_specs) else None
+                if (incoming_spec is not None and shared_spec is not None
+                        and incoming_spec != shared_spec
+                        and (incoming_spec.kind != "primitive"
+                             or shared_spec.kind != "primitive")):
+                    # Structured types are argument families too. In particular
+                    # vector<int>& cannot receive a vector<double> argument.
+                    conflicted.add(callee)
+                    break
                 if (family in self._ARGUMENT_FAMILIES
                         and shared in self._ARGUMENT_FAMILIES
                         and family != shared
@@ -5564,6 +5651,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         is_val_static = self._is_static_expression(node.value)
         declared_types: list[PineType] = []
+        tuple_specs = (
+            self._func_tuple_element_specs.get(node.value.callee.name, ())
+            if isinstance(node.value, FuncCall)
+            and isinstance(node.value.callee, Identifier)
+            else ()
+        )
 
         for idx, name in enumerate(node.names):
             inferred_element_type = (
@@ -5613,6 +5706,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             setattr(sym, "_pf_decl_node_id", id(node))
             setattr(sym, "_pf_decl_binding_name", name)
             setattr(sym, "_pf_tuple_binding", True)
+            if (idx < len(tuple_specs) and tuple_specs[idx] is not None
+                    and (tuple_specs[idx].kind != "primitive"
+                         or tuple_specs[idx].name == "string")):
+                sym.type_spec = tuple_specs[idx]
+                self._record_collection_type(
+                    name, tuple_specs[idx], symbol_scope=sym.scope,
+                )
             self._record_script_block_binding(sym, outer_symbol)
             self._note_member_writer(sym, name, node)
 
@@ -5824,6 +5924,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         terminal_direct_return_spec = self._type_spec_from_expr(
             terminal_ret_expr
         )
+        if isinstance(terminal_ret_expr, TupleLiteral):
+            self._func_tuple_element_specs[node.name] = tuple(
+                self._type_spec_from_expr(element)
+                for element in terminal_ret_expr.elements
+            )
+        elif (isinstance(terminal_ret_expr, FuncCall)
+                and isinstance(terminal_ret_expr.callee, Identifier)):
+            self._func_tuple_element_specs[node.name] = (
+                self._func_tuple_element_specs.get(
+                    terminal_ret_expr.callee.name, ()
+                )
+            )
         terminal_map_return = self._terminal_map_call_return(
             terminal_ret_expr,
             {
@@ -6973,6 +7085,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         parameter_types: dict[str, PineType | TypeSpec] | None = None,
     ) -> TypeSpec | None:
         """Use lexical type facts and written-call facts, never a float fallback."""
+        return OperatorTypeQuery(self, parameter_types)._operand_type(node)
+
+    def _operator_operand_type_uncached(
+        self, node: ASTNode,
+        parameter_types: dict[str, PineType | TypeSpec] | None,
+        query: OperatorTypeQuery,
+    ) -> TypeSpec | None:
+        """Resolve an operand using the current expression query's memo."""
         if isinstance(node, Identifier) and parameter_types is not None:
             if node.name in parameter_types:
                 ptype = parameter_types[node.name]
@@ -7027,7 +7147,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         arguments.append(node.kwargs.get(name))
                     result = source_builtin_result(
                         ns, callee.member, tuple(
-                            self._operator_operand_type(arg, parameter_types)
+                            query._operand_type(arg)
                             if arg is not None else None for arg in arguments
                         ),
                     )
@@ -7035,7 +7155,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         return result
                     # The structured return contract can prove a collection
                     # even when no scalar result rule applies.
-                    result = OperatorTypeQuery(self, parameter_types)._type_spec_from_expr(node)
+                    result = query._type_spec_from_expr(node)
                     return result if result is not None and result.kind != "primitive" else None
             if isinstance(callee, Identifier) and callee.name in {"nz", "fixnan", "input"}:
                 return None
@@ -7043,7 +7163,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if isinstance(node.object, Subscript):
                 # Nested history is decided by the subscript checker.
                 return None
-            receiver = self._operator_operand_type(node.object, parameter_types)
+            receiver = query._operand_type(node.object)
             if receiver is None:
                 return None
             if receiver.kind in {"array", "matrix", "map"}:
@@ -7065,7 +7185,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 terminal = self._selection_terminal_expr(body)
                 if terminal is None:
                     continue
-                arm = self._operator_operand_type(terminal, parameter_types)
+                arm = query._operand_type(terminal)
                 if arm is None:
                     return None
                 if result is None:
@@ -7087,7 +7207,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             else:
                 op, operands = "?:", (node.condition, node.true_val, node.false_val)
             result, _ = resolve_operator(op, tuple(
-                self._operator_operand_type(expr, parameter_types)
+                query._operand_type(expr)
                 for expr in operands
             ))
             return result
@@ -7125,7 +7245,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         or getattr(sym, "_pf_parameter_owner", None)):
                     result = sym.type_spec
         if result is None and isinstance(node, (MemberAccess, FuncCall, Subscript)):
-            result = OperatorTypeQuery(self, parameter_types)._type_spec_from_expr(node)
+            result = query._type_spec_from_expr(node)
             if isinstance(node, FuncCall) and result is not None and result.kind == "primitive":
                 # A definition-wide callable result is legacy inference.
                 # Collection accessors instead have a declared element slot.
@@ -7138,7 +7258,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         else callee.object
                     )
                 receiver_type = (
-                    self._operator_operand_type(receiver, parameter_types)
+                    query._operand_type(receiver)
                     if receiver is not None else None
                 )
                 accessors = {
@@ -8391,35 +8511,41 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             )
         validated.add(key)
 
-    def _propagate_deferred_map_callable_specs(
+    def _propagate_deferred_callable_specs(
         self,
         owner: str,
         parameter_specs: dict[str, TypeSpec | None],
         visiting: frozenset[str] = frozenset(),
+        _memo: set | None = None,
     ) -> bool:
-        """Monomorphize an all-untyped wrapper chain for one concrete map call.
+        """Carry exact value types through deferred callable argument edges.
 
         Function definitions are analyzed before their concrete top-level call
         sites.  Consequently ``wrapper(a) => identity(a)`` initially creates
         both ``FuncInfo`` records with scalar fallbacks.  The definition pass
         already captured identity-keyed parameter-flow edges for deferred map
-        history validation; reuse those exact edges to carry a later map
-        ``TypeSpec`` inward, then infer map returns on the way back out.
+        history validation; reuse those exact edges to carry the concrete
+        ``TypeSpec`` inward, then infer returns on the way back out.
 
-        This is deliberately bounded and map-triggered.  Cycles stop at the
-        active owner, incompatible previously-established parameter specs stop
-        that edge, and scalar-only call graphs never mutate.  PineForge emits
-        one C++ body per ordinary UDF, so silently replacing one concrete map
-        specialization with a different one would be a false polymorphic
-        inference rather than a valid widening.
+        Queries are memoized by function and input types, never by call path.
+        A diamond therefore visits each concrete signature once. Existing map
+        incompatibility diagnostics remain authoritative; other distinct value
+        families are retained at their written calls for clone specialization.
         """
         if owner in visiting:
             return False
         if not any(
-            spec is not None and spec.kind == "map"
+            spec is not None
+            and (spec.kind != "primitive" or spec.name == "string")
             for spec in parameter_specs.values()
         ):
             return False
+        if _memo is None:
+            _memo = set()
+        profile = (owner, tuple(parameter_specs.items()))
+        if profile in _memo:
+            return False
+        _memo.add(profile)
 
         func_info = next(
             (info for info in self._func_infos if info.name == owner),
@@ -8428,6 +8554,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         func_def = self._func_defs.get(owner)
         if func_info is None or func_def is None:
             return False
+        if self._budget is not None:
+            self._budget.check(func_def.loc, Phase.ANALYZER)
 
         changed = False
         while len(func_info.param_type_specs) < len(func_def.params):
@@ -8472,7 +8600,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         for _ in range(max(1, len(edges) + 1)):
             pass_changed = False
             for (
-                _call_id,
+                call_id,
                 callee_owner,
                 callee_param_names,
                 bound_args,
@@ -8526,10 +8654,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             )
                         ):
                             callee_specs[param_name] = contextual_map_spec
-                if self._propagate_deferred_map_callable_specs(
+                self._callable_bound_param_specs_by_node[call_id] = tuple(
+                    callee_specs.get(name) for name in callee_param_names
+                )
+                self._callable_edge_specs[(
+                    owner,
+                    tuple(parameter_specs.get(name) for name in func_def.params),
+                    call_id,
+                )] = self._callable_bound_param_specs_by_node[call_id]
+                if self._propagate_deferred_callable_specs(
                     callee_owner,
                     callee_specs,
                     next_visiting,
+                    _memo,
                 ):
                     pass_changed = True
             changed = changed or pass_changed
@@ -8539,6 +8676,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         terminal = self._direct_terminal_return_expr(func_def)
         return_spec = None
         scalar_return_type = None
+        exact = self._callable_value_return_spec(func_def, parameter_specs)
+        if exact is not None and (
+            exact.kind != "primitive" or exact.name == "string"
+        ):
+            return_spec = exact
+            self._callable_return_specs_by_profile[(
+                owner, tuple(parameter_specs.get(name) for name in func_def.params),
+            )] = exact
+            if exact.kind == "primitive":
+                scalar_return_type = self._primitive_pine_type_from_spec(exact)
         if isinstance(terminal, Identifier) and terminal.name in parameter_specs:
             candidate = parameter_specs.get(terminal.name)
             if candidate is not None and candidate.kind == "map":
@@ -8565,7 +8712,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return_spec = candidate
         if return_spec is not None:
             established_return = self._func_return_type_specs.get(owner)
-            if established_return is None:
+            if (established_return is None
+                    or (established_return.kind == "primitive"
+                        and return_spec.kind != "primitive")):
                 self._func_return_type_specs[owner] = return_spec
                 func_info.return_type_spec = return_spec
                 changed = True
@@ -8573,6 +8722,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 if func_info.return_type_spec is None:
                     func_info.return_type_spec = return_spec
                     changed = True
+            if return_spec.kind == "primitive":
+                result_type = self._primitive_pine_type_from_spec(return_spec)
+                if result_type != PineType.UNKNOWN:
+                    func_info.return_type = result_type
+                    self._func_return_types[owner] = result_type
+            elif return_spec.kind == "udt":
+                func_info.udt_return_type = return_spec.name
+                self._func_udt_return_types[owner] = return_spec.name
             # A different established return belongs to another concrete map
             # specialization.  Keep it unchanged rather than falsely widening.
 

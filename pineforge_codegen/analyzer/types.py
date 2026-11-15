@@ -41,8 +41,8 @@ from typing import Any
 
 from .. import signatures as sigs
 from ..ast_nodes import (
-    ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall, Identifier, IfStmt,
-    MemberAccess, NaLiteral, NumberLiteral, StringLiteral, Subscript, Ternary,
+    ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall, FuncDef,
+    Identifier, IfStmt, MemberAccess, MethodDef, NaLiteral, NumberLiteral, StringLiteral, Subscript, Ternary,
     SwitchStmt, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..errors import Phase
@@ -314,7 +314,7 @@ class TypeHelper:
         *,
         nullable: bool | None = None,
     ) -> TypeSpec | None:
-        """Keep exact collection joins; extend other families only around ``na``."""
+        """Keep exact callable joins and the established script selection policy."""
         if nullable is None:
             nullable = any(self._selection_contains_na(node) for node, _ in branches)
         result: TypeSpec | None = None
@@ -327,7 +327,12 @@ class TypeHelper:
                 spec = TypeSpec.primitive("color")
             if spec is None:
                 return None
-            if not nullable and spec.kind not in {"map", "matrix"}:
+            if (not nullable and spec.kind not in {"map", "matrix"}
+                    and not isinstance(
+                        self._current_top_level_stmt, (FuncDef, MethodDef),
+                    )):
+                # Callable value inference must not promote unresolved script
+                # selections into collection-history bindings.
                 return None
             result = (
                 spec
@@ -542,6 +547,11 @@ class TypeHelper:
             ))
             return self._selection_type_spec(branches)
         if isinstance(value, FuncCall):
+            exact = getattr(
+                self, "_callable_bound_return_specs_by_node", {}
+            ).get(id(value))
+            if exact is not None:
+                return exact
             cal = value.callee
             if (isinstance(cal, Identifier) and cal.name in ("line", "box")
                     and len(value.args) == 1 and not value.kwargs
@@ -893,6 +903,27 @@ class TypeHelper:
             return OperatorTypeQuery(
                 self, parameter_specs,
             )._type_spec_from_expr(self._direct_terminal_return_expr(func_def))
+        finally:
+            self._current_top_level_stmt = previous_owner
+            self._symbols.current_scope = previous_scope
+
+    def _callable_value_return_spec(self, func_def, parameter_specs):
+        """Read a callable's value with its lexical locals and concrete inputs.
+
+        This query never revisits the analyzer or allocates stateful call sites.
+        Each branch gets its own environment, so an expired local cannot borrow
+        the type of a same-named global or another branch's declaration.
+        """
+        previous_owner = self._current_top_level_stmt
+        previous_scope = self._symbols.current_scope
+        self._symbols.current_scope = self._operator_definition_scopes.get(
+            id(func_def), self._symbols.global_scope,
+        )
+        self._current_top_level_stmt = func_def
+        try:
+            return OperatorTypeQuery(self, dict(parameter_specs)).body_value_spec(
+                func_def.body
+            )
         finally:
             self._current_top_level_stmt = previous_owner
             self._symbols.current_scope = previous_scope
@@ -1462,13 +1493,120 @@ class OperatorTypeQuery(TypeHelper):
     def __init__(self, analyzer, parameter_types):
         self._analyzer = analyzer
         self._parameter_types = parameter_types
+        self._type_query_memo = None
 
     def __getattr__(self, name):
         return getattr(self._analyzer, name)
 
+    def _memoized_type(self, node, kind, context, infer):
+        # Share successful and unresolved results across the value/operand
+        # fallback paths of one read-only query. Drop the entire memo when
+        # that query returns, before any declaration, scope or callable facts
+        # can change. A later query, even on this object, starts fresh.
+        memo = self._type_query_memo
+        root = memo is None
+        if root:
+            memo = self._type_query_memo = {}
+        try:
+            key = (kind, id(node), context)
+            if key not in memo:
+                if self._analyzer._budget is not None:
+                    self._analyzer._budget.check(
+                        getattr(node, "loc", None), Phase.ANALYZER,
+                    )
+                memo[key] = infer()
+            return memo[key]
+        finally:
+            if root:
+                self._type_query_memo = None
+
+    def _operand_type(self, node):
+        return self._memoized_type(
+            node, "operand", None,
+            lambda: self._analyzer._operator_operand_type_uncached(
+                node, self._parameter_types, self,
+            ),
+        )
+
     def check_body(self, body):
         for node in body:
             self._check_node(node)
+
+    def body_value_spec(self, body):
+        """Infer declaration and terminal value types without checking operators."""
+        result = None
+        for node in body or ():
+            if self._analyzer._budget is not None:
+                self._analyzer._budget.check(node.loc, Phase.ANALYZER)
+            if isinstance(node, VarDecl):
+                result = (
+                    self._type_spec_from_hint(node.type_hint)
+                    if node.type_hint else self._value_spec(node.value)
+                )
+                self._parameter_types[node.name] = result
+            elif isinstance(node, Assignment):
+                result = (
+                    self._parameter_types.get(node.target.name)
+                    if isinstance(node.target, Identifier)
+                    else self._value_spec(node.target)
+                )
+                if result is None:
+                    result = self._value_spec(node.value)
+            elif isinstance(node, TupleAssign):
+                # Tuple elements are independent value bindings.
+                specs = ()
+                if isinstance(node.value, FuncCall) and isinstance(
+                    node.value.callee, Identifier
+                ):
+                    specs = getattr(
+                        self._analyzer, "_func_tuple_element_specs", {}
+                    ).get(node.value.callee.name, ())
+                for index, name in enumerate(node.names):
+                    self._parameter_types[name] = (
+                        specs[index] if index < len(specs) else None
+                    )
+                result = None
+            elif isinstance(node, IfStmt):
+                branches = [
+                    OperatorTypeQuery(
+                        self._analyzer, dict(self._parameter_types)
+                    ).body_value_spec(branch)
+                    for branch in (node.body, node.else_body)
+                ]
+                result = unify_type_specs(
+                    *branches,
+                    left_is_na=not node.body,
+                    right_is_na=not node.else_body,
+                )
+            elif isinstance(node, SwitchStmt):
+                result = None
+                first = True
+                for branch in [
+                    *(body for _, body in node.cases), node.default_body
+                ]:
+                    spec = OperatorTypeQuery(
+                        self._analyzer, dict(self._parameter_types)
+                    ).body_value_spec(branch)
+                    result = spec if first else unify_type_specs(
+                        result, spec, right_is_na=not branch,
+                    )
+                    first = False
+            elif isinstance(node, ExprStmt):
+                result = self._value_spec(node.expr)
+            else:
+                result = self._value_spec(node)
+        return result
+
+    def _value_spec(self, value):
+        return self._memoized_type(
+            value, "value", None, lambda: self._value_spec_uncached(value),
+        )
+
+    def _value_spec_uncached(self, value):
+        spec = self._type_spec_from_expr(value)
+        if spec is None:
+            spec = self._operand_type(value)
+        return spec
 
     def _check_node(self, node):
         if not isinstance(node, ASTNode):
@@ -1564,11 +1702,34 @@ class OperatorTypeQuery(TypeHelper):
             return
         self._analyzer._check_operator_operands(node, op, operands, self._parameter_types)
 
-    def _type_spec_from_expr(self, value, **kwargs):
+    def _type_spec_from_expr(self, value, *, _ternary_arms=None):
+        return self._memoized_type(
+            value, "spec", _ternary_arms,
+            lambda: self._type_spec_from_expr_uncached(
+                value, _ternary_arms=_ternary_arms,
+            ),
+        )
+
+    def _type_spec_from_expr_uncached(self, value, **kwargs):
         if isinstance(value, Identifier):
-            return self._analyzer._operator_operand_type(
-                value, self._parameter_types,
+            return self._operand_type(value)
+        if (isinstance(value, FuncCall)
+                and isinstance(value.callee, Identifier)
+                and value.callee.name in self._analyzer._func_defs):
+            name = value.callee.name
+            definition = self._analyzer._func_defs[name]
+            args = self._analyzer._bind_callable_args(
+                value, list(definition.params)
             )
+            profile = tuple(
+                self._value_spec(arg) if arg is not None else None
+                for arg in args
+            )
+            exact = self._analyzer._callable_return_specs_by_profile.get(
+                (name, profile)
+            )
+            if exact is not None:
+                return exact
         if (isinstance(value, MemberAccess)
                 and isinstance(value.object, Identifier)
                 and self._pine_version == 6
@@ -1591,7 +1752,7 @@ class OperatorTypeQuery(TypeHelper):
     def _visit(self, node):
         # TypeHelper's array.from fallback normally visits its arguments.
         # Here it asks for facts only, so no TA or request is registered again.
-        spec = self._analyzer._operator_operand_type(node, self._parameter_types)
+        spec = self._operand_type(node)
         if spec is not None and spec.kind == "primitive":
             return next((ptype for ptype in PineType if ptype.value == spec.name),
                         PineType.UNKNOWN)
@@ -1600,7 +1761,7 @@ class OperatorTypeQuery(TypeHelper):
     def _array_from_element_spec(self, value):
         # Array construction must not recover a coarse symbol/call result
         # after the operator query deliberately left its source unresolved.
-        return self._analyzer._operator_operand_type(value, self._parameter_types)
+        return self._operand_type(value)
 
     @staticmethod
     def _pine_type_to_spec(pine_type):

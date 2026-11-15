@@ -1924,6 +1924,7 @@ class CallHandlers:
         for i in range(len(param_specs)):
             if param_specs[i] is None and i < len(arg_specs):
                 param_specs[i] = arg_specs[i]
+        self._callable_bound_param_specs_by_node[id(node)] = tuple(param_specs)
         self._record_deferred_param_call_edge(
             node,
             func_name,
@@ -2171,13 +2172,43 @@ class CallHandlers:
         # scalar fallbacks.  Propagate the concrete specs through the exact
         # definition-time call edges and infer returns in post-order before
         # codegen snapshots the FuncInfo table.
-        self._propagate_deferred_map_callable_specs(
+        self._propagate_deferred_callable_specs(
             func_name,
             {
                 name: spec
                 for name, spec in zip(func_def.params, param_specs)
             },
         )
+        value_specs = [*param_specs, fi.return_type_spec]
+        exact_return = (
+            self._callable_value_return_spec(
+                func_def, dict(zip(func_def.params, param_specs)),
+            )
+            if any(
+                spec is not None
+                and (spec.kind != "primitive" or spec.name == "string")
+                for spec in value_specs
+            )
+            else None
+        )
+        if exact_return is not None and (
+            exact_return.kind != "primitive" or exact_return.name == "string"
+        ):
+            self._callable_bound_return_specs_by_node[id(node)] = exact_return
+            self._callable_return_specs_by_profile[
+                (func_name, tuple(param_specs))
+            ] = exact_return
+            if (fi.return_type_spec is None
+                    or fi.return_type_spec.kind == "primitive"):
+                fi.return_type_spec = exact_return
+                self._func_return_type_specs[func_name] = exact_return
+            if exact_return.kind == "primitive":
+                return_type = self._primitive_pine_type_from_spec(exact_return)
+                fi.return_type = return_type
+                self._func_return_types[func_name] = return_type
+            elif exact_return.kind == "udt":
+                fi.udt_return_type = exact_return.name
+                self._func_udt_return_types[func_name] = exact_return.name
 
         if return_type == PineType.NA:
             self._na_return_callables[id(node)] = func_def

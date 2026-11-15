@@ -3072,6 +3072,15 @@ class TypeInferer:
                 return TypeSpec.udt(func_name)
             if namespace is None:
                 func_info = self._func_info_map.get(func_name)
+                if func_info is not None:
+                    exact = getattr(
+                        self.ctx, "func_callsite_return_specs", {}
+                    ).get((
+                        func_info.name,
+                        self._callable_target_callsite_idx(func_info, node),
+                    ))
+                    if exact is not None:
+                        return exact
                 return_spec = (self._array_return_spec(func_info)
                                if func_info is not None else None)
                 if return_spec is not None:
