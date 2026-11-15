@@ -2207,9 +2207,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         self._fresh_var_members.append((g_name, v, fresh_member))
                     # Fresh fixnan members: each path gets its OWN previous-
                     # value member so two call paths never share fixnan state.
+                    # These are the owners of the reserved fixnan namespace,
+                    # rather than identities composed from Pine spellings.
                     ffixnan_remap: dict[str, str] = {}
                     for orig_fn_member in fixnan_originals(g_name):
-                        fresh_fn_member = self._generated_class_name(
+                        fresh_fn_member = self._generated_helper_name(
                             ("fixnan-instance", fresh_counter, orig_fn_member),
                             f"{orig_fn_member}__ni{fresh_counter}",
                         )

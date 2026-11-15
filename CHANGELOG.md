@@ -23,9 +23,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 ## Unreleased (next release)
 
 - Generated function variants and persistent local copies avoid authored and
-  generated member names, including names ending in `_cs1`. Declarations,
-  calls and history storage use the same allocated identities. Regenerate C++
-  and relink affected strategies.
+  generated member names, including names ending in `_cs1` and composed names
+  that overlap collection-history or requested-context storage. Persistent
+  declarations in sibling blocks also retain distinct storage when a script
+  uses their generated spelling. Declarations, calls and history storage use
+  the same allocated identities. Regenerate C++ and relink affected strategies.
 
 - A zone name the engine rejects now makes calendar-form `timestamp()` stop the
   run at its first evaluation, instead of silently calculating a UTC value.

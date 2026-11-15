@@ -717,6 +717,14 @@ class NamingHelper:
         ctx = getattr(self, "ctx", None)
         if "time_close" in getattr(ctx, "series_vars", ()):
             bound.add("time_close")
+        # Sibling-block and owner-qualified persistent identities need not
+        # occur in the syntax. Reserve them before escaping any name, and let
+        # their declarations and consumers use the same safe-name mapping.
+        storage_names = {
+            name for name, _, _ in getattr(ctx, "var_members", ())
+        }
+        bound.update(storage_names)
+        authored.update(storage_names)
         self._safe_name_map: dict[str, str] = {}
         self._safe_name_occupied = authored
         self._safe_name_bound = bound
@@ -770,7 +778,16 @@ class NamingHelper:
         self._func_variant_callsite: dict[tuple[str, str], int] = {}
 
     def _generated_class_name(self, key: tuple, preferred: str) -> str:
-        """Allocate one stable member/method identity outside authored names."""
+        """Allocate a composed Pine identity outside fixed helper namespaces."""
+        if (preferred in CPP_RESERVED or preferred in BUILTIN_ACCESSOR_NAMES
+                or is_emitter_temporary(preferred)):
+            # Suffixing a reserved family such as _secN_* never escapes it.
+            # Change the leading token before checking exact occupied names.
+            preferred = f"pf_safe_{preferred}"
+        return self._generated_helper_name(key, preferred)
+
+    def _generated_helper_name(self, key: tuple, preferred: str) -> str:
+        """Allocate one stable identity, including a helper's own namespace."""
         allocated = self._generated_class_names
         if key not in allocated:
             allocated[key] = self._allocate_generated_cpp_name(
