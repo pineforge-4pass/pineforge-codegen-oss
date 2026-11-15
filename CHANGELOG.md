@@ -45,6 +45,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
   and tuple boundaries by value, and `label(na)` produces a missing label
   handle. Polyline locals, arrays, fields and delete methods retain opaque
   handles and argument evaluation while rendering remains a visual no-op.
+- Generated function variants and persistent local copies avoid authored and
+  generated member names, including names ending in `_cs1` and composed names
+  that overlap collection-history or requested-context storage. Persistent
+  declarations in sibling blocks also retain distinct storage when a script
+  uses their generated spelling. Declarations, calls and history storage use
+  the same allocated identities. Regenerate C++ and relink affected strategies.
 
 - A zone name the engine rejects now makes calendar-form `timestamp()` stop the
   run at its first evaluation, instead of silently calculating a UTC value.

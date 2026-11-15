@@ -721,6 +721,14 @@ class NamingHelper:
         ctx = getattr(self, "ctx", None)
         if "time_close" in getattr(ctx, "series_vars", ()):
             bound.add("time_close")
+        # Sibling-block and owner-qualified persistent identities need not
+        # occur in the syntax. Reserve them before escaping any name, and let
+        # their declarations and consumers use the same safe-name mapping.
+        storage_names = {
+            name for name, _, _ in getattr(ctx, "var_members", ())
+        }
+        bound.update(storage_names)
+        authored.update(storage_names)
         self._safe_name_map: dict[str, str] = {}
         self._safe_name_occupied = authored
         self._safe_name_bound = bound
@@ -753,6 +761,43 @@ class NamingHelper:
         for name in sorted((local_bindings & function_names) - member_names):
             self._local_function_names[name] = self._safe_name(name)
             self._allocate_safe_name(name)
+
+        # Analyzer-qualified storage (including sibling-block members) and
+        # TA/fixnan sites can have names absent from the authored AST. Clones
+        # and generated methods share their C++ class namespace. Reserve exact
+        # identities, rather than treating every authored _csN suffix as private.
+        self._safe_name_occupied.update(
+            self._safe_name(name) for name in member_names
+        )
+        self._safe_name_occupied.update(
+            self._safe_name(name)
+            for name, _ptype in getattr(ctx, "global_var_decls", ())
+        )
+        for sites in (
+            getattr(ctx, "ta_call_sites", ()),
+            getattr(ctx, "fixnan_sites", ()),
+        ):
+            self._safe_name_occupied.update(site.member_name for site in sites)
+        self._generated_class_names: dict[tuple, str] = {}
+        self._func_variant_callsite: dict[tuple[str, str], int] = {}
+
+    def _generated_class_name(self, key: tuple, preferred: str) -> str:
+        """Allocate a composed Pine identity outside fixed helper namespaces."""
+        if (preferred in CPP_RESERVED or preferred in BUILTIN_ACCESSOR_NAMES
+                or is_emitter_temporary(preferred)):
+            # Suffixing a reserved family such as _secN_* never escapes it.
+            # Change the leading token before checking exact occupied names.
+            preferred = f"pf_safe_{preferred}"
+        return self._generated_helper_name(key, preferred)
+
+    def _generated_helper_name(self, key: tuple, preferred: str) -> str:
+        """Allocate one stable identity, including a helper's own namespace."""
+        allocated = self._generated_class_names
+        if key not in allocated:
+            allocated[key] = self._allocate_generated_cpp_name(
+                preferred, self._safe_name_occupied
+            )
+        return allocated[key]
 
     def _allocate_safe_name(self, name: str) -> str:
         if name in LEGACY_CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES:
@@ -788,12 +833,14 @@ class NamingHelper:
         return name
 
     def _func_safe_name(self, name: str) -> str:
-        """Prefix function names that collide with class members (series vars or var members)."""
+        """Allocate function names that collide with class data members."""
         safe = getattr(self, "_local_function_names", {}).get(
             name, self._safe_name(name),
         )
         if safe in self._all_member_names:
-            return f"_fn_{safe}"
+            return self._generated_class_name(
+                ("function", name), f"_fn_{safe}"
+            )
         return safe
 
     def _resolve_callee(self, callee) -> tuple[str | None, str | None]:

@@ -436,12 +436,12 @@ class CallVisitor:
 
         cs_info = self.ctx.func_call_cs_map.get(id(node))
         if self._active_call_site_idx is not None and cs_info is not None:
-            return f"{base}_cs{self._active_call_site_idx}"
+            return self._func_variant_name(fi.name, self._active_call_site_idx)
         if cs_info is not None and cs_info[0] == fi.name:
-            return f"{base}_cs{cs_info[1]}"
+            return self._func_variant_name(fi.name, cs_info[1])
         if (self._active_call_site_idx is not None
                 and self.ctx.func_call_site_counts.get(fi.name, 0) > 1):
-            return f"{base}_cs{self._active_call_site_idx}"
+            return self._func_variant_name(fi.name, self._active_call_site_idx)
         return base
 
     def _typed_user_method_info(self, receiver, member: str):
@@ -3669,16 +3669,16 @@ class CallVisitor:
             # the parent's active call-site index. This ensures sub-functions
             # called from ma_cs6() use their _cs6 variant, not _cs0.
             fname, _ = cs_info
-            emit_name = f"{self._func_safe_name(fname)}_cs{self._active_call_site_idx}"
+            emit_name = self._func_variant_name(fname, self._active_call_site_idx)
         elif cs_info is not None:
             fname, cs_idx = cs_info
-            emit_name = f"{self._func_safe_name(fname)}_cs{cs_idx}"
+            emit_name = self._func_variant_name(fname, cs_idx)
         elif (self._active_call_site_idx is not None
               and func_name in self._func_names
               and self.ctx.func_call_site_counts.get(func_name, 0) > 1):
             # Inside a per-call-site variant: propagate call-site index to
             # sub-functions that also have variants (for state isolation)
-            emit_name = f"{self._func_safe_name(func_name)}_cs{self._active_call_site_idx}"
+            emit_name = self._func_variant_name(func_name, self._active_call_site_idx)
         call_head = emit_name
         if namespace is None and func_name in self._func_names:
             return self._ordered_user_call_expr(

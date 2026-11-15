@@ -266,6 +266,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._block_var_owner: dict[str, int] = {}
         self._block_var_renames: dict[int, dict[str, str]] = {}
         self._block_var_seq = 0
+        self._block_var_taken: set[str] | None = None
         # Identifier node identity -> the lexical Symbol.scope resolved while
         # that node's source scope is live.  Codegen uses this narrow
         # provenance to distinguish true global aliases from same-named local
@@ -5019,6 +5020,31 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             or any(id(body) == outer_owner for body in self._block_node_stack)
         )
 
+    def _allocate_block_var_member(self, node: VarDecl) -> str:
+        """Keep generated lexical storage apart from every syntax spelling."""
+        if self._block_var_taken is None:
+            self._block_var_taken = set()
+            for item, _depth in iter_ast_nodes(self._ast):
+                if self._budget is not None:
+                    self._budget.check(item.loc, Phase.ANALYZER)
+                for attr in ("name", "var", "member"):
+                    value = getattr(item, attr, None)
+                    if isinstance(value, str):
+                        self._block_var_taken.add(value)
+                for attr in ("names", "vars", "params", "members"):
+                    self._block_var_taken.update(
+                        value for value in (getattr(item, attr, None) or ())
+                        if isinstance(value, str)
+                    )
+        while True:
+            if self._budget is not None:
+                self._budget.check(node.loc, Phase.ANALYZER)
+            self._block_var_seq += 1
+            member_name = f"{node.name}__blk{self._block_var_seq}"
+            if member_name not in self._block_var_taken:
+                self._block_var_taken.add(member_name)
+                return member_name
+
     def _visit_VarDecl(self, node: VarDecl) -> PineType:
         if (not node.is_var and not node.is_varip and node.type_hint is None
                 and isinstance(node.value, NaLiteral)
@@ -5277,8 +5303,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     self._block_var_owner[node.name] = block_id
                 elif owner != block_id:
                     # Sibling-scope collision: disambiguate this declaration.
-                    self._block_var_seq += 1
-                    member_name = f"{node.name}__blk{self._block_var_seq}"
+                    member_name = self._allocate_block_var_member(node)
                     self._block_var_renames.setdefault(block_id, {})[node.name] = member_name
             self._var_members.append((member_name, val_type, init_str))
             scope_cursor = self._symbols.current_scope

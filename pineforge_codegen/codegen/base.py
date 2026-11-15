@@ -737,7 +737,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 remap = {}
                 for orig_name in orig_names:
                     safe = self._safe_name(orig_name)
-                    remap[safe] = f"{safe}_cs{cs_idx}"
+                    # Several enclosing owners can refer to the same clone.
+                    # Its identity belongs to the original member + callsite,
+                    # independently of which owner first requests its name.
+                    remap[safe] = self._generated_class_name(
+                        ("var-clone", safe, cs_idx), f"{safe}_cs{cs_idx}"
+                    )
                 self._func_cs_var_remap[(fname, cs_idx)] = remap
                 self._func_var_members_set.update(
                     orig_name for orig_name in orig_names)
@@ -1221,8 +1226,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     _h = _hints[_i] if _i < len(_hints) else None
                     if _h and str(_h).replace(" ", "") in _SKIP_DECL_TYPES:
                         self._visual_drop_vars.add(_p)
-        # Build set of all member names (series vars, var members) for collision
-        # detection. It precedes the security metadata below: a timeframe
+        # Build the authored/analyzer data-member inventory for callable name
+        # collisions. It precedes the security metadata below: a timeframe
         # computed by a user function (``tf = tfFromLabel(choice)``) renders
         # that call through ``_func_safe_name`` at registration time.
         self._all_member_names: set[str] = set()
@@ -1230,6 +1235,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._all_member_names.add(self._safe_name(name))
         for name, _, _ in ctx.var_members:
             self._all_member_names.add(self._safe_name(name))
+        for name, _ptype in ctx.global_var_decls:
+            self._all_member_names.add(self._safe_name(name))
+        # Freeze natural callable identities before security rendering and
+        # later support allocators. Calls and declarations must use this same
+        # allocation even when an authored member is spelled like a clone.
+        for fi in ctx.func_infos:
+            self._func_cpp_base_name(fi.name)
+            for cs_idx in range(ctx.func_call_site_counts.get(fi.name, 0)):
+                self._func_variant_name(fi.name, cs_idx)
         # Collect request.security metadata per call
         self._security_eval_info: list[dict] = []
         self._security_ta_variant_names: dict[tuple[int, int, tuple], str] = {}
@@ -1569,6 +1583,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._runtime_var_init_flags: dict[tuple[int, str], str] = {}
 
         used_names = set(self._all_member_names)
+        used_names.update(self._generated_class_names.values())
         # ``_all_member_names`` historically covers persistent ``var`` and
         # Series members only.  Plain global declarations are class members as
         # well, so include them before minting a generated flag; otherwise a
@@ -1605,7 +1620,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for callsite in range(
                 self.ctx.func_call_site_counts.get(func_info.name, 0)
             ):
-                used_names.add(f"{emitted}_cs{callsite}")
+                used_names.add(self._func_variant_name(func_info.name, callsite))
         used_names.update(inst["name"] for inst in self._fresh_instances)
 
         def allocate_flag(base: str) -> str:
@@ -2055,7 +2070,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return list(self._func_cs_fixnan_remap.get((fname, 0), {}).keys())
 
         def natural_name(fname: str, cs_idx: int) -> str:
-            return f"{self._func_cpp_base_name(fname)}_cs{cs_idx}"
+            return self._func_variant_name(fname, cs_idx)
 
         interned: dict[tuple, dict] = {}
         worklist: list[dict] = []
@@ -2174,17 +2189,28 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 ginst = interned.get(key)
                 if ginst is None:
                     fresh_counter += 1
-                    inst_name = f"{self._func_cpp_base_name(g_name)}__ni{fresh_counter}"
+                    inst_name = self._generated_class_name(
+                        ("function-instance", fresh_counter),
+                        f"{self._func_cpp_base_name(g_name)}__ni{fresh_counter}",
+                    )
                     fvar_remap: dict[str, str] = {}
                     for v in var_originals(g_name):
-                        fresh_member = f"{v}__ni{fresh_counter}"
+                        fresh_member = self._generated_class_name(
+                            ("var-instance", fresh_counter, v),
+                            f"{v}__ni{fresh_counter}",
+                        )
                         fvar_remap[v] = fresh_member
                         self._fresh_var_members.append((g_name, v, fresh_member))
                     # Fresh fixnan members: each path gets its OWN previous-
                     # value member so two call paths never share fixnan state.
+                    # These are the owners of the reserved fixnan namespace,
+                    # rather than identities composed from Pine spellings.
                     ffixnan_remap: dict[str, str] = {}
                     for orig_fn_member in fixnan_originals(g_name):
-                        fresh_fn_member = f"{orig_fn_member}__ni{fresh_counter}"
+                        fresh_fn_member = self._generated_helper_name(
+                            ("fixnan-instance", fresh_counter, orig_fn_member),
+                            f"{orig_fn_member}__ni{fresh_counter}",
+                        )
                         ffixnan_remap[orig_fn_member] = fresh_fn_member
                         # Find the original FixnanCallSite to carry its type.
                         orig_fn_site = None
@@ -3944,6 +3970,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return self._emit_udt_method_cpp_name(fi)
         return self._func_safe_name(fname)
 
+    def _func_variant_name(self, fname: str, cs_idx: int) -> str:
+        """Resolve a callable clone once for emission, dispatch and history."""
+        name = self._generated_class_name(
+            ("function-clone", fname, cs_idx),
+            f"{self._func_cpp_base_name(fname)}_cs{cs_idx}",
+        )
+        self._func_variant_callsite[(fname, name)] = cs_idx
+        return name
+
     def _inline_history_contexts_for_owner(self, owner: str | None) -> list[str | None]:
         """Return every method-emission context that owns one source AST site.
 
@@ -3966,7 +4001,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         ) and total_cs > 0
         if cloned:
             contexts: list[str | None] = [
-                f"{self._func_cpp_base_name(owner)}_cs{idx}"
+                self._func_variant_name(owner, idx)
                 for idx in range(total_cs)
             ]
         else:
@@ -4127,11 +4162,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         ) -> int | None:
             if owner is None or context is None:
                 return None
-            prefix = f"{self._func_cpp_base_name(owner)}_cs"
-            if not context.startswith(prefix):
-                return None
-            suffix = context[len(prefix):]
-            return int(suffix) if suffix.isdigit() else None
+            return self._func_variant_callsite.get((owner, context))
 
         def target_cs_for_context(
             fi,
@@ -4267,7 +4298,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 fi, call, owner, owner_context
             )
             if target_cs is not None:
-                return f"{self._func_cpp_base_name(fi.name)}_cs{target_cs}"
+                return self._func_variant_name(fi.name, target_cs)
             return None
 
         requested_roots: set[tuple[str, str | None]] = set()
@@ -4729,6 +4760,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             getattr(self, "_runtime_var_init_flag_used_names", ())
         )
         class_used.update(self._all_member_names)
+        class_used.update(self._generated_class_names.values())
         class_used.update(
             self._safe_name(name) for name in self._all_bound_names
         )
@@ -6207,12 +6239,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for fi in self.ctx.func_infos:
             if fi.name not in self.ctx.func_var_members:
                 continue
-            emitted = self._func_cpp_base_name(fi.name)
             total_cs = self.ctx.func_call_site_counts.get(fi.name, 0)
             variants = range(total_cs) if total_cs > 0 else (None,)
             for cs_idx in variants:
-                suffix = f"_cs{cs_idx}" if cs_idx is not None else ""
-                flag = allocate_legacy_flag(f"_fvinit_{emitted}{suffix}")
+                emitted = (
+                    self._func_variant_name(fi.name, cs_idx)
+                    if cs_idx is not None else self._func_cpp_base_name(fi.name)
+                )
+                flag = allocate_legacy_flag(f"_fvinit_{emitted}")
                 lines.append(f"    bool {flag} = false;")
 
         for inst in self._fresh_instances:

@@ -2364,10 +2364,19 @@ class TopLevelEmitter:
             allocated = {}
             for key, name in methods:
                 encoded = cpp_identifier_fragment(name)
-                allocated[key] = (
-                    name if encoded == name else
-                    self._allocate_generated_cpp_name(encoded, used)
-                )
+                if encoded == name and name in self._all_member_names:
+                    # Let the function channel separate an authored value
+                    # binding from its established typed-method spelling.
+                    allocated[key] = name
+                else:
+                    preferred = (
+                        name if encoded == name else
+                        self._allocate_generated_cpp_name(encoded, used)
+                    )
+                    allocated[key] = self._generated_class_name(
+                        ("typed-method", key), preferred
+                    )
+                used.add(allocated[key])
             self._escaped_method_cpp_names = allocated
         return self._func_safe_name(allocated[fi.name])
 
@@ -2712,7 +2721,7 @@ class TopLevelEmitter:
             self._active_call_site_idx = None
             self._current_instance_name = instance["name"]
         elif call_site_idx is not None:
-            func_name = f"{func_name}_cs{call_site_idx}"
+            func_name = self._func_variant_name(fi.name, call_site_idx)
             remap = self._func_cs_ta_remap.get((fi.name, call_site_idx), {})
             self._active_ta_remap = remap
             var_remap = self._func_cs_var_remap.get((fi.name, call_site_idx), {})
