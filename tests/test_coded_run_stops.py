@@ -9,19 +9,24 @@ from pineforge_codegen import transpile
 from pineforge_codegen.codegen.helpers import (
     CPP_EMITTER_NAMES, CPP_STANDARD_MACROS, is_emitter_temporary,
 )
-from pineforge_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP, request_stop
+from pineforge_codegen.codegen.run_stops import (
+    RUN_STOP_SHIMS_CPP, TIMEZONE_STOP_SHIM_CPP, request_stop,
+)
 from pineforge_codegen.external_requests import request_stop_marker
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from tests._compile import compile_cpp, run_emitted_tu
 from tests._legacy_cpp import _without_run_failure_scaffold
+from tests.test_timestamp_rejected_zone import MISSPELLED_ZONE_MESSAGE
+from tests.test_timezone_lambda_validation import _render_lambdas
 
 
 PRELUDE = '//@version=6\nstrategy("coded stops")\n'
 HELPERS = (
     "pine_no_data_stop", "pine_other_symbol_stop", "pine_array_stop",
     "pine_collection_stop", "pine_na_stop", "pine_limit_stop",
-    "pine_unsupported_stop", "pine_string_stop", "pine_engine_invariant",
+    "pine_unsupported_stop", "pine_string_stop", "pine_timezone_stop",
+    "pine_engine_invariant",
     "note_run_failure", "note_run_failure_unknown",
     "_pf_invariant_at", "_pf_setting_failure_info_",
     "_pf_setting_error_base", "_pf_latched_setting_error",
@@ -31,6 +36,7 @@ SHIMS = (
     "_PF_COLLECTION_STOP", "_PF_NA_STOP", "_PF_LIMIT_STOP",
     "_PF_UNSUPPORTED_STOP", "_PF_STRING_STOP", "_PF_ENGINE_INVARIANT",
     "_PF_INVARIANT_AT", "_PF_SETTING_FAILURE",
+    "_PF_TIMEZONE_STOP", "PINEFORGE_HAS_TIMEZONE_STOP_V1",
 )
 TEMPORARIES = (
     "_pf_number_text", "_pf_substring_text", "_pf_substring_begin",
@@ -108,9 +114,23 @@ int main() {
 
 @pytest.mark.parametrize("legacy", [False, True])
 def test_stop_shims_compile_and_keep_english(legacy):
-    cpp = transpile(PRELUDE)
+    cpp, bodies = _render_lambdas("America/Newyork")
+    assert cpp.count(TIMEZONE_STOP_SHIM_CPP) == 1
     if legacy:
         cpp = _legacy_branch(cpp)
+        cpp = cpp.replace(
+            TIMEZONE_STOP_SHIM_CPP,
+            "#undef PINEFORGE_HAS_TIMEZONE_STOP_V1\n" + TIMEZONE_STOP_SHIM_CPP,
+        )
+    else:
+        # Require the real header's typed API; an unavailable typed arm must
+        # never silently execute the fallback and count as native coverage.
+        cpp = cpp.replace(
+            TIMEZONE_STOP_SHIM_CPP,
+            "#ifndef PINEFORGE_HAS_TIMEZONE_STOP_V1\n"
+            '#error "typed timezone stop requires real engine support"\n'
+            "#endif\n" + TIMEZONE_STOP_SHIM_CPP,
+        )
     driver = r'''
 #include <cassert>
 #include <iostream>
@@ -142,9 +162,26 @@ int main() {
     stop([] { _PF_STRING_STOP("substring_out_of_range", "unchanged"); }, "pine_string_error");
     stop([] { _PF_STRING_STOP("format_index_overflow", "unchanged"); }, "pine_string_error");
     stop([] { _PF_ENGINE_INVARIANT("unchanged", std::runtime_error); }, "engine_invariant");
+    try {
+        const auto value = (TIMESTAMP_LAMBDA);
+        std::cout << "unexpected timestamp value " << value;
+        assert(false);
+    } catch (const std::exception& error) {
+#ifdef PINEFORGE_HAS_TIMEZONE_STOP_V1
+        assert(std::string(error.what()) == std::string("Error before the first bar: ") + EXPECTED_MESSAGE);
+        const auto failure = ::pineforge::classify_run_failure(error);
+        assert(failure.code == ::pineforge::RunFailureCode::pine_timezone_error);
+        assert(failure.args);
+        assert(*failure.args == R"({"bar_index":-1,"function":"timestamp","zone":"America/Newyork"})");
+#else
+        assert(std::string(error.what()) == EXPECTED_MESSAGE);
+#endif
+    }
     std::cout << "all stops propagated";
 }
 '''
+    driver = driver.replace("TIMESTAMP_LAMBDA", bodies[0])
+    driver = driver.replace("EXPECTED_MESSAGE", json.dumps(MISSPELLED_ZONE_MESSAGE))
     assert run_emitted_tu(cpp, driver, opt="-O2", label="both run-stop branches") == "all stops propagated"
 
 
@@ -152,15 +189,21 @@ int main() {
 def test_helper_names_are_reserved(helper):
     assert (helper in CPP_EMITTER_NAMES or helper in CPP_STANDARD_MACROS
             or is_emitter_temporary(helper))
-    cpp = transpile(PRELUDE + f"{helper} = close\nplot({helper})\n")
+    cpp = transpile(PRELUDE + f"{helper} = close\nplot({helper})\n"
+                    + 'stamp = timestamp("UTC", 2024, 1, 1, 0, 0)\n')
+    assert cpp.count(TIMEZONE_STOP_SHIM_CPP) == 1
     assert not re.search(rf"\bdouble {helper}\b", cpp)
     compile_cpp(cpp, label=f"reserved {helper}")
 
 
-@pytest.mark.parametrize("helper", ["_PF_NO_DATA_STOP", "_pf_invariant_at"])
+@pytest.mark.parametrize(
+    "helper", ["_PF_NO_DATA_STOP", "_pf_invariant_at", "_PF_TIMEZONE_STOP"],
+)
 def test_script_function_with_emitter_name_is_reserved(helper):
     cpp = transpile(PRELUDE + f"{helper}(value) => value + 1\n"
-                    + f"result = {helper}(41)\n")
+                    + f"result = {helper}(41)\n"
+                    + 'stamp = timestamp("UTC", 2024, 1, 1, 0, 0)\n')
+    assert cpp.count(TIMEZONE_STOP_SHIM_CPP) == 1
     assert not re.search(rf"\bdouble {helper}\(", cpp)
     driver = r'''
 #include <cassert>
