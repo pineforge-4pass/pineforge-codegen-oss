@@ -4830,7 +4830,8 @@ class SecurityEmitter:
     def _emit_security_expr_hist_members(
         self, sec_id: int, expr_node, lines: list[str], mbb_suffix: str
     ) -> None:
-        if self._security_reads_bar_index(expr_node):
+        mutable_names = self._security_eval_info[sec_id].get("mutable_globals") or ()
+        if self._security_reads_bar_index(expr_node, mutable_names):
             # The requested bar's ``bar_index``: one count per requested bar,
             # advanced where the evaluator opens its slot.
             self._security_bar_index_secs.add(sec_id)
@@ -7878,6 +7879,11 @@ class SecurityEmitter:
             emitted_lines=emitted_lines,
         )
         expr_cpp = self._security_copy_store_cpp(node.name, info, node.value, expr_cpp)
+        cpp_type = self._security_cpp_type_for_mutable(node.name, info)
+        if node.value is None or isinstance(node.value, NaLiteral) or cpp_type == "double":
+            # A replayed declaration stores into its declared destination:
+            # bare na has that type, and a float copy preserves integer na.
+            expr_cpp = self._security_local_value(expr_cpp, node.value, cpp_type, ())
 
         if getattr(info, "is_var", False):
             if getattr(info, "is_series", False):
@@ -11697,35 +11703,48 @@ class SecurityEmitter:
         return (isinstance(node, Identifier) and node.name == "bar_index"
                 and "bar_index" not in getattr(self, "_safe_name_bound", ()))
 
-    def _security_reads_bar_index(self, expr_node) -> bool:
+    def _security_reads_bar_index(self, expr_node, mutable_names=()) -> bool:
         """Whether a payload reads ``bar_index``: in itself, the globals it
-        reads or the user functions it calls. TradingView evaluates it on
-        the requested bar -- the count of requested bars before it -- where
-        the evaluator used to read the chart's (``pine_bar_index()``)."""
-        from ..limits import iter_ast_nodes
-
+        reads, replayed state or the user functions it calls. Follow only
+        this request's mutable inventory, so retaining a copy does not
+        discover updates outside its original source boundary."""
         global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        mutable_infos = getattr(self, "_global_mutable_infos", None) or {}
+        mutable_names = set(mutable_names or ())
+        func_names = getattr(self, "_func_names", None) or ()
+        func_infos = getattr(self, "_func_info_map", None) or {}
+        budget = getattr(self, "_budget", None)
         seen: set[tuple[str, str]] = set()
+        visited: set[int] = set()
         pending = [expr_node]
         while pending:
-            root = pending.pop()
-            if not isinstance(root, ASTNode):
+            node = pending.pop()
+            if not isinstance(node, ASTNode) or id(node) in visited:
                 continue
-            for n, _depth in iter_ast_nodes(root):
-                if self._security_is_bar_index(n):
-                    return True
-                if (isinstance(n, Identifier) and n.name in global_expr_map
-                        and ("global", n.name) not in seen
-                        and self._security_identifier_is_global_binding(n)):
-                    seen.add(("global", n.name))
-                    pending.append(global_expr_map[n.name])
-                if (isinstance(n, FuncCall) and isinstance(n.callee, Identifier)
-                        and n.callee.name in self._func_names
-                        and ("func", n.callee.name) not in seen):
-                    seen.add(("func", n.callee.name))
-                    info = self._func_info_map.get(n.callee.name)
-                    if info is not None and getattr(info, "node", None) is not None:
-                        pending.extend(info.node.body)
+            visited.add(id(node))
+            if budget is not None:
+                budget.check(getattr(node, "loc", None), Phase.CODEGEN)
+            if self._security_is_bar_index(node):
+                return True
+            if (isinstance(node, Identifier)
+                    and self._security_identifier_is_global_binding(node)):
+                key = ("global", node.name)
+                if key not in seen:
+                    seen.add(key)
+                    if node.name in mutable_names:
+                        info = mutable_infos.get(node.name)
+                        pending.extend(getattr(info, "source_stmts", None) or ())
+                    elif node.name in global_expr_map:
+                        pending.append(global_expr_map[node.name])
+            if (isinstance(node, FuncCall) and isinstance(node.callee, Identifier)
+                    and node.callee.name in func_names
+                    and ("func", node.callee.name) not in seen):
+                seen.add(("func", node.callee.name))
+                info = func_infos.get(node.callee.name)
+                function = getattr(info, "node", None)
+                if function is not None:
+                    pending.extend(function.body or ())
+            pending.extend(syntax_children(node))
         return False
 
     def _security_variant_order_key(self, signature: tuple, binding_stack) -> tuple:

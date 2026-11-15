@@ -103,6 +103,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
   method calls, including named arguments. Numeric `na` values sort last in
   ascending order and first in descending order; string arrays use lexical
   ordering. The source array is unchanged. (#392)
+- `request.security` keeps the requested-bar history and declaration-time
+  value of top-level scalar copies of persistent or reassigned globals,
+  including copy chains. A declared float copy preserves an integer source's
+  missing value, and replayed updates use the requested `bar_index`.
+  See [#393](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/393).
 
 ## 1.12.0 — 2026-11-12
 

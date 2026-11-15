@@ -7,6 +7,7 @@ AnalyzerContext for the code generator.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from ..ast_nodes import (
@@ -36,7 +37,7 @@ from ..builtin_constants import BUILTIN_ENUM_STORAGE, contains_builtin_enum, is_
 from ..input_keys import assign_input_keys
 from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
 from ..security_contexts import (
-    PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series,
+    GLOBAL_ANNOTATION, PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series,
 )
 from ..session_reads import emitted_session_reads
 from ..collection_history import (
@@ -182,6 +183,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._session_unresolved_method_calls: dict[int, set[str]] = {}
         self._symbols = SymbolTable()
         self._ta_call_sites: list[TACallSite] = []
+        # Final analysis consumes this inventory even when no request was seen.
+        self._security_calls: list[SecurityCallInfo] = []
         self._series_vars: set[str] = set()
         self._series_var_members: set[str] = set()
         self._series_decl_nodes: set[int] = set()
@@ -731,6 +734,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             for name, info in self._global_binding_infos.items()
             if info.is_var or name in self._global_reassigned_names
         }
+        self._retain_security_value_copies(mutable_global_infos)
 
         pure_global_expr_map = {
             k: v for k, v in self._global_expr_map.items() if k not in mutable_global_infos
@@ -2467,9 +2471,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         out: set[str] = set()
 
         if isinstance(node, Identifier):
+            scope = self._identifier_binding_scopes.get(id(node))
+            if scope != "global" and not (
+                scope is None and (node.annotations or {}).get(GLOBAL_ANNOTATION)
+            ):
+                # Parameters and locals do not read a same-spelled global.
+                return out
             name = node.name
-            if name in self._global_binding_infos:
-                info = self._global_binding_infos[name]
+            info = self._global_binding_infos.get(name)
+            if info is not None:
                 if info.is_var or name in self._global_reassigned_names:
                     out.add(name)
                     if name in resolving:
@@ -2479,9 +2489,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         out |= self._collect_security_mutable_globals(stmt, resolving)
                     resolving.remove(name)
                     return out
-            if name in self._global_expr_map and name not in resolving:
+            value = self._global_expr_map.get(name)
+            if value is None and info is not None and isinstance(info.decl_node, VarDecl):
+                # The legacy series-name set can omit this global from the
+                # expression map after a helper parameter reads its history.
+                # Its declaration still records the call-time dependency.
+                value = info.decl_node.value
+            if value is not None and name not in resolving:
                 resolving.add(name)
-                out |= self._collect_security_mutable_globals(self._global_expr_map[name], resolving)
+                out |= self._collect_security_mutable_globals(value, resolving)
                 resolving.remove(name)
                 return out
 
@@ -2529,6 +2545,147 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             out |= self._collect_security_mutable_globals(child, resolving)
 
         return out
+
+    def _retain_security_value_copies(
+        self, mutable_infos: dict[str, MutableGlobalInfo],
+    ) -> None:
+        """Replay scalar copies whose value cannot be substituted in a request.
+
+        A history read needs the copy's own requested-bar samples. A copy made
+        before a later store to its source also needs its declaration replayed
+        at its original position, even without history. Chart storage and
+        helper-local bindings keep their independently analyzed identities.
+        """
+        if not self._security_calls or not mutable_infos:
+            return
+        budget = getattr(self, "_budget", None)
+        positions = {id(stmt): index for index, stmt in enumerate(self._ast.body)}
+
+        def is_global(node):
+            scope = self._identifier_binding_scopes.get(id(node))
+            annotations = getattr(node, "annotations", None) or {}
+            return scope == "global" or (
+                scope is None and bool(annotations.get(GLOBAL_ANNOTATION))
+            )
+
+        aliases = {}
+        last_write = {}
+        primitive = {PineType.FLOAT, PineType.INT, PineType.BOOL,
+                     PineType.STRING, PineType.COLOR}
+        for name, info in self._global_binding_infos.items():
+            if budget is not None:
+                budget.check(phase=Phase.ANALYZER)
+            last_write[name] = max(
+                (positions.get(id(stmt), -1) for stmt in info.source_stmts),
+                default=-1,
+            )
+            decl = info.decl_node
+            if (name in mutable_infos or info.pine_type not in primitive
+                    or not isinstance(decl, VarDecl) or id(decl) not in positions
+                    or not isinstance(decl.value, Identifier) or not is_global(decl.value)):
+                continue
+            source = self._global_binding_infos.get(decl.value.name)
+            if source is None or source.pine_type not in primitive:
+                continue
+            binding = self._identifier_decl_bindings.get(id(decl.value))
+            if (binding is not None and source.decl_node is not None
+                    and binding[0] != id(source.decl_node)):
+                continue
+            aliases[name] = source.name
+
+        # Memoize chains rather than walking once per path through a diamond.
+        rooted = dict.fromkeys(mutable_infos, True)
+        for name in aliases:
+            path, seen = [], set()
+            current = name
+            while current in aliases and current not in rooted and current not in seen:
+                if budget is not None:
+                    budget.check(phase=Phase.ANALYZER)
+                seen.add(current)
+                path.append(current)
+                current = aliases[current]
+            reaches_state = rooted.get(current, False)
+            for alias in path:
+                rooted[alias] = reaches_state
+        aliases = {name: source for name, source in aliases.items() if rooted[name]}
+        if not aliases:
+            return
+        snapshots = {
+            name for name, source in aliases.items()
+            if last_write[source] > positions[id(self._global_binding_infos[name].decl_node)]
+        }
+
+        def dependencies(root):
+            pending, seen, names, history = [root], set(), set(), set()
+            while pending:
+                if budget is not None:
+                    budget.check(phase=Phase.ANALYZER)
+                node = pending.pop()
+                if not isinstance(node, ASTNode) or id(node) in seen:
+                    continue
+                seen.add(id(node))
+                if (isinstance(node, Subscript) and isinstance(node.object, Identifier)
+                        and is_global(node.object) and node.object.name in aliases):
+                    history.add(node.object.name)
+                if isinstance(node, Identifier) and is_global(node):
+                    name = node.name
+                    if name in aliases or name in mutable_infos:
+                        names.add(name)
+                        pending.extend(self._global_binding_infos[name].source_stmts)
+                    elif name in self._global_expr_map:
+                        pending.append(self._global_expr_map[name])
+                if isinstance(node, FuncCall):
+                    if self._is_input_func_call(node):
+                        # Cosmetic input arguments are not data dependencies.
+                        pending.append(node.args[0] if node.args else node.kwargs.get("defval"))
+                        continue
+                    if isinstance(node.callee, Identifier):
+                        function = self._func_defs.get(node.callee.name)
+                        if function is not None:
+                            pending.extend(function.body)
+                pending.extend(syntax_children(node))
+            return names, history
+
+        required, histories = set(), set()
+        requests = []
+        for call in self._security_calls:
+            names, history = dependencies(call.expression)
+            histories.update(history)
+            required.update(names & snapshots)
+            requests.append((call, names))
+        required.update(histories)
+        if not required:
+            return
+        for name in sorted(required):
+            info = self._global_binding_infos[name]
+            mutable_infos[name] = replace(info, is_series=info.is_series or name in histories)
+        sources = {}
+        for name in sorted(required):
+            chain = set()
+            source = name
+            while source in aliases and source not in chain:
+                if budget is not None:
+                    budget.check(phase=Phase.ANALYZER)
+                chain.add(source)
+                source = aliases[source]
+            chain.add(source)
+            # The original call-time inventory already bounds which inputs
+            # of a source's updates are replayed. Retaining a copy must not
+            # widen that boundary to writes discovered later in the script.
+            sources[name] = chain & mutable_infos.keys()
+        for call, names in requests:
+            # Preserve each request's original replay boundary. A helper read
+            # elsewhere in its payload must not pull later chart-only writes
+            # into the request merely because another operand copies state.
+            original = set(getattr(call, "mutable_globals", ()) or ())
+            additions = set()
+            for name in names & required:
+                # Newly retained aliases need their own replay. A pre-existing
+                # mutable source participates only if this call already read
+                # it as mutable; its first later write is not retroactive.
+                additions.update(sources[name] & (original | required))
+            call.mutable_globals = tuple(sorted(original | additions))
+            call.depends_on_mutable_globals = bool(call.mutable_globals)
 
     def _session_history_unsafe_functions(
             self, func_defs: dict, find_calls, known_func_names: set[str],
