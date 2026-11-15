@@ -277,6 +277,17 @@ This exception covers only constructs PineForge refuses today. A form that compi
 The emission invariant (`AGENTS.md#emission-invariant`) states this rule for every emission path. The notes in this file describe existing behavior: a documented approximation or unsupported fallback is an implementation gap, not an exception to the invariant.
 
 Input defaults use the input family's Pine type and qualifier contract.
+Inventoried `size.*`, `position.*`, `line.style_*`, `label.style_*` and
+`shape.*` members have string values independently of a visual call's
+rendering support. `builtin_constants.py` supplies their value and semantic
+type to analysis, emission and string-input proofs. Line styles also supply
+box border styles. Assignments, selections and callable variants preserve
+those types. `order.ascending` and `order.descending` instead retain nominal
+`sort_order` TypeSpecs; their runtime storage does not permit a Pine string
+conversion. Typed slots and operator contracts check that identity.
+`tests/test_builtin_style_values.py` covers the value paths, named bindings
+and nominal restrictions, including order arguments of collection sorting.
+
 An explicit `const color` carrier with a proven initializer supplies its
 packed value to the getter and settings descriptor before `on_bar`; the
 manifest reads that descriptor. `codegen/constant_values.py` resolves lexical

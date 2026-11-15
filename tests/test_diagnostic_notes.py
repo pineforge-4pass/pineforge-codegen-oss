@@ -25,6 +25,26 @@ EMA_SEED_TEXT_DELTA = DELTA["text_changes"]["PF-W1505"]
 BEFORE = json.loads((FIXTURES / "catalog.before.json").read_text())["codes"]
 PRODUCT_BEFORE = json.loads((FIXTURES / "product.before.json").read_text())
 CATALOG_ENTRY_ADDITIONS = {
+    # Reserved builtin-enum identity copied from the stock-generated catalog.
+    "PF-E2093": {
+        "severity": "error",
+        "area": "analysis",
+        "message": "Cannot use {actual} as {expected} for {context}.",
+        "hint": None,
+        "explanation": "A built-in enum retains its nominal Pine type independently of its runtime storage. Assignments, arguments and defaults must use the expected semantic type.",
+        "args": {
+            "actual": {
+                "kind": "identifier",
+            },
+            "expected": {
+                "kind": "identifier",
+            },
+            "context": {
+                "kind": "identifier",
+            },
+        },
+        "user_message": "Cannot use {actual} as {expected} for {context}.",
+    },
     # Pine v6's order-condition migration has its own stable identity.
     "PF-E2081": {
         "severity": "error",
@@ -208,6 +228,7 @@ def test_exact_catalog_delta_and_legacy_pin():
     assert set(legacy) == set(BEFORE)
     assert set(current) == set(catalog)
     assert set(current) - set(legacy) == CATALOG_ADDITIONS
+    assert current["PF-E2093"] == "b2d5cd10ea46245c7a9e31ff15db9db7d8538221d5443c9cc15ba0013a19e93f"
     assert set(LOOKAHEAD_MIGRATION) == {"PF-E1085", "PF-W1085"}
     assert {code for code in legacy if legacy[code] != current[code]} == (
         NOTE_CODES | set(LOOKAHEAD_MIGRATION))
@@ -262,6 +283,20 @@ def test_catalog_delta_rejects_malformed_candidate(mutation):
                        else "changed")
     with pytest.raises((AssertionError, KeyError)):
         _assert_catalog_delta(bad)
+
+
+def test_catalog_delta_rejects_unknown_code():
+    catalog = copy.deepcopy(diagnostics_catalog()["codes"])
+    _assert_catalog_delta(catalog)
+    for code, template in (
+        ("PF-E9999", "PF-E2093"),
+        ("PF-W9999", "PF-W1503"),
+    ):
+        assert code not in catalog
+        candidate = copy.deepcopy(catalog)
+        candidate[code] = copy.deepcopy(catalog[template])
+        with pytest.raises(AssertionError):
+            _assert_catalog_delta(candidate)
 
 
 @pytest.mark.parametrize("code", ["PF-E1085", "PF-W1085"])

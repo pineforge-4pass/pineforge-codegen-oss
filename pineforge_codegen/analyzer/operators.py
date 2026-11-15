@@ -1,6 +1,7 @@
 """Pine operator overloads over semantic types, independent of C++ storage."""
 
 from ..symbols import TypeSpec
+from ..builtin_constants import is_builtin_enum
 
 
 # Only argument-independent scalar results belong here. The signature
@@ -196,7 +197,8 @@ def resolve_operator(
         # Enum identities establish equality constraints; their other
         # operator contracts still have no proven domain here.
         operands = tuple(
-            None if actual is not None and actual.kind == "enum" else actual
+            None if actual is not None and actual.kind == "enum"
+            and not is_builtin_enum(actual) else actual
             for actual in operands
         )
     if op == "?:":

@@ -1,11 +1,9 @@
 """Loud-rejection sweep for constant-only namespaces (audit items A1-A3, A6).
 
-Constant-namespace members (plot.style_*, text.align_*, shape.*, ...) are
-only legitimate as arguments to parse-and-skip visual calls or inside the
-strategy() declaration. As FREE EXPRESSIONS they used to fall through codegen
-to ``std::string("<member>")`` while the analyzer typed them INT — a silent
-mismatch. They must now reject with a clear CompileError, while the
-argument-context uses keep transpiling. ``alert.freq_*`` are an exception:
+Unlowered constant domains keep their existing explicit refusal, while
+inventoried string values are ordinary expressions. Shape constants now share
+their exact string values and types across value and visual-argument contexts.
+``alert.freq_*`` are also strings:
 TradingView gives them const string values ("all", "once_per_bar",
 "once_per_bar_close"; tests/test_e2e_alert_freq_values.py), so they are
 ordinary values. ``barmerge.*`` are another: a script may hold and compare
@@ -21,23 +19,27 @@ PRELUDE = '//@version=6\nstrategy("T")\n'
 
 
 # ---------------------------------------------------------------------------
-# Free-expression reads must reject
+# Free-expression reads follow their value contract
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("expr", [
-    "plot.style_line + 1",
-    "extend.both",
-    "font.family_monospace",
-    "hline.style_dashed",
-    "location.belowbar",
-    "scale.right",
-    "shape.triangleup",
-    "text.align_left",
-    "xloc.bar_index",
-    "yloc.price",
+@pytest.mark.parametrize("expr,expected", [
+    ("plot.style_line + 1", None),
+    ("extend.both", None),
+    ("font.family_monospace", None),
+    ("hline.style_dashed", None),
+    ("location.belowbar", None),
+    ("scale.right", None),
+    ("shape.triangleup", "shape_triangle_up"),
+    ("text.align_left", None),
+    ("xloc.bar_index", None),
+    ("yloc.price", None),
 ])
-def test_const_namespace_free_expression_rejected(expr):
+def test_const_namespace_free_expression_contract(expr, expected):
     ns = expr.split(".")[0]
+    if expected is not None:
+        cpp = transpile(PRELUDE + f"x = {expr}\n")
+        assert f'x = std::string("{expected}");' in cpp
+        return
     with pytest.raises(CompileError, match=ns):
         transpile(PRELUDE + f"x = {expr}\n")
 

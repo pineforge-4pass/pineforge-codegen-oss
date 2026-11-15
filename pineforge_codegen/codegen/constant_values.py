@@ -12,20 +12,26 @@ from ..library_v5 import _CONSTANT_NAMESPACES
 from ..security_contexts import ScriptIndex
 from ..signatures import INPUT_FUNCTIONS, MATH_CONSTANTS
 from ..symbols import PineType
+from ..builtin_constants import STRING_CONSTANT_VALUES, builtin_constant
 from .color_constants import COLOR_PARAMETERS, color_arguments, literal_color_value
 from .constant_fold import fold_constant_expression
 from .strategy_declaration import _NAMED_CONSTANTS
 from .tables import (
     ALERT_FREQ_VALUES, DRAWING_STYLE_NS, NAME_ECHO_STRING_MEMBERS,
-    ORDER_DIRECTION_MAP,
 )
 
 
 _STRING_INPUT_CONSTANT_MEMBERS = {
     **NAME_ECHO_STRING_MEMBERS,
     "alert": ALERT_FREQ_VALUES,
-    "order": ORDER_DIRECTION_MAP,
+    **STRING_CONSTANT_VALUES,
     "session": frozenset({"regular", "extended"}),
+}
+_SCALAR_CONSTANTS = {
+    **{f"math.{name}": value for name, value in MATH_CONSTANTS.items()},
+    **{f"{namespace}.{member}": value
+       for namespace, members in STRING_CONSTANT_VALUES.items()
+       for member, value in members.items()},
 }
 
 
@@ -171,8 +177,7 @@ class ConstantResolver:
                 if value is None or value.pine_type == PineType.COLOR:
                     return None
                 known[node.name] = value.value
-        value, proven = fold_constant_expression(
-            expr, known, {f"math.{name}": value for name, value in MATH_CONSTANTS.items()})
+        value, proven = fold_constant_expression(expr, known, _SCALAR_CONSTANTS)
         kind = {bool: PineType.BOOL, int: PineType.INT, float: PineType.FLOAT,
                 str: PineType.STRING}.get(type(value))
         return ConstantValue(kind, value) if proven and kind is not None else None
@@ -187,6 +192,9 @@ class ConstantResolver:
             return ConstantValue(PineType.COLOR, literal_color_value(expr))
         if (isinstance(expr, MemberAccess) and isinstance(expr.object, Identifier)
                 and id(expr.object) not in self.index.refs):
+            constant = builtin_constant(expr.object.name, expr.member)
+            if constant is not None and constant.type_spec.kind == "primitive":
+                return ConstantValue(PineType.STRING, constant.value)
             value = literal_color_value(expr)
             if value is not None:
                 return ConstantValue(PineType.COLOR, value)

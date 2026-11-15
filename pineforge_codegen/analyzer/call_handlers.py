@@ -139,6 +139,9 @@ class CallHandlers:
 
         if expr is None:
             return PineType.UNKNOWN
+        constant = self._builtin_constant_info(expr)
+        if constant is not None:
+            return constant.storage_type
         if isinstance(expr, ExprStmt):
             return infer(expr.expr)
         if isinstance(expr, Identifier):

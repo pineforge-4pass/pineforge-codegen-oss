@@ -22,6 +22,7 @@ import re
 from ..intrinsic_binding import validate_intrinsic_keywords
 from ..signatures import IntrinsicFunc
 from ..symbols import PineType
+from ..builtin_constants import ENUM_CONSTANT_VALUES
 from .helpers import (
     evaluate_args_once, na_preserving_int_cast, pine_index_int_cast,
     pine_truth_cast,
@@ -654,8 +655,8 @@ DISPLAY_MAP = {
 # order.* sort-direction constants — emitted as std::string literals. Unknown
 # member falls back to "ascending".
 ORDER_DIRECTION_MAP = {
-    "ascending": 'std::string("ascending")',
-    "descending": 'std::string("descending")',
+    member: f'std::string("{value}")'
+    for member, value in ENUM_CONSTANT_VALUES["order"][1].items()
 }
 
 NAME_ECHO_STRING_MEMBERS = {

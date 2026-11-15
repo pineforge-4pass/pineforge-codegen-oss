@@ -52,6 +52,16 @@ supported as exact pairs; on the 0.x line they are independent. See the
   uses their generated spelling. Declarations, calls and history storage use
   the same allocated identities. Regenerate C++ and relink affected strategies.
 
+- Built-in size, position, line/label style and shape constants retain their
+  string values in variables, selections, function arguments and returns, and
+  string input defaults/options. This fixes ambiguous C++ assignments, NUL
+  strings, unsupported size inputs and null-pointer string construction (#389).
+  Sort-order constants retain their distinct `sort_order` identity through
+  defaults and comparisons; invalid string conversions are diagnosed at their
+  Pine location, including individual elements of string input options.
+  `array.sort_indices` honors a supplied sort direction.
+  Scalar function overloads no longer crash during type checking.
+  Regenerate C++ and relink affected strategies.
 - A zone name the engine rejects now makes calendar-form `timestamp()` stop the
   run at its first evaluation, instead of silently calculating a UTC value.
   The paired engine reports a typed timezone error identifying the failed bar.

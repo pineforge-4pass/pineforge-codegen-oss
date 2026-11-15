@@ -178,19 +178,50 @@ def test_public_corpus_input_metadata_inventory_is_available():
 
 
 def test_unrepresentable_strings_match_receipt_in_both_envelopes():
+    # Preserve the original mixed fixture: its nominal sort_order default is
+    # TV-invalid as a string input, so both public APIs must refuse it.
     source = (ROOT / "tests" / "fixtures" / "input_metadata.pine").read_text()
+    with pytest.raises(CompileError, match="sort_order as string") as error:
+        transpile_full(source)
+    diagnostic = error.value.diagnostics[0]
+    assert diagnostic.code == "PF-E2093"
+    assert (diagnostic.location.line, diagnostic.location.col) == (13, 32)
+    assert diagnostic.args == {
+        "actual": "sort_order", "expected": "string",
+        "context": "argument 'defval' of 'input.string'",
+    }
+    envelope = json.loads(GLUE(source))
+    assert envelope["ok"] is False
+    assert "cpp" not in envelope
+    assert "inputs" not in envelope
+    errors = [item for item in envelope["diagnostics"] if item["severity"] == "error"]
+    assert [(item["code"], item["line"], item["col"], item["args"]) for item in errors] == [
+        (diagnostic.code, 13, 32, diagnostic.args),
+    ]
+
+
+def test_supported_string_constants_match_receipt_in_both_envelopes():
+    source = (ROOT / "tests" / "fixtures" / "input_metadata_strings.pine").read_text()
     inputs = transpile_full(source)["inputs"]
-    assert inputs == json.loads(GLUE(source))["inputs"]
+    envelope = json.loads(GLUE(source))
+    assert envelope["ok"] is True
+    assert inputs == envelope["inputs"]
     by_key = {entry["title"]: entry for entry in inputs}
-    for key in ("Size", "Position"):
-        assert by_key[key]["supported"] is False
-        assert by_key[key]["default"] == ""
-        assert by_key[key]["options"] == []
-    assert by_key["Mixed"]["supported"] is False
-    assert by_key["Mixed"]["default"] == "literal"
-    assert by_key["Mixed"]["options"] == []
-    assert all(entry["supported"] is True for entry in inputs
-               if entry["title"] not in ("Size", "Position", "Mixed"))
+    assert list(by_key) == [
+        "Length", "Threshold", "Enabled", "Source", "Side", "Symbol",
+        "Frequency", "Direction", "Currency", "Session", "Format",
+        "Size", "Position", "Mixed",
+    ]
+    for key, default, options in [
+        ("Size", "small", ["small", "tiny"]),
+        ("Position", "top_right", ["top_right", "bottom_right"]),
+        ("Mixed", "literal", ["literal", "small"]),
+    ]:
+        assert by_key[key] == {
+            "title": key, "type": "string", "default": default,
+            "options": options, "supported": True,
+        }
+    assert all(entry["supported"] is True for entry in inputs)
 
 
 STRING_VALUES = [

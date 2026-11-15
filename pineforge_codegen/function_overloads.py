@@ -55,6 +55,7 @@ class _ScalarProof:
 
     _STRING_RETURNING_STR_FUNCTIONS = Analyzer._STRING_RETURNING_STR_FUNCTIONS
     _is_certainly_string = Analyzer._is_certainly_string
+    _builtin_constant_info = Analyzer._builtin_constant_info
 
     def __init__(self, program: Program, function_names: set[str]) -> None:
         self._symbols = SymbolTable()

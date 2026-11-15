@@ -93,6 +93,7 @@ from .capacities import literal_history_offset
 
 from ..errors import CodegenInvariantError, Phase
 from ..symbols import TypeSpec
+from ..builtin_constants import builtin_constant
 from ..external_requests import UNPINNED_ANNOTATION
 from ..ast_nodes import (
     ASTNode,
@@ -1009,6 +1010,9 @@ class ExprVisitor:
             return self._visit_expr(StringLiteral(value=sizing.value))
         if isinstance(node.object, Identifier):
             ns = node.object.name
+            constant = builtin_constant(ns, node.member)
+            if constant is not None:
+                return f'std::string("{self._cpp_string_escape(constant.value)}")'
             if ns == "alert" and node.member in ALERT_FREQ_VALUES:
                 # TradingView's const string values (its own tape spells them).
                 return f'std::string("{ALERT_FREQ_VALUES[node.member]}")'
@@ -1380,12 +1384,9 @@ class ExprVisitor:
                 if node.member in COLOR_CONST_MAP:
                     return COLOR_CONST_MAP[node.member]
                 return "0"
-            # Drawing style/visual CONSTANT member reads (line.style_solid,
-            # box.style_dashed, label.style_label_left, ...). These namespaces
-            # left SKIP_NAMESPACES (their FuncCall forms now route to the arena),
-            # but their constant members only ever feed dropped visual kwargs, so
-            # they still lower to "0". The function names arrive as FuncCalls
-            # (visit_call), never here. See spec §4.4.
+            # Inventoried constants were lowered above, independently of the
+            # renderer. Uninventoried members retain the legacy fallback here;
+            # namespace functions arrive as FuncCalls in visit_call.
             if ns in DRAWING_STYLE_NS:
                 return "0"
             if ns in SKIP_NAMESPACES:

@@ -13,6 +13,7 @@ import pytest
 
 from pineforge_codegen import transpile_full
 from pineforge_codegen.codegen.checked_settings import _numeric_setting_value
+from pineforge_codegen.errors import CompileError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,12 +60,19 @@ def test_enum_inputs_publish_their_choices_and_keep_the_member_default():
 @pytest.mark.parametrize("literal,value", [
     ("alert.freq_all", "all"), ("alert.freq_once_per_bar", "once_per_bar"),
     ("currency.USD", "USD"), ("format.price", "price"),
-    ("order.ascending", "ascending"), ("session.regular", "regular")])
+    ("session.regular", "regular"), ("size.small", "small"),
+    ("position.top_right", "top_right"), ("line.style_dashed", "dsh"),
+    ("label.style_label_up", "lup"), ("shape.circle", "shape_circle")])
 def test_builtin_string_constants_publish_their_runtime_values(literal, value):
     inputs = _inputs(f'a = input.string({literal}, "A", options=[{literal}, "other"])\n')
     assert inputs["A"]["default"] == value
     assert inputs["A"]["options"] == [value, "other"]
     assert inputs["A"]["supported"] is True
+
+
+def test_sort_order_is_not_a_string_input_default():
+    with pytest.raises(CompileError, match="sort_order"):
+        _inputs('a = input.string(order.ascending, "A")\n')
 
 
 def test_named_string_constants_publish_their_values():

@@ -24,6 +24,7 @@ class Param:
     pine_type: PineType = PineType.FLOAT
     default: Any = None          # None = required, else default value
     is_series: bool = True       # series vs simple/const
+    type_spec: TypeSpec | None = None  # nominal identity beyond primitive storage
 
 
 @dataclass
@@ -492,6 +493,14 @@ ARRAY_FUNCTIONS: dict[str, IntrinsicFunc] = {
     "includes": _func("array.includes", _sig([("id", F), ("value", F)], ret=B)),
     "every": _func("array.every", _sig([("id", F)], ret=B)),
     "some": _func("array.some", _sig([("id", F)], ret=B)),
+    "sort": _func("array.sort", FuncSig(params=[
+        Param("id", F),
+        Param("order", S, "ascending", type_spec=TypeSpec("enum", name="sort_order")),
+    ], return_type=VOID)),
+    "sort_indices": _func("array.sort_indices", FuncSig(params=[
+        Param("id", F),
+        Param("order", S, "ascending", type_spec=TypeSpec("enum", name="sort_order")),
+    ], return_type=F)),
 }
 
 MATRIX_FUNCTIONS: dict[str, IntrinsicFunc] = {
@@ -502,6 +511,10 @@ MATRIX_FUNCTIONS: dict[str, IntrinsicFunc] = {
         "is_stochastic", "is_binary", "is_zero",
     )
 }
+MATRIX_FUNCTIONS["sort"] = _func("matrix.sort", FuncSig(params=[
+    Param("id", F), Param("column", I, 0),
+    Param("order", S, "ascending", type_spec=TypeSpec("enum", name="sort_order")),
+], return_type=VOID))
 
 # matrix.new<type>(rows, columns, initial_value): the row and column counts
 # default to 0. The record exists for keyword binding only (its element type
@@ -641,6 +654,9 @@ _input("float",  _sig([("defval", F), ("title", S, ""), ("minval", F, None),
                        ("maxval", F, None), ("step", F, None)] + _C, ret=F))
 _input("bool",   _sig([("defval", B), ("title", S, "")] + _C, ret=B))
 _input("string", _sig([("defval", S), ("title", S, ""), ("options", S, None)] + _C, ret=S))
+INPUT_FUNCTIONS["string"].primary.params[2].type_spec = TypeSpec.array(
+    TypeSpec.primitive("string")
+)
 _input("source", _sig([("defval", F), ("title", S, "")] + _C, ret=F),
        default_qualifier="series")
 _input("color",  _sig([("defval", I), ("title", S, "")] + _C, ret=I),

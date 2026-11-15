@@ -32,6 +32,7 @@ from ..symbols import (
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from ..limits import TimeBudget, iter_ast_nodes, syntax_children
+from ..builtin_constants import BUILTIN_ENUM_STORAGE, contains_builtin_enum, is_builtin_enum
 from ..input_keys import assign_input_keys
 from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
 from ..security_contexts import (
@@ -3656,6 +3657,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
     @staticmethod
     def _primitive_pine_type_from_spec(spec) -> PineType:
+        if is_builtin_enum(spec):
+            return BUILTIN_ENUM_STORAGE[spec.name]
         if spec is None or getattr(spec, "kind", None) != "primitive":
             return PineType.UNKNOWN
         return {
@@ -4485,7 +4488,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Convert CamelCase to snake_case for method lookup
         visitor = getattr(self, method_name, None)
         if visitor is not None:
-            return visitor(node)
+            result = visitor(node)
+            if isinstance(node, FuncCall):
+                self._check_builtin_enum_arguments(node)
+            return result
 
         # Fallback: try generic visit
         return PineType.VOID
@@ -5057,6 +5063,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             for value in (definition.annotations or {}).get("param_defaults", ())
             if value is not None
         }
+        for name, spec, value in zip(
+            definition.params, self._param_type_specs_from_def(definition),
+            (definition.annotations or {}).get("param_defaults", ()),
+        ):
+            self._check_nominal_slot(value, spec, f"default of parameter '{name}'")
 
     def _check_typed_parameter_mismatches(
         self,
@@ -5079,6 +5090,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # only limits the existing refusal.
         default_types = self._parameter_default_scalar_types.get(id(definition), {})
         for name, spec, value in zip(definition.params, specs, values):
+            if value is not None and spec is not None:
+                self._check_nominal_slot(value, spec, f"parameter '{name}' of '{function_name}'")
             if (
                 value is not None
                 and spec is not None
@@ -5092,6 +5105,91 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     f"for int parameter '{name}'.",
                     value.loc,
                 )
+
+    def _check_nominal_slot(self, value, expected, context, parameter_types=None):
+        """A builtin enum fits only its own nominal domain, never its storage."""
+        if (value is None or expected is None or self._pine_version != 6
+                or self._in_v5_library_definition(value)):
+            return
+        if (expected.kind == "array" and expected.element is not None
+                and isinstance(value, TupleLiteral)):
+            for item in value.elements:
+                self._check_nominal_slot(item, expected.element, context, parameter_types)
+            return
+        actual = self._operator_operand_type(value, parameter_types)
+        if not (contains_builtin_enum(actual) or contains_builtin_enum(expected)):
+            return
+        if (actual is None or actual == TypeSpec.primitive("na")
+                or join_value_types(actual, expected, invariant=True) is not None):
+            return
+        self._error(
+            f"Cannot use {actual} as {expected} for {context}.",
+            value.loc,
+        )
+
+    def _check_builtin_enum_arguments(self, node, parameter_types=None):
+        """Bind nominal argument contracts from the intrinsic signatures."""
+        if self._pine_version != 6 or self._in_v5_library_definition(node):
+            return
+        callee = node.callee
+        namespace = None
+        arguments = list(node.args)
+        if isinstance(callee, Identifier):
+            name = callee.name
+            if name in self._func_defs:
+                return
+        elif isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier):
+            name = callee.member
+            receiver = callee.object
+            fields = self._udt_field_type_specs.get(receiver.name)
+            if name == "new" and fields is not None:
+                for index, (field_name, field_spec) in enumerate(fields.items()):
+                    value = (arguments[index] if index < len(arguments)
+                             else node.kwargs.get(field_name))
+                    self._check_nominal_slot(
+                        value, field_spec, f"field '{field_name}' of '{receiver.name}'",
+                        parameter_types,
+                    )
+                return
+            receiver_spec = (
+                self._operator_operand_type(receiver, parameter_types)
+                if parameter_types is not None else self._type_spec_from_expr(receiver)
+            )
+            binding = self._value_bindings.declaration_bindings.get(id(receiver))
+            if binding is None:
+                namespace = receiver.name
+            elif receiver_spec is not None and receiver_spec.kind in {"array", "matrix", "map"}:
+                owner_name = method_receiver_type_name(receiver_spec)
+                if f"{owner_name}.{name}" in self._method_signatures:
+                    return
+                namespace = receiver_spec.kind
+                arguments.insert(0, receiver)
+            else:
+                return
+        else:
+            return
+        if namespace is None and name in {"int", "float", "bool", "string"}:
+            for argument in arguments:
+                self._check_nominal_slot(
+                    argument, TypeSpec.primitive(name), f"cast '{name}'", parameter_types,
+                )
+        intrinsic = sigs.get_intrinsic(namespace, name)
+        if intrinsic is None:
+            return
+        # Signature types for polymorphic collection values describe storage.
+        # Their element arguments retain the existing TypeSpec-aware checks.
+        parameters = max(intrinsic.signatures, key=lambda signature: len(signature.params)).params
+        for index, parameter in enumerate(parameters):
+            value = (arguments[index] if index < len(arguments)
+                     else node.kwargs.get(parameter.name))
+            if value is None:
+                continue
+            if namespace in {"array", "matrix", "map"} and parameter.type_spec is None:
+                continue
+            expected = parameter.type_spec or TypeSpec.primitive(parameter.pine_type.value)
+            self._check_nominal_slot(value, expected, f"argument '{parameter.name}' of "
+                                     f"'{namespace + '.' if namespace else ''}{name}'",
+                                     parameter_types)
 
     def _record_script_block_binding(self, sym: Symbol, outer: Symbol | None) -> None:
         if not self._block_node_stack or self._collection_scope_stack:
@@ -5166,6 +5264,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         )
         # Infer type from the value expression
         val_type = self._visit(node.value)
+        if node.type_hint:
+            self._check_nominal_slot(
+                node.value, self._type_spec_from_hint(node.type_hint),
+                f"declaration '{node.name}'",
+            )
         if (node.type_hint == "int"
                 and isinstance(node.value, NumberLiteral)
                 and isinstance(node.value.value, float)
@@ -5455,6 +5558,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _visit_Assignment(self, node: Assignment) -> PineType:
         # Visit the value first
         val_type = self._visit(node.value)
+        self._check_nominal_slot(
+            node.value, self._type_spec_from_expr(node.target), "assignment",
+        )
         if node.op in ("+=", "-=", "*=", "/=", "%="):
             self._check_operator_operands(
                 node, node.op[:-1], (node.target, node.value),
@@ -5854,10 +5960,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # (e.g. ``getLineStyle(styleStr)`` where ``styleStr`` is a ``string`` param).
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
         param_hints = (node.annotations or {}).get("param_type_hints", [])
+        param_specs = self._param_type_specs_from_def(node)
         for i, param in enumerate(node.params):
             hint = param_hints[i] if i < len(param_hints) else None
-            pspec = self._type_spec_from_hint(hint) if hint else None
+            pspec = param_specs[i]
             ptype = self._type_hint_to_pine(hint) if hint else PineType.UNKNOWN
+            if is_builtin_enum(pspec):
+                ptype = BUILTIN_ENUM_STORAGE[pspec.name]
             sym = Symbol(
                 name=param,
                 pine_type=ptype,
@@ -6179,6 +6288,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     terminal_direct_return_spec
                 )
 
+        if is_builtin_enum(terminal_direct_return_spec):
+            # A nominal result is independent of the primitive adapter used
+            # to store it, including a returned default parameter or wrapper.
+            body_type = BUILTIN_ENUM_STORAGE[terminal_direct_return_spec.name]
+            self._func_return_type_specs[node.name] = terminal_direct_return_spec
+
         # Store return type
         self._func_return_types[node.name] = body_type
 
@@ -6274,6 +6389,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         )
         self._record_parameter_default_scalar_types(node)
         method_key = f"{node.type_name}.{node.name}"
+        declared_param_specs = self._param_type_specs_from_def(node)
         self._symbols.enter_scope(f"method_{node.type_name}_{node.name}")
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
         param_hints = (node.annotations or {}).get("param_type_hints", [])
@@ -6286,7 +6402,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # a regular UDF parameter; seeding it as FLOAT makes even a single
             # bool/int history call silently coerce through Series<double>.
             ptype = self._type_hint_to_pine(hint) if hint else PineType.UNKNOWN
-            pspec = self._type_spec_from_hint(hint) if hint else None
+            pspec = declared_param_specs[i]
+            if is_builtin_enum(pspec):
+                ptype = BUILTIN_ENUM_STORAGE[pspec.name]
             udt_self = (
                 node.type_name
                 if i == 0 and pspec is not None and pspec.kind == "udt"
@@ -6340,6 +6458,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 ret_type = self._statement_value_type(node.body[-1], ret_type)
             if terminal_ret_expr is not None:
                 terminal_spec = self._type_spec_from_expr(terminal_ret_expr)
+                if is_builtin_enum(terminal_spec):
+                    return_type_spec = terminal_spec
+                    ret_type = BUILTIN_ENUM_STORAGE[terminal_spec.name]
                 nullable_selection = self._selection_contains_na(terminal_ret_expr)
                 terminal_needs_structured_return = (
                     nullable_selection
@@ -6509,12 +6630,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _certain_scalar_type(self, node: ASTNode) -> PineType:
         """Return a scalar type only when the syntax proves it.
 
-        Member access deliberately stays unknown: several namespace members
-        have legacy analyzer types that do not describe the value codegen
-        emits. Declaration hints, literals, builtin numeric series,
+        Uninventoried member access stays unknown: legacy namespace types
+        do not always describe emitted values. Inventoried typed constants,
+        declaration hints, literals, builtin numeric series,
         comparisons, logical results, arithmetic over proven numeric values,
         and the small set of scalar casts and builtin calls are reliable.
         """
+        constant = self._builtin_constant_info(node)
+        if constant is not None:
+            return constant.storage_type
         if isinstance(node, NumberLiteral):
             return PineType.FLOAT if isinstance(node.value, float) else PineType.INT
         if isinstance(node, StringLiteral):
@@ -7118,6 +7242,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         query: OperatorTypeQuery,
     ) -> TypeSpec | None:
         """Resolve an operand using the current expression query's memo."""
+        constant = self._builtin_constant_info(node)
+        if constant is not None:
+            return constant.type_spec
         if isinstance(node, Identifier) and parameter_types is not None:
             if node.name in parameter_types:
                 ptype = parameter_types[node.name]
@@ -9169,6 +9296,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.FLOAT
 
     def _visit_MemberAccess(self, node: MemberAccess) -> PineType:
+        constant = self._builtin_constant_info(node)
+        if constant is not None:
+            return constant.storage_type
         from ..drawing_all import drawing_all_kind
         if drawing_all_kind(node) not in {None, "polyline"}:
             # Collections use TypeSpec for their shape; PineType stays scalar.

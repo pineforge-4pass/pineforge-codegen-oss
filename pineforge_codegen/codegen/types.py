@@ -51,6 +51,7 @@ from ..cpp_names import cpp_identifier_fragment
 from ..errors import CodegenInvariantError, Phase
 from ..external_requests import UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
+from ..builtin_constants import BUILTIN_ENUM_STORAGE, builtin_constant, is_builtin_enum
 from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
 from ..matrix_overloads import matrix_sum_has_rhs
 from ..reference_casts import na_reference_cast_kind
@@ -185,6 +186,8 @@ class TypeInferer:
         """Render a TypeSpec as the equivalent C++ declaration string."""
         if spec is None:
             return "double"
+        if is_builtin_enum(spec):
+            return PINE_TYPE_TO_CPP[BUILTIN_ENUM_STORAGE[spec.name]]
         if spec.kind == "primitive":
             return {"float": "double", "int": "int", "int64": "int64_t",
                     "bool": "bool", "string": "std::string",
@@ -2758,7 +2761,9 @@ class TypeInferer:
                 spec = TypeSpec.primitive("color")
             if spec is None:
                 return None
-            if not nullable and spec.kind not in {"map", "matrix"}:
+            if (not nullable and spec.kind not in {"map", "matrix"}
+                    and spec != TypeSpec.primitive("string")
+                    and not is_builtin_enum(spec)):
                 return None
             result = (
                 spec
@@ -3064,6 +3069,10 @@ class TypeInferer:
                         if plan is not None else spec)
             if self._builtin_sizing_constant(node) is not None:
                 return TypeSpec.primitive("string")
+            if isinstance(node.object, Identifier):
+                constant = builtin_constant(node.object.name, node.member)
+                if constant is not None:
+                    return constant.type_spec
             return None
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
@@ -6543,6 +6552,11 @@ class TypeInferer:
                 return "std::string"
         if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
             ename = node.object.name
+            owner = self._type_spec_from_expr(node.object)
+            if owner is None:
+                constant = builtin_constant(ename, node.member)
+                if constant is not None:
+                    return self._type_spec_to_cpp(constant.type_spec)
             if ename == "color":
                 return "int64_t"
             if ename in self._enum_defs and node.member in self._enum_defs[ename]:

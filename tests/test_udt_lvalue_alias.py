@@ -249,6 +249,8 @@ if close > open
 plot(close)
 """
     cpp = transpile(src)
-    assert 'draw(std::string(""))' in cpp
+    # TradingView reference capture, entry 19: label.style_label_down=ldn.
+    # Source SHA-256: f5af7fd13cf1d6a645d13e36531caeffc995629fc810a95bbcc5dbb699cde973
+    assert "draw(std::string(\"ldn\"))" in cpp
     # No bare null-pointer string construction.
     assert "draw(0)" not in cpp

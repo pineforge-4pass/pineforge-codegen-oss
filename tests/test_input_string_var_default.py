@@ -438,13 +438,12 @@ def test_a_variable_holding_a_string_constant_carries_it():
     'value = input.string(size.small, "Choice")\n',
     'var D = size.small\nvalue = input.string(D, "Choice")\n',
 ])
-def test_visual_constants_keep_their_empty_default(body):
-    """Inert visual constants retain the safe legacy coercion and unsupported descriptor."""
+def test_visual_string_constants_keep_their_default_value(body):
+    """A direct constant or immutable carrier supplies the same supported value."""
     full = transpile_full(HEAD + body)
-    assert 'get_input_string("Choice", std::string(""))' in full["cpp"]
+    assert 'get_input_string("Choice", std::string("small"))' in full["cpp"]
     assert full["inputs"] == [{
-        "title": "Choice", "type": "string", "default": "",
-        "options": [], "supported": False,
+        "title": "Choice", "type": "string", "default": "small", "supported": True,
     }]
 
 
