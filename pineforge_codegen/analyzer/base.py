@@ -5745,6 +5745,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     node.loc or node.target.loc,
                 )
             else:
+                # Retain the target's lexical binding just like a read.
+                # A compound store may have no other read of its target
+                # to expose the dependency to a requested expression.
+                self._visit(node.target)
                 if (node.op in (":=", "+=", "-=", "*=", "/=", "%=")
                         and self._pine_version == 6
                         and not self._in_v5_library_definition(node)

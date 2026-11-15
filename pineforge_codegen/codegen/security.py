@@ -10789,8 +10789,7 @@ class SecurityEmitter:
                         types[current] = ("std::string" if series in self._security_string_series
                                           else "double")
                 elif value.target.name in args[4] and bound is None:
-                    # Assignment targets are resolved directly by the analyzer,
-                    # so unlike reads they need not carry identifier provenance.
+                    # The checked outer binding writes its request-owned state.
                     info = self._global_mutable_infos[value.target.name]
                     state = self._security_state_name(args[0], value.target.name)
                     current = f"{state}[0]" if info.is_series else state
