@@ -806,6 +806,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # authority for nested stateful-helper dispatch (see visit_call).
         self._current_instance_name: str | None = None
         self._instance_dispatch: dict[tuple[str | None, int], str] = {}
+        self._live_func_instances: set[str] | None = None
         self._fresh_instances: list[dict] = []
         self._fresh_var_members: list[tuple[str, str, str]] = []
         # Fresh fixnan members for context-sensitive helper instances (nested
@@ -2075,6 +2076,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         interned: dict[tuple, dict] = {}
         worklist: list[dict] = []
         seen_walk: set[str] = set()
+        instances: dict[str, dict] = {}
         fresh_counter = 0
 
         # Seed with the natural clones the flat emission loop produces.
@@ -2107,6 +2109,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if inst["name"] in seen_walk:
                 continue
             seen_walk.add(inst["name"])
+            instances[inst["name"]] = inst
             body = func_bodies.get(inst["fname"])
             if not body:
                 continue
@@ -2266,6 +2269,137 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     self._fresh_instances.append(ginst)
                     worklist.append(ginst)
                 self._instance_dispatch[(inst["name"], id(callnode))] = ginst["name"]
+
+        # Definition-time calls reserve variants too. First find the paths
+        # rooted in executable statements, using the same natural/fresh
+        # dispatch graph as the call visitor. Resolvable natural variants of
+        # those callable owners are retained below.
+        for fi in ctx.func_infos:
+            instances.setdefault(self._func_cpp_base_name(fi.name), {
+                "fname": fi.name, "name": self._func_cpp_base_name(fi.name),
+                "call_site_idx": None, "ta_remap": {},
+            })
+        methods: dict[int, set[str]] = {}
+        for call_id, key in ctx.method_call_bindings:
+            methods.setdefault(call_id, set()).add(key)
+
+        def targets(call, parent):
+            dispatch = self._instance_dispatch.get(
+                (parent["name"] if parent is not None else None, id(call)),
+            )
+            if dispatch is not None:
+                return [dispatch]
+            bound = ctx.func_call_cs_map.get(id(call))
+            if bound is not None:
+                names = [bound[0]]
+            elif id(call) in inherited_names:
+                names = [inherited_names[id(call)]]
+            elif isinstance(call.callee, Identifier) and call.callee.name in func_bodies:
+                names = [call.callee.name]
+            else:
+                names = sorted(methods.get(id(call), ()))
+            result = []
+            for name in names:
+                if name in stateful and ctx.func_call_site_counts.get(name, 0) > 0:
+                    index = (
+                        bound[1] if bound is not None
+                        else (parent.get("call_site_idx") or 0) if parent is not None
+                        else 0
+                    )
+                    result.append(natural_name(name, index))
+                else:
+                    result.append(self._func_cpp_base_name(name))
+            return result
+
+        roots = [
+            stmt for stmt in ctx.ast.body
+            if not isinstance(stmt, (FuncDef, MethodDef))
+        ]
+        pending = [
+            target
+            for call in self._iter_func_calls(roots)
+            for target in targets(call, None)
+        ]
+        live: set[str] = set()
+        live_owners: set[str] = set()
+        used_ta: set[str] = set()
+        while pending:
+            if self._budget is not None:
+                self._budget.check(phase=Phase.CODEGEN)
+            name = pending.pop()
+            if name in live:
+                continue
+            live.add(name)
+            instance = instances.get(name)
+            if instance is None:
+                continue
+            owner = instance["fname"]
+            live_owners.add(owner)
+            used_ta.update(instance.get("ta_remap", {}).values())
+            for call in self._iter_func_calls(func_bodies.get(owner, ())):
+                pending.extend(targets(call, instance))
+
+        # A reachable callable keeps its already-resolved natural variants,
+        # including state borrowed while analyzing an uncalled caller. Only
+        # definition-time paths whose state cannot be constructed need pruning.
+        # Check their whole dispatch closure so a retained body never names a
+        # dropped callee or TA member. Executable paths stay unconditional: the
+        # constructor guard must still report any invalid length they use.
+        sites_by_member = {
+            site.member_name: site for site in ctx.ta_call_sites
+        }
+        retainable: dict[str, bool] = {name: True for name in live}
+        retained_edges: dict[str, list[str]] = {}
+
+        def can_retain(name: str) -> bool:
+            if name in retainable:
+                return retainable[name]
+            if self._budget is not None:
+                self._budget.check(phase=Phase.CODEGEN)
+            retainable[name] = False
+            instance = instances.get(name)
+            if instance is None or instance["fname"] not in live_owners:
+                return False
+            for member in instance.get("ta_remap", {}).values():
+                site = sites_by_member.get(member)
+                if site is None or self._ta_dynamic_refusal(site) is not None:
+                    return False
+            retained_edges[name] = [
+                target
+                for call in self._iter_func_calls(
+                    func_bodies.get(instance["fname"], ())
+                )
+                for target in targets(call, instance)
+            ]
+            retainable[name] = all(
+                can_retain(target) for target in retained_edges[name]
+            )
+            return retainable[name]
+
+        pending = [
+            name for name, instance in instances.items()
+            if instance.get("call_site_idx") is not None
+            and not instance.get("fresh", False)
+            and name not in live and can_retain(name)
+        ]
+        while pending:
+            if self._budget is not None:
+                self._budget.check(phase=Phase.CODEGEN)
+            name = pending.pop()
+            if name in live:
+                continue
+            live.add(name)
+            used_ta.update(instances[name].get("ta_remap", {}).values())
+            pending.extend(retained_edges.get(name, ()))
+        self._live_func_instances = live
+        self._dead_func_names.update(stateful - live_owners)
+        self._dead_ta_indices = {
+            index for index, site in enumerate(ctx.ta_call_sites)
+            if site.owner_func in stateful and site.member_name not in used_ta
+        }
+        self._fresh_instances[:] = [
+            instance for instance in self._fresh_instances if instance["name"] in live
+        ]
 
     def _callable_var_collection_spec(
             self, name: str, owner_func: str | None = None) -> TypeSpec | None:
@@ -5657,17 +5791,27 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 # emits ``std::vector<T>`` and the eval method pushes the
                 # per-sub-bar value. Element type is inferred from the
                 # expression — analyzer constrained it to int / float / bool.
+                tuple_types = item.get("tuple_element_types", ())
                 ctype = self._infer_cpp_type_for_security_elem(expr_node)
-                if ctype not in ("double", "int", "bool"):
+                if tuple_types:
+                    accumulators = ", ".join(
+                        f"std::vector<{part}>"
+                        for part in self._lower_tf_tuple_cpp_types(tuple_types)
+                    )
+                    result_type = f"std::tuple<{accumulators}>"
+                elif ctype not in ("double", "int", "bool"):
                     # Defensive fallback — analyzer should already have
                     # rejected unsupported types, but keep the codegen
                     # well-defined if a future path slips through.
                     ctype = "double"
+                    result_type = f"std::vector<{ctype}>"
+                else:
+                    result_type = f"std::vector<{ctype}>"
                 self._security_ohlc_hist_fields_by_sec[sec_id] = (
                     self._collect_security_ohlc_hist_fields(state_expr)
                 )
                 lines.append(
-                    f"    std::vector<{ctype}> _req_sec_lower_tf_{sec_id}{{}};"
+                    f"    {result_type} _req_sec_lower_tf_{sec_id}{{}};"
                 )
                 for field in sorted(
                     self._security_ohlc_hist_fields_by_sec.get(sec_id, ())
@@ -6344,6 +6488,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if (has_ta or has_series or needs_security_clone) and total_cs > 0:
                 # Emit one variant per call site
                 for cs_idx in range(total_cs):
+                    if (self._live_func_instances is not None
+                            and self._func_variant_name(fi.name, cs_idx)
+                            not in self._live_func_instances):
+                        continue
                     self._emit_func_def(fi, lines, call_site_idx=cs_idx)
                     lines.append("")
             else:

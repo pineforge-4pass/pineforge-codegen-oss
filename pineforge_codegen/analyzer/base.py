@@ -5733,6 +5733,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
     def _visit_TupleAssign(self, node: TupleAssign) -> PineType:
         val_type = self._visit(node.value)
+        lower_types = (node.value.annotations or {}).get(
+            "lower_tf_tuple_element_types", (),
+        )
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
         is_program_global = (
             self._global_scope and self._symbols.current_scope.name == "global"
@@ -5847,7 +5850,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._record_script_block_binding(sym, outer_symbol)
             self._note_member_writer(sym, name, node)
 
-            if (self._collection_scope_stack
+            if idx < len(lower_types):
+                inner = lower_types[idx]
+                spec = TypeSpec.array(
+                    TypeSpec.primitive("int64") if inner == PineType.INT
+                    else self._pine_type_to_spec(inner)
+                )
+                self._record_collection_type(name, spec)
+            elif (self._collection_scope_stack
                     and self._block_node_stack
                     and self._symbols.current_scope.name != "global"):
                 owner_id = id(self._block_node_stack[-1])

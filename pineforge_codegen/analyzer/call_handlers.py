@@ -1004,9 +1004,8 @@ class CallHandlers:
         the codegen knows to emit a ``std::vector<T>`` accumulator that
         gets cleared on sub-bar 0 and pushed-to per sub-bar.
 
-        UDT / color / string element types are deliberately rejected here
-        with a precise diagnostic; the runtime path only knows how to
-        accumulate ``double`` / ``int`` / ``bool``."""
+        Scalar calls retain their existing numeric/bool arrays. Tuple calls
+        carry each primitive element's type to its own array accumulator."""
         param_names = ["symbol", "timeframe", "expression",
                        "ignore_invalid_symbol", "currency",
                        "ignore_invalid_timeframe", "calc_bars_count"]
@@ -1036,13 +1035,6 @@ class CallHandlers:
                 node.loc,
             )
 
-        if isinstance(expr_node, TupleLiteral):
-            self._error(
-                "request.security_lower_tf does not support tuple expressions yet. "
-                "Issue separate request.security_lower_tf calls for each series.",
-                node.loc,
-            )
-
         for arg in node.args:
             if arg is not None and arg is not expr_node:
                 self._visit(arg)
@@ -1057,20 +1049,45 @@ class CallHandlers:
         ta_end = len(self._ta_call_sites)
         security_ta_range = (ta_start, ta_end) if ta_end > ta_start else None
 
+        tuple_types = self._tuple_element_types_by_node.get(id(expr_node), ())
+        if (isinstance(expr_node, FuncCall)
+                and isinstance(expr_node.callee, Identifier)
+                and self._func_returns_tuple.get(expr_node.callee.name, False)):
+            tuple_types = self._func_tuple_element_types.get(expr_node.callee.name, ())
+            if PineType.UNKNOWN in tuple_types:
+                tuple_types = self._security_callsite_tuple_types(
+                    expr_node.callee.name, expr_node, tuple_types,
+                )
+        elif (isinstance(expr_node, FuncCall)
+              and isinstance(expr_node.callee, MemberAccess)
+              and isinstance(expr_node.callee.object, Identifier)
+              and expr_node.callee.object.name == "ta"):
+            count = TA_TUPLE_ELEMENT_COUNTS.get(expr_node.callee.member, 0)
+            if count:
+                tuple_types = tuple_types or (PineType.FLOAT,) * count
+
         # Cache the resolved element type on the call node so the
         # ``_type_spec_from_expr`` pass can map ``request.security_lower_tf``
         # to ``array<T>`` without re-visiting the expression (which would
         # double-allocate TA call sites for expressions like ``ta.ema``).
         cached_anns = getattr(node, "annotations", None) or {}
         cached_anns["lower_tf_element_pine_type"] = expr_pine_type
+        if tuple_types:
+            cached_anns["lower_tf_tuple_element_types"] = tuple_types
+            self._security_tuple_shapes[id(node)] = len(tuple_types)
         node.annotations = cached_anns
 
-        if expr_pine_type not in (PineType.FLOAT, PineType.INT, PineType.BOOL,
-                                   PineType.NA, PineType.UNKNOWN):
+        element_types = tuple_types or (expr_pine_type,)
+        supported = {PineType.FLOAT, PineType.INT, PineType.BOOL,
+                     PineType.NA, PineType.UNKNOWN}
+        if tuple_types:
+            supported |= {PineType.STRING, PineType.COLOR}
+        unsupported = next((item for item in element_types if item not in supported), None)
+        if unsupported is not None:
             element_label = {
                 PineType.STRING: "string",
                 PineType.COLOR: "color",
-            }.get(expr_pine_type, str(expr_pine_type))
+            }.get(unsupported, str(unsupported))
             self._error(
                 "request.security_lower_tf element type '" + element_label
                 + "' is not yet supported. Supported element types: float, int, bool. "
@@ -1088,8 +1105,9 @@ class CallHandlers:
             sec_id=sec_id,
             timeframe=context["timeframe"] if context is not None else tf_node,
             expression=expr_node,
-            returns_tuple=False,
-            tuple_size=0,
+            returns_tuple=bool(tuple_types),
+            tuple_size=len(tuple_types),
+            tuple_element_types=tuple(tuple_types),
             gaps=None,
             lookahead=None,
             ta_range=security_ta_range,

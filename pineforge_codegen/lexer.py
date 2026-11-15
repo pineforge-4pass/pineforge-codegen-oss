@@ -386,12 +386,24 @@ class Lexer:
             indent_level += 1
 
         raw = self.source[line_start: self.pos]
-        if " \t" in raw:
+        columns = raw.count("\t") * 4 + raw.count(" ")
+        mixed = "\t" in raw and " " in raw
+        aligned_block = (
+            columns % 4 == 0
+            and columns // 4 <= self.indent_stack[-1] + 1
+        )
+        if " \t" in raw and not aligned_block:
             self._emit_diagnostic(
                 "Indentation cannot contain spaces followed by a tab.",
                 self.line, self.col, self.col + 1,
             )
-        if "\t" in raw:
+        if mixed and aligned_block and not self._in_continuation:
+            indent_level = columns // 4
+        elif "\t" in raw:
+            # Keep the established treatment of incomplete mixed prefixes
+            # and first-body skipped widths, including pending logical-line
+            # continuations. Their TV grammar is not established by the
+            # nested, complete-level layouts.
             indent_level = raw.count("\t")
         else:
             indent_level = len(raw) // 4
