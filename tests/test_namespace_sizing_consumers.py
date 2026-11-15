@@ -176,14 +176,28 @@ def test_legacy_constant_storage_is_not_a_semantic_operator_proof(namespace, mem
 
 @pytest.mark.parametrize("version", (5, 6))
 def test_authored_namespace_receiver_keeps_its_field_type(version):
-    cpp = transpile(
-        f'//@version={version}\nstrategy("Sizing receiver")\n'
-        "type Mode\n    int cash\n"
-        "readMode(Mode strategy) => strategy.cash\n"
-        "sampleValue = readMode(Mode.new(3))\n"
-        "if sampleValue > 0\n"
-        '    strategy.entry("L", strategy.long)\n'
-    )
+    if version == 5:
+        libraries = {"pftest/SizingReceiver/1": (
+            '//@version=5\nlibrary("SizingReceiver")\n'
+            "export type Mode\n    int cash\n"
+            "export readMode(Mode strategy) => strategy.cash\n"
+        )}
+        source = (
+            HEADER + "import pftest/SizingReceiver/1 as L\n"
+            "sampleValue = L.readMode(L.Mode.new(3))\n"
+            "if sampleValue > 0\n"
+            '    strategy.entry("L", strategy.long)\n'
+        )
+        cpp = transpile(source, libraries=libraries)
+    else:
+        cpp = transpile(
+            f'//@version={version}\nstrategy("Sizing receiver")\n'
+            "type Mode\n    int cash\n"
+            "readMode(Mode strategy) => strategy.cash\n"
+            "sampleValue = readMode(Mode.new(3))\n"
+            "if sampleValue > 0\n"
+            '    strategy.entry("L", strategy.long)\n'
+        )
     body = _source_body(cpp)
     assert "readMode(" in body
     assert "strategy_entry(" in body
