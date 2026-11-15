@@ -42,7 +42,8 @@ def test_length_rejects_undeclared_parameter_names(name):
     assert diagnostic.phase == Phase.ANALYZER
     assert diagnostic.args == {"key": "str.length", "name": name}
     assert diagnostic.location.line == 3
-    assert diagnostic.location.col == body.index(f"{name} =") + 1
+    argument_start = body.index("(") + 1
+    assert diagnostic.location.col == body.index(f"{name} =", argument_start) + 1
 
 
 @pytest.mark.parametrize("name", TYPE_NAMES)
