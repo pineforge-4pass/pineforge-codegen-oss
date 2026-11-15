@@ -96,7 +96,7 @@ def test_non_string_timeframes_are_refused_by_semantic_type(
     line, = [(index, line) for index, line in enumerate(source.splitlines(), 1)
              if call in line]
     assert diagnostic.location.line == line[0]
-    assert diagnostic.location.col == line[1].index(supplied) + (
+    assert diagnostic.location.col == line[1].index(supplied, line[1].index(call)) + (
         len("timeframe = ") if named else 0
     ) + 1
 
