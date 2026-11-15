@@ -3830,6 +3830,12 @@ class CallVisitor:
         constant = self._builtin_sizing_constant(node)
         if constant is not None:
             return str(constant.host_value)
+        if isinstance(node, Ternary):
+            return (
+                f"(({self._visit_expr(node.condition)}) ? "
+                f"({self._strategy_qty_type_arg(node.true_val)}) : "
+                f"({self._strategy_qty_type_arg(node.false_val)}))"
+            )
         value = self._visit_expr(node)
         if self._infer_type(node) != "std::string":
             # Retain the legacy numeric host API, including its -1 sentinel.
