@@ -5,7 +5,7 @@ from collections import Counter
 from ..ast_nodes import EnumDecl, FuncDef, Identifier, StrategyDecl, StringLiteral, TypeDecl, VarDecl
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from ..limits import iter_ast_nodes
-from ..signatures import MATH_CONSTANTS, STRATEGY_PARAMETERS
+from ..signatures import MATH_CONSTANTS, STRATEGY_PARAMETERS, STRATEGY_SIZING_CONSTANTS
 from .constant_fold import NON_CONSTANT, NamedConstant, fold_constant_expression
 from .tables import DAYOFWEEK_MAP, NAME_ECHO_STRING_MEMBERS
 
@@ -16,12 +16,16 @@ DECLARATION_ONLY_CONSTANT = "pf_strategy_declaration_only_constant"
 _NAMED_CONSTANTS = {
     f"strategy.{name}": NamedConstant(f"strategy.{name}", name.rsplit(".", 1)[-1])
     for name in (
-        "fixed", "cash", "percent_of_equity", "commission.percent",
+        "commission.percent",
         "commission.cash_per_order", "commission.cash_per_contract",
         "long", "short", "oca.none", "oca.cancel", "oca.reduce",
         "direction.all", "direction.long", "direction.short",
     )
 }
+_NAMED_CONSTANTS.update({
+    name: NamedConstant(name, item.value)
+    for name, item in STRATEGY_SIZING_CONSTANTS.items()
+})
 _NAMED_CONSTANTS.update({
     f"{namespace}.{member}": NamedConstant(f"{namespace}.{member}", member)
     for namespace in ("currency", "format")

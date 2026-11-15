@@ -1071,8 +1071,8 @@ ALLOWLIST_USER_MESSAGES = {
 }
 
 
-# Declaration presentation follows the extracted template through code allocation.
-STRATEGY_DECLARATION_PRESENTATION = {
+# Authored presentation follows the extracted template through code allocation.
+DIAGNOSTIC_PRESENTATION = {
     "strategy(): too many positional arguments (expected {expected_count}, got {actual_count})": (
         "A strategy declaration has more positional values than its signature accepts. "
         "Remove the extra values or use the declared parameter names.",
@@ -1087,6 +1087,13 @@ STRATEGY_DECLARATION_PRESENTATION = {
         "A strategy declaration setting depends on a series, input, mutable variable or unresolved name. "
         "Supply a literal or an expression over earlier constants.",
         "Strategy setting ''{name}'' must be a compile-time constant.",
+    ),
+    "Cannot call ''{function_name}'' with an argument of type {argument_type} for "
+    "{parameter_type} parameter ''{name}''.": (
+        "A non-string value cannot be used for a string parameter. Pass a string value "
+        "of the declared parameter type; a permitted generic na adopts that type.",
+        "Argument ''{name}'' of ''{function_name}'' has type {argument_type}, "
+        "but requires {parameter_type}.",
     ),
 }
 
@@ -1137,7 +1144,7 @@ def main(argv=None) -> int:
                 entry["user_message"] = sentence
                 entry["explanation"] = entry["explanation"] or _ALLOWLIST_EXPLANATION
         for entry in catalog["codes"].values():
-            presentation = STRATEGY_DECLARATION_PRESENTATION.get(entry["message"])
+            presentation = DIAGNOSTIC_PRESENTATION.get(entry["message"])
             if presentation is not None:
                 explanation, sentence = presentation
                 entry["explanation"] = entry["explanation"] or explanation

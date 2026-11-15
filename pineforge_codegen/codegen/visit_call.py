@@ -157,8 +157,16 @@ from ..diagnostic_codes import render_diagnostic
 from ..external_requests import RECORDED_KEY_ANNOTATION, request_stop_marker
 from ..intrinsic_binding import bind_intrinsic_arguments, validate_intrinsic_keywords
 from ..limits import iter_ast_nodes
+from ..reference_casts import na_reference_cast_kind
 from ..security_contexts import ticker_symbol_arg
-from ..symbols import PineType, TypeSpec, method_receiver_type_name
+from ..symbols import (
+    PineType,
+    TypeSpec,
+    method_receiver_type_name,
+    public_cpp_type_name,
+    public_type_name,
+)
+from ..analyzer.value_bindings import ValueBindings
 from ..method_binding import (
     MethodBindError,
     bind_function_defaults,
@@ -428,12 +436,12 @@ class CallVisitor:
 
         cs_info = self.ctx.func_call_cs_map.get(id(node))
         if self._active_call_site_idx is not None and cs_info is not None:
-            return f"{base}_cs{self._active_call_site_idx}"
+            return self._func_variant_name(fi.name, self._active_call_site_idx)
         if cs_info is not None and cs_info[0] == fi.name:
-            return f"{base}_cs{cs_info[1]}"
+            return self._func_variant_name(fi.name, cs_info[1])
         if (self._active_call_site_idx is not None
                 and self.ctx.func_call_site_counts.get(fi.name, 0) > 1):
-            return f"{base}_cs{self._active_call_site_idx}"
+            return self._func_variant_name(fi.name, self._active_call_site_idx)
         return base
 
     def _typed_user_method_info(self, receiver, member: str):
@@ -2573,6 +2581,8 @@ class CallVisitor:
             return self._emit_drawing_namespace_call(namespace, func_name, node)
         if self._is_chart_point_callee(callee):
             return self._emit_chart_point(func_name, node)
+        if namespace == "polyline" and func_name in {"new", "delete"}:
+            return self._emit_polyline_call(func_name, node)
 
         # Skip visual/unsupported namespace calls
         if namespace in SKIP_NAMESPACES or namespace in SKIP_VAR_TYPES:
@@ -2990,10 +3000,8 @@ class CallVisitor:
             )
 
         # Drawing casts of na use the same missing handle as a typed binding.
-        if (namespace is None and func_name in ("line", "box")
-                and len(node.args) == 1 and not node.kwargs
-                and self._is_na_expr(node.args[0])):
-            return f"{DRAWING_TYPE_TO_CPP[func_name]}{{}}"
+        if cast_kind := na_reference_cast_kind(node):
+            return f"{DRAWING_TYPE_TO_CPP[cast_kind]}{{}}"
 
         # Type cast functions: int(x), float(x), bool(x), string(x)
         if func_name == "int" and namespace is None and node.args:
@@ -3211,22 +3219,84 @@ class CallVisitor:
                 return f'{log_funcs[func_name]}({self._visit_expr(message)})'
             return '"" /* unsupported log */'
 
-        # timeframe.* calls (e.g., timeframe.change) — not supported in single-TF backtest
+        # An empty timeframe argument denotes the chart period, whether it
+        # comes from a literal, an input or a user call. Bind by parameter
+        # name and resolve the evaluated string, not the argument's AST form.
         if namespace == "timeframe":
-            if func_name == "change":
-                tf_arg = self._visit_expr(node.args[0]) if node.args else 'script_tf_'
-                # Symbol-clock overload: D/W/M boundaries fall on the SYMBOL's
-                # session day (17:00 ET on OANDA forex, 09:30 ET RTH on
-                # equities), intraday buckets on the session-open grid — the
-                # same clock request.security aggregation uses. UTC/24x7
-                # syminfo reduces to the tz-less epoch math bit-for-bit.
-                return (
-                    f'tf_change(prev_bar_timestamp_, current_bar_.timestamp, {tf_arg}, '
-                    'syminfo_.timezone, syminfo_.session)'
+            if func_name in ("change", "in_seconds"):
+                argument = self._resolve_func_args(
+                    node, f"timeframe.{func_name}",
+                ).get("timeframe")
+
+                def timeframe_call(tf_arg: str) -> str:
+                    if func_name == "change":
+                        # Keep the symbol-clock overload for calendar and
+                        # session-anchored intraday boundaries.
+                        return (
+                            f'tf_change(prev_bar_timestamp_, current_bar_.timestamp, {tf_arg}, '
+                            'syminfo_.timezone, syminfo_.session)'
+                        )
+                    return f'tf_to_seconds({tf_arg})'
+
+                if argument is None:
+                    return timeframe_call("script_tf_")
+                actual = self._type_spec_from_expr(argument)
+                if (actual is None and isinstance(argument, MemberAccess)
+                        and isinstance(argument.object, Identifier)
+                        and self.ctx.identifier_decl_bindings.get(id(argument.object)) is None
+                        and ValueBindings.declaration_of(argument.object) is None):
+                    variable_spec = sigs.get_variable_type_spec(
+                        argument.object.name, argument.member,
+                    )
+                    if variable_spec is not None:
+                        actual = variable_spec
+                actual_cpp_type = self._text_type(argument)
+                argument_is_string = (
+                    actual == TypeSpec.primitive("string")
+                    or (actual is None and actual_cpp_type == "std::string")
                 )
-            if func_name == "in_seconds":
-                tf_arg = self._visit_expr(node.args[0]) if node.args else 'script_tf_'
-                return f'tf_to_seconds({tf_arg})'
+                if (not isinstance(argument, NaLiteral)
+                        and (not argument_is_string or actual_cpp_type == "bool")):
+                    # A call-site variant may resolve an untyped helper after
+                    # analysis. Check before bool-to-text compatibility can
+                    # turn a non-string value into a C++ string.
+                    argument_type = (
+                        public_type_name(actual)
+                        if actual is not None
+                        else public_cpp_type_name(actual_cpp_type)
+                    )
+                    intrinsic = sigs.BUILTIN_FUNCTIONS[f"{namespace}.{func_name}"]
+                    parameter = intrinsic.primary.params[0]
+                    function_name = intrinsic.name
+                    parameter_type = parameter.pine_type.value
+                    name = parameter.name
+                    from ..pine_spelling import expr_start
+
+                    self._codegen_error(
+                        expr_start(argument),
+                        f"Cannot call '{function_name}' with an argument of type {argument_type} "
+                        f"for {parameter_type} parameter '{name}'.",
+                    )
+                argument_cpp = self._visit_rhs_value(
+                    argument, target_cpp_type="std::string",
+                )
+                if cpp_is_plain_read(argument_cpp):
+                    # Keep resolved locals and parameters as direct engine
+                    # arguments when nonempty. Stable reads can be checked
+                    # without introducing another binding.
+                    return (
+                        f'(({argument_cpp}).empty() ? {timeframe_call("script_tf_")} : '
+                        f'{timeframe_call(argument_cpp)})'
+                    )
+                # A function-return argument can carry state. Evaluate it
+                # once before testing emptiness and passing the chosen value.
+                call = timeframe_call(
+                    "(_pf_timeframe_arg.empty() ? script_tf_ : _pf_timeframe_arg)"
+                )
+                return (
+                    '([&]() { const std::string _pf_timeframe_arg = '
+                    f'({argument_cpp}); return {call}; }}())'
+                )
             # Defensive: support_checker.NOT_YET_FUNC should already have rejected
             # any unhandled timeframe.* call. Reaching here implies the checker was
             # bypassed.
@@ -3277,20 +3347,7 @@ class CallVisitor:
                     try:
                         val = self._visit_rhs_value(
                             value_node,
-                            target_cpp_type=(
-                                f_cpp_type
-                                if (self._is_nullable_collection_cpp_type(f_cpp_type)
-                                    or (f_cpp_type == "std::vector<int64_t>"
-                                        and ("field", namespace, f.name)
-                                            in self._array_widths.wide)
-                                    or f_cpp_type in self._udt_defs
-                                    or f_cpp_type in DRAWING_TYPE_TO_CPP.values()
-                                    # A bare na for a string field is the typed
-                                    # string na, not the numeric ``na<double>()``.
-                                    or (f_cpp_type == "std::string"
-                                        and self._is_na_expr(value_node)))
-                                else None
-                            ),
+                            target_cpp_type=f_cpp_type,
                         )
                     finally:
                         self._array_ctor_expected = previous_expected
@@ -3612,16 +3669,16 @@ class CallVisitor:
             # the parent's active call-site index. This ensures sub-functions
             # called from ma_cs6() use their _cs6 variant, not _cs0.
             fname, _ = cs_info
-            emit_name = f"{self._func_safe_name(fname)}_cs{self._active_call_site_idx}"
+            emit_name = self._func_variant_name(fname, self._active_call_site_idx)
         elif cs_info is not None:
             fname, cs_idx = cs_info
-            emit_name = f"{self._func_safe_name(fname)}_cs{cs_idx}"
+            emit_name = self._func_variant_name(fname, cs_idx)
         elif (self._active_call_site_idx is not None
               and func_name in self._func_names
               and self.ctx.func_call_site_counts.get(func_name, 0) > 1):
             # Inside a per-call-site variant: propagate call-site index to
             # sub-functions that also have variants (for state isolation)
-            emit_name = f"{self._func_safe_name(func_name)}_cs{self._active_call_site_idx}"
+            emit_name = self._func_variant_name(func_name, self._active_call_site_idx)
         call_head = emit_name
         if namespace is None and func_name in self._func_names:
             return self._ordered_user_call_expr(
@@ -3754,6 +3811,34 @@ class CallVisitor:
         """A missing Pine string uses the host's empty-string sentinel."""
         return '""' if node is None or isinstance(node, NaLiteral) else self._visit_expr(node)
 
+    def _strategy_qty_type_arg(self, node) -> str:
+        """Convert a Pine sizing string only where the host expects its code."""
+        if node is None:
+            return "-1"
+        constant = self._builtin_sizing_constant(node)
+        if constant is not None:
+            return str(constant.host_value)
+        if isinstance(node, Ternary):
+            return (
+                f"(({self._visit_expr(node.condition)}) ? "
+                f"({self._strategy_qty_type_arg(node.true_val)}) : "
+                f"({self._strategy_qty_type_arg(node.false_val)}))"
+            )
+        value = self._visit_expr(node)
+        if self._infer_type(node) != "std::string":
+            # Retain the legacy numeric host API, including its -1 sentinel.
+            return value
+        cases = " ".join(
+            f"if (_pf_qty_type == {self._visit_expr(StringLiteral(value=item.value))}) "
+            f"return {item.host_value};"
+            for item in sigs.STRATEGY_SIZING_CONSTANTS.values()
+        )
+        return (
+            "([&]() -> int { const std::string _pf_qty_type = "
+            f"({value}); {cases} "
+            'throw std::invalid_argument("Unknown strategy sizing value"); }())'
+        )
+
     def _visit_strategy_call(self, func_name: str, node: FuncCall) -> str:
         from .order_shapes import record_order_call
         if func_name in ("convert_to_account", "convert_to_symbol"):
@@ -3789,7 +3874,7 @@ class CallVisitor:
             comment_val = self._strategy_string_arg(comment)
             oca_name_val = self._strategy_string_arg(oca_name)
             oca_type_val = self._visit_expr(oca_type) if oca_type else "0"
-            qty_type_val = self._visit_expr(qty_type) if qty_type else "-1"
+            qty_type_val = self._strategy_qty_type_arg(qty_type)
             qty_val = self._visit_float_arg(qty)
             if stop is not None or limit is not None or qty is not None or oca_name is not None or oca_type is not None or qty_type is not None:
                 limit_val = self._visit_float_arg(limit)
@@ -4405,18 +4490,20 @@ class CallVisitor:
 
         Uses the PineScript parameter ordering from signatures registry.
         """
-        # sig_key is like "strategy.entry" -> namespace="strategy", func_name="entry"
+        # Namespace records use their short name; dotted builtin records use
+        # the complete key in BUILTIN_FUNCTIONS (e.g. timeframe.change).
         parts = sig_key.split(".", 1)
+        intrinsic = (
+            sigs.get_intrinsic(parts[0], parts[1]) if len(parts) == 2 else None
+        )
+        if intrinsic is None:
+            intrinsic = sigs.get_intrinsic(None, sig_key)
         validate_intrinsic_keywords(
-            sigs.get_intrinsic(parts[0], parts[1]) if len(parts) == 2
-            else sigs.get_intrinsic(None, sig_key),
+            intrinsic,
             node.kwargs,
             pine_version=self.ctx.ast.version,
         )
-        if len(parts) == 2:
-            param_names = sigs.get_param_names(parts[0], parts[1]) or []
-        else:
-            param_names = sigs.get_param_names(None, sig_key) or []
+        param_names = intrinsic.param_names if intrinsic is not None else []
         result: dict = {}
         # Map positional args by parameter name
         for i, arg in enumerate(node.args):

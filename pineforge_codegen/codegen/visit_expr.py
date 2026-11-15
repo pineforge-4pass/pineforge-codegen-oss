@@ -506,6 +506,8 @@ class ExprVisitor:
         self,
         target_name: str | None,
         target_cpp_type: str | None,
+        *,
+        target_node=None,
     ) -> str | None:
         """Resolve a drawing target without leaking a shadowed global type.
 
@@ -520,6 +522,11 @@ class ExprVisitor:
                 if target_cpp_type in DRAWING_TYPE_TO_CPP.values()
                 else None
             )
+        if target_node is not None:
+            spec = self._type_spec_from_expr(target_node)
+            if (spec is not None and spec.kind == "udt"
+                    and spec.name in DRAWING_TYPE_TO_CPP):
+                return DRAWING_TYPE_TO_CPP[spec.name]
         if not target_name:
             return None
         if target_name in self._lexical_drawing_types:
@@ -547,7 +554,7 @@ class ExprVisitor:
         # later local declaration pre-shadow earlier statements.  Exact
         # top-level types are captured separately because the analyzer's flat
         # raw-name registry can be overwritten by a same-named local.
-        return self._global_drawing_cpp_types.get(target_name)
+        return getattr(self, "_global_drawing_cpp_types", {}).get(target_name)
 
     def _udt_target_cpp_type(
         self,
@@ -997,6 +1004,9 @@ class ExprVisitor:
                 # call reaches the array it holds.
                 return f"(*{field})"
             return field
+        sizing = self._builtin_sizing_constant(node)
+        if sizing is not None:
+            return self._visit_expr(StringLiteral(value=sizing.value))
         if isinstance(node.object, Identifier):
             ns = node.object.name
             if ns == "alert" and node.member in ALERT_FREQ_VALUES:
@@ -1085,13 +1095,6 @@ class ExprVisitor:
                     return "avg_losing_trade_percent()"
                 if node.member == "margin_liquidation_price":
                     return "margin_liquidation_price()"
-                # Qty type / commission constants
-                if node.member == "fixed":
-                    return "0"
-                if node.member == "percent_of_equity":
-                    return "1"
-                if node.member == "cash":
-                    return "2"
                 if node.member == "account_currency":
                     return self._strategy_account_currency_expr()
                 # Sub-namespaces (oca, direction, risk, commission) handled below

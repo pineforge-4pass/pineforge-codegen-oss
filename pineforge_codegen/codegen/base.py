@@ -32,6 +32,7 @@ from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from ..limits import TimeBudget, iter_ast_nodes, syntax_children
 from ..matrix_overloads import matrix_sum_has_rhs
+from ..reference_casts import na_reference_cast_kind
 from . import graph_journal
 from .capacities import CapacityPolicy, validate_capacity_options
 from ..session_reads import emitted_session_reads
@@ -736,7 +737,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 remap = {}
                 for orig_name in orig_names:
                     safe = self._safe_name(orig_name)
-                    remap[safe] = f"{safe}_cs{cs_idx}"
+                    # Several enclosing owners can refer to the same clone.
+                    # Its identity belongs to the original member + callsite,
+                    # independently of which owner first requests its name.
+                    remap[safe] = self._generated_class_name(
+                        ("var-clone", safe, cs_idx), f"{safe}_cs{cs_idx}"
+                    )
                 self._func_cs_var_remap[(fname, cs_idx)] = remap
                 self._func_var_members_set.update(
                     orig_name for orig_name in orig_names)
@@ -1110,9 +1116,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # ``_active_var_remap`` while emitting the owning block's statements.
         self._block_var_renames: dict[int, dict[str, str]] = getattr(ctx, "block_var_renames", {}) or {}
         self._udt_field_type_specs: dict[str, dict[str, TypeSpec]] = getattr(ctx, "udt_field_type_specs", {}) or {}
-        # Map UDT struct name -> set of field names that were dropped from the
-        # emitted C++ struct because they had drawing-only types (label, line,
-        # box, linefill, polyline, table, chart.point). Populated eagerly
+        # Map UDT struct name -> visual-only table fields omitted from the
+        # emitted record. Populated eagerly
         # here from ``self._udt_defs`` so downstream visitors (visit_expr /
         # visit_stmt) can consult it before ``generate()`` runs. The struct
         # emission loop later asserts/syncs against this same map. Used to
@@ -1120,9 +1125,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # generated C++ never references a member that doesn't exist on the
         # emitted struct. See: pineforge-codegen issue #10.
         # Drawing-objects-as-data: line/box/label/linefill/chart.point are now
-        # REAL data (un-dropped from UDT structs). Only table/polyline stay
-        # dropped (no C++ representation). See drawing-objects-as-data.md §4.2.
-        _DRAWING_TYPES_INIT = {"table", "polyline"}
+        # REAL data (un-dropped from UDT structs). Polyline retains an opaque
+        # handle while its geometry remains visual-only. Only table is dropped.
+        _DRAWING_TYPES_INIT = {"table"}
         self._udt_omitted_fields: dict[str, set[str]] = {}
         for _type_name, _fields in self._udt_defs.items():
             _omitted = set()
@@ -1198,14 +1203,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 self._map_vars.add(_name)
             elif _spec.kind == "udt" and _spec.name:
                 self._udt_var_types.setdefault(_name, _spec.name)
-        # Table / polyline variables and params have NO C++ representation
+        # Table variables and params have NO C++ representation
         # (SKIP_VAR_TYPES). A *method* call on such a receiver
         # (``panel.cell(...)``, ``dash.merge_cells(...)``) is a visual no-op
         # that must be dropped — but unlike the namespace form
         # (``table.cell(...)``) the receiver is a bare var/param the
         # namespace-based skip cannot see. Collect those names so
         # ``_is_skip_expr`` can drop their method calls.
-        _SKIP_DECL_TYPES = set(SKIP_VAR_TYPES) | {"polyline"}
+        _SKIP_DECL_TYPES = set(SKIP_VAR_TYPES)
         self._visual_drop_vars: set[str] = set()
         for _node in self._walk_ast(self.ctx.ast):
             if isinstance(_node, VarDecl):
@@ -1221,8 +1226,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     _h = _hints[_i] if _i < len(_hints) else None
                     if _h and str(_h).replace(" ", "") in _SKIP_DECL_TYPES:
                         self._visual_drop_vars.add(_p)
-        # Build set of all member names (series vars, var members) for collision
-        # detection. It precedes the security metadata below: a timeframe
+        # Build the authored/analyzer data-member inventory for callable name
+        # collisions. It precedes the security metadata below: a timeframe
         # computed by a user function (``tf = tfFromLabel(choice)``) renders
         # that call through ``_func_safe_name`` at registration time.
         self._all_member_names: set[str] = set()
@@ -1230,6 +1235,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._all_member_names.add(self._safe_name(name))
         for name, _, _ in ctx.var_members:
             self._all_member_names.add(self._safe_name(name))
+        for name, _ptype in ctx.global_var_decls:
+            self._all_member_names.add(self._safe_name(name))
+        # Freeze natural callable identities before security rendering and
+        # later support allocators. Calls and declarations must use this same
+        # allocation even when an authored member is spelled like a clone.
+        for fi in ctx.func_infos:
+            self._func_cpp_base_name(fi.name)
+            for cs_idx in range(ctx.func_call_site_counts.get(fi.name, 0)):
+                self._func_variant_name(fi.name, cs_idx)
         # Collect request.security metadata per call
         self._security_eval_info: list[dict] = []
         self._security_ta_variant_names: dict[tuple[int, int, tuple], str] = {}
@@ -1359,7 +1373,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Drawing-objects-as-data: gate all new emission (drawing.hpp include +
         # the per-type arenas) on this flag so non-drawing strategies stay
         # byte-identical. Caps come from the strategy() header max_*_count.
-        self._uses_drawing = self._detect_drawing_usage()
+        self._uses_polyline = self._detect_drawing_usage({"polyline"})
+        self._uses_drawing = self._detect_drawing_usage(
+            set(DRAWING_TYPE_TO_CPP) - {"polyline"},
+        )
         self._drawing_caps = self._compute_drawing_caps() if self._uses_drawing else {}
 
         # Pine history directives retain their existing global-maximum rule.
@@ -1451,14 +1468,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """Whether a drawing RHS is the constant missing handle."""
         return (
             self._is_na_expr(node)
-            or (
-                isinstance(node, FuncCall)
-                and isinstance(node.callee, Identifier)
-                and node.callee.name in ("line", "box")
-                and len(node.args) == 1
-                and not node.kwargs
-                and self._is_na_expr(node.args[0])
-            )
+            or na_reference_cast_kind(node) is not None
         )
 
     def _is_runtime_scalar_var_initializer(
@@ -1573,6 +1583,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._runtime_var_init_flags: dict[tuple[int, str], str] = {}
 
         used_names = set(self._all_member_names)
+        used_names.update(self._generated_class_names.values())
         # ``_all_member_names`` historically covers persistent ``var`` and
         # Series members only.  Plain global declarations are class members as
         # well, so include them before minting a generated flag; otherwise a
@@ -1609,7 +1620,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for callsite in range(
                 self.ctx.func_call_site_counts.get(func_info.name, 0)
             ):
-                used_names.add(f"{emitted}_cs{callsite}")
+                used_names.add(self._func_variant_name(func_info.name, callsite))
         used_names.update(inst["name"] for inst in self._fresh_instances)
 
         def allocate_flag(base: str) -> str:
@@ -2059,7 +2070,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return list(self._func_cs_fixnan_remap.get((fname, 0), {}).keys())
 
         def natural_name(fname: str, cs_idx: int) -> str:
-            return f"{self._func_cpp_base_name(fname)}_cs{cs_idx}"
+            return self._func_variant_name(fname, cs_idx)
 
         interned: dict[tuple, dict] = {}
         worklist: list[dict] = []
@@ -2178,17 +2189,28 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 ginst = interned.get(key)
                 if ginst is None:
                     fresh_counter += 1
-                    inst_name = f"{self._func_cpp_base_name(g_name)}__ni{fresh_counter}"
+                    inst_name = self._generated_class_name(
+                        ("function-instance", fresh_counter),
+                        f"{self._func_cpp_base_name(g_name)}__ni{fresh_counter}",
+                    )
                     fvar_remap: dict[str, str] = {}
                     for v in var_originals(g_name):
-                        fresh_member = f"{v}__ni{fresh_counter}"
+                        fresh_member = self._generated_class_name(
+                            ("var-instance", fresh_counter, v),
+                            f"{v}__ni{fresh_counter}",
+                        )
                         fvar_remap[v] = fresh_member
                         self._fresh_var_members.append((g_name, v, fresh_member))
                     # Fresh fixnan members: each path gets its OWN previous-
                     # value member so two call paths never share fixnan state.
+                    # These are the owners of the reserved fixnan namespace,
+                    # rather than identities composed from Pine spellings.
                     ffixnan_remap: dict[str, str] = {}
                     for orig_fn_member in fixnan_originals(g_name):
-                        fresh_fn_member = f"{orig_fn_member}__ni{fresh_counter}"
+                        fresh_fn_member = self._generated_helper_name(
+                            ("fixnan-instance", fresh_counter, orig_fn_member),
+                            f"{orig_fn_member}__ni{fresh_counter}",
+                        )
                         ffixnan_remap[orig_fn_member] = fresh_fn_member
                         # Find the original FixnanCallSite to carry its type.
                         orig_fn_site = None
@@ -3948,6 +3970,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return self._emit_udt_method_cpp_name(fi)
         return self._func_safe_name(fname)
 
+    def _func_variant_name(self, fname: str, cs_idx: int) -> str:
+        """Resolve a callable clone once for emission, dispatch and history."""
+        name = self._generated_class_name(
+            ("function-clone", fname, cs_idx),
+            f"{self._func_cpp_base_name(fname)}_cs{cs_idx}",
+        )
+        self._func_variant_callsite[(fname, name)] = cs_idx
+        return name
+
     def _inline_history_contexts_for_owner(self, owner: str | None) -> list[str | None]:
         """Return every method-emission context that owns one source AST site.
 
@@ -3970,7 +4001,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         ) and total_cs > 0
         if cloned:
             contexts: list[str | None] = [
-                f"{self._func_cpp_base_name(owner)}_cs{idx}"
+                self._func_variant_name(owner, idx)
                 for idx in range(total_cs)
             ]
         else:
@@ -4131,11 +4162,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         ) -> int | None:
             if owner is None or context is None:
                 return None
-            prefix = f"{self._func_cpp_base_name(owner)}_cs"
-            if not context.startswith(prefix):
-                return None
-            suffix = context[len(prefix):]
-            return int(suffix) if suffix.isdigit() else None
+            return self._func_variant_callsite.get((owner, context))
 
         def target_cs_for_context(
             fi,
@@ -4271,7 +4298,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 fi, call, owner, owner_context
             )
             if target_cs is not None:
-                return f"{self._func_cpp_base_name(fi.name)}_cs{target_cs}"
+                return self._func_variant_name(fi.name, target_cs)
             return None
 
         requested_roots: set[tuple[str, str | None]] = set()
@@ -4733,6 +4760,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             getattr(self, "_runtime_var_init_flag_used_names", ())
         )
         class_used.update(self._all_member_names)
+        class_used.update(self._generated_class_names.values())
         class_used.update(
             self._safe_name(name) for name in self._all_bound_names
         )
@@ -6155,6 +6183,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.append("    DrawingArena<BoxRec> _pf_boxes_{_PF_DRAWING_UNBOUNDED};")
             lines.append("    DrawingArena<LabelRec> _pf_labels_{_PF_DRAWING_UNBOUNDED};")
             lines.append("    DrawingArena<LinefillRec> _pf_linefills_{_PF_DRAWING_UNBOUNDED};")
+        if self._uses_polyline:
+            lines.append("    uint64_t _pf_polyline_next_id_ = 0;")
 
         # 8e. The copies an array or a matrix variable's executions left
         #     (pineforge_codegen/collection_history.py).
@@ -6209,12 +6239,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for fi in self.ctx.func_infos:
             if fi.name not in self.ctx.func_var_members:
                 continue
-            emitted = self._func_cpp_base_name(fi.name)
             total_cs = self.ctx.func_call_site_counts.get(fi.name, 0)
             variants = range(total_cs) if total_cs > 0 else (None,)
             for cs_idx in variants:
-                suffix = f"_cs{cs_idx}" if cs_idx is not None else ""
-                flag = allocate_legacy_flag(f"_fvinit_{emitted}{suffix}")
+                emitted = (
+                    self._func_variant_name(fi.name, cs_idx)
+                    if cs_idx is not None else self._func_cpp_base_name(fi.name)
+                )
+                flag = allocate_legacy_flag(f"_fvinit_{emitted}")
                 lines.append(f"    bool {flag} = false;")
 
         for inst in self._fresh_instances:
@@ -6564,13 +6596,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if self._is_chart_point_callee(node.callee):
                 return False
             func_name, namespace = self._resolve_callee(node.callee)
+            if namespace == "polyline" and func_name in {"new", "delete"}:
+                # The geometry is visual-only; its handle and argument
+                # evaluations must still flow through declarations and calls.
+                return False
             if namespace is None and func_name in SKIP_FUNC_NAMES:
                 return True
             if namespace in SKIP_NAMESPACES:
                 return True
             if namespace in SKIP_VAR_TYPES:
                 return True
-            # Method call on a table/polyline-typed receiver var/param
+            # Method call on a table-typed receiver var/param
             # (``panel.cell(...)``). These types have no C++ representation, so
             # the call is a visual no-op — drop it (mirrors the namespace form).
             if namespace in self._visual_drop_vars:
@@ -6586,9 +6622,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
     def _is_omitted_udt_field(self, node) -> bool:
         """True when ``node`` is a ``MemberAccess`` on a UDT variable and the
-        member name was dropped from the emitted struct because it had a
-        drawing-only type (label, line, box, linefill, polyline, table,
-        chart.point). Callers use this to rewrite reads and strip writes so
+        member name was dropped from the emitted struct because it had the
+        visual-only table type. Callers rewrite reads and strip writes so
         the generated C++ never references a non-existent struct member.
         See: pineforge-codegen issue #10.
         """

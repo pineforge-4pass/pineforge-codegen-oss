@@ -53,6 +53,7 @@ from ..external_requests import UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
 from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
 from ..matrix_overloads import matrix_sum_has_rhs
+from ..reference_casts import na_reference_cast_kind
 from ..symbols import (
     PineType,
     TypeSpec,
@@ -3061,6 +3062,8 @@ class TypeInferer:
                 plan = getattr(self, "_array_widths", None)
                 return (plan.widen(spec, {("field", owner.name, node.member)})
                         if plan is not None else spec)
+            if self._builtin_sizing_constant(node) is not None:
+                return TypeSpec.primitive("string")
             return None
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
@@ -3143,6 +3146,11 @@ class TypeInferer:
             targs = self._template_args_from_call(node)
             # Drawing-objects-as-data return typing (spec §4.5 DRAWING_RETURN_SPECS):
             # *.new / *.copy -> handle of the self-type; linefill.get_line* -> line.
+            if (func_name not in getattr(self, "_func_info_map", {})
+                    and (cast_kind := na_reference_cast_kind(node))):
+                return TypeSpec.udt(cast_kind)
+            if namespace == "polyline" and func_name == "new":
+                return TypeSpec.udt("polyline")
             if namespace in DRAWING_NS:
                 if func_name in ("new", "copy"):
                     return TypeSpec.udt(namespace)
@@ -5306,6 +5314,12 @@ class TypeInferer:
         primitive_global = self._primitive_block_shadow_globals.get(name)
         if primitive_global is not None:
             return self._type_for_decl(primitive_global)
+        drawing_cpp_type = self._drawing_target_cpp_type(name, None)
+        if drawing_cpp_type is not None:
+            # The coarse PineType of an ID is not numeric storage. In
+            # particular a tuple's drawing value must never enter a double
+            # conversion merely because the destination is a var member.
+            return drawing_cpp_type
         for vname, ptype, _init in self.ctx.var_members:
             if vname == name:
                 if self._numeric_na_member(name):
@@ -6138,6 +6152,26 @@ class TypeInferer:
             return "std::vector<double>"
         return "double"
 
+    def _builtin_sizing_constant(self, node):
+        """Resolve registered constants only through an unshadowed namespace."""
+        if not (isinstance(node, MemberAccess)
+                and isinstance(node.object, Identifier)):
+            return None
+        receiver = node.object
+        name = receiver.name
+        constant = sigs.get_sizing_constant(name, node.member)
+        if constant is None:
+            return None
+        if (self.ctx.identifier_decl_bindings.get(id(receiver)) is not None
+                or ValueBindings.declaration_of(receiver) is not None
+                or name in self._current_func_param_types
+                or name in self._current_func_locals
+                or name in self._current_loop_vars
+                or name in self._udt_defs
+                or name in self._enum_defs):
+            return None
+        return constant
+
     def _text_type(self, node) -> str:
         """Pine bool provenance is consumed only by explicit text conversion."""
         if not self._pine_v5_body:
@@ -6340,6 +6374,11 @@ class TypeInferer:
             return "double"
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            if (func_name not in getattr(self, "_func_info_map", {})
+                    and (cast_kind := na_reference_cast_kind(node))):
+                return DRAWING_TYPE_TO_CPP[cast_kind]
+            if namespace == "polyline" and func_name == "new":
+                return DRAWING_TYPE_TO_CPP["polyline"]
             if namespace == "color":
                 return "int64_t" if func_name in {"new", "rgb", "from_gradient"} else "int"
             if (namespace == "request" and func_name == "security"

@@ -67,7 +67,13 @@ def test_ta_vwap_bands_form_threads_symbol_clock():
     assert calls, cpp
     for call in calls:
         assert ("current_bar_.timestamp, syminfo_.timezone, syminfo_.session, "
-                "tf_change(") in call, call
+                "((std::string(\"D\")).empty() ? tf_change(") in call, call
+        assert (
+            'tf_change(prev_bar_timestamp_, current_bar_.timestamp, script_tf_, '
+            'syminfo_.timezone, syminfo_.session) : '
+            'tf_change(prev_bar_timestamp_, current_bar_.timestamp, std::string("D"), '
+            'syminfo_.timezone, syminfo_.session)'
+        ) in call, call
 
 
 def test_vwap_prelude_shim_gated_on_usage():

@@ -1,0 +1,10 @@
+//@version=6
+strategy("timeframe.change empty string", overlay = true, initial_capital = 10000)
+fast = ta.ema(close, 10)
+slow = ta.ema(close, 30)
+chg = timeframe.change("") ? 1 : 0
+// @pf-trace chg=chg
+if ta.crossover(fast, slow)
+    strategy.entry("Long", strategy.long, qty = 0.01)
+if ta.crossunder(fast, slow)
+    strategy.close("Long")

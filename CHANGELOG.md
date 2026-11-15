@@ -22,6 +22,36 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Strategy sizing constants retain their string values in expressions, aliases
+  and helper calls. Host order and risk settings convert these values to their
+  numeric representation only at the setting boundary.
+
+- `timeframe.in_seconds` and `timeframe.change` resolve an evaluated empty
+  string to the chart period, including input, variable, function-return and
+  named arguments. The argument is evaluated once, and nonempty strings keep
+  their explicit period. Bare `na` remains accepted; the value returned by
+  `timeframe.change(na)` is still awaiting verification against TradingView.
+  Non-string timeframe arguments are refused before C++ emission with the
+  stable `PF-E2095` type diagnostic and a source location, including input
+  values, reassignments, indicator results and helper parameters. Equally
+  specific diagnostic templates distinguish primitive types from qualifiers
+  using their catalog argument kinds. Dotted builtin signatures retain supplied
+  arguments, including escaped string literals and VWAP anchors. (#394)
+- Script identifiers spelled like integer-to-float conversion temporaries,
+  including the underscore suffixes of nested conversions, now use the
+  generator's reserved-name escaping.
+- Reference-typed UDT fields keep their type when initialized or reassigned
+  with `na`, including array defaults. Drawing handles cross user-function
+  and tuple boundaries by value, and `label(na)` produces a missing label
+  handle. Polyline locals, arrays, fields and delete methods retain opaque
+  handles and argument evaluation while rendering remains a visual no-op.
+- Generated function variants and persistent local copies avoid authored and
+  generated member names, including names ending in `_cs1` and composed names
+  that overlap collection-history or requested-context storage. Persistent
+  declarations in sibling blocks also retain distinct storage when a script
+  uses their generated spelling. Declarations, calls and history storage use
+  the same allocated identities. Regenerate C++ and relink affected strategies.
+
 - A zone name the engine rejects now makes calendar-form `timestamp()` stop the
   run at its first evaluation, instead of silently calculating a UTC value.
   The paired engine reports a typed timezone error identifying the failed bar.

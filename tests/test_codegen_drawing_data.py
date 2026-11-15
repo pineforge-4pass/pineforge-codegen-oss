@@ -302,7 +302,7 @@ if not na(globalLine)
     strategy.entry("L", strategy.long)
 '''
     cpp = transpile(src)
-    body = cpp.split("Line update(Line& initial) {", 1)[1].split("    }", 1)[0]
+    body = cpp.split("Line update(Line initial) {", 1)[1].split("    }", 1)[0]
     assert "h = ((cond) ? (_pf_collect_lines_(pf_line_new" in body
     assert ": (Line{}));" in body
     assert "na<double>()" not in body

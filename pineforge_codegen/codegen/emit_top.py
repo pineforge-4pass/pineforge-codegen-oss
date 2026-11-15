@@ -87,6 +87,7 @@ from __future__ import annotations
 
 import re
 
+from ..signatures import STRATEGY_SIZING_CONSTANTS
 from .run_stops import RUN_STOP_SHIMS_CPP, TIMEZONE_STOP_SHIM_CPP
 
 from ..ast_nodes import (
@@ -107,7 +108,7 @@ from .tables import (
     RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN,
 )
 from ..limits import iter_ast_nodes
-from .drawing import DRAWING_LIFETIME_CPP
+from .drawing import DRAWING_LIFETIME_CPP, POLYLINE_HANDLE_CPP
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 from .tv_string_units import TV_STRING_UNITS_CPP, TV_STRING_UNITS_MARKER
 
@@ -265,6 +266,8 @@ class TopLevelEmitter:
         self._emit_ta_compat_shims(lines)
         if getattr(self, "_uses_drawing", False):
             lines.append(DRAWING_LIFETIME_CPP)
+        if self._uses_polyline:
+            lines.append(POLYLINE_HANDLE_CPP)
         if self._uses_tv_number_format:
             lines.append(TV_NUMBER_FORMAT_CPP)
             lines.append("")
@@ -1353,9 +1356,8 @@ class TopLevelEmitter:
 
         # default_qty_type: strategy.fixed / strategy.percent_of_equity / strategy.cash
         qty_type_map = {
-            "strategy.fixed": "QtyType::FIXED",
-            "strategy.percent_of_equity": "QtyType::PERCENT_OF_EQUITY",
-            "strategy.cash": "QtyType::CASH",
+            name: f"QtyType::{item.host_name}"
+            for name, item in STRATEGY_SIZING_CONSTANTS.items()
         }
         qty_type = declared_or_v6_default("default_qty_type")
         if qty_type in qty_type_map:
@@ -1446,9 +1448,13 @@ class TopLevelEmitter:
         lines.append('        } else if (key == "close_entries_rule") {')
         lines.append('            overrides.close_entries_rule = (value == "ANY" || value == "any" || value == "1");')
         lines.append('        } else if (key == "default_qty_type") {')
-        lines.append('            if (value == "fixed" || value == "strategy.fixed" || value == "0") overrides.default_qty_type = static_cast<int>(QtyType::FIXED);')
-        lines.append('            else if (value == "percent_of_equity" || value == "strategy.percent_of_equity" || value == "1") overrides.default_qty_type = static_cast<int>(QtyType::PERCENT_OF_EQUITY);')
-        lines.append('            else if (value == "cash" || value == "strategy.cash" || value == "2") overrides.default_qty_type = static_cast<int>(QtyType::CASH);')
+        for index, (name, item) in enumerate(STRATEGY_SIZING_CONSTANTS.items()):
+            branch = "if" if index == 0 else "else if"
+            lines.append(
+                f'            {branch} (value == "{item.value}" || value == "{name}" '
+                f'|| value == "{item.host_value}") overrides.default_qty_type = '
+                f'static_cast<int>(QtyType::{item.host_name});'
+            )
         lines.append("            else return;")
         lines.append('        } else if (key == "commission_type") {')
         lines.append('            if (value == "percent" || value == "strategy.commission.percent" || value == "0") overrides.commission_type = static_cast<int>(CommissionType::PERCENT);')
@@ -2358,10 +2364,19 @@ class TopLevelEmitter:
             allocated = {}
             for key, name in methods:
                 encoded = cpp_identifier_fragment(name)
-                allocated[key] = (
-                    name if encoded == name else
-                    self._allocate_generated_cpp_name(encoded, used)
-                )
+                if encoded == name and name in self._all_member_names:
+                    # Let the function channel separate an authored value
+                    # binding from its established typed-method spelling.
+                    allocated[key] = name
+                else:
+                    preferred = (
+                        name if encoded == name else
+                        self._allocate_generated_cpp_name(encoded, used)
+                    )
+                    allocated[key] = self._generated_class_name(
+                        ("typed-method", key), preferred
+                    )
+                used.add(allocated[key])
             self._escaped_method_cpp_names = allocated
         return self._func_safe_name(allocated[fi.name])
 
@@ -2522,6 +2537,7 @@ class TopLevelEmitter:
                         or (
                             recv_spec.kind == "udt"
                             and recv_spec.name not in self._udt_defs
+                            and recv_spec.name not in DRAWING_TYPE_TO_CPP
                         )
                     ):
                         cpp_t = f"{cpp_t}&"
@@ -2537,7 +2553,8 @@ class TopLevelEmitter:
                     )
                     cpp_t = (
                         recv_cpp
-                        if fi.udt_type_name in self._udt_defs
+                        if (fi.udt_type_name in self._udt_defs
+                            or fi.udt_type_name in DRAWING_TYPE_TO_CPP)
                         else f"{recv_cpp}&"
                     )
                     safe_p = self._safe_name(p)
@@ -2596,7 +2613,8 @@ class TopLevelEmitter:
                 if spec.kind == "udt":
                     self._udt_param_udt[p] = spec.name
                     self._udt_param_udt[self._safe_name(p)] = spec.name
-                    if spec.name not in self._udt_defs:
+                    if (spec.name not in self._udt_defs
+                            and spec.name not in DRAWING_TYPE_TO_CPP):
                         cpp_t = f"{cpp_t}&"
                 elif spec.kind in ("array", "map"):
                     elem = spec.element if spec.kind == "array" else spec.value
@@ -2703,7 +2721,7 @@ class TopLevelEmitter:
             self._active_call_site_idx = None
             self._current_instance_name = instance["name"]
         elif call_site_idx is not None:
-            func_name = f"{func_name}_cs{call_site_idx}"
+            func_name = self._func_variant_name(fi.name, call_site_idx)
             remap = self._func_cs_ta_remap.get((fi.name, call_site_idx), {})
             self._active_ta_remap = remap
             var_remap = self._func_cs_var_remap.get((fi.name, call_site_idx), {})

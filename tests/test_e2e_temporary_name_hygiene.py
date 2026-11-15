@@ -117,12 +117,24 @@ def test_every_temporary_the_emitter_declares_is_reserved():
     # Temporaries derived from emitted C++: every underscore-prefixed local
     # declared inside a generated lambda that is not a name of the script.
     names = set()
-    for name in TAPES:
-        source = (FIXTURES / f"{name}.pine").read_text()
+    sources = [(FIXTURES / f"{name}.pine").read_text() for name in TAPES]
+    sources.append(
+        HEAD + 'frameChoice = input.timeframe("")\n'
+        'chosenFrame() => frameChoice\n'
+        'secondsValue = timeframe.in_seconds(chosenFrame())\n'
+        'changedValue = timeframe.change(timeframe = chosenFrame())\n'
+        'plot(secondsValue)\nplot(changedValue ? 1 : 0)\n'
+    )
+    sources.append(
+        HEAD + 'qtyMode = input.string("cash", options = ["cash", "percent_of_equity"])\n'
+        'strategy.entry("L", strategy.long, qty = 1, qty_type = qtyMode)\n'
+    )
+    for source in sources:
         authored = {t.value for t in Lexer(source).tokenize() if t.type.name == "IDENT"}
         for line in transpile(source).splitlines():
             if "[&]" in line:
                 names |= {n for n in DECL.findall(line)
                           if n not in authored and not n.startswith("pf_safe_")}
     assert names, "the tapes' C++ declares no temporary"
+    assert "_pf_timeframe_arg" in names
     assert sorted(n for n in names if not is_emitter_temporary(n)) == []

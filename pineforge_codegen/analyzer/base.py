@@ -27,6 +27,7 @@ from ..symbols import (
     SymbolTable,
     TypeSpec,
     method_receiver_type_name,
+    public_type_name,
     unify_pine_types,
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
@@ -265,6 +266,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._block_var_owner: dict[str, int] = {}
         self._block_var_renames: dict[int, dict[str, str]] = {}
         self._block_var_seq = 0
+        self._block_var_taken: set[str] | None = None
         # Identifier node identity -> the lexical Symbol.scope resolved while
         # that node's source scope is live.  Codegen uses this narrow
         # provenance to distinguish true global aliases from same-named local
@@ -5018,6 +5020,31 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             or any(id(body) == outer_owner for body in self._block_node_stack)
         )
 
+    def _allocate_block_var_member(self, node: VarDecl) -> str:
+        """Keep generated lexical storage apart from every syntax spelling."""
+        if self._block_var_taken is None:
+            self._block_var_taken = set()
+            for item, _depth in iter_ast_nodes(self._ast):
+                if self._budget is not None:
+                    self._budget.check(item.loc, Phase.ANALYZER)
+                for attr in ("name", "var", "member"):
+                    value = getattr(item, attr, None)
+                    if isinstance(value, str):
+                        self._block_var_taken.add(value)
+                for attr in ("names", "vars", "params", "members"):
+                    self._block_var_taken.update(
+                        value for value in (getattr(item, attr, None) or ())
+                        if isinstance(value, str)
+                    )
+        while True:
+            if self._budget is not None:
+                self._budget.check(node.loc, Phase.ANALYZER)
+            self._block_var_seq += 1
+            member_name = f"{node.name}__blk{self._block_var_seq}"
+            if member_name not in self._block_var_taken:
+                self._block_var_taken.add(member_name)
+                return member_name
+
     def _visit_VarDecl(self, node: VarDecl) -> PineType:
         if (not node.is_var and not node.is_varip and node.type_hint is None
                 and isinstance(node.value, NaLiteral)
@@ -5276,8 +5303,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     self._block_var_owner[node.name] = block_id
                 elif owner != block_id:
                     # Sibling-scope collision: disambiguate this declaration.
-                    self._block_var_seq += 1
-                    member_name = f"{node.name}__blk{self._block_var_seq}"
+                    member_name = self._allocate_block_var_member(node)
                     self._block_var_renames.setdefault(block_id, {})[node.name] = member_name
             self._var_members.append((member_name, val_type, init_str))
             scope_cursor = self._symbols.current_scope
@@ -7157,15 +7183,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     or authored_method
                 ):
                     result = None
-        if result is None and isinstance(node, MemberAccess):
-            if isinstance(node.object, Identifier):
-                ns = node.object.name
-                if ns == "syminfo":
-                    ptype = sigs.SYMINFO_VARIABLES.get(f"syminfo.{node.member}")
-                    if ptype is not None:
-                        result = TypeSpec.primitive(ptype.value)
-                elif ns == "timeframe" and node.member == "period":
-                    result = TypeSpec.primitive("string")
         if result is None and isinstance(node, FuncCall):
             callee = node.callee
             if isinstance(callee, Identifier):
@@ -7459,6 +7476,46 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return main_type
         return result_type
 
+    def _check_timeframe_string_arguments(
+        self, node: FuncCall,
+        parameter_types: dict[str, PineType | TypeSpec] | None = None,
+    ) -> None:
+        """Check string signature slots using lexical and written-call types."""
+        if self._pine_version != 6 or self._in_v5_library_definition(node):
+            return
+        callee = node.callee
+        if (not isinstance(callee, MemberAccess)
+                or not isinstance(callee.object, Identifier)
+                or callee.object.name != "timeframe"
+                or self._value_bindings.declaration_bindings.get(id(callee.object)) is not None
+                or (parameter_types is not None and callee.object.name in parameter_types)):
+            return
+        intrinsic = sigs.BUILTIN_FUNCTIONS.get(f"timeframe.{callee.member}")
+        if intrinsic is None:
+            return
+        bound = self._bind_callable_args(node, intrinsic.param_names)
+        for parameter, value in zip(intrinsic.primary.params, bound):
+            if value is None or parameter.pine_type != PineType.STRING:
+                continue
+            actual = self._operator_operand_type(value, parameter_types)
+            if actual is None or actual in {
+                TypeSpec.primitive("string"), TypeSpec.primitive("na"),
+            }:
+                # Untyped helper parameters stay open until their written
+                # call supplies a type. Bare na adopts the string signature.
+                continue
+            function_name = intrinsic.name
+            argument_type = public_type_name(actual) or str(actual)
+            parameter_type = parameter.pine_type.value
+            name = parameter.name
+            from ..pine_spelling import expr_start
+
+            self._error(
+                f"Cannot call '{function_name}' with an argument of type {argument_type} "
+                f"for {parameter_type} parameter '{name}'.",
+                expr_start(value).loc or value.loc,
+            )
+
     def _visit_FuncCall(self, node: FuncCall) -> PineType:
         if self._pine_version == 6 and not self._in_v5_library_definition(node):
             self._parameter_qualifiers.check_builtin(node)
@@ -7589,6 +7646,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 visited_member_arg_types[id(arg)] = self._visit(arg)
             for val in node.kwargs.values():
                 visited_member_arg_types[id(val)] = self._visit(val)
+            self._check_timeframe_string_arguments(node)
             # UDT method call-site typing.  Method definitions may contain an
             # untyped parameter history read; resolve receiver + args here and
             # apply the same deferred map-history gate as regular UDFs before
@@ -8958,6 +9016,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if drawing_all_kind(node) not in {None, "polyline"}:
             # Collections use TypeSpec for their shape; PineType stays scalar.
             return PineType.FLOAT
+        if self._builtin_sizing_constant(node) is not None:
+            return PineType.STRING
         # Handle specific namespaces
         if isinstance(node.object, Identifier):
             ns = node.object.name
@@ -8966,9 +9026,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if ns == "strategy":
                 # Direction constants
                 if node.member in ("long", "short"):
-                    return PineType.INT
-                # Qty type constants
-                if node.member in ("percent_of_equity", "fixed", "cash"):
                     return PineType.INT
                 # Commission type constants
                 if node.member in ("commission",):

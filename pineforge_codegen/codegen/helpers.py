@@ -464,6 +464,7 @@ CPP_EMITTER_NAMES = frozenset("""
     _security_helper_series_ _security_helper_series_str_
     _use_precalc _var_initialized _ta_initialized_ _inputs_initialized_
     _pf_lines_ _pf_boxes_ _pf_labels_ _pf_linefills_
+    _PFPolyline _pf_polyline_next_id_
     _pf_script_state_checkpoint_ _PFScriptState _PFForeignEmaSeeding
     _PFALMA _PFKC _PFKCW _PFAnchoredVWAP _PFAnchoredVWAPBands
     _PFPivotPointLevels _PFArrayField _PFTvFormatValue
@@ -533,6 +534,7 @@ CPP_TEMPORARY_NAMES = frozenset("""
     _pf_series_raw _pf_raw _pf_val_t _pf_out _pf_prior
     _pf_hist_offset_raw _pf_hist_offset_numeric _pf_hist_offset _pf_hist_bar
     _pf_calendar_ts _pf_calendar_tz
+    _pf_timeframe_arg _pf_qty_type
     _tz _yr _mo _dy _hr _min _sc _res _old _old_tz _had_old _secs
     _last_tz _last_yr _last_mo _last_dy _last_hr _last_min _last_sc
     _last_res
@@ -542,7 +544,7 @@ CPP_TEMPORARY_NAMES = frozenset("""
     _pf_number_text
     _pf_substring_text _pf_substring_begin _pf_substring_end _pf_substring_error
     _pf_array_new_size _pf_array_new_value _pf_array_new_size_type _pf_array_new_error
-    _pf_read _pf_v5_l _pf_v5_r _pf_wide_l _pf_wide_r
+    _pf_read _pf_v5_l _pf_v5_r _pf_wide_l _pf_wide_r _pf_w
     _pf_symbol _pf_colon _pf_color _pf_bar_back _pf_ema_seeding
     _pf_history_array _pf_history_offset _pf_matrix_target
     _pf_array_index_type
@@ -550,7 +552,8 @@ CPP_TEMPORARY_NAMES = frozenset("""
     _pf_sort_left _pf_sort_right _pf_sort_left_na _pf_sort_right_na
 """.split())
 # These numbered members and locals keep their source-order spelling rather
-# than allocating against authored names. Reserve their complete spellings,
+# than allocating against authored names. Double coercions append underscores
+# to _pf_w to distinguish nested temporaries. Reserve their complete spellings,
 # just as for fixed temporaries, without reserving ordinary underscore names.
 _CPP_TEMPORARY_PATTERN = re.compile(
     r"_v\d+|_secval_\d+(?:_v\d+)?|_tuple_result_\d+(?:_elem_\d+)?|_tuple_unused_\d+|__switch_val_\d+"
@@ -560,6 +563,7 @@ _CPP_TEMPORARY_PATTERN = re.compile(
     r"|_pf_every_bar_ta_\d+|_pf_shared_\d+_\d+|__pf_array\w*|__pf_raw_\w+"
     r"|_pf_collection_hist_\w+"
     r"|_pf_substring_arg\d+"
+    r"|_pf_w_+"
     r"|_req_sec_(?:lower_tf_)?\d+(?:_\d+)?|_precalc_\w+|_sec\d+_\w+"
     r"|_pf_(?:sec|rec)_missing_\d+|_eval_security_\d+"
     r"|_RuntimeSec\d+|_runtime_(?:feed|request)_\d+"
@@ -717,6 +721,14 @@ class NamingHelper:
         ctx = getattr(self, "ctx", None)
         if "time_close" in getattr(ctx, "series_vars", ()):
             bound.add("time_close")
+        # Sibling-block and owner-qualified persistent identities need not
+        # occur in the syntax. Reserve them before escaping any name, and let
+        # their declarations and consumers use the same safe-name mapping.
+        storage_names = {
+            name for name, _, _ in getattr(ctx, "var_members", ())
+        }
+        bound.update(storage_names)
+        authored.update(storage_names)
         self._safe_name_map: dict[str, str] = {}
         self._safe_name_occupied = authored
         self._safe_name_bound = bound
@@ -749,6 +761,43 @@ class NamingHelper:
         for name in sorted((local_bindings & function_names) - member_names):
             self._local_function_names[name] = self._safe_name(name)
             self._allocate_safe_name(name)
+
+        # Analyzer-qualified storage (including sibling-block members) and
+        # TA/fixnan sites can have names absent from the authored AST. Clones
+        # and generated methods share their C++ class namespace. Reserve exact
+        # identities, rather than treating every authored _csN suffix as private.
+        self._safe_name_occupied.update(
+            self._safe_name(name) for name in member_names
+        )
+        self._safe_name_occupied.update(
+            self._safe_name(name)
+            for name, _ptype in getattr(ctx, "global_var_decls", ())
+        )
+        for sites in (
+            getattr(ctx, "ta_call_sites", ()),
+            getattr(ctx, "fixnan_sites", ()),
+        ):
+            self._safe_name_occupied.update(site.member_name for site in sites)
+        self._generated_class_names: dict[tuple, str] = {}
+        self._func_variant_callsite: dict[tuple[str, str], int] = {}
+
+    def _generated_class_name(self, key: tuple, preferred: str) -> str:
+        """Allocate a composed Pine identity outside fixed helper namespaces."""
+        if (preferred in CPP_RESERVED or preferred in BUILTIN_ACCESSOR_NAMES
+                or is_emitter_temporary(preferred)):
+            # Suffixing a reserved family such as _secN_* never escapes it.
+            # Change the leading token before checking exact occupied names.
+            preferred = f"pf_safe_{preferred}"
+        return self._generated_helper_name(key, preferred)
+
+    def _generated_helper_name(self, key: tuple, preferred: str) -> str:
+        """Allocate one stable identity, including a helper's own namespace."""
+        allocated = self._generated_class_names
+        if key not in allocated:
+            allocated[key] = self._allocate_generated_cpp_name(
+                preferred, self._safe_name_occupied
+            )
+        return allocated[key]
 
     def _allocate_safe_name(self, name: str) -> str:
         if name in LEGACY_CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES:
@@ -784,12 +833,14 @@ class NamingHelper:
         return name
 
     def _func_safe_name(self, name: str) -> str:
-        """Prefix function names that collide with class members (series vars or var members)."""
+        """Allocate function names that collide with class data members."""
         safe = getattr(self, "_local_function_names", {}).get(
             name, self._safe_name(name),
         )
         if safe in self._all_member_names:
-            return f"_fn_{safe}"
+            return self._generated_class_name(
+                ("function", name), f"_fn_{safe}"
+            )
         return safe
 
     def _resolve_callee(self, callee) -> tuple[str | None, str | None]:

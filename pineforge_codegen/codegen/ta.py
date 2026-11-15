@@ -547,7 +547,7 @@ class TaSiteHelper:
             reserved_types.add(emitted)
             total = self.ctx.func_call_site_counts.get(info.name, 0)
             for callsite in range(total):
-                reserved_members.add(f"{emitted}_cs{callsite}")
+                reserved_members.add(self._func_variant_name(info.name, callsite))
         for instance in getattr(self, "_fresh_instances", ()):
             reserved_members.add(instance["name"])
         self._lazy_source_clock_type_name = allocate("_PFLazySourceClock", reserved_types)

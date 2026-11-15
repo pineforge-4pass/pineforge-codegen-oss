@@ -48,6 +48,7 @@ from ..ast_nodes import (
 from ..errors import Phase
 from ..limits import iter_ast_nodes
 from ..matrix_overloads import matrix_sum_has_rhs
+from ..reference_casts import na_reference_cast_kind
 from ..symbols import (
     PineType,
     TypeSpec,
@@ -59,7 +60,9 @@ from .operators import join_value_types, reference_value_type
 # Drawing-objects-as-data type names (spec §4.1). Defined locally — the
 # analyzer must not import from ``codegen`` (codegen imports analyzer, so the
 # reverse would be a cycle). Mirrors codegen.tables.DRAWING_TYPE_TO_CPP keys.
-_DRAWING_TYPE_NAMES = frozenset({"line", "box", "label", "linefill", "chart.point"})
+_DRAWING_TYPE_NAMES = frozenset({
+    "line", "box", "label", "linefill", "chart.point", "polyline",
+})
 _DRAWING_NS = frozenset({"line", "box", "label", "linefill"})
 _DIRECT_ARRAY_VALUE_PRODUCERS = frozenset({
     "from",
@@ -90,6 +93,26 @@ class TypeHelper:
     ``self._enum_defs``) document the contract in the module
     docstring above.
     """
+
+    def _builtin_sizing_constant(self, value):
+        if not (isinstance(value, MemberAccess)
+                and isinstance(value.object, Identifier)):
+            return None
+        receiver = value.object
+        constant = sigs.get_sizing_constant(receiver.name, value.member)
+        if constant is None:
+            return None
+        parameters = getattr(self, "_parameter_types", None)
+        bindings = self._value_bindings.declaration_bindings
+        if ((self._pine_version == 6 and id(receiver) not in bindings)
+                or self._value_bindings.binding_of(receiver) is not None
+                or (self._pine_version != 6
+                    and self._symbols.resolve(receiver.name) is not None)
+                or (parameters is not None and receiver.name in parameters)
+                or receiver.name in self._udt_fields
+                or receiver.name in self._enum_defs):
+            return None
+        return constant
 
     def _split_top_level_type_args(self, text: str) -> list[str]:
         args: list[str] = []
@@ -588,6 +611,10 @@ class TypeHelper:
                     return typed_receiver_spec
             # Drawing-objects-as-data return typing: *.new / *.copy -> handle of
             # the self-type; linefill.get_line* -> line; chart.point.* -> point.
+            if cast_kind := na_reference_cast_kind(value):
+                return TypeSpec.udt(cast_kind)
+            if ns == "polyline" and func == "new":
+                return TypeSpec.udt("polyline")
             if ns in _DRAWING_NS:
                 if func in ("new", "copy"):
                     return TypeSpec.udt(ns)
@@ -807,6 +834,8 @@ class TypeHelper:
             owner = self._type_spec_from_expr(value.object)
             if owner is not None and owner.kind == "udt" and owner.name:
                 return (self._udt_field_type_specs.get(owner.name) or {}).get(value.member)
+            if self._builtin_sizing_constant(value) is not None:
+                return TypeSpec.primitive("string")
         return None
 
     @staticmethod
@@ -1535,6 +1564,9 @@ class OperatorTypeQuery(TypeHelper):
             op, operands = node.op, (node.operand,)
         elif isinstance(node, Ternary):
             op, operands = "?:", (node.condition, node.true_val, node.false_val)
+        elif isinstance(node, FuncCall):
+            self._analyzer._check_timeframe_string_arguments(node, self._parameter_types)
+            return
         else:
             return
         self._analyzer._check_operator_operands(node, op, operands, self._parameter_types)
@@ -1544,6 +1576,23 @@ class OperatorTypeQuery(TypeHelper):
             return self._analyzer._operator_operand_type(
                 value, self._parameter_types,
             )
+        if (isinstance(value, MemberAccess)
+                and isinstance(value.object, Identifier)
+                and self._pine_version == 6
+                and not self._in_v5_library_definition(value)):
+            receiver = value.object
+            bindings = self._value_bindings.declaration_bindings
+            # Require the receiver's recorded lexical namespace use. A
+            # missing record is not proof, and even an unresolved parameter
+            # or local in the written-call environment shadows a namespace.
+            if (id(receiver) in bindings and bindings[id(receiver)] is None
+                    and (self._parameter_types is None
+                         or receiver.name not in self._parameter_types)
+                    and receiver.name not in self._udt_fields
+                    and receiver.name not in self._enum_defs):
+                spec = sigs.get_variable_type_spec(receiver.name, value.member)
+                if spec is not None:
+                    return spec
         return super()._type_spec_from_expr(value, **kwargs)
 
     def _visit(self, node):

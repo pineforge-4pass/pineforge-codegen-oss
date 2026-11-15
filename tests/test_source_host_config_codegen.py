@@ -259,13 +259,26 @@ def test_risk_reassigned_type_reads_the_current_value(
     ]
     assert len(calls) == 1
     # The flag must read t after its write, rather than use its initializer.
+    conversion = (
+        r"\(\[&\]\(\) -> int \{ const std::string _pf_qty_type = "
+        r"\(t(?:\[0\])?\); "
+        r'if \(_pf_qty_type == std::string\("fixed"\)\) return 0; '
+        r'if \(_pf_qty_type == std::string\("percent_of_equity"\)\) return 1; '
+        r'if \(_pf_qty_type == std::string\("cash"\)\) return 2; '
+        r'throw std::invalid_argument\("Unknown strategy sizing value"\); \}\(\)\)'
+    )
     assert re.fullmatch(
         rf"set_pine_risk_{risk_func}\(\(double\)\(14\), "
-        r"\(\(t(?:\[0\])?\) == static_cast<int>\(QtyType::PERCENT_OF_EQUITY\)\)\);",
+        rf"\(\({conversion}\) == static_cast<int>\(QtyType::PERCENT_OF_EQUITY\)\)\);",
         calls[0],
     )
+    assert (
+        f'if (_pf_qty_type == std::string("{assigned}")) return {assigned_value};'
+        in calls[0]
+    )
     write = re.search(
-        rf"\bt(?:\.update\({assigned_value}\)| = {assigned_value});", cpp,
+        rf'\bt(?:\.update\(std::string\("{assigned}"\)\)'
+        rf'| = std::string\("{assigned}"\));', cpp,
     )
     assert write is not None
     assert write.start() < cpp.index(calls[0])
