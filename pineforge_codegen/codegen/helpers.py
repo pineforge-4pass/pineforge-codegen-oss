@@ -750,6 +750,34 @@ class NamingHelper:
             self._local_function_names[name] = self._safe_name(name)
             self._allocate_safe_name(name)
 
+        # Analyzer-qualified storage (including sibling-block members) and
+        # TA/fixnan sites can have names absent from the authored AST. Clones
+        # and generated methods share their C++ class namespace. Reserve exact
+        # identities, rather than treating every authored _csN suffix as private.
+        self._safe_name_occupied.update(
+            self._safe_name(name) for name in member_names
+        )
+        self._safe_name_occupied.update(
+            self._safe_name(name)
+            for name, _ptype in getattr(ctx, "global_var_decls", ())
+        )
+        for sites in (
+            getattr(ctx, "ta_call_sites", ()),
+            getattr(ctx, "fixnan_sites", ()),
+        ):
+            self._safe_name_occupied.update(site.member_name for site in sites)
+        self._generated_class_names: dict[tuple, str] = {}
+        self._func_variant_callsite: dict[tuple[str, str], int] = {}
+
+    def _generated_class_name(self, key: tuple, preferred: str) -> str:
+        """Allocate one stable member/method identity outside authored names."""
+        allocated = self._generated_class_names
+        if key not in allocated:
+            allocated[key] = self._allocate_generated_cpp_name(
+                preferred, self._safe_name_occupied
+            )
+        return allocated[key]
+
     def _allocate_safe_name(self, name: str) -> str:
         if name in LEGACY_CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES:
             base = f"_{name}_"
@@ -784,12 +812,14 @@ class NamingHelper:
         return name
 
     def _func_safe_name(self, name: str) -> str:
-        """Prefix function names that collide with class members (series vars or var members)."""
+        """Allocate function names that collide with class data members."""
         safe = getattr(self, "_local_function_names", {}).get(
             name, self._safe_name(name),
         )
         if safe in self._all_member_names:
-            return f"_fn_{safe}"
+            return self._generated_class_name(
+                ("function", name), f"_fn_{safe}"
+            )
         return safe
 
     def _resolve_callee(self, callee) -> tuple[str | None, str | None]:
