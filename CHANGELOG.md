@@ -50,8 +50,33 @@ supported as exact pairs; on the 0.x line they are independent. See the
   that overlap collection-history or requested-context storage. Persistent
   declarations in sibling blocks also retain distinct storage when a script
   uses their generated spelling. Declarations, calls and history storage use
-  the same allocated identities. Regenerate C++ and relink affected strategies.
+  the same allocated identities, including when selecting reachable variants
+  for emission. Regenerate C++ and relink affected strategies.
+- Persistent declarations accept a type qualifier after `var` or `varip`.
+  Lower-timeframe requests return independently typed arrays for inline and
+  helper-returned tuple payloads.
+- Complete nested indentation levels can combine tabs and spaces. Requested
+  `na`/`nz` helper parameters retain their bindings beside time operations;
+  global tuple declarations and their member histories share one requested
+  sample. Uncalled forwarding helpers no longer allocate unresolved TA buffers
+  for their unreachable call variants (#372). Bare tuple-element history
+  payloads retain their located refusal. Tuple histories rendered through the
+  expression visitor, including reads through globals, retain their chart
+  series and warning. Resolvable variants of a reachable helper retain their
+  TA state even when registered through an uncalled caller. Requested builtin
+  tuples reuse their existing sampled results, and mixed-clock tuple history
+  uses the registered history diagnostic.
 
+- Built-in size, position, line/label style and shape constants retain their
+  string values in variables, selections, function arguments and returns, and
+  string input defaults/options. This fixes ambiguous C++ assignments, NUL
+  strings, unsupported size inputs and null-pointer string construction (#389).
+  Sort-order constants retain their distinct `sort_order` identity through
+  defaults and comparisons; invalid string conversions are diagnosed at their
+  Pine location, including individual elements of string input options.
+  `array.sort_indices` honors a supplied sort direction.
+  Scalar function overloads no longer crash during type checking.
+  Regenerate C++ and relink affected strategies.
 - A zone name the engine rejects now makes calendar-form `timestamp()` stop the
   run at its first evaluation, instead of silently calculating a UTC value.
   The paired engine reports a typed timezone error identifying the failed bar.

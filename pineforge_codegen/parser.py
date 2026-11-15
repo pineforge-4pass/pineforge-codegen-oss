@@ -835,11 +835,18 @@ class Parser:
         return False
 
     def _parse_var_keyword_decl(self) -> VarDecl:
-        """Parse: var [type] name = expr  or  varip [type] name = expr"""
+        """Parse: (var | varip) [[qualifier] type] name = expr."""
         start_tok = self._current()
         is_var = self._current().type == TokenType.VAR
         is_varip = self._current().type == TokenType.VARIP
         self._advance()
+
+        qualifier = None
+        if (self._check(TokenType.IDENT)
+                and self._current().value in ("const", "series", "simple")
+                and (self._peek().type in TYPE_KEYWORDS
+                     or self._is_ident_typed_var_decl(offset=1))):
+            qualifier = self._advance().value
 
         type_hint = None
         if self._current().type in TYPE_KEYWORDS:
@@ -873,6 +880,10 @@ class Parser:
             name=name_tok.value, value=value,
             is_var=is_var, is_varip=is_varip, type_hint=type_hint,
         )
+        if qualifier is not None:
+            node.annotations = {"qualifier": qualifier}
+            if self._library and qualifier == "const":
+                node.annotations["declared_const"] = True
         self._retain_declaration_names(node, name_tok)
         return self._set_loc(node, start_tok)
 

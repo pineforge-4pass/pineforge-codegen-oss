@@ -52,6 +52,9 @@ pineforge_codegen/
 │                                   (after generation; the C++ unchanged).
 ├── session_reads.py                The session.<flag>[k] reads the generated
 │                                   C++ holds (analyzer and codegen share it).
+├── builtin_constants.py            Typed scalar constant values shared by
+│                                   analysis, emission and input proofs;
+│                                   nominal builtin enums retain TypeSpec identity.
 ├── signatures.py                   Pine v6 builtin signature registry
 │                                   (TA / math / str / strategy / input /
 │                                    map / built-ins) — single source of

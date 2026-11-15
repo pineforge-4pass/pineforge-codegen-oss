@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError
 from pineforge_codegen.ast_nodes import Identifier, MemberAccess, StringLiteral
 from pineforge_codegen.codegen.checked_settings import _string_setting_arg
 from pineforge_codegen.codegen.tables import (
@@ -28,20 +29,20 @@ CONSTANT_FAMILIES = {
     "alert": ("freq_all", "all"),
     "currency": ("USD", "USD"),
     "format": ("mintick", "mintick"),
-    "order": ("ascending", "ascending"),
+    "order": ("ascending", None),
     "session": ("regular", "regular"),
-    "position": ("top_right", None),
-    "size": ("small", None),
-    "line": ("style_solid", None),
+    "position": ("top_right", "top_right"),
+    "size": ("small", "small"),
+    "line": ("style_solid", "sol"),
     "box": ("style_dashed", None),
-    "label": ("style_label_up", None),
+    "label": ("style_label_up", "lup"),
     "extend": ("right", None),
     "font": ("family_monospace", None),
     "hline": ("style_dotted", None),
     "location": ("abovebar", None),
     "plot": ("style_line", None),
     "scale": ("right", None),
-    "shape": ("triangleup", None),
+    "shape": ("triangleup", "shape_triangle_up"),
     "text": ("align_left", None),
     "xloc": ("bar_index", None),
     "yloc": ("price", None),
@@ -165,6 +166,11 @@ def test_each_builtin_constant_family_is_string_or_unsupported(namespace, placem
     constant = f"{namespace}.{member}"
     arguments = (f'{constant}, "Choice"' if placement == "default" else
                  f'"literal", "Choice", options=["literal", {constant}]')
+    if namespace == "order":
+        with pytest.raises(CompileError, match="sort_order"):
+            transpile(f'//@version=6\nstrategy("constants")\n'
+                      f'choice = input.string({arguments})\n', check_support=False)
+        return
     cpp = transpile(f'//@version=6\nstrategy("constants")\n'
                     f'choice = input.string({arguments})\nplot(close)\n', check_support=False)
     metadata = _metadata(cpp, "Choice")
@@ -191,6 +197,12 @@ def test_non_string_literals_never_enter_string_metadata(lowered):
 def test_unknown_builtin_members_do_not_fabricate_pine_strings(namespace):
     expression = MemberAccess(object=Identifier(name=namespace), member="unknown")
     assert _string_setting_arg(expression, 'std::string("unknown")') is None
+
+
+@pytest.mark.parametrize("member", ["ascending", "descending"])
+def test_nominal_enum_payload_is_not_a_string_setting_literal(member):
+    expression = MemberAccess(object=Identifier(name="order"), member=member)
+    assert _string_setting_arg(expression, f'std::string("{member}")') is None
 
 
 @pytest.mark.parametrize("optimization", ["-O0", "-O2"])
@@ -241,7 +253,7 @@ def test_known_constant_options_match_getters_and_legacy_values_are_unchanged(op
     source = '''//@version=6
 strategy("constant settings")
 frequency = input.string(alert.freq_all, "Frequency", options=[alert.freq_all, alert.freq_once_per_bar])
-direction = input.string(order.ascending, "Direction", options=[order.ascending, order.descending])
+direction = input.string("ascending", "Direction", options=["ascending", "descending"])
 currencyChoice = input.string(currency.USD, "Currency", options=[currency.USD, currency.EUR])
 sessionChoice = input.string(session.regular, "Session", options=[session.regular, session.extended])
 numberFormat = input.string(format.mintick, "Format", options=[format.mintick, format.percent])
@@ -264,8 +276,7 @@ int main() {
     InputProbe strategy;
     char error[256]{};
     assert(strategy.read("Frequency", "all") == std::string("all"));
-    assert(strategy.read("Size", "") == std::string(""));
-    assert(strategy.read("Size", "") != std::string("small"));
+    assert(strategy.read("Size", "small") == std::string("small"));
     assert(strategy_set_input_checked(&strategy, "Frequency", "once_per_bar", error,
                                       sizeof(error)) == PF_SETTINGS_OK);
     assert(strategy.read("Frequency", "all") == std::string("once_per_bar"));
@@ -286,13 +297,13 @@ int main() {
                                       sizeof(error)) == PF_SETTINGS_INVALID_ARGUMENT);
     assert(strategy.read("Frequency", "all") == std::string("once_per_bar"));
     assert(strategy_set_input_checked(&strategy, "Size", "small", error,
-                                      sizeof(error)) == PF_SETTINGS_UNSUPPORTED);
-    assert(strategy.read("Size", "") == std::string(""));
+                                      sizeof(error)) == PF_SETTINGS_OK);
+    assert(strategy.read("Size", "small") == std::string("small"));
     strategy_set_input(&strategy, "Size", "small");
     assert(strategy.read("Size", "") == std::string("small"));
     assert(strategy_set_input_checked(&strategy, "Size", "tiny", error,
-                                      sizeof(error)) == PF_SETTINGS_UNSUPPORTED);
-    assert(strategy.read("Size", "") == std::string("small"));
+                                      sizeof(error)) == PF_SETTINGS_OK);
+    assert(strategy.read("Size", "small") == std::string("tiny"));
     std::cout << strategy._pf_settings_receipt();
 }
 '''
@@ -310,9 +321,10 @@ int main() {
         assert inputs[name]["default"] == default
         assert inputs[name]["options"] == options
     assert inputs["Frequency"]["effective_value"] == "once_per_bar"
-    assert inputs["Size"]["supported"] is False
-    assert inputs["Size"]["default"] == "" and inputs["Size"]["options"] == []
-    assert inputs["Size"]["effective_value"] == "small"
+    assert inputs["Size"]["supported"] is True
+    assert inputs["Size"]["default"] == "small"
+    assert inputs["Size"]["options"] == ["small", "tiny"]
+    assert inputs["Size"]["effective_value"] == "tiny"
 
 
 @pytest.mark.parametrize("sha12", SOURCE_INPUTS)
@@ -334,7 +346,8 @@ def test_population_source_settings_receipt(sha12):
         assert all(isinstance(option, str) for option in entry["options"])
     for name in SOURCE_INPUTS[sha12]:
         entry = inputs[name]
-        assert entry["supported"] is False
-        assert entry["default"] == entry["effective_value"] == ""
-        assert entry["options"] == []
-        assert '"string", std::string(""), {}' in _metadata(cpp, name)
+        assert entry["supported"] is True
+        assert entry["default"] == entry["effective_value"]
+        assert entry["default"] != ""
+        assert all(isinstance(option, str) and option != "" for option in entry["options"])
+        assert ", true, {}," in _metadata(cpp, name)

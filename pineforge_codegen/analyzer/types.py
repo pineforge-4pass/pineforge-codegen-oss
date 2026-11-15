@@ -47,6 +47,7 @@ from ..ast_nodes import (
 )
 from ..errors import Phase
 from ..limits import iter_ast_nodes
+from ..builtin_constants import builtin_constant, is_builtin_enum
 from ..matrix_overloads import matrix_sum_has_rhs
 from ..reference_casts import na_reference_cast_kind
 from ..symbols import (
@@ -180,15 +181,31 @@ class TypeHelper:
     def _param_type_specs_from_def(self, func_def) -> list:
         """Per-parameter ``TypeSpec`` (or ``None``) from a function's DECLARED
         parameter type hints — the authoritative source for typed params
-        (``pivot hi``, ``string tf``, ``line[] arr``). Untyped params are
-        ``None`` here so regular-function call-site inference can fill them.
+        (``pivot hi``, ``string tf``, ``line[] arr``). An untyped builtin-enum
+        default keeps its nominal base type; other untyped params remain
+        ``None`` so regular-function call-site inference can fill them.
         """
         hints = (getattr(func_def, "annotations", None) or {}).get("param_type_hints", [])
         specs: list = []
+        defaults = (getattr(func_def, "annotations", None) or {}).get("param_defaults", [])
         for i in range(len(func_def.params)):
             hint = hints[i] if i < len(hints) else None
-            specs.append(self._type_spec_from_hint(hint) if hint else None)
+            spec = self._type_spec_from_hint(hint) if hint else None
+            if (spec is None and not hint and i < len(defaults)
+                    and defaults[i] is not None):
+                inferred = self._operator_operand_type(defaults[i])
+                if is_builtin_enum(inferred):
+                    spec = inferred
+            specs.append(spec)
         return specs
+
+    def _builtin_constant_info(self, node):
+        if not (isinstance(node, MemberAccess) and isinstance(node.object, Identifier)):
+            return None
+        bindings = getattr(self, "_value_bindings", None)
+        if bindings is not None and bindings.declaration_bindings.get(id(node.object)) is not None:
+            return None
+        return builtin_constant(node.object.name, node.member)
 
     def _template_args_from_call(self, node: FuncCall) -> list[str]:
         callee = node.callee
@@ -317,7 +334,7 @@ class TypeHelper:
         *,
         nullable: bool | None = None,
     ) -> TypeSpec | None:
-        """Keep exact callable joins and the established script selection policy."""
+        """Keep exact callable joins and script collection, string and enum joins."""
         if nullable is None:
             nullable = any(self._selection_contains_na(node) for node, _ in branches)
         result: TypeSpec | None = None
@@ -331,6 +348,8 @@ class TypeHelper:
             if spec is None:
                 return None
             if (not nullable and spec.kind not in {"map", "matrix"}
+                    and spec != TypeSpec.primitive("string")
+                    and not is_builtin_enum(spec)
                     and not isinstance(
                         self._current_top_level_stmt, (FuncDef, MethodDef),
                     )):
@@ -384,6 +403,9 @@ class TypeHelper:
     ) -> TypeSpec | None:
         if value is None:
             return None
+        constant = self._builtin_constant_info(value)
+        if constant is not None:
+            return constant.type_spec
         from ..drawing_all import drawing_all_result_spec
         drawing_spec = drawing_all_result_spec(value)
         if drawing_spec is not None:
@@ -1633,10 +1655,19 @@ class OperatorTypeQuery(TypeHelper):
                 if node.type_hint else
                 self._analyzer._operator_operand_type(node.value, self._parameter_types)
             )
+            if node.type_hint:
+                self._analyzer._check_nominal_slot(
+                    node.value, spec, f"declaration '{node.name}'", self._parameter_types,
+                )
             self._parameter_types[node.name] = spec
             return
         if isinstance(node, Assignment):
             self._check_node(node.value)
+            self._analyzer._check_nominal_slot(
+                node.value,
+                self._analyzer._operator_operand_type(node.target, self._parameter_types),
+                "assignment", self._parameter_types,
+            )
             if node.op != ":=":
                 self._analyzer._check_operator_operands(
                     node, node.op[:-1], (node.target, node.value), self._parameter_types,
@@ -1696,6 +1727,8 @@ class OperatorTypeQuery(TypeHelper):
         for field, value in vars(node).items():
             if field not in {"loc", "annotations"}:
                 self._check_node(value)
+        if isinstance(node, FuncCall):
+            self._analyzer._check_builtin_enum_arguments(node, self._parameter_types)
         if isinstance(node, BinOp):
             op, operands = node.op, (node.left, node.right)
         elif isinstance(node, UnaryOp):

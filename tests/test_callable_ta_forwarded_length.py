@@ -11,6 +11,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
+from tests._compile import compile_cpp
 from tests.test_runtime_var_initialization import _compile_and_run
 
 
@@ -640,3 +641,16 @@ out = rec_next(close, 1)
         CompileError, match="Recursive stateful callable cycle"
     ):
         transpile(source)
+
+
+@pytest.mark.parametrize("average", ["rma", "ema", "sma"])
+def test_unreachable_forwarding_keeps_live_input_backed_lengths(average) -> None:
+    source = f'''//@version=6
+strategy("reachable input length")
+filtered(float sample, int window) => ta.{average}(sample, window)
+unreached(float sample, int window) => filtered(filtered(sample, window), window)
+period = input.int(7, "Period", minval = 1)
+observed = filtered(window = period, sample = close)
+plot(observed)
+'''
+    compile_cpp(transpile(source, check_support=True), label="reachable-input-backed-ta-length")

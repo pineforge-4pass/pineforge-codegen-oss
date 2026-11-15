@@ -1360,14 +1360,13 @@ def test_str_tonumber_and_length_typed_numeric():
 
 
 def test_input_string_unresolvable_default_is_safe():
-    # input.string(size.tiny, ...) — size.tiny is unresolved; the default must
-    # NOT pass a null char* to get_input_string (strlen crash). It coerces to
-    # an empty string.
+    # The known Pine string size.tiny keeps its value and the original
+    # null-pointer safety guarantee. Retain this regression's historical id.
     cpp = _cpp(
         "sz = input.string(size.tiny, \"Label Size\", options=[size.tiny])\n"
         "plot(close)"
     )
-    assert 'get_input_string("Label Size", std::string(""))' in cpp
+    assert 'get_input_string("Label Size", std::string("tiny"))' in cpp
     assert 'get_input_string("Label Size", 0)' not in cpp
 
 

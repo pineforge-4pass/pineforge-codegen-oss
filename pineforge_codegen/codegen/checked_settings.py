@@ -17,11 +17,11 @@ _STRING_ESCAPE_VALUES = {
 
 
 def _string_setting_arg(expr, lowered: str) -> str | None:
-    """Use the body's known string constants, never its inert visual codes.
+    """Use inventoried Pine strings, excluding nominal enum storage payloads.
 
     Name-echo strings are accepted only for inventoried currency/format members.
-    Unknown constants leave the checked input unsupported; legacy getters
-    and setters retain their existing execution semantics.
+    Visual constants share their typed value with the body. Unknown constants
+    leave the checked input unsupported.
     """
     if isinstance(expr, MemberAccess):
         if isinstance(expr.object, Identifier):

@@ -4,8 +4,8 @@ TradingView evaluates a tuple declaration `[_, g] = pair(x)` on the REQUESTED
 bar when a request.security payload reads `g`, directly or through a function
 that reads the global: the global is a plain value of the requested context. A
 function with state (a ta.* call, a `var`, a request) advances that state once
-per evaluation, so reading its tuple once per element would advance it twice;
-that case, and the history of an element, stay refused.
+per evaluation. Every element shares its declaration's requested-context
+sample, including when the payload reads a member more than once.
 
 The value rows hold the requested series to numbers written here from the
 source and the 1-day alignment of a 15-minute chart (96 chart bars per day),
@@ -16,11 +16,12 @@ to the same payload written inline, which has always lowered.
 from __future__ import annotations
 
 import math
+import re
 
 import pytest
 
 from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from tests._compile import compile_cpp
 from tests._e2e import (
     Build, chart_feed_head, execute_all, per_bar_mismatches, skip_unless_e2e_env,
 )
@@ -68,10 +69,19 @@ STATEFUL = [
 
 
 @pytest.mark.parametrize("name,declarations,payload", STATEFUL, ids=[row[0] for row in STATEFUL])
-def test_a_stateful_user_tuple_element_stays_refused(name, declarations, payload):
-    with pytest.raises(CompileError, match="an element of a tuple declaration it cannot re-evaluate") as caught:
-        transpile(_source(declarations, payload, "close", "60"))
-    assert [d.code for d in caught.value.diagnostics] == ["PF-E3044"]
+def test_a_stateful_user_tuple_declaration_is_sampled_once(name, declarations, payload):
+    cpp = transpile(
+        _source(declarations, f"{payload} + {payload} + b", "close", "60"),
+        check_support=True,
+    )
+    evaluator = cpp.split(
+        "void _eval_security_0(const Bar& bar, bool is_complete) {", 1,
+    )[1].split("\n    }\n", 1)[0]
+    samples = re.findall(r"const auto (_pf_sec0_tuple_\d+_value) = ", evaluator)
+    assert len(samples) == 1
+    assert evaluator.count(f"std::get<0>({samples[0]})") == 2
+    assert f"std::get<1>({samples[0]})" in evaluator
+    compile_cpp(cpp, label=f"requested-tuple-{name}")
 
 
 def _column(outcome, name):

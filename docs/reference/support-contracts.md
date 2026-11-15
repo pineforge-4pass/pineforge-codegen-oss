@@ -1,5 +1,29 @@
 ## Support contracts
 
+Persistent typed declarations parse their storage prefix separately from their
+qualifier: `var const float`, `varip const int`, and the corresponding `simple`
+and `series` forms retain both annotations and their existing initialization.
+
+`request.security_lower_tf` tuple payloads, written inline or returned by a
+helper, produce one array per element. Each intrabar evaluates the tuple once
+before distributing values to the independently typed arrays; clearing the
+request clears every array together. Tuple-bound arrays retain collection
+metadata in global and callable scopes.
+
+A global tuple declaration read by `request.security` is sampled once in the
+requested evaluator, in declaration order. Scalar and history reads share that
+sample, including stateful helper results. Member history commits on completed
+requested bars even when a lazy payload does not read the member on that bar.
+Helper parameter bindings remain active through `na`/`nz` builtin emission in
+both evaluator modes. These rules supersede the older tuple refusal limitations
+described in the historical helper row below.
+
+Complete mixed tab/space nested block prefixes use four columns per tab plus
+the spaces. Previously accepted incomplete mixed prefixes, skipped first-body
+widths and pending logical-line continuations retain their earlier handling
+pending additional TradingView observations; they are not newly refused as part
+of the nested-block correction.
+
 Builtin `array.slice` on a resolved typed array in the script, a function or
 method parameter, or a callable-local array opens the view gate and lowers the
 script's array storage to typed handles:
@@ -277,6 +301,17 @@ This exception covers only constructs PineForge refuses today. A form that compi
 The emission invariant (`AGENTS.md#emission-invariant`) states this rule for every emission path. The notes in this file describe existing behavior: a documented approximation or unsupported fallback is an implementation gap, not an exception to the invariant.
 
 Input defaults use the input family's Pine type and qualifier contract.
+Inventoried `size.*`, `position.*`, `line.style_*`, `label.style_*` and
+`shape.*` members have string values independently of a visual call's
+rendering support. `builtin_constants.py` supplies their value and semantic
+type to analysis, emission and string-input proofs. Line styles also supply
+box border styles. Assignments, selections and callable variants preserve
+those types. `order.ascending` and `order.descending` instead retain nominal
+`sort_order` TypeSpecs; their runtime storage does not permit a Pine string
+conversion. Typed slots and operator contracts check that identity.
+`tests/test_builtin_style_values.py` covers the value paths, named bindings
+and nominal restrictions, including order arguments of collection sorting.
+
 An explicit `const color` carrier with a proven initializer supplies its
 packed value to the getter and settings descriptor before `on_bar`; the
 manifest reads that descriptor. `codegen/constant_values.py` resolves lexical

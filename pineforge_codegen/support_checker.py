@@ -58,6 +58,7 @@ from .array_binding import bind_array_constructor_arguments
 from .builtin_keywords import positional_builtin
 from .intrinsic_binding import intrinsic_keyword_diagnostics
 from .limits import iter_ast_nodes
+from .builtin_constants import builtin_constant
 from .pine_spelling import expr_start
 from .external_requests import (
     ABSENT_LOWERING, CHART_FALLBACK_ANNOTATION, FEED_LOWERING, FEED_WARNING_ANNOTATION,
@@ -2276,6 +2277,7 @@ class SupportChecker:
         if (
             self._const_arg_ctx_depth == 0
             and isinstance(node.object, Identifier)
+            and builtin_constant(node.object.name, node.member) is None
             and not (node.object.name == "alert"
                      and node.member in ALERT_FREQ_MEMBERS)
             and not (node.object.name == "barmerge"
