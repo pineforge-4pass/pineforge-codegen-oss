@@ -132,12 +132,39 @@ def test_numeric_timeframe_is_refused_during_analysis(function, named, argument,
 @pytest.mark.parametrize("named", [False, True], ids=["positional", "named"])
 @pytest.mark.parametrize("optimization", ["-O0", "-O2"])
 def test_na_timeframe_full_translation_unit_compiles(function, named, optimization):
-    from tests._compile import compile_cpp
+    from tests._compile import run_emitted_tu
 
     argument = "timeframe = na" if named else "na"
     cpp = transpile(
         '//@version=6\nstrategy("Missing timeframe compilation")\n'
         f"value = timeframe.{function}({argument})\n"
     )
-    compile_cpp(cpp, label=f"timeframe.{function}({argument}) {optimization}",
-                extra_flags=[optimization])
+    driver = r'''
+#include <iostream>
+#include <vector>
+int main() {
+    std::vector<pineforge::Bar> bars(4);
+    for (std::size_t i = 0; i < bars.size(); ++i) {
+        bars[i].open = bars[i].high = bars[i].low = bars[i].close = 100.0 + i;
+        bars[i].volume = 1.0;
+        bars[i].timestamp = 1704067200000LL + static_cast<long long>(i) * 3600000LL;
+    }
+    GeneratedStrategy strategy;
+    strategy.run(bars.data(), bars.size(), "60", "60");
+    if (!strategy.last_error().empty()) {
+        std::cerr << strategy.last_error() << "\n";
+        return 1;
+    }
+    std::cout << "executed " << static_cast<double>(strategy.value) << "\n";
+}
+'''
+    output = run_emitted_tu(
+        cpp, driver, opt=optimization,
+        label=f"timeframe.{function}({argument})",
+    )
+    # This row proves a real optimized build and execution. It records the
+    # observed value without settling the separate TradingView na-value check.
+    marker, observed = output.strip().split()
+    assert marker == "executed"
+    float(observed)
+    print(f"timeframe.{function}({argument}) {optimization}: {output.strip()}")

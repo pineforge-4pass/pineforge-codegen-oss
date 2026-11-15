@@ -159,6 +159,7 @@ from ..intrinsic_binding import bind_intrinsic_arguments, validate_intrinsic_key
 from ..limits import iter_ast_nodes
 from ..security_contexts import ticker_symbol_arg
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
+from ..analyzer.value_bindings import ValueBindings
 from ..method_binding import (
     MethodBindError,
     bind_function_defaults,
@@ -3232,6 +3233,44 @@ class CallVisitor:
 
                 if argument is None:
                     return timeframe_call("script_tf_")
+                actual = self._type_spec_from_expr(argument)
+                if (actual is None and isinstance(argument, MemberAccess)
+                        and isinstance(argument.object, Identifier)
+                        and self.ctx.identifier_decl_bindings.get(id(argument.object)) is None
+                        and ValueBindings.declaration_of(argument.object) is None):
+                    variable_type = sigs.get_variable_type(
+                        argument.object.name, argument.member,
+                    )
+                    if variable_type != PineType.UNKNOWN:
+                        actual = TypeSpec.primitive(variable_type.value)
+                actual_cpp_type = self._text_type(argument)
+                argument_is_string = (
+                    actual == TypeSpec.primitive("string")
+                    or (actual is None and actual_cpp_type == "std::string")
+                )
+                if (not isinstance(argument, NaLiteral)
+                        and (not argument_is_string or actual_cpp_type == "bool")):
+                    # A call-site variant may resolve an untyped helper after
+                    # analysis. Check before bool-to-text compatibility can
+                    # turn a non-string value into a C++ string.
+                    argument_type = (
+                        "bool" if actual_cpp_type == "bool" else
+                        (method_receiver_type_name(actual) or str(actual))
+                        if actual is not None else
+                        {"int": "int", "int64_t": "int", "double": "float"}.get(
+                            actual_cpp_type, actual_cpp_type,
+                        )
+                    )
+                    intrinsic = sigs.BUILTIN_FUNCTIONS[f"{namespace}.{func_name}"]
+                    parameter = intrinsic.primary.params[0]
+                    function_name = intrinsic.name
+                    parameter_type = parameter.pine_type.value
+                    name = parameter.name
+                    self._codegen_error(
+                        argument,
+                        f"Cannot call '{function_name}' with a {argument_type} "
+                        f"argument for {parameter_type} parameter '{name}'.",
+                    )
                 argument_cpp = self._visit_rhs_value(
                     argument, target_cpp_type="std::string",
                 )

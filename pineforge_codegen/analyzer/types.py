@@ -1535,6 +1535,9 @@ class OperatorTypeQuery(TypeHelper):
             op, operands = node.op, (node.operand,)
         elif isinstance(node, Ternary):
             op, operands = "?:", (node.condition, node.true_val, node.false_val)
+        elif isinstance(node, FuncCall):
+            self._analyzer._check_timeframe_string_arguments(node, self._parameter_types)
+            return
         else:
             return
         self._analyzer._check_operator_operands(node, op, operands, self._parameter_types)
