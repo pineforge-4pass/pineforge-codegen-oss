@@ -90,19 +90,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `array.sort_indices` honors a supplied sort direction.
   Scalar function overloads no longer crash during type checking.
   Regenerate C++ and relink affected strategies.
-- User-defined object types receive collision-aware generated names, so a Pine
-  type such as `Trade` cannot collide with a type imported from the engine.
-- `ta.sma` accepts a changing series length through the paired engine's
-  `pineforge::source::SeriesSma` implementation. Each written call and requested
-  context retains its own history, including repeated loop/helper reaches and
-  replacement evaluations. Constant and input-stable lengths keep the existing
-  fixed-length SMA implementation. Regenerate C++ and relink with an engine
-  release that includes the series SMA primitive.
 - Eligible chart-symbol `request.security` registrations with `lookahead_on`
   and `gaps_off` now explicitly request historical higher-timeframe projection.
   Affected generated C++ requires the matching engine headers and library with
   the seven-argument same-symbol registration overload; regenerate and relink.
-
 - A zone name the engine rejects now makes calendar-form `timestamp()` stop the
   run at its first evaluation, instead of silently calculating a UTC value.
   The paired engine reports a typed timezone error identifying the failed bar.

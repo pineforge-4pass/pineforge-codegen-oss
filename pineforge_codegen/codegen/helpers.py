@@ -466,7 +466,7 @@ CPP_EMITTER_NAMES = frozenset("""
     _pf_lines_ _pf_boxes_ _pf_labels_ _pf_linefills_
     _PFPolyline _pf_polyline_next_id_
     _pf_script_state_checkpoint_ _PFScriptState _PFForeignEmaSeeding
-    _PFALMA _PFKC _PFKCW _PFAnchoredVWAP _PFAnchoredVWAPBands _PFSeriesSma
+    _PFALMA _PFKC _PFKCW _PFAnchoredVWAP _PFAnchoredVWAPBands
     _PFPivotPointLevels _PFArrayField _PFTvFormatValue
     _PFCollectionTraits _PFArrayHistoryValue _PFCollectionHistory
     _pf_collection_history_changed kLoopTimeLimitMs kTvFloatStepEnd
@@ -530,7 +530,6 @@ CPP_RESERVED = set(
 CPP_TEMPORARY_NAMES = frozenset("""
     _nz_v _nz_y _fixnan_v _pna_l _pna_r _pfc_l _pfc_r _pfc_eq _hv _hidx _sv
     _out _func_ret _pf_v _pf_idx_v _pf_idx_t _pf_bool_v _pf_bool_t
-    _pf_source _pf_length
     _pf_color_v _pf_color_t _pf_color_base _pf_color_alpha _pf_sign_v
     _pf_series_raw _pf_raw _pf_val_t _pf_out _pf_prior
     _pf_hist_offset_raw _pf_hist_offset_numeric _pf_hist_offset _pf_hist_bar
@@ -683,7 +682,6 @@ class NamingHelper:
         """
         authored: set[str] = set()
         bound: set[str] = set()
-        user_types: set[str] = set()
         local_bindings: set[str] = set()
         direct_declarations = {id(node) for node in ast.body}
         function_names = {
@@ -700,7 +698,6 @@ class NamingHelper:
                     authored.update(value for value in values
                                     if isinstance(value, str) and value)
             if isinstance(node, TypeDecl):
-                user_types.add(node.name)
                 authored.update(field.name for field in node.fields)
                 bound.add(node.name)
                 bound.update(field.name for field in node.fields)
@@ -738,10 +735,7 @@ class NamingHelper:
         self._safe_name_occupied = authored
         self._safe_name_bound = bound
         for name in sorted(bound):
-            # Every authored object type lives in the generated-name space.
-            # A namespace import can expose an engine type with any Pine name;
-            # a finite reserved-name inventory cannot protect this category.
-            if (name in user_types or name in CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES
+            if (name in CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES
                     or is_emitter_temporary(name)):
                 self._allocate_safe_name(name)
         # Buffered locals already keep their function apart through the

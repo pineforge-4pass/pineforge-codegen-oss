@@ -56,18 +56,17 @@ resolved like the symbol and the timeframe, bar series and user calls
 allowed, the requests are copied once per distinct value, and each copy's
 payload reads the value in the parameter's place (``fastMa[1]``; an untitled
 input carries its declaration's key as its title). A length or history index
-every top-level call passes one setup-stable value keeps the analyzer's single evaluator;
+every top-level call passes one value keeps the analyzer's single evaluator;
 its call-site clones for differing timeframes built every clone from the
 first call's length. Only a value the request builder lowers on the
 requested bars in the read's place is put in (``_Lowered``); any other keeps
 the earlier lowering, never a refusal: a reassigned or ``var`` name, a loop
 variable, a name the helper declares, a user call other than a global's
 value the builder inlines whole (``_inlined_function``), a global declared
-after the helper whose type cannot be preserved there, a history object other
-than one the builder owns, or a global under a builtin rendered on the chart's
-terms. Numeric window lengths and history indices may vary: requested values,
-including ``bar_index`` and operators over requested values, close into their
-own payloads instead of using constructor text from the first call.
+after the helper (read on the chart's terms there), a history object other
+than a bar or price series, a ``ta.*`` call, an ``input.source``, an inline
+operator expression or a global holding a numeric one or such a call, a
+global under a builtin rendered on the chart's terms.
 
 A request of another symbol that reads that symbol's pinned feed
 (``external_requests``: the support checker's ``feed`` lowering) is keyed by
@@ -1317,15 +1316,10 @@ def _analyzer_binds_payload(prog: ScriptIndex, func: str, request: FuncCall,
     objects, lengths, _ = _payload_positions(prog, request)
     if any(id(read) not in lengths for read in reads):
         return False
-    lowered = _Lowered(prog, func)
     for param in {prog.refs[id(read)][2] for read in reads}:
         args = [prog.param_arg(func, call, param) for call in calls]
         if len({context_key(arg) for arg in args}) > 1 or any(
                 id(node) in prog.input_names for arg in args for node in _walk(arg)):
-            return False
-        if not lowered.length(args[0]):
-            # A single spelling can still change on every requested bar.
-            # It needs a payload binding, not the analyzer's constructor text.
             return False
     return True
 
@@ -1383,7 +1377,6 @@ def _payload_positions(prog: ScriptIndex, request: FuncCall) -> tuple[set[int], 
 # and as a history object.
 _VALUE_SERIES = frozenset({
     "open", "high", "low", "close", "volume", "hl2", "hlc3", "ohlc4", "hlcc4",
-    "bar_index",
 })
 _HISTORY_SERIES = _VALUE_SERIES
 _VALUE_CALLS = frozenset({"nz", "int", "float"})
@@ -1753,11 +1746,7 @@ def _payload_values(prog: ScriptIndex, func: str, request: FuncCall, reads: list
             if id(read) in objects:
                 ok = lowered.history(value, globals_ok=id(read) not in rendered)
             elif id(read) in lengths:
-                # A runtime window length is an ordinary requested value.
-                # Requiring setup-time stability here left different helper
-                # calls sharing the first call's requested evaluator.
-                ok = lowered.length(value) or lowered.value(
-                    value, globals_ok=id(read) not in rendered)
+                ok = lowered.length(value)
             else:
                 ok = lowered.value(value, globals_ok=id(read) not in rendered)
             if not ok:

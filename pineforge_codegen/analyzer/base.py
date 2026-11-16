@@ -4594,7 +4594,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return True
             sym = self._symbols.resolve(node.name)
             if sym is not None:
-                if sym.is_const:
+                if sym.is_const or node.name.startswith("input"):
                     return True
                 if getattr(sym, "is_static_series", False):
                     return True
@@ -4602,7 +4602,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         if isinstance(node, MemberAccess):
             if isinstance(node.object, Identifier):
-                if node.object.name == "input" or node.object.name in self._enum_defs:
+                if node.object.name.startswith("input") or node.object.name in self._enum_defs:
                     return True
             return self._is_static_expression(node.object)
 

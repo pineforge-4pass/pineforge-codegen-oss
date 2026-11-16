@@ -1700,30 +1700,6 @@ class SecurityEmitter:
         def fail(value, kind, detail):
             self._security_selection_refusal(value, kind, detail)
 
-        # An outer write owns the refusal before setup validation reaches a
-        # selector read that the same write makes mutable. Keep this check
-        # structural so all other leaf diagnostics retain their visit order.
-        for selection_node, _depth in iter_ast_nodes(node):
-            if isinstance(selection_node, IfStmt):
-                bodies = (selection_node.body, selection_node.else_body)
-            elif isinstance(selection_node, SwitchStmt):
-                bodies = [body for _case, body in selection_node.cases]
-                bodies.append(selection_node.default_body)
-            else:
-                continue
-            for body in bodies:
-                local = set()
-                for stmt in body or ():
-                    if isinstance(stmt, VarDecl):
-                        local.add(stmt.name)
-                    elif isinstance(stmt, TupleAssign):
-                        local.update(name for name in stmt.names if name != "_")
-                    elif isinstance(stmt, Assignment) and (
-                        not isinstance(stmt.target, Identifier)
-                        or stmt.target.name not in local
-                    ):
-                        fail(stmt, "statement", "outer assignment")
-
         def expression(value, env):
             if isinstance(value, Identifier):
                 if value.name in env:
@@ -8816,7 +8792,6 @@ class SecurityEmitter:
             ]
 
         lines.append(f"    void _eval_security_{sec_id}(const Bar& bar, bool is_complete) {{")
-        self._emit_series_sma_begin(lines, sec_id)
         if sec_id in self._security_bar_index_secs:
             member = self._security_bar_index_member(sec_id)
             if self._security_foreign(sec_id):

@@ -62,11 +62,8 @@ from ..symbols import (
     unify_type_specs,
 )
 from .helpers import (
-    BUILTIN_ACCESSOR_NAMES,
-    CPP_RESERVED,
     NA_PRESERVING_INT_TYPES,
     evaluate_args_once,
-    is_emitter_temporary,
     na_preserving_int_cast,
     pine_truth_cast,
 )
@@ -223,15 +220,9 @@ class TypeInferer:
 
     def _udt_arena_member_name(self, type_name: str) -> str:
         """Per-strategy arena member owning one user-defined object's records."""
-        allocated = getattr(self, "_udt_arena_member_names", {}).get(type_name)
-        if allocated is not None:
-            return allocated
-        # Keep historical reserved-name fragments, but escaping every handle
-        # type must not rename otherwise non-colliding arena helpers.
-        if (type_name in CPP_RESERVED or type_name in BUILTIN_ACCESSOR_NAMES
-                or is_emitter_temporary(type_name)):
-            type_name = self._safe_name(type_name)
-        return f"_pf_udt_{cpp_identifier_fragment(type_name)}"
+        return getattr(self, "_udt_arena_member_names", {}).get(
+            type_name, f"_pf_udt_{self._safe_name(type_name)}"
+        )
 
     def _udt_arena_cpp_type(self, type_name: str) -> str:
         """Generated arena specialization for one user-defined object type."""

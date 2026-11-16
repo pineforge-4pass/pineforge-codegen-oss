@@ -3,9 +3,11 @@
 PineForge sizes a ta.* indicator buffer from a length that is constant or
 derived from an input. A series length (a loop counter, a value computed per
 bar) is refused for functions that still need a constructor-sized buffer.
-ta.percentile_nearest_rank and ta.sma lower to their engine series classes.
-The supported SMA call no longer emits its former PF-E5092 refusal.
-Other unsupported functions keep the plain wording, with the C++ class name, which
+ta.percentile_nearest_rank lowers to its engine series class. For the ta.*
+functions with a RECORDED TradingView result that a series length compiles
+(ta.sma, named in the engine's note on its TradingView compile probes) the
+refusal names the Pine function and says that TradingView accepts the call.
+Every other function keeps the plain wording, with the C++ class name, which
 makes no claim about TradingView: the functions where TradingView refuses a
 series length too (ta.ema, ta.rsi, ...), and the ones with no recorded result
 (ta.wma, ta.percentile_linear_interpolation, ta.pivothigh, ...). A function
@@ -14,9 +16,8 @@ joins the first group only with its own recorded result.
 
 import pytest
 
-from pineforge_codegen import transpile, transpile_full
+from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
-from tests._compile import compile_cpp
 
 ACCEPTED_CODE = "PF-E5092"
 PLAIN_CODE = "PF-E5009"
@@ -58,12 +59,19 @@ def _refusal(source: str):
 @pytest.mark.parametrize("source, argument, name", [
     (_bar_source("ta.sma(close, n)"), "n", "ta.sma"),
 ])
-def test_supported_series_length_does_not_emit_the_former_refusal(source, argument, name):
-    result = transpile_full(source)
-    assert all(d.code != ACCEPTED_CODE for d in result["diagnostics"])
-    assert "_PFSeriesSma _ta_sma_" in result["cpp"]
-    assert f"ta_number({argument})" in result["cpp"]
-    compile_cpp(result["cpp"], label=f"supported {name} series length")
+def test_a_series_length_with_a_recorded_tradingview_result_says_so(source, argument, name):
+    diagnostic = _refusal(source)
+    assert diagnostic.code == ACCEPTED_CODE
+    assert diagnostic.message == (
+        f"Unsupported TA constructor length '{argument}' for {name}: {REASON} "
+        f"TradingView accepts a series length for {name}(); "
+        "PineForge does not support it yet."
+    )
+    expected_line = next(
+        number for number, line in enumerate(source.splitlines(), start=1)
+        if f"{name}(" in line
+    )
+    assert diagnostic.location.line == expected_line
 
 
 @pytest.mark.parametrize("source, argument, class_name", [
