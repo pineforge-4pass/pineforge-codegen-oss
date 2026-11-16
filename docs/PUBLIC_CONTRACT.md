@@ -151,6 +151,9 @@ site, in source order. It classifies each parameter that the call actually passe
 numeric values are default (`absent`), finite constants (`literal`), expressions
 from a conservative non-missing-value allowlist (`never_na`), or potentially
 missing (`maybe_na`). Text, enums, directions and IDs have separate classes.
+One passed parameter is not classified in version 1: the `comment` of
+`strategy.order`. Its entry has no `comment` field, whether the call passes a
+comment or not.
 IDs are classified without exposing their literal strings. Entry counts and
 target relations include IDs from both `strategy.entry` and `strategy.order`;
 they distinguish direction, shared IDs, repeated sites and exit ordering.

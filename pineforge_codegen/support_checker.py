@@ -260,7 +260,7 @@ BARSTATE_APPROX_VARS: dict[str, str] = {
 
 STRATEGY_UNSUPPORTED_PARAMS: dict[str, set[str]] = {
     "entry": {"alert_message", "disable_alert"},
-    "order": {"comment", "alert_message", "disable_alert", "qty_type"},
+    "order": {"alert_message", "disable_alert", "qty_type"},
     "exit": {"comment_profit", "comment_loss", "comment_trailing", "alert_message", "alert_profit", "alert_loss", "alert_trailing", "disable_alert"},
     "close": {"alert_message", "disable_alert"},
     "close_all": {"alert_message", "disable_alert"},

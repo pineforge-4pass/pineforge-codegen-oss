@@ -560,12 +560,38 @@ def test_string_consumers_keep_explicit_bool_conversion(
         _assert_native_text(tmp_path, native_env, body, expression, condition)
 
 
+def _one_call(statement: str, name: str) -> str:
+    """The one emitted ``name(...)`` statement of a script placing ``statement``."""
+    cpp = transpile(HEADER + statement + "\n")
+    lines = [line.strip() for line in cpp.splitlines() if line.strip().startswith(name + "(")]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
 @pytest.mark.parametrize("comment", ('"plain"', "str.tostring(close)", 'str.format("{0}", close)'))
-def test_order_comments_without_bool_conversion_keep_reference_cpp(tmp_path, comment):
-    _assert_reference_cpp(
-        tmp_path, HEADER
-        + f'strategy.order("L", strategy.long, qty = 1, comment = {comment})\n',
-    )
+def test_order_comment_lowers_as_the_entry_comment_does(comment):
+    """An order forwards its comment, lowered exactly as an entry's comment is.
+
+    These comments were frozen-C++ controls while the order's comment was not
+    emitted. It is emitted now, once, as the host door's last argument, so the
+    control is the lowering the same build gives the same expression as a
+    ``strategy.entry`` comment. The calls without a comment locate the argument:
+    no emitted text is spelled here.
+    """
+    entry_tail = ', "", 0, -1);'  # after an entry's comment: oca_name, oca_type, qty_type
+    bare_entry = _one_call('strategy.entry("L", strategy.long, qty = 1)', "strategy_entry")
+    bare_order = _one_call('strategy.order("L", strategy.long, qty = 1)', "strategy_order")
+    assert bare_entry.endswith('""' + entry_tail), bare_entry
+    assert bare_order.endswith(', "");'), bare_order
+    entry = _one_call(
+        f'strategy.entry("L", strategy.long, qty = 1, comment = {comment})', "strategy_entry")
+    entry_head = bare_entry[:-len('""' + entry_tail)]
+    assert entry.startswith(entry_head) and entry.endswith(entry_tail), entry
+    lowered = entry[len(entry_head):-len(entry_tail)]
+    assert lowered and lowered != '""', entry
+    order = _one_call(
+        f'strategy.order("L", strategy.long, qty = 1, comment = {comment})', "strategy_order")
+    assert order == bare_order[:-len('"");')] + lowered + ");"
 
 
 def test_concatenation_keeps_explicit_bool_conversion(tmp_path, native_env):
@@ -606,10 +632,13 @@ def test_log_format_arguments_keep_their_cpp_bool_type(tmp_path, native_env, cha
     'alert(str.tostring(session.isfirstbar_regular), alert.freq_all)',
     'alertcondition(session.isfirstbar_regular, title = "first", message = "first")',
     'label.new(bar_index, close, tooltip = str.tostring(session.isfirstbar_regular))',
-    'strategy.order("L", strategy.long, qty = 1, comment = str.tostring(session.isfirstbar_regular))',
 ))
 def test_omitted_text_sinks_keep_reference_cpp(tmp_path, statement):
-    """Frozen-C++ control: alerts, constructor tooltip and order comment are omitted."""
+    """Frozen-C++ control: alerts and the constructor tooltip are omitted.
+
+    An order's comment is forwarded to the engine and is no longer one of them
+    (test_order_comment_lowers_as_the_entry_comment_does).
+    """
     reference = reference_codegen(NUMERIC_REFERENCE)
     assert reference is not None, "required C++ reference is unavailable"
     pine = tmp_path / "strategy.pine"
@@ -631,10 +660,11 @@ def test_omitted_text_sinks_keep_reference_cpp(tmp_path, statement):
 ))
 def test_order_with_a_bool_text_comment_compiles_and_runs(
         tmp_path, native_env, body, comment):
-    """The engine's order carries no comment, so a bool text there must not break the build.
+    """A bool text in an order's comment must not break the build.
 
-    A script that compiled and ran before the bool-text change keeps compiling and
-    running, and the order itself is still placed: the position grows.
+    The comment is forwarded to the engine's order. A script that compiled and
+    ran before keeps compiling and running, and the order itself is still
+    placed: the position grows.
     """
     source = (
         HEADER + body

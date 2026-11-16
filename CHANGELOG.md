@@ -22,6 +22,16 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- `strategy.order(..., comment=...)` now forwards its comment to the engine's
+  order instead of dropping it with a warning, so the trade the order opens or
+  closes reports it through `strategy.opentrades.entry_comment`,
+  `strategy.closedtrades.entry_comment` and `strategy.closedtrades.exit_comment`.
+  The order-shapes receipt keeps its version 1 fields: a `strategy.order` entry
+  has no `comment` field, with a comment or without. Order comment expressions
+  now evaluate; their host reads appear in `host_reads`. Generated C++ now passes
+  the comment as the eighth argument of `strategy_order`, so it needs the paired
+  engine whose host accepts it: regenerate every strategy and relink (#291).
+
 - Numeric string patterns now preserve mandatory integer zeros before grouping
   and sign assembly, so `str.tostring(9448, "00000")` returns `"09448"`.
 

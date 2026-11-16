@@ -4075,6 +4075,12 @@ class CallVisitor:
             stop_arg = self._visit_float_arg(p.get("stop"))
             oca_name = self._strategy_string_arg(p.get("oca_name"))
             oca_type = self._visit_expr(p.get("oca_type")) if "oca_type" in p else "0"
+            # The order's comment is the host door's trailing argument: the
+            # trade a fill of this order opens or closes carries it. The
+            # version 1 order-shapes receipt has no comment field for an
+            # order, so the comment is lowered here and not recorded below.
+            comment_n = p.get("comment")
+            comment = self._strategy_string_arg(comment_n)
             record_order_call(self, node, "order", {
                 "id": (order_id, p.get("id")), "direction": (direction, direction_node),
                 "qty": (qty, p.get("qty"), "na<double>()"),
@@ -4083,7 +4089,8 @@ class CallVisitor:
                 "oca_name": (oca_name, p.get("oca_name"), '""'),
                 "oca_type": (oca_type, p.get("oca_type"), "0"),
             })
-            return f"strategy_order({order_id}, {direction}, {qty}, {limit_arg}, {stop_arg}, {oca_name}, {oca_type})"
+            return (f"strategy_order({order_id}, {direction}, {qty}, {limit_arg}, {stop_arg}, "
+                    f"{oca_name}, {oca_type}, {comment})")
 
         if func_name == "risk":
             return "/* skip */"
