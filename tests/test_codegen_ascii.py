@@ -457,7 +457,7 @@ def test_ascii_type_field_and_method_names_keep_their_spelling():
     assert cpp.isascii()
     code = code_only(cpp)
     # The type, field and method retain their complete authored ASCII components.
-    assert "struct PointValue {" in code
+    assert "struct pf_safe_PointValue {" in code
     assert "double field_value =" in code
     assert "_udt_PointValue_read_value(" in code
 

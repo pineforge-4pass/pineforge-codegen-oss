@@ -5,7 +5,8 @@ length when that binding is never reassigned.  The value is fixed for the
 entire run, so it has the same constructor-sizing semantics as an ordinary
 literal alias.  Keep the admission deliberately narrower than the general
 stable-runtime reset path: mutable, history-promoted, and dynamic persistent
-bindings must continue to fail closed.
+bindings must not acquire fixed constructor sizing. A changing SMA length
+uses the series primitive instead.
 """
 
 from __future__ import annotations
@@ -15,9 +16,10 @@ import re
 import pytest
 
 from pineforge_codegen import transpile
-from pineforge_codegen.ast_nodes import MethodDef
+from pineforge_codegen.ast_nodes import FuncCall, MemberAccess, MethodDef
 from pineforge_codegen.errors import CompileError, Level, Phase
 from pineforge_codegen.lexer import Lexer
+from pineforge_codegen.limits import iter_ast_nodes
 from pineforge_codegen.parser import Parser
 from tests._compile import compile_cpp
 
@@ -78,19 +80,16 @@ def _assert_method_declaration_fences_sma(
     assert (program.annotations or {}).get("parse_recovery_count", 0) == 0
     assert any(isinstance(node, MethodDef) for node in program.body)
 
-    with pytest.raises(CompileError) as caught:
-        transpile(source, filename="stable-var-method-declaration.pine")
-
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.phase is Phase.CODEGEN
-    assert diagnostic.location.line == expected_line
-    assert diagnostic.message == (
-        "Unsupported TA constructor length 'p' for ta.sma: it is neither a "
-        "compile-time constant nor derived from an input, so PineForge cannot "
-        "size the indicator buffer. TradingView accepts a series length for "
-        "ta.sma(); PineForge does not support it yet."
+    assert any(
+        isinstance(node, FuncCall)
+        and isinstance(node.callee, MemberAccess)
+        and node.callee.member == "sma" and node.loc.line == expected_line
+        for node, _ in iter_ast_nodes(program)
     )
+    cpp = transpile(source, filename="stable-var-method-declaration.pine")
+    assert re.search(r"_PFSeriesSma _ta_sma_\w+;", cpp)
+    assert not re.search(r"_ta_sma_\w+\(5\)", _constructor_initializers(cpp))
+    compile_cpp(cpp, label="method-fenced SMA length")
 
 
 @pytest.mark.parametrize(
@@ -455,18 +454,11 @@ def test_callable_parameter_rebinding_fences_literal_specialization(
         + "\nobserved = requested(p)\n"
     )
 
-    with pytest.raises(CompileError) as caught:
-        transpile(source)
-
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.phase is Phase.CODEGEN
-    assert diagnostic.message == (
-        "Unsupported TA constructor length 'p' for ta.sma: it is neither a "
-        "compile-time constant nor derived from an input, so PineForge cannot "
-        "size the indicator buffer. TradingView accepts a series length for "
-        "ta.sma(); PineForge does not support it yet."
-    )
+    cpp = transpile(source)
+    assert re.search(r"_PFSeriesSma _ta_sma_\w+;", cpp)
+    assert "ta_number(q)" in cpp
+    assert not re.search(r"_ta_sma_\w+\(5\)", _constructor_initializers(cpp))
+    compile_cpp(cpp, label="rebound callable SMA length")
 
 
 @pytest.mark.parametrize(
@@ -598,18 +590,10 @@ strategy("requested stable literal negative")
 requested = request.security(syminfo.tickerid, "60", ta.sma(close, L))
 '''
 
-    with pytest.raises(CompileError) as caught:
-        transpile(source)
-
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.phase is Phase.CODEGEN
-    assert diagnostic.message == (
-        "Unsupported TA constructor length 'L' for ta.sma: it is neither a "
-        "compile-time constant nor derived from an input, so PineForge cannot "
-        "size the indicator buffer. TradingView accepts a series length for "
-        "ta.sma(); PineForge does not support it yet."
-    )
+    cpp = transpile(source)
+    assert re.search(r"_PFSeriesSma _sec\d+__ta_sma_\w+;", cpp)
+    assert not re.search(r"_sec\d+__ta_sma_\w+\(5\)", _constructor_initializers(cpp))
+    compile_cpp(cpp, label="requested nonliteral SMA length")
 
 
 def test_input_backed_parameter_keeps_override_aware_reset() -> None:

@@ -143,7 +143,7 @@ type Pt
 var m = matrix.new<Pt>(1, 1)
 '''
     cpp = _emit(src)
-    assert "PineGenericMatrix<Pt>::new_(1, 1, Pt{})" in cpp
+    assert "PineGenericMatrix<pf_safe_Pt>::new_(1, 1, pf_safe_Pt{})" in cpp
 
 
 def test_udt_constructor_wrapping_matrix_new_keeps_udt_member_type():
@@ -261,7 +261,7 @@ var m = matrix.new<Pt>(2, 2)
 var m2 = m.transpose()
 '''
     cpp = _emit(src)
-    assert "PineGenericMatrix<Pt>" in cpp
+    assert "PineGenericMatrix<pf_safe_Pt>" in cpp
 
 
 def test_lhs_typing_var_m_eq_matrix_new_int_local():
@@ -364,7 +364,7 @@ var m = matrix.new<Pt>(2, 2)
 v = (m[1]).get(0, 0)
 '''
     cpp = _emit(src)
-    assert "PineGenericMatrix<Pt>" in cpp
+    assert "PineGenericMatrix<pf_safe_Pt>" in cpp
 
 
 def test_chained_receiver_preserves_matrix_spec():
@@ -407,7 +407,7 @@ type Pt
 var m = matrix.new<Pt>(2, 2)
 '''
     cpp = _emit(src)
-    assert "PineGenericMatrix<Pt>::new_(2, 2, Pt{})" in cpp
+    assert "PineGenericMatrix<pf_safe_Pt>::new_(2, 2, pf_safe_Pt{})" in cpp
 
 
 def test_matrix_concat_emits_assignment_method_form():
