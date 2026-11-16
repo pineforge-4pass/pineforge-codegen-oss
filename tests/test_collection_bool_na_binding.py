@@ -140,10 +140,10 @@ SCALAR_CALLS = (
 )
 
 
-# The tree just before the collection-binding change. Its own outcome is the
-# reference, so emission changes that landed before it (record methods are
-# emitted differently since then) are not attributed to this change.
-SCALAR_PARENT = "d6c75495e463fd1b6e01060b3967f918bd2c4e4a"
+# Codegen main from before the collection-binding change. Its output for
+# these scripts differs from this tree only by that change; a tree that also
+# carries the collision-safe record names would differ for record methods.
+SCALAR_PARENT = "f848df52b05cd4118dfd90101080446d8a7582ad"
 
 
 @pytest.fixture(scope="module")
