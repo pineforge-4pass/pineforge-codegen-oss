@@ -152,46 +152,149 @@ def test_every_consumer_uses_the_checked_type_and_matching_factory(family, quali
 
 @pytest.mark.parametrize("family", _TYPES)
 @pytest.mark.parametrize("named", (False, True))
-def test_precalculation_checks_each_overridden_length_before_an_na_source(family, named):
+def test_checked_precalculation_defers_length_stop_to_reached_call(family, named):
     call = (_NAMED if named else _POSITIONAL)[family].format(
-        sample="close", span="lengthInput", second="secondInput", signal="signalInput"
+        sample="sourceValue", span="lengthInput", second="secondInput", signal="signalInput"
     )
+    observed = {
+        "kc": ("observed", "observedUpper", "observedLower"),
+        "macd": ("observedLine", "observedSignal", "observed"),
+    }.get(family, ("observed",))
     source = (
         '//@version=6\nstrategy("checked precalc")\n'
         'lengthInput = input.int(13, "Length")\n'
         'secondInput = input.int(25, "Second length")\n'
         'signalInput = input.int(9, "Signal length")\n'
+        'sourceValue = input.source(high, "Source")\n'
+        "var int visited = 0\nvar int completed = 0\n"
+        "visited += 1\n"
+        "sourceLag = sourceValue[1]\n"
+        "beforeValue = ta.sma(open, 2)\n"
         + _assignment(family, "observed", call)
-        + "plot(observed)\n"
+        + f"completed += 1\nplot({' + '.join(observed)} + beforeValue + visited + completed + sourceLag)\n"
     )
     cpp = transpile(source)
     expected = _TYPES[family]
     assert _HEADER in cpp
     assert "void precalculate(const Bar* bars, int n)" in cpp
+    cache = f"_precalc_{_members(cpp, family)[0][1]}"
+    assert f"{cache}[i] =" in cpp
+    caches = re.findall(r"^\s+std::vector<.+> (_precalc_\w+);$", cpp, re.M)
+    assert len(caches) >= 2
     # Both resets around precalculation and the live input reset construct the
     # same checked type. The first source below is NA in either route.
     assert re.search(rf"= {re.escape(expected)}\(.*get_input_int", cpp)
     driver = r"""
 #include <cstdio>
+#include <pineforge/run_failure.hpp>
 #include <stdexcept>
+void equal_value(double actual, double expected) {
+    if (is_na(actual) != is_na(expected) ||
+        (!is_na(expected) && actual != expected &&
+         (!std::isfinite(actual) || !std::isfinite(expected) ||
+          std::abs(actual - expected) > 1e-10 * (1 + std::abs(expected)))))
+        throw std::runtime_error("cached and live routes differ");
+}
+struct RecordingStrategy : GeneratedStrategy {
+    bool allow_cache = true;
+    std::vector<std::vector<double>> values;
+    void prepare_script_run(const Bar* bars, int n, bool allow) override {
+        GeneratedStrategy::prepare_script_run(bars, n, allow && allow_cache);
+        if (visited != 0 || completed != 0)
+            throw std::runtime_error("preparation executed the script");
+        if (sourceValue.size() != 0 || get_input_source("Source", sourceValue).size() != 0)
+            throw std::runtime_error("precalculation leaked input source history");
+        values.clear();
+    }
+    void on_source_bar(const Bar& bar) override {
+        GeneratedStrategy::on_source_bar(bar);
+        values.push_back({sourceValue[0], sourceLag, beforeValue, OBSERVED_VALUES});
+    }
+};
+void check_first_call(RecordingStrategy& strategy, const Bar& bar, int length) {
+    bool stopped = false;
+    try {
+        strategy.dispatch_bar(bar);
+    } catch (const std::exception& error) {
+        const auto* failure = dynamic_cast<const pineforge::RunFailureInfo*>(&error);
+        if (!failure || failure->run_failure_code() !=
+                pineforge::RunFailureCode::pine_invalid_argument)
+            throw;
+        stopped = true;
+    }
+    if (stopped != (length <= 0))
+        throw std::runtime_error("wrong generated length validation");
+    if (strategy.visited != 1 || strategy.completed != (stopped ? 0 : 1))
+        throw std::runtime_error("length stop moved before prior script statements");
+    if (!is_na(strategy.sourceLag))
+        throw std::runtime_error("first real bar saw replayed source history");
+}
 int main() {
-    Bar bars[] = {{100.0, 102.0, 99.0, na<double>(), 1.0, 1743465600000LL}};
+    constexpr int count = 64;
+    Bar bars[count];
+    for (int i = 0; i < count; ++i) {
+        const double value = 100.0 + i + (i % 5) * 0.25;
+        bars[i] = {value, value + 2, value - 1, value + 0.5, 1.0,
+                   1743465600000LL + i * 60000LL};
+    }
+    Bar missing_source = bars[0];
+    missing_source.high = na<double>();
+    missing_source.close = na<double>();
     int checked = 0;
     for (const char* key : {LENGTH_KEYS}) {
         for (int length : {0, -1, 7}) {
             for (bool precalculate : {false, true}) {
-                GeneratedStrategy strategy;
+                RecordingStrategy strategy;
                 strategy.set_input(key, std::to_string(length));
-                bool stopped = false;
-                try {
-                    strategy.prepare_script_run(bars, 1, precalculate);
-                    strategy.dispatch_bar(bars[0]);
-                } catch (const std::exception&) {
-                    stopped = true;
+                strategy.set_input("Source", "high");
+                strategy.prepare_script_run(&missing_source, 1, precalculate);
+                if (strategy._use_precalc != (precalculate && length > 0))
+                    throw std::runtime_error("wrong precalculation publication");
+                if (length <= 0 && !(EMPTY_CACHES))
+                    throw std::runtime_error("abandoned replay retained a partial cache");
+                check_first_call(strategy, missing_source, length);
+                if (precalculate && length <= 0) {
+                    RecordingStrategy control;
+                    control.set_input(key, std::to_string(length));
+                    control.set_input("Source", "high");
+                    control.prepare_script_run(&missing_source, 1, false);
+                    check_first_call(control, missing_source, length);
+                    equal_value(strategy.beforeValue, control.beforeValue);
+                    equal_value(strategy.sourceValue[0], control.sourceValue[0]);
                 }
-                if (stopped != (length <= 0))
-                    throw std::runtime_error("wrong generated length validation");
                 ++checked;
+
+                // Reuse the same object after abandonment and success, with
+                // changed valid lengths and selected input.source series.
+                for (int valid : {3, 11}) {
+                    const char* selected = valid == 3 ? "close" : "open";
+                    strategy.set_input(key, std::to_string(valid));
+                    strategy.set_input("Source", selected);
+                    RecordingStrategy live;
+                    live.allow_cache = false;
+                    live.set_input(key, std::to_string(valid));
+                    live.set_input("Source", selected);
+                    strategy.run(bars, count);
+                    live.run(bars, count);
+                    if (!strategy._use_precalc || live._use_precalc)
+                        throw std::runtime_error("valid rerun did not use the requested route");
+                    if (strategy.values.size() != count || live.values.size() != count)
+                        throw std::runtime_error("valid rerun omitted bars");
+                    int published = 0;
+                    for (int i = 0; i < count; ++i) {
+                        const auto& actual = strategy.values[i];
+                        const auto& expected = live.values[i];
+                        for (std::size_t j = 0; j < actual.size(); ++j)
+                            equal_value(actual[j], expected[j]);
+                        equal_value(actual[0],
+                                    valid == 3 ? bars[i].close : bars[i].open);
+                        if (std::isfinite(actual.back())) ++published;
+                    }
+                    if (strategy.visited != count || strategy.completed != count ||
+                        published == 0)
+                        throw std::runtime_error("valid rerun did not complete and publish");
+                    ++checked;
+                }
             }
         }
     }
@@ -204,10 +307,123 @@ int main() {
     if family == "macd":
         keys.append("Signal length")
     driver = driver.replace("LENGTH_KEYS", ", ".join(f'"{key}"' for key in keys))
+    driver = driver.replace(
+        "EMPTY_CACHES", " && ".join(f"strategy.{name}.empty()" for name in caches)
+    )
+    driver = driver.replace("OBSERVED_VALUES", ", ".join(observed))
     out = run_emitted_tu(
         cpp, driver, opt="-O0", label=f"checked_na_{family}_{named}"
     )
-    assert int(out.strip()) == len(keys) * len((0, -1, 7)) * len((False, True))
+    assert int(out.strip()) == len(keys) * 3 * 2 * 3
+
+
+@pytest.mark.parametrize(
+    ("body", "guarded"),
+    (
+        ("value = ta.ema(close, 3)\n", True),
+        ("value = ta.sma(close, 3)\n", False),
+        ("unused(float sample) => ta.ema(sample, 3)\nvalue = ta.sma(close, 3)\n", False),
+        (
+            'simple int span = syminfo.type == "crypto" ? 3 : 5\n'
+            "value = ta.ema(close, span) + ta.sma(close, 3)\n",
+            False,
+        ),
+    ),
+)
+def test_precalculation_handler_only_covers_live_eligible_checked_sites(body, guarded):
+    cpp = transpile('//@version=6\nstrategy("precalc handler selection")\n' + body + "plot(value)\n")
+    precalc = cpp.split("void precalculate(const Bar* bars, int n)", 1)[1].split("\n    }", 1)[0]
+    assert ("catch (const std::exception& _pf_precalc_error)" in precalc) is guarded
+    if guarded:
+        assert "#include <pineforge/run_failure.hpp>" in cpp
+        assert precalc.index(".resize(n);") < precalc.index("try {")
+        assert precalc.index("= pineforge::source::PineEma(") < precalc.index("try {")
+        assert precalc.index("_use_precalc = true;") < precalc.index("catch (")
+        assert precalc.rindex("= pineforge::source::PineEma(") > precalc.index("catch (")
+        assert "catch (...)" not in precalc
+
+
+@pytest.mark.parametrize("begin", (0, -1))
+def test_precalculation_propagates_unrelated_string_errors_and_allocation_failures(begin):
+    # Long text forces a real allocation in the replay's source expression.
+    # The invalid substring raises the engine's carried pine_string_error,
+    # independent of the checked EMA length.
+    padding = "0" * 64
+    cpp = transpile(
+        '//@version=6\nstrategy("precalc failure boundary")\n'
+        "var int visited = 0\nvisited += 1\n"
+        f'value = ta.ema(str.tonumber(str.substring("{padding}" + str.tostring(close), {begin})), 3)\n'
+        "plot(value + visited)\n"
+    )
+    member = _members(cpp, "ema")[0][1]
+    cache = f"_precalc_{member}"
+    assert f"{cache}[i] =" in cpp
+    driver = r"""
+#include <cstdio>
+#include <cstdlib>
+#include <new>
+#include <pineforge/run_failure.hpp>
+#include <stdexcept>
+static bool fail_next_allocation = false;
+void* operator new(std::size_t size) {
+    if (fail_next_allocation) {
+        fail_next_allocation = false;
+        throw std::bad_alloc();
+    }
+    if (void* memory = std::malloc(size ? size : 1)) return memory;
+    throw std::bad_alloc();
+}
+void operator delete(void* memory) noexcept { std::free(memory); }
+void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
+void* operator new[](std::size_t size) { return ::operator new(size); }
+void operator delete[](void* memory) noexcept { std::free(memory); }
+void operator delete[](void* memory, std::size_t) noexcept { std::free(memory); }
+int main() {
+    Bar bars[] = {{100.0, 102.0, 99.0, 101.0, 1.0, 1743465600000LL}};
+    GeneratedStrategy strategy;
+    bool stopped = false;
+    try {
+        strategy.prepare_script_run(bars, 1, true);
+    } catch (const std::exception& error) {
+        const auto* failure = dynamic_cast<const pineforge::RunFailureInfo*>(&error);
+        if (!failure || failure->run_failure_code() != pineforge::RunFailureCode::pine_string_error)
+            throw;
+        stopped = true;
+    }
+    if (stopped != INVALID_BEGIN || strategy.visited != 0 ||
+        strategy._use_precalc != !stopped)
+        throw std::runtime_error("unrelated replay failure was suppressed");
+    int checked = 1;
+    if (!stopped) {
+        strategy.dispatch_bar(bars[0]);
+        if (strategy.visited != 1)
+            throw std::runtime_error("valid string source did not execute");
+        for (bool inside_replay : {false, true}) {
+            GeneratedStrategy failing;
+            // With capacity reserved, resize cannot allocate; the long
+            // string source still must allocate during actual replay.
+            if (inside_replay) failing.CACHE_MEMBER.reserve(1);
+            fail_next_allocation = true;
+            bool allocation_stopped = false;
+            try {
+                failing.precalculate(bars, 1);
+            } catch (const std::bad_alloc&) {
+                allocation_stopped = true;
+            }
+            fail_next_allocation = false;
+            if (!allocation_stopped || failing._use_precalc || failing.visited != 0)
+                throw std::runtime_error("allocation failure was suppressed");
+            ++checked;
+        }
+    }
+    std::printf("%d\n", checked);
+}
+"""
+    driver = driver.replace("CACHE_MEMBER", cache).replace(
+        "INVALID_BEGIN", "true" if begin < 0 else "false"
+    )
+    out = run_emitted_tu(cpp, driver, opt="-O0", label=f"precalc_failure_boundary_{begin}")
+    assert int(out.strip()) == (1 if begin < 0 else 3)
 
 
 def test_keltner_scope_restores_context_on_compute_and_recompute_failure():

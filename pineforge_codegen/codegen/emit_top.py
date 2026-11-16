@@ -173,6 +173,8 @@ class TopLevelEmitter:
             for site in self.ctx.ta_call_sites
         ):
             lines.append('#include <pineforge/source/pine_ta_length.hpp>')
+        if self._has_checked_precalculated_ta():
+            lines.extend(('#include <pineforge/run_failure.hpp>', '#include <exception>'))
         lines.append('#include <pineforge/math.hpp>')
         lines.append('#include <pineforge/series.hpp>')
         lines.append('#include <pineforge/na.hpp>')
@@ -3055,10 +3057,20 @@ class TopLevelEmitter:
             if _ti not in self._dead_ta_indices
         )
 
+    def _has_checked_precalculated_ta(self) -> bool:
+        """Whether replay can reach an execution-checked EMA-family length."""
+        return any(
+            site.class_name in self._TA_CHECKED_CLASSES
+            and self._ta_site_uses_precalc(site)
+            for _ti, site in enumerate(self.ctx.ta_call_sites)
+            if _ti not in self._dead_ta_indices
+        )
+
     def _emit_precalculate_and_run(self, lines: list[str]) -> None:
         if not self._has_precalculated_ta():
             return
 
+        checked_precalc = self._has_checked_precalculated_ta()
         replayed_source_series: list[str] = []
         for stmt in self.ctx.ast.body:
             if not isinstance(stmt, VarDecl):
@@ -3107,6 +3119,9 @@ class TopLevelEmitter:
 
         # Start precalculation loop
         lines.append("")
+        if checked_precalc:
+            lines.append("        try {")
+        replay_start = len(lines)
         lines.append("        for (int i = 0; i < n; ++i) {")
 
         # Push OHLCV into series
@@ -3200,6 +3215,23 @@ class TopLevelEmitter:
             self._precalc_loop_active = False
 
         lines.append("        }")
+        if checked_precalc:
+            for index in range(replay_start, len(lines)):
+                lines[index] = "    " + lines[index] if lines[index] else ""
+            lines.extend([
+                "            _use_precalc = true;",
+                "        } catch (const std::exception& _pf_precalc_error) {",
+                "            const auto* _pf_precalc_failure =",
+                "                dynamic_cast<const pineforge::RunFailureInfo*>(&_pf_precalc_error);",
+                "            if (!_pf_precalc_failure ||",
+                "                _pf_precalc_failure->run_failure_code() !=",
+                "                    pineforge::RunFailureCode::pine_invalid_argument) throw;",
+                "            // The real bar path checks the length at the original call.",
+            ])
+            for _ti, site in enumerate(self.ctx.ta_call_sites):
+                if _ti not in self._dead_ta_indices and self._ta_site_uses_precalc(site):
+                    lines.append(f"            _precalc_{site.member_name}.clear();")
+            lines.append("        }")
 
         # Reset indicators and series for the real backtest run
         lines.append("")
@@ -3221,7 +3253,8 @@ class TopLevelEmitter:
             lines.append("        _src_ohlc4_.clear(); _src_hlcc4_.clear();")
 
         lines.append("")
-        lines.append("        _use_precalc = true;")
+        if not checked_precalc:
+            lines.append("        _use_precalc = true;")
         lines.append("    }")
         lines.append("")
 
