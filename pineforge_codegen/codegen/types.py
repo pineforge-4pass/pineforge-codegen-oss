@@ -4001,7 +4001,7 @@ class TypeInferer:
         sym = self.ctx.symbols.resolve(node.name)
         if sym is not None:
             inferred = self._infer_type(node.value)
-            if inferred == "std::vector<double>":
+            if inferred in ("std::vector<double>", "std::string"):
                 return inferred
             cpp_type = PINE_TYPE_TO_CPP.get(sym.pine_type, "double")
             if cpp_type != "double" or sym.pine_type != PineType.UNKNOWN:
@@ -6430,6 +6430,18 @@ class TypeInferer:
                          or (sym.scope == "global"
                              and self._numeric_na_global(node.name)))):
                 return "double"
+            if sym is not None and sym.pine_type in (PineType.UNKNOWN, PineType.VOID):
+                # A coarse analyzer type must not turn string storage into a
+                # numeric operand. Prefer this read's lexical declaration;
+                # synthetic identifiers can recover the emitted member type.
+                declaration = self.ctx.identifier_binding_nodes.get(id(node))
+                storage_type = (
+                    self._type_for_decl(declaration)
+                    if isinstance(declaration, VarDecl)
+                    else self._slot_scalar_cpp_type(node.name)
+                )
+                if storage_type == "std::string":
+                    return storage_type
             if sym is not None and getattr(sym, "type_spec", None) is not None:
                 return self._type_spec_to_cpp(sym.type_spec)
             if sym is not None and sym.pine_type != PineType.UNKNOWN:

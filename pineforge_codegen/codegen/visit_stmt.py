@@ -1045,6 +1045,8 @@ class StmtVisitor:
                 self._int_slot_cpp_type(None, self._series_type_for(node.name)),
             )
             self._emit_history_series_write(lines, pad, safe, cpp_val)
+            if target_cpp_type == "std::string":
+                remember_local_type(target_cpp_type)
             return
 
         # If/switch expression: x = if cond ... else ...
