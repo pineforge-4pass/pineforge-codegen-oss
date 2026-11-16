@@ -9718,6 +9718,27 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.FLOAT
 
     def _visit_MemberAccess(self, node: MemberAccess) -> PineType:
+        if isinstance(node.object, Identifier):
+            sym = self._symbols.resolve(node.object.name)
+            # A field read's receiver is an identifier read like any other:
+            # codegen needs its binding scope (``_call_site_var_name``).
+            self._identifier_binding_scopes[id(node.object)] = (
+                getattr(sym, "scope", None) if sym is not None else None
+            )
+            udt_name = None
+            if sym is not None:
+                udt_name = sym.udt_type_name
+                if udt_name is None and sym.type_spec is not None and sym.type_spec.kind == "udt":
+                    udt_name = sym.type_spec.name
+            if udt_name:
+                field_type = (self._udt_fields.get(udt_name) or {}).get(node.member)
+                if field_type is not None:
+                    return field_type
+            # Untyped parameters can acquire their record type at a call site.
+            # An authored receiver's spelling cannot select a builtin namespace.
+            if self._value_bindings.declaration_bindings.get(id(node.object)) is not None:
+                return PineType.UNKNOWN
+
         constant = self._builtin_constant_info(node)
         if constant is not None:
             return constant.storage_type
@@ -9928,22 +9949,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # dividends.*, earnings.*, splits.* variables
             if ns in ("dividends", "earnings", "splits"):
                 return PineType.FLOAT
-
-            sym = self._symbols.resolve(ns)
-            # A field read's receiver is an identifier read like any other:
-            # codegen needs its binding scope (``_call_site_var_name``).
-            self._identifier_binding_scopes[id(node.object)] = (
-                getattr(sym, "scope", None) if sym is not None else None
-            )
-            udt_name = None
-            if sym is not None:
-                udt_name = sym.udt_type_name
-                if udt_name is None and sym.type_spec is not None and sym.type_spec.kind == "udt":
-                    udt_name = sym.type_spec.name
-            if udt_name:
-                field_type = (self._udt_fields.get(udt_name) or {}).get(node.member)
-                if field_type is not None:
-                    return field_type
 
         # Handle nested member access (e.g., strategy.oca.reduce,
         # strategy.closedtrades.profit, strategy.commission.percent)
