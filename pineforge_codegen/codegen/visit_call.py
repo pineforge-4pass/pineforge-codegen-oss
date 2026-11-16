@@ -205,6 +205,8 @@ from .tables import (
     SKIP_NAMESPACES,
     SKIP_VAR_TYPES,
     STR_ARGS_READ_REPEATEDLY,
+    STR_BYTE_SEARCH_MAP,
+    STR_BYTE_SEARCH_REPEATED,
     STR_FUNC_MAP,
     TIME_FIELD_EXPRS,
     TIMESTAMP_CALENDAR_BODY,
@@ -4483,6 +4485,12 @@ class CallVisitor:
                     lambda a: f'[&](){{ std::string __pf_s={a[0]}; auto __pf_p=__pf_s.find({a[1]}); if(__pf_p!=std::string::npos) __pf_s.replace(__pf_p,{a[1]}.length(),{a[2]}); return __pf_s; }}()',
                     "_pf_str_a")
             return 'std::string("")'
+
+        if (func_name in STR_BYTE_SEARCH_MAP
+                and all(self._string_is_canonical(argument) for argument in arg_nodes)):
+            return evaluate_args_once(
+                args, STR_BYTE_SEARCH_REPEATED.get(func_name, ()),
+                STR_BYTE_SEARCH_MAP[func_name], "_pf_str_a")
 
         if func_name in STR_FUNC_MAP and STR_FUNC_MAP[func_name] is not None:
             if func_name in ("length", "pos", "contains", "startswith", "endswith", "match"):

@@ -409,14 +409,14 @@ EMISSION_ROWS = [
     pytest.param('n = str.length("abc")\nplot(close)\n', True, id="str-length-alone"),
     pytest.param('t = str.match("aéb", "a.b")\nplot(close)\n', True,
                  id="str-match-alone"),
-    pytest.param('n = str.contains("abc", "b")\nplot(close)\n', True,
+    pytest.param('n = str.contains("abc", "b")\nplot(close)\n', False,
                  id="str-contains-alone"),
-    pytest.param('n = str.startswith("abc", "a")\nplot(close)\n', True,
+    pytest.param('n = str.startswith("abc", "a")\nplot(close)\n', False,
                  id="str-startswith-alone"),
-    pytest.param('n = str.endswith("abc", "c")\nplot(close)\n', True,
+    pytest.param('n = str.endswith("abc", "c")\nplot(close)\n', False,
                  id="str-endswith-alone"),
-    pytest.param('s = "a" + "b"\nplot(close)\n', True, id="string-plus-alone"),
-    pytest.param('s = "a"\ns += "b"\nplot(close)\n', True, id="string-append-alone"),
+    pytest.param('s = "a" + "b"\nplot(close)\n', False, id="string-plus-alone"),
+    pytest.param('s = "a"\ns += "b"\nplot(close)\n', False, id="string-append-alone"),
     pytest.param("n = 1\nn += 2\nplot(close)\n", False,
                  id="control-numeric-append"),
     pytest.param(
@@ -501,18 +501,22 @@ def test_requested_compound_assignment_uses_its_storage_family(
         + "plot(close)\n"
     )
     body = requested_body(cpp, 0)
-    assert ("_pf_u16_concat(" in body) is string
-    assert (HELPER_DEFINITION in cpp) is string
+    # Every string argument and stored/history value here is complete ASCII.
+    # Unit helpers are selected by possible surrogate halves, independently
+    # of the slot's scalar family; numeric controls remain native too.
+    assert "_pf_u16_concat(" not in body
+    assert HELPER_DEFINITION not in cpp
     if string:
         assert 'std::string("b")' in body
         # The chart helper is emitted too, even when only a request calls it.
         # Both bodies must keep the persistent/local string out of arithmetic.
         assert "_pf_u16_concat(std::to_string(" not in cpp
-        for line in body.splitlines():
-            if "_pf_u16_concat(" in line:
-                assert "std::to_string(" not in line
-                assert "is_na(" not in line
-                assert "(double)" not in line
+        joins = [line for line in body.splitlines() if " + " in line or " += " in line]
+        assert joins
+        for line in joins:
+            assert "std::to_string(" not in line
+            assert "is_na(" not in line
+            assert "(double)" not in line
     else:
         assert "1.25" in body
 

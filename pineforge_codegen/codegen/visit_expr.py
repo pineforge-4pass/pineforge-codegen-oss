@@ -93,7 +93,7 @@ from .capacities import literal_history_offset
 
 from ..analyzer.value_bindings import ValueBindings
 from ..errors import CodegenInvariantError, Phase
-from ..symbols import TypeSpec
+from ..symbols import PineType, TypeSpec
 from ..builtin_constants import builtin_constant
 from ..external_requests import UNPINNED_ANNOTATION
 from ..ast_nodes import (
@@ -785,9 +785,10 @@ class ExprVisitor:
     def _reads_builtin_variable(self, node: Identifier) -> bool:
         """Whether this read resolves to a builtin rather than an authored value.
 
-        Bar fields follow the same lexical rule as other builtins. Preserve
-        the analyzer's exact binding, including an explicit builtin binding
-        before a later declaration. Copied reads retain authored-use metadata.
+        Nonnumeric bar-name bindings need declaration-aware emission. Numeric
+        script bindings retain the established bar-field route; callable
+        locals already had their own route before the string lowering.
+        An explicit builtin binding before a later declaration stays builtin.
         """
         name = node.name
         if ((name not in BAR_FIELDS and name not in BAR_BUILTINS)
@@ -799,6 +800,15 @@ class ExprVisitor:
             if id(node) in self.ctx.identifier_decl_bindings
             else ValueBindings.declaration_of(node)
         )
+        if name in BAR_FIELDS and binding is not None:
+            declared = self._builtin_declaration_symbol(node)
+            spec = declared.type_spec if declared is not None else None
+            if (declared is not None
+                    and declared.pine_type in (PineType.INT, PineType.FLOAT, PineType.BOOL)
+                    and (spec is None or (
+                        spec.kind == "primitive" and spec.name in ("int", "float", "bool")))
+                    and self._builtin_local_symbol(node) is None):
+                return True
         annotations = node.annotations or {}
         return (binding is None
                 and not annotations.get("tuple_builtin_binding")
@@ -2023,9 +2033,52 @@ class ExprVisitor:
             return "std::string"
         return inferred
 
+    def _string_is_canonical(self, node, bindings=()) -> bool:
+        """Whether a string cannot carry isolated UTF-16 halves."""
+        from .string_values import StringValues
+
+        if node is None:
+            return False
+        facts = getattr(self, "_string_values", None)
+        if facts is None:
+            facts = self._string_values = StringValues(self)
+        if facts.is_canonical(node):
+            return True
+        frame = getattr(self, "_security_fallback_frame", None)
+        if not bindings and frame is not None and id(node) not in frame["chart"]:
+            bindings = frame["args"][5]
+        return bool(bindings) and self._security_string_is_canonical(node, bindings)
+
+    @staticmethod
+    def _string_operand_cpp(rendered: str, cpp_type: str | None) -> str:
+        """The existing string-addition conversion, shared by both visitors."""
+        if cpp_type == "std::string":
+            return rendered
+        if cpp_type == "bool":
+            return f'(({rendered}) ? std::string("true") : std::string("false"))'
+        if cpp_type is None:
+            # Requested binding inference can be incomplete. Dispatch on the
+            # rendered value's type rather than converting a string numerically.
+            return (
+                "([](const auto& _pf_value) { "
+                "if constexpr (std::is_same_v<std::decay_t<decltype(_pf_value)>, std::string>) "
+                "return _pf_value; "
+                "else if constexpr (std::is_same_v<std::decay_t<decltype(_pf_value)>, bool>) "
+                'return std::string(_pf_value ? "true" : "false"); '
+                "else return std::to_string(_pf_value); "
+                f"}}({rendered}))"
+            )
+        return f"std::to_string({rendered})"
+
     def _string_concat_cpp(self, left: str, right: str, *,
-                           left_node=None, right_node=None) -> str:
-        """Join two rendered string values through their UTF-16 units."""
+                           left_node=None, right_node=None, bindings=(),
+                           canonical: bool | None = None) -> str:
+        """Use unit concatenation only when a value can carry surrogate halves."""
+        if canonical is None:
+            canonical = all(self._string_is_canonical(operand, bindings)
+                            for operand in (left_node, right_node))
+        if canonical:
+            return f"({left} + {right})"
         self._uses_tv_string_units = True
         if any(
             isinstance(operand, StringLiteral)
@@ -2063,16 +2116,14 @@ class ExprVisitor:
             lt = self._concat_type(node.left)
             rt = self._concat_type(node.right)
             if lt == "std::string" or rt == "std::string":
-                def _as_string(rendered, inferred):
-                    if inferred == "std::string":
-                        return rendered
-                    if inferred == "bool":
-                        return f'(({rendered}) ? std::string("true") : std::string("false"))'
-                    return f"std::to_string({rendered})"
-
                 return self._string_concat_cpp(
-                    _as_string(left, lt), _as_string(right, rt),
-                    left_node=node.left, right_node=node.right)
+                    self._string_operand_cpp(left, lt),
+                    self._string_operand_cpp(right, rt),
+                    left_node=node.left, right_node=node.right,
+                    canonical=(
+                        (lt != "std::string" or self._string_is_canonical(node.left))
+                        and (rt != "std::string" or self._string_is_canonical(node.right))
+                    ))
         if (node.op in ("+", "-", "*", "/", "%")
                 and not widened and not na_checked
                 and any(self._integer_na_operand(side)

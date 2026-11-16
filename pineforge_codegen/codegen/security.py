@@ -5773,6 +5773,7 @@ class SecurityEmitter:
                         current = _series_expr(series_name, "0")
                         rhs = self._compound_assign_rhs(
                             current, stmt.op, expr_cpp, stmt.target, stmt.value,
+                            string_bindings=runtime_stack_local,
                             target_cpp_type=(
                                 "std::string"
                                 if series_name in self._security_string_series else None),
@@ -5801,7 +5802,8 @@ class SecurityEmitter:
                     else:
                         rhs = self._compound_assign_rhs(
                             binding, stmt.op, expr_cpp, stmt.target, stmt.value,
-                            target_cpp_type=self._security_local_cpp_types.get(binding))
+                            target_cpp_type=self._security_local_cpp_types.get(binding),
+                            string_bindings=runtime_stack_local)
                     if rhs is None:
                         lines.append(f"{pad}{binding} {stmt.op} {expr_cpp};")
                     else:
@@ -8253,17 +8255,22 @@ class SecurityEmitter:
         wide = node.op != ":=" and store(value_cpp) != value_cpp
         slot_type = self._security_cpp_type_for_mutable(target_name, info)
         string_concat = node.op == "+=" and slot_type == "std::string"
+        unit_concat = string_concat and not all(
+            self._string_is_canonical(operand)
+            for operand in (node.target, node.value)
+        )
 
         def combined(target_read: str) -> str:
             operand = store(value_cpp) if string_concat else value_cpp
             return (self._compound_assign_rhs(
-                        target_read, node.op, operand, target_cpp_type=slot_type)
+                        target_read, node.op, operand, node.target, node.value,
+                        target_cpp_type=slot_type)
                     or f"({target_read} {node.op[0]} {value_cpp})")
 
         if getattr(info, "is_series", False):
             if node.op == ":=":
                 lines.append(f"{pad}{state_name}.update({store(value_cpp)});")
-            elif wide or string_concat:
+            elif wide or unit_concat:
                 lines.append(f"{pad}{state_name}.update("
                              f"{store(combined(f'{state_name}[0]'))});")
             else:
@@ -8273,7 +8280,7 @@ class SecurityEmitter:
 
         if node.op == ":=":
             lines.append(f"{pad}{state_name} = {store(value_cpp)};")
-        elif wide or string_concat:
+        elif wide or unit_concat:
             lines.append(f"{pad}{state_name} = {store(combined(state_name))};")
         else:
             lines.append(f"{pad}{state_name} {node.op} {value_cpp};")
@@ -10500,7 +10507,7 @@ class SecurityEmitter:
                 self._binop_operands_need_order(expr_node)
                 or not all(
                     self._security_value_is_string(side, helper_binding_stack, ())
-                    and self._security_string_is_canonical(side, helper_binding_stack)
+                    and self._string_is_canonical(side, helper_binding_stack)
                     for side in (expr_node.left, expr_node.right)
                 )
             )
@@ -10537,10 +10544,25 @@ class SecurityEmitter:
                 op = cpp_ops.get(expr_node.op, expr_node.op)
                 if normalize_concat:
                     # The builder has resolved helper bindings to their
-                    # requested string values, rather than chart locals.
+                    # requested values. Apply the chart's numeric/bool text
+                    # conversions before selecting a string join.
+                    types = [
+                        "std::string"
+                        if self._security_value_is_string(side, helper_binding_stack, ())
+                        else self._security_argument_value_type(side, helper_binding_stack)
+                        for side in (expr_node.left, expr_node.right)
+                    ]
                     return self._string_concat_cpp(
-                        left, right,
-                        left_node=expr_node.left, right_node=expr_node.right)
+                        self._string_operand_cpp(left, types[0]),
+                        self._string_operand_cpp(right, types[1]),
+                        left_node=expr_node.left, right_node=expr_node.right,
+                        bindings=helper_binding_stack,
+                        canonical=all(
+                            (cpp_type is not None and cpp_type != "std::string")
+                            or self._string_is_canonical(side, helper_binding_stack)
+                            for side, cpp_type in zip(
+                                (expr_node.left, expr_node.right), types)
+                        ))
                 if expr_node.op in ("and", "or"):
                     left = self._coerce_bool_expr(left, expr_node.left)
                     right = self._coerce_bool_expr(right, expr_node.right)
@@ -11526,7 +11548,8 @@ class SecurityEmitter:
                 value = self._security_local_value(value, node.value, cpp_type, args[5])
             rhs = (value if node.op == ":="
                    else self._compound_assign_rhs(
-                       name, node.op, value, target_cpp_type=cpp_type))
+                       name, node.op, value, node.target, node.value,
+                       target_cpp_type=cpp_type, string_bindings=args[5]))
             if rhs is not None:
                 if node.op == ":=":
                     rhs = self._security_local_value(rhs, node.value, cpp_type, args[5])

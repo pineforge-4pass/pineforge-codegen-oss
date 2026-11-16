@@ -6373,6 +6373,10 @@ class TypeInferer:
             lexical_tuple_type = self._lexical_tuple_cpp_type(node)
             if lexical_tuple_type is not None:
                 return lexical_tuple_type
+            if node.name in BAR_FIELDS and self._reads_builtin_variable(node):
+                # Keep the type of the selected numeric bar read, rather
+                # than the type of a declaration its legacy route bypasses.
+                return "double"
             declared = self._builtin_declaration_symbol(node)
             if declared is not None:
                 return self._type_for_decl(declared._pf_decl_node)

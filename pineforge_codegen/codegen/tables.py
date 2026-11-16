@@ -1717,6 +1717,15 @@ STR_ARGS_READ_REPEATEDLY = {
     "repeat": (0, 1, 2),
 }
 
+# Complete strings have the same boolean search result in bytes and UTF-16
+# units. Retain their established spelling, including one-evaluation bindings.
+STR_BYTE_SEARCH_MAP = {
+    "contains": lambda args: f"({args[0]}.find({args[1]}) != std::string::npos)",
+    "startswith": lambda args: f"({args[0]}.substr(0, {args[1]}.length()) == {args[1]})",
+    "endswith": lambda args: f"({args[0]}.length() >= {args[1]}.length() && {args[0]}.compare({args[0]}.length() - {args[1]}.length(), {args[1]}.length(), {args[1]}) == 0)",
+}
+STR_BYTE_SEARCH_REPEATED = {"startswith": (1,), "endswith": (0, 1)}
+
 
 # ---------------------------------------------------------------------------
 # kwarg merge helper (used by visitor / dispatch sites that accept kwargs)

@@ -1160,6 +1160,7 @@ class StmtVisitor:
     def _compound_assign_rhs(self, target_read: str, op: str, val_cpp: str,
                              target_node=None, value_node=None, *,
                              target_cpp_type: str | None = None,
+                             string_bindings=(),
                              target_is_double: bool = False,
                              value_is_double: bool = False) -> str | None:
         """RHS for a compound assignment that must NOT lower to the C++
@@ -1178,9 +1179,18 @@ class StmtVisitor:
                 and (target_cpp_type or self._concat_type(target_node)) == "std::string"):
             # A bare na takes the string slot's type; other values keep the
             # assignment writer's already-rendered RHS.
-            if self._is_na_expr(value_node):
+            missing_string = self._is_na_expr(value_node)
+            if missing_string:
                 val_cpp = "na<std::string>()"
-            return self._string_concat_cpp(target_read, val_cpp)
+            if (not missing_string
+                    and all(self._string_is_canonical(operand, string_bindings)
+                            for operand in (target_node, value_node))):
+                return None
+            # Keep the typed compound writer on the established unit path.
+            # Its RHS has already adopted the target's string family; a bare
+            # na or an unproved state value must not return to numeric +=.
+            return self._string_concat_cpp(
+                target_read, val_cpp, canonical=False)
         # Requested helper state already stores numeric values as doubles.
         # Its caller supplies the emitted operand families after converting
         # the RHS; the chart AST's int hint cannot type those series reads.
