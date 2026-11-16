@@ -1738,32 +1738,21 @@ class CallVisitor:
                 or self._type_spec_to_cpp(param_spec)
             )
             cpp = self._visit_rhs_value(arg_node, target_cpp_type=target_cpp_type)
+            # Numeric selections still emit a double NaN after target-typed
+            # lowering. Convert at the actual integer parameter boundary,
+            # preserving both its declared width and exactly-once evaluation.
             return (self._coerce_int_slot(cpp, arg_node, target_cpp_type)
-                    if target_cpp_type == "int64_t" else cpp)
+                    if target_cpp_type in {"int", "int64_t"} else cpp)
         if param_name not in method_series:
             cpp = self._visit_expr(arg_node)
             int_cpp = self._func_param_int_cpp_type(
                 func_info, param_index,
                 self._callable_target_callsite_idx(func_info, call_node))
-            if int_cpp == "double":
-                return self._coerce_int_slot(cpp, arg_node, int_cpp)
-            if int_cpp == "int64_t":
-                cpp = self._coerce_int_slot(cpp, arg_node, int_cpp)
-            elif (int_cpp is not None
-                    and (self._holds_na_aware_wide_double(arg_node)
-                         or isinstance(arg_node, (Identifier, Subscript)))
-                    and self._emitted_value_is_double(arg_node)):
-                # An integer stored as double (including a bare-na global)
-                # must translate NaN to the parameter's integer sentinel.
-                # Same-width integer reads and direct numeric selections
-                # retain their existing argument expression.
-                cpp = na_preserving_int_cast(cpp, int_cpp)
-            elif int_cpp == "int" and isinstance(arg_node, MemberAccess):
-                # A UDT ``int`` field is ``int64_t`` storage: its na
-                # (INT64_MIN) passed into an ``int`` parameter would truncate
-                # to 0. ``_coerce_int_slot`` narrows exactly such a field read.
-                cpp = self._coerce_int_slot(cpp, arg_node, int_cpp)
-            return cpp
+            # Calls and compound expressions can emit double even when Pine
+            # types them as int and their AST contains no literal na. The
+            # shared slot conversion checks emitted type and integer-width
+            # provenance, including the original sentinel of wide UDT fields.
+            return self._coerce_int_slot(cpp, arg_node, int_cpp)
         expected_cpp_type = self._series_param_element_cpp_type(
             func_info,
             param_index,
