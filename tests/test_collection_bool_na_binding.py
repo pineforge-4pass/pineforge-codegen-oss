@@ -140,7 +140,10 @@ SCALAR_CALLS = (
 )
 
 
-SCALAR_PARENT = "f848df52b05cd4118dfd90101080446d8a7582ad"
+# The tree just before the collection-binding change. Its own outcome is the
+# reference, so emission changes that landed before it (record methods are
+# emitted differently since then) are not attributed to this change.
+SCALAR_PARENT = "d6c75495e463fd1b6e01060b3967f918bd2c4e4a"
 
 
 @pytest.fixture(scope="module")
@@ -483,10 +486,6 @@ def test_parent_eager_store_error_precedes_a_later_analyzer_error():
         "strategy.exit", id="unqualified-exit-disable-alert",
     ),
     pytest.param(
-        'value = request.currency_rate("USD", "EUR", na)\n',
-        "request.currency_rate", id="unqualified-request-flag",
-    ),
-    pytest.param(
         "value = input.int(1, confirm = na)\n",
         "input.int", id="unqualified-input-confirm",
     ),
@@ -511,6 +510,23 @@ def test_unqualified_storage_slots_create_needs_not_refusal_intents(body, builti
         and reason == "no qualified new bool/na obligation; retain parent admission"
         for _owner, _location, name, reason in context.builtin_bool_na_needs
     ), f"{builtin} must be visited and retained as an unqualified obligation"
+
+
+def test_currency_rate_na_flag_is_refused_at_its_argument():
+    # The currency-rate flag is a declared bool parameter, and a Pine v6 bool
+    # cannot be na, so the call is refused at the na argument instead of being
+    # retained as an unqualified obligation.
+    body = 'value = request.currency_rate("USD", "EUR", na)\n'
+    with pytest.raises(CompileError) as caught:
+        transpile(HEADER + body + "plot(close)\n")
+    located = [
+        (d.location.line, d.location.col)
+        for d in caught.value.diagnostics
+        if "request.currency_rate" in d.message
+        and "ignore_invalid_currency" in d.message
+    ]
+    # Two header lines; na starts at the 45th column of the third line.
+    assert located == [(3, body.index("na") + 1)]
 
 
 # These are the parent's three version-limited contracts, in namespace and
