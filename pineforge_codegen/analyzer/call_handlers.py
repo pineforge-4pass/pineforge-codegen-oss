@@ -1301,10 +1301,9 @@ class CallHandlers:
 
     def _handle_input_member_call(self, member: str, node: FuncCall) -> PineType:
         """Handle input.int(), input.float(), etc."""
-        if member == "bool" and not self._in_v5_library_definition(node):
-            default = node.args[0] if node.args else node.kwargs.get("defval")
-            if isinstance(default, NaLiteral):
-                self._bool_na_error(default.loc)
+        intrinsic = sigs.get_intrinsic("input", member)
+        if intrinsic is not None:
+            self._check_registered_parent_bool_na(node, intrinsic)
         for arg in node.args:
             self._visit(arg)
         for val in node.kwargs.values():

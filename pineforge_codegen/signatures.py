@@ -12,7 +12,7 @@ Each signature specifies:
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from .symbols import PineType, TypeSpec
 
@@ -25,6 +25,18 @@ class Param:
     default: Any = None          # None = required, else default value
     is_series: bool = True       # series vs simple/const
     type_spec: TypeSpec | None = None  # nominal identity beyond primitive storage
+    # A dependent Pine type, independent of the legacy primitive storage slot:
+    # "id.element", "id.key", "id.value", "id" or the explicit "template".
+    type_from: str | None = None
+    # Optional without a literal default (e.g. a receiver-dependent extent).
+    optional: bool = False
+    # Storage PineType.BOOL alone is not a semantic refusal contract.
+    # parent_eager preserves the analyzer boundary from before collection
+    # argument binding; the
+    # element-store contract is limited to the retained bool collection rule.
+    na_policy: Literal["parent_eager", "bool_element_store"] | None = None
+    # None keeps the policy's unrestricted-version admission boundary.
+    na_versions: tuple[int, ...] | None = None
 
 
 @dataclass
@@ -55,6 +67,9 @@ class IntrinsicFunc:
     # Pine variadic callables forbid every keyword. This does not constrain
     # their positional arity to the overload examples recorded below.
     variadic: bool = False
+    # Collection instance calls insert their receiver into the first slot.
+    # Constructors and ordinary namespace functions have no instance receiver.
+    receiver_kind: str | None = None
 
     @property
     def primary(self) -> FuncSig:
@@ -75,11 +90,14 @@ class IntrinsicFunc:
 # Helper constructors
 # ---------------------------------------------------------------------------
 
-def _sig(params: list[tuple], ret: PineType = PineType.FLOAT,
+def _sig(params: list[tuple | Param], ret: PineType = PineType.FLOAT,
          returns_tuple: bool = False, tuple_count: int = 0) -> FuncSig:
-    """Shorthand to build a FuncSig from tuples of (name, type, default)."""
+    """Build a FuncSig from (name, type, default) tuples or dependent Params."""
     plist = []
     for p in params:
+        if isinstance(p, Param):
+            plist.append(p)
+            continue
         name = p[0]
         ptype = p[1] if len(p) > 1 else PineType.FLOAT
         default = p[2] if len(p) > 2 else None
@@ -90,10 +108,11 @@ def _sig(params: list[tuple], ret: PineType = PineType.FLOAT,
 
 def _func(name: str, *sigs: FuncSig,
           keyword_names_verified: bool = False,
-          variadic: bool = False) -> IntrinsicFunc:
+          variadic: bool = False,
+          receiver_kind: str | None = None) -> IntrinsicFunc:
     return IntrinsicFunc(name=name, signatures=list(sigs),
                          keyword_names_verified=keyword_names_verified,
-                         variadic=variadic)
+                         variadic=variadic, receiver_kind=receiver_kind)
 
 
 # Shortcuts for common param types
@@ -470,11 +489,17 @@ _str("split",       _sig([("string", S), ("separator", S)], ret=S))  # returns a
 
 MAP_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 
-def _map(short_name: str, *sigs: FuncSig) -> None:
-    MAP_FUNCTIONS[short_name] = _func(f"map.{short_name}", *sigs)
+def _map(short_name: str, *sigs: FuncSig,
+         receiver_kind: str | None = None) -> None:
+    MAP_FUNCTIONS[short_name] = _func(
+        f"map.{short_name}", *sigs, receiver_kind=receiver_kind,
+    )
 
 _map("new",      _sig([], ret=F))
-_map("put",      _sig([("id", F), ("key", S), ("value", F)], ret=F))
+_map("put",      _sig([
+    ("id", F), Param("key", S, type_from="id.key"),
+    Param("value", F, type_from="id.value", na_policy="parent_eager"),
+], ret=F), receiver_kind="map")
 _map("get",      _sig([("id", F), ("key", S)], ret=F))
 _map("remove",   _sig([("id", F), ("key", S)], ret=F))
 _map("contains", _sig([("id", F), ("key", S)], ret=B))
@@ -483,12 +508,14 @@ _map("clear",    _sig([("id", F)], ret=VOID))
 _map("keys",     _sig([("id", F)], ret=F))     # returns array
 _map("values",   _sig([("id", F)], ret=F))     # returns array
 _map("copy",     _sig([("id", F)], ret=F))
-_map("put_all",  _sig([("id", F), ("id2", F)], ret=VOID))
+_map("put_all",  _sig([
+    ("id", F), Param("id2", F, type_from="id"),
+], ret=VOID), receiver_kind="map")
 
 
-# Scalar collection predicates. Collection storage and argument validation
-# retain their TypeSpec-aware dispatch; these signatures describe Pine values
-# independently of the historical C++ storage family.
+# Collection signatures describe Pine values independently of historical C++
+# storage. Dependent scalar slots take their types from the bound receiver;
+# collection storage and emission retain their TypeSpec-aware dispatch.
 ARRAY_FUNCTIONS: dict[str, IntrinsicFunc] = {
     "includes": _func("array.includes", _sig([("id", F), ("value", F)], ret=B)),
     "every": _func("array.every", _sig([("id", F)], ret=B)),
@@ -501,6 +528,36 @@ ARRAY_FUNCTIONS: dict[str, IntrinsicFunc] = {
         Param("id", F),
         Param("order", S, "ascending", type_spec=TypeSpec("enum", name="sort_order")),
     ], return_type=F)),
+    # Only this generic constructor has the existing explicit bool/na check.
+    # new_bool and matrix.new retain their established nullable initializer
+    # admission; their erased records are not made into bool element contracts.
+    "new": _func("array.new", _sig([
+        ("size", I, 0),
+        Param("initial_value", F, type_from="template", optional=True,
+              na_policy="parent_eager"),
+    ])),
+    "push": _func("array.push", _sig([
+        ("id", F), Param("value", F, type_from="id.element",
+                         na_policy="parent_eager", na_versions=(6,)),
+    ], ret=VOID), receiver_kind="array"),
+    "unshift": _func("array.unshift", _sig([
+        ("id", F), Param("value", F, type_from="id.element",
+                         na_policy="bool_element_store"),
+    ], ret=VOID), receiver_kind="array"),
+    "insert": _func("array.insert", _sig([
+        ("id", F), ("index", I),
+        Param("value", F, type_from="id.element", na_policy="bool_element_store"),
+    ], ret=VOID), receiver_kind="array"),
+    "set": _func("array.set", _sig([
+        ("id", F), ("index", I),
+        Param("value", F, type_from="id.element",
+              na_policy="parent_eager", na_versions=(6,)),
+    ], ret=VOID), receiver_kind="array"),
+    "fill": _func("array.fill", _sig([
+        ("id", F), Param("value", F, type_from="id.element",
+                         na_policy="bool_element_store"),
+        ("index_from", I, 0), Param("index_to", I, optional=True),
+    ], ret=VOID), receiver_kind="array"),
 }
 
 MATRIX_FUNCTIONS: dict[str, IntrinsicFunc] = {
@@ -515,6 +572,21 @@ MATRIX_FUNCTIONS["sort"] = _func("matrix.sort", FuncSig(params=[
     Param("id", F), Param("column", I, 0),
     Param("order", S, "ascending", type_spec=TypeSpec("enum", name="sort_order")),
 ], return_type=VOID))
+MATRIX_FUNCTIONS.update({
+    "set": _func("matrix.set", _sig([
+        ("id", F), ("row", I), ("column", I),
+        Param("value", F, type_from="id.element",
+              na_policy="parent_eager", na_versions=(6,)),
+    ], ret=VOID), receiver_kind="matrix"),
+    "fill": _func("matrix.fill", _sig([
+        ("id", F), Param("value", F, type_from="id.element",
+                         na_policy="bool_element_store"),
+        Param("from_row", I, optional=True),
+        Param("to_row", I, optional=True),
+        Param("from_column", I, optional=True),
+        Param("to_column", I, optional=True),
+    ], ret=VOID), receiver_kind="matrix"),
+})
 
 # matrix.new<type>(rows, columns, initial_value): the row and column counts
 # default to 0. The record exists for keyword binding only (its element type
@@ -637,6 +709,11 @@ INPUT_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 
 def _input(short_name: str, *sigs: FuncSig,
            default_type: PineType | None = None, default_qualifier: str = "const") -> None:
+    # All input parameters after defval are optional, including those whose
+    # omitted value is not represented by a literal in these records.
+    for signature in sigs:
+        for param in signature.params[1:]:
+            param.optional = True
     intrinsic = _func(f"input.{short_name}", *sigs)
     intrinsic.default_contract = InputDefaultContract(
         default_type if default_type is not None else sigs[0].params[0].pine_type,
@@ -652,7 +729,9 @@ _input("int",    _sig([("defval", I), ("title", S, ""), ("minval", I, None),
                        ("maxval", I, None), ("step", I, 1)] + _C, ret=I))
 _input("float",  _sig([("defval", F), ("title", S, ""), ("minval", F, None),
                        ("maxval", F, None), ("step", F, None)] + _C, ret=F))
-_input("bool",   _sig([("defval", B), ("title", S, "")] + _C, ret=B))
+_input("bool",   _sig([
+    Param("defval", B, na_policy="parent_eager"), ("title", S, ""),
+] + _C, ret=B))
 _input("string", _sig([("defval", S), ("title", S, ""), ("options", S, None)] + _C, ret=S))
 INPUT_FUNCTIONS["string"].primary.params[2].type_spec = TypeSpec.array(
     TypeSpec.primitive("string")
@@ -1015,6 +1094,16 @@ def get_intrinsic(namespace: str | None, func_name: str) -> IntrinsicFunc | None
         # so every keyword check treats them as it treated an unknown call.
         record = REQUEST_VALUE_FUNCTIONS.get(func_name)
     return record
+
+
+def get_receiver_intrinsics(func_name: str) -> tuple[IntrinsicFunc, ...]:
+    """Registered instance candidates, without querying a receiver's type."""
+    return tuple(
+        record
+        for registry in (ARRAY_FUNCTIONS, MATRIX_FUNCTIONS, MAP_FUNCTIONS)
+        if (record := registry.get(func_name)) is not None
+        and record.receiver_kind is not None
+    )
 
 
 def get_param_names(namespace: str | None, func_name: str) -> list[str] | None:

@@ -2,17 +2,220 @@
 
 from __future__ import annotations
 
-from .ast_nodes import ASTNode, BoolLiteral, FuncCall, NumberLiteral, StringLiteral
+from collections.abc import Callable
+from dataclasses import dataclass
+
+from .ast_nodes import (
+    ASTNode, BoolLiteral, FuncCall, NaLiteral, NumberLiteral, StringLiteral,
+)
 from .diagnostic_codes import render_diagnostic
 from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from .pine_spelling import expr_start
-from .signatures import IntrinsicFunc, Param
+from .signatures import FuncSig, IntrinsicFunc, Param
+from .symbols import TypeSpec
 
 
 _STRATEGY_ORDER_FUNCTIONS = frozenset({
     "strategy.entry", "strategy.order", "strategy.exit", "strategy.close",
     "strategy.close_all", "strategy.cancel", "strategy.cancel_all",
 })
+
+
+@dataclass(frozen=True)
+class BoundIntrinsicCall:
+    """Selected signature slots and types, without rewriting ASTs.
+
+    A storage type does not itself authorize a refusal: Param.na_policy
+    carries that separate semantic/admission contract.
+    """
+
+    intrinsic: IntrinsicFunc
+    signature: FuncSig
+    arguments: tuple[ASTNode | None, ...]
+    parameter_types: tuple[TypeSpec | None, ...]
+    receiver_type: TypeSpec | None = None
+
+
+def _instantiated_type(
+    param: Param, intrinsic: IntrinsicFunc, signature: FuncSig,
+    supplied: dict[str, ASTNode], actual_types: dict[int, TypeSpec | None],
+    receiver_type: TypeSpec | None, template_type: TypeSpec | None,
+) -> TypeSpec | None:
+    if param.type_from == "template":
+        return template_type
+    if param.type_from is not None:
+        root, _, component = param.type_from.partition(".")
+        spec = actual_types.get(id(supplied.get(root)))
+        if not component:
+            return spec
+        if component == "element" and spec is not None:
+            return spec.element
+        if component == "key" and spec is not None:
+            return spec.key
+        if component == "value" and spec is not None:
+            return spec.value
+        return None
+    if intrinsic.receiver_kind is not None and param is signature.params[0]:
+        return receiver_type
+    return TypeSpec.primitive(param.pine_type.value)
+
+
+def parent_na_contract_params(
+    intrinsic: IntrinsicFunc, pine_version: int | None,
+) -> tuple[Param, ...]:
+    """Eligible eager slots, before binding or querying any expression type."""
+    if len(intrinsic.signatures) != 1:
+        return ()
+    return tuple(
+        param for param in intrinsic.signatures[0].params
+        if param.na_policy == "parent_eager"
+        and (param.na_versions is None or pine_version in param.na_versions)
+    )
+
+
+def bind_parent_na_contract(
+    node: FuncCall, intrinsic: IntrinsicFunc,
+    type_of: Callable[[ASTNode], TypeSpec | None], *,
+    pine_version: int | None,
+    receiver: ASTNode | None = None, template_type: TypeSpec | None = None,
+) -> BoundIntrinsicCall | None:
+    """Project the parent's eager admission check onto one registered signature.
+
+    This is not proof that the whole call is a valid builtin invocation.
+    The parent checked its target slot before arity, unrelated arguments and
+    user-method dispatch. Position won over a duplicate keyword. Preserve
+    those outcomes, without mutating the AST or guessing an overload. Filter
+    policies by the actual caller version before binding or type queries.
+    """
+    eligible = parent_na_contract_params(intrinsic, pine_version)
+    if not eligible:
+        return None
+    signature = intrinsic.signatures[0]
+    positional = ([receiver] if receiver is not None else []) + list(node.args)
+    supplied = {
+        param.name: positional[index] if index < len(positional)
+        else node.kwargs[param.name]
+        for index, param in enumerate(signature.params)
+        if index < len(positional) or param.name in node.kwargs
+    }
+    if not any(
+        isinstance(supplied.get(param.name), NaLiteral) for param in eligible
+    ):
+        return None
+    receiver_type = None
+    actual_types: dict[int, TypeSpec | None] = {}
+    if intrinsic.receiver_kind is not None and signature.params:
+        value = supplied.get(signature.params[0].name)
+        if value is not None:
+            receiver_type = type_of(value)
+            actual_types[id(value)] = receiver_type
+    parameter_types = tuple(
+        _instantiated_type(
+            param, intrinsic, signature, supplied, actual_types,
+            receiver_type, template_type,
+        ) if any(param is active for active in eligible) else None
+        for param in signature.params
+    )
+    return BoundIntrinsicCall(
+        intrinsic, signature,
+        tuple(supplied.get(param.name) for param in signature.params),
+        parameter_types, receiver_type,
+    )
+
+
+def bind_intrinsic_call(
+    node: FuncCall,
+    intrinsic: IntrinsicFunc,
+    type_of: Callable[[ASTNode], TypeSpec | None],
+    *,
+    receiver: ASTNode | None = None,
+    template_type: TypeSpec | None = None,
+    needs: list[str] | None = None,
+) -> BoundIntrinsicCall | None:
+    """Select one signature using names, arity and proved argument types.
+
+    A bare na does not choose between numeric and bool overloads. Unknown
+    argument types keep alternatives viable; tied alternatives, invalid
+    binding and unresolved receiver types leave the old admission in place.
+    Missing defaults are not synthesized and the call is never mutated.
+    """
+    def unproved(reason: str) -> None:
+        if needs is not None:
+            needs.append(reason)
+
+    if intrinsic.variadic:
+        unproved("variadic signature has no proved fixed parameter binding")
+        return None
+    if receiver is not None and intrinsic.receiver_kind is None:
+        unproved("the registered signature has no instance receiver")
+        return None
+    positional = ([receiver] if receiver is not None else []) + list(node.args)
+    expressions = [*positional, *node.kwargs.values()]
+    # Query once per expression, outside the overload loop.
+    actual_types = {
+        id(value): type_of(value)
+        for value in expressions if not isinstance(value, NaLiteral)
+    }
+    candidates: list[BoundIntrinsicCall] = []
+    for signature in intrinsic.signatures:
+        names = [param.name for param in signature.params]
+        if (len(positional) > len(names)
+                or not node.kwargs.keys() <= set(names[len(positional):])):
+            continue
+        supplied = dict(zip(names, positional))
+        supplied.update(node.kwargs)
+        if any(
+            param.name not in supplied
+            and param.default is None and not param.optional
+            for param in signature.params
+        ):
+            continue
+        receiver_type = None
+        if intrinsic.receiver_kind is not None:
+            value = supplied.get(names[0]) if names else None
+            receiver_type = actual_types.get(id(value))
+            if (receiver_type is None
+                    or receiver_type.kind != intrinsic.receiver_kind):
+                continue
+
+        parameter_types = tuple(
+            _instantiated_type(
+                param, intrinsic, signature, supplied, actual_types,
+                receiver_type, template_type,
+            ) for param in signature.params
+        )
+        arguments = tuple(supplied.get(name) for name in names)
+        # Discriminate overloads only with actual proved types. A single
+        # signature already proves its parameter slots; other validators own
+        # incompatible values in unrelated slots.
+        if len(intrinsic.signatures) > 1:
+            compatible = True
+            for value, expected in zip(arguments, parameter_types):
+                if value is None or isinstance(value, NaLiteral):
+                    continue
+                actual = actual_types.get(id(value))
+                if actual is None or expected is None:
+                    continue
+                if actual == expected:
+                    continue
+                if (actual.kind == expected.kind == "primitive"
+                        and actual.name in {"int", "int64"}
+                        and expected.name == "float"):
+                    continue
+                compatible = False
+                break
+            if not compatible:
+                continue
+        candidates.append(BoundIntrinsicCall(
+            intrinsic, signature, arguments, parameter_types, receiver_type,
+        ))
+    if not candidates:
+        unproved("no signature binds the supplied slots and proved receiver type")
+        return None
+    if len(candidates) != 1:
+        unproved("overload remains ambiguous with the available argument types")
+        return None
+    return candidates[0]
 
 
 def intrinsic_keyword_diagnostics(

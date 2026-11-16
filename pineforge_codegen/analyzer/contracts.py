@@ -24,6 +24,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..errors import Diagnostic, SourceLocation
+from ..intrinsic_binding import BoundIntrinsicCall
 from ..symbols import PineType, TypeSpec
 
 
@@ -416,3 +418,14 @@ class AnalyzerContext:
     # emitted. Stored as ``list`` (not ``list[PfTracePragma]``) to
     # keep this module free of imports back into ``pragmas.py``.
     pf_trace_pragmas: list = field(default_factory=list)
+    # (lexical owner, selected binding, parameter index, located diagnostic).
+    # Only newly qualified element-store errors are deferred. Existing parent
+    # refusals stay eager and never enter this list.
+    builtin_bool_na_intents: list[
+        tuple[str | None, BoundIntrinsicCall, int, Diagnostic]
+    ] = field(default_factory=list)
+    # Unproved bindings retain admission; these are internal source gaps,
+    # not new warnings or refusals: (owner, location, builtin name, reason).
+    builtin_bool_na_needs: list[
+        tuple[str | None, SourceLocation, str, str]
+    ] = field(default_factory=list)

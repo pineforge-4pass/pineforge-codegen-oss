@@ -1008,6 +1008,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if fi is not None and getattr(fi, "is_udt_method", False):
                 continue
             self._dead_func_names.add(_fn)
+        # Only newly qualified element-store intents reach this consumer.
+        # Parent refusals remain eager even for owners omitted by this loop.
+        # Never copy or weaken the existing owner decision.
+        for owner, _binding, _parameter, diagnostic in ctx.builtin_bool_na_intents:
+            if owner is not None and owner in self._dead_func_names:
+                continue
+            raise CompileError([diagnostic])
         # Mark TA sites dead ONLY when their owner is a dead function. A
         # site with ``owner_func=None`` (top-level) or whose owner is a
         # live function survives -- even if it sits inside a dead

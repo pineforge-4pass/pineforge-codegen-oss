@@ -35,6 +35,10 @@ from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from ..limits import TimeBudget, iter_ast_nodes, syntax_children
 from ..builtin_constants import BUILTIN_ENUM_STORAGE, contains_builtin_enum, is_builtin_enum
 from ..input_keys import assign_input_keys
+from ..intrinsic_binding import (
+    BoundIntrinsicCall, bind_intrinsic_call, bind_parent_na_contract,
+    parent_na_contract_params,
+)
 from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
 from ..security_contexts import (
     GLOBAL_ANNOTATION, PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series,
@@ -201,6 +205,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             Diagnostic(level=Level.WARNING, phase=Phase.ANALYZER, location=loc,
                        message=message, hint=hint)
             for message, hint, loc in (ast.annotations or {}).get(PASS_WARNINGS_ANNOTATION, ())]
+        self._builtin_bool_na_intents: list[
+            tuple[str | None, BoundIntrinsicCall, int, Diagnostic]
+        ] = []
+        self._builtin_bool_na_needs: list[
+            tuple[str | None, SourceLocation, str, str]
+        ] = []
+        self._builtin_bool_na_seen: set[tuple[int, int]] = set()
         self._global_var_decls: list[tuple[str, PineType]] = []
         # Top-level ordinary bindings are lexical global state even when a
         # same-named callable history reference has already polluted the
@@ -756,6 +767,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             func_cs_fixnan_clone_names=self._func_cs_fixnan_clone_names,
             strategy_params=self._strategy_params,
             diagnostics=self._diagnostics,
+            builtin_bool_na_intents=self._builtin_bool_na_intents,
+            builtin_bool_na_needs=self._builtin_bool_na_needs,
             filename=self._filename,
             global_var_decls=self._global_var_decls,
             global_expr_map=pure_global_expr_map,
@@ -5105,79 +5118,202 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             node.args[0].loc,
         )
 
-    def _check_bool_map_put_na(
-        self, node: FuncCall, obj: ASTNode, member: str,
+    def _check_registered_parent_bool_na(
+        self, node: FuncCall, intrinsic: sigs.IntrinsicFunc | None = None,
     ) -> None:
-        """A map of bool values cannot store a bare na: its value is a bool."""
-        if member != "put" or self._in_v5_library_definition(node):
-            return
-        if isinstance(obj, Identifier) and obj.name == "map":
-            receiver = node.args[0] if node.args else node.kwargs.get("id")
-            value_index = 2
-        else:
-            receiver = obj
-            value_index = 1
-        value = (
-            node.args[value_index] if len(node.args) > value_index
-            else node.kwargs.get("value")
-        )
-        if receiver is None or not isinstance(value, NaLiteral):
-            return
-        spec = self._type_spec_from_expr(receiver)
-        if (spec is not None and spec.kind == "map"
-                and spec.value is not None and spec.value.kind == "primitive"
-                and spec.value.name == "bool"):
-            self._bool_na_error(value.loc)
+        """Preserve eager parent outcomes using explicit signature policies.
 
-    def _check_bool_collection_na(
-        self, node: FuncCall, obj: ASTNode, member: str,
-    ) -> None:
-        """A bool array or matrix cannot receive a bare na element."""
-        if (self._pine_version != 6
-                or self._in_v5_library_definition(node)):
+        The parent applied these checks before user-method dispatch, including
+        when that method's own parameter was numeric. This compatibility
+        projection is deliberately separate from proving a builtin invocation.
+        """
+        if (self._in_v5_library_definition(node)
+                or not any(isinstance(value, NaLiteral)
+                           for value in (*node.args, *node.kwargs.values()))):
             return
         receiver = None
-        value_index = None
-        if isinstance(obj, Identifier) and obj.name in {"array", "matrix"}:
-            receiver = node.args[0] if node.args else node.kwargs.get("id")
-            if obj.name == "array":
-                if member == "push":
-                    value_index = 1
-                elif member == "set":
-                    value_index = 2
-            elif member == "set":
-                value_index = 3
-        else:
-            receiver = obj
-            spec = self._type_spec_from_expr(receiver)
-            if spec is not None and spec.kind == "array":
-                if member == "push":
-                    value_index = 0
-                elif member == "set":
-                    value_index = 1
-            elif spec is not None and spec.kind == "matrix" and member == "set":
-                value_index = 2
-        if receiver is None or value_index is None:
+        if intrinsic is None:
+            callee = node.callee
+            if not isinstance(callee, MemberAccess):
+                return
+            obj = callee.object
+            if isinstance(obj, Identifier):
+                intrinsic = sigs.get_intrinsic(obj.name, callee.member)
+            if intrinsic is None:
+                if not any(
+                    parent_na_contract_params(candidate, self._pine_version)
+                    for candidate in sigs.get_receiver_intrinsics(callee.member)
+                ):
+                    return
+                spec = self._type_spec_from_expr(obj)
+                if spec is None:
+                    return
+                intrinsic = sigs.get_intrinsic(spec.kind, callee.member)
+                if intrinsic is None or intrinsic.receiver_kind != spec.kind:
+                    return
+                receiver = obj
+        if not parent_na_contract_params(intrinsic, self._pine_version):
             return
-        value = (
-            node.args[value_index] if len(node.args) > value_index
-            else node.kwargs.get("value")
+        templates = self._template_args_from_call(node)
+        bound = bind_parent_na_contract(
+            node, intrinsic, self._type_spec_from_expr,
+            pine_version=self._pine_version, receiver=receiver,
+            template_type=(
+                self._type_spec_from_hint(templates[0])
+                if len(templates) == 1 else None
+            ),
         )
-        if not isinstance(value, NaLiteral):
+        if bound is None:
             return
-        spec = self._type_spec_from_expr(receiver)
-        if (
-            spec is None
-            or spec.kind not in {"array", "matrix"}
-            or spec.element is None
-            or spec.element.kind != "primitive"
-            or spec.element.name != "bool"
+        for index, (value, expected) in enumerate(zip(
+            bound.arguments, bound.parameter_types,
+        )):
+            if (not isinstance(value, NaLiteral)
+                    or expected != TypeSpec.primitive("bool")):
+                continue
+            spec = bound.receiver_type
+            if (bound.signature.params[index].type_from == "id.element"
+                    and spec is not None and spec.kind in {"array", "matrix"}):
+                self._error(
+                    f"Cannot store a value of the 'na' type in {spec.kind}<bool>.",
+                    value.loc,
+                )
+            else:
+                self._bool_na_error(value.loc)
+
+    def _record_builtin_bool_na(self, node: FuncCall) -> None:
+        """Bind a builtin before recording a bool/na intent in its source scope.
+
+        Only explicit element-store policies may add deferred obligations.
+        Storage-B slots never authorize a scalar bool refusal. Parent-eager
+        policies are enforced at their original analyzer dispatch points.
+        """
+        if (self._pine_version != 6
+                or self._in_v5_library_definition(node)
+                or not any(isinstance(value, NaLiteral)
+                           for value in (*node.args, *node.kwargs.values()))):
+            return
+        callee = node.callee
+        intrinsic = None
+        receiver = None
+        owner = self._enclosing_func_names[-1] if self._enclosing_func_names else None
+        if isinstance(callee, Identifier):
+            symbol = self._symbols.resolve(callee.name)
+            if (callee.name in self._func_defs
+                    or self._value_bindings.declaration_bindings.get(id(callee)) is not None
+                    or (symbol is not None and (
+                        hasattr(symbol, "_pf_decl_node_id")
+                        or getattr(symbol, "_pf_parameter_owner", None) is not None
+                    ))):
+                return
+            intrinsic = sigs.get_intrinsic(None, callee.name)
+        elif isinstance(callee, MemberAccess):
+            obj = callee.object
+            if isinstance(obj, Identifier):
+                symbol = self._symbols.resolve(obj.name)
+                authored = (
+                    self._value_bindings.declaration_bindings.get(id(obj)) is not None
+                    or (symbol is not None and (
+                        hasattr(symbol, "_pf_decl_node_id")
+                        or getattr(symbol, "_pf_parameter_owner", None) is not None
+                    ))
+                )
+                if not authored:
+                    intrinsic = (
+                        sigs.get_intrinsic(obj.name, callee.member)
+                        or sigs.get_value_function(f"{obj.name}.{callee.member}")
+                    )
+            if intrinsic is None:
+                spec = self._type_spec_from_expr(obj)
+                if spec is None:
+                    # A familiar member spelling alone cannot prove a
+                    # builtin receiver, even when a later call might type it.
+                    for kind in ("array", "matrix", "map"):
+                        candidate = sigs.get_intrinsic(kind, callee.member)
+                        if candidate is not None and candidate.receiver_kind == kind:
+                            self._builtin_bool_na_needs.append((
+                                owner, node.loc or SourceLocation(self._filename, 1, 1, 1),
+                                candidate.name, "collection receiver type is unproved",
+                            ))
+                    return
+                if spec.kind not in {"array", "matrix", "map"}:
+                    return
+                receiver_name = method_receiver_type_name(spec)
+                if f"{receiver_name}.{callee.member}" in self._method_signatures:
+                    return
+                intrinsic = sigs.get_intrinsic(spec.kind, callee.member)
+                if intrinsic is None or intrinsic.receiver_kind != spec.kind:
+                    return
+                receiver = obj
+        if intrinsic is None:
+            return
+        if not any(
+            param.na_policy == "bool_element_store"
+            for signature in intrinsic.signatures for param in signature.params
         ):
+            self._builtin_bool_na_needs.append((
+                owner, node.loc or SourceLocation(self._filename, 1, 1, 1),
+                intrinsic.name, "no qualified new bool/na obligation; retain parent admission",
+            ))
             return
-        self._error(
-            f"Cannot store a value of the 'na' type in {spec.kind}<bool>.",
-            value.loc,
+
+        def type_of(value: ASTNode) -> TypeSpec | None:
+            spec = self._operator_operand_type(value)
+            if spec is not None:
+                return spec
+            # Collection identities can be proved independently of the legacy
+            # primitive return slot. Never use that slot's float fallback.
+            spec = self._type_spec_from_expr(value)
+            return spec if spec is not None and spec.kind != "primitive" else None
+
+        templates = self._template_args_from_call(node)
+        template_type = (
+            self._type_spec_from_hint(templates[0]) if len(templates) == 1 else None
         )
+        needs: list[str] = []
+        bound = bind_intrinsic_call(
+            node, intrinsic, type_of, receiver=receiver,
+            template_type=template_type, needs=needs,
+        )
+        if bound is None:
+            location = node.loc or SourceLocation(self._filename, 1, 1, 1)
+            for reason in needs:
+                self._builtin_bool_na_needs.append((
+                    owner, location, intrinsic.name, reason,
+                ))
+            return
+        for index, (value, expected) in enumerate(zip(
+            bound.arguments, bound.parameter_types,
+        )):
+            if bound.signature.params[index].na_policy != "bool_element_store":
+                continue
+            if not isinstance(value, NaLiteral):
+                continue
+            if expected is None:
+                self._builtin_bool_na_needs.append((
+                    owner, value.loc or SourceLocation(self._filename, 1, 1, 1),
+                    intrinsic.name,
+                    f"parameter {bound.signature.params[index].name} has no proved type",
+                ))
+                continue
+            if expected != TypeSpec.primitive("bool"):
+                continue
+            key = (id(node), index)
+            if key in self._builtin_bool_na_seen:
+                continue
+            self._builtin_bool_na_seen.add(key)
+            spec = bound.receiver_type
+            if (bound.signature.params[index].type_from == "id.element"
+                    and spec is not None and spec.kind in {"array", "matrix"}):
+                message = f"Cannot store a value of the 'na' type in {spec.kind}<bool>."
+            else:
+                message = "Invalid bool value: a bool cannot be na in Pine v6."
+            diagnostic = Diagnostic(
+                level=Level.ERROR, phase=Phase.ANALYZER,
+                location=value.loc or SourceLocation(self._filename, 1, 1, 1),
+                message=message,
+            )
+            self._builtin_bool_na_intents.append((owner, bound, index, diagnostic))
 
     def _check_udt_constructor_bool_na(self, node: FuncCall) -> None:
         """A user-defined bool field cannot be initialized with bare na."""
@@ -7936,6 +8072,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             )
 
     def _visit_FuncCall(self, node: FuncCall) -> PineType:
+        self._record_builtin_bool_na(node)
         if self._pine_version == 6 and not self._in_v5_library_definition(node):
             self._parameter_qualifiers.check_builtin(node)
         from ..drawing_all import drawing_all_call, DRAWING_ALL_READS
@@ -8047,18 +8184,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return self._visit(node.args[0])
 
             # General member call (e.g., array.push, etc.)
-            if (isinstance(obj, Identifier) and obj.name == "array"
-                    and member == "new"
-                    and self._template_args_from_call(node) == ["bool"]
-                    and not self._in_v5_library_definition(node)):
-                initial = (
-                    node.args[1] if len(node.args) > 1
-                    else node.kwargs.get("initial_value")
-                )
-                if isinstance(initial, NaLiteral):
-                    self._bool_na_error(initial.loc)
-            self._check_bool_map_put_na(node, obj, member)
-            self._check_bool_collection_na(node, obj, member)
+            self._check_registered_parent_bool_na(node)
             receiver_pine_type = self._visit(obj)
             visited_member_arg_types: dict[int, PineType] = {}
             for arg in node.args:
