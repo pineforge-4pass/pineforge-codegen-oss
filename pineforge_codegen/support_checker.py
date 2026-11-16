@@ -2208,7 +2208,7 @@ class SupportChecker:
     def _visit_MemberAccess(self, node: MemberAccess) -> None:
         from .drawing_all import drawing_all_kind, drawing_all_refusal
         kind = drawing_all_kind(node)
-        if kind is not None and id(node) not in self._drawing_all_read_members:
+        if kind not in {None, "table"} and id(node) not in self._drawing_all_read_members:
             self._err(node, drawing_all_refusal(kind), allow_switch_warning=False)
             return
         if (node.annotations or {}).get(HISTORY_MEMBER_ANNOTATION):

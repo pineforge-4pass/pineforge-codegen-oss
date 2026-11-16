@@ -64,7 +64,7 @@ from .operators import fixed_builtin_result, join_value_types, reference_value_t
 # analyzer must not import from ``codegen`` (codegen imports analyzer, so the
 # reverse would be a cycle). Mirrors codegen.tables.DRAWING_TYPE_TO_CPP keys.
 _DRAWING_TYPE_NAMES = frozenset({
-    "line", "box", "label", "linefill", "chart.point", "polyline",
+    "line", "box", "label", "linefill", "chart.point", "polyline", "table",
 })
 _DRAWING_NS = frozenset({"line", "box", "label", "linefill"})
 _DIRECT_ARRAY_VALUE_PRODUCERS = frozenset({
@@ -700,6 +700,8 @@ class TypeHelper:
                 return TypeSpec.udt(cast_kind)
             if ns == "polyline" and func == "new":
                 return TypeSpec.udt("polyline")
+            if ns == "table" and func in {"new", "copy"}:
+                return TypeSpec.udt("table")
             if ns in _DRAWING_NS:
                 if func in ("new", "copy"):
                     return TypeSpec.udt(ns)

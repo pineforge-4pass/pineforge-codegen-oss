@@ -1211,13 +1211,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 self._map_vars.add(_name)
             elif _spec.kind == "udt" and _spec.name:
                 self._udt_var_types.setdefault(_name, _spec.name)
-        # Table variables and params have NO C++ representation
-        # (SKIP_VAR_TYPES). A *method* call on such a receiver
-        # (``panel.cell(...)``, ``dash.merge_cells(...)``) is a visual no-op
-        # that must be dropped — but unlike the namespace form
-        # (``table.cell(...)``) the receiver is a bare var/param the
-        # namespace-based skip cannot see. Collect those names so
-        # ``_is_skip_expr`` can drop their method calls.
+        # Table rendering methods (``panel.cell(...)``, ``dash.merge_cells(...)``)
+        # remain visual no-ops. Collect receivers for the method-form skip;
+        # ``_is_skip_expr`` retains handle creation, copying and deletion.
         _SKIP_DECL_TYPES = set(SKIP_VAR_TYPES)
         self._visual_drop_vars: set[str] = set()
         for _node in self._walk_ast(self.ctx.ast):
@@ -1382,8 +1378,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # the per-type arenas) on this flag so non-drawing strategies stay
         # byte-identical. Caps come from the strategy() header max_*_count.
         self._uses_polyline = self._detect_drawing_usage({"polyline"})
+        self._uses_table = self._detect_drawing_usage({"table"})
         self._uses_drawing = self._detect_drawing_usage(
-            set(DRAWING_TYPE_TO_CPP) - {"polyline"},
+            set(DRAWING_TYPE_TO_CPP) - {"polyline", "table"},
         )
         self._drawing_caps = self._compute_drawing_caps() if self._uses_drawing else {}
 
@@ -6450,6 +6447,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.append("    DrawingArena<LinefillRec> _pf_linefills_{_PF_DRAWING_UNBOUNDED};")
         if self._uses_polyline:
             lines.append("    uint64_t _pf_polyline_next_id_ = 0;")
+        if self._uses_table:
+            lines.append("    _PFTableRegistry _pf_tables_;")
 
         # 8e. The copies an array or a matrix variable's executions left
         #     (pineforge_codegen/collection_history.py).
@@ -6869,19 +6868,29 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 # The geometry is visual-only; its handle and argument
                 # evaluations must still flow through declarations and calls.
                 return False
+            if namespace == "table" and func_name in {"new", "copy", "delete"}:
+                return False
+            if (isinstance(node.callee, MemberAccess)
+                    and node.callee.member in {"copy", "delete"}):
+                receiver = self._type_spec_from_expr(node.callee.object)
+                if (receiver is not None and receiver.kind == "udt"
+                        and receiver.name == "table"):
+                    return False
             if namespace is None and func_name in SKIP_FUNC_NAMES:
                 return True
             if namespace in SKIP_NAMESPACES:
                 return True
             if namespace in SKIP_VAR_TYPES:
                 return True
-            # Method call on a table-typed receiver var/param
-            # (``panel.cell(...)``). These types have no C++ representation, so
-            # the call is a visual no-op — drop it (mirrors the namespace form).
+            # Rendering calls on a table receiver (``panel.cell(...)``) retain
+            # their visual skip, matching the namespace form.
             if namespace in self._visual_drop_vars:
                 return True
             # strategy.risk.* — handled in _visit_stmt, not skipped
         if isinstance(node, MemberAccess):
+            from ..drawing_all import drawing_all_kind
+            if drawing_all_kind(node) == "table":
+                return False
             if isinstance(node.object, Identifier) and node.object.name in SKIP_NAMESPACES:
                 return True
             # strategy.risk member access — not skipped (handled in _visit_stmt)

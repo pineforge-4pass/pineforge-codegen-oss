@@ -108,7 +108,7 @@ from .tables import (
     RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN,
 )
 from ..limits import iter_ast_nodes
-from .drawing import DRAWING_LIFETIME_CPP, POLYLINE_HANDLE_CPP
+from .drawing import DRAWING_LIFETIME_CPP, POLYLINE_HANDLE_CPP, TABLE_COLLECTION_CPP
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 from .tv_string_units import TV_STRING_UNITS_CPP, TV_STRING_UNITS_MARKER
 from .unicode_regex import UNICODE_REGEX_CPP
@@ -175,6 +175,8 @@ class TopLevelEmitter:
         lines.append('#include <pineforge/na.hpp>')
         if getattr(self, "_uses_map", False):
             lines.append('#include <pineforge/map.hpp>')
+        if self._uses_table:
+            lines.append("#include <deque>")
         lines.append("#include <cstdint>")
         lines.append("#include <cmath>")
         lines.append("#include <algorithm>")
@@ -279,6 +281,8 @@ class TopLevelEmitter:
             lines.append(DRAWING_LIFETIME_CPP)
         if self._uses_polyline:
             lines.append(POLYLINE_HANDLE_CPP)
+        if self._uses_table:
+            lines.append(TABLE_COLLECTION_CPP)
         if self._uses_tv_number_format:
             lines.append(TV_NUMBER_FORMAT_CPP)
             lines.append("")
