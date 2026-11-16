@@ -260,6 +260,7 @@ int main() {
             live = live[-50:]
     # Creation 56 collects six; four more leave IDs 6..59, 54 alive.
     expected = (len(live), live[0], live[-1], int(0 not in live))
+    assert expected == (54, 6, 59, 1)
     result = run_emitted_tu(transpile(source), driver, opt="-O2", label="label collection")
     assert tuple(map(int, result.split())) == expected
 
@@ -332,6 +333,7 @@ int main() {
         pending = published + [40]
         # Forty handles were published; creation 41 exists before its collector stops.
         expected = (len(published), len(published), len(published), len(pending))
+        assert expected == (40, 40, 40, 41)
         assert tuple(map(int, result[2].split())) == expected
         assert "The script keeps more than 40 live drawings of one type;" in "\n".join(result[3:])
     else:
@@ -349,6 +351,7 @@ int main() {
             before_count, len(published), len(published), len(live),
             live[0], live[-1], int(0 not in live),
         )
+        assert expected == (53, 60, 60, 54, 6, 59, 1)
         assert tuple(map(int, result[2].split())) == expected
 
 
@@ -448,6 +451,7 @@ int main() {
     survivors = [identity for identity in live if identity not in eligible[:6]]
     # At trigger 1+6, all six older IDs and the new ID are protected; none can collect.
     expected = (len(published), len(published), len(survivors), int(0 in survivors))
+    assert expected == (6, 6, 7, 1)
     assert tuple(map(int, result[2].split())) == expected
 
 
