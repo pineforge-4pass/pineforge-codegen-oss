@@ -34,7 +34,7 @@ from tests._numeric_expected import (
 
 FIXTURES = Path(__file__).parent / "fixtures" / "security_ltf_tv"
 NAME = "w9sec_ltf_computed_tf"
-PRE_LANE = "fdcdcbb"  # main at the CGINT3 integration base (cg/security2 4e5d482 in it)
+BASELINE_CODEGEN_REVISION = "fdcdcbb"  # main at the CGINT3 integration base (cg/security2 4e5d482 in it)
 
 
 def _aux_1m_feed(engine: Path, base: Path) -> Path:
@@ -132,7 +132,7 @@ a = request.security_lower_tf(syminfo.tickerid, str.tostring(sec / 60), close)
 sec := 60
 plot(array.size(a))
 '''
-    legacy = reference_codegen(PRE_LANE)
+    legacy = reference_codegen(BASELINE_CODEGEN_REVISION)
     cases = (
         (helper, (("((double)(sec) / (double)(60))",
                    integer_arithmetic("sec", "/", "60")),)),
@@ -147,7 +147,7 @@ plot(array.size(a))
         assert ("is assigned a value it cannot compute there" in warnings[0]
                 or "is assigned after the first request" in warnings[0]), warnings
         if legacy is None:
-            pytest.skip(f"the lane base ({PRE_LANE}) is not in this checkout's history")
+            pytest.skip(f"the lane base ({BASELINE_CODEGEN_REVISION}) is not in this checkout's history")
         path = tmp_path / f"s{i}.pine"
         path.write_text(pine, encoding="utf-8")
         # Registered as every earlier build registered it.
@@ -214,9 +214,9 @@ plot(v)
 '''
     configure = _configure(transpile_full(pine)["cpp"])
     assert "decltype(this->tf)" not in configure
-    legacy = reference_codegen(PRE_LANE)
+    legacy = reference_codegen(BASELINE_CODEGEN_REVISION)
     if legacy is None:
-        pytest.skip(f"the lane base ({PRE_LANE}) is not in this checkout's history")
+        pytest.skip(f"the lane base ({BASELINE_CODEGEN_REVISION}) is not in this checkout's history")
     path = tmp_path / "shadow.pine"
     path.write_text(pine, encoding="utf-8")
     assert configure == _configure(transpile_json(path, legacy)["cpp"])

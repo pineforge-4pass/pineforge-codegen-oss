@@ -35,9 +35,9 @@ _REQUIRE_REPORT_HEADERS = """
 #ifndef PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1
 #error Constructor regressions require the paired 1.7.0 trade-history policy headers
 #endif
-namespace pf_cr150_report = pineforge::report;
-namespace pf_cr150_report_sink = pineforge::report_sink;
-namespace pf_cr150_report_sequence = pineforge::report_sequence;
+namespace pf_constructor_report = pineforge::report;
+namespace pf_constructor_report_sink = pineforge::report_sink;
+namespace pf_constructor_report_sequence = pineforge::report_sequence;
 """
 
 
@@ -154,7 +154,7 @@ def test_trade_history_export_name_transpiles_and_compiles(
     # Compile a call to the unescaped public export after the script's type
     # or function, so escaping the export itself cannot produce a false green.
     call_export = """
-int pf_cr150_call_trade_history_export() {
+int pf_test_call_trade_history_export() {
     return ::strategy_reads_trade_history();
 }
 """

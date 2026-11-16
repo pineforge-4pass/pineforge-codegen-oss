@@ -37,14 +37,14 @@ from tests import _compile as compile_env
 from tests._e2e import Build, reference_codegen, skip_unless_e2e_env
 from tests._security_tapes import mismatches, replay, source, tape_exits
 
-PRE_LANE = "7a39cb3"  # cg/popfix, this lane's base
+BASELINE_CODEGEN_REVISION = "7a39cb3"  # cg/popfix, this lane's base
 
 
 def test_payload_calls_read_the_requested_bar_like_the_tape(tmp_path_factory):
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("security2_payload_udf")
     builds = {"probe": Build(source("sec2_payload_udf"))}
-    legacy = reference_codegen(PRE_LANE)
+    legacy = reference_codegen(BASELINE_CODEGEN_REVISION)
     if legacy is not None:
         builds["pre_lane"] = Build(source("sec2_payload_udf"), codegen=legacy)
     exits = replay(engine, base, builds)
@@ -53,7 +53,7 @@ def test_payload_calls_read_the_requested_bar_like_the_tape(tmp_path_factory):
     missed = mismatches(tape, exits["probe"])
     assert not missed, "\n".join(missed[:10])
     if "pre_lane" not in exits:
-        pytest.skip(f"the pre-lane codegen ({PRE_LANE}) is not in this checkout's history")
+        pytest.skip(f"the pre-lane codegen ({BASELINE_CODEGEN_REVISION}) is not in this checkout's history")
     # The pre-lane build read the chart bar in a1, a3, a4 and a5.
     assert len(mismatches(tape, exits["pre_lane"])) == len(tape)
     print(f"payload calls: {len(tape)} of {len(tape)} exit Signals equal TradingView's "
