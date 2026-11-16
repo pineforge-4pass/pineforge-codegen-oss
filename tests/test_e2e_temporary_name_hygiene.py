@@ -108,26 +108,30 @@ def test_names_outside_the_temporaries_keep_their_spelling():
         assert not is_emitter_temporary(name), name
 
 
-@pytest.mark.parametrize("name, initializer, call, declaration", [
+@pytest.mark.parametrize("name, initializer, call, target", [
     ("_pf_currency_value", "close",
-     "strategy.convert_to_account(_pf_currency_value)",
-     "const double _pf_currency_value = (pf_safe__pf_currency_value);"),
+     "strategy.convert_to_account(_pf_currency_value)", "_pf_currency_value"),
     ("_pf_currency_value", "close",
-     "strategy.convert_to_symbol(_pf_currency_value)",
-     "const double _pf_currency_value = (pf_safe__pf_currency_value);"),
-    ("_pf_currency_from", '"USD"',
-     'request.currency_rate("EUR", _pf_currency_from)',
-     "const std::string _pf_currency_to = (pf_safe__pf_currency_from);"),
+     "strategy.convert_to_symbol(_pf_currency_value)", "_pf_currency_value"),
+    # A literal initializer need not leave an authored read in the call to
+    # escape; a runtime value (the symbol's currency) does.
+    ("_pf_currency_from", "syminfo.currency",
+     'request.currency_rate("EUR", _pf_currency_from)', "_pf_currency_to"),
 ])
 def test_currency_arguments_cannot_capture_authored_temporaries(
-    name, initializer, call, declaration,
+    name, initializer, call, target,
 ):
     # Before: the amount initialized itself, or the target read the lambda's
     # origin instead of the script's target. The authored read must be escaped.
     cpp = transpile(HEAD + f"{name} = {initializer}\nobserved = {call}\n")
     statement = next(line.strip() for line in cpp.splitlines()
                      if line.strip().startswith("observed = "))
-    assert declaration in statement
+    declared = re.search(rf"\b{target} = \((.*?)\);", statement)
+    assert declared, statement
+    # The lambda's target reads the escaped authored name, never the bare
+    # spelling, which inside the lambda is the lowering's own temporary.
+    assert re.search(rf"\bpf_safe_{name}\b", declared.group(1)), declared.group(0)
+    assert not re.search(rf"\b{name}\b", declared.group(1)), declared.group(0)
     assert re.search(rf"^\s+pf_safe_{name} = ", cpp, re.M)
 
 
