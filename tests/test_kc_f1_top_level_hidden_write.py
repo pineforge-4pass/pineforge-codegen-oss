@@ -263,7 +263,7 @@ def test_stable_selection_write_sizes_ema_from_live_input(selection: str):
         _EMA_PREFIX + selection + "plot(ta.ema(close, len))\n"
     )
     resets = re.findall(
-        rf"\b{re.escape(member)} = ta::EMA\(([^\n]*)\);", cpp
+        rf"\b{re.escape(member)} = pineforge::source::PineEma\(([^\n]*)\);", cpp
     )
     assert resets, "EMA must be reconstructed from the live preset choice"
     for reset in resets:

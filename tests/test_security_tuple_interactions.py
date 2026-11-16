@@ -270,7 +270,7 @@ plot(outA + outB + outC + outD)
 
 def test_security_tuple_preserves_four_distinct_ema_variants_structurally():
     cpp = transpile(_FOUR_EMA_VARIANTS)
-    members = set(re.findall(r"ta::EMA (_sec0__ta_ema_1_v\d+);", cpp))
+    members = set(re.findall(r"pineforge::source::PineEma (_sec0__ta_ema_1_v\d+);", cpp))
     assert len(members) == 4
 
     constructor = next(
@@ -339,7 +339,7 @@ plot(outA + outB + outC + outD)
 
 def test_security_tuple_input_ema_variants_get_distinct_runtime_resets():
     cpp = transpile(_FOUR_INPUT_EMA_VARIANTS)
-    members = set(re.findall(r"ta::EMA (_sec0__ta_ema_1_v\d+);", cpp))
+    members = set(re.findall(r"pineforge::source::PineEma (_sec0__ta_ema_1_v\d+);", cpp))
     assert len(members) == 4
 
     constructor = next(
@@ -354,7 +354,7 @@ def test_security_tuple_input_ema_variants_get_distinct_runtime_resets():
 
     resets = set(
         re.findall(
-            r'(_sec0__ta_ema_1_v\d+) = ta::EMA\(get_input_int\("(L[2-5])", ([2-5])\)\);',
+            r'(_sec0__ta_ema_1_v\d+) = pineforge::source::PineEma\(get_input_int\("(L[2-5])", ([2-5])\)\);',
             cpp,
         )
     )
@@ -427,11 +427,11 @@ plot(outA + outB + outC + outD)
 
 def test_security_tuple_timeframe_ema_variants_reset_and_run_distinctly():
     cpp = transpile(_FOUR_TIMEFRAME_EMA_VARIANTS)
-    members = set(re.findall(r"ta::EMA (_sec0__ta_ema_1_v\d+);", cpp))
+    members = set(re.findall(r"pineforge::source::PineEma (_sec0__ta_ema_1_v\d+);", cpp))
     assert len(members) == 4
     resets = set(
         re.findall(
-            r'(_sec0__ta_ema_1_v\d+) = ta::EMA\((\(?tf_multiplier\("1"\)(?: \+ [123])?\)?)\);',
+            r'(_sec0__ta_ema_1_v\d+) = pineforge::source::PineEma\((\(?tf_multiplier\("1"\)(?: \+ [123])?\)?)\);',
             cpp,
         )
     )

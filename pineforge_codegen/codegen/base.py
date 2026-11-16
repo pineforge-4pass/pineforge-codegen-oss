@@ -7324,7 +7324,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             runtime_args, any_runtime = self._ta_run_ctor_args(site)
             if any_runtime:
                 resets.append(
-                    f"{site.member_name} = {site.class_name}({', '.join(runtime_args)});"
+                    f"{site.member_name} = {self._ta_fixed_cpp_type(site)}({', '.join(runtime_args)});"
                 )
 
         # Security-context TA copies. Normally these share the ctor args of
@@ -7416,7 +7416,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         runtime_args.append(rendered)
                     if any_runtime:
                         resets.append(
-                            f"{variant['member_name']} = {site.class_name}({', '.join(runtime_args)});"
+                            f"{variant['member_name']} = {self._ta_fixed_cpp_type(site)}({', '.join(runtime_args)});"
                         )
 
         return resets

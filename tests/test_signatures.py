@@ -429,7 +429,7 @@ class TestTAKwargs:
 
     def test_ta_ema_kwargs(self):
         cpp = _generate(_pine('x = ta.ema(source=close, length=20)'))
-        assert "ta::EMA" in cpp
+        assert "pineforge::source::PineEma" in cpp
 
     def test_ta_rma_kwargs(self):
         cpp = _generate(_pine('x = ta.rma(source=close, length=14)'))
@@ -493,7 +493,7 @@ class TestTAKwargs:
 
     def test_ta_macd_kwargs(self):
         cpp = _generate(_pine('[m, s, h] = ta.macd(source=close, fastlen=12, slowlen=26, siglen=9)'))
-        assert "ta::MACD" in cpp
+        assert "pineforge::source::PineMacd" in cpp
 
     def test_ta_bb_kwargs(self):
         # TradingView names ta.bb's source ``series``; ``source=`` used to be

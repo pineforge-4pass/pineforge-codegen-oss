@@ -22,6 +22,14 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked
+  source adapters for fixed, input and simple lengths, including helper and
+  requested-context copies and precalculation. Invalid lengths are checked
+  when the call executes, including with an unavailable source. Keltner calls
+  restore their existing seeding context if validation throws. Requires the
+  `PineEma`, `PineTsi`, `PineKc`, `PineKcw` and `PineMacd` APIs in
+  `pineforge/source/pine_ta_length.hpp`; regenerate C++ and relink.
+
 - `strategy.convert_to_account`, `strategy.convert_to_symbol` and
   `request.currency_rate` now emit calls to the paired engine's host conversion
   API with the resolved account currency and Pine evaluation time. Arguments

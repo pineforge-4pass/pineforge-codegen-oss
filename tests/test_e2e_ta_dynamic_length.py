@@ -123,8 +123,8 @@ def test_simple_length_is_the_constant(runs):
     # ``lenP`` is an input.string choice: input-derived, its EMA keeps the
     # constructor and is reset from the input (the request.security helpers
     # row), with the same trades.
-    assert "pineforge::source::FirstCallBound<ta::EMA> " not in cpp
-    assert "= ta::EMA(" in cpp
+    assert "pineforge::source::FirstCallBound<pineforge::source::PineEma> " not in cpp
+    assert "= pineforge::source::PineEma(" in cpp
     # The request.security payload builds its own from the context-free
     # spelling of the length (inputs through their override-aware getters).
     assert "_sec0__ta_rsi_" in cpp and "simple_ta_length(" in cpp

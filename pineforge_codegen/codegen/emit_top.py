@@ -168,7 +168,10 @@ class TopLevelEmitter:
         lines.append('#include <pineforge/ta.hpp>')
         lines.extend(['#if __has_include(<pineforge/checked_settings.hpp>)',
                       '#include <pineforge/checked_settings.hpp>', '#endif'])
-        if self._ta_uses_dynamic_lengths():
+        if self._ta_uses_dynamic_lengths() or any(
+            site.class_name in self._TA_CHECKED_CLASSES
+            for site in self.ctx.ta_call_sites
+        ):
             lines.append('#include <pineforge/source/pine_ta_length.hpp>')
         lines.append('#include <pineforge/math.hpp>')
         lines.append('#include <pineforge/series.hpp>')
@@ -295,11 +298,8 @@ class TopLevelEmitter:
     def _emit_ta_compat_shims(self, lines: list[str]) -> None:
         """Emit source-level adapters for TA1 arguments and anchored forms.
 
-        The adapters are selected by feature macros exported from
-        ``pineforge/ta.hpp``. This lets one generated TU compile against the
-        TA1 engine and the previous engine while keeping the Pine call-site
-        shape identical. The old branch deliberately preserves the historical
-        lowering; it is only selected when the corresponding macro is absent.
+        Keltner calls require the paired checked source API. Other TA1
+        adapters retain their existing feature-macro compatibility branches.
         """
         classes = {
             site.class_name for site in getattr(self.ctx, "ta_call_sites", ())
@@ -329,59 +329,35 @@ class TopLevelEmitter:
                 "",
             ])
 
-        if "_PFKC" in classes:
+        for shim, adapter, result in (
+            ("_PFKC", "PineKc", "ta::KCResult"),
+            ("_PFKCW", "PineKcw", "double"),
+        ):
+            if shim not in classes:
+                continue
             lines.extend([
-                "#ifdef PF_KC_HAS_USE_TRUE_RANGE",
-                "class _PFKC {",
-                "    ta::KC impl_;",
+                f"class {shim} {{",
+                f"    pineforge::source::{adapter} impl_;",
                 "public:",
-                "    _PFKC(int length, double mult, bool use_true_range = true)"
+                f"    {shim}(int length, double mult, bool use_true_range = true)"
                 " : impl_(length, mult, use_true_range) {}",
-                "    ta::KCResult compute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "    ta::KCResult recompute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "};",
-                "#else",
-                "class _PFKC {",
-                "    ta::KC impl_;",
-                "public:",
-                "    _PFKC(int length, double mult, bool = true) : impl_(length, mult) {}",
-                "    ta::KCResult compute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "    ta::KCResult recompute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "};",
-                "#endif",
-                "",
+                "    void observe_owned_storage(pineforge::OwnedStorage& out) const noexcept"
+                " { impl_.observe_owned_storage(out); }",
             ])
-
-        if "_PFKCW" in classes:
-            lines.extend([
-                "#ifdef PF_KC_HAS_USE_TRUE_RANGE",
-                "class _PFKCW {",
-                "    ta::KCW impl_;",
-                "public:",
-                "    _PFKCW(int length, double mult, bool use_true_range = true)"
-                " : impl_(length, mult, use_true_range) {}",
-                "    double compute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "    double recompute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "};",
-                "#else",
-                "class _PFKCW {",
-                "    ta::KCW impl_;",
-                "public:",
-                "    _PFKCW(int length, double mult, bool = true) : impl_(length, mult) {}",
-                "    double compute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "    double recompute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "};",
-                "#endif",
-                "",
-            ])
+            for method in ("compute", "recompute"):
+                lines.extend([
+                    f"    {result} {method}(double src, double high, double low, double close) {{",
+                    # Preserve the existing Keltner seeding context on both
+                    # success and argument-validation exceptions.
+                    "        struct _pf_seed_scope {",
+                    "            bool _pf_prior = ta::ema_na_warmup_flag();",
+                    "            _pf_seed_scope() { ta::ema_na_warmup_flag() = true; }",
+                    "            ~_pf_seed_scope() { ta::ema_na_warmup_flag() = _pf_prior; }",
+                    "        } _pf_seed;",
+                    f"        return impl_.{method}(src, high, low, close);",
+                    "    }",
+                ])
+            lines.extend(["};", ""])
 
         if "_PFAnchoredVWAP" in classes:
             lines.extend([
@@ -3116,7 +3092,7 @@ class TopLevelEmitter:
                 continue
             if self._ta_site_uses_precalc(site):
                 run_args, _any_runtime = self._ta_run_ctor_args(site)
-                lines.append(f"        {site.member_name} = {site.class_name}({', '.join(run_args)});")
+                lines.append(f"        {site.member_name} = {self._ta_fixed_cpp_type(site)}({', '.join(run_args)});")
 
         # Clear series
         lines.append("")
@@ -3233,7 +3209,7 @@ class TopLevelEmitter:
                 continue
             if self._ta_site_uses_precalc(site):
                 run_args, _any_runtime = self._ta_run_ctor_args(site)
-                lines.append(f"        {site.member_name} = {site.class_name}({', '.join(run_args)});")
+                lines.append(f"        {site.member_name} = {self._ta_fixed_cpp_type(site)}({', '.join(run_args)});")
 
         for field_name in sorted(self.ctx.series_bar_fields):
             lines.append(f"        _s_{field_name}.clear();")

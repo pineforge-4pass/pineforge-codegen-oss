@@ -69,7 +69,7 @@ plot(src)
     # Reset lowers through the expression visitor, which parenthesizes operands
     # (grouping preserved: ``(rsiLen * 2) - 1``, not a flattened infix string).
     assert '(get_input_int("RSI Length", 14) * 2) - 1' in reset
-    assert "ta::EMA(1)" not in reset  # must NOT be the silent no-op
+    assert "pineforge::source::PineEma(1)" not in reset  # must NOT be the silent no-op
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +98,7 @@ plot(out)
         reset = _reset_line(cpp, m)
         assert 'get_input_int("Smooth EMA Length", 5)' in reset
         assert '(get_input_int("Smooth EMA Length", 5) * 2) - 1' in reset
-    assert "ta::EMA(1)" not in cpp
+    assert "pineforge::source::PineEma(1)" not in cpp
 
 
 # ---------------------------------------------------------------------------
@@ -598,7 +598,7 @@ plot(ta.ema(close, lenv))
     # The pre-fix flattened form would place the sum's `+ ... /` and a trailing
     # `- get_input_int("B", 3)` as siblings of the top-level division.
     assert '+ get_input_int("B", 3) /' not in reset
-    assert "ta::EMA(1)" not in reset  # must NOT collapse to the silent no-op
+    assert "pineforge::source::PineEma(1)" not in reset  # must NOT collapse to the silent no-op
 
 
 def test_reset_uses_float_division_for_two_int_operands():
@@ -622,7 +622,7 @@ plot(ta.ema(close, lenv))
     assert '(double)(get_input_int("Poles", 4))' in reset
     assert '2 / get_input_int("Poles", 4)' not in reset
     assert "std::pow" in reset
-    assert "ta::EMA(1)" not in reset
+    assert "pineforge::source::PineEma(1)" not in reset
 
 
 # ===========================================================================
@@ -669,7 +669,7 @@ plot(ta.ema(close, n))
     # No dangling UDF call spelling / bare param may survive.
     assert "f_len" not in reset
     assert " m " not in reset and "= m;" not in reset
-    assert "ta::EMA(1)" not in reset  # must NOT collapse to the silent no-op
+    assert "pineforge::source::PineEma(1)" not in reset  # must NOT collapse to the silent no-op
 
 
 # R2 — never-reassigned ``var`` scalar stable-init used in a length (isolates

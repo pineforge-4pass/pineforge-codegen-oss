@@ -6,6 +6,7 @@ Reuse the existing native fixture and compare the issue's original traces.
 
 import math
 
+from pineforge_codegen import transpile
 from tests.test_public_issue_291 import _assert_values, _values, native
 
 
@@ -44,6 +45,12 @@ diff = v - hist
 plot(v)
 """
     control = source.replace("readHist() => hist\n", "readHist() => histCopy\n")
+    for script in (source, control):
+        cpp = transpile(script)
+        assert "#include <pineforge/source/pine_ta_length.hpp>" in cpp
+        assert "pineforge::source::PineMacd _ta_macd_1;" in cpp
+        assert "hist = _result__ta_macd_1.histogram;" in cpp
+        assert "double hist = _result__ta_macd_1.histogram;" not in cpp
     expected = native("case_2_control", control)
     expected_v = _values(expected, "v")
     assert len({value for value in expected_v if math.isfinite(value)}) > 1, (
