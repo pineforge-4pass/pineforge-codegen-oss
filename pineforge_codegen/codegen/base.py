@@ -3452,18 +3452,20 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
     def _collect_reassigned_stable_scalars(self, reassigned: set[str]) -> None:
         """Track class-scope scalars that are reassigned but only along stable
-        if/elif paths (see ``test_stable_reassigned_class_scope_length``).
+        selection paths (see ``test_stable_reassigned_class_scope_length``).
 
         For each top-level ``v = <init>`` whose name is reassigned, build the
         final value as a nested ternary by folding subsequent top-level
-        IfStmts / direct Assignments. If every condition and every assigned
-        RHS is stable (and renderable), record the ternary in
+        IfStmts / SwitchStmts / direct Assignments, including selections
+        used as another binding's value. Only writes to the global binding
+        count. If every condition and every assigned RHS is stable (and
+        renderable), record the ternary in
         ``_derived_input_expr`` and add ``v`` to ``_stable_runtime_vars`` so
         the TA ctor reset path can expand it. Anything non-stable (a ta.*
         result, a bar field, a series var) leaves the var untracked, so the
         ctor guard still rejects it loudly.
         """
-        from ..ast_nodes import IfStmt, Assignment
+        from ..security_contexts import ScriptIndex
         body = self.ctx.ast.body or []
         # Pre-resolve each reassigned var's initial VarDecl.
         inits: dict[str, object] = {}
@@ -3479,15 +3481,22 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if not inits:
             return
 
+        index = ScriptIndex(self.ctx.ast)
+        global_writes = {
+            name: {id(write) for write in index.writes.get(("global", name), ())}
+            for name in inits
+        }
+
         def _value_after(stmts, fallback: str | None) -> str | None:
             """Fold a statement list into the final value expression for the
             target var, given ``fallback`` as the value on entry. Returns None
             if any condition / assignment is non-stable or unrenderable."""
             current = fallback
             for s in stmts or []:
-                if isinstance(s, Assignment) and isinstance(s.target, Identifier):
-                    if s.target.name != target_name:
-                        continue
+                if (
+                    isinstance(s, Assignment)
+                    and id(s) in global_writes[target_name]
+                ):
                     if s.op != ":=":
                         return None  # compound assignment — not a stable fold
                     if not self._expr_is_stable(s.value):
@@ -3496,6 +3505,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     if rhs is None:
                         return None
                     current = rhs
+                elif (
+                    isinstance(s, (VarDecl, TupleAssign, Assignment))
+                    and isinstance(s.value, (IfStmt, SwitchStmt))
+                ):
+                    current = _value_after([s.value], current)
+                    if current is None:
+                        return None
                 elif isinstance(s, IfStmt):
                     # Only model IfStmts that actually reassign the target var;
                     # an unrelated IfStmt (e.g. entry/exit logic with a series
@@ -3515,17 +3531,46 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     if else_val is None:
                         return None
                     current = f"({cond} ? {then_val} : {else_val})"
-                # Other statement shapes (for/while/switch/var decls of
-                # other vars) are ignored for this var's value fold; they
-                # do not reassign ``target_name`` in a way we model.
+                elif isinstance(s, SwitchStmt):
+                    if not _reassigns(s, target_name):
+                        continue
+                    subject = None
+                    if s.expr is not None:
+                        if not self._expr_is_stable(s.expr):
+                            return None
+                        subject = self._arith_operand_to_str(s.expr)
+                        if subject is None:
+                            return None
+                    selected = _value_after(s.default_body, current)
+                    if selected is None:
+                        return None
+                    # Each branch starts from the incoming value. Build in
+                    # reverse so the first matching case wins; an absent
+                    # default leaves the incoming value unchanged.
+                    for case_expr, case_body in reversed(s.cases):
+                        if not self._expr_is_stable(case_expr):
+                            return None
+                        cond = self._arith_operand_to_str(case_expr)
+                        if cond is None:
+                            return None
+                        if subject is not None:
+                            cond = f"{subject} == {cond}"
+                        case_val = _value_after(case_body, current)
+                        if case_val is None:
+                            return None
+                        selected = f"({cond} ? {case_val} : {selected})"
+                    current = selected
+                elif _reassigns(s, target_name):
+                    # An unmodeled statement may still hide a target write.
+                    return None
             return current
 
         def _reassigns(node, name: str) -> bool:
-            """True if any ``:=`` assignment to ``name`` occurs within node."""
-            from ..ast_nodes import IfStmt as _If, Assignment as _Asg
-            if isinstance(node, _Asg) and isinstance(node.target, Identifier):
-                if node.target.name == name:
-                    return True
+            """True if node contains a write resolved to the global binding."""
+            if isinstance(node, (FuncDef, MethodDef)):
+                return False
+            if id(node) in global_writes[name]:
+                return True
             # A binding's selection value can write a different target.
             if (
                 isinstance(node, (VarDecl, TupleAssign, Assignment))
@@ -3533,7 +3578,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 and _reassigns(node.value, name)
             ):
                 return True
-            if isinstance(node, _If):
+            if isinstance(node, IfStmt):
                 if any(_reassigns(c, name) for c in (node.body or [])):
                     return True
                 if any(_reassigns(c, name) for c in (node.else_body or [])):
@@ -3551,6 +3596,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return False
 
         for target_name, init_node in inits.items():
+            if self._budget is not None:
+                self._budget.check(init_node.loc, Phase.CODEGEN)
             init_str = self._arith_expr_to_str(init_node)
             if init_str is None:
                 continue
