@@ -34,7 +34,7 @@ from tests._numeric_expected import (
 
 FIXTURES = Path(__file__).parent / "fixtures" / "security_ltf_tv"
 NAME = "w9sec_ltf_computed_tf"
-BASELINE_CODEGEN_REVISION = "fdcdcbb"  # main at the CGINT3 integration base (cg/security2 4e5d482 in it)
+BASELINE_CODEGEN_REVISION = "fdcdcbb"  # main before this fix; it already contains 4e5d482
 
 
 def _aux_1m_feed(engine: Path, base: Path) -> Path:
