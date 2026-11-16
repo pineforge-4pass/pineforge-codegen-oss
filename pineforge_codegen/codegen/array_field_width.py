@@ -315,6 +315,12 @@ def prepare_array_widths(gen):
             if not isinstance(node, FuncCall):
                 continue
             fn, ns = gen._resolve_callee(node.callee)
+            if (ns == "request" and fn == "security"
+                    and (node.annotations or {}).get("security_result_type_spec") is not None):
+                payload = node.kwargs.get(
+                    "expression", node.args[2] if len(node.args) > 2 else None
+                )
+                connect(node_slots, slots(payload, owner))
             callees = gen._wide_callable_args(node)
             for info, bound in callees:
                 for index, actual in bound:

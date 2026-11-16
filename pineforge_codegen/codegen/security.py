@@ -2446,6 +2446,10 @@ class SecurityEmitter:
                 "tuple_element_types": tuple(
                     getattr(item, "tuple_element_types", ()) or ()
                 ),
+                "result_type_spec": getattr(item, "result_type_spec", None),
+                "tuple_element_specs": tuple(
+                    getattr(item, "tuple_element_specs", ()) or ()
+                ),
                 "gaps_node": item.gaps,
                 "lookahead_node": item.lookahead,
                 "ta_range": item.ta_range,
@@ -4339,10 +4343,56 @@ class SecurityEmitter:
             )
         return self._security_source_hist_fields[key][1]
 
-    @staticmethod
+    def _security_result_spec(
+        self, item: dict, index: int | None = None,
+    ) -> TypeSpec | None:
+        """Structured result type, retaining codegen's collection widths."""
+        payload = item["expr_node"]
+        if index is None:
+            spec = item.get("result_type_spec")
+        else:
+            specs = item.get("tuple_element_specs", ())
+            spec = specs[index] if index < len(specs) else None
+            payload = (payload.elements[index]
+                       if isinstance(payload, TupleLiteral) else None)
+        if spec is None or spec.kind not in {"udt", "array", "map", "matrix"}:
+            return None
+        plan = getattr(self, "_array_widths", None)
+        if plan is not None and payload is not None:
+            return plan.widen(spec, plan.nodes.get(id(payload), ()))
+        return spec
+
+    def _security_result_element_cpp_type(self, item: dict, index: int) -> str:
+        spec = self._security_result_spec(item, index)
+        if spec is not None:
+            return self._type_spec_to_cpp(spec)
+        return self._infer_cpp_type_for_security_elem(item["expr_node"].elements[index])
+
+    def _security_tuple_cpp_types(self, item: dict) -> list[str]:
+        payload = item["expr_node"]
+        if isinstance(payload, TupleLiteral):
+            types = [
+                self._security_result_element_cpp_type(item, index)
+                for index in range(len(payload.elements))
+            ]
+            return ["double" if item.get("foreign") and ctype == "int" else ctype
+                    for ctype in types]
+        return self._security_tuple_element_cpp_types(
+            item["tuple_size"], item.get("tuple_element_types", ()),
+            item.get("tuple_element_specs", ()),
+        )
+
+    def _security_result_default(self, item: dict) -> str:
+        spec = self._security_result_spec(item)
+        if spec is not None:
+            return self._default_for_spec(spec)
+        return "na<std::string>()" if item.get("string_result") else "na<double>()"
+
     def _security_tuple_element_cpp_types(
+        self,
         tuple_size: int,
         tuple_element_types: tuple[PineType, ...] = (),
+        tuple_element_specs: tuple[TypeSpec | None, ...] = (),
     ) -> list[str]:
         """Per-element C++ storage of a helper tuple of arbitrary arity.
 
@@ -4354,18 +4404,22 @@ class SecurityEmitter:
         if len(tuple_element_types) != tuple_size:
             return ["double"] * max(0, tuple_size)
         return [
-            "bool" if item == PineType.BOOL
+            self._type_spec_to_cpp(tuple_element_specs[index])
+            if (index < len(tuple_element_specs)
+                and tuple_element_specs[index] is not None
+                and tuple_element_specs[index].kind in {"udt", "array", "map", "matrix"})
+            else "bool" if item == PineType.BOOL
             else "std::string" if item == PineType.STRING
             else "double"
-            for item in tuple_element_types
+            for index, item in enumerate(tuple_element_types)
         ]
 
-    @classmethod
     def _security_tuple_result_default(
-        cls,
+        self,
         cpp_type: str,
         tuple_size: int,
         tuple_element_types: tuple[PineType, ...] = (),
+        tuple_element_specs: tuple[TypeSpec | None, ...] = (),
     ) -> str:
         # TradingView reads a bool element false and a numeric or string
         # element na before the first requested value and on a gaps_on bar
@@ -4375,23 +4429,29 @@ class SecurityEmitter:
             "std::string": "na<std::string>()",
         }
         vals = ", ".join(
-            defaults.get(element, "na<double>()")
-            for element in cls._security_tuple_element_cpp_types(
-                tuple_size, tuple_element_types
-            )
+            self._default_for_spec(tuple_element_specs[index])
+            if (index < len(tuple_element_specs)
+                and tuple_element_specs[index] is not None
+                and tuple_element_specs[index].kind in {"udt", "array", "map", "matrix"})
+            else defaults.get(element, "na<double>()")
+            for index, element in enumerate(self._security_tuple_element_cpp_types(
+                tuple_size, tuple_element_types, tuple_element_specs
+            ))
         )
         return f"{cpp_type}{{{vals}}}"
 
-    @classmethod
     def _security_helper_tuple_cpp_type(
-        cls,
+        self,
         tuple_size: int,
         tuple_element_types: tuple[PineType, ...] = (),
+        tuple_element_specs: tuple[TypeSpec | None, ...] = (),
     ) -> str:
         """C++ storage type for a supported helper tuple of arbitrary arity
         (``_security_tuple_element_cpp_types`` per element)."""
         return "std::tuple<" + ", ".join(
-            cls._security_tuple_element_cpp_types(tuple_size, tuple_element_types)
+            self._security_tuple_element_cpp_types(
+                tuple_size, tuple_element_types, tuple_element_specs
+            )
         ) + ">"
 
     def _collect_security_ta_hist_indices(self, node) -> set[int]:
@@ -9170,7 +9230,7 @@ class SecurityEmitter:
                     security_mutable_names=security_mutable_names,
                     emitted_lines=lines,
                 )
-                elem_t = self._infer_cpp_type_for_security_elem(el)
+                elem_t = self._security_result_element_cpp_type(item, i)
                 if self._security_foreign(sec_id) and elem_t == "int":
                     # Held as a double (base.py): the integer's na stays na.
                     el_cpp = ("[](auto _pf_v) { return is_na(_pf_v) ? na<double>() "
@@ -9261,7 +9321,8 @@ class SecurityEmitter:
                 f"        _req_sec_lower_tf_{sec_id}.push_back({expr_cpp});"
             )
         else:
-            expr_cpp = self._security_float_cpp(expr_cpp, expr_node)
+            if self._security_result_spec(item) is None:
+                expr_cpp = self._security_float_cpp(expr_cpp, expr_node)
             lines.append(f"        _req_sec_{sec_id} = {expr_cpp};")
         self._emit_security_ohlc_hist_pushes(sec_id, lines)
         self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
@@ -9382,7 +9443,7 @@ class SecurityEmitter:
             if returns_tuple and tuple_size and tuple_size > 0 and isinstance(expr_node, TupleLiteral):
                 lines.append(f"            case {sec_id}:")
                 for i, el in enumerate(expr_node.elements):
-                    ctype = self._infer_cpp_type_for_security_elem(el)
+                    ctype = self._security_result_element_cpp_type(item, i)
                     if ctype == "double":
                         lines.append(f"                _req_sec_{sec_id}_{i} = na<double>();")
                     elif ctype == "bool":
@@ -9393,6 +9454,11 @@ class SecurityEmitter:
                         lines.append(f'                _req_sec_{sec_id}_{i} = std::string("");')
                     elif ctype == "std::vector<double>":
                         lines.append(f"                _req_sec_{sec_id}_{i}.clear();")
+                    elif (spec := self._security_result_spec(item, i)) is not None:
+                        lines.append(
+                            f"                _req_sec_{sec_id}_{i} = "
+                            f"{self._default_for_spec(spec)};"
+                        )
                     else:
                         lines.append(f"                _req_sec_{sec_id}_{i} = 0;")
                 for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):
@@ -9419,12 +9485,16 @@ class SecurityEmitter:
                     self._security_helper_tuple_cpp_type(
                         tuple_size,
                         item.get("tuple_element_types", ()),
+                        item.get("tuple_element_specs", ()),
                     ),
                 )
                 lines.append(f"            case {sec_id}:")
+                default = self._security_tuple_result_default(
+                    ctype, tuple_size, item.get("tuple_element_types", ()),
+                    item.get("tuple_element_specs", ()),
+                )
                 lines.append(
-                    f"                _req_sec_{sec_id} = "
-                    f"{self._security_tuple_result_default(ctype, tuple_size, item.get('tuple_element_types', ()))};"
+                    f"                _req_sec_{sec_id} = {default};"
                 )
                 for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):
                     lines.append(
@@ -9439,9 +9509,7 @@ class SecurityEmitter:
                 hist = self._security_ohlc_hist_fields_by_sec.get(sec_id, ())
                 ta_hist_names = self._security_ta_hist_series_names(sec_id)
                 expr_hist_names = self._security_expr_hist_series_names(sec_id)
-                na_cpp = (
-                    "na<std::string>()" if item.get("string_result") else "na<double>()"
-                )
+                na_cpp = self._security_result_default(item)
                 if hist or ta_hist_names or expr_hist_names:
                     lines.append(f"            case {sec_id}:")
                     lines.append(f"                _req_sec_{sec_id} = {na_cpp};")
@@ -9471,7 +9539,7 @@ class SecurityEmitter:
         lines.append(f"            case {sec_id}:")
         if returns_tuple and tuple_size and tuple_size > 0 and isinstance(expr_node, TupleLiteral):
             for i, el in enumerate(expr_node.elements):
-                ctype = self._infer_cpp_type_for_security_elem(el)
+                ctype = self._security_result_element_cpp_type(item, i)
                 value = {
                     "double": "na<double>()",
                     "bool": "false",
@@ -9480,6 +9548,11 @@ class SecurityEmitter:
                 }.get(ctype)
                 if ctype == "std::vector<double>":
                     lines.append(f"                _req_sec_{sec_id}_{i}.clear();")
+                elif (spec := self._security_result_spec(item, i)) is not None:
+                    lines.append(
+                        f"                _req_sec_{sec_id}_{i} = "
+                        f"{self._default_for_spec(spec)};"
+                    )
                 else:
                     lines.append(f"                _req_sec_{sec_id}_{i} = "
                                  f"{value or self._default_for_type(ctype)};")
@@ -9496,13 +9569,15 @@ class SecurityEmitter:
             }.get(
                 ta_name,
                 self._security_helper_tuple_cpp_type(
-                    tuple_size, item.get("tuple_element_types", ())),
+                    tuple_size, item.get("tuple_element_types", ()),
+                    item.get("tuple_element_specs", ())),
             )
             default = self._security_tuple_result_default(
-                ctype, tuple_size, item.get("tuple_element_types", ()))
+                ctype, tuple_size, item.get("tuple_element_types", ()),
+                item.get("tuple_element_specs", ()))
             lines.append(f"                _req_sec_{sec_id} = {default};")
         else:
-            na_cpp = "na<std::string>()" if item.get("string_result") else "na<double>()"
+            na_cpp = self._security_result_default(item)
             lines.append(f"                _req_sec_{sec_id} = {na_cpp};")
         lines.append("                break;")
 

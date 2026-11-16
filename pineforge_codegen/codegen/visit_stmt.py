@@ -1790,6 +1790,13 @@ class StmtVisitor:
                 f"std::vector<{ctype}>"
                 for ctype in self._lower_tf_tuple_cpp_types(lower_types)
             ]
+        if (isinstance(node.value, FuncCall)
+                and self._resolve_callee(node.value.callee) == ("security", "request")):
+            item = self._security_call_for_request(node.value)
+            if item is not None and any(
+                    self._security_result_spec(item, index) is not None
+                    for index in range(count)):
+                return self._security_tuple_cpp_types(item)
         if isinstance(node.value, (IfStmt, SwitchStmt)):
             return self._infer_selection_tuple_types(node.value, count)
         if not isinstance(node.value, FuncCall):

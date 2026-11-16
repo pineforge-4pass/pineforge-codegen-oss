@@ -4501,6 +4501,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     returns_tuple=sec.returns_tuple,
                     tuple_size=sec.tuple_size,
                     tuple_element_types=sec.tuple_element_types,
+                    result_type_spec=sec.result_type_spec,
+                    tuple_element_specs=sec.tuple_element_specs,
                     gaps=sec.gaps,
                     lookahead=sec.lookahead,
                     ta_range=sec.ta_range,
@@ -6157,7 +6159,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._func_tuple_element_specs.get(node.value.callee.name, ())
             if isinstance(node.value, FuncCall)
             and isinstance(node.value.callee, Identifier)
-            else ()
+            else (node.value.annotations or {}).get("security_tuple_element_specs", ())
         )
 
         for idx, name in enumerate(node.names):
@@ -6448,6 +6450,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     terminal_ret_expr.callee.name, ()
                 )
             )
+        elif isinstance(terminal_ret_expr, FuncCall):
+            requested_specs = (terminal_ret_expr.annotations or {}).get(
+                "security_tuple_element_specs", ()
+            )
+            if requested_specs:
+                self._func_tuple_element_specs[node.name] = requested_specs
         terminal_map_return = self._terminal_map_call_return(
             terminal_ret_expr,
             {

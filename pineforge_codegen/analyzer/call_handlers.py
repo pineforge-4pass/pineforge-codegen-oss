@@ -856,6 +856,13 @@ class CallHandlers:
                 expr_type = self._visit(expr_node)
             ta_end = len(self._ta_call_sites)
             security_ta_range = (ta_start, ta_end) if ta_end > ta_start else None
+            # Query already-visited values without registering TA/request
+            # sites again. PineType alone cannot describe a record or array.
+            type_query = OperatorTypeQuery(self)
+            result_spec = type_query._type_spec_from_expr(expr_node)
+            if result_spec is not None and result_spec.kind not in {
+                    "udt", "array", "map", "matrix"}:
+                result_spec = None
 
             # Assign ID and record the call
             sec_id = len(self._security_calls)
@@ -866,6 +873,11 @@ class CallHandlers:
                 self._tuple_element_types_by_node.get(id(expr_node), ())
                 if returns_tuple
                 else ()
+            )
+            tuple_element_specs = (
+                tuple(type_query._type_spec_from_expr(element)
+                      for element in expr_node.elements)
+                if returns_tuple else ()
             )
             if not returns_tuple and isinstance(expr_node, FuncCall):
                 expr_func = None
@@ -879,6 +891,9 @@ class CallHandlers:
                     if self._func_returns_tuple.get(expr_func, False):
                         tuple_size = self._func_tuple_element_count.get(expr_func, 0)
                         tuple_types = self._func_tuple_element_types.get(expr_func, ())
+                        tuple_element_specs = self._func_tuple_element_specs.get(
+                            expr_func, ()
+                        )
                         if PineType.UNKNOWN in tuple_types:
                             tuple_types = self._security_callsite_tuple_types(
                                 expr_func, expr_node, tuple_types
@@ -953,6 +968,12 @@ class CallHandlers:
             # A string payload returns a string (TradingView's na string reads
             # empty); every other scalar keeps the historical float result.
             string_result = not returns_tuple and expr_type == PineType.STRING
+            if result_spec is not None or tuple_element_specs:
+                node.annotations = {
+                    **(node.annotations or {}),
+                    "security_result_type_spec": result_spec,
+                    "security_tuple_element_specs": tuple_element_specs,
+                }
             self._security_calls.append(SecurityCallInfo(
                 sec_id=sec_id,
                 timeframe=tf_node,
@@ -974,8 +995,12 @@ class CallHandlers:
                 foreign=notes.get(LOWERING_ANNOTATION) == FEED_LOWERING,
                 ignore_invalid=node.kwargs.get("ignore_invalid_symbol"),
                 loc=node.loc,
+                result_type_spec=result_spec,
+                tuple_element_specs=tuple_element_specs,
             ))
 
+            if result_spec is not None and not returns_tuple:
+                return expr_type
             return PineType.STRING if string_result else PineType.FLOAT
 
         if func_name == "security_lower_tf":

@@ -808,6 +808,10 @@ class TypeHelper:
                 return TypeSpec.array(TypeSpec.primitive("string"))
             if ns == "ta" and func == "pivot_point_levels":
                 return TypeSpec.array(TypeSpec.primitive("float"))
+            if ns == "request" and func == "security":
+                requested_spec = (value.annotations or {}).get("security_result_type_spec")
+                if requested_spec is not None:
+                    return requested_spec
             if ns == "request" and func == "security_lower_tf":
                 # ``request.security_lower_tf`` returns array<T> where T
                 # is the Pine type of the expression argument. We use the
