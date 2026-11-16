@@ -165,6 +165,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def __init__(self, ast: Program, filename: str = "<stdin>",
                  budget: TimeBudget | None = None,
                  session_clones: frozenset[str] | None = None) -> None:
+        TypeHelper.__init__(self)
         self._ast = ast
         self._filename = filename
         self._budget = budget
@@ -312,7 +313,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 defined_names.add(stmt.name)
         # Track user-defined function return types
         self._func_return_types: dict[str, PineType] = {}
-        self._ternary_int_fallbacks: set[int] = set()
         # Track user-defined function tuple returns
         self._func_returns_tuple: dict[str, bool] = {}
         self._func_tuple_element_count: dict[str, int] = {}
@@ -501,7 +501,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # request.security rebinding helpers for mutable globals
         self._global_binding_infos: dict[str, MutableGlobalInfo] = {}
         self._global_reassigned_names: set[str] = set()
-        self._current_top_level_stmt: ASTNode | None = None
         self._global_scope = True
         self._static_vars: set[str] = set()
         # Stack of enclosing user-function param-name sets, pushed while visiting
@@ -8053,7 +8052,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._bool_na_error(token.loc)
 
     def _visit_Ternary(self, node: Ternary) -> PineType:
-        self._ternary_int_fallbacks.discard(id(node))
+        self._ternary_int_fallbacks.pop(id(node), None)
         condition_type = self._visit(node.condition)
         self._check_untyped_na_condition(node.condition, condition_type)
         true_type = self._visit(node.true_val)
@@ -8100,7 +8099,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             result_type = structured_type
         if result_type == PineType.INT and main_type != PineType.INT:
             # Keep the true arm's numeric fallback through later return queries.
-            self._ternary_int_fallbacks.add(id(node))
+            self._ternary_int_fallbacks[id(node)] = node
             return main_type
         return result_type
 

@@ -97,6 +97,10 @@ class TypeHelper:
     docstring above.
     """
 
+    def __init__(self) -> None:
+        self._current_top_level_stmt: ASTNode | None = None
+        self._ternary_int_fallbacks: dict[int, Ternary] = {}
+
     def _builtin_sizing_constant(self, value):
         if not (isinstance(value, MemberAccess)
                 and isinstance(value.object, Identifier)):
@@ -480,7 +484,7 @@ class TypeHelper:
             if selection_spec is not None:
                 if (selection_spec.kind == "primitive"
                         and selection_spec.name in {"int", "int64"}
-                        and id(value) in getattr(self, "_ternary_int_fallbacks", ())):
+                        and id(value) in self._ternary_int_fallbacks):
                     # An integer spec must not retype the analyzed missing arm.
                     return None
                 return selection_spec
