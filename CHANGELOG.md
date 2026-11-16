@@ -22,6 +22,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Numeric string patterns now preserve mandatory integer zeros before grouping
+  and sign assembly, so `str.tostring(9448, "00000")` returns `"09448"`.
+
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked
   source adapters for fixed, input and simple lengths, including helper and
   requested-context copies and precalculation. Invalid lengths are checked
