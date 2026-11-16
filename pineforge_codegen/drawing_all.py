@@ -1,4 +1,4 @@
-"""Drawing collection types, table arrays and read-only drawing snapshots."""
+"""Drawing collection types and the evidenced read-only snapshot surface."""
 
 from dataclasses import replace
 
@@ -6,7 +6,7 @@ from .ast_nodes import FuncCall, Identifier, MemberAccess
 from .symbols import TypeSpec
 
 
-DRAWING_ALL_KINDS = frozenset({"line", "box", "label", "linefill", "polyline", "table"})
+DRAWING_ALL_KINDS = frozenset({"line", "box", "label", "linefill", "polyline"})
 DRAWING_ALL_READS = frozenset({"size", "first", "last", "get"})
 DRAWING_ALL_SNAPSHOT = "pf_drawing_all_snapshot"
 
@@ -95,9 +95,6 @@ def drawing_all_uses(program):
 
     def kind_of(node):
         kind = drawing_all_kind(node)
-        # Table snapshots use the ordinary typed-array consumer path.
-        if kind == "table":
-            return None
         if kind is not None:
             return kind
         if isinstance(node, Identifier):

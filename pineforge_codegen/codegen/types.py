@@ -3185,8 +3185,6 @@ class TypeInferer:
                 return TypeSpec.udt(cast_kind)
             if namespace == "polyline" and func_name == "new":
                 return TypeSpec.udt("polyline")
-            if namespace == "table" and func_name in {"new", "copy"}:
-                return TypeSpec.udt("table")
             if namespace in DRAWING_NS:
                 if func_name in ("new", "copy"):
                     return TypeSpec.udt(namespace)
@@ -6442,8 +6440,6 @@ class TypeInferer:
                 return DRAWING_TYPE_TO_CPP[cast_kind]
             if namespace == "polyline" and func_name == "new":
                 return DRAWING_TYPE_TO_CPP["polyline"]
-            if namespace == "table" and func_name in {"new", "copy"}:
-                return DRAWING_TYPE_TO_CPP["table"]
             if namespace == "color":
                 return "int64_t" if func_name in {"new", "rgb", "from_gradient"} else "int"
             if (namespace == "request" and func_name == "security"
@@ -6602,8 +6598,6 @@ class TypeInferer:
                 return "std::string"
         if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
             ename = node.object.name
-            if ename == "table" and node.member == "all":
-                return self._type_spec_to_cpp(self._type_spec_from_expr(node))
             owner = self._type_spec_from_expr(node.object)
             if owner is None:
                 constant = builtin_constant(ename, node.member)

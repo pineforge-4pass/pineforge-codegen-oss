@@ -2578,8 +2578,6 @@ class CallVisitor:
             return self._emit_chart_point(func_name, node)
         if namespace == "polyline" and func_name in {"new", "delete"}:
             return self._emit_polyline_call(func_name, node)
-        if namespace == "table" and func_name in {"new", "copy", "delete"}:
-            return self._emit_table_call(func_name, node)
 
         # Skip visual/unsupported namespace calls
         if namespace in SKIP_NAMESPACES or namespace in SKIP_VAR_TYPES:

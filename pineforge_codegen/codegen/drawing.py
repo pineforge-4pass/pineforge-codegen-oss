@@ -50,37 +50,6 @@ struct _PFPolyline {
 };
 """
 
-TABLE_COLLECTION_CPP = """\
-// Table rendering is visual-only; handle identity and lifetime are script data.
-struct _PFTable {
-    uint64_t id = 0;
-    bool is_na() const { return id == 0; }
-    friend bool operator==(const _PFTable& _pf_left, const _PFTable& _pf_right) {
-        return _pf_left.id == _pf_right.id;
-    }
-    friend bool operator!=(const _PFTable& _pf_left, const _PFTable& _pf_right) {
-        return !(_pf_left == _pf_right);
-    }
-};
-struct _PFTableRegistry {
-    uint64_t next_id = 0;
-    std::deque<uint64_t> live;
-    _PFTable create() {
-        _PFTable _pf_handle{++next_id};
-        live.push_back(_pf_handle.id);
-        return _pf_handle;
-    }
-    _PFTable copy(_PFTable _pf_source) {
-        return std::find(live.begin(), live.end(), _pf_source.id) == live.end()
-            ? _PFTable{} : create();
-    }
-    void erase(_PFTable _pf_handle) {
-        live.erase(std::remove(live.begin(), live.end(), _pf_handle.id), live.end());
-    }
-    const std::deque<uint64_t>& order() const { return live; }
-};
-"""
-
 _POLYLINE_PARAMS = {
     "new": (
         "points", "curved", "closed", "xloc", "line_color", "fill_color",
@@ -264,8 +233,7 @@ class DrawingVisitor:
         # Copy IDs, not records. Deleting a drawing cannot invalidate iteration
         # over this array, and a setter still writes through the handle.
         handle = DRAWING_TYPE_TO_CPP[kind]
-        order = ("_pf_tables_.order()" if kind == "table"
-                 else f"{DRAWING_ARENA[kind]}.order()")
+        order = f"{DRAWING_ARENA[kind]}.order()"
         return (
             f"([&]() {{ std::vector<{handle}> __pf_snapshot; "
             f"for (auto __pf_id : {order}) "
@@ -282,13 +250,6 @@ class DrawingVisitor:
         if call is None:
             return None
         kind, method, _receiver, arguments = call
-        if kind == "table":
-            spec = self._type_spec_from_expr(_receiver)
-            args = self._array_method_arg_nodes(method, arguments)
-            return self._array_method_expr(
-                self._visit_expr(_receiver), method,
-                self._array_method_args(method, args, spec), spec, node,
-            )
         if kind not in DRAWING_ARENA or method not in DRAWING_ALL_READS:
             self._codegen_error(node, drawing_all_refusal(kind))
         args = self._array_method_arg_nodes(method, arguments)
@@ -420,28 +381,6 @@ class DrawingVisitor:
             "return _PFPolyline{++this->_pf_polyline_next_id_}; }())"
         )
 
-    def _emit_table_call(self, method: str, node: FuncCall, receiver=None) -> str:
-        """Retain table lifetime and evaluate creation arguments once."""
-        if method not in {"copy", "delete"}:
-            arguments = ([receiver] if receiver is not None else []) + [
-                *node.args, *node.kwargs.values(),
-            ]
-            statements = " ".join(
-                f"static_cast<void>({self._visit_expr(argument)});"
-                for argument in arguments
-            )
-            result = "return _pf_tables_.create();" if method == "new" else ""
-            return f"([&]() {{ {statements} {result} }}())"
-        value_node = (receiver if receiver is not None else
-                      node.args[0] if node.args else node.kwargs.get("table_id"))
-        if value_node is None:
-            raise CodegenInvariantError(node)
-        value = self._visit_rhs_value(
-            value_node, target_cpp_type=DRAWING_TYPE_TO_CPP["table"],
-        )
-        operation = "erase" if method == "delete" else "copy"
-        return f"_pf_tables_.{operation}({value})"
-
     def _emit_drawing_alloc(self, dtype: str, node: FuncCall) -> str:
         arena = DRAWING_ARENA[dtype]
         if dtype == "linefill":
@@ -568,8 +507,6 @@ class DrawingVisitor:
         """
         if dtype == "polyline":
             return self._emit_polyline_call(method, node, receiver=recv_node)
-        if dtype == "table":
-            return self._emit_table_call(method, node, receiver=recv_node)
         arena = DRAWING_ARENA[dtype]
         recv = self._visit_expr(recv_node)
         geometry, noop = DRAWING_METHODS_BY_TYPE[dtype]
@@ -695,7 +632,7 @@ class DrawingVisitor:
         _fn, ns = self._resolve_callee(callee)
         from .tables import DRAWING_NS
         dtype = None
-        if ns in DRAWING_NS or ns in {"polyline", "table"}:
+        if ns in DRAWING_NS or ns == "polyline":
             dtype = ns
         else:
             recv_spec = self._type_spec_from_expr(callee.object)
@@ -720,7 +657,7 @@ class DrawingVisitor:
         _fn, ns = self._resolve_callee(node.callee)
         from .tables import DRAWING_NS
         dtype = None
-        if ns in DRAWING_NS or ns in {"polyline", "table"}:
+        if ns in DRAWING_NS or ns == "polyline":
             dtype = ns
         else:
             recv_spec = self._type_spec_from_expr(node.callee.object)
@@ -731,8 +668,6 @@ class DrawingVisitor:
             return False
         if dtype == "polyline":
             return method == "delete"
-        if dtype == "table":
-            return method not in {"new", "copy"}
         if method in ("new", "copy"):
             return False                      # constructors / copy return a handle
         if (dtype, method) in _DRAWING_GETTER_RET:

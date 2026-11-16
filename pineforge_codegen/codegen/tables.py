@@ -484,12 +484,12 @@ PINE_TYPE_TO_CPP = {
 # Drawing-objects-as-data (spec §4.1)
 # ---------------------------------------------------------------------------
 # Pine drawing type name -> C++ value type.
-# Polyline and table values have generated handles; their rendering remains a
+# Polyline values have an opaque generated handle; their geometry remains a
 # visual no-op. Only the engine-backed kinds below have drawing arenas.
 DRAWING_TYPE_TO_CPP = {
     "line": "Line", "box": "Box", "label": "Label",
     "linefill": "Linefill", "chart.point": "ChartPoint",
-    "polyline": "_PFPolyline", "table": "_PFTable",
+    "polyline": "_PFPolyline",
 }
 # Function-call namespaces routed to the per-type arena dispatch.
 DRAWING_NS = {"line", "box", "label", "linefill"}
@@ -531,8 +531,7 @@ SKIP_FUNC_NAMES = {
 # line / box / label / linefill REMOVED — they now route to real drawing
 # codegen (gated on _uses_drawing). table / polyline / chart / display / size
 # / position stay visual-only. Polyline creation/deletion is intercepted before
-# the generic skip to retain its typed handle and argument evaluations. Table
-# creation, copying, deletion and collection reads also retain their data.
+# the generic skip to retain its typed handle and argument evaluations.
 SKIP_NAMESPACES = {
     "table", "polyline", "chart",
     "display", "size", "position",
