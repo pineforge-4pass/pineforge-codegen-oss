@@ -7,7 +7,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen.pine_spelling import pine_string_literal
-from tests._compile import _COMPILER, compile_cpp
+from tests._compile import _COMPILER, STRATEGY_FP_FLAGS, compile_cpp, skip_if_no_compile_env
 from tests._cpp_tokens import string_values
 
 PRELUDE = '//@version=6\nstrategy("prefix probe")\n'
@@ -69,7 +69,7 @@ def test_symbol_variable_and_chart_symbol_function_are_identical(function):
 @pytest.mark.parametrize("opt", ["-O0", "-O2"])
 def test_symbol_literal_expressions_return_the_expected_parts(function, opt, tmp_path):
     if _COMPILER is None:
-        pytest.skip("C++ compiler unavailable")
+        skip_if_no_compile_env()
     body = "".join(f"prefixValue{index} = syminfo.{function}({pine_string_literal(symbol)})\n"
                    for index, (symbol, _prefix, _ticker) in enumerate(SYMBOLS))
     body += f"prefixValue{len(SYMBOLS)} = syminfo.{function}(syminfo.tickerid)\n"
@@ -86,7 +86,7 @@ def test_symbol_literal_expressions_return_the_expected_parts(function, opt, tmp
     executable = tmp_path / "prefix"
     source.write_text(driver, encoding="utf-8")
     build = subprocess.run([_COMPILER, "-std=c++17", "-Wall", "-Werror", opt,
-                            str(source), "-o", str(executable)],
+                            *STRATEGY_FP_FLAGS, str(source), "-o", str(executable)],
                            capture_output=True, text=True)
     assert build.returncode == 0, build.stderr
     run = subprocess.run([str(executable)], capture_output=True, text=True)
