@@ -964,6 +964,19 @@ class SecurityEmitter:
         ))
         return "\n".join(lines)
 
+    def _security_registration_tf(self, item):
+        """Render one registration after its C++ type identities are fixed."""
+        self._security_tf_lower = bool(item.get("is_lower_tf_array"))
+        if item.get("runtime_context"):
+            return None, "_pf_state.cursor.timeframe"
+        if item.get("series_tf_invalid") is not None:
+            return item["tf_node"].value, None
+        if item.get("dead"):
+            return None, "input_tf_"
+        return self._resolve_security_tf(
+            item["tf_node"], item.get("containing_func", "")
+        )
+
     def _resolve_security_tf(self, tf_node, containing_func: str):
         """Resolve a ``request.security`` timeframe argument to ``(tf_str, tf_expr)``.
 

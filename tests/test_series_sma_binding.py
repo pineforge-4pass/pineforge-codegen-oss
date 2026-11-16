@@ -6,6 +6,55 @@ import pytest
 
 from pineforge_codegen import transpile
 from tests._compile import compile_cpp, run_emitted_tu
+from tests.test_array_retained_alias import _reference_cpp
+
+
+@pytest.mark.parametrize("binding", [
+    pytest.param("length = 5", id="plain-literal"),
+    pytest.param("var int length = 5", id="admitted-persistent-literal"),
+    pytest.param('length = input.int(5, "Window")', id="input"),
+])
+def test_fixed_sma_keeps_complete_base_cpp(binding):
+    source = (
+        '//@version=6\nstrategy("fixed SMA emission")\n'
+        + binding + "\nvalue = ta.sma(close, length)\nplot(value)\n"
+    )
+    cpp = transpile(source)
+    assert cpp == _reference_cpp(source)
+    assert "_PFSeriesSma" not in cpp
+    assert "pineforge/source/pine_ta_length.hpp" not in cpp
+    compile_cpp(cpp, label="fixed SMA complete emission")
+
+
+@pytest.mark.parametrize("body", [
+    pytest.param("_pf_length = close\nplot(_pf_length)\n", id="factory-local-name"),
+    pytest.param("""type _PFSeriesSma
+    float value
+sample = _PFSeriesSma.new(close)
+plot(sample.value)
+""", id="support-type-name"),
+])
+def test_unused_sma_helper_names_keep_complete_base_cpp(body):
+    source = '//@version=6\nstrategy("unused SMA helper names")\n' + body
+    cpp = transpile(source)
+    assert cpp == _reference_cpp(source)
+    compile_cpp(cpp, label="unused SMA helper name")
+
+
+def test_series_sma_support_type_avoids_an_authored_type():
+    cpp = transpile("""//@version=6
+strategy("SMA support type collision")
+type _PFSeriesSma
+    float value
+sample = _PFSeriesSma.new(close)
+length = 1 + bar_index % 5
+value = ta.sma(sample.value, length)
+plot(value)
+""")
+    assert "struct _PFSeriesSma {\n    int32_t __pf_id" in cpp
+    assert "class _PFSeriesSma__pf2 {" in cpp
+    assert re.search(r"^    _PFSeriesSma__pf2 _ta_sma_\w+;$", cpp, re.M)
+    compile_cpp(cpp, label="SMA allocated support type")
 
 
 def test_series_sma_adapter_replaces_an_entire_evaluation_not_its_last_call():
@@ -148,7 +197,10 @@ value = ta.sma(_pf_source, _pf_length)
 plot(value)
 """)
     assert "const double _pf_source = (pf_safe__pf_source);" in cpp
-    assert "ta_number(pf_safe__pf_length)" in cpp
+    assert (
+        "const double _pf_length__pf2 = pineforge::source::ta_number(_pf_length);"
+    ) in cpp
+    assert "return std::pair<double, double>{_pf_source, _pf_length__pf2};" in cpp
     compile_cpp(cpp, label="series SMA argument temporary hygiene")
 
 

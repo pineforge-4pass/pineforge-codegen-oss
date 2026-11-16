@@ -279,7 +279,9 @@ class TopLevelEmitter:
         if self._ta_uses_series_sma():
             from .series_sma import SERIES_SMA_CPP
             lines.append("#include <utility>")
-            lines.append(SERIES_SMA_CPP)
+            lines.append(SERIES_SMA_CPP.replace(
+                "_PFSeriesSma", self._ta_series_sma_cpp_type()
+            ))
         if getattr(self, "_uses_drawing", False):
             lines.append(DRAWING_LIFETIME_CPP)
         if self._uses_polyline:
@@ -2689,7 +2691,7 @@ class TopLevelEmitter:
             # struct (Line/Box/Label/Linefill), not the unknown lowercase name.
             ret_type = DRAWING_TYPE_TO_CPP.get(
                 return_udt_name,
-                self._safe_name(return_udt_name)
+                self._udt_cpp_name(return_udt_name)
                 if return_udt
                 else return_udt_name,
             )
@@ -2725,7 +2727,7 @@ class TopLevelEmitter:
         if return_udt:
             # Use the generated handle name so an authored type cannot be
             # confused with a drawing handle's C++ name.
-            rhs_return_cpp_type = self._safe_name(return_udt_name)
+            rhs_return_cpp_type = self._udt_cpp_name(return_udt_name)
         elif (self._is_nullable_collection_cpp_type(ret_type)
               or ret_type in DRAWING_TYPE_TO_CPP.values()
               or (ret_type == "std::vector<int64_t>"

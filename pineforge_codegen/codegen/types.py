@@ -203,7 +203,7 @@ class TypeInferer:
             # of the old collapse to double / unknown-type-name.
             if spec.name in DRAWING_TYPE_TO_CPP:
                 return DRAWING_TYPE_TO_CPP[spec.name]
-            return (self._safe_name(spec.name)
+            return (self._udt_cpp_name(spec.name)
                     if spec.name in self._udt_defs else "double")
         if spec.kind == "array":
             return f"std::vector<{self._type_spec_to_cpp(spec.element)}>"
@@ -239,7 +239,7 @@ class TypeInferer:
         """Generated arena specialization for one user-defined object type."""
         return (
             f"{getattr(self, '_udt_arena_template_cpp_name', '_PFUdtArena')}<"
-            f"{self._safe_name(type_name)}, "
+            f"{self._udt_cpp_name(type_name)}, "
             f"{self._udt_record_cpp_type(type_name)}>"
         )
 
@@ -576,7 +576,7 @@ class TypeInferer:
                 # not the integer sentinel, which a double does not carry.
                 return "na<double>()"
             if spec.name in getattr(self, "_udt_defs", ()):
-                return f"{self._safe_name(spec.name)}{{}}"
+                return f"{self._udt_cpp_name(spec.name)}{{}}"
             return self._default_for_type(self._type_spec_to_cpp(spec))
         cpp_type = self._type_spec_to_cpp(spec)
         if cpp_type.startswith("std::vector") or cpp_type.startswith("PineMap"):
@@ -4086,7 +4086,7 @@ class TypeInferer:
         udt = self._series_handle_type_name(name)
         if udt is None:
             return None
-        return DRAWING_TYPE_TO_CPP.get(udt) or self._safe_name(udt)
+        return DRAWING_TYPE_TO_CPP.get(udt) or self._udt_cpp_name(udt)
 
     def _series_handle_target(self, name: str) -> str | None:
         """``_visit_rhs_value``'s target for a value stored in such a

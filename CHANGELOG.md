@@ -100,6 +100,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   Regenerate C++ and relink affected strategies.
 - User-defined object types receive collision-aware generated names, so a Pine
   type such as `Trade` cannot collide with a type imported from the engine.
+  Types without a collision retain their existing C++ spelling. Conditional
+  headers determine which extra type names need escaping; value and parameter
+  names keep their own identities. Series-SMA helper names are allocated only
+  when the helper is emitted.
 - `ta.sma` accepts a changing series length through the paired engine's
   `pineforge::source::SeriesSma` implementation. Each written call and requested
   context retains its own history, including repeated loop/helper reaches and

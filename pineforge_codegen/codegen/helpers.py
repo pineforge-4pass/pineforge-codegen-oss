@@ -4,8 +4,8 @@ Mixin holding stateless / near-stateless name-mangling and AST-walk
 helpers used everywhere in the codegen. Lives here so the heavier
 visitor / emitter mixins can depend on it without owning its
 implementation. Keep this module free of imports from any other
-``codegen/*`` submodule (the generated data module ``host_members``
-aside) so it stays at the bottom of the dependency graph.
+``codegen/*`` submodule (the name inventories ``host_members`` and
+``engine_names`` aside) so it stays at the bottom of the dependency graph.
 
 Mixin contract: ``NamingHelper`` reads at most one piece of host state,
 ``self._all_member_names`` (used by ``_func_safe_name``). The class
@@ -22,6 +22,7 @@ from ..ast_nodes import (
 )
 from ..limits import iter_ast_nodes
 from ..signatures import SESSION_FLAG_MEMBERS
+from .engine_names import ENGINE_HEADER_NAMES, ENGINE_IMPORTED_NAMES, ENGINE_MACRO_NAMES
 from .host_members import HOST_MEMBER_NAMES
 
 
@@ -474,7 +475,7 @@ CPP_EMITTER_NAMES = frozenset("""
     _pf_lines_ _pf_boxes_ _pf_labels_ _pf_linefills_
     _PFPolyline _pf_polyline_next_id_
     _pf_script_state_checkpoint_ _PFScriptState _PFForeignEmaSeeding
-    _PFALMA _PFKC _PFKCW _PFAnchoredVWAP _PFAnchoredVWAPBands _PFSeriesSma
+    _PFALMA _PFKC _PFKCW _PFAnchoredVWAP _PFAnchoredVWAPBands
     _PFPivotPointLevels _PFArrayField _PFTvFormatValue
     _PFCollectionTraits _PFArrayHistoryValue _PFCollectionHistory
     _pf_collection_history_changed kLoopTimeLimitMs kTvFloatStepEnd
@@ -518,7 +519,7 @@ LIBC_RESERVED_NAMES = frozenset("""
 CPP_RESERVED = set(
     LEGACY_CPP_RESERVED | CPP_KEYWORDS | CPP_CONTEXTUAL |
     CPP_NATIVE_TYPE_NAMES | CPP_STANDARD_MACROS | CPP_EMITTER_NAMES |
-    HOST_MEMBER_NAMES | LIBC_RESERVED_NAMES
+    HOST_MEMBER_NAMES | LIBC_RESERVED_NAMES | ENGINE_MACRO_NAMES
 )
 
 # Temporaries the emitter declares in the C++ it generates around a user's
@@ -538,7 +539,6 @@ CPP_RESERVED = set(
 CPP_TEMPORARY_NAMES = frozenset("""
     _nz_v _nz_y _fixnan_v _pna_l _pna_r _pfc_l _pfc_r _pfc_eq _hv _hidx _sv
     _out _func_ret _pf_v _pf_idx_v _pf_idx_t _pf_bool_v _pf_bool_t
-    _pf_source _pf_length
     _pf_color_v _pf_color_t _pf_color_base _pf_color_alpha _pf_sign_v
     _pf_series_raw _pf_raw _pf_val_t _pf_out _pf_prior
     _pf_hist_offset_raw _pf_hist_offset_numeric _pf_hist_offset _pf_hist_bar
@@ -763,15 +763,37 @@ class NamingHelper:
         bound.update(storage_names)
         authored.update(storage_names)
         self._safe_name_map: dict[str, str] = {}
-        self._safe_name_occupied = authored
+        self._safe_name_occupied = authored | ENGINE_IMPORTED_NAMES
         self._safe_name_bound = bound
         for name in sorted(bound):
-            # Every authored object type lives in the generated-name space.
-            # A namespace import can expose an engine type with any Pine name;
-            # a finite reserved-name inventory cannot protect this category.
-            if (name in user_types or name in CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES
+            if (name in CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES
                     or is_emitter_temporary(name)):
                 self._allocate_safe_name(name)
+        # Type names occupy file scope, unlike the values and parameters
+        # above. Keep their identities separate: a conditional header must
+        # never change an already allocated value/clone identity.
+        self._udt_cpp_names: dict[str, str] = {}
+        optional_names = set().union(*ENGINE_HEADER_NAMES.values())
+        for name in sorted(user_types):
+            safe = self._safe_name(name)
+            if safe == name and name in ENGINE_IMPORTED_NAMES:
+                safe = self._allocate_escaped_cpp_name(name)
+            self._udt_cpp_names[name] = safe
+        self._pending_udt_cpp_names = {
+            name for name in user_types & optional_names
+            if self._udt_cpp_names[name] == name
+        }
+        value_members = {
+            self._safe_name(name) for name, _, _ in getattr(ctx, "var_members", ())
+        } | {
+            self._safe_name(name) for name, _ in getattr(ctx, "global_var_decls", ())
+        } | {
+            self._safe_name(info.name) for info in getattr(ctx, "func_infos", ())
+        }
+        self._pending_udt_cpp_names.update(
+            name for name in user_types
+            if self._udt_cpp_names[name] in value_members
+        )
         # Buffered locals already keep their function apart through the
         # member-collision path. Ordinary locals need separate value and
         # callable spellings so an on_bar local cannot hide a class method.
@@ -835,7 +857,7 @@ class NamingHelper:
             )
         return allocated[key]
 
-    def _allocate_safe_name(self, name: str) -> str:
+    def _allocate_escaped_cpp_name(self, name: str) -> str:
         if name in LEGACY_CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES:
             base = f"_{name}_"
         else:
@@ -848,9 +870,38 @@ class NamingHelper:
                or is_emitter_temporary(candidate)):
             candidate = f"{base}_{suffix}"
             suffix += 1
-        self._safe_name_map[name] = candidate
         occupied.add(candidate)
         return candidate
+
+    def _allocate_safe_name(self, name: str) -> str:
+        candidate = self._allocate_escaped_cpp_name(name)
+        self._safe_name_map[name] = candidate
+        return candidate
+
+    def _udt_cpp_name(self, name: str) -> str:
+        """The single handle spelling shared by every object-type consumer."""
+        return getattr(self, "_udt_cpp_names", {}).get(name, self._safe_name(name))
+
+    def _finalise_udt_cpp_names(self, headers, value_members=()) -> None:
+        """Bind conditional type identities after actual include selection."""
+        imported = set().union(
+            *(ENGINE_HEADER_NAMES[header] for header in headers)
+        )
+        self._safe_name_occupied.update(imported)
+        for name in sorted(self._pending_udt_cpp_names):
+            if ((name in imported and self._udt_cpp_names[name] == name)
+                    or self._udt_cpp_names[name] in value_members):
+                self._udt_cpp_names[name] = self._allocate_escaped_cpp_name(name)
+        self._pending_udt_cpp_names = set()
+
+    def _engine_cpp_type_in_class(self, name: str) -> str:
+        """Qualify an engine type only when a class value hides its name."""
+        hidden = name in self._all_member_names or any(
+            self._func_cpp_base_name(info.name) == name
+            for info in self.ctx.func_infos
+            if info.name not in self._dead_func_names
+        )
+        return f"pineforge::{name}" if hidden else name
 
     def _safe_name(self, name: str) -> str:
         """Rename Pine identifiers that collide with emitted C++ names."""

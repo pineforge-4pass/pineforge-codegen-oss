@@ -578,11 +578,11 @@ class ExprVisitor:
         if spec is None and target_node is not None:
             spec = self._type_spec_from_expr(target_node)
         if spec is not None and spec.kind == "udt" and spec.name in self._udt_defs:
-            return self._safe_name(spec.name)
+            return self._udt_cpp_name(spec.name)
         if not target_name:
             return None
         udt_name = self._identifier_udt_type(target_name)
-        return self._safe_name(udt_name) if udt_name in self._udt_defs else None
+        return self._udt_cpp_name(udt_name) if udt_name in self._udt_defs else None
 
     def _tuple_literal_element(self, element) -> str:
         """One element of a tuple literal, as ``std::make_tuple`` takes it: a
@@ -689,11 +689,11 @@ class ExprVisitor:
         udt_target = None
         if (target_cpp_type in self._udt_defs
                 and target_cpp_type not in DRAWING_TYPE_TO_CPP.values()):
-            udt_target = self._safe_name(target_cpp_type)
+            udt_target = self._udt_cpp_name(target_cpp_type)
         elif target_cpp_type is not None:
             udt_target = next(
                 (target_cpp_type for name in self._udt_defs
-                 if self._safe_name(name) == target_cpp_type),
+                 if self._udt_cpp_name(name) == target_cpp_type),
                 None,
             )
         drawing_target = (

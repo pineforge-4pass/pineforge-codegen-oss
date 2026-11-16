@@ -1272,21 +1272,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # a function-parameter tf is resolved from the call sites (the
             # evaluator is a class method, so the param is not in scope there).
             # A lower-timeframe request has no chart-timeframe fallback.
-            self._security_tf_lower = bool(item.get("is_lower_tf_array"))
-            if item.get("runtime_context"):
-                tf_str, tf_expr = None, "_pf_state.cursor.timeframe"
-            elif item.get("series_tf_invalid") is not None:
-                # A closed computed arm may be invalid. It has a typed result
-                # slot for emission, but no registration; selecting it stops
-                # the run at the authored request.
-                tf_str, tf_expr = tf_node.value, None
-            elif item.get("dead"):
-                # A helper no top-level statement reaches: its evaluator is
-                # never read, registered on the chart timeframe.
-                tf_str, tf_expr = None, "input_tf_"
+            if self._pending_udt_cpp_names:
+                # Retain the AST until header-dependent type names are
+                # frozen. No provisional C++ is cached or rewritten.
+                tf_str = tf_expr = None
             else:
-                tf_str, tf_expr = self._resolve_security_tf(
-                    tf_node, item.get("containing_func", ""))
+                tf_str, tf_expr = self._security_registration_tf(item)
 
             is_lookahead_on = False
             if lookahead_node is not None:
@@ -1348,7 +1339,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "tf_node": tf_node,
                 "gaps_on": is_gaps_on,
                 "lookahead_on": is_lookahead_on,
-                "lookahead_expr": self._security_lookahead_expr(lookahead_value),
+                "lookahead_expr": (
+                    None if self._pending_udt_cpp_names
+                    else self._security_lookahead_expr(lookahead_value)
+                ),
                 "lookahead_value": lookahead_value,
                 "heikinashi": bool(item.get("heikinashi", False)),
                 "ta_range": ta_range,
@@ -1388,6 +1382,33 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._uses_drawing = self._detect_drawing_usage(
             set(DRAWING_TYPE_TO_CPP) - {"polyline"},
         )
+        headers = []
+        if self._uses_map:
+            headers.append("pineforge/map.hpp")
+        if self._uses_matrix:
+            headers.append("pineforge/matrix.hpp")
+            if self._detect_generic_matrix_usage():
+                headers.append("pineforge/generic_matrix.hpp")
+        if self._uses_drawing:
+            headers.append("pineforge/drawing.hpp")
+        pending_types = self._pending_udt_cpp_names
+        class_values = {
+            self._safe_name(name) for name, _, _ in self.ctx.var_members
+            if name not in self._visual_drop_vars
+        } | {
+            self._safe_name(name) for name, _ in self.ctx.global_var_decls
+            if name not in self._visual_drop_vars
+        } | {
+            self._func_cpp_base_name(info.name) for info in self.ctx.func_infos
+            if info.name not in self._dead_func_names
+        }
+        self._finalise_udt_cpp_names(headers, class_values)
+        if pending_types:
+            for info, item in zip(self._security_eval_info, self._security_calls):
+                info["tf"], info["tf_expr"] = self._security_registration_tf(item)
+                info["lookahead_expr"] = self._security_lookahead_expr(
+                    info["lookahead_value"]
+                )
         self._drawing_caps = self._compute_drawing_caps() if self._uses_drawing else {}
 
         # Pine history directives retain their existing global-maximum rule.
@@ -2549,7 +2570,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     # A history-read var object keeps its references, as
                     # its base member does.
                     udt_t = udt_spec.name if udt_spec is not None else member_udt_type
-                    element = (self._safe_name(udt_t) if udt_t in self._udt_defs
+                    element = (self._udt_cpp_name(udt_t) if udt_t in self._udt_defs
                                else cpp_type)
                     lines.append(f"    Series<{element}> {cloned_safe}{series_suffix};")
                 elif collection_spec is not None:
@@ -2576,7 +2597,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         if udt_spec is not None
                         else member_udt_type
                     )
-                    handle_cpp = DRAWING_TYPE_TO_CPP.get(udt_t, self._safe_name(udt_t))
+                    handle_cpp = DRAWING_TYPE_TO_CPP.get(udt_t, self._udt_cpp_name(udt_t))
                     lines.append(f"    {handle_cpp} {cloned_safe} = {handle_cpp}{{}};")
                 elif vname in self._runtime_scalar_var_init_members:
                     # Declaration-site state may remain unreached while COOF
@@ -4436,7 +4457,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # the references its calls passed (``_series_param_element_cpp_type``).
         handle_cpp_types = {
             *DRAWING_TYPE_TO_CPP.values(),
-            *(self._safe_name(name) for name in self._udt_defs),
+            *(self._udt_cpp_name(name) for name in self._udt_defs),
         }
 
         def register_one(
@@ -4874,7 +4895,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 or not (spec.name in DRAWING_TYPE_TO_CPP
                         or spec.name in self._udt_defs)):
             return None
-        return DRAWING_TYPE_TO_CPP.get(spec.name) or self._safe_name(spec.name)
+        return DRAWING_TYPE_TO_CPP.get(spec.name) or self._udt_cpp_name(spec.name)
 
     def _registered_history_handle(self, node: Subscript) -> str | None:
         """The handle type of the synthetic history Series the prepass
@@ -4885,7 +4906,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if member is None:
             return None
         handles = {*DRAWING_TYPE_TO_CPP.values(),
-                   *(self._safe_name(name) for name in self._udt_defs)}
+                   *(self._udt_cpp_name(name) for name in self._udt_defs)}
         for info in self._inline_history_members:
             if info["member_name"] == member:
                 return info["cpp_type"] if info["cpp_type"] in handles else None
@@ -5635,7 +5656,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # The two-phase order also permits self/nested UDT fields without
         # embedding a C++ type recursively by value.
         for type_name in self._udt_defs:
-            safe_type_name = self._safe_name(type_name)
+            safe_type_name = self._udt_cpp_name(type_name)
             lines.append(f"struct {safe_type_name} {{")
             lines.append("    int32_t __pf_id = -1;")
             lines.append("};")
@@ -6290,9 +6311,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     # A history-read var object: its history holds the
                     # references it held (``_series_handle_cpp_type``).
                     lines.append(
-                        f"    Series<{self._safe_name(udt_type)}> {safe}{_mbb};")
+                        f"    Series<{self._udt_cpp_name(udt_type)}> {safe}{_mbb};")
                 else:
-                    lines.append(f"    {self._safe_name(udt_type)} {safe};")
+                    lines.append(f"    {self._udt_cpp_name(udt_type)} {safe};")
                 continue
             cpp_type = PINE_TYPE_TO_CPP.get(ptype, "double")
             if cpp_type == "int" and self._numeric_na_member(name):
@@ -6411,7 +6432,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if _draw_cpp is not None:
                     lines.append(f"    {_draw_cpp} {safe} = {_draw_cpp}{{}};")
                 else:
-                    udt_cpp = self._safe_name(udt_t)
+                    udt_cpp = self._udt_cpp_name(udt_t)
                     lines.append(f"    {udt_cpp} {safe} = {udt_cpp}{{}};")
             else:
                 expr = self.ctx.global_expr_map.get(name) if hasattr(self.ctx, "global_expr_map") else None
@@ -6522,10 +6543,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         #     max_*_count the way TradingView does (default 50; see
         #     DRAWING_LIFETIME_CPP), and linefills are never collected.
         if self._uses_drawing:
-            lines.append("    DrawingArena<LineRec> _pf_lines_{_PF_DRAWING_UNBOUNDED};")
-            lines.append("    DrawingArena<BoxRec> _pf_boxes_{_PF_DRAWING_UNBOUNDED};")
-            lines.append("    DrawingArena<LabelRec> _pf_labels_{_PF_DRAWING_UNBOUNDED};")
-            lines.append("    DrawingArena<LinefillRec> _pf_linefills_{_PF_DRAWING_UNBOUNDED};")
+            arena = self._engine_cpp_type_in_class("DrawingArena")
+            for record, member in (
+                ("LineRec", "_pf_lines_"), ("BoxRec", "_pf_boxes_"),
+                ("LabelRec", "_pf_labels_"), ("LinefillRec", "_pf_linefills_"),
+            ):
+                record_cpp = self._engine_cpp_type_in_class(record)
+                lines.append(
+                    f"    {arena}<{record_cpp}> {member}{{_PF_DRAWING_UNBOUNDED}};"
+                )
         if self._uses_polyline:
             lines.append("    uint64_t _pf_polyline_next_id_ = 0;")
 

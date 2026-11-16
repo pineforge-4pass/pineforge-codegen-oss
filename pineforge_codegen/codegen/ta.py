@@ -1941,7 +1941,7 @@ class TaSiteHelper:
         if plan["kind"] == "series_percentile":
             return self._TA_SERIES_PERCENTILE_CLASS
         if plan["kind"] == "series_sma":
-            return "_PFSeriesSma"
+            return self._ta_series_sma_cpp_type()
         if plan["kind"] == "supertrend":
             return "pineforge::source::PineSupertrend"
         return f"pineforge::source::FirstCallBound<{self._ta_fixed_cpp_type(site)}>"
@@ -1955,6 +1955,10 @@ class TaSiteHelper:
         """The C++ type of one request.security copy of a site."""
         return self._ta_plan_cpp_type(
             site, self._ta_security_plan(sec_id, site, variant.get("binding_stack", ())))
+
+    def _ta_series_sma_cpp_type(self) -> str:
+        """Allocate the support type only for a live series-SMA lowering."""
+        return self._generated_helper_name(("series_sma", "type"), "_PFSeriesSma")
 
     def _ta_series_sma_members(self, sec_id: int | None = None) -> list[str]:
         """Series SMA objects owned by one chart/requested evaluator.
@@ -2091,12 +2095,15 @@ class TaSiteHelper:
             if len(site.compute_args) != 1 or not base_args:
                 self._codegen_error(site.node, "ta.sma: wrong number of arguments")
             length = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
+            length_name = self._generated_helper_name(
+                ("series_sma", "length"), "_pf_length"
+            )
             # C++ does not order function arguments. Evaluate the Pine source
             # and length once, in parameter order, before the primitive call.
             return (
                 f"[&]() {{ const double _pf_source = ({base_args}); "
-                f"const double _pf_length = pineforge::source::ta_number({length}); "
-                "return std::pair<double, double>{_pf_source, _pf_length}; }"
+                f"const double {length_name} = pineforge::source::ta_number({length}); "
+                f"return std::pair<double, double>{{_pf_source, {length_name}}}; }}"
             )
         if kind == "series_percentile":
             if len(site.compute_args) != 2:

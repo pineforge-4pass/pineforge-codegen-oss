@@ -280,7 +280,7 @@ def test_reserved_names_remain_exported() -> None:
     assert {*_ENGINE_SCOPE_NAMES, "set_trade_history_streamable"} <= CPP_RESERVED
 
 
-def test_object_type_names_do_not_depend_on_the_engine_name_inventory() -> None:
+def test_noncolliding_type_keeps_its_name() -> None:
     cpp = transpile(_PRELUDE + "type TradeSummary\n    float value\n")
-    assert "struct pf_safe_TradeSummary {" in cpp
-    assert "struct TradeSummary {" not in cpp
+    assert "struct TradeSummary {" in cpp
+    assert "struct pf_safe_TradeSummary {" not in cpp
