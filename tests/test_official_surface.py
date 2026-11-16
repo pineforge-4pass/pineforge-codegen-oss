@@ -362,7 +362,7 @@ NAMESPACE_SMOKES = {
     "log.warning":       ('log.warning("hi")',         "pine_log_warning"),
     "log.error":         ('log.error("hi")',           "pine_log_error"),
     "runtime.error":     ('runtime.error("boom")',     "pine_runtime_error"),
-    "request.currency_rate": ('x = request.currency_rate("EUR", "USD")', "pine_runtime_error"),
+    "request.currency_rate": ('x = request.currency_rate("EUR", "USD")', "request_currency_rate("),
     "timeframe.change":  ('x = timeframe.change("D")', "tf_change"),
     "timeframe.in_seconds": ('x = timeframe.in_seconds("1")', "tf_to_seconds"),
     "color.new":         ('x = color.new(color.red, 50)', "new_color"),

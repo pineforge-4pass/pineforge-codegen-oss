@@ -1771,8 +1771,9 @@ class Parser:
         call_arg_order: list = []
 
         while not self._check(TokenType.RPAREN) and not self._at_end():
-            # A call label may be an identifier or a type keyword, before =.
-            if ((self._current().type == TokenType.IDENT
+            # A call label may be an identifier, a type keyword or the
+            # contextual loop keyword "to", immediately before =.
+            if ((self._current().type in (TokenType.IDENT, TokenType.TO)
                     or self._current().type in TYPE_KEYWORDS)
                     and self._peek().type == TokenType.EQUALS
                     and self._peek(2).type != TokenType.EQUALS):

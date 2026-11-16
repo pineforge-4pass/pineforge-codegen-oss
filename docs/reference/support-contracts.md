@@ -330,12 +330,30 @@ existing located PF-E1006 is retained as a PineForge limitation and is listed
 as a compile gap. A located refusal of a spelling TradingView rejects follows
 its general grammar, type and qualifier rule.
 
-The taxonomy:
+Currency conversion lowers to host calls. `strategy.convert_to_account`,
+`strategy.convert_to_symbol` and `request.currency_rate` emit calls to the
+paired engine's host API with the resolved `strategy.account_currency` and Pine
+evaluation time (the requested bar inside an admitted requested expression).
+PineForge stages supplied arguments once in declared parameter order, as its
+other built-in lowerings do, independently of keyword spelling and only in an
+evaluated branch. This describes PineForge's rule, not a measured TradingView
+currency-call ordering result. The request passes `ignore_invalid_currency`
+and carries the original Pine call and line in its generated failure handler.
+String/string/bool request slots and required strategy-conversion bindings are
+checked before emission.
 
+Codegen fetches no FX data and supplies no rate, alias, identity shortcut or
+timestamp shift. The paired engine's host conversion contract requires explicit
+host input for differing account/quote identities, permits identity only when
+the identities match, and defines forward/reverse results, unavailable-rate
+failure and ignored-request diagnostics. Matching engine headers and runtime
+with these host APIs are required.
+
+The taxonomy:
 
 | Bucket                           | What                                                                 |
 | -------------------------------- | -------------------------------------------------------------------- |
-| `HARD_REJECT_FUNC`               | Calls with no PineForge semantics at all (e.g. `request.seed`; `request.currency_rate` is not one: it has no feed, so it translates and stops the run where it is evaluated, its arguments first, a skipped branch evaluating nothing). |
+| `HARD_REJECT_FUNC`               | Calls with no PineForge semantics at all (e.g. `request.seed`). |
 | `HARD_REJECT_NAMESPACE`          | Whole-namespace rejects — currently EMPTY (the old `ticker.*` blanket reject became per-function `HARD_REJECT_FUNC` entries: `ticker.{renko,kagi,linebreak,pointfigure,new,modify}`; `ticker.inherit`/`ticker.standard` pass through, `ticker.heikinashi` allowed for the chart's own symbol). |
 | `DIVERGENT_VARS` (warning) / `DIVERGENT_VARS_ERROR` (reject) | Built-in variables whose value can diverge from TV. `bar_index` and `last_bar_index` warn because they depend on the fed data window; `last_bar_index` lowers to the window's true final index. The ERROR subset is reserved for silent mis-aliases and is currently empty. |
 | `BARSTATE_APPROX_VARS` (warning) | Barstate flags PineForge approximates in batch mode.                 |

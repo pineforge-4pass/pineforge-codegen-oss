@@ -986,6 +986,8 @@ class CallHandlers:
             self._visit(arg)
         for val in node.kwargs.values():
             self._visit(val)
+        if func_name == "currency_rate":
+            self._check_currency_rate_arguments(node)
         return PineType.FLOAT
 
     def _handle_request_security_lower_tf(self, node: FuncCall) -> PineType:

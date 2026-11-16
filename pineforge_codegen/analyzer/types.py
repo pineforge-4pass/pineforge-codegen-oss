@@ -1737,6 +1737,7 @@ class OperatorTypeQuery(TypeHelper):
             op, operands = "?:", (node.condition, node.true_val, node.false_val)
         elif isinstance(node, FuncCall):
             self._analyzer._check_timeframe_string_arguments(node, self._parameter_types)
+            self._analyzer._check_currency_rate_arguments(node, self._parameter_types)
             return
         else:
             return

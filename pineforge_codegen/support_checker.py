@@ -1861,11 +1861,12 @@ class SupportChecker:
             self._visit_children(node)
             return
 
-        if ns == "strategy" and name == "default_entry_qty":
-            # One numeric price, as TradingView binds it: a call that binds
-            # to nothing (no price, a second price, an unknown or repeated
-            # argument name) has no value to lower. A registered namespace
-            # signature must bind even in a non-default switch arm
+        if ns == "strategy" and name in (
+            "default_entry_qty", "convert_to_account", "convert_to_symbol",
+        ):
+            # Each signature requires one numeric value: a missing, extra,
+            # unknown or repeated argument has no valid binding to lower.
+            # A registered namespace signature must bind even in a non-default switch arm
             # (``_check_builtin_arguments``), so the refusal stays an error there.
             if not self._check_builtin_arguments(
                     node, full, func=sigs.STRATEGY_FUNCTIONS[name]):
@@ -1904,8 +1905,8 @@ class SupportChecker:
             self._visit_children_const_ok(node)
             return
         if ns == "request" and name in sigs.REQUEST_FUNCTIONS:
-            # Currency rates have no feed: codegen stops the run only where
-            # the call is evaluated, including when its value reaches a trade.
+            # The host supplies currency rates. Validate all arguments even
+            # when a lazy branch will skip the runtime query.
             self._check_builtin_arguments(node, full, func=sigs.REQUEST_FUNCTIONS[name])
             self._visit_children(node)
             return
@@ -2775,7 +2776,7 @@ class SupportChecker:
 
         Registered bare builtins and unary math calls that bind are
         rewritten positionally by ``builtin_keywords``; request.currency_rate
-        uses the same validation before its evaluation-time stop.
+        uses the same validation before its evaluation-time host query.
         Returns True when the arguments bind.
         """
         if func is None:

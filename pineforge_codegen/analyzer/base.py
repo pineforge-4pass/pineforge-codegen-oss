@@ -5055,6 +5055,50 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     and callee.member in ("new", "rgb", "from_gradient"))
         return False
 
+    def _check_currency_rate_arguments(
+        self, node: FuncCall,
+        parameter_types: dict[str, PineType | TypeSpec] | None = None,
+    ) -> None:
+        """Refuse proven type mismatches before the host's string/bool slots.
+
+        Use lexical and written-call type proofs, as for timeframe strings:
+        an unresolved helper parameter is not evidence for a refusal.
+        """
+        if self._pine_version != 6 or self._in_v5_library_definition(node):
+            return
+        callee = node.callee
+        if (not isinstance(callee, MemberAccess)
+                or not isinstance(callee.object, Identifier)
+                or callee.object.name != "request"
+                or callee.member != "currency_rate"
+                or self._value_bindings.declaration_bindings.get(id(callee.object)) is not None
+                or (parameter_types is not None and callee.object.name in parameter_types)):
+            return
+        intrinsic = sigs.REQUEST_FUNCTIONS["currency_rate"]
+        bound = self._bind_callable_args(node, intrinsic.param_names)
+        for parameter, value in zip(intrinsic.primary.params, bound):
+            if value is None:
+                continue
+            parameter_type = parameter.pine_type.value
+            expected = TypeSpec.primitive(parameter_type)
+            actual = self._operator_operand_type(value, parameter_types)
+            if actual is None or actual == expected:
+                continue
+            if (parameter.pine_type == PineType.STRING
+                    and actual == TypeSpec.primitive("na")):
+                # Generic na adopts the string slot's missing-value sentinel.
+                continue
+            function_name = intrinsic.name
+            argument_type = public_type_name(actual) or str(actual)
+            name = parameter.name
+            from ..pine_spelling import expr_start
+
+            self._error(
+                f"Cannot call '{function_name}' with an argument of type {argument_type} "
+                f"for {parameter_type} parameter '{name}'.",
+                expr_start(value).loc or value.loc,
+            )
+
     def _check_default_entry_qty_price(self, node: FuncCall) -> None:
         """``strategy.default_entry_qty`` takes a numeric price; v6 refuses a
         string, bool, color or collection. Only a type the syntax proves is

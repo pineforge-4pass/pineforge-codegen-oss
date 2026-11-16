@@ -395,7 +395,9 @@ _REFERENCE_SPELLING = {
     "values = array.from(year(time), hour(time = time, timezone = \"UTC\"))\n",
     "strategy.entry(\"L\", strategy.long, qty = 1)\nstrategy.order(\"O\", strategy.short, qty = 2)\n",
     "strategy.exit(\"X\", \"L\", stop = close)\nstrategy.close(\"L\", immediately = true)\nstrategy.close_all()\n",
-    "strategy.cancel(\"L\")\nstrategy.cancel_all()\nx = strategy.convert_to_account(close)\n",
+    # Currency conversion now queries the host and is intentionally different
+    # from this reference. Keep an unrelated scalar lowering under full equality.
+    "strategy.cancel(\"L\")\nstrategy.cancel_all()\nx = math.abs(close)\n",
 ])
 def test_unrelated_lowerings_keep_cpp_diagnostics_and_manifests(tmp_path, body):
     from tests._e2e import reference_codegen, transpile_json

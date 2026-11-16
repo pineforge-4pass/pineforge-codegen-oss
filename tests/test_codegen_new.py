@@ -562,15 +562,20 @@ def test_priceless_strategy_exit_cancels_bracket_with_default_from_entry_and_com
     assert "strategy_close(" not in cpp
 
 
-def test_strategy_convert_to_account_and_symbol_remain_identity_lowerings():
+def test_strategy_convert_to_account_and_symbol_delegate_identity_to_host():
     cpp = _generate(
         "to_account = strategy.convert_to_account(close)\n"
         "to_symbol = strategy.convert_to_symbol(open)"
     )
-    assert "to_account = (current_bar_.close);" in cpp
-    assert "to_symbol = (current_bar_.open);" in cpp
-    assert "strategy_convert_to_account" not in cpp
-    assert "strategy_convert_to_symbol" not in cpp
+    assert "const double _pf_currency_value = (current_bar_.close);" in cpp
+    assert "const double _pf_currency_value = (current_bar_.open);" in cpp
+    assert cpp.count("const std::string _pf_currency_account = (syminfo_.currency);") == 2
+    assert cpp.count("const std::int64_t _pf_currency_time = (current_bar_.timestamp);") == 2
+    for method in ("strategy_convert_to_account", "strategy_convert_to_symbol"):
+        assert (
+            f"this->{method}(_pf_currency_value, _pf_currency_account, "
+            "_pf_currency_time)"
+        ) in cpp
 
 
 def test_strategy_position_size():

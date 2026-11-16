@@ -108,9 +108,33 @@ def test_names_outside_the_temporaries_keep_their_spelling():
         assert not is_emitter_temporary(name), name
 
 
+@pytest.mark.parametrize("name, initializer, call, declaration", [
+    ("_pf_currency_value", "close",
+     "strategy.convert_to_account(_pf_currency_value)",
+     "const double _pf_currency_value = (pf_safe__pf_currency_value);"),
+    ("_pf_currency_value", "close",
+     "strategy.convert_to_symbol(_pf_currency_value)",
+     "const double _pf_currency_value = (pf_safe__pf_currency_value);"),
+    ("_pf_currency_from", '"USD"',
+     'request.currency_rate("EUR", _pf_currency_from)',
+     "const std::string _pf_currency_to = (pf_safe__pf_currency_from);"),
+])
+def test_currency_arguments_cannot_capture_authored_temporaries(
+    name, initializer, call, declaration,
+):
+    # Before: the amount initialized itself, or the target read the lambda's
+    # origin instead of the script's target. The authored read must be escaped.
+    cpp = transpile(HEAD + f"{name} = {initializer}\nobserved = {call}\n")
+    statement = next(line.strip() for line in cpp.splitlines()
+                     if line.strip().startswith("observed = "))
+    assert declaration in statement
+    assert re.search(rf"^\s+pf_safe_{name} = ", cpp, re.M)
+
+
 DECL = re.compile(
-    r"(?<![\w:])(?:(?:auto|double|int|int64_t|bool|std::string|std::size_t|size_t"
+    r"(?<![\w:])(?:(?:auto|double|int|int64_t|std::int64_t|bool|std::string|std::size_t|size_t"
     r"|long double)\s+|auto&&\s*|auto&\s*)(_\w+)\s*(?:=|;|\()")
+CATCH_DECL = re.compile(r"\bcatch\s*\(\s*const\s+std::runtime_error&\s+(_\w+)\s*\)")
 
 
 def test_every_temporary_the_emitter_declares_is_reserved():
@@ -129,12 +153,22 @@ def test_every_temporary_the_emitter_declares_is_reserved():
         HEAD + 'qtyMode = input.string("cash", options = ["cash", "percent_of_equity"])\n'
         'strategy.entry("L", strategy.long, qty = 1, qty_type = qtyMode)\n'
     )
+    sources.append(
+        HEAD + 'accountAmount = strategy.convert_to_account(close)\n'
+        'symbolAmount = strategy.convert_to_symbol(open)\n'
+        'currencyRate = request.currency_rate("USD", "EUR", ignore_invalid_currency = true)\n'
+    )
     for source in sources:
         authored = {t.value for t in Lexer(source).tokenize() if t.type.name == "IDENT"}
         for line in transpile(source).splitlines():
             if "[&]" in line:
-                names |= {n for n in DECL.findall(line)
+                names |= {n for n in DECL.findall(line) + CATCH_DECL.findall(line)
                           if n not in authored and not n.startswith("pf_safe_")}
     assert names, "the tapes' C++ declares no temporary"
     assert "_pf_timeframe_arg" in names
+    assert {
+        "_pf_currency_from", "_pf_currency_to", "_pf_currency_ignore",
+        "_pf_currency_value", "_pf_currency_account", "_pf_currency_time",
+        "_pf_currency_error",
+    } <= names
     assert sorted(n for n in names if not is_emitter_temporary(n)) == []

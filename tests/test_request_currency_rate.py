@@ -1,4 +1,4 @@
-"""Currency-rate requests stop only when their expression is evaluated."""
+"""Host currency requests retain branch laziness and failure provenance."""
 
 from __future__ import annotations
 
@@ -17,9 +17,7 @@ from tests import _compile as compile_env
 
 _PRELUDE = "//@version=6\nstrategy('Currency branch')\n"
 _CALL = "request.currency_rate('EUR', 'USD')"
-_MESSAGE = (
-    "request.currency_rate needs currency conversion data that PineForge does not have."
-)
+_MESSAGE = "currency_conversion_rate_unavailable"
 _NO_DATA_CALL = (
     'request.financial(syminfo.tickerid, close > open ? "FQ_X" : "FQ_Y", "FQ")'
 )
@@ -79,14 +77,17 @@ def _request_stop_call(source: str, cpp: str) -> str:
         rf"(?P<call>{literal}), (?P<line>\d+), (?P<message>{literal})\)"
     )
 
-    def extract(generated: str):
+    def extract(generated: str, stop_pattern: str):
         body = generated.split("void on_source_bar(", 1)[1]
-        stops = list(re.finditer(pattern, body))
+        stops = list(re.finditer(stop_pattern, body))
         assert len(stops) == 1, body
         return stops[0]
 
-    sibling = extract(sibling_cpp)
-    stop = extract(cpp)
+    sibling = extract(sibling_cpp, pattern)
+    host_pattern = pattern.replace(
+        rf"(?P<message>{literal})", r"(?P<message>_pf_currency_error\.what\(\))"
+    )
+    stop = extract(cpp, host_pattern)
     assert sibling.group("function") == '"request.financial"'
     assert stop.group("function") == '"request.currency_rate"'
     assert stop.group("call").startswith('"request.currency_rate(')
@@ -95,7 +96,7 @@ def _request_stop_call(source: str, cpp: str) -> str:
     # request provenance and English, from right to left to preserve spans.
     expected = sibling.group()
     for field, replacement in (
-        ("message", f'"{_MESSAGE}"'),
+        ("message", "_pf_currency_error.what()"),
         ("line", str(line)),
         ("call", stop.group("call")),
         ("function", '"request.currency_rate"'),
@@ -104,11 +105,12 @@ def _request_stop_call(source: str, cpp: str) -> str:
         end = sibling.end(field) - sibling.start()
         expected = expected[:start] + replacement + expected[end:]
     assert stop.group() == expected
-    assert f"{expected}, na<double>()" in cpp
+    assert "try { return this->request_currency_rate(" in cpp
+    assert f"{expected}; throw;" in cpp
     return expected
 
 
-def test_reporter_ternary_keeps_no_data_stop_in_untaken_arm():
+def test_reporter_ternary_keeps_host_lookup_and_stop_in_untaken_arm():
     cpp = _translated(_REPORTER)
     literal = transpile(_REPORTER.replace(_CALL, "1.0"))
     before, untaken = _assignment(cpp, "rate").split(" : ", 1)
@@ -116,11 +118,13 @@ def test_reporter_ternary_keeps_no_data_stop_in_untaken_arm():
     stop = _request_stop_call(_REPORTER, cpp)
     assert before == literal_before
     assert stop not in before and stop in untaken
+    assert "this->request_currency_rate(" not in before
+    assert "this->request_currency_rate(" in untaken
     assert cpp.count(stop) == 1
     assert cpp.index(stop) > cpp.index("void on_source_bar(")
 
 
-def test_never_taken_trade_branch_keeps_no_data_stop_in_branch():
+def test_never_taken_trade_branch_keeps_host_lookup_and_stop_in_branch():
     cpp = _translated(_NEVER_TRADE)
     literal = transpile(_NEVER_TRADE.replace(_CALL, "1.0"))
     marker = next(line for line in literal.splitlines() if "if (false) {" in line)
@@ -129,6 +133,8 @@ def test_never_taken_trade_branch_keeps_no_data_stop_in_branch():
     stop = _request_stop_call(_NEVER_TRADE, cpp)
     assert stop in branch and "strategy_entry(" in branch
     assert stop not in before + after
+    assert "this->request_currency_rate(" in branch
+    assert "this->request_currency_rate(" not in before + after
 
 
 @pytest.mark.parametrize("call", [
@@ -165,9 +171,12 @@ def test_argument_effects_stay_in_the_untaken_expression():
     assert stop in untaken
     assert "bump" in untaken and "ignoreCurrency" in untaken
     assert "bump" not in before and "ignoreCurrency" not in before
-    assert untaken.count("(void)(") == 3
+    assert untaken.count("const std::string _pf_currency_from =") == 1
+    assert untaken.count("const std::string _pf_currency_to =") == 1
+    assert untaken.count("const bool _pf_currency_ignore =") == 1
     assert (untaken.index('"GBP"') < untaken.index('"JPY"')
-            < untaken.index("ignoreCurrency") < untaken.index(stop))
+            < untaken.index("ignoreCurrency")
+            < untaken.index("this->request_currency_rate(") < untaken.index(stop))
 
 
 @pytest.mark.parametrize("arguments", [
@@ -178,7 +187,7 @@ def test_argument_effects_stay_in_the_untaken_expression():
     "'EUR', 'USD', from = 'GBP'",
 ])
 def test_malformed_calls_still_fail_signature_validation(arguments):
-    # A well-formed twin must translate; origin/main refuses it with PF-E1025.
+    # The host lookup does not relax ordinary Pine signature validation.
     _translated(_EVALUATED)
     source = _EVALUATED.replace(_CALL, f"request.currency_rate({arguments})")
     with pytest.raises(CompileError) as caught:
@@ -279,7 +288,8 @@ int main() {
 
 
 def _compile_and_run(source: str, driver: str, directory: Path,
-                     label: str, *, legacy: bool = False) -> subprocess.CompletedProcess:
+                     label: str, *, legacy: bool = False,
+                     extra_sources: tuple[Path, ...] = ()) -> subprocess.CompletedProcess:
     compile_env.skip_if_no_engine_lib()
     cpp = _translated(source)
     if legacy:
@@ -296,7 +306,8 @@ def _compile_and_run(source: str, driver: str, directory: Path,
         compile_env._COMPILER, "-std=c++17", "-O0",
         *compile_env.STRATEGY_FP_FLAGS,
         *compile_env._include_flags(isolate_headers=False),
-        str(path), str(compile_env._ENGINE_LIB), "-pthread", "-o", str(executable),
+        str(path), *(str(extra) for extra in extra_sources),
+        str(compile_env._ENGINE_LIB), "-pthread", "-o", str(executable),
     ]
     built = subprocess.run(command, capture_output=True, text=True)
     assert built.returncode == 0, built.stderr or built.stdout
@@ -347,8 +358,12 @@ def test_evaluated_calls_stop_like_runtime_error(body, legacy, tmp_path):
     subject_message, *subject_failure = subject.stderr.splitlines()
     control_message, *control_failure = control.stderr.splitlines()
     sibling_message, *sibling_failure = sibling.stderr.splitlines()
-    assert subject_message == control_message
-    assert _MESSAGE in subject.stderr
+    # The engine now supplies currencies and evaluation time in the message;
+    # runtime.error still supplies the progress/failure-transport control.
+    assert _MESSAGE in subject_message and _MESSAGE in control_message
+    assert "EUR" in subject_message and "USD" in subject_message
+    evaluation_time = 180000 if "bar_index == 2" in body else 60000
+    assert str(evaluation_time) in subject_message
     assert "request.financial" in sibling_message
     assert len(subject_failure) == len(control_failure) == len(sibling_failure)
     if subject_failure:

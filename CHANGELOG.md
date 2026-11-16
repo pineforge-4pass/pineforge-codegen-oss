@@ -22,6 +22,17 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- `strategy.convert_to_account`, `strategy.convert_to_symbol` and
+  `request.currency_rate` now emit calls to the paired engine's host conversion
+  API with the resolved account currency and Pine evaluation time. Arguments
+  execute once in PineForge's built-in parameter order, only when the call is
+  evaluated. Codegen supplies no rate, identity shortcut or FX feed. The engine's
+  host contract governs supplied-rate availability, matching-currency identity
+  and failure reporting, including ignored requests. Invalid currency-request
+  argument types and malformed strategy-conversion bindings receive located
+  translation diagnostics. Requires matching engine headers and runtime with
+  these APIs; regenerate C++ and relink. (#376)
+
 - Strategy sizing constants retain their string values in expressions, aliases
   and helper calls. Host order and risk settings convert these values to their
   numeric representation only at the setting boundary.

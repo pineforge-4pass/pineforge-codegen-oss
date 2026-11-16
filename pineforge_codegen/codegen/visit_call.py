@@ -181,7 +181,6 @@ from .helpers import (
     na_preserving_int_cast, pine_truth_cast,
 )
 from .id_sites import BUILTIN_NAMESPACES
-from .run_stops import request_stop
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_NEW_CTORS,
@@ -2587,22 +2586,7 @@ class CallVisitor:
         # request.* calls
         if namespace == "request":
             if func_name == "currency_rate":
-                # Keep argument effects and the stop in the expression, so a
-                # skipped branch evaluates neither. The comma's final operand
-                # supplies Pine's float type; the no-data shim never returns.
-                marker = request_stop_marker(node)
-                marker["message"] = (
-                    "request.currency_rate needs currency conversion data "
-                    "that PineForge does not have."
-                )
-                args = _merge_kwargs(
-                    node.args, node.kwargs,
-                    sigs.get_param_names("request", func_name), self._visit_expr,
-                    intrinsic=sigs.get_intrinsic("request", func_name),
-                )
-                effects = [f"(void)({arg})" for arg in args]
-                effects += [request_stop(marker), "na<double>()"]
-                return f"({', '.join(effects)})"
+                return self._visit_host_currency_call(func_name, node)
             if func_name == "security":
                 param_names = ["symbol", "timeframe", "expression", "gaps", "lookahead", "ignore_invalid_symbol", "currency"]
                 all_args = list(node.args)
@@ -3828,12 +3812,72 @@ class CallVisitor:
             'throw std::invalid_argument("Unknown strategy sizing value"); }())'
         )
 
+    def _visit_host_currency_call(self, func_name: str, node: FuncCall) -> str:
+        """Query supplied host data at Pine's evaluation time, lazily.
+
+        Follow the parameter-order staging used by other builtins, including
+        builtin_keywords, array.new and color.from_gradient, independently of
+        keyword spelling. C++ call arguments alone would not guarantee that
+        order. Account resolution is shared with strategy.account_currency.
+        The security renderer rewrites the existing Pine time expression to
+        the requested bar, just as it rewrites authored time/price reads.
+        """
+        methods = {
+            "convert_to_account": "strategy_convert_to_account",
+            "convert_to_symbol": "strategy_convert_to_symbol",
+            "currency_rate": "request_currency_rate",
+        }
+        is_request = func_name == "currency_rate"
+        namespace = "request" if is_request else "strategy"
+        bound = self._resolve_func_args(node, f"{namespace}.{func_name}")
+        declarations = []
+        if is_request:
+            for param in ("from", "to"):
+                value = self._strategy_string_arg(bound[param])
+                declarations.append(
+                    f"const std::string _pf_currency_{param} = ({value});"
+                )
+            ignore_node = bound.get("ignore_invalid_currency")
+            ignore = (
+                self._coerce_bool_expr(self._visit_expr(ignore_node), ignore_node)
+                if ignore_node is not None else "false"
+            )
+            declarations.append(f"const bool _pf_currency_ignore = ({ignore});")
+            arguments = ["_pf_currency_from", "_pf_currency_to"]
+        else:
+            value = self._visit_float_arg(bound["value"])
+            declarations.append(f"const double _pf_currency_value = ({value});")
+            arguments = ["_pf_currency_value"]
+        declarations.extend((
+            "const std::string _pf_currency_account = "
+            f"({self._strategy_account_currency_expr()});",
+            "const std::int64_t _pf_currency_time = "
+            f"({BAR_BUILTINS['time']});",
+        ))
+        arguments.extend(("_pf_currency_account", "_pf_currency_time"))
+        if is_request:
+            arguments.append("_pf_currency_ignore")
+        call = f"this->{methods[func_name]}({', '.join(arguments)})"
+        result = f"return {call};"
+        if is_request:
+            # Argument failures retain their own provenance: catch only the
+            # host query. Preserve its currencies/timestamp/diagnostic text,
+            # adding the original Pine request site through the existing shim.
+            marker = request_stop_marker(node)
+            function = self._cpp_string_escape(marker["function"])
+            spelling = self._cpp_string_escape(marker["call"])
+            result = (
+                f"try {{ {result} }} "
+                "catch (const std::runtime_error& _pf_currency_error) { "
+                f'_PF_NO_DATA_STOP("{function}", "{spelling}", {marker["line"]}, '
+                "_pf_currency_error.what()); throw; }"
+            )
+        return f"([&]() -> double {{ {' '.join(declarations)} {result} }}())"
+
     def _visit_strategy_call(self, func_name: str, node: FuncCall) -> str:
         from .order_shapes import record_order_call
         if func_name in ("convert_to_account", "convert_to_symbol"):
-            p = self._resolve_func_args(node, f"strategy.{func_name}")
-            v = self._visit_float_arg(p.get("value"), "0.0")
-            return f"({v})"
+            return self._visit_host_currency_call(func_name, node)
         if func_name == "default_entry_qty":
             # The host's query of the default order size at a price. The support
             # checker has bound exactly one price, so none is invented here.
