@@ -898,10 +898,8 @@ class CallVisitor:
             optional = {"size": 0, "initial_value": None}
             aliases = {}
             receiver = "id"
-        elif (method in CHECKED_ARRAY_METHOD_KWARGS
-              or (functional and method == "push")):
-            slots = (["value"] if method == "push"
-                     else list(CHECKED_ARRAY_METHOD_KWARGS[method]))
+        elif method in CHECKED_ARRAY_METHOD_KWARGS:
+            slots = list(CHECKED_ARRAY_METHOD_KWARGS[method])
             optional = ARRAY_OPTIONAL_PARAMS.get(method, {})
             aliases = {}
             receiver = "id"
@@ -1215,7 +1213,14 @@ class CallVisitor:
         argument in source/signature order, while retaining lvalue aliases and
         extending temporary receiver lifetime through the operation.
         """
-        args = [self._visit_expr(arg) for arg in arg_nodes]
+        # Bind bare na to the value type before the argument lambdas infer it.
+        args = [
+            self._array_init_value_expr(spec.value, arg)
+            if (method == "put" and index == 1 and spec is not None
+                and isinstance(arg, NaLiteral))
+            else self._visit_expr(arg)
+            for index, arg in enumerate(arg_nodes)
+        ]
         if (method == "put" and arg_nodes and spec is not None
                 and spec.value is not None and spec.value.kind == "primitive"
                 and spec.value.name == "float"):

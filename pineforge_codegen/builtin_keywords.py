@@ -14,6 +14,9 @@ Registered math records with complete keyword sets use the same binding,
 so their supplied expressions reach analysis and requested-helper emission
 positionally, including both overloads of ``math.round``.
 
+The same binding gives ``na(x = value)`` its operand before bool checking
+and emission.
+
 The calls whose single parameter is a timeframe or a trade number
 (``timeframe.change``, ``timeframe.in_seconds``, the accessors of
 ``strategy.closedtrades`` and ``strategy.opentrades``) take the same route: the
@@ -36,6 +39,7 @@ from .limits import iter_ast_nodes
 from . import signatures as sigs
 
 POSITIONAL_BUILTINS = {
+    "na": sigs.BUILTIN_FUNCTIONS["na"],
     "nz": sigs.BUILTIN_FUNCTIONS["nz"],
     "fixnan": sigs.BUILTIN_FUNCTIONS["fixnan"],
 }

@@ -1259,6 +1259,7 @@ CHECKED_ARRAY_METHOD_KWARGS: dict[str, list[str]] = {
     "sort": ["order"],
     "sort_indices": ["order"],
     "indexof": ["value"],
+    "push": ["value"],
     "unshift": ["value"],
     "join": ["separator"],
 }
