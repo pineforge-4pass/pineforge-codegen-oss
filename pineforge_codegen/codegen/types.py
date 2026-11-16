@@ -2772,7 +2772,7 @@ class TypeInferer:
                 spec = TypeSpec.primitive("color")
             if spec is None:
                 return None
-            if (not nullable and spec.kind not in {"map", "matrix"}
+            if (not nullable and spec.kind not in {"array", "map", "matrix"}
                     and spec != TypeSpec.primitive("string")
                     and not is_builtin_enum(spec)):
                 return None
@@ -2788,11 +2788,9 @@ class TypeInferer:
     def _array_selection_spec(self, node) -> TypeSpec | None:
         """The one array type every value arm of a selection returns, else None.
 
-        ``_selection_type_spec`` keeps only map and matrix joins outside ``na``
-        (an array is typed by its declaration), so a global declared by a
-        ``switch`` or an ``if`` of arrays had no spec to register it as an
-        array variable. An arm that is ``na`` adds nothing; any other arm that
-        is not an array of the same type makes the selection no array."""
+        This declaration fallback follows ``_selection_type_spec``'s exact
+        array join rule. An arm that is ``na`` adds nothing; any other arm
+        that is not an array of the same type makes the selection no array."""
         arms: list[ASTNode] = []
         pending = [node]
         while pending:

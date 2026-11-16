@@ -395,14 +395,13 @@ class TypeHelper:
                 spec = TypeSpec.primitive("color")
             if spec is None:
                 return None
-            if (not nullable and spec.kind not in {"map", "matrix"}
+            if (not nullable and spec.kind not in {"array", "map", "matrix"}
                     and spec != TypeSpec.primitive("string")
                     and not is_builtin_enum(spec)
                     and not isinstance(
                         self._current_top_level_stmt, (FuncDef, MethodDef),
                     )):
-                # Callable value inference must not promote unresolved script
-                # selections into collection-history bindings.
+                # Other script values keep their existing inference paths.
                 return None
             result = (
                 spec
