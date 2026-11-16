@@ -858,7 +858,9 @@ class CallHandlers:
             security_ta_range = (ta_start, ta_end) if ta_end > ta_start else None
             # Query already-visited values without registering TA/request
             # sites again. PineType alone cannot describe a record or array.
-            type_query = OperatorTypeQuery(self)
+            # No call-site parameter overlay applies here: parameters keep
+            # their lexical types, as in the analyzer's other read queries.
+            type_query = OperatorTypeQuery(self, {})
             result_spec = type_query._type_spec_from_expr(expr_node)
             if result_spec is not None and result_spec.kind not in {
                     "udt", "array", "map", "matrix"}:
