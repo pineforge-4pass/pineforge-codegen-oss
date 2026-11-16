@@ -5464,6 +5464,26 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             value.loc,
         )
 
+    def _check_primitive_slot(self, value, expected, context):
+        """Check proven scalar types without using legacy inference defaults."""
+        if (value is None or expected is None or expected.kind != "primitive"
+                or self._pine_version != 6 or self._in_v5_library_definition(value)):
+            return
+        expected = public_type_name(expected)
+        if expected not in {"int", "float", "bool", "string", "color"}:
+            return
+        actual = self._operator_operand_type(value)
+        if actual is None or actual.kind != "primitive":
+            return
+        actual = public_type_name(actual)
+        if (actual in {expected, "na"}
+                or (actual == "int" and expected == "float")):
+            return
+        self._error(
+            f"Cannot use {actual} as {expected} for {context}.",
+            value.loc,
+        )
+
     def _check_builtin_enum_arguments(self, node, parameter_types=None):
         """Bind nominal argument contracts from the intrinsic signatures."""
         if self._pine_version != 6 or self._in_v5_library_definition(node):
@@ -5616,6 +5636,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 node.loc,
             )
         type_spec = self._type_spec_from_hint(node.type_hint) if node.type_hint else None
+        if node.type_hint:
+            self._check_primitive_slot(
+                node.value, type_spec, f"declaration '{node.name}'",
+            )
         if type_spec is None:
             type_spec = self._type_spec_from_expr(node.value)
         if (type_spec is None and not node.type_hint
@@ -5641,12 +5665,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._collection_scope_stack[-1]
             )
 
-        # Check for type hint override
-        if node.type_hint:
-            hint_type = self._type_hint_to_pine(node.type_hint)
-            if hint_type != PineType.UNKNOWN:
-                val_type = hint_type
-
         # Check for input calls
         is_const = False
         const_value = None
@@ -5661,6 +5679,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             enum_name = node.value.object.name
             if node.value.member in self._enum_defs.get(enum_name, ()):
                 enum_type_name = enum_name
+
+        # An input initializer must also retain the declaration's type.
+        if node.type_hint:
+            hint_type = self._type_hint_to_pine(node.type_hint)
+            if hint_type != PineType.UNKNOWN:
+                val_type = hint_type
 
         udt_ctor = self._udt_name_from_ctor(node.value)
         # User function return propagation: if the value is a call to a user
@@ -5902,6 +5926,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._check_operator_operands(
                 node, node.op[:-1], (node.target, node.value),
             )
+        self._check_primitive_slot(
+            node.value, self._operator_operand_type(node.target), "assignment",
+        )
 
         udt_ctor = self._udt_name_from_ctor(node.value)
         if isinstance(node.target, Identifier) and udt_ctor is not None:
