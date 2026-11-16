@@ -1,4 +1,4 @@
-"""Bounded lowering for finite-choice ``ta.highest``/``ta.lowest`` lengths.
+"""Bounded lowering for finite-choice rolling-window lengths.
 
 Pine permits a ``series int`` length for its rolling extrema.  PineForge's
 runtime extrema objects intentionally keep one fixed constructor length, so a
@@ -39,10 +39,17 @@ declarations: ``var``/``varip`` dependencies and any name reassigned anywhere
 in the program stay unsupported.  Direct inline ``input.int`` arms are also
 left unsupported so lowering cannot duplicate their declarations.
 
-Everything else retains the existing loud unsupported-length diagnostic.  In
-particular, this is not a claim of arbitrary series-length support for EMA,
-SMA, pivots, UDF-local sites, request.security evaluators, or unbounded
-run-time lengths.
+For ``ta.sma``, a reassigned top-level length also has a finite domain when
+its initializer and every write are fixed integer lengths. Freeze the initial
+value in an immutable alias, keep the authored writes, and use the same
+fixed-history expansion at eager top-level call sites. Input choices retain
+their existing override-aware constructor path, including unconstrained
+``input.int`` declarations. Selection-valued bindings participate in the
+write inventory through their lexical bindings.
+
+Everything else retains the existing unsupported-length diagnostic. This is
+not arbitrary series-length support for SMA, EMA, pivots, UDF-local sites,
+request.security evaluators, or unbounded run-time lengths.
 """
 
 from __future__ import annotations
@@ -51,8 +58,10 @@ import copy
 from dataclasses import replace
 
 from .ast_nodes import (
+    ArgOrder,
     Assignment,
     BinOp,
+    ExprStmt,
     FuncCall,
     FuncDef,
     Identifier,
@@ -60,6 +69,7 @@ from .ast_nodes import (
     MethodDef,
     NumberLiteral,
     Program,
+    StringLiteral,
     Subscript,
     Ternary,
     TupleAssign,
@@ -467,6 +477,10 @@ def _all_bound_names(program: Program) -> set[str]:
     def walk(node) -> None:
         if node is None:
             return
+        if isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child)
+            return
         if isinstance(node, VarDecl):
             names.add(node.name)
         if isinstance(node, (FuncDef, MethodDef)):
@@ -517,6 +531,10 @@ def _assigned_names(program: Program) -> set[str]:
     def walk(node) -> None:
         if node is None:
             return
+        if isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child)
+            return
         if isinstance(node, Assignment) and isinstance(node.target, Identifier):
             names.add(node.target.name)
         if isinstance(node, TupleAssign):
@@ -558,6 +576,10 @@ def _dependency_declarations(
     def walk(current, limit: int) -> None:
         nonlocal valid
         if current is None:
+            return
+        if isinstance(current, (list, tuple)):
+            for child in current:
+                walk(child, limit)
             return
         if isinstance(current, Identifier):
             if current.name in ambiguous_names:
@@ -605,8 +627,218 @@ def _dependency_declarations(
     return dependencies, valid
 
 
+def _expand_length_choices(call, length_index: int, choices, fresh_choice_names):
+    """Advance a fixed history per choice, then select by the actual length."""
+
+    suffixes = (
+        ("true", "false") if len(choices) == 2
+        else tuple(f"value_{i + 1}" for i in range(len(choices)))
+    )
+    selected_name, *value_names = fresh_choice_names(("selected", *suffixes))
+    declarations = [VarDecl(
+        name=selected_name,
+        value=copy.deepcopy(call.args[length_index]),
+        loc=call.loc,
+    )]
+    for choice, name in zip(choices, value_names):
+        args = copy.deepcopy(call.args)
+        args[length_index] = copy.deepcopy(choice)
+        declarations.append(VarDecl(
+            name=name,
+            value=replace(call, args=args, kwargs={}, annotations={
+                **(call.annotations or {}),
+                "call_arg_order": ArgOrder(args),
+            }),
+            loc=call.loc,
+        ))
+    selected = Identifier(name=value_names[-1], loc=call.loc)
+    for choice, name in reversed(list(zip(choices[:-1], value_names[:-1]))):
+        selected = Ternary(
+            condition=BinOp(
+                left=Identifier(name=selected_name, loc=call.loc),
+                op="==",
+                right=copy.deepcopy(choice),
+                loc=call.loc,
+            ),
+            true_val=Identifier(name=name, loc=call.loc),
+            false_val=selected,
+            loc=call.loc,
+        )
+    return declarations, selected
+
+
+def _expand_reassigned_sma_lengths(program: Program, fresh_choice_names) -> Program:
+    """Expand only finite, fixed-valued writes at eager chart call sites."""
+
+    from .security_contexts import ScriptIndex
+
+    index = None
+    definitions = {}
+    ambiguous = set()
+    for position, statement in enumerate(program.body):
+        if isinstance(statement, VarDecl):
+            if statement.name in definitions:
+                ambiguous.add(statement.name)
+            definitions[statement.name] = (position, statement)
+        elif isinstance(statement, TupleAssign):
+            ambiguous.update(statement.names)
+    frozen = {}
+
+    def fixed_length(node, before: int, *, inline_input=False, seen=frozenset()):
+        if _is_positive_int_literal(node):
+            return True
+        if _is_input_int_call(node):
+            # A direct input is moved, never duplicated into the histories.
+            # Its domain need not have minval: ordinary fixed SMA lengths
+            # already use the override-aware input constructor path.
+            return inline_input
+        if not isinstance(node, Identifier):
+            return False
+        binding = index.refs.get(id(node))
+        if (binding is None or binding[0] != "global"
+                or binding in index.unstable or binding in seen
+                or node.name in ambiguous):
+            return False
+        position, declaration = definitions.get(node.name, (before, None))
+        if (position >= before or declaration is None
+                or declaration.type_hint not in (None, "int")
+                or (declaration.annotations or {}).get("qualifier") == "series"):
+            return False
+        return fixed_length(
+            declaration.value, position, inline_input=True, seen=seen | {binding},
+        )
+
+    def choices_for(length, before: int):
+        nonlocal index
+        if index is None:
+            index = ScriptIndex(program)
+        binding = index.refs.get(id(length))
+        if (binding != ("global", length.name) or length.name in ambiguous
+                or binding not in index.reassigned):
+            return None
+        position, declaration = definitions.get(length.name, (before, None))
+        if (position >= before or declaration is None
+                or declaration.is_var or declaration.is_varip
+                or declaration.type_hint not in (None, "int")
+                or (declaration.annotations or {}).get("qualifier") == "series"
+                or not fixed_length(declaration.value, position, inline_input=True)):
+            return None
+        choices = [declaration.value]
+        for write in index.writes[binding]:
+            if write.op != ":=":
+                return None
+            value = write.value
+            if (isinstance(value, Identifier)
+                    and index.refs.get(id(value)) == binding):
+                continue  # Assigning the current value adds no new choice.
+            if not fixed_length(value, before):
+                return None
+            if value not in choices:
+                choices.append(value)
+        if length.name not in frozen:
+            initial_name, = fresh_choice_names(("initial",))
+            value = declaration.value
+            if (_is_input_int_call(value) and len(value.args) < 2
+                    and "title" not in value.kwargs):
+                # Moving an untitled input must retain its authored key.
+                title = StringLiteral(value=length.name, loc=value.loc)
+                order = (value.annotations or {}).get(
+                    "call_arg_order", [*value.args, *value.kwargs.values()],
+                )
+                value = replace(
+                    value, kwargs={**value.kwargs, "title": title},
+                    annotations={
+                        **(value.annotations or {}),
+                        "call_arg_order": ArgOrder([*order, title]),
+                    },
+                )
+            frozen[length.name] = replace(declaration, name=initial_name, value=value)
+        return [
+            Identifier(name=frozen[length.name].name, loc=declaration.loc),
+            *choices[1:],
+        ]
+
+    def rewrite(node, before: int, prefix):
+        if isinstance(node, FuncCall):
+            namespace, name = _call_name(node)
+            if namespace == "request":
+                return node  # The payload has its own evaluation context.
+            if (namespace == "ta" and name == "sma" and not node.kwargs
+                    and len(node.args) == 2
+                    and all(isinstance(arg, Identifier) for arg in node.args)):
+                choices = choices_for(node.args[1], before)
+                if choices is not None:
+                    declarations, selected = _expand_length_choices(
+                        node, 1, choices, fresh_choice_names,
+                    )
+                    # Keep the selection in emitted code even when the
+                    # enclosing visual call is dropped by the emitter.
+                    result_name, = fresh_choice_names(("result",))
+                    declarations.append(VarDecl(
+                        name=result_name, value=selected, loc=node.loc,
+                    ))
+                    prefix.extend(declarations)
+                    return Identifier(name=result_name, loc=node.loc)
+            args = [rewrite(arg, before, prefix) for arg in node.args]
+            kwargs = {key: rewrite(value, before, prefix)
+                      for key, value in node.kwargs.items()}
+            replacements = {id(old): new for old, new in zip(node.args, args)}
+            replacements.update(
+                (id(node.kwargs[key]), value) for key, value in kwargs.items()
+            )
+            annotations = node.annotations
+            order = (annotations or {}).get("call_arg_order")
+            if order is not None:
+                annotations = {
+                    **annotations,
+                    "call_arg_order": ArgOrder(
+                        replacements.get(id(arg), arg) for arg in order
+                    ),
+                }
+            return replace(node, args=args, kwargs=kwargs, annotations=annotations)
+        if isinstance(node, BinOp) and node.op not in {"and", "or"}:
+            return replace(
+                node, left=rewrite(node.left, before, prefix),
+                right=rewrite(node.right, before, prefix),
+            )
+        if isinstance(node, UnaryOp):
+            return replace(node, operand=rewrite(node.operand, before, prefix))
+        # Do not hoist out of lazy arms, history references or local scopes.
+        return node
+
+    body = []
+    for position, statement in enumerate(program.body):
+        prefix = []
+        if (isinstance(statement, VarDecl)
+                and not statement.is_var and not statement.is_varip):
+            statement = replace(
+                statement, value=rewrite(statement.value, position, prefix),
+            )
+        elif isinstance(statement, Assignment) and isinstance(statement.target, Identifier):
+            statement = replace(
+                statement, value=rewrite(statement.value, position, prefix),
+            )
+        elif isinstance(statement, ExprStmt):
+            statement = replace(
+                statement, expr=rewrite(statement.expr, position, prefix),
+            )
+        body.extend((*prefix, statement))
+    if not frozen:
+        return program
+    result = []
+    for statement in body:
+        if isinstance(statement, VarDecl) and statement.name in frozen:
+            initial = frozen[statement.name]
+            result.append(initial)
+            statement = replace(
+                statement, value=Identifier(name=initial.name, loc=statement.loc),
+            )
+        result.append(statement)
+    return replace(program, body=result)
+
+
 def expand_finite_choice_extrema_lengths(program: Program) -> Program:
-    """Return ``program`` with the bounded finite-choice extrema lowering.
+    """Return ``program`` with bounded finite-choice extrema/SMA lowerings.
 
     The parser's original tree is left untouched.  This matters because the
     support checker runs on the authored program and because callers may reuse
@@ -647,13 +879,15 @@ def expand_finite_choice_extrema_lengths(program: Program) -> Program:
     assigned_names = _assigned_names(program)
     counter = 0
 
-    def fresh_choice_names() -> tuple[str, str, str]:
+    def fresh_choice_names(
+        suffixes=("selected", "true", "false"),
+    ) -> tuple[str, ...]:
         nonlocal counter
         while True:
             counter += 1
             candidates = tuple(
                 f"pf_ta_length_choice_{counter}_{suffix}"
-                for suffix in ("selected", "true", "false")
+                for suffix in suffixes
             )
             if not any(candidate in used_names for candidate in candidates):
                 used_names.update(candidates)
@@ -753,46 +987,13 @@ def expand_finite_choice_extrema_lengths(program: Program) -> Program:
             body.append(statement)
             continue
 
-        selected_name, true_name, false_name = fresh_choice_names()
+        declarations, selected = _expand_length_choices(
+            call, length_index, (choice.true_val, choice.false_val),
+            fresh_choice_names,
+        )
+        body.extend((*declarations, replace(statement, value=selected)))
 
-        true_args = copy.deepcopy(call.args)
-        false_args = copy.deepcopy(call.args)
-        true_args[length_index] = copy.deepcopy(choice.true_val)
-        false_args[length_index] = copy.deepcopy(choice.false_val)
-        true_call = replace(call, args=true_args, kwargs={})
-        false_call = replace(call, args=false_args, kwargs={})
-        true_decl = VarDecl(
-            name=true_name,
-            value=true_call,
-            loc=call.loc,
-        )
-        false_decl = VarDecl(
-            name=false_name,
-            value=false_call,
-            loc=call.loc,
-        )
-        selected_length_decl = VarDecl(
-            name=selected_name,
-            value=copy.deepcopy(length_node),
-            loc=call.loc,
-        )
-        selected = Ternary(
-            condition=BinOp(
-                left=Identifier(name=selected_name, loc=call.loc),
-                op="==",
-                right=copy.deepcopy(choice.true_val),
-                loc=call.loc,
-            ),
-            true_val=Identifier(name=true_name, loc=call.loc),
-            false_val=Identifier(name=false_name, loc=call.loc),
-            loc=call.loc,
-        )
-
-        body.extend((
-            selected_length_decl,
-            true_decl,
-            false_decl,
-            replace(statement, value=selected),
-        ))
-
-    return replace(program, body=body)
+    result = replace(program, body=body)
+    if assigned_names:
+        result = _expand_reassigned_sma_lengths(result, fresh_choice_names)
+    return result

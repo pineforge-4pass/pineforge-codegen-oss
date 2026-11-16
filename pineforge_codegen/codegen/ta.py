@@ -277,7 +277,7 @@ class TaSiteHelper:
             return expr.name in getattr(self, "_static_vars", set())
         if isinstance(expr, MemberAccess):
             if isinstance(expr.object, Identifier) and (
-                expr.object.name.startswith("input") or expr.object.name in getattr(self, "_enum_defs", {})
+                expr.object.name == "input" or expr.object.name in getattr(self, "_enum_defs", {})
             ):
                 return True
             return self._expr_safe_for_ta_precalc(expr.object)

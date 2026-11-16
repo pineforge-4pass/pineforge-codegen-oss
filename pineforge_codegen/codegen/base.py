@@ -3524,14 +3524,26 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             """True if any ``:=`` assignment to ``name`` occurs within node."""
             from ..ast_nodes import IfStmt as _If, Assignment as _Asg
             if isinstance(node, _Asg) and isinstance(node.target, Identifier):
-                return node.target.name == name
+                if node.target.name == name:
+                    return True
+            # A binding's selection value can write a different target.
+            if (
+                isinstance(node, (VarDecl, TupleAssign, Assignment))
+                and isinstance(node.value, (IfStmt, SwitchStmt))
+                and _reassigns(node.value, name)
+            ):
+                return True
             if isinstance(node, _If):
                 if any(_reassigns(c, name) for c in (node.body or [])):
                     return True
                 if any(_reassigns(c, name) for c in (node.else_body or [])):
                     return True
                 return False
-            for attr in ("body", "else_body", "cases", "default_body"):
+            if isinstance(node, SwitchStmt):
+                for _condition, stmts in node.cases:
+                    if any(_reassigns(c, name) for c in stmts):
+                        return True
+            for attr in ("body", "else_body", "default_body"):
                 sub = getattr(node, attr, None)
                 if isinstance(sub, list):
                     if any(_reassigns(c, name) for c in sub):
@@ -3576,6 +3588,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if isinstance(node, Assignment):
                 if isinstance(node.target, Identifier):
                     reassigned.add(node.target.name)
+            # Selection-valued bindings keep their statements under value,
+            # rather than under the binding's own body.
+            if (
+                isinstance(node, (VarDecl, TupleAssign, Assignment))
+                and isinstance(node.value, (IfStmt, SwitchStmt))
+            ):
+                walk(node.value)
             # Recurse into child nodes
             if hasattr(node, 'body') and isinstance(node.body, list):
                 for child in node.body:
