@@ -47,20 +47,22 @@ def test_mutating_operand_is_evaluated_after_the_left_operand_is_bound():
     s6 = _assignment(cpp, "s6")
     bound = _BINDING.findall(s6)
     # The + that adds str.tostring(a.remove(-1)) and the + that adds
-    # array.join(a, ","); the + of a literal "," and the effect-free + of the
-    # two reads before them keep their spelling.
+    # array.join(a, ","); literal separators and the effect-free join of the
+    # two reads before them need no operand-order binding.
     assert len(bound) == 2, s6
     # The inner binding's right operand comes first in the text.
     before_remove, before_join = sorted(
-        s6.index(f"return ({token} + ") for token in bound
+        s6.index(f"return _pf_u16_concat({token}, ") for token in bound
     )
     # a.get(-1) is read into the inner binding, then a.remove(-1) erases.
     assert s6.index("return (__pf_array[(size_t)__pf_array_index]);") < before_remove
     assert s6.index(".erase(") > before_remove
     # array.join(a, ",") reads the array after the outer binding.
-    assert s6.index("std::to_string(a[") > before_join
-    # Operands no other operand changes keep the plain C++ operator: s4's
-    # two reads, and every entry id's concatenation.
+    join_receiver = s6.index("const auto& _pf_join_parts = (a);")
+    assert join_receiver > before_join
+    assert s6.index("_pf_join_number(_pf_join_parts[_pf_join_i])") > join_receiver
+    # Operands no other operand changes need no order binding: s4's two
+    # reads, and every entry id's concatenation.
     assert "__pf_binop_lhs_" not in _assignment(cpp, "s4")
     assert cpp.count("__pf_binop_lhs_") == s6.count("__pf_binop_lhs_")
 
@@ -111,7 +113,9 @@ payload = request.security(syminfo.tickerid, "60", str.tostring(ints.get(-1)) + 
     ):
         line = _assignment(cpp, target)
         (token,) = _BINDING.findall(line)
-        assert (line.index(bound) < line.index(f"return ({token} ")
+        returned = (f"return ({token} " if target == "through_call"
+                    else f"return _pf_u16_concat({token}, ")
+        assert (line.index(bound) < line.index(returned)
                 < line.index(after)), line
     # A bool operand is bound as a bool: a std::vector<bool> element is a
     # proxy of the bit, which the remove moves (a bound proxy stays right only
@@ -123,7 +127,7 @@ payload = request.security(syminfo.tickerid, "60", str.tostring(ints.get(-1)) + 
     # A request.security payload binds its left operand the same way.
     payload = _assignment(cpp, "_req_sec_0")
     (token,) = _BINDING.findall(payload)
-    assert payload.index(".erase(") > payload.index(f"return ({token} + ")
+    assert payload.index(".erase(") > payload.index(f"return _pf_u16_concat({token}, ")
 
 
 def test_operands_are_evaluated_left_to_right_at_run_time():

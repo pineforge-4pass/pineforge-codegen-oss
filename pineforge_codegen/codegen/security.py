@@ -210,6 +210,9 @@ class _SecurityHelperArgumentFrame(dict):
         self.caller_stack = caller_stack
         self.call = call
         self.float_parameters: frozenset[str] = frozenset()
+        # Declared parameter types survive expansion to caller-authored ASTs,
+        # including bare na, whose own expression type is numeric.
+        self.parameter_types: dict[str, str] = {}
         # Runtime metadata only: the dict's values remain the authored ASTs,
         # which key TA discovery and binding signatures.
         self.samples: dict[str, _SecurityArgumentSample] = {}
@@ -936,7 +939,7 @@ class SecurityEmitter:
         for sec_id in sites:
             info = self._security_eval_info[sec_id]
             tf = info["tf"]
-            arm = (f'"{self._cpp_string_escape(tf)}"' if tf is not None
+            arm = (self._security_tf_literal(tf) if tf is not None
                    else info["tf_expr"])
             # Missing string values denote the chart timeframe in a selection.
             condition = f"{target} == {arm}"
@@ -944,10 +947,10 @@ class SecurityEmitter:
                 condition = f"({target}.empty() || {condition})"
             invalid = info.get("series_tf_invalid")
             if invalid is not None:
-                message = self._cpp_string_escape(invalid)
+                message = self._cpp_std_string(invalid)
                 lines.extend((
                     f"    if ({condition}) {{",
-                    f'        pine_runtime_error(std::string("{message}"));',
+                    f'        pine_runtime_error({message});',
                     # Retain the expression's scalar/tuple/array return type
                     # even when every inventoried value is invalid.
                     f"        return {result(sec_id)};",
@@ -1126,9 +1129,8 @@ class SecurityEmitter:
               else substituted)
 
     def _security_tf_literal(self, tf: str) -> str:
-        """A timeframe string as the C++ string literal registration and the
-        evaluator's ``timeframe.*`` reads spell it."""
-        return f'"{self._cpp_string_escape(tf)}"'
+        """A complete timeframe string for registration and evaluator reads."""
+        return self._cpp_string_literal(tf)
 
     def _security_lookahead_value(self, node):
         """A computed lookahead's value before on_bar initializes its aliases."""
@@ -2755,6 +2757,14 @@ class SecurityEmitter:
             if name in frame:
                 return name in getattr(frame, "float_parameters", ())
         return False
+
+    @staticmethod
+    def _security_parameter_cpp_type(name, bindings) -> str | None:
+        for frame in reversed(bindings or ()):
+            types = getattr(frame, "parameter_types", {})
+            if name in frame or name in types:
+                return types.get(name)
+        return None
 
     def _security_index_reads_helper_local(
         self,
@@ -5057,6 +5067,13 @@ class SecurityEmitter:
             )
         return expr_cpp
 
+    def _security_type_for_decl(self, node, bindings=(), body=()) -> str:
+        """Type an evaluator local in its requested lexical bindings."""
+        if (not node.type_hint
+                and self._security_value_is_string(node.value, bindings, body)):
+            return "std::string"
+        return self._type_for_decl(node)
+
     def _security_float_cpp(self, rendered, node, bindings=()) -> str:
         """Adapt a builder-owned value without re-evaluating it on the chart."""
         if not self._security_integer_na_operand(node, bindings):
@@ -5187,7 +5204,7 @@ class SecurityEmitter:
                 continue
             if not isinstance(stmt, VarDecl):
                 continue
-            cpp_type = self._type_for_decl(stmt)
+            cpp_type = self._security_type_for_decl(stmt, stack + (frame,))
             persistent = stmt.is_var or stmt.is_varip
             if persistent or stmt.name in local_series:
                 numeric = (cpp_type != "std::string"
@@ -5291,11 +5308,10 @@ class SecurityEmitter:
         seen: set[str] = set()
         global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
 
-        def is_string_decl(stmt: VarDecl) -> bool:
-            # The emitter's own rule (``_type_for_decl``), read in the same
-            # class-scope context it runs in.
+        def is_string_decl(stmt: VarDecl, bindings=(), body=()) -> bool:
+            # Use the emitter's lexical rule before declaring its series map.
             try:
-                return self._type_for_decl(stmt) == "std::string"
+                return self._security_type_for_decl(stmt, bindings, body) == "std::string"
             except Exception:
                 return stmt.type_hint == "string" or isinstance(stmt.value, StringLiteral)
 
@@ -5346,23 +5362,30 @@ class SecurityEmitter:
                 if info is None or info.node is None:
                     continue
                 series = set(self.ctx.func_series_vars.get(info.name, set()))
-                if scan_body(info.node.body, series):
+                declarations = _SecurityHelperArgumentFrame({}, ())
+                declarations.parameter_types = self._security_declared_parameter_types(info)
+                if scan_body(info.node.body, series, (declarations,)):
                     return True
             return False
 
-        def scan_body(body, series: set[str]) -> bool:
+        def scan_body(body, series: set[str], bindings=(), declarations=()) -> bool:
+            preceding = list(declarations)
             for stmt in body or []:
+                if self._budget is not None:
+                    self._budget.check(stmt.loc, Phase.CODEGEN)
                 if isinstance(stmt, VarDecl):
                     persistent = stmt.is_var or (
                         stmt.is_varip and id(stmt) in self._security_series_tf_local_decls)
-                    if (persistent or stmt.name in series) and is_string_decl(stmt):
+                    if ((persistent or stmt.name in series)
+                            and is_string_decl(stmt, bindings, preceding)):
                         return True
                     if scan_expr(stmt.value):
                         return True
+                    preceding.append(stmt)
                 elif isinstance(stmt, IfStmt):
                     if (scan_expr(stmt.condition)
-                            or scan_body(stmt.body, series)
-                            or scan_body(stmt.else_body, series)):
+                            or scan_body(stmt.body, series, bindings, preceding)
+                            or scan_body(stmt.else_body, series, bindings, preceding)):
                         return True
                 elif scan_expr(stmt):
                     return True
@@ -5462,6 +5485,9 @@ class SecurityEmitter:
         local_cpp_bindings: dict[str, str] = {}
         runtime_stack = plan["binding_stack"] + (local_cpp_bindings,)
         local_series_names = set(plan.get("local_series_names", ()))
+        string_sources = getattr(self, "_security_string_binding_sources", None)
+        if string_sources is None:
+            string_sources = self._security_string_binding_sources = {}
 
         def _series_expr(binding_name: str, index_expr: str) -> str:
             return self._security_helper_series_value(binding_name, index_expr)
@@ -5486,6 +5512,17 @@ class SecurityEmitter:
                 self._activate_callable_collection_binding(stmt.name, spec)
 
             if isinstance(stmt, VarDecl):
+                # Retain the initializer's lexical frame before activating
+                # its declaration. Keep only reads of that initializer, so
+                # a long block does not copy every earlier binding per local.
+                source_reads = {}
+                if stmt.value is not None:
+                    for read, _ in iter_ast_nodes(stmt.value):
+                        if self._budget is not None:
+                            self._budget.check(read.loc, Phase.CODEGEN)
+                        if isinstance(read, Identifier) and read.name in active_bindings:
+                            source_reads[read.name] = active_bindings[read.name]
+                source_stack = plan["binding_stack"] + (source_reads,)
                 if stmt.is_varip:
                     self._security_check_helper_varip(
                         stmt, plan["call_node"], sec_id=sec_id)
@@ -5514,7 +5551,7 @@ class SecurityEmitter:
                         self._security_persistent_helper_series.add(series_name)
                     cpp_type = None
                     if is_persistent_var or self._security_string_series_declared:
-                        cpp_type = self._type_for_decl(stmt)
+                        cpp_type = self._security_type_for_decl(stmt, runtime_stack_local)
                     is_color_state = (
                         is_persistent_var and self._security_helper_var_is_color(stmt)
                     )
@@ -5525,6 +5562,7 @@ class SecurityEmitter:
                         cpp_type = self._security_helper_var_state_type(stmt)
                     if cpp_type == "std::string":
                         self._security_store_string_series(stmt, series_name)
+                        string_sources[binding] = (stmt, source_stack)
                         if stmt.value is None or isinstance(stmt.value, NaLiteral):
                             expr_cpp = "na<std::string>()"
                     if not is_color_state and cpp_type != "std::string":
@@ -5582,7 +5620,7 @@ class SecurityEmitter:
                         plan["func_info"].name,
                         stmt.name,
                     )
-                    cpp_type = self._type_for_decl(stmt)
+                    cpp_type = self._security_type_for_decl(stmt, runtime_stack_local)
                     expr_cpp = self._build_security_expr(
                         sec_id,
                         stmt.value,
@@ -5598,6 +5636,8 @@ class SecurityEmitter:
                     )
                     active_bindings[stmt.name] = local_name
                     self._security_local_cpp_types[local_name] = cpp_type
+                    if cpp_type == "std::string":
+                        string_sources[local_name] = (stmt, source_stack)
                     lines.append(f"{pad}{cpp_type} {local_name} = {expr_cpp};")
                 else:
                     expr_cpp = self._build_security_expr(
@@ -5643,9 +5683,9 @@ class SecurityEmitter:
                 )
                 series_name = self._security_series_binding_target(binding)
                 if series_name is not None:
-                    if series_name in self._security_string_series and isinstance(
-                            stmt.value, NaLiteral):
-                        expr_cpp = "na<std::string>()"
+                    if series_name in self._security_string_series:
+                        expr_cpp = self._security_local_value(
+                            expr_cpp, stmt.value, "std::string", runtime_stack_local)
                     elif series_name in self._security_color_series:
                         expr_cpp = self._security_color_series_store(expr_cpp)
                     else:
@@ -5668,6 +5708,9 @@ class SecurityEmitter:
                         current = _series_expr(series_name, "0")
                         rhs = self._compound_assign_rhs(
                             current, stmt.op, expr_cpp, stmt.target, stmt.value,
+                            target_cpp_type=(
+                                "std::string"
+                                if series_name in self._security_string_series else None),
                             target_is_double=(
                                 series_name not in self._security_color_series
                                 and series_name not in self._security_string_series),
@@ -5692,7 +5735,8 @@ class SecurityEmitter:
                         rhs = None
                     else:
                         rhs = self._compound_assign_rhs(
-                            binding, stmt.op, expr_cpp, stmt.target, stmt.value)
+                            binding, stmt.op, expr_cpp, stmt.target, stmt.value,
+                            target_cpp_type=self._security_local_cpp_types.get(binding))
                     if rhs is None:
                         lines.append(f"{pad}{binding} {stmt.op} {expr_cpp};")
                     else:
@@ -6525,6 +6569,14 @@ class SecurityEmitter:
             "TradingView evaluates it on the requested bar.",
         )
 
+    def _security_declared_parameter_types(self, info) -> dict[str, str]:
+        specs = self.ctx.func_declared_param_type_specs.get(info.name, ())
+        return {
+            name: self._type_spec_to_cpp(spec)
+            for name, spec in zip(info.node.params, specs)
+            if spec is not None
+        }
+
     def _security_bind_helper_args(
         self,
         node: FuncCall,
@@ -6563,6 +6615,7 @@ class SecurityEmitter:
                         fi, index, self._callable_target_callsite_idx(fi, node)) == "double")
                 for frame in frames:
                     frame.float_parameters = float_parameters
+                    frame.parameter_types = self._security_declared_parameter_types(fi)
                 return fi, base_stack + frames
         if not isinstance(node.callee, Identifier):
             self._codegen_error(
@@ -6614,6 +6667,7 @@ class SecurityEmitter:
             param for index, param in enumerate(params)
             if self._func_param_int_cpp_type(
                 fi, index, self._callable_target_callsite_idx(fi, node)) == "double")
+        new_frame.parameter_types = self._security_declared_parameter_types(fi)
         return fi, base_stack + (new_frame,)
 
     def _security_helper_call_plan(
@@ -6792,6 +6846,16 @@ class SecurityEmitter:
         nxt = depth + 1
         if isinstance(node, StringLiteral):
             return True
+        if isinstance(node, Subscript):
+            if (isinstance(node.object, Identifier)
+                    and self._security_identifier_is_global_binding(node.object)
+                    and self._security_bar_history_field(node.object) is not None):
+                # This resolver retains bar-series history even when a
+                # global has a string declaration of the same spelling.
+                # Infer the value that the requested builder emits.
+                return False
+            return self._security_value_is_string(
+                node.object, helper_binding_stack, body, nxt)
         if isinstance(node, Identifier) and not self._security_identifier_is_global_binding(node):
             for stmt in reversed(body or []):
                 if isinstance(stmt, VarDecl) and stmt.name == node.name:
@@ -6800,6 +6864,10 @@ class SecurityEmitter:
                     return self._security_value_is_string(
                         stmt.value, helper_binding_stack, body, nxt
                     )
+            parameter_type = self._security_parameter_cpp_type(
+                node.name, helper_binding_stack)
+            if parameter_type is not None:
+                return parameter_type == "std::string"
             binding = self._security_lookup_helper_binding_context(
                 node.name, helper_binding_stack
             )
@@ -6832,6 +6900,124 @@ class SecurityEmitter:
                 plan["expr"], plan["binding_stack"], plan["body"], nxt
             )
         return self._infer_type(node) == "std::string"
+
+    def _security_string_is_canonical(self, node, bindings=()) -> bool:
+        """Prove that a requested string contains no isolated UTF-16 halves.
+
+        Only complete literals, default numeric/bool formatting and immutable
+        aliases/history of those values establish this representation. Cuts,
+        collection elements, mutable bindings and unknown producers retain
+        normalization. This query never renders or evaluates an expression.
+        """
+        from ..analyzer.value_bindings import ValueBindings
+
+        inventory = getattr(self, "_security_canonical_string_sources", None)
+        if inventory is None:
+            declarations, writes, written_names = {}, set(), []
+            for value, _ in iter_ast_nodes(self.ctx.ast):
+                if self._budget is not None:
+                    self._budget.check(value.loc, Phase.CODEGEN)
+                if isinstance(value, VarDecl):
+                    declarations[(id(value), value.name)] = value
+                elif (isinstance(value, Assignment)
+                      and isinstance(value.target, Identifier)):
+                    target = value.target
+                    keys = {
+                        self.ctx.identifier_decl_bindings.get(id(target)),
+                        ValueBindings.declaration_of(target),
+                    } - {None}
+                    writes.update(keys)
+                    written_names.append((keys, target.name))
+            # An unresolved/copied write cannot establish that a current
+            # same-spelled slot is immutable.
+            unknown_names = {
+                name for keys, name in written_names
+                if not any(key in declarations for key in keys)
+            }
+            inventory = self._security_canonical_string_sources = (
+                declarations, writes, unknown_names,
+            )
+        declarations, writes, unknown_names = inventory
+        pending = [(node, bindings)]
+        seen = set()
+        while pending:
+            value, stack = pending.pop()
+            key = (id(value), tuple(id(frame) for frame in stack or ()))
+            if key in seen:
+                continue
+            seen.add(key)
+            if self._budget is not None:
+                self._budget.check(getattr(value, "loc", None), Phase.CODEGEN)
+            if isinstance(value, StringLiteral):
+                if any(0xD800 <= ord(char) < 0xE000 for char in value.value):
+                    return False
+                continue
+            if value is None or isinstance(value, NaLiteral):
+                # The string missing-value representation contains no units.
+                continue
+            if isinstance(value, Identifier):
+                authored_binding = ValueBindings.declaration_of(value)
+                bound = (None if self._security_identifier_is_global_binding(value)
+                         else self._security_lookup_helper_binding_context(
+                             value.name, stack))
+                if bound is not None and isinstance(bound[0], ASTNode):
+                    pending.append(bound)
+                    continue
+                if bound is not None:
+                    source = getattr(self, "_security_string_binding_sources", {}).get(
+                        bound[0])
+                    if source is None:
+                        return False
+                    declaration, stack = source
+                else:
+                    declaration = self.ctx.identifier_binding_nodes.get(id(value))
+                    if not isinstance(declaration, VarDecl):
+                        binding = (self.ctx.identifier_decl_bindings[id(value)]
+                                   if id(value) in self.ctx.identifier_decl_bindings
+                                   else authored_binding)
+                        declaration = declarations.get(binding)
+                if not isinstance(declaration, VarDecl):
+                    return False
+                if ((id(declaration), declaration.name) in writes
+                        or authored_binding in writes
+                        or declaration.name in unknown_names):
+                    return False
+                pending.append((declaration.value, stack))
+                continue
+            if isinstance(value, Subscript) and isinstance(value.object, Identifier):
+                if not self._security_value_is_string(value.object, stack, ()):
+                    return False
+                pending.append((value.object, stack))
+                continue
+            if isinstance(value, Ternary):
+                pending.extend((arm, stack) for arm in (value.true_val, value.false_val))
+                continue
+            if isinstance(value, BinOp) and value.op == "+":
+                pending.extend((side, stack) for side in (value.left, value.right))
+                continue
+            if isinstance(value, FuncCall):
+                name, namespace = self._resolve_callee(value.callee)
+                if namespace == "str" and name == "tostring":
+                    arguments = _merge_kwargs(
+                        value.args, value.kwargs,
+                        sigs.get_param_names("str", name), lambda arg: arg,
+                        intrinsic=sigs.get_intrinsic("str", name),
+                    )
+                    if len(arguments) == 1:
+                        argument = arguments[0]
+                        if self._security_value_is_string(argument, stack, ()):
+                            pending.append((argument, stack))
+                            continue
+                        # The call visitor has a separate enum-title path;
+                        # only its numeric/bool formatter proves this fact.
+                        symbol = (self.ctx.symbols.resolve(argument.name)
+                                  if isinstance(argument, Identifier) else None)
+                        if (not getattr(symbol, "enum_type_name", None)
+                                and self._text_type(argument) in (
+                                    "int", "int64_t", "double", "bool")):
+                            continue
+            return False
+        return True
 
     def _validate_security_persistent_var_control_flow(self, expr_node) -> None:
         """Reject helper ``var`` state whose rollback would be conditional.
@@ -8000,15 +8186,19 @@ class SecurityEmitter:
         # (``/`` in double, ``%`` through std::fmod: C++ ``%`` takes no
         # double) and narrows its result.
         wide = node.op != ":=" and store(value_cpp) != value_cpp
+        slot_type = self._security_cpp_type_for_mutable(target_name, info)
+        string_concat = node.op == "+=" and slot_type == "std::string"
 
         def combined(target_read: str) -> str:
-            return (self._compound_assign_rhs(target_read, node.op, value_cpp)
+            operand = store(value_cpp) if string_concat else value_cpp
+            return (self._compound_assign_rhs(
+                        target_read, node.op, operand, target_cpp_type=slot_type)
                     or f"({target_read} {node.op[0]} {value_cpp})")
 
         if getattr(info, "is_series", False):
             if node.op == ":=":
                 lines.append(f"{pad}{state_name}.update({store(value_cpp)});")
-            elif wide:
+            elif wide or string_concat:
                 lines.append(f"{pad}{state_name}.update("
                              f"{store(combined(f'{state_name}[0]'))});")
             else:
@@ -8018,7 +8208,7 @@ class SecurityEmitter:
 
         if node.op == ":=":
             lines.append(f"{pad}{state_name} = {store(value_cpp)};")
-        elif wide:
+        elif wide or string_concat:
             lines.append(f"{pad}{state_name} = {store(combined(state_name))};")
         else:
             lines.append(f"{pad}{state_name} {node.op} {value_cpp};")
@@ -9532,7 +9722,7 @@ class SecurityEmitter:
         if column is not None and self._security_foreign(sec_id):
             # request.footprint(...) of another symbol: the delta its feed
             # records for the requested bar (the value its delta() reads).
-            return f'_pf_symbol_column({sec_id}, "{self._cpp_string_escape(column)}")'
+            return f'_pf_symbol_column({sec_id}, {self._cpp_string_literal(column)})'
 
         if resolving is None:
             resolving = set()
@@ -9576,6 +9766,10 @@ class SecurityEmitter:
                 )
                 if self._security_float_parameter(expr_node.name, helper_binding_stack):
                     rendered = self._security_float_cpp(rendered, bound, bound_stack)
+                if self._security_parameter_cpp_type(
+                        expr_node.name, helper_binding_stack) == "std::string":
+                    rendered = self._security_local_value(
+                        rendered, bound, "std::string", bound_stack)
                 return rendered
             bar_fields = {
                 **SECURITY_BAR_FIELD_EXPRS,
@@ -9650,6 +9844,9 @@ class SecurityEmitter:
                 )
                 resolving.remove(expr_node.name)
                 symbol = self._variable_symbol(expr_node.name)
+                if self._infer_type(expr_node) == "std::string":
+                    resolved = self._security_local_value(
+                        resolved, value, "std::string", ())
                 if (symbol is not None
                         and self._global_float_na_selection(expr_node.name, symbol.pine_type)):
                     resolved = self._security_float_cpp(resolved, value)
@@ -10205,6 +10402,18 @@ class SecurityEmitter:
             right = self._build_security_expr(
                 sec_id, expr_node.right, ta_range, ta_results, resolving, security_mutable_names, helper_binding_stack, emitted_lines
             )
+            string_concat = (
+                expr_node.op == "+"
+                and self._security_value_is_string(expr_node, helper_binding_stack, ())
+            )
+            normalize_concat = string_concat and (
+                self._binop_operands_need_order(expr_node)
+                or not all(
+                    self._security_value_is_string(side, helper_binding_stack, ())
+                    and self._security_string_is_canonical(side, helper_binding_stack)
+                    for side in (expr_node.left, expr_node.right)
+                )
+            )
             wide_na = False
             if (self._int_arith_leaves_int32(expr_node)
                     # Operands spelled as int literals keep their fold
@@ -10236,6 +10445,12 @@ class SecurityEmitter:
             def lower(left: str, right: str) -> str:
                 cpp_ops = {"and": "&&", "or": "||"}
                 op = cpp_ops.get(expr_node.op, expr_node.op)
+                if normalize_concat:
+                    # The builder has resolved helper bindings to their
+                    # requested string values, rather than chart locals.
+                    return self._string_concat_cpp(
+                        left, right,
+                        left_node=expr_node.left, right_node=expr_node.right)
                 if expr_node.op in ("and", "or"):
                     left = self._coerce_bool_expr(left, expr_node.left)
                     right = self._coerce_bool_expr(right, expr_node.right)
@@ -10262,6 +10477,13 @@ class SecurityEmitter:
                 return self._lower_relational(op, expr_node.left, expr_node.right, left, right)
 
             # The left operand first, as on the chart (``_left_operand_first``).
+            if normalize_concat:
+                # A unit join is a string operation even when chart inference
+                # has forgotten the requested locals' types. Complete strings
+                # instead keep the existing operator and its conservative
+                # missingness wrapper, whose integral-only checks are inert
+                # for std::string.
+                return self._left_operand_first(expr_node, left, right, lower)
             if wide_na:
                 return self._left_operand_first(
                     expr_node, left, right,
@@ -10459,6 +10681,9 @@ class SecurityEmitter:
                     argument = self._build_security_expr(
                         sec_id, argument_node, ta_range, ta_results, resolving,
                         security_mutable_names, frame.caller_stack, emitted_lines)
+                    if frame.parameter_types.get(parameter) == "std::string":
+                        argument = self._security_local_value(
+                            argument, argument_node, "std::string", frame.caller_stack)
                     name = self._security_next_inline_name(sec_id, func_name, parameter)
                     emitted_lines.append(f"        const auto {name} = {argument};")
                     frame.samples[parameter] = _SecurityArgumentSample(name, None)
@@ -11205,11 +11430,14 @@ class SecurityEmitter:
             return True
         if isinstance(node, Assignment) and id(node.target) in context["reads"]:
             name = context["reads"][id(node.target)]
+            cpp_type = context["types"].get(name)
             value = build(node.value)
+            if node.op == "+=" and cpp_type == "std::string":
+                value = self._security_local_value(value, node.value, cpp_type, args[5])
             rhs = (value if node.op == ":="
-                   else self._compound_assign_rhs(name, node.op, value))
+                   else self._compound_assign_rhs(
+                       name, node.op, value, target_cpp_type=cpp_type))
             if rhs is not None:
-                cpp_type = context["types"].get(name)
                 if node.op == ":=":
                     rhs = self._security_local_value(rhs, node.value, cpp_type, args[5])
                 elif cpp_type in ("int", "int64_t"):

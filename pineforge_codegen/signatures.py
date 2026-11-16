@@ -465,7 +465,7 @@ _str("tonumber",    _sig([("string", S)], ret=F))
 _str("format",      _sig([("formatString", S)], ret=S))  # variadic
 _str("format_time", _sig([("time", I), ("format", S), ("timezone", S, "")], ret=S),
      keyword_names_verified=True)
-_str("length",      _sig([("string", S)], ret=I))
+_str("length",      _sig([("string", S)], ret=I), keyword_names_verified=True)
 _str("contains",    _sig([("source", S), ("str", S)], ret=B))
 _str("startswith",  _sig([("source", S), ("str", S)], ret=B))
 _str("endswith",    _sig([("source", S), ("str", S)], ret=B))
