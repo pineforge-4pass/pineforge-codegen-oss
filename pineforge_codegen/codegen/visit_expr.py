@@ -804,6 +804,17 @@ class ExprVisitor:
                 and not annotations.get("tuple_builtin_binding")
                 and not annotations.get("builtin_shadow_binding"))
 
+    def _stable_scalar_read_literal(self, node: Identifier) -> str | None:
+        notes = node.annotations or {}
+        literal = notes.get("stable_scalar_literal")
+        if (literal is not None
+                and notes.get("stable_scalar_fold") != self._derived_input_expr[node.name]
+                and self._infer_type(node) in ("double", "float")):
+            # The string folder does not retain intermediate float boundaries.
+            # The live prefix already has the statement visitor's evaluation.
+            return None
+        return literal
+
     def _visit_ident(self, node: Identifier) -> str:
         name = node.name
         # Bare 'na' identifier → na<double>()
@@ -829,10 +840,20 @@ class ExprVisitor:
             binding is not None
             and binding[0] in self.ctx.primitive_block_shadow_types
         )
+        # A reassigned scalar's final fold is not its value at earlier reads.
+        # Only an authored, positioned read carries a safe literal snapshot;
+        # callable/request reads and other copies fall through to live storage.
+        reassigned_stable = name in self._reassigned_stable_scalars
+        if (reassigned_stable and not primitive_shadow_read
+                and not self._known_var_is_lexically_shadowed(name)):
+            literal = self._stable_scalar_read_literal(node)
+            if literal is not None:
+                return literal
         # Inline known constants (literals). Input-backed names are NOT inlined
         # because strategy_set_input() can override them at runtime; emit the
         # variable name and let get_input_*() produce the current value.
         if (name in self._known_vars
+                and not reassigned_stable
                 and name not in self._input_backed_vars
                 and not primitive_shadow_read
                 and not self._known_var_is_lexically_shadowed(name)):
@@ -1543,6 +1564,8 @@ class ExprVisitor:
         if (isinstance(node, Identifier)
                 and node.name in self._known_vars
                 and node.name not in self._input_backed_vars
+                and (node.name not in self._reassigned_stable_scalars
+                     or self._stable_scalar_read_literal(node) is not None)
                 and not self._known_var_is_lexically_shadowed(node.name)):
             return None
         return "int" if cpp_type in ("int", "int64_t") else "float"
@@ -2276,6 +2299,18 @@ class ExprVisitor:
             pending = [index_node]
             while pending:
                 part = pending.pop()
+                if (isinstance(part, Identifier)
+                        and part.name in self._reassigned_stable_scalars):
+                    literal = self._stable_scalar_read_literal(part)
+                    if literal is None:
+                        known[part.name] = NON_CONSTANT
+                    elif literal in ("true", "false"):
+                        known[part.name] = literal == "true"
+                    else:
+                        known[part.name] = (
+                            float(literal) if any(c in literal for c in ".eE")
+                            else int(literal)
+                        )
                 if isinstance(part, Identifier) and part.name not in known and (
                     self.ctx.identifier_binding_nodes.get(id(part)) is not None
                     or part.name in self._current_func_param_types

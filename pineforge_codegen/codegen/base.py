@@ -922,6 +922,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # state are NOT here, so a TA length fed by them is still rejected
         # by the constructor guard.
         self._stable_runtime_vars: set[str] = set()
+        # These bindings have a different stable value at each source position.
+        # Their reads carry prefix folds; an unpositioned read uses live storage.
+        self._reassigned_stable_scalars: set[str] = set()
         # Narrow subset of persistent scalars that a TA constructor may fold
         # directly: one unique top-level ``var [int] name = <int literal>``
         # binding, never reassigned and never promoted to Series storage.
@@ -1420,12 +1423,22 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         after the callable and collection inventories have been initialized.
         Aliases follow their declaration bindings through the same query.
         """
+        discarded: set[str] = set()
         for stmt in self.ctx.ast.body:
             if (isinstance(stmt, VarDecl)
                     and stmt.name in self._known_vars
                     and stmt.name not in self._input_backed_vars
                     and self._crosses_wide_int_boundary(stmt.value, None, set())):
                 self._known_vars.pop(stmt.name)
+                discarded.add(stmt.name)
+        if discarded:
+            for read in self._walk_ast(self.ctx.ast):
+                if isinstance(read, Identifier) and read.name in discarded:
+                    read.annotations = {
+                        **(read.annotations or {}),
+                        "stable_scalar_fold": None,
+                        "stable_scalar_literal": None,
+                    }
 
     def _scalar_var_init_depends_on_runtime_input(self, init_ast) -> bool:
         """Whether a nominally constant initializer depends on input state.
@@ -3464,6 +3477,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         the TA ctor reset path can expand it. Anything non-stable (a ta.*
         result, a bar field, a series var) leaves the var untracked, so the
         ctor guard still rejects it loudly.
+
+        Keep the incoming fold on each global read as well. The final fold
+        sizes a constructor only when the read has reached that value.
+        Callable bodies and request payloads have no chart execution position.
         """
         from ..security_contexts import ScriptIndex
         body = self.ctx.ast.body or []
@@ -3486,6 +3503,24 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             name: {id(write) for write in index.writes.get(("global", name), ())}
             for name in inits
         }
+        unpositioned_reads: set[int] = set()
+        for node in self._walk_ast(self.ctx.ast):
+            if (isinstance(node, (FuncDef, MethodDef))
+                    or (isinstance(node, FuncCall)
+                        and self._resolve_callee(node.callee)[1] == "request")):
+                if self._budget is not None:
+                    self._budget.check(node.loc, Phase.CODEGEN)
+                unpositioned_reads.update(
+                    id(read) for read in self._walk_ast(node)
+                    if isinstance(read, Identifier)
+                )
+
+        def _record_reads(node, current: str | None) -> None:
+            for read in self._walk_ast(node):
+                if (isinstance(read, Identifier) and read.name == target_name
+                        and id(read) not in unpositioned_reads
+                        and self.ctx.identifier_binding_scopes.get(id(read)) == "global"):
+                    read_values[id(read)] = (read, current)
 
         def _value_after(stmts, fallback: str | None) -> str | None:
             """Fold a statement list into the final value expression for the
@@ -3501,6 +3536,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         return None  # compound assignment — not a stable fold
                     if not self._expr_is_stable(s.value):
                         return None
+                    _record_reads(s.value, current)
                     rhs = self._arith_expr_to_str(s.value)
                     if rhs is None:
                         return None
@@ -3518,12 +3554,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     # condition) must NOT abort the fold — the var simply keeps
                     # its current value through it.
                     if not _reassigns(s, target_name):
+                        _record_reads(s, current)
                         continue
                     if not self._expr_is_stable(s.condition):
                         return None
                     cond = self._arith_expr_to_str(s.condition)
                     if cond is None:
                         return None
+                    _record_reads(s.condition, current)
                     then_val = _value_after(s.body, current)
                     if then_val is None:
                         return None
@@ -3533,6 +3571,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     current = f"({cond} ? {then_val} : {else_val})"
                 elif isinstance(s, SwitchStmt):
                     if not _reassigns(s, target_name):
+                        _record_reads(s, current)
                         continue
                     subject = None
                     if s.expr is not None:
@@ -3541,6 +3580,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         subject = self._arith_operand_to_str(s.expr)
                         if subject is None:
                             return None
+                        _record_reads(s.expr, current)
                     selected = _value_after(s.default_body, current)
                     if selected is None:
                         return None
@@ -3553,6 +3593,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         cond = self._arith_operand_to_str(case_expr)
                         if cond is None:
                             return None
+                        _record_reads(case_expr, current)
                         if subject is not None:
                             cond = f"{subject} == {cond}"
                         case_val = _value_after(case_body, current)
@@ -3563,6 +3604,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 elif _reassigns(s, target_name):
                     # An unmodeled statement may still hide a target write.
                     return None
+                else:
+                    _record_reads(s, current)
             return current
 
         def _reassigns(node, name: str) -> bool:
@@ -3601,6 +3644,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             init_str = self._arith_expr_to_str(init_node)
             if init_str is None:
                 continue
+            read_values: dict[int, tuple[Identifier, str | None]] = {}
             final = _value_after(body, init_str)
             if final is None:
                 continue
@@ -3621,6 +3665,40 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     )
                 except ValueError:
                     pass
+            snapshots: dict[str | None, tuple[str | None, str | None]] = {}
+            for read, prefix in read_values.values():
+                if prefix not in snapshots:
+                    expression = prefix
+                    literal = None
+                    if prefix is not None:
+                        # Do not resolve another mutable binding through its
+                        # end value while evaluating an earlier prefix.
+                        tokens = set(re.findall(
+                            r"[A-Za-z_][A-Za-z_0-9]*", blank_string_literals(prefix)
+                        ))
+                        if tokens & reassigned:
+                            expression = None
+                        elif not self._refs_input(prefix):
+                            value = (
+                                self._known_vars.get(target_name) if prefix == final
+                                else fold_numeric_expression(prefix, self._known_vars)
+                            )
+                            if isinstance(value, bool):
+                                literal = "true" if value else "false"
+                            elif isinstance(value, int):
+                                if prefix == final or -(1 << 63) < value < (1 << 63):
+                                    literal = str(value)
+                            elif (isinstance(value, float) and value == value
+                                  and abs(value) != float("inf")):
+                                literal = str(value)
+                    snapshots[prefix] = (expression, literal)
+                expression, literal = snapshots[prefix]
+                read.annotations = {
+                    **(read.annotations or {}),
+                    "stable_scalar_fold": expression,
+                    "stable_scalar_literal": literal,
+                }
+            self._reassigned_stable_scalars.add(target_name)
             self._derived_input_expr[target_name] = final
             self._stable_runtime_vars.add(target_name)
             # Mark input-backed iff the expression references an input so the

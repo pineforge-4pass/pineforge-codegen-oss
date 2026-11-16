@@ -1650,6 +1650,27 @@ class TaSiteHelper:
                     and not self._ta_identifier_reads_top_level(read, scoped=True)
                     for read in self._walk_ast(node))
         }
+        # A constructor/reset has only the final fold. Earlier reads need the
+        # stable value at the actual call, captured once by first_call. A
+        # callable's substituted spelling has no unique execution position.
+        positioned = {
+            pos for pos, node in enumerate(nodes)
+            if any(
+                isinstance(read, Identifier)
+                and read.name in self._reassigned_stable_scalars
+                and self._ta_identifier_reads_top_level(read, scoped=True)
+                and (read.annotations or {}).get("stable_scalar_fold")
+                != self._derived_input_expr[read.name]
+                for read in self._walk_ast(node)
+            )
+        }
+        if site.owner_func is not None:
+            positioned.update(
+                pos for pos, arg in enumerate(site.ctor_args)
+                if self._reassigned_stable_scalars.intersection(
+                    re.findall(r"[A-Za-z_][A-Za-z_0-9]*", blank_string_literals(arg))
+                )
+            )
         refused = [
             pos for pos, arg in enumerate(site.ctor_args)
             if pos in shadowed
@@ -1657,10 +1678,10 @@ class TaSiteHelper:
                 and (self._runtime_ctor_arg_for_reset(arg) is None
                      or self._ta_arg_takes_plan(site, pos, arg)))
         ]
-        if not refused:
+        if not refused and not positioned:
             return None
         if len(nodes) != len(site.ctor_args):
-            return {"kind": "refused", "refused": refused}
+            return {"kind": "refused", "refused": sorted(set(refused) | positioned)}
         # A call outside every callable is spelled from its own nodes, whose
         # identifiers carry the analyzer's scope. A callable's constructor
         # arguments are its call site's spelling substituted into the body.
@@ -1670,7 +1691,25 @@ class TaSiteHelper:
                   if own_nodes else self._simple_ta_arg_cpp(site.ctor_args[pos]))
             for pos in refused
         }
-        return self._ta_plan_for(site, refused, simple)
+        return self._ta_plan_at_read(site, refused, simple, positioned)
+
+    def _ta_plan_at_read(self, site: "TACallSite", refused: list,
+                         simple: dict, positioned: set[int]) -> dict:
+        if not positioned:
+            return self._ta_plan_for(site, refused, simple)
+        # Positions the constructor already accepted are stable. Bind their
+        # actual reads once, without reclassifying them as series arguments or
+        # imposing a narrower simple-expression grammar.
+        plan = (
+            self._ta_plan_for(site, refused, simple) if refused
+            else {"kind": "first_call", "simple": simple,
+                  "family": self._ta_site_function(site)}
+        )
+        return {
+            **plan,
+            "refused": sorted(set(refused) | positioned),
+            "positioned": positioned.difference(refused),
+        }
 
     def _ta_plan_for(self, site: "TACallSite", refused: list, simple: dict) -> dict:
         """The plan of a site whose ``refused`` constructor arguments have the
@@ -1732,7 +1771,9 @@ class TaSiteHelper:
                 ):
                     self._refuse_shared_security_ta_lengths(sec_id, site)
                 return None
-            self._refuse_shared_security_ta_lengths(sec_id, site)
+            if (not plan.get("positioned")
+                    or len(plan["positioned"]) != len(plan["refused"])):
+                self._refuse_shared_security_ta_lengths(sec_id, site)
             return {**plan, "site": ctor_site, "sec_id": sec_id}
         if not site.ctor_args:
             return None
@@ -1749,6 +1790,12 @@ class TaSiteHelper:
                 )
             return None
         bound = [self._security_helper_bound_ast(node, stack) for node in nodes]
+        positioned = {
+            pos for pos, node in enumerate(bound) if node is not None
+            and any(isinstance(read, Identifier)
+                    and read.name in self._reassigned_stable_scalars
+                    for read in self._walk_ast(node))
+        }
         # The positions the runtime-reset path would refuse
         # (``_collect_ta_runtime_resets``); none -> that path, unchanged.
         # ``ctor_args`` are rendered C++ here: the bound argument's Pine
@@ -1759,14 +1806,14 @@ class TaSiteHelper:
             and ((self._runtime_ctor_arg_for_reset(arg) is None and not stability[pos])
                  or self._ta_bound_arg_takes_plan(site, pos, bound[pos]))
         ]
-        if not refused:
+        if not refused and not positioned:
             return None
         bound_simple = {
             pos: self._simple_ta_arg_cpp_node(node, scoped=True)
             for pos, node in enumerate(bound) if node is not None
         }
-        plan = self._ta_plan_for(
-            site, refused, {pos: bound_simple.get(pos) for pos in refused})
+        plan = self._ta_plan_at_read(
+            site, refused, {pos: bound_simple.get(pos) for pos in refused}, positioned)
         if plan["kind"] == "refused":
             forced = [pos for pos in plan["refused"]
                       if stability[pos] or self._runtime_ctor_arg_for_reset(ctor_args[pos]) is not None]
@@ -2000,7 +2047,9 @@ class TaSiteHelper:
         copy reached through a helper call takes the argument that call
         binds (``ctor_args`` holds the first call site's); any request.security
         copy reads ``timeframe.*`` in its requested context."""
-        if "bound_simple" in plan:
+        if position in plan.get("positioned", ()):
+            value = None  # Render the live read in its actual emission context.
+        elif "bound_simple" in plan:
             value = plan["bound_simple"].get(position)
         elif position in plan.get("refused", ()):
             # A refused position takes its context-free spelling, else (a
@@ -2162,6 +2211,12 @@ class TaSiteHelper:
             name = node.name
             if self._known_var_is_lexically_shadowed(name):
                 return None
+            if name in self._reassigned_stable_scalars:
+                if scoped and not self._ta_identifier_reads_top_level(node, scoped=True):
+                    return None
+                # Preserve the read's prefix literal if it has one; otherwise
+                # its live member is stable at this call's execution point.
+                return copy.deepcopy(node)
             if not self._ta_identifier_reads_top_level(node, scoped):
                 return None
             # A derived name tracked only since string literals are spelled
