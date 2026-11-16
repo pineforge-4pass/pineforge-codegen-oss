@@ -195,7 +195,7 @@ def test_host_name_collision(call, method):
 
 
 @pytest.mark.parametrize("call, method", _HOST_CALLS)
-def test_source_provenance_and_no_default_rate_literal(call, method):
+def test_host_failure_propagation_and_no_default_rate_literal(call, method):
     cpp = transpile(_HEADER + f"observed = {call}\n")
     statement = _assignment(cpp, "observed")
     assert f"return this->{method}(" in statement
@@ -205,17 +205,11 @@ def test_source_provenance_and_no_default_rate_literal(call, method):
     for shortcut in (" ? ", "if (", "0.9", "1.0", "1.2", "86400000",
                      "account_currency_fx", "unordered_map", "std::map"):
         assert shortcut not in statement
-    if method == "request_currency_rate":
-        literal = r'"(?:\\.|[^"\\])*"'
-        stop = re.search(
-            rf'_PF_NO_DATA_STOP\("request.currency_rate", ({literal}), 3, '
-            r'_pf_currency_error\.what\(\)\)', statement,
-        )
-        assert stop, statement
-        assert json.loads(stop[1]) == (
-            "request.currency_rate(syminfo.currency, strategy.account_currency)"
-        )
-        assert statement.index("this->request_currency_rate(") < stop.start()
+    # Propagate the engine's exception, code and arguments without relabeling.
+    # Currency failures have no API for attaching the original Pine call site.
+    assert "_PF_NO_DATA_STOP(" not in statement
+    assert "try {" not in statement
+    assert "catch (" not in statement
 
 
 # Separate real-engine TU: its public C declarations cannot conflict with the
@@ -251,6 +245,56 @@ struct CurrencyStrategy : GeneratedStrategy {
 '''
 
 
+@pytest.mark.parametrize("call, method", _HOST_CALLS)
+def test_missing_rate_preserves_host_failure_transport(call, method, tmp_path):
+    compile_env.skip_if_no_engine_lib()
+    host_arguments = (
+        '"USD", "EUR", "EUR", at_ms, false'
+        if method == "request_currency_rate" else '100.0, "EUR", at_ms'
+    )
+    driver = _DRIVER_HEADER + r'''
+int main() {
+    CurrencyStrategy strategy("USD");
+    const std::int64_t at_ms = 1743465600000LL;
+    ::pineforge::RunFailureValue expected;
+    try {
+''' + f"        strategy.{method}({host_arguments});\n" + r'''
+        return 1;
+    } catch (const ::pineforge::coded<std::runtime_error>& error) {
+        expected = error.run_failure();
+    }
+    Bar bars[] = {Bar{100, 100, 100, 100, 1, at_ms}};
+    ReportC report{};
+    run_backtest_full(&strategy, bars, 1, "1", "1", 0, 4, 0, &report);
+    report_free(&report);
+    if (strategy.last_error().empty()) return 2;
+    const auto actual = ::pineforge::run_failure_value_of(strategy);
+    // Compare canonical argument bytes, not just selected JSON fields.
+    if (actual.code != expected.code || !expected.args || !actual.args
+        || *actual.args != *expected.args) return 3;
+    std::cout << ::pineforge::run_failure_code_of(strategy) << '\n'
+              << ::pineforge::run_failure_args_of(strategy) << '\n';
+}
+'''
+    result = _compile_and_run(
+        _HEADER + f"observed = {call}\n", driver, tmp_path, "missing_rate",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stderr == ""
+    code, arguments = result.stdout.splitlines()
+    assert code == "currency_conversion_rate_unavailable"
+    reverse = method == "strategy_convert_to_symbol"
+    assert json.loads(arguments) == {
+        "function": method.removeprefix("strategy_").removeprefix("request_"),
+        "reason": "rate_unavailable",
+        "from": "EUR" if reverse else "USD",
+        "to": "USD" if reverse else "EUR",
+        "account_currency": "EUR",
+        "symbol_currency": "USD",
+        "time_ms": 1743465600000,
+    }
+
+
 def _run(source: str, driver: str, directory: Path, label: str) -> str:
     compile_env.skip_if_no_engine_lib()
     bridge = directory / f"{label}_host_input.cpp"
@@ -283,8 +327,8 @@ int main() {
         const std::string error = strategy.last_error();
         if (!error.empty()) {
             report_free(&report);
-            if (mode != 2 ||
-                error.find("currency_conversion_rate_unavailable") == std::string::npos) {
+            if (mode != 2 || std::string(::pineforge::run_failure_code_of(strategy))
+                != "currency_conversion_rate_unavailable") {
                 std::cerr << error;
                 return 3;
             }

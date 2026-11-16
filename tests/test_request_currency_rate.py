@@ -1,4 +1,4 @@
-"""Host currency requests retain branch laziness and failure provenance."""
+"""Host currency requests retain branch laziness and coded host failures."""
 
 from __future__ import annotations
 
@@ -63,76 +63,46 @@ def _assignment(cpp: str, name: str) -> str:
     return statements[0]
 
 
-def _request_stop_call(source: str, cpp: str) -> str:
-    # A series financial id has no recorded feed. Its value reaches a branch
-    # that trades, so its read emits the sibling no-data stop convention.
-    sibling_cpp = transpile(_PRELUDE + (
-        f"data = {_NO_DATA_CALL}\n"
-        "if data > 0\n"
-        "    strategy.entry('no data', strategy.long)\n"
-    ))
-    literal = r'"(?:\\.|[^"\\])*"'
-    pattern = (
-        rf"(?P<helper>_PF_\w+_STOP)\((?P<function>{literal}), "
-        rf"(?P<call>{literal}), (?P<line>\d+), (?P<message>{literal})\)"
+def _request_host_call(cpp: str) -> str:
+    # The host's coded exception already carries the conversion arguments.
+    # A catch here must not replace it with the sibling no-data request stop.
+    call = (
+        "return this->request_currency_rate("
+        "_pf_currency_from, _pf_currency_to, _pf_currency_account, "
+        "_pf_currency_time, _pf_currency_ignore);"
     )
-
-    def extract(generated: str, stop_pattern: str):
-        body = generated.split("void on_source_bar(", 1)[1]
-        stops = list(re.finditer(stop_pattern, body))
-        assert len(stops) == 1, body
-        return stops[0]
-
-    sibling = extract(sibling_cpp, pattern)
-    host_pattern = pattern.replace(
-        rf"(?P<message>{literal})", r"(?P<message>_pf_currency_error\.what\(\))"
-    )
-    stop = extract(cpp, host_pattern)
-    assert sibling.group("function") == '"request.financial"'
-    assert stop.group("function") == '"request.currency_rate"'
-    assert stop.group("call").startswith('"request.currency_rate(')
-    line = source[:source.index("request.currency_rate(")].count("\n") + 1
-    # Derive the whole expected invocation from the sibling, replacing only
-    # request provenance and English, from right to left to preserve spans.
-    expected = sibling.group()
-    for field, replacement in (
-        ("message", "_pf_currency_error.what()"),
-        ("line", str(line)),
-        ("call", stop.group("call")),
-        ("function", '"request.currency_rate"'),
-    ):
-        start = sibling.start(field) - sibling.start()
-        end = sibling.end(field) - sibling.start()
-        expected = expected[:start] + replacement + expected[end:]
-    assert stop.group() == expected
-    assert "try { return this->request_currency_rate(" in cpp
-    assert f"{expected}; throw;" in cpp
-    return expected
+    body = cpp.split("void on_source_bar(", 1)[1]
+    assert body.count(call) == 1
+    statement, = [line for line in body.splitlines() if call in line]
+    assert "_PF_NO_DATA_STOP(" not in statement
+    assert "try {" not in statement
+    assert "catch (" not in statement
+    return call
 
 
-def test_reporter_ternary_keeps_host_lookup_and_stop_in_untaken_arm():
+def test_reporter_ternary_keeps_host_lookup_in_untaken_arm():
     cpp = _translated(_REPORTER)
     literal = transpile(_REPORTER.replace(_CALL, "1.0"))
     before, untaken = _assignment(cpp, "rate").split(" : ", 1)
     literal_before, _ = _assignment(literal, "rate").split(" : ", 1)
-    stop = _request_stop_call(_REPORTER, cpp)
+    call = _request_host_call(cpp)
     assert before == literal_before
-    assert stop not in before and stop in untaken
+    assert call not in before and call in untaken
     assert "this->request_currency_rate(" not in before
     assert "this->request_currency_rate(" in untaken
-    assert cpp.count(stop) == 1
-    assert cpp.index(stop) > cpp.index("void on_source_bar(")
+    assert cpp.count(call) == 1
+    assert cpp.index(call) > cpp.index("void on_source_bar(")
 
 
-def test_never_taken_trade_branch_keeps_host_lookup_and_stop_in_branch():
+def test_never_taken_trade_branch_keeps_host_lookup_in_branch():
     cpp = _translated(_NEVER_TRADE)
     literal = transpile(_NEVER_TRADE.replace(_CALL, "1.0"))
     marker = next(line for line in literal.splitlines() if "if (false) {" in line)
     before, branch = cpp.split(marker, 1)
     branch, after = branch.split("\n" + marker.split("if", 1)[0] + "}", 1)
-    stop = _request_stop_call(_NEVER_TRADE, cpp)
-    assert stop in branch and "strategy_entry(" in branch
-    assert stop not in before + after
+    call = _request_host_call(cpp)
+    assert call in branch and "strategy_entry(" in branch
+    assert call not in before + after
     assert "this->request_currency_rate(" in branch
     assert "this->request_currency_rate(" not in before + after
 
@@ -148,10 +118,10 @@ def test_evaluated_call_lowers_at_its_assignment(call):
     literal = transpile(source.replace(call, "1.0"))
     statement = _assignment(cpp, "x")
     assert statement.split(" = ", 1)[0] == _assignment(literal, "x").split(" = ", 1)[0]
-    stop = _request_stop_call(source, cpp)
-    assert stop in statement
-    assert cpp.count(stop) == 1
-    assert cpp.index(stop) > cpp.index("void on_source_bar(")
+    host_call = _request_host_call(cpp)
+    assert host_call in statement
+    assert cpp.count(host_call) == 1
+    assert cpp.index(host_call) > cpp.index("void on_source_bar(")
 
 
 def test_switch_arm_no_longer_emits_the_legacy_warning():
@@ -159,7 +129,7 @@ def test_switch_arm_no_longer_emits_the_legacy_warning():
     cpp = _translated(source)
     literal = transpile(source.replace(_CALL, "1.0"))
     assert "void on_source_bar(" in literal
-    assert _request_stop_call(source, cpp) in cpp.split("void on_source_bar(", 1)[1]
+    assert _request_host_call(cpp) in cpp.split("void on_source_bar(", 1)[1]
 
 
 def test_argument_effects_stay_in_the_untaken_expression():
@@ -167,8 +137,8 @@ def test_argument_effects_stay_in_the_untaken_expression():
     literal = transpile(_SIDE_EFFECTS.replace(_SIDE_CALL, "1.0"))
     before, untaken = _assignment(cpp, "rate").split(" : ", 1)
     assert before == _assignment(literal, "rate").split(" : ", 1)[0]
-    stop = _request_stop_call(_SIDE_EFFECTS, cpp)
-    assert stop in untaken
+    call = _request_host_call(cpp)
+    assert call in untaken
     assert "bump" in untaken and "ignoreCurrency" in untaken
     assert "bump" not in before and "ignoreCurrency" not in before
     assert untaken.count("const std::string _pf_currency_from =") == 1
@@ -176,7 +146,8 @@ def test_argument_effects_stay_in_the_untaken_expression():
     assert untaken.count("const bool _pf_currency_ignore =") == 1
     assert (untaken.index('"GBP"') < untaken.index('"JPY"')
             < untaken.index("ignoreCurrency")
-            < untaken.index("this->request_currency_rate(") < untaken.index(stop))
+            < untaken.index("_pf_currency_account =")
+            < untaken.index("_pf_currency_time =") < untaken.index(call))
 
 
 @pytest.mark.parametrize("arguments", [
@@ -204,7 +175,7 @@ def test_skipped_call_arguments_are_still_analyzed():
     argument = 'input.string("EUR", "From currency")'
     source = _REPORTER.replace("'EUR'", argument)
     cpp = _translated(source)
-    assert _request_stop_call(source, cpp) in _assignment(cpp, "rate")
+    assert _request_host_call(cpp) in _assignment(cpp, "rate")
     # The same nested input under an ordinary string call has the same
     # analyzed descriptor, even though neither false arm executes.
     control = _REPORTER.replace(_CALL, f"str.length({argument})")
@@ -360,7 +331,8 @@ def test_evaluated_calls_stop_like_runtime_error(body, legacy, tmp_path):
     sibling_message, *sibling_failure = sibling.stderr.splitlines()
     # The engine now supplies currencies and evaluation time in the message;
     # runtime.error still supplies the progress/failure-transport control.
-    assert _MESSAGE in subject_message and _MESSAGE in control_message
+    assert "request.currency_rate" in subject_message
+    assert _MESSAGE in control_message
     assert "EUR" in subject_message and "USD" in subject_message
     evaluation_time = 180000 if "bar_index == 2" in body else 60000
     assert str(evaluation_time) in subject_message
@@ -368,10 +340,19 @@ def test_evaluated_calls_stop_like_runtime_error(body, legacy, tmp_path):
     assert len(subject_failure) == len(control_failure) == len(sibling_failure)
     if subject_failure:
         assert len(subject_failure) == 2
-        assert subject_failure[0] == sibling_failure[0] != control_failure[0]
-        assert subject_failure[0] and control_failure[0]
+        # The conversion failure is distinct from both no-data requests and
+        # runtime.error, even when runtime.error spells its code as text.
+        assert subject_failure[0] == _MESSAGE
+        assert sibling_failure[0] == "no_data_request"
+        assert control_failure[0] == "strategy_runtime_error"
         args = json.loads(subject_failure[1])
-        assert args["function"] == "request.currency_rate"
-        assert args["call"].startswith("request.currency_rate(")
-        assert args["line"] == source[:source.index(_CALL)].count("\n") + 1
+        assert args == {
+            "function": "currency_rate",
+            "reason": "unsupported_pair",
+            "from": "EUR",
+            "to": "USD",
+            "account_currency": "USD",
+            "symbol_currency": "USD",
+            "time_ms": evaluation_time,
+        }
         assert json.loads(sibling_failure[1])["function"] == "request.financial"

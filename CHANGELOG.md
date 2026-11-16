@@ -28,7 +28,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   execute once in PineForge's built-in parameter order, only when the call is
   evaluated. Codegen supplies no rate, identity shortcut or FX feed. The engine's
   host contract governs supplied-rate availability, matching-currency identity
-  and failure reporting, including ignored requests. Invalid currency-request
+  and failure reporting, including ignored requests. Conversion refusals retain
+  the engine's `currency_conversion_rate_unavailable` code and structured
+  currency/time arguments. Invalid currency-request
   argument types and malformed strategy-conversion bindings receive located
   translation diagnostics. Requires matching engine headers and runtime with
   these APIs; regenerate C++ and relink. (#376)

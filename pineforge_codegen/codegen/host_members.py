@@ -31,6 +31,7 @@ HOST_MEMBER_NAMES = frozenset({
     "cancel_all",
     "clear_security",
     "closed_trade_commission",
+    "closed_trade_count",
     "closed_trade_direction",
     "closed_trade_entry_bar_index",
     "closed_trade_entry_comment",

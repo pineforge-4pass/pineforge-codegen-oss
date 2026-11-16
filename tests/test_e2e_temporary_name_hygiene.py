@@ -131,10 +131,10 @@ def test_currency_arguments_cannot_capture_authored_temporaries(
     assert re.search(rf"^\s+pf_safe_{name} = ", cpp, re.M)
 
 
+# Currency failures propagate directly; no std::runtime_error catch local remains.
 DECL = re.compile(
     r"(?<![\w:])(?:(?:auto|double|int|int64_t|std::int64_t|bool|std::string|std::size_t|size_t"
     r"|long double)\s+|auto&&\s*|auto&\s*)(_\w+)\s*(?:=|;|\()")
-CATCH_DECL = re.compile(r"\bcatch\s*\(\s*const\s+std::runtime_error&\s+(_\w+)\s*\)")
 
 
 def test_every_temporary_the_emitter_declares_is_reserved():
@@ -162,13 +162,12 @@ def test_every_temporary_the_emitter_declares_is_reserved():
         authored = {t.value for t in Lexer(source).tokenize() if t.type.name == "IDENT"}
         for line in transpile(source).splitlines():
             if "[&]" in line:
-                names |= {n for n in DECL.findall(line) + CATCH_DECL.findall(line)
+                names |= {n for n in DECL.findall(line)
                           if n not in authored and not n.startswith("pf_safe_")}
     assert names, "the tapes' C++ declares no temporary"
     assert "_pf_timeframe_arg" in names
     assert {
         "_pf_currency_from", "_pf_currency_to", "_pf_currency_ignore",
         "_pf_currency_value", "_pf_currency_account", "_pf_currency_time",
-        "_pf_currency_error",
     } <= names
     assert sorted(n for n in names if not is_emitter_temporary(n)) == []

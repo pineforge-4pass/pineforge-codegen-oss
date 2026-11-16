@@ -154,7 +154,7 @@ from ..ast_nodes import (
 from ..collection_history import history_annotation, literal_offset
 from ..array_binding import bind_array_constructor_arguments
 from ..diagnostic_codes import render_diagnostic
-from ..external_requests import RECORDED_KEY_ANNOTATION, request_stop_marker
+from ..external_requests import RECORDED_KEY_ANNOTATION
 from ..intrinsic_binding import bind_intrinsic_arguments, validate_intrinsic_keywords
 from ..limits import iter_ast_nodes
 from ..reference_casts import na_reference_cast_kind
@@ -3865,20 +3865,10 @@ class CallVisitor:
         if is_request:
             arguments.append("_pf_currency_ignore")
         call = f"this->{methods[func_name]}({', '.join(arguments)})"
+        # Let the run boundary preserve the host's coded<std::runtime_error>
+        # and RunFailureInfo unchanged. The currency API has no call-site
+        # attachment method; a no-data stop would replace its code and args.
         result = f"return {call};"
-        if is_request:
-            # Argument failures retain their own provenance: catch only the
-            # host query. Preserve its currencies/timestamp/diagnostic text,
-            # adding the original Pine request site through the existing shim.
-            marker = request_stop_marker(node)
-            function = self._cpp_string_escape(marker["function"])
-            spelling = self._cpp_string_escape(marker["call"])
-            result = (
-                f"try {{ {result} }} "
-                "catch (const std::runtime_error& _pf_currency_error) { "
-                f'_PF_NO_DATA_STOP("{function}", "{spelling}", {marker["line"]}, '
-                "_pf_currency_error.what()); throw; }"
-            )
         return f"([&]() -> double {{ {' '.join(declarations)} {result} }}())"
 
     def _visit_strategy_call(self, func_name: str, node: FuncCall) -> str:
