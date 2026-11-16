@@ -138,6 +138,12 @@ def test_footprint_of_the_charts_own_symbol_reads_its_feed(tmp_path_factory):
     assert not result.ok and PINNED in result.error
 
 
+def _engine_refuses_column(name: str) -> bool:
+    """The engine's rule for the name of an instrument-feed column: required,
+    so not empty, and without a NUL (every name below is valid UTF-8)."""
+    return name == "" or "\0" in name
+
+
 @pytest.mark.parametrize("names", [
     ("fp\0left", "fp\0right", "fp"),
     ("fp\x01left", "fp\x01right", "fp"),
@@ -146,7 +152,13 @@ def test_footprint_of_the_charts_own_symbol_reads_its_feed(tmp_path_factory):
     ("", "suffix", "missing"),
 ], ids=["nul", "other-control", "ascii", "unicode-nul", "empty-name"])
 def test_generated_column_helpers_compare_whole_names(names):
-    """Internal serializer/lookup contract; public Pine produces ASCII names."""
+    """Internal serializer/lookup contract; public Pine produces ASCII names.
+
+    Two contracts, kept apart. The emitted literal carries the whole name and
+    the emitted lookup compares whole names: that holds for every row. A feed
+    the engine runs is the other one: it refuses a column named by the empty
+    string or holding a NUL, so a run over such a column is that refusal, by
+    its field, and only the other rows read their columns through a run."""
     from pineforge_codegen import CodeGen, _generate
     from pineforge_codegen.external_requests import FOOTPRINT_COLUMN_ANNOTATION
 
@@ -192,6 +204,9 @@ public:
     using GeneratedStrategy::_pf_symbol_data_installed;
     using GeneratedStrategy::_pf_symbol_column;
 
+    // The two columns go into the host's feed store, which the emitted lookup
+    // reads, under any name. Whether the engine runs a feed holding them is
+    // its own judgement of the names, made when the run begins.
     void install(const std::string& left, const std::string& right,
                  const std::vector<pineforge::Bar>& bars,
                  const std::vector<int64_t>& closes) {
@@ -234,18 +249,44 @@ int main() {
     check("other-timeframe", probe._pf_symbol_data_installed("PF:A", "60", LEFT));
     check("unknown-context-na", std::isnan(probe._pf_symbol_column(-1, LEFT)));
     probe.run(bars.data(), bars.size(), "15", "15");
-    if (!probe.last_error().empty()) throw std::runtime_error(probe.last_error());
-    std::cout << "payload=" << probe.d << "\n";
-    std::cout << "left=" << probe._pf_symbol_column(0, LEFT) << "\n";
-    std::cout << "right=" << probe._pf_symbol_column(0, RIGHT) << "\n";
+    // The run's own record, whole: nothing is caught and nothing is rethrown.
+    std::cout << "run-error=" << probe.last_error() << "\n";
+    std::cout << "run-code=" << pineforge::run_failure_code_of(probe) << "\n";
+    std::cout << "run-args=" << pineforge::run_failure_args_of(probe) << "\n";
+    if (probe.last_error().empty()) {
+        std::cout << "payload=" << probe.d << "\n";
+        std::cout << "left=" << probe._pf_symbol_column(0, LEFT) << "\n";
+        std::cout << "right=" << probe._pf_symbol_column(0, RIGHT) << "\n";
+    } else {
+        check("left-na", std::isnan(probe._pf_symbol_column(0, LEFT)));
+        check("right-na", std::isnan(probe._pf_symbol_column(0, RIGHT)));
+    }
     check("unknown-column-na", std::isnan(probe._pf_symbol_column(0, MISSING)));
 }
 '''.replace("LEFT", native_bytes(names[0])).replace("RIGHT", native_bytes(names[1]))
     driver = driver.replace("MISSING", native_bytes(names[2])).replace("// BODY", body)
     output = run_emitted_tu(cpp, driver, opt="-O0", label="complete column names")
-    assert output.splitlines() == [
+    # The emitted lookup, for every row: each installed name is found whole,
+    # and neither its prefix nor another feed's key is.
+    lookup = [
         "name0=1", "name1=1", "name2=0", "no-column-filter=1",
         f"empty-name={int(names[0] == '')}", "other-symbol=0", "other-timeframe=0",
-        "unknown-context-na=1", "payload=19.75", "left=19.75", "right=-23.5",
-        "unknown-column-na=1",
+        "unknown-context-na=1",
     ]
+    # The run, by the engine's rule for the two installed names.
+    if any(_engine_refuses_column(name) for name in names[:2]):
+        # The engine judges the feed before the first bar and names the field:
+        # 70 is the run spec's instrument-feed columns. No site is registered,
+        # so no column value is delivered.
+        outcome = [
+            "run-error=Pine adapter produced invalid native run spec field 70",
+            "run-code=symbol_feeds_refused",
+            'run-args={"field":"instrument_feed_columns","reason":"kernel_refused_series"}',
+            "left-na=1", "right-na=1",
+        ]
+    else:
+        # An accepted feed: the payload reads the last bar's value of the
+        # first column, and each lookup its own column's; the two differ.
+        outcome = ["run-error=", "run-code=", "run-args=",
+                   "payload=19.75", "left=19.75", "right=-23.5"]
+    assert output.splitlines() == lookup + outcome + ["unknown-column-na=1"]
