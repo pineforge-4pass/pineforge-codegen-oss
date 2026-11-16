@@ -7590,7 +7590,43 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     # ------------------------------------------------------------------
 
     def _visit_ExprStmt(self, node: ExprStmt) -> PineType:
-        return self._visit(node.expr)
+        result = self._visit(node.expr)
+        self._record_security_array_stmt(node)
+        return result
+
+    def _record_security_array_stmt(self, node: ExprStmt) -> None:
+        """Keep standalone array operations beside their binding's stores.
+
+        A requested copy must replay these operations in source order, just
+        as a scalar copy replays assignments. Resolve the receiver while its
+        lexical scope is live; unrelated statements in the same block stay out.
+        """
+        call = node.expr
+        if (self._enclosing_func_names or self._current_top_level_stmt is None
+                or not isinstance(call, FuncCall)
+                or not isinstance(call.callee, MemberAccess)):
+            return
+        intrinsic = sigs.get_intrinsic("array", call.callee.member)
+        if intrinsic is None or intrinsic.receiver_kind != "array":
+            return
+        receiver = call.callee.object
+        if (isinstance(receiver, Identifier) and receiver.name == "array"
+                and self._value_bindings.declaration_bindings.get(id(receiver)) is None):
+            receiver = self._bind_callable_args(call, intrinsic.param_names)[0]
+        elif self._receiver_method_key(receiver, call.callee.member) is not None:
+            return
+        if not isinstance(receiver, Identifier):
+            return
+        symbol = self._symbols.resolve(receiver.name)
+        if (symbol is None or symbol.scope != "global"
+                or symbol.type_spec is None or symbol.type_spec.kind != "array"):
+            return
+        self._record_global_binding_stmt(
+            receiver.name, symbol.pine_type, symbol.is_var,
+        )
+        node.annotations = {
+            **(node.annotations or {}), "security_array_receiver": receiver.name,
+        }
 
     # ------------------------------------------------------------------
     # Expression visitors

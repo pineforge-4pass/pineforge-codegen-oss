@@ -2537,6 +2537,11 @@ class SecurityEmitter:
         return f"{self._security_state_name(sec_id, name)}_initialized"
 
     def _security_cpp_type_for_mutable(self, name: str, info) -> str:
+        spec = self._global_collection_types.get(name)
+        if spec is not None and spec.kind == "array":
+            # PineType does not retain collection shape.
+            # Each requested copy needs the same array type as chart storage.
+            return self._type_spec_to_cpp(self._widen_array_spec_for_name(name, spec))
         if getattr(info, "is_series", False):
             return self._series_type_for(name)
         cpp_type = PINE_TYPE_TO_CPP.get(getattr(info, "pine_type", PineType.FLOAT), "double")
@@ -8232,6 +8237,16 @@ class SecurityEmitter:
             self._emit_security_rebind_assignment(
                 sec_id, node, lines, relevant_names, ta_results, indent, emitted_lines
             )
+            return
+        if isinstance(node, ExprStmt):
+            receiver = (node.annotations or {}).get("security_array_receiver")
+            if receiver in relevant_names:
+                expression = self._build_security_expr(
+                    sec_id, node.expr, None, ta_results,
+                    security_mutable_names=relevant_names,
+                    emitted_lines=emitted_lines,
+                )
+                lines.append(f"{'    ' * indent}{expression};")
             return
         if isinstance(node, IfStmt):
             body_lines: list[str] = []
