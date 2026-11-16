@@ -9,10 +9,7 @@ from .tables import STRATEGY_DIRECTION_VALUES
 
 
 _QUOTED_STRING = r'"(?:[^"\\\x00\r\n]|\\(?:["\\nrt]|000))*"'
-_STRING_LITERAL = re.compile(
-    rf'(?:std::string\((?P<wrapped>{_QUOTED_STRING})(?:, (?P<count>0|[1-9][0-9]*))?\)'
-    rf'|(?P<bare>{_QUOTED_STRING}))'
-)
+_STRING_LITERAL = re.compile(rf'(?:std::string\({_QUOTED_STRING}\)|{_QUOTED_STRING})')
 _STRING_ESCAPE = re.compile(r'\\(?:["\\nrt]|000)')
 _STRING_ESCAPE_VALUES = {
     r'\"': '"', r'\\': '\\', r'\n': '\n', r'\r': '\r', r'\t': '\t', r'\000': '\0',
@@ -40,11 +37,7 @@ def _string_setting_arg(expr, lowered: str) -> str | None:
             )
         if not known:
             return None
-    try:
-        _string_setting_value(lowered)
-    except ValueError:
-        return None
-    return lowered
+    return lowered if _STRING_LITERAL.fullmatch(lowered) else None
 
 
 def _visit_setting_arg(emitter, expr) -> str:
@@ -60,22 +53,16 @@ def _visit_setting_arg(emitter, expr) -> str:
 
 
 def _string_setting_value(lowered: str) -> str:
-    """Decode counted and uncounted literals with their native string semantics.
+    """Decode the emitter's literals as native std::string(const char*) values.
 
     Only the serializer's escape grammar is accepted; Unicode stays literal.
-    A counted literal retains NUL and must carry its exact UTF-8 byte count.
-    Uncounted C-string conversions still stop at the first NUL. An escaped
-    backslash remains ordinary data in either form.
+    The receipt's string constructors stop at the first NUL, including one
+    followed by digits, while an escaped backslash remains ordinary data.
     """
-    match = _STRING_LITERAL.fullmatch(lowered)
-    if match is None:
+    if not _STRING_LITERAL.fullmatch(lowered):
         raise ValueError("setting value is not an emitted C++ string literal")
-    literal = match["wrapped"] or match["bare"]
+    literal = lowered[len("std::string("):-1] if lowered.startswith("std::string(") else lowered
     decoded = _STRING_ESCAPE.sub(lambda match: _STRING_ESCAPE_VALUES[match.group()], literal[1:-1])
-    if match["count"] is not None:
-        if int(match["count"]) != len(decoded.encode("utf-8")):
-            raise ValueError("setting value is not an emitted C++ string literal")
-        return decoded
     return decoded.partition("\0")[0]
 
 
@@ -253,7 +240,10 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
                         option = emitter._string_input_argument(option, refuse_unproven=False)
                     option_cpp = _visit_setting_arg(emitter, option)
                     if getter == "get_input_string":
-                        option_cpp = _string_setting_arg(option, option_cpp)
+                        # An input's options stay C strings: they stop at the
+                        # first NUL, as the default does.
+                        option_cpp = _string_setting_arg(
+                            option, emitter._unsized_std_string(option_cpp))
                         if option_cpp is None:
                             supported = "false"
                         else:

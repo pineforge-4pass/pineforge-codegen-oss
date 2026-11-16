@@ -91,7 +91,6 @@ from .constant_fold import NON_CONSTANT, fold_constant_expression
 from .run_stops import checked_history_offset, history_offset_guard, request_stop
 from .capacities import literal_history_offset
 
-from ..analyzer.value_bindings import ValueBindings
 from ..errors import CodegenInvariantError, Phase
 from ..symbols import TypeSpec
 from ..builtin_constants import builtin_constant
@@ -777,30 +776,20 @@ class ExprVisitor:
         if name in self._current_func_series_params:
             return True
         if (name in self._current_func_param_types
+                or (name in BAR_FIELDS and self._builtin_local_symbol(node) is None)
                 or self._reads_builtin_variable(node)):
             return False
         return self._binding_is_series(
             name, self._call_site_var_name(node, self._safe_name(name)))
 
     def _reads_builtin_variable(self, node: Identifier) -> bool:
-        """Whether this read resolves to a builtin rather than an authored value.
-
-        Bar fields follow the same lexical rule as other builtins. Preserve
-        the analyzer's exact binding, including an explicit builtin binding
-        before a later declaration. Copied reads retain authored-use metadata.
-        """
-        name = node.name
-        if ((name not in BAR_FIELDS and name not in BAR_BUILTINS)
-                or name in self._current_func_param_types
-                or name in self._current_func_series_params):
-            return False
-        binding = (
-            self.ctx.identifier_decl_bindings[id(node)]
-            if id(node) in self.ctx.identifier_decl_bindings
-            else ValueBindings.declaration_of(node)
-        )
+        """Whether ``node`` reads a builtin variable (``second``, ``hour``,
+        ``bar_index``...) and not a user variable of the same name
+        (``float second = na``). A read the analyzer bound to a user
+        declaration in scope is the user's: it carries the annotation a
+        tuple-destructured name does, or ``builtin_shadow_binding``."""
         annotations = node.annotations or {}
-        return (binding is None
+        return (node.name in BAR_BUILTINS
                 and not annotations.get("tuple_builtin_binding")
                 and not annotations.get("builtin_shadow_binding"))
 
@@ -822,8 +811,10 @@ class ExprVisitor:
         if (retained and name in retained.aliases
                 and not self._known_var_is_lexically_shadowed(name)):
             return f"(*{self._safe_name(name)})"
+        if name in BAR_FIELDS and self._builtin_local_symbol(node) is None:
+            return BAR_FIELDS[name]
         if self._reads_builtin_variable(node):
-            return BAR_FIELDS[name] if name in BAR_FIELDS else BAR_BUILTINS[name]
+            return BAR_BUILTINS[name]
         binding = self.ctx.identifier_decl_bindings.get(id(node))
         primitive_shadow_read = (
             binding is not None
@@ -1979,44 +1970,6 @@ class ExprVisitor:
             )
         return memo[key]
 
-    def _concat_type(self, operand) -> str:
-        """The scalar type of a concatenation operand, including series locals."""
-        frame = getattr(self, "_security_fallback_frame", None)
-        if (frame is not None and id(operand) not in frame["chart"]
-                and self._security_value_is_string(
-                    operand, frame["args"][5], ())):
-            # A builtin's argument can stay in this visitor while its reads
-            # are delegated to requested storage. Type the operator in that
-            # same binding frame, including cloned callable locals.
-            return "std::string"
-        inferred = self._infer_type(operand)
-        if (inferred == "double"
-                and isinstance(operand, Identifier)
-                and operand.name in self._current_func_locals
-                and self._identifier_reads_series(operand)
-                and self._series_type_for(operand.name) == "std::string"):
-            # Series locals bypass the scalar local-type map. Their current
-            # slot has the same type as their history reads.
-            return "std::string"
-        return inferred
-
-    def _string_concat_cpp(self, left: str, right: str, *,
-                           left_node=None, right_node=None) -> str:
-        """Join two rendered string values through their UTF-16 units."""
-        self._uses_tv_string_units = True
-        if any(
-            isinstance(operand, StringLiteral)
-            and operand.value
-            and operand.value.isascii()
-            for operand in (left_node, right_node)
-        ):
-            # A nonempty ASCII operand separates any surrogate halves:
-            # this boundary cannot need recomposition. Keep the native
-            # string expression and the operand types already inferred,
-            # normalizing any pairs formed earlier inside either operand.
-            return f"_pf_u16_normalize({left} + {right})"
-        return f"_pf_u16_concat({left}, {right})"
-
     def _lower_binop(self, node: BinOp, left: str, right: str,
                      widened: bool = False, na_checked: bool = False) -> str:
         """The C++ of ``node`` over its rendered operands; ``widened`` when
@@ -2037,8 +1990,20 @@ class ExprVisitor:
                         f"const bool _pf_v5_r = ({right}); "
                         f"return _pf_v5_l {op} _pf_v5_r; }}())")
         if node.op == "+":
-            lt = self._concat_type(node.left)
-            rt = self._concat_type(node.right)
+            def _concat_type(operand):
+                inferred = self._infer_type(operand)
+                if (inferred == "double"
+                        and isinstance(operand, Identifier)
+                        and operand.name in self._current_func_locals
+                        and self._identifier_reads_series(operand)
+                        and self._series_type_for(operand.name) == "std::string"):
+                    # Series locals bypass the scalar local-type map. Their
+                    # current slot has the same type as their history reads.
+                    return "std::string"
+                return inferred
+
+            lt = _concat_type(node.left)
+            rt = _concat_type(node.right)
             if lt == "std::string" or rt == "std::string":
                 def _as_string(rendered, inferred):
                     if inferred == "std::string":
@@ -2047,9 +2012,7 @@ class ExprVisitor:
                         return f'(({rendered}) ? std::string("true") : std::string("false"))'
                     return f"std::to_string({rendered})"
 
-                return self._string_concat_cpp(
-                    _as_string(left, lt), _as_string(right, rt),
-                    left_node=node.left, right_node=node.right)
+                return f"({_as_string(left, lt)} + {_as_string(right, rt)})"
         if (node.op in ("+", "-", "*", "/", "%")
                 and not widened and not na_checked
                 and any(self._integer_na_operand(side)

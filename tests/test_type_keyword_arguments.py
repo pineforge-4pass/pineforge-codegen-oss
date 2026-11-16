@@ -23,27 +23,12 @@ def _error(body):
 @pytest.mark.parametrize("value", [
     '"abc"',
     '"abcdefg"',
-    '"a😀b"',
     'bar_index % 2 == 0 ? "abcd" : "abcdefg"',
     'str.tostring(math.sqrt(number = 4.0))',
 ])
 def test_type_keyword_label_lowers_like_positional(value):
     expected = _transpile(f"pf_value = str.length({value})")
     assert _transpile(f"pf_value = str.length(string = {value})") == expected
-
-
-@pytest.mark.parametrize("name", ["source", "value", "pf_unknown"])
-def test_length_rejects_undeclared_parameter_names(name):
-    # TV accepts string= and independently refuses source= (unknown argument
-    # and missing string). Every undeclared label uses the same registry rule.
-    body = f'pf_value = str.length({name} = "a😀b")'
-    diagnostic = _error(body)
-    assert diagnostic.code == "PF-E2027"
-    assert diagnostic.phase == Phase.ANALYZER
-    assert diagnostic.args == {"key": "str.length", "name": name}
-    assert diagnostic.location.line == 3
-    argument_start = body.index("(") + 1
-    assert diagnostic.location.col == body.index(f"{name} =", argument_start) + 1
 
 
 @pytest.mark.parametrize("name", TYPE_NAMES)

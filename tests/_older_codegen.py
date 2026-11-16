@@ -73,13 +73,9 @@ def with_utf16_units(cpp: str) -> str:
     The older emission counted ``str.length`` through ``(int)text.length()`` and
     carried no unit helpers. The calls become calls of the helper and the helper
     block is added before the syminfo helpers, where the current emitter puts
-    it. A repaired string concatenation also needs the block. A text that
-    already carries the current block is not given a second copy."""
+    it. A text without such a call is returned as it is."""
     spelled, sites = _spell_lengths(cpp)
-    if not sites and "_pf_u16_concat(" not in spelled:
+    if not sites:
         return cpp
-    if "inline int _pf_u16_length(" in spelled:
-        assert TV_STRING_UNITS_CPP in spelled, spelled
-        return spelled
     assert spelled.count(_SYMINFO_HELPERS) == 1, spelled
     return spelled.replace(_SYMINFO_HELPERS, TV_STRING_UNITS_CPP + "\n\n" + _SYMINFO_HELPERS)

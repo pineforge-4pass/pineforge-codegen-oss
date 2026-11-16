@@ -111,14 +111,10 @@ from ..limits import iter_ast_nodes
 from .drawing import DRAWING_LIFETIME_CPP, POLYLINE_HANDLE_CPP
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 from .tv_string_units import TV_STRING_UNITS_CPP, TV_STRING_UNITS_MARKER
-from .unicode_regex import UNICODE_REGEX_CPP
 
 
 # Keep the late-selected include beside the headers the C++ allowlist reads.
 ENUM_STRING_INCLUDE = '#include <pineforge/source/pine_policy_support.hpp>'
-UNICODE_REGEX_INCLUDES = (
-    "#include <locale>", "#include <regex>", "#include <utility>",
-)
 _TRADE_HISTORY_POLICY_MARKER = "        /* __PINEFORGE_TRADE_HISTORY_POLICY__ */"
 
 
@@ -139,9 +135,6 @@ class TopLevelEmitter:
         self._uses_tv_number_format = any(
             (namespace == "str" and func_name in {"format", "tostring"})
             or (namespace is None and func_name == "tostring")
-            # Namespace and method joins can render numeric elements without
-            # an explicit str.tostring call, including in callable bodies.
-            or (isinstance(node.callee, MemberAccess) and node.callee.member == "join")
             or (namespace == "log" and func_name in {"info", "warning", "error"}
                 and len(node.args) > 1)
             for root in roots
@@ -1579,7 +1572,7 @@ class TopLevelEmitter:
             "    // invalid (na under ignore_invalid_symbol, a stopped run without it).",
             "    bool _pf_symbol_data_installed(const std::string& symbol,",
             "                                   const std::string& timeframe,",
-            "                                   const std::string* column = nullptr) const {",
+            "                                   const char* column = nullptr) const {",
             "        const auto facts = symbol_facts_.find(symbol);",
             "        if (facts != symbol_facts_.end() && facts->second.valid && !*facts->second.valid)",
             "            return true;",
@@ -1590,15 +1583,10 @@ class TopLevelEmitter:
             "            if (feed.instrument != symbol || feed.tf != tf) continue;",
             "            if (column == nullptr) return true;",
             "            for (const auto& named : feed.columns) {",
-            "                if (named.name == *column) return true;",
+            "                if (named.name == column) return true;",
             "            }",
             "        }",
             "        return false;",
-            "    }",
-            "    bool _pf_symbol_data_installed(const std::string& symbol,",
-            "                                   const std::string& timeframe,",
-            "                                   const std::string& column) const {",
-            "        return _pf_symbol_data_installed(symbol, timeframe, &column);",
             "    }",
             "    // Its payload seeds ta.ema as TradingView does in the requested context:",
             "    // na until `length` values, then their mean (EmaSeeding::SimpleAverage).",
@@ -1610,15 +1598,14 @@ class TopLevelEmitter:
             "        _PFForeignEmaSeeding& operator=(const _PFForeignEmaSeeding&) = delete;",
             "    };",
         ])
-        if any(self._security_footprint_column(info["sec_id"]) is not None
-               for info in self._security_eval_info):
+        if any(self._security_footprint_column(info["sec_id"]) for info in self._security_eval_info):
             lines.extend([
                 "    // A footprint's delta: the named column of the requested bar.",
-                "    double _pf_symbol_column(int sec_id, const std::string& name) const {",
+                "    double _pf_symbol_column(int sec_id, const char* name) const {",
                 "        return security_column_value(sec_id, name);",
                 "    }",
                 "#else",
-                "    double _pf_symbol_column(int, const std::string&) const { return na<double>(); }",
+                "    double _pf_symbol_column(int, const char*) const { return na<double>(); }",
             ])
         lines.append("#endif")
 
@@ -1632,7 +1619,7 @@ class TopLevelEmitter:
         sec_id = info["sec_id"]
         symbol = self._security_tf_runtime_expr(info["symbol_node"])
         column = self._security_footprint_column(sec_id)
-        column = f', {self._cpp_string_literal(column)}' if column is not None else ""
+        column = f', "{self._cpp_string_escape(column)}"' if column else ""
         ignore_node = info.get("ignore_invalid_node")
         if ignore_node is None:
             ignore = "false"
@@ -2205,10 +2192,6 @@ class TopLevelEmitter:
             ) from exc
         if self._uses_tv_string_units:
             lines[marker] = TV_STRING_UNITS_CPP
-            if self._uses_unicode_regex:
-                lines[marker] += "\n".join(
-                    header for header in UNICODE_REGEX_INCLUDES if header not in lines
-                ) + "\n" + UNICODE_REGEX_CPP
         else:
             del lines[marker:marker + 2]
 

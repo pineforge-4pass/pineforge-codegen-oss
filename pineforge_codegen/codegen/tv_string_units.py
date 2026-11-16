@@ -4,11 +4,9 @@ TradingView measures a Pine string in UTF-16 code units: a character outside
 the Basic Multilingual Plane (an emoji) is two units, every other character is
 one. The generated code keeps text as UTF-8, whose byte counts differ from the
 unit counts for every character that is not plain ASCII (an accent is two
-bytes, a CJK character three, an emoji four). String measurement, search and
-substring use these translation-unit-local helpers. String-array joins also
-use the same units, so adjacent surrogate halves recompose across parts and
-separators. Concatenation uses the same decode/re-encode path, preserving
-unpaired halves; the engine is not involved.
+bytes, a CJK character three, an emoji four). ``str.length``, ``str.pos`` and
+``str.substring`` count and cut through these translation-unit-local helpers;
+the engine is not involved.
 
 A cut between the two units of an emoji leaves a lone surrogate. UTF-8 has no
 form for it, so each half is kept as its own three-byte sequence, the form
@@ -37,6 +35,12 @@ inline int _pf_u16_length(const std::string& text) {
     return static_cast<int>(units);
 }
 
+inline int _pf_u16_pos(const std::string& text, const std::string& needle) {
+    const std::size_t at = text.find(needle);
+    if (at == std::string::npos) return -1;
+    return _pf_u16_length(text.substr(0, at));
+}
+
 inline std::vector<uint16_t> _pf_u16_decode(const std::string& text) {
     std::vector<uint16_t> units;
     units.reserve(text.size());
@@ -62,46 +66,6 @@ inline std::vector<uint16_t> _pf_u16_decode(const std::string& text) {
         }
     }
     return units;
-}
-
-inline std::size_t _pf_u16_find(const std::string& _pf_text,
-                                const std::string& _pf_needle) {
-    const auto _pf_text_units = _pf_u16_decode(_pf_text);
-    const auto _pf_needle_units = _pf_u16_decode(_pf_needle);
-    if (_pf_needle_units.empty()) return 0;
-    const auto _pf_at = std::search(
-        _pf_text_units.begin(), _pf_text_units.end(),
-        _pf_needle_units.begin(), _pf_needle_units.end());
-    if (_pf_at == _pf_text_units.end()) return std::string::npos;
-    return static_cast<std::size_t>(_pf_at - _pf_text_units.begin());
-}
-
-inline int _pf_u16_pos(const std::string& _pf_text, const std::string& _pf_needle) {
-    const std::size_t _pf_at = _pf_u16_find(_pf_text, _pf_needle);
-    return _pf_at == std::string::npos ? na<int>() : static_cast<int>(_pf_at);
-}
-
-inline bool _pf_u16_contains(const std::string& _pf_text,
-                             const std::string& _pf_needle) {
-    return _pf_u16_find(_pf_text, _pf_needle) != std::string::npos;
-}
-
-inline bool _pf_u16_startswith(const std::string& _pf_text,
-                               const std::string& _pf_needle) {
-    const auto _pf_text_units = _pf_u16_decode(_pf_text);
-    const auto _pf_needle_units = _pf_u16_decode(_pf_needle);
-    return _pf_needle_units.size() <= _pf_text_units.size()
-        && std::equal(_pf_needle_units.begin(), _pf_needle_units.end(),
-                      _pf_text_units.begin());
-}
-
-inline bool _pf_u16_endswith(const std::string& _pf_text,
-                             const std::string& _pf_needle) {
-    const auto _pf_text_units = _pf_u16_decode(_pf_text);
-    const auto _pf_needle_units = _pf_u16_decode(_pf_needle);
-    return _pf_needle_units.size() <= _pf_text_units.size()
-        && std::equal(_pf_needle_units.rbegin(), _pf_needle_units.rend(),
-                      _pf_text_units.rbegin());
 }
 
 // The units from begin to end, as UTF-8. A high surrogate that the cut leaves
@@ -136,31 +100,6 @@ inline std::string _pf_u16_encode(const std::vector<uint16_t>& units, std::size_
         }
     }
     return text;
-}
-
-inline std::string _pf_u16_normalize(const std::string& text) {
-    const std::vector<uint16_t> units = _pf_u16_decode(text);
-    return _pf_u16_encode(units, 0, units.size());
-}
-
-inline std::string _pf_u16_concat(const std::string& left, const std::string& right) {
-    return _pf_u16_normalize(left + right);
-}
-
-template<class _pf_StringArray>
-inline std::string _pf_u16_join(const _pf_StringArray& _pf_parts,
-                                const std::string& _pf_separator) {
-    const auto _pf_separator_units = _pf_u16_decode(_pf_separator);
-    std::vector<uint16_t> _pf_join_units;
-    for (std::size_t _pf_i = 0; _pf_i < _pf_parts.size(); ++_pf_i) {
-        if (_pf_i != 0)
-            _pf_join_units.insert(_pf_join_units.end(),
-                                  _pf_separator_units.begin(), _pf_separator_units.end());
-        const auto _pf_part_units = _pf_u16_decode(_pf_parts[_pf_i]);
-        _pf_join_units.insert(_pf_join_units.end(),
-                              _pf_part_units.begin(), _pf_part_units.end());
-    }
-    return _pf_u16_encode(_pf_join_units, 0, _pf_join_units.size());
 }
 
 // std::string::substr in units: past the end it throws std::out_of_range with

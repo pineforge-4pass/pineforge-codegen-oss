@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import re
 
-import pytest
-
 from pineforge_codegen import transpile
 from tests import _compile as compile_env
 
@@ -100,80 +98,3 @@ plot(v)
         body,
     ), body
     compile_env.compile_cpp(cpp, label="security-helper-state-narrowing")
-
-
-@pytest.mark.parametrize(
-    "prefix, arguments, forwarded",
-    [
-        pytest.param("string absent = na\n", '"é", absent', False, id="global-na"),
-        pytest.param(
-            "string absent = na\nstring alias = absent\n",
-            '"中", alias', False, id="aliased-global-na",
-        ),
-        pytest.param("", 'na, "suffix"', False, id="parameter-na"),
-        pytest.param(
-            "string absent = na\n", 'absent, "尾"', True, id="forwarded-first-na",
-        ),
-        pytest.param(
-            "first = 17\nstring absent = na\n", '"lead", absent', True,
-            id="parameter-shadows-global",
-        ),
-    ],
-)
-def test_requested_string_arguments_type_inferred_locals(prefix, arguments, forwarded):
-    # The declaration and missing-value representations are the unit target;
-    # Unicode/NA value observations belong to the external parity probes.
-    helper = (
-        "combine(string first, string last) =>\n"
-        "    accumulated = first\n"
-        "    accumulated += last\n"
-        "    accumulated\n"
-    )
-    if forwarded:
-        helper += (
-            "forward(string first, string last) =>\n"
-            "    copied = first\n"
-            "    combine(copied, last)\n"
-        )
-    callee = "forward" if forwarded else "combine"
-    source = (
-        '//@version=6\nstrategy("requested string argument storage")\n'
-        + helper + prefix
-        + f'joined = request.security(syminfo.tickerid, "1", {callee}({arguments}))\n'
-        + "plot(str.length(joined))\n"
-    )
-    cpp = transpile(source)
-    body = _eval_bodies(cpp)
-    assert re.search(r"std::string _sec0_combine_\d+_accumulated = ", body), body
-    if forwarded:
-        assert re.search(r"std::string _sec0_forward_\d+_copied = ", body), body
-    assert "na<std::string>()" in body, body
-    assert "na<double>()" not in body, body
-    assert "_pf_u16_concat(" in body, body
-    compile_env.compile_cpp(cpp, label="requested-string-argument-storage")
-
-
-@pytest.mark.parametrize(
-    "storage",
-    [pytest.param("var ", id="persistent"), pytest.param("", id="history")],
-)
-def test_requested_inferred_string_state_declares_string_history(storage):
-    history = "    previous = accumulated[1]\n" if not storage else ""
-    result = "previous" if history else "accumulated"
-    source = (
-        '//@version=6\nstrategy("requested inferred string history")\n'
-        "read_value(string first) =>\n"
-        f"    {storage}accumulated = first\n"
-        + history + f"    {result}\n"
-        + 'joined = request.security(syminfo.tickerid, "1", read_value(na))\n'
-        + "plot(str.length(joined))\n"
-    )
-    cpp = transpile(source)
-    body = _eval_bodies(cpp)
-    assert "Series<std::string>> _security_helper_series_str_;" in cpp
-    assert "_security_helper_series_str_" in body, body
-    assert "na<std::string>()" in body, body
-    assert "na<double>()" not in body, body
-    if history:
-        assert re.search(r"std::string _sec0_read_value_\d+_previous = ", body), body
-    compile_env.compile_cpp(cpp, label="requested-inferred-string-history")

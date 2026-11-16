@@ -387,30 +387,23 @@ class _CounterQuery:
         return None
 
 
-class IntegerConstants:
-    """Memoized immutable integer arithmetic, shared by value and argument checks.
+class _NumericValueQuery(_CounterQuery):
+    """One value query for storage and counters, including integral proofs."""
 
-    Missing values and runtime expressions supply no proof. In particular, na
-    is never converted to the native integer sentinel while checking a value.
-    """
+    _use_reassignment_values = True
 
-    def __init__(self, sources, bindings, budget=None):
-        self.sources = sources
-        self.bindings = bindings
-        self.budget = budget
-        self.values = {}
+    def __init__(self, check_query):
+        super().__init__(check_query.sources, check_query.bindings, check_query.scopes)
+        self.check_query = check_query
+        self.integer_constants = {}
 
-    def value(self, node):
+    def _integer_constant(self, node):
         """Prove an integer using only immutable literal arithmetic."""
-        if node is None:
-            return None
-        if self.budget is not None:
-            self.budget.check(node.loc, Phase.ANALYZER)
         key = id(node)
-        if key in self.values:
-            return self.values[key]
+        if key in self.integer_constants:
+            return self.integer_constants[key]
         # Memoize failures too; a provisional failure breaks alias cycles.
-        self.values[key] = None
+        self.integer_constants[key] = None
         value = None
         if isinstance(node, NumberLiteral) and type(node.value) is int:
             value = node.value
@@ -422,14 +415,14 @@ class IntegerConstants:
                     and declaration.name not in self.sources.reassigned_names
                     and declaration.type_hint in (None, "int")
                     and (declaration.annotations or {}).get("qualifier") in (None, "const")):
-                value = self.value(declaration.value)
+                value = self._integer_constant(declaration.value)
         elif isinstance(node, UnaryOp) and node.op in {"+", "-"}:
-            operand = self.value(node.operand)
+            operand = self._integer_constant(node.operand)
             if operand is not None:
                 value = -operand if node.op == "-" else operand
         elif isinstance(node, BinOp) and node.op in {"+", "-", "*", "/", "%"}:
-            left = self.value(node.left)
-            right = self.value(node.right)
+            left = self._integer_constant(node.left)
+            right = self._integer_constant(node.right)
             if left is not None and right is not None:
                 if node.op == "+":
                     value = left + right
@@ -443,22 +436,8 @@ class IntegerConstants:
                     elif node.op == "%":
                         remainder = abs(left) % abs(right)
                         value = -remainder if left < 0 else remainder
-        self.values[key] = value
+        self.integer_constants[key] = value
         return value
-
-
-class _NumericValueQuery(_CounterQuery):
-    """One value query for storage and counters, including integral proofs."""
-
-    _use_reassignment_values = True
-
-    def __init__(self, check_query):
-        super().__init__(check_query.sources, check_query.bindings, check_query.scopes)
-        self.check_query = check_query
-        self._integer_constants = IntegerConstants(self.sources, self.bindings)
-
-    def _integer_constant(self, node):
-        return self._integer_constants.value(node)
 
     def infer(self, node):
         if isinstance(node, BinOp) and node.op == "/":

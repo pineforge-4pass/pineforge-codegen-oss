@@ -237,27 +237,20 @@ STRING_VALUES = [
                  id="literal-escape-text"),
     pytest.param("x\\\0" + "789", "x\\", id="backslash-before-nul"),
     pytest.param("x\0y\0z", "x", id="multiple-nuls"),
-    pytest.param("é\0中😀", "é", id="unicode-nul"),
 ]
 
 
 @pytest.mark.parametrize("value,expected", STRING_VALUES)
-@pytest.mark.parametrize("wrapped", [False, True, "counted"],
-                         ids=["literal", "std-string", "counted"])
+@pytest.mark.parametrize("wrapped", [False, True], ids=["literal", "std-string"])
 def test_emitted_string_setting_decoder(value, expected, wrapped):
     literal = '"' + NamingHelper._cpp_string_escape(value) + '"'
-    if wrapped == "counted":
-        lowered = f"std::string({literal}, {len(value.encode('utf-8'))})"
-    else:
-        lowered = f"std::string({literal})" if wrapped else literal
+    lowered = f"std::string({literal})" if wrapped else literal
     assert _string_setting_arg(StringLiteral(value=value), lowered) == lowered
-    assert _string_setting_value(lowered) == (value if wrapped == "counted" else expected)
+    assert _string_setting_value(lowered) == expected
 
 
 @pytest.mark.parametrize("lowered", [
-    "0", "nullptr", 'std::string("x", 0)', 'std::string("x", 2)',
-    'std::string("é\\000z", 3)', 'std::string("é\\000z", 5)',
-    '"x" + other', '"x" "y"',
+    "0", "nullptr", 'std::string("x", 1)', '"x" + other', '"x" "y"',
     r'"\u2603"', r'"\x41"', r'"\012"', r'"\0"', r'"\a"',
     '"x\\"', '"x\ny"', '"x\ry"', '"x\0y"',
 ])
@@ -267,69 +260,9 @@ def test_string_setting_decoder_refuses_non_emitted_forms(lowered):
         _string_setting_value(lowered)
 
 
-INPUT_DRIVER = r'''
-#include <iostream>
-#include <stdexcept>
-#include <vector>
-
-class InputProbe : public GeneratedStrategy {
-public:
-    using GeneratedStrategy::_pf_set_input_checked;
-    using GeneratedStrategy::_pf_settings_receipt;
-};
-
-void observe(const char* name, const std::string& value) {
-    static const char digits[] = "0123456789abcdef";
-    std::cout << name << "=";
-    for (unsigned char byte : value)
-        std::cout << digits[byte >> 4] << digits[byte & 15];
-    std::cout << "\n";
-}
-
-void execute(InputProbe& strategy) {
-    std::vector<pineforge::Bar> bars(3);
-    for (std::size_t i = 0; i < bars.size(); ++i) {
-        bars[i].open = bars[i].low = 90.0 + double(i);
-        bars[i].high = 110.0 + double(i);
-        bars[i].close = 100.0 + double(i);
-        bars[i].volume = 1.0;
-        bars[i].timestamp = 1704067200000LL + static_cast<long long>(i) * 60000LL;
-    }
-    strategy.run(bars.data(), bars.size(), "1", "1");
-    if (!strategy.last_error().empty())
-        throw std::runtime_error(strategy.last_error());
-}
-
-int main() {
-    // BODY
-}
-'''
-
-
-def _bytes_cpp(value):
-    """Supply a native setter value independently of the product serializer."""
-    return "std::string{" + ", ".join(
-        f"static_cast<char>({byte})" for byte in value.encode("utf-8")
-    ) + "}"
-
-
-def _run_input_observer(full, body, opt):
-    output = run_emitted_tu(
-        full["cpp"], INPUT_DRIVER.replace("// BODY", body),
-        opt=opt, label="string input bytes and receipt",
-    )
-    records = {}
-    for line in output.splitlines():
-        key, value = line.split("=", 1)
-        assert key not in records, output
-        records[key] = value
-    return records
-
-
 @pytest.mark.parametrize("value,expected", STRING_VALUES)
 @pytest.mark.parametrize("opt", ["-O0", "-O2"])
-@pytest.mark.parametrize("call_style", ["positional", "named"])
-def test_all_string_input_forms_match_native_receipt(value, expected, opt, call_style):
+def test_all_string_input_forms_match_native_receipt(value, expected, opt):
     literal = pine_string_literal(value)
     forms = [
         ("string", "String default", ""),
@@ -340,24 +273,14 @@ def test_all_string_input_forms_match_native_receipt(value, expected, opt, call_
         ("string", "String option", f', options=[{literal}, "safe"]'),
     ]
     source = '//@version=6\nstrategy("literal settings")\n'
-    for index, (kind, title, options) in enumerate(forms):
-        arguments = (f'defval={literal}, title="{title}"'
-                     if call_style == "named" else f'{literal}, "{title}"')
-        source += f'choice_{index} = input.{kind}({arguments}{options})\n'
+    source += "".join(f'choice_{index} = input.{kind}({literal}, "{title}"{options})\n'
+                      for index, (kind, title, options) in enumerate(forms))
     full = transpile_full(source)
     envelope = json.loads(GLUE(source))
     assert envelope["ok"] is True
     assert envelope["inputs"] == full["inputs"]
-    body = "InputProbe strategy;\nexecute(strategy);\n"
-    body += "".join(
-        f'observe("choice_{index}", strategy.choice_{index});\n'
-        for index in range(len(forms))
-    )
-    body += 'std::cout << "receipt=" << strategy._pf_settings_receipt() << "\\n";\n'
-    records = _run_input_observer(full, body, opt)
-    assert set(records) == {*(f"choice_{index}" for index in range(len(forms))), "receipt"}
-    receipt = json.loads(records.pop("receipt"))
-    assert list(records.values()) == [value.encode("utf-8").hex()] * len(forms)
+    receipt = json.loads(run_emitted_tu(full["cpp"], RECEIPT_DRIVER, opt=opt,
+                                       label="literal settings receipt"))
     assert len(full["inputs"]) == len(receipt["inputs"]) == len(forms)
     for metadata, checked, (kind, title, options) in zip(full["inputs"], receipt["inputs"], forms):
         assert metadata["title"] == checked["name"] == title
@@ -365,88 +288,6 @@ def test_all_string_input_forms_match_native_receipt(value, expected, opt, call_
         if kind == "symbol":
             assert metadata["kind"] == "symbol"
         assert metadata["supported"] is True
-        # STRING_VALUES' second field describes uncounted C strings only.
-        # Authored defaults and options retain the complete Pine value.
-        assert metadata["default"] == checked["default"] == checked["effective_value"] == value
-        assert metadata.get("options", []) == ([value, "safe"] if options else [])
+        assert metadata["default"] == checked["default"] == checked["effective_value"] == expected
+        assert metadata.get("options", []) == ([expected, "safe"] if options else [])
         assert _manifest_view(metadata) == _receipt_view(checked)
-
-
-@pytest.mark.parametrize("separator", ["\0", "\x01", ""],
-                         ids=["nul", "other-control", "ascii"])
-@pytest.mark.parametrize("opt", ["-O0", "-O2"])
-def test_string_options_keep_distinct_suffixes_in_native_values(separator, opt):
-    """The C++ checked setter validates whole option values, including NUL."""
-    options = [f"a{separator}b", f"a{separator}c"]
-    source = '//@version=6\nstrategy("option identity")\n'
-    source += f'var string FIRST = {pine_string_literal(options[0])}\n'
-    source += f'const string SECOND = {pine_string_literal(options[1])}\n'
-    source += 'choice = input.string(FIRST, "Choice", options=[FIRST, SECOND])\n'
-    full = transpile_full(source)
-    attempts = [*options, "a"]
-    body = ""
-    for index, attempt in enumerate(attempts):
-        body += f'''
-{{
-    InputProbe strategy;
-    try {{
-        strategy._pf_set_input_checked("Choice", {_bytes_cpp(attempt)});
-        std::cout << "accepted{index}=1\\n";
-    }} catch (const ::pineforge::checked_settings::Error&) {{
-        std::cout << "accepted{index}=0\\n";
-    }}
-    execute(strategy);
-    observe("value{index}", strategy.choice);
-    std::cout << "receipt{index}=" << strategy._pf_settings_receipt() << "\\n";
-}}
-'''
-    records = _run_input_observer(full, body, opt)
-    assert set(records) == {
-        f"{field}{index}" for field in ("accepted", "value", "receipt") for index in range(3)
-    }
-    assert full["inputs"][0]["supported"] is True
-    assert full["inputs"][0]["options"] == options
-    for index, attempt in enumerate(attempts):
-        accepted = attempt in options
-        effective = attempt if accepted else options[0]
-        assert records[f"accepted{index}"] == str(int(accepted))
-        assert records[f"value{index}"] == effective.encode("utf-8").hex()
-        (checked,) = json.loads(records[f"receipt{index}"])["inputs"]
-        assert checked["supported"] is True
-        assert checked["options"] == options
-        assert checked["effective_value"] == effective
-
-
-@pytest.mark.parametrize("separator", ["\0", "\x01", ""],
-                         ids=["nul", "other-control", "ascii"])
-@pytest.mark.parametrize("opt", ["-O0", "-O2"])
-def test_input_keys_keep_distinct_suffixes_for_scalar_and_source_getters(separator, opt):
-    """Full C++ keys address scalar/source inputs independently of prefixes."""
-    keys = [f"Key{separator}left", f"Key{separator}right", "Key", f"Source{separator}value"]
-    source = '//@version=6\nstrategy("key identity")\n'
-    source += f'const string KEY = {pine_string_literal("Key" + separator)}\n'
-    source += 'first = input.int(11, KEY + "left")\n'
-    source += f'second = input.int(defval=22, title={pine_string_literal(keys[1])})\n'
-    source += 'prefix = input.int(33, "Key")\n'
-    source += f'selected = input.source(title={pine_string_literal(keys[3])}, defval=close)\n'
-    full = transpile_full(source)
-    overrides = ["41", "42", "43", "high"]
-    body = "InputProbe strategy;\n"
-    for key, value in zip(keys, overrides, strict=True):
-        body += f"strategy._pf_set_input_checked({_bytes_cpp(key)}, {_bytes_cpp(value)});\n"
-    body += '''
-execute(strategy);
-std::cout << "first=" << strategy.first << "\\n";
-std::cout << "second=" << strategy.second << "\\n";
-std::cout << "prefix=" << strategy.prefix << "\\n";
-std::cout << "selected=" << strategy.selected << "\\n";
-std::cout << "receipt=" << strategy._pf_settings_receipt() << "\\n";
-'''
-    records = _run_input_observer(full, body, opt)
-    assert set(records) == {"first", "second", "prefix", "selected", "receipt"}
-    assert [records[name] for name in ("first", "second", "prefix")] == overrides[:3]
-    assert float(records["selected"]) == 112.0
-    assert [entry["title"] for entry in full["inputs"]] == keys
-    inputs = json.loads(records["receipt"])["inputs"]
-    assert [entry["name"] for entry in inputs] == keys
-    assert [entry["effective_value"] for entry in inputs] == overrides

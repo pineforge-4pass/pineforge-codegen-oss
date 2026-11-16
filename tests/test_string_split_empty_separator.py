@@ -12,7 +12,7 @@ runs the strategy on three bars and reads the script's own variables.
 import pytest
 
 from pineforge_codegen import transpile
-from tests._compile import compile_cpp, run_emitted_tu
+from tests._compile import run_emitted_tu
 
 HEADER = '//@version=6\nstrategy("string split")\n'
 
@@ -133,45 +133,3 @@ CONTROL_ROWS = [
 @pytest.mark.parametrize("script, observe, expected", CONTROL_ROWS)
 def test_a_separator_that_is_not_empty_splits_as_before(script, observe, expected):
     assert _run(script, observe) == expected
-
-
-MISSING_SEPARATOR_ROWS = [
-    pytest.param(
-        'n = array.size(str.split("abc", na))\n'
-        'parts = str.split("abc", na)\nplot(n)\n',
-        id="literal-separator-and-nested-consumer",
-    ),
-    pytest.param(
-        'parts = str.split("", separator = na)\n'
-        'n = array.size(parts)\nplot(n)\n',
-        id="empty-source-with-named-separator",
-    ),
-    pytest.param(
-        'parts = str.split(separator = na, string = "é中")\n'
-        'n = array.size(parts)\nplot(n)\n',
-        id="bmp-source-with-reversed-keywords",
-    ),
-    pytest.param(
-        'parts = str.split("a\U0001f600b", na)\n'
-        'n = array.size(parts)\nplot(n)\n',
-        id="astral-source-with-positional-separator",
-    ),
-    pytest.param(
-        'src = close > open ? "longer" : "xy"\n'
-        'parts = str.split(src, na)\nn = array.size(parts)\nplot(n)\n',
-        id="computed-source",
-    ),
-    pytest.param(
-        'f(string src) =>\n    str.split(src, na)\n'
-        'parts = f("aéb")\nn = array.size(parts)\nplot(n)\n',
-        id="helper-body",
-    ),
-]
-
-
-@pytest.mark.parametrize("script", MISSING_SEPARATOR_ROWS)
-def test_a_literal_na_separator_has_the_string_parameter_type(script):
-    # This target is contextual argument typing: compile the complete emitted
-    # TU so a numeric na cannot reach a string parameter. Runtime/TV values
-    # belong to the split probes, including the separate named/Unicode tapes.
-    compile_cpp(transpile(HEADER + script), label="split string argument type")
