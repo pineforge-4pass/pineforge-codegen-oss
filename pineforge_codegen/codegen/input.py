@@ -25,6 +25,7 @@ from ..ast_nodes import (
     MemberAccess,
     NumberLiteral,
     StringLiteral,
+    TupleLiteral,
     UnaryOp,
     VarDecl,
 )
@@ -560,6 +561,12 @@ class InputHelper:
         """
         if namespace == "input" and func_name in sigs.INPUT_FUNCTIONS:
             names = sigs.get_param_names("input", func_name)
+            if ("options" in node.kwargs
+                    or (len(node.args) > 2 and isinstance(node.args[2], TupleLiteral))):
+                for signature in sigs.INPUT_FUNCTIONS[func_name].signatures:
+                    if any(param.name == "options" for param in signature.params):
+                        names = [param.name for param in signature.params]
+                        break
         elif func_name == "input" and namespace is None:
             names = sigs.get_param_names(None, "input")
         else:
