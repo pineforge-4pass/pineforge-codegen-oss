@@ -726,15 +726,9 @@ _C = [("tooltip", S, None), ("inline", S, None), ("group", S, None),
       ("display", I, None), ("confirm", B, None)]
 
 _input("int",    _sig([("defval", I), ("title", S, ""), ("minval", I, None),
-                       ("maxval", I, None), ("step", I, 1)] + _C, ret=I),
-                 _sig([("defval", I), ("title", S, ""),
-                       Param("options", I, type_spec=TypeSpec.array(
-                           TypeSpec.primitive("int")))] + _C, ret=I))
+                       ("maxval", I, None), ("step", I, 1)] + _C, ret=I))
 _input("float",  _sig([("defval", F), ("title", S, ""), ("minval", F, None),
-                       ("maxval", F, None), ("step", F, None)] + _C, ret=F),
-                 _sig([("defval", F), ("title", S, ""),
-                       Param("options", F, type_spec=TypeSpec.array(
-                           TypeSpec.primitive("float")))] + _C, ret=F))
+                       ("maxval", F, None), ("step", F, None)] + _C, ret=F))
 _input("bool",   _sig([
     Param("defval", B, na_policy="parent_eager"), ("title", S, ""),
 ] + _C, ret=B))

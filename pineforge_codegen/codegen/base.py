@@ -5913,8 +5913,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                             hist_fields |= self._collect_security_ohlc_hist_fields(stmt)
                 self._security_ohlc_hist_fields_by_sec[sec_id] = hist_fields
                 for i, el in enumerate(expr_node.elements):
-                    spec = self._security_result_spec(item, i)
-                    ctype = self._security_result_element_cpp_type(item, i)
+                    ctype = self._infer_cpp_type_for_security_elem(el)
                     if ctype == "int" and item.get("foreign"):
                         # Another symbol's int element (its time, time_close,
                         # bar_index) is held as a double: a millisecond
@@ -5923,11 +5922,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         ctype = "double"
                     if ctype == "std::vector<double>":
                         lines.append(f"    {ctype} _req_sec_{sec_id}_{i}{{}};")
-                    elif spec is not None:
-                        lines.append(
-                            f"    {ctype} _req_sec_{sec_id}_{i} = "
-                            f"{self._default_for_spec(spec)};"
-                        )
                     else:
                         default = {
                             "double": "na<double>()",
@@ -5949,27 +5943,19 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     self._security_helper_tuple_cpp_type(
                         tuple_size,
                         item.get("tuple_element_types", ()),
-                        item.get("tuple_element_specs", ()),
                     ),
                 )
                 default = self._security_tuple_result_default(
                     ctype,
                     tuple_size,
                     item.get("tuple_element_types", ()),
-                    item.get("tuple_element_specs", ()),
                 )
                 lines.append(f"    {ctype} _req_sec_{sec_id} = {default};")
             else:
                 self._security_ohlc_hist_fields_by_sec[sec_id] = (
                     self._collect_security_ohlc_hist_fields_for_call(state_item)
                 )
-                spec = self._security_result_spec(item)
-                if spec is not None:
-                    lines.append(
-                        f"    {self._type_spec_to_cpp(spec)} _req_sec_{sec_id} = "
-                        f"{self._default_for_spec(spec)};"
-                    )
-                elif item.get("string_result"):
+                if item.get("string_result"):
                     lines.append(f"    std::string _req_sec_{sec_id} = na<std::string>();")
                 else:
                     lines.append(f"    double _req_sec_{sec_id} = na<double>();")

@@ -201,9 +201,6 @@ class SecurityCallInfo:
     # The request call's source location (``request_discovery`` names the
     # site by its line).
     loc: Any = None
-    # Structured payloads cannot use the legacy scalar float storage.
-    result_type_spec: TypeSpec | None = None
-    tuple_element_specs: tuple[TypeSpec | None, ...] = ()
 
 
 @dataclass

@@ -165,7 +165,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def __init__(self, ast: Program, filename: str = "<stdin>",
                  budget: TimeBudget | None = None,
                  session_clones: frozenset[str] | None = None) -> None:
-        TypeHelper.__init__(self)
         self._ast = ast
         self._filename = filename
         self._budget = budget
@@ -313,6 +312,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 defined_names.add(stmt.name)
         # Track user-defined function return types
         self._func_return_types: dict[str, PineType] = {}
+        self._ternary_int_fallbacks: set[int] = set()
         # Track user-defined function tuple returns
         self._func_returns_tuple: dict[str, bool] = {}
         self._func_tuple_element_count: dict[str, int] = {}
@@ -501,6 +501,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # request.security rebinding helpers for mutable globals
         self._global_binding_infos: dict[str, MutableGlobalInfo] = {}
         self._global_reassigned_names: set[str] = set()
+        self._current_top_level_stmt: ASTNode | None = None
         self._global_scope = True
         self._static_vars: set[str] = set()
         # Stack of enclosing user-function param-name sets, pushed while visiting
@@ -4501,8 +4502,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     returns_tuple=sec.returns_tuple,
                     tuple_size=sec.tuple_size,
                     tuple_element_types=sec.tuple_element_types,
-                    result_type_spec=sec.result_type_spec,
-                    tuple_element_specs=sec.tuple_element_specs,
                     gaps=sec.gaps,
                     lookahead=sec.lookahead,
                     ta_range=sec.ta_range,
@@ -5465,26 +5464,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             value.loc,
         )
 
-    def _check_primitive_slot(self, value, expected, context):
-        """Check proven scalar types without using legacy inference defaults."""
-        if (value is None or expected is None or expected.kind != "primitive"
-                or self._pine_version != 6 or self._in_v5_library_definition(value)):
-            return
-        expected = public_type_name(expected)
-        if expected not in {"int", "float", "bool", "string", "color"}:
-            return
-        actual = self._operator_operand_type(value)
-        if actual is None or actual.kind != "primitive":
-            return
-        actual = public_type_name(actual)
-        if (actual in {expected, "na"}
-                or (actual == "int" and expected == "float")):
-            return
-        self._error(
-            f"Cannot use {actual} as {expected} for {context}.",
-            value.loc,
-        )
-
     def _check_builtin_enum_arguments(self, node, parameter_types=None):
         """Bind nominal argument contracts from the intrinsic signatures."""
         if self._pine_version != 6 or self._in_v5_library_definition(node):
@@ -5637,10 +5616,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 node.loc,
             )
         type_spec = self._type_spec_from_hint(node.type_hint) if node.type_hint else None
-        if node.type_hint:
-            self._check_primitive_slot(
-                node.value, type_spec, f"declaration '{node.name}'",
-            )
         if type_spec is None:
             type_spec = self._type_spec_from_expr(node.value)
         if (type_spec is None and not node.type_hint
@@ -5666,6 +5641,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._collection_scope_stack[-1]
             )
 
+        # Check for type hint override
+        if node.type_hint:
+            hint_type = self._type_hint_to_pine(node.type_hint)
+            if hint_type != PineType.UNKNOWN:
+                val_type = hint_type
+
         # Check for input calls
         is_const = False
         const_value = None
@@ -5680,12 +5661,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             enum_name = node.value.object.name
             if node.value.member in self._enum_defs.get(enum_name, ()):
                 enum_type_name = enum_name
-
-        # An input initializer must also retain the declaration's type.
-        if node.type_hint:
-            hint_type = self._type_hint_to_pine(node.type_hint)
-            if hint_type != PineType.UNKNOWN:
-                val_type = hint_type
 
         udt_ctor = self._udt_name_from_ctor(node.value)
         # User function return propagation: if the value is a call to a user
@@ -5927,9 +5902,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._check_operator_operands(
                 node, node.op[:-1], (node.target, node.value),
             )
-        self._check_primitive_slot(
-            node.value, self._operator_operand_type(node.target), "assignment",
-        )
 
         udt_ctor = self._udt_name_from_ctor(node.value)
         if isinstance(node.target, Identifier) and udt_ctor is not None:
@@ -6159,7 +6131,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._func_tuple_element_specs.get(node.value.callee.name, ())
             if isinstance(node.value, FuncCall)
             and isinstance(node.value.callee, Identifier)
-            else (node.value.annotations or {}).get("security_tuple_element_specs", ())
+            else ()
         )
 
         for idx, name in enumerate(node.names):
@@ -6450,12 +6422,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     terminal_ret_expr.callee.name, ()
                 )
             )
-        elif isinstance(terminal_ret_expr, FuncCall):
-            requested_specs = (terminal_ret_expr.annotations or {}).get(
-                "security_tuple_element_specs", ()
-            )
-            if requested_specs:
-                self._func_tuple_element_specs[node.name] = requested_specs
         terminal_map_return = self._terminal_map_call_return(
             terminal_ret_expr,
             {
@@ -7598,43 +7564,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     # ------------------------------------------------------------------
 
     def _visit_ExprStmt(self, node: ExprStmt) -> PineType:
-        result = self._visit(node.expr)
-        self._record_security_array_stmt(node)
-        return result
-
-    def _record_security_array_stmt(self, node: ExprStmt) -> None:
-        """Keep standalone array operations beside their binding's stores.
-
-        A requested copy must replay these operations in source order, just
-        as a scalar copy replays assignments. Resolve the receiver while its
-        lexical scope is live; unrelated statements in the same block stay out.
-        """
-        call = node.expr
-        if (self._enclosing_func_names or self._current_top_level_stmt is None
-                or not isinstance(call, FuncCall)
-                or not isinstance(call.callee, MemberAccess)):
-            return
-        intrinsic = sigs.get_intrinsic("array", call.callee.member)
-        if intrinsic is None or intrinsic.receiver_kind != "array":
-            return
-        receiver = call.callee.object
-        if (isinstance(receiver, Identifier) and receiver.name == "array"
-                and self._value_bindings.declaration_bindings.get(id(receiver)) is None):
-            receiver = self._bind_callable_args(call, intrinsic.param_names)[0]
-        elif self._receiver_method_key(receiver, call.callee.member) is not None:
-            return
-        if not isinstance(receiver, Identifier):
-            return
-        symbol = self._symbols.resolve(receiver.name)
-        if (symbol is None or symbol.scope != "global"
-                or symbol.type_spec is None or symbol.type_spec.kind != "array"):
-            return
-        self._record_global_binding_stmt(
-            receiver.name, symbol.pine_type, symbol.is_var,
-        )
-        node.annotations = {
-            **(node.annotations or {}), "security_array_receiver": receiver.name,
-        }
+        return self._visit(node.expr)
 
     # ------------------------------------------------------------------
     # Expression visitors
@@ -8096,7 +8026,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._bool_na_error(token.loc)
 
     def _visit_Ternary(self, node: Ternary) -> PineType:
-        self._ternary_int_fallbacks.pop(id(node), None)
+        self._ternary_int_fallbacks.discard(id(node))
         condition_type = self._visit(node.condition)
         self._check_untyped_na_condition(node.condition, condition_type)
         true_type = self._visit(node.true_val)
@@ -8143,7 +8073,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             result_type = structured_type
         if result_type == PineType.INT and main_type != PineType.INT:
             # Keep the true arm's numeric fallback through later return queries.
-            self._ternary_int_fallbacks[id(node)] = node
+            self._ternary_int_fallbacks.add(id(node))
             return main_type
         return result_type
 

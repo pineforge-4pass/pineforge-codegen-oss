@@ -2881,11 +2881,6 @@ class TypeInferer:
         drawing_spec = drawing_all_result_spec(node)
         if drawing_spec is not None:
             return drawing_spec
-        requested_spec = (getattr(node, "annotations", None) or {}).get(
-            "security_result_type_spec"
-        )
-        if requested_spec is not None:
-            return requested_spec
         budget = getattr(self, "_budget", None)
         if budget is not None:
             # A method chain re-infers each receiver more than once, so this
@@ -5300,17 +5295,12 @@ class TypeInferer:
                 or declaration in self._direct_program_tuple_decl_nodes
                 or self._decl_binding_is_series(declaration, name)):
             return None
-        # Direct TA and scalar request tuples keep their established types.
+        # Direct TA/request tuples keep their established type contracts.
         if self._get_ta_site(node.value) is not None:
             return None
         if (isinstance(node.value, FuncCall)
                 and self._resolve_callee(node.value.callee)
                 == ("security", "request")):
-            item = self._security_call_for_request(node.value)
-            if item is not None:
-                spec = self._security_result_spec(item, node.names.index(name))
-                if spec is not None:
-                    return self._type_spec_to_cpp(spec)
             return None
         active = self.__dict__.setdefault("_lexical_tuple_type_queries", set())
         if declaration in active:
@@ -5329,7 +5319,7 @@ class TypeInferer:
         Infer the element, rather than the whole tuple-returning call. This
         shares the helper/selection tuple contract, including wide-int
         provenance, with both member layout and later scalar writes.
-        Scalar requested and TA tuples retain their existing storage contracts.
+        Requested and TA tuples retain their existing storage contracts.
         """
         binding = self._direct_program_tuple_bindings.get(name)
         if binding is None:
@@ -5340,11 +5330,6 @@ class TypeInferer:
         if (isinstance(node.value, FuncCall)
                 and self._resolve_callee(node.value.callee)
                 == ("security", "request")):
-            item = self._security_call_for_request(node.value)
-            if item is not None:
-                spec = self._security_result_spec(item, index)
-                if spec is not None:
-                    return self._type_spec_to_cpp(spec)
             return None
         active = self.__dict__.setdefault("_global_tuple_type_queries", set())
         if id(node) in active:
@@ -6445,9 +6430,6 @@ class TypeInferer:
             if (namespace == "request" and func_name == "security"
                     and self._security_call_returns_string(node)):
                 return "std::string"
-            requested_spec = (node.annotations or {}).get("security_result_type_spec")
-            if requested_spec is not None:
-                return self._type_spec_to_cpp(self._type_spec_from_expr(node))
             # Nested trade-accessor calls bypass the flat namespace signature
             # table.  Their textual metadata accessors return std::string from
             # the runtime, so hintless locals must not use the double fallback.
@@ -6863,7 +6845,13 @@ class TypeInferer:
             # read stores it (``_req_sec_N`` or its per-element members).
             item = self._security_call_for_request(request)
             if item is not None and item.get("returns_tuple"):
-                return self._security_tuple_cpp_types(item)
+                payload = item["expr_node"]
+                if isinstance(payload, TupleLiteral):
+                    return ["double" if item.get("foreign") and cpp_t == "int" else cpp_t
+                            for cpp_t in map(self._infer_cpp_type_for_security_elem,
+                                             payload.elements)]
+                return self._security_tuple_element_cpp_types(
+                    count, item.get("tuple_element_types", ()))
         if expr is not None:
             return [
                 self._tuple_literal_element_cpp_type(
