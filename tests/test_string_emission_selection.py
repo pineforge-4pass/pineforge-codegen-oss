@@ -147,3 +147,47 @@ def test_one_half_argument_keeps_a_shared_helper_on_unit_search():
         + 'half = predicate(str.substring("😀", 0, 1))\nplot(close)\n'
     )
     assert "return _pf_u16_contains(_pf_search_source, _pf_search_needle);" in cpp
+
+
+def test_a_parameter_follows_its_own_definition_not_its_spelling():
+    cpp = transpile(
+        HEADER
+        + 'keeps_bytes(string payload) => str.contains(payload, "a")\n'
+        + 'keeps_units(string payload) => str.contains(payload, "b")\n'
+        + 'ordinary = keeps_bytes("ab")\n'
+        + 'half = keeps_units(str.substring("😀", 0, 1))\nplot(close)\n'
+    )
+    # Both parameters share one spelling; only the second can receive a half.
+    assert '.find(std::string("a"))' in cpp
+    assert '.find(std::string("b"))' not in cpp
+    assert "return _pf_u16_contains(_pf_search_source, _pf_search_needle);" in cpp
+
+
+def test_a_parameter_is_independent_of_a_same_named_complete_global():
+    cpp = transpile(
+        HEADER
+        + 'payload = "ab"\n'
+        + 'predicate(string payload) => str.contains(payload, "a")\n'
+        + 'observed = predicate(str.substring("😀", 0, 1))\nplot(close)\n'
+    )
+    # The body reads its parameter, which the complete global cannot certify.
+    assert '.find(std::string("a"))' not in cpp
+    assert "return _pf_u16_contains(_pf_search_source, _pf_search_needle);" in cpp
+
+
+@pytest.mark.parametrize("argument, native", (
+    pytest.param('"cd"', True, id="complete"),
+    pytest.param('str.substring("😀", 0, 1)', False, id="half"),
+))
+def test_a_keyword_argument_replaces_the_default_it_names(argument, native):
+    cpp = transpile(
+        HEADER
+        + 'predicate(string payload, string needle = "a") =>'
+        + " str.contains(payload, needle)\n"
+        + f'observed = predicate("ab", needle = {argument})\nplot(close)\n'
+    )
+    # The written keyword, not the complete default, decides the parameter.
+    assert (".find(needle)" in cpp) is native
+    assert (
+        "return _pf_u16_contains(_pf_search_source, _pf_search_needle);" in cpp
+    ) is not native

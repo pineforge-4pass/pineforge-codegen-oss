@@ -8,7 +8,6 @@ paths; an unknown producer keeps the unit lowering.
 
 from collections import defaultdict, deque
 
-from ..analyzer.value_bindings import ValueBindings
 from ..ast_nodes import (
     Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall, FuncDef,
     Identifier, IfStmt, MemberAccess, MethodDef, NaLiteral, NumberLiteral,
@@ -24,18 +23,38 @@ class StringValues:
     def __init__(self, codegen):
         self.codegen = codegen
         self.nodes = {}
-        pending = [codegen.ctx.ast]
+        # The callable whose body holds each node. A script statement, a
+        # trace expression and a default (evaluated where its call is
+        # written) have none.
+        self.owners = {}
+        # A plain function's parameter receives every value from a written
+        # call or a declared default, so only these definitions can prove one.
+        self.functions = {
+            id(function.node) for function in codegen._func_info_map.values()
+            if function.node is not None and not function.is_udt_method
+        }
+        pending = [(codegen.ctx.ast, None)]
+        # A trace expression is emitted too, and can call a helper.
+        pending.extend(
+            (pragma.expr_node, None)
+            for pragma in getattr(codegen.ctx, "pf_trace_pragmas", None) or ()
+            if pragma.expr_node is not None
+        )
         for function in codegen.ctx.func_infos:
             if function.node is not None:
-                pending.append(function.node)
-            pending.extend(value for value in self._defaults(function) if value is not None)
+                pending.append((function.node, None))
+            pending.extend(
+                (value, None) for value in self._defaults(function) if value is not None)
         while pending:
-            node = pending.pop()
+            node, owner = pending.pop()
             if id(node) in self.nodes:
                 continue
             self._check(node)
             self.nodes[id(node)] = node
-            pending.extend(syntax_children(node))
+            self.owners[id(node)] = owner
+            if isinstance(node, (FuncDef, MethodDef)):
+                owner = node
+            pending.extend((child, owner) for child in syntax_children(node))
 
         declarations = {}
         parameters = defaultdict(list)
@@ -45,25 +64,32 @@ class StringValues:
             if isinstance(node, VarDecl):
                 declarations[id(node), node.name] = node
             elif isinstance(node, Assignment) and isinstance(node.target, Identifier):
-                binding = self._binding(node.target)
-                if binding is None:
+                bindings = self._bindings(node.target)
+                if bindings is None or node.op not in (":=", "+="):
                     unknown_writes.add(node.target.name)
-                elif node.op in (":=", "+="):
-                    writes[binding].append(node.value)
                 else:
-                    unknown_writes.add(node.target.name)
+                    for binding in bindings:
+                        writes[binding].append(node.value)
             elif isinstance(node, FuncCall) and isinstance(node.callee, Identifier):
                 function = codegen._func_info_map.get(node.callee.name)
                 if function is None or function.node is None or function.is_udt_method:
                     continue
-                for index, name in enumerate(function.node.params):
-                    argument = (
-                        node.args[index] if index < len(node.args)
-                        else node.kwargs.get(name)
-                    )
-                    defaults = self._defaults(function)
-                    if argument is None and index < len(defaults):
-                        argument = defaults[index]
+                names = function.node.params
+                defaults = self._defaults(function)
+                # A surplus argument or a keyword naming no later parameter
+                # cannot be placed: this call then proves no parameter.
+                placed = len(node.args) <= len(names) and all(
+                    keyword in names[len(node.args):] for keyword in node.kwargs
+                )
+                for index, name in enumerate(names):
+                    argument = None
+                    if placed:
+                        argument = (
+                            node.args[index] if index < len(node.args)
+                            else node.kwargs.get(name)
+                        )
+                        if argument is None and index < len(defaults):
+                            argument = defaults[index]
                     parameters[id(function.node), name].append(argument)
 
         dependencies = {}
@@ -115,10 +141,47 @@ class StringValues:
             if function.node is not None else ()
         )
 
-    def _binding(self, node):
-        bindings = self.codegen.ctx.identifier_decl_bindings
-        return (bindings[id(node)] if id(node) in bindings
-                else ValueBindings.declaration_of(node))
+    def _bindings(self, node):
+        """Every binding an identifier can name in the emitted tree, or None.
+
+        The lexical resolver is exact for the tree it walked: a declaration,
+        a loop, or the callable that declares the name as a parameter. The
+        analyzer's first-visit snapshot can name another declaration, because
+        a callable's nested blocks share its symbol scope; such a use depends
+        on both. None leaves the value unknown.
+        """
+        ctx = self.codegen.ctx
+        visited = id(node) in ctx.identifier_decl_bindings
+        snapshot = ctx.identifier_decl_bindings.get(id(node))
+        lexical = ctx.identifier_lexical_bindings.get(id(node))
+        if lexical is None:
+            # A builtin, or a use outside the resolver's walk.
+            return None if snapshot is None else (snapshot,)
+        owner = self.owners.get(id(node))
+        declaration = self.nodes.get(lexical[0])
+        holder = self.owners.get(lexical[0])
+        if (declaration is None or lexical[1] != node.name
+                or (holder is not None and holder is not owner)):
+            # Not a binding this use can see in this tree.
+            return None
+        if isinstance(declaration, (FuncDef, MethodDef)):
+            # A parameter is proved only for the plain function holding the
+            # use: its values are that definition's written arguments.
+            if (declaration is not owner or id(declaration) not in self.functions
+                    or node.name not in declaration.params):
+                return None
+        elif visited and snapshot is None:
+            # The analyzer resolved no declaration where the resolver did.
+            return None
+        if snapshot is None or snapshot == lexical:
+            return (lexical,)
+        return (lexical, snapshot)
+
+    def _names_value(self, node):
+        """Whether an identifier names an authored value, not a namespace."""
+        ctx = self.codegen.ctx
+        return (ctx.identifier_lexical_bindings.get(id(node)) is not None
+                or ctx.identifier_decl_bindings.get(id(node)) is not None)
 
     def _dependencies(self, node):
         if isinstance(node, StringLiteral):
@@ -132,9 +195,9 @@ class StringValues:
             # the typed writer handle it before proving a native string join.
             return None
         if isinstance(node, Identifier):
-            binding = self._binding(node)
-            if binding is not None:
-                return [binding]
+            bindings = self._bindings(node)
+            if bindings is not None:
+                return list(bindings)
             # A runtime builtin is not a string producer. In particular, do
             # not borrow its numeric chart type to prove a formatter/helper
             # result in a different binding context.
@@ -172,7 +235,7 @@ class StringValues:
             if callee.name == "string":
                 return [id(value) for value in (*node.args, *node.kwargs.values())]
         if (isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier)
-                and self._binding(callee.object) is None):
+                and not self._names_value(callee.object)):
             if (callee.object.name == "str"
                     and callee.member in {"tostring", "upper", "lower", "trim", "repeat",
                                           "format", "replace", "replace_all"}):

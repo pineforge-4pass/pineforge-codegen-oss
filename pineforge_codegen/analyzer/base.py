@@ -773,6 +773,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             global_expr_map=pure_global_expr_map,
             identifier_binding_scopes=dict(self._identifier_binding_scopes),
             identifier_decl_bindings=dict(self._identifier_decl_bindings),
+            identifier_lexical_bindings=dict(self._value_bindings.declaration_bindings),
             primitive_block_shadow_types=dict(self._primitive_block_shadow_types),
             for_counter_types=dict(self._for_counter_types),
             identifier_binding_nodes=dict(self._identifier_binding_nodes),

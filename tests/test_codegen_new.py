@@ -787,7 +787,9 @@ x = m.get("key1")
 def test_str_contains():
     src = 'x = str.contains("hello world", "world")\n'
     cpp = _generate(src)
-    assert "_pf_u16_contains(_pf_search_source, _pf_search_needle)" in cpp
+    assert "find" in cpp
+    assert "npos" in cpp
+    assert "_pf_u16_contains(" not in cpp
 
 
 def test_str_lower():
@@ -820,13 +822,15 @@ def test_str_length():
 def test_str_startswith():
     src = 'x = str.startswith("hello", "he")\n'
     cpp = _generate(src)
-    assert "_pf_u16_startswith(_pf_search_source, _pf_search_needle)" in cpp
+    assert "substr" in cpp
+    assert "_pf_u16_startswith(" not in cpp
 
 
 def test_str_endswith():
     src = 'x = str.endswith("hello", "lo")\n'
     cpp = _generate(src)
-    assert "_pf_u16_endswith(_pf_search_source, _pf_search_needle)" in cpp
+    assert "compare" in cpp
+    assert "_pf_u16_endswith(" not in cpp
 
 
 def test_str_pos():
