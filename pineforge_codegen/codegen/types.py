@@ -5324,11 +5324,12 @@ class TypeInferer:
             active.remove(declaration)
 
     def _ordinary_global_tuple_cpp_type(self, name: str) -> str | None:
-        """The declared element type of an ordinary Program-global tuple.
+        """The stored element type of an ordinary Program-global tuple.
 
         Infer the element, rather than the whole tuple-returning call. This
         shares the helper/selection tuple contract, including wide-int
         provenance, with both member layout and later scalar writes.
+        Integer storage also accounts for writes bound to this declaration.
         Scalar requested and TA tuples retain their existing storage contracts.
         """
         binding = self._direct_program_tuple_bindings.get(name)
@@ -5352,7 +5353,10 @@ class TypeInferer:
         active.add(id(node))
         try:
             types = self._tuple_binding_cpp_types(node)
-            return types[index] if index < len(types) else None
+            cpp_type = types[index] if index < len(types) else None
+            if cpp_type == "int" and self._is_int64_builtin_init(name, node):
+                return "int64_t"
+            return cpp_type
         finally:
             active.remove(id(node))
 
