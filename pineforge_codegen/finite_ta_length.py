@@ -82,6 +82,7 @@ from .ast_nodes import (
 _EXTREMA_NAMES = frozenset({"highest", "lowest"})
 _COMPARISON_OPS = frozenset({"==", "!=", "<", "<=", ">", ">="})
 _ARITHMETIC_OPS = frozenset({"+", "-", "*", "/", "%"})
+_MAX_SMA_LENGTH_CHOICES = 128
 _BAR_IDENTIFIERS = frozenset({
     "open", "high", "low", "close", "volume",
     "hl2", "hlc3", "ohlc4", "hlcc4",
@@ -469,8 +470,8 @@ def _plain_extrema_call(node) -> tuple[str, object, int] | None:
     return name, node.args[0], 1
 
 
-def _all_bound_names(program: Program) -> set[str]:
-    """Collect authored binders so generated top-level names cannot collide."""
+def _all_bound_names(root) -> set[str]:
+    """Collect authored binders from a program or expression subtree."""
 
     names: set[str] = set()
 
@@ -513,7 +514,7 @@ def _all_bound_names(program: Program) -> set[str]:
             else:
                 walk(value)
 
-    walk(program)
+    walk(root)
     return names
 
 
@@ -675,13 +676,16 @@ def _expand_reassigned_sma_lengths(program: Program, fresh_choice_names) -> Prog
     index = None
     definitions = {}
     ambiguous = set()
+    # Block indexing can hide a global write when that block later declares
+    # the same name, so exclude every name with another authored binder.
     for position, statement in enumerate(program.body):
         if isinstance(statement, VarDecl):
             if statement.name in definitions:
                 ambiguous.add(statement.name)
             definitions[statement.name] = (position, statement)
-        elif isinstance(statement, TupleAssign):
-            ambiguous.update(statement.names)
+            ambiguous.update(_all_bound_names(statement.value))
+        else:
+            ambiguous.update(_all_bound_names(statement))
     frozen = {}
 
     def fixed_length(node, before: int, *, inline_input=False, seen=frozenset()):
@@ -734,6 +738,8 @@ def _expand_reassigned_sma_lengths(program: Program, fresh_choice_names) -> Prog
             if not fixed_length(value, before):
                 return None
             if value not in choices:
+                if len(choices) >= _MAX_SMA_LENGTH_CHOICES:
+                    return None
                 choices.append(value)
         if length.name not in frozen:
             initial_name, = fresh_choice_names(("initial",))

@@ -122,6 +122,66 @@ plot(value)
 @pytest.mark.parametrize(
     "source",
     [
+        """//@version=6
+strategy("shadow after write")
+length = input.int(10, "Length")
+if close < open
+    length := 30
+if close > open
+    length := 20
+    length = 5
+plot(ta.sma(close, length))
+""",
+        """//@version=6
+strategy("parameter shadows length")
+length = input.int(10, "Length")
+length_value(int length) =>
+    length
+if close > open
+    length := 20
+plot(length_value(5))
+plot(ta.sma(close, length))
+""",
+        """//@version=6
+strategy("loop variable shadows length")
+length = input.int(10, "Length")
+if close > open
+    length := 20
+float total = 0.0
+for length = 2 to 4
+    total += length
+plot(total)
+plot(ta.sma(close, length))
+""",
+    ],
+    ids=["declaration-after-write", "function-parameter", "loop-variable"],
+)
+def test_shadowed_written_sma_length_uses_series_sma(source: str) -> None:
+    cpp = transpile(source)
+    assert "pf_ta_length_choice" not in cpp
+    assert re.findall(r"^\s*_PFSeriesSma\s+(\w+);$", cpp, re.M)
+
+
+def test_many_fixed_sma_lengths_use_series_sma() -> None:
+    # More than 128 distinct writes must not allocate a fixed history each.
+    writes = "".join(
+        f"if bar_index == {length}\n    length := {length}\n"
+        for length in range(1, 130)
+    )
+    source = (
+        '//@version=6\nstrategy("many fixed lengths")\n'
+        'length = input.int(10, "Length")\n'
+        + writes
+        + "plot(ta.sma(close, length))\n"
+    )
+    cpp = transpile(source)
+    assert "pf_ta_length_choice" not in cpp
+    assert re.findall(r"^\s*_PFSeriesSma\s+(\w+);$", cpp, re.M)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
         (
             '//@version=6\nstrategy("loop counter stays unsupported")\n'
             "float out = 0.0\n"
