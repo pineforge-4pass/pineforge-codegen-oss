@@ -848,7 +848,7 @@ class _Resolver:
             for kind, limit in zip(types, limits)
         )
 
-    def run(self, program: Program) -> None:
+    def _bind_overload_program(self, program: Program) -> None:
         names = _Names(self.declarations)
         for index, statement in enumerate(program.body):
             names.statement = index
@@ -969,7 +969,7 @@ def bind_scalar_overloads(program: Program, *,
         }
 
     resolver = _Resolver(program, groups, records, budget)
-    resolver.run(program)
+    resolver._bind_overload_program(program)
 
     # The copies a call reaches. Every declaration stays; a copy read only
     # for a call that another declaration took in the end is not emitted.
