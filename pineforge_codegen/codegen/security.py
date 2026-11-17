@@ -964,8 +964,39 @@ class SecurityEmitter:
         ))
         return "\n".join(lines)
 
+    # Per-request registration state, created on first use
+    # (``_security_tf_site_state``).
+    _security_tf_sites = None
+    # The globals one request's registration expanded into their declaration
+    # expressions, collected while ``_security_registration_tf`` resolves it.
+    _security_tf_site_expansions = None
+    # The names of the request's own replay being rendered: a global built
+    # from a reassigned one is among them, and its readers there name its
+    # replayed local instead of expanding it where they read it.
+    _security_tf_replay_names = None
+
+    def _security_tf_site_state(self) -> dict:
+        """``plans``: sec_id -> (the timeframe as registration rendered it,
+        the names and the statements of the request's own first-bar replay).
+        ``private`` / ``shared``: the reassigned globals read by the requests
+        that have such a replay / by every other registration expression.
+        ``global``: name -> whether the shared replay computes it.
+        ``owners``: node id -> index of its top-level statement."""
+        state = self._security_tf_sites
+        if state is None:
+            state = self._security_tf_sites = {
+                "plans": {}, "private": set(), "shared": set(), "global": {},
+                "owners": None,
+            }
+        return state
+
     def _security_registration_tf(self, item):
-        """Render one registration after its C++ type identities are fixed."""
+        """Render one registration after its C++ type identities are fixed.
+
+        The reassigned globals the timeframe reads are collected for this
+        request alone: one the shared first-bar replay cannot serve may still
+        replay the statements before its own source position
+        (``_security_tf_site_replay``)."""
         self._security_tf_lower = bool(item.get("is_lower_tf_array"))
         if item.get("runtime_context"):
             return None, "_pf_state.cursor.timeframe"
@@ -973,9 +1004,111 @@ class SecurityEmitter:
             return item["tf_node"].value, None
         if item.get("dead"):
             return None, "input_tf_"
-        return self._resolve_security_tf(
-            item["tf_node"], item.get("containing_func", "")
-        )
+        state = self._security_tf_site_state()
+        state["plans"].pop(item["sec_id"], None)
+        shared = self._security_tf_mutable_reads
+        reads: set[str] = set()
+        expansions: list[str] = []
+        self._security_tf_mutable_reads = reads
+        self._security_tf_site_expansions = expansions
+        try:
+            tf, tf_expr = self._resolve_security_tf(
+                item["tf_node"], item.get("containing_func", "")
+            )
+        finally:
+            self._security_tf_mutable_reads = shared
+            self._security_tf_site_expansions = None
+        replay = None
+        if reads and tf_expr is not None:
+            if self._budget is not None:
+                # The closures below scan the script once per name.
+                self._budget.check(getattr(item["tf_node"], "loc", None), Phase.CODEGEN)
+            replay = self._security_tf_site_replay(item["tf_node"], reads, expansions)
+        if replay is None:
+            # The shared replay computes them, or nothing does and it warns.
+            shared.update(reads)
+            state["shared"].update(reads)
+            return tf, tf_expr
+        state["private"].update(reads)
+        state["plans"][item["sec_id"]] = (tf_expr, *replay)
+        return tf, tf_expr
+
+    def _security_tf_site_replay(self, tf_node, reads: set[str], expansions: list[str]):
+        """``(names, statements)`` of one request's own first-bar replay, or
+        None when the shared replay serves it or nothing computes it.
+
+        The shared replay (``_security_tf_replay_prologue``) holds what every
+        request reads only when all the statements precede the first request.
+        A global written after a request has another value at each request:
+        with ``sec := 60`` between two ``request.security_lower_tf(...,
+        str.tostring(sec / 60), ...)`` the first reads the declared value and
+        the second 60, on every bar (TradingView's intrabar counts of that
+        script on a 60-minute chart: 12, then 60). Such a request replays the
+        statements before its own position (``_security_tf_replay_closure``
+        with its span), in a scope of its own.
+
+        A global registration expanded into its declaration expression is
+        evaluated where the request is, not where it was declared: that is
+        the same value only while no replayed statement lies between the
+        two, so any other request keeps the registration it had."""
+        state = self._security_tf_site_state()
+        served = True
+        for name in sorted(reads):
+            if name not in state["global"]:
+                state["global"][name] = bool(self._security_tf_replay_closure({name})[0])
+            served = served and state["global"][name]
+        if served:
+            return None
+        span = self._security_tf_request_span(tf_node)
+        if span is None:
+            return None
+        names, stmts = self._security_tf_replay_closure(set(reads), span)
+        if names is None:
+            return None
+        if expansions:
+            body = list(getattr(self.ctx.ast, "body", None) or ())
+            position = {id(stmt): index for index, stmt in enumerate(body)}
+            replayed = [position[id(stmt)] for stmt in stmts]
+            global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+            for name in dict.fromkeys(expansions):
+                value = global_expr_map.get(name)
+                if value is None or not self._security_tf_reads_reassigned(value):
+                    continue
+                declared = next(
+                    (index for index, stmt in enumerate(body)
+                     if isinstance(stmt, VarDecl) and stmt.value is value), None)
+                if declared is None or declared >= span[0] or any(
+                        index >= declared for index in replayed):
+                    return None
+        return names, stmts
+
+    def _security_tf_request_span(self, tf_node) -> tuple[int, int] | None:
+        """``(first, last)`` index of the top-level statements that can
+        evaluate the timeframe expression ``tf_node``, or None when its place
+        is unknown: the statement holding it, or, for an expression in a
+        function or method, every statement after the definition (a callable
+        is called after it is defined; which statements call it is not
+        followed here)."""
+        body = list(getattr(self.ctx.ast, "body", None) or ())
+        state = self._security_tf_site_state()
+        owners = state["owners"]
+        if owners is None:
+            owners = state["owners"] = {}
+            for index, stmt in enumerate(body):
+                if self._budget is not None:
+                    self._budget.check(getattr(stmt, "loc", None), Phase.CODEGEN)
+                for node, _depth in iter_ast_nodes(stmt):
+                    # A node two statements hold has no one place.
+                    owners[id(node)] = (
+                        index if owners.get(id(node), index) == index else -1)
+        at = owners.get(id(tf_node))
+        if at is None or at < 0:
+            return None
+        if not isinstance(body[at], (FuncDef, MethodDef)):
+            return at, at
+        if at + 1 >= len(body):
+            return None
+        return at + 1, len(body) - 1
 
     def _resolve_security_tf(self, tf_node, containing_func: str):
         """Resolve a ``request.security`` timeframe argument to ``(tf_str, tf_expr)``.
@@ -1035,6 +1168,9 @@ class SecurityEmitter:
                 return None, self._visit_expr(self._input_var_to_call[name])
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
             if name in global_expr_map:
+                if self._security_tf_site_expansions is not None:
+                    # Read where the request is (``_security_tf_site_replay``).
+                    self._security_tf_site_expansions.append(name)
                 self._check_security_tf_arms(global_expr_map[name], {name})
                 expanded = self._security_tf_runtime_expr(
                     global_expr_map[name], resolving={name}
@@ -1168,7 +1304,19 @@ class SecurityEmitter:
             return None
         if isinstance(value, MemberAccess):
             return "true" if value.member == "lookahead_on" else "false"
-        return f"static_cast<bool>({self._security_tf_runtime_expr(value)})"
+        # A lookahead reads the shared first-bar replay: its reassigned
+        # globals stay in that replay whatever the timeframes' own replays
+        # hold (``_security_tf_shared_replay``).
+        shared = self._security_tf_mutable_reads
+        reads: set[str] = set()
+        self._security_tf_mutable_reads = reads
+        try:
+            rendered = self._security_tf_runtime_expr(value)
+        finally:
+            self._security_tf_mutable_reads = shared
+            shared.update(reads)
+            self._security_tf_site_state()["shared"].update(reads)
+        return f"static_cast<bool>({rendered})"
 
     def _security_historical_projection_arg(self, info: dict, tf_expr: str) -> str:
         """Opt an ordinary chart registration into historical HTF projection.
@@ -1494,12 +1642,16 @@ class SecurityEmitter:
             if name in global_expr_map and name not in resolving:
                 if (global_binding
                         and self._security_tf_reads_reassigned(global_expr_map[name])
-                        and self._security_tf_replay_closure({name})[0]):
+                        and (name in (self._security_tf_replay_names or ())
+                             or self._security_tf_replay_closure({name})[0])):
                     # Built from a reassigned global: the first bar computes it
                     # at its declaration (``_security_tf_replay_prologue``),
                     # before the reassignments after it.
                     self._security_tf_mutable_reads.add(name)
                     return node
+                if self._security_tf_site_expansions is not None:
+                    # Read where the request is (``_security_tf_site_replay``).
+                    self._security_tf_site_expansions.append(name)
                 return self._substitute_tf_input_reads(
                     global_expr_map[name], resolving | {name})
             if name in self._global_mutable_infos and global_binding:
@@ -1978,6 +2130,56 @@ class SecurityEmitter:
     _SECURITY_TF_REPLAY_OPS = frozenset({":=", "+=", "-=", "*=", "/=", "%="})
 
     def _security_tf_replay_prologue(self) -> list[str]:
+        """What ``configure_security_evaluators()`` computes before it
+        registers: the shared first-bar replay (``_security_tf_shared_replay``),
+        returned as its opening lines, and the registration expression of
+        every request that replays the statements before its own position
+        instead (``_security_tf_render_site_replays``)."""
+        lines = self._security_tf_shared_replay()
+        self._security_tf_render_site_replays()
+        return lines
+
+    def _security_tf_render_site_replays(self) -> None:
+        """Give each request with a replay of its own
+        (``_security_tf_site_replay``) the registration expression computing
+        it: a scope that declares the names its timeframe reads, replays the
+        statements before the request in source order as the shared replay
+        renders them, and returns the timeframe as registration rendered it.
+
+        Rendered where the shared replay is, from the plan each time. Only
+        registration reads it: the evaluator keeps the timeframe as rendered
+        (``_security_timeframe_expr``)."""
+        plans = self._security_tf_site_state()["plans"]
+        if not plans:
+            return
+        shared = self._security_tf_mutable_reads
+        # What the replayed values read belongs to no shared replay.
+        self._security_tf_mutable_reads = set()
+        try:
+            for info in self._security_eval_info:
+                plan = plans.get(info["sec_id"])
+                if plan is None:
+                    continue
+                expr, names, stmts = plan
+                pad = "            "
+                lines = [
+                    "([&]() -> std::string {",
+                    f"{pad}// Values on the first bar where this request reads them.",
+                ]
+                for name in names:
+                    safe = self._safe_name(name)
+                    lines.append(f"{pad}decltype(this->{safe}) {safe}{{}};")
+                self._security_tf_replay_names = frozenset(names)
+                for stmt in stmts:
+                    self._security_tf_replay_stmt(stmt, set(names), lines, pad)
+                lines.append(f"{pad}return {expr};")
+                lines.append("        }())")
+                info["tf_expr"] = "\n".join(lines)
+        finally:
+            self._security_tf_replay_names = None
+            self._security_tf_mutable_reads = shared
+
+    def _security_tf_shared_replay(self) -> list[str]:
         """The first bar's computation of the reassigned globals the requests'
         timeframes read, as locals of ``configure_security_evaluators()``.
 
@@ -1993,9 +2195,16 @@ class SecurityEmitter:
         inputs (their getters), ``timeframe.*`` / ``syminfo.*`` / ``format.*``
         and pure ``math`` / ``str`` calls. A name that cannot be computed so
         keeps the registration every earlier build emitted, with a warning
-        naming what stops it."""
+        naming what stops it.
+
+        These locals hold what a request reads only when every statement
+        precedes the first request. A name read by nothing but requests that
+        replay the statements before their own position is left to them
+        (``_security_tf_site_replay``)."""
+        state = self._security_tf_site_state()
+        own = state["private"] - state["shared"]
         replayed: set[str] = set()
-        for name in sorted(self._security_tf_mutable_reads):
+        for name in sorted(self._security_tf_mutable_reads - own):
             closure, blocker = self._security_tf_replay_closure({name})
             if closure:
                 replayed.update(closure)
@@ -2044,13 +2253,24 @@ class SecurityEmitter:
             return None, "is not a scalar int, float, bool or string"
         return decl, (list(info.source_stmts) if info is not None else [decl])
 
-    def _security_tf_replay_closure(self, names: set[str]):
+    def _security_tf_replay_closure(self, names: set[str],
+                                    span: tuple[int, int] | None = None):
         """``(closure names, top-level statements)``, each in source order,
         that compute ``names`` on the first bar before any request, or
-        ``(None, (name, reason))`` for the first one that cannot be."""
+        ``(None, (name, reason))`` for the first one that cannot be.
+
+        With ``span``, the top-level statements that can evaluate one request
+        (``_security_tf_request_span``), they compute what that request reads
+        instead: the statements before the span. A statement inside the span
+        would change the value where the request reads it. One after it runs
+        once the request has read the name, on every bar, and is left out;
+        that holds only for a name every bar declares again, so a ``var`` or
+        ``varip`` name, which carries a later value into the next bar's
+        request, is not computed this way."""
         body = list(getattr(self.ctx.ast, "body", None) or ())
         position = {id(stmt): i for i, stmt in enumerate(body)}
-        first_request = self._security_first_request_position(body)
+        first_request = (
+            self._security_first_request_position(body) if span is None else None)
         closure = set(names)
         while True:
             stmts: dict[int, ASTNode] = {}
@@ -2060,9 +2280,22 @@ class SecurityEmitter:
                 if decl is None:
                     return None, (name, source)
                 decls[name] = decl
+                if span is not None:
+                    info = self._global_mutable_infos.get(name)
+                    if getattr(info, "is_var", False) or decl.is_var or decl.is_varip:
+                        return None, (name, "keeps its value from bar to bar")
+                    if (position[id(decl)] >= span[0]
+                            or not any(stmt is decl for stmt in source)):
+                        return None, (name, "is not declared before the request")
                 for stmt in source:
-                    if position.get(id(stmt), first_request) >= first_request:
-                        return None, (name, "is assigned after the first request")
+                    at = position.get(id(stmt))
+                    if span is None:
+                        if at is None or at >= first_request:
+                            return None, (name, "is assigned after the first request")
+                    elif at is None or span[0] <= at <= span[1]:
+                        return None, (name, "is assigned where the request reads it")
+                    elif at > span[1]:
+                        continue
                     stmts[id(stmt)] = stmt
             reads: set[str] = set()
             for stmt in stmts.values():
@@ -5087,6 +5320,12 @@ class SecurityEmitter:
         info = self._security_eval_info[sec_id]
         if info.get("tf"):
             return self._security_tf_literal(info["tf"])
+        plan = self._security_tf_site_state()["plans"].get(sec_id)
+        if plan is not None:
+            # Registration alone replays the request's first-bar values
+            # (``_security_tf_render_site_replays``); the evaluator spells the
+            # timeframe as every earlier build did.
+            return plan[0]
         if info.get("tf_expr"):
             return info["tf_expr"]
         return "input_tf_"

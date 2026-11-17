@@ -594,6 +594,73 @@ def test_order_comment_lowers_as_the_entry_comment_does(comment):
     assert order == bare_order[:-len('"");')] + lowered + ");"
 
 
+def _order_call(cpp: str) -> str:
+    """The one emitted ``strategy_order(...)`` statement of ``cpp``."""
+    lines = [line.strip() for line in cpp.splitlines()
+             if line.strip().startswith("strategy_order(")]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
+def _entry_comment_cpp(comment: str) -> str:
+    """What this build emits for ``comment`` as a ``strategy.entry`` comment.
+
+    Read out of the entry call between the arguments an entry without a
+    comment has around it, so no lowering is spelled here.
+    """
+    entry_tail = ', "", 0, -1);'  # after an entry's comment: oca_name, oca_type, qty_type
+    bare_entry = _one_call('strategy.entry("L", strategy.long, qty = 1)', "strategy_entry")
+    assert bare_entry.endswith('""' + entry_tail), bare_entry
+    entry = _one_call(
+        f'strategy.entry("L", strategy.long, qty = 1, comment = {comment})', "strategy_entry")
+    entry_head = bare_entry[:-len('""' + entry_tail)]
+    assert entry.startswith(entry_head) and entry.endswith(entry_tail), entry
+    lowered = entry[len(entry_head):-len(entry_tail)]
+    assert lowered and lowered != '""', entry
+    return lowered
+
+
+def _assert_reference_order_gains_only_its_comment(tmp_path, comment: str) -> None:
+    """The frozen reference's order call, plus the forwarded comment.
+
+    The reference build did not emit an order's comment. This build forwards
+    it to the engine as the host door's last argument, so against the frozen
+    reference the order statement keeps every argument the reference emitted,
+    byte for byte, and gains exactly one: the lowering the same expression has
+    as an entry's comment. A dropped, repeated or misplaced comment, and a
+    change to any reference argument, each break the equality.
+    """
+    reference = reference_codegen(NUMERIC_REFERENCE)
+    assert reference is not None, "required C++ reference is unavailable"
+    pine = tmp_path / "strategy.pine"
+    pine.write_text(
+        HEADER + f'strategy.order("L", strategy.long, qty = 1, comment = {comment})\n',
+        encoding="utf-8",
+    )
+    current = transpile_json(pine)
+    previous = transpile_json(pine, reference)
+    assert current["ok"], current.get("diagnostics")
+    assert previous["ok"], previous.get("diagnostics")
+    reference_order = _order_call(previous["cpp"])
+    assert reference_order.endswith(");"), reference_order
+    lowered = _entry_comment_cpp(comment)
+    assert lowered not in reference_order, "the reference did not emit the comment"
+    assert _order_call(current["cpp"]) == reference_order[:-len(");")] + ", " + lowered + ");"
+
+
+@pytest.mark.parametrize("comment", ('"plain"', "str.tostring(close)", 'str.format("{0}", close)'))
+def test_order_comments_without_bool_conversion_keep_reference_cpp(tmp_path, comment):
+    """An order with a comment keeps the reference's call and adds the comment.
+
+    This was a frozen-C++ control while an order's comment was not emitted.
+    The comment is forwarded now, so the control is the one statement that
+    changes, held against the reference build's own call. The same build's
+    spelling of the call is in
+    test_order_comment_lowers_as_the_entry_comment_does.
+    """
+    _assert_reference_order_gains_only_its_comment(tmp_path, comment)
+
+
 def test_concatenation_keeps_explicit_bool_conversion(tmp_path, native_env):
     _assert_native_text(
         tmp_path, native_env, "", '"x" + str.tostring(session.isfirstbar_regular)',
@@ -632,13 +699,19 @@ def test_log_format_arguments_keep_their_cpp_bool_type(tmp_path, native_env, cha
     'alert(str.tostring(session.isfirstbar_regular), alert.freq_all)',
     'alertcondition(session.isfirstbar_regular, title = "first", message = "first")',
     'label.new(bar_index, close, tooltip = str.tostring(session.isfirstbar_regular))',
+    'strategy.order("L", strategy.long, qty = 1, comment = str.tostring(session.isfirstbar_regular))',
 ))
 def test_omitted_text_sinks_keep_reference_cpp(tmp_path, statement):
     """Frozen-C++ control: alerts and the constructor tooltip are omitted.
 
-    An order's comment is forwarded to the engine and is no longer one of them
-    (test_order_comment_lowers_as_the_entry_comment_does).
+    An order's comment was omitted too and is forwarded to the engine now.
+    Its row keeps its place here and holds what replaced the omission: the
+    reference's order call gains the bool text as its one new argument.
     """
+    if statement.startswith("strategy.order("):
+        _assert_reference_order_gains_only_its_comment(
+            tmp_path, "str.tostring(session.isfirstbar_regular)")
+        return
     reference = reference_codegen(NUMERIC_REFERENCE)
     assert reference is not None, "required C++ reference is unavailable"
     pine = tmp_path / "strategy.pine"

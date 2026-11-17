@@ -46,12 +46,19 @@ def _resets(cpp: str) -> list[str]:
 def test_the_reset_reads_the_alias_through_the_inputs():
     cpp = transpile(source(NAME, FIXTURES))
     resets = "\n".join(_resets(cpp))
-    for cls in ("EMA", "SMA", "RSI", "Highest"):
-        line = next(ln for ln in resets.splitlines() if f"= ta::{cls}(" in ln)
-        # The alias's own member is never the length: it is 0 until the body
-        # assigns it, after the reset has run.
-        assert not re.search(rf"ta::{cls}\((len|len2)\)", line), line
-        assert 'get_input_int("A", 3)' in line and 'get_input_int("B", 4)' in line, line
+    # The EMA is the checked source object since the EMA family moved to the
+    # paired adapters (tests/test_checked_ema_family_adapters.py); the other
+    # three keep their engine classes. Each class is still required to be
+    # reset, from the inputs.
+    for cls in ("pineforge::source::PineEma", "ta::SMA", "ta::RSI", "ta::Highest"):
+        lines = [ln for ln in resets.splitlines() if f"= {cls}(" in ln]
+        assert lines, f"no reset builds {cls}:\n{resets}"
+        for line in lines:
+            # The alias's own member is never the length: it is 0 until the
+            # body assigns it, after the reset has run.
+            assert not re.search(rf"{re.escape(cls)}\((len|len2)\)", line), line
+            assert 'get_input_int("A", 3)' in line and 'get_input_int("B", 4)' in line, line
+    assert "= ta::EMA(" not in resets
     compile_cpp(cpp)
 
 

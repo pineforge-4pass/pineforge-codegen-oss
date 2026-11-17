@@ -1807,6 +1807,22 @@ class TaSiteHelper:
                  or self._ta_bound_arg_takes_plan(site, pos, bound[pos]))
         ]
         if not refused and not positioned:
+            # The constructor path. A helper-bound length that reads a global
+            # the requested context rebinds (a persistent one the
+            # constructor-literal proof did not admit) cannot size the
+            # constructor: the evaluator refuses such a constructor argument.
+            # Where the function reads its length on every call, it is that
+            # series length instead, read after the rebinds as the direct
+            # call's is. Every other function keeps the constructor path and
+            # its refusal.
+            rebound = sorted(
+                self._security_ta_rebound_ctor_positions(sec_id, stack, nodes))
+            if rebound:
+                series_plan = self._ta_plan_for(
+                    site, rebound, {pos: None for pos in rebound})
+                if series_plan["kind"] in self._TA_PER_CALL_LENGTH_KINDS:
+                    return {**series_plan, "site": site, "sec_id": sec_id,
+                            "bound_simple": {pos: None for pos in rebound}}
             return None
         bound_simple = {
             pos: self._simple_ta_arg_cpp_node(node, scoped=True)
@@ -1825,6 +1841,31 @@ class TaSiteHelper:
                 self._refuse_security_ta_ctor_arg(site, pos, ctor_args[pos], nodes[pos], stack)
             return None
         return {**plan, "site": site, "sec_id": sec_id, "bound_simple": bound_simple}
+
+    # The plans whose length is an argument of every call, not of the object.
+    _TA_PER_CALL_LENGTH_KINDS = frozenset({
+        "series_sma", "series_extreme", "series_percentile",
+    })
+
+    def _security_ta_rebound_ctor_positions(self, sec_id: int, stack: tuple,
+                                            nodes: list) -> set[int]:
+        """The constructor positions of a helper-bound request.security copy
+        that read a global its requested context rebinds: the reads
+        ``_security_ta_ctor_depends_on_mutables`` refuses for a constructor."""
+        info = next(
+            (item for item in self._security_eval_info
+             if item.get("sec_id") == sec_id),
+            {},
+        )
+        mutable = set(info.get("mutable_globals") or ()).difference(
+            getattr(self, "_stable_var_ctor_literals", {}))
+        if not mutable:
+            return set()
+        return {
+            pos for pos, node in enumerate(nodes)
+            if self._expr_depends_on_security_mutables(
+                node, mutable, helper_binding_stack=stack)
+        }
 
     def _refuse_security_ta_ctor_arg(self, site: "TACallSite", pos: int, cpp: str,
                                      node, stack) -> None:

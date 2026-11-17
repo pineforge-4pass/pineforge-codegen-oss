@@ -245,7 +245,17 @@ def test_a_compound_modulo_of_a_wide_product_in_a_payload_compiles():
     body = cpp[cpp.index("void _eval_security_0"):cpp.index("void evaluate_security")]
     store = next(l.strip() for l in body.splitlines()
                  if l.strip().startswith("_sec0_w = ") and "_pf_wide_l" in l)
-    assert store.startswith("_sec0_w = [&](){ auto _pf_v = (std::fmod((double)(_sec0_w), (double)(")
+    # w can be na (1 % 0 on the first bars), and an integer na is a sentinel
+    # that converting to double would turn into a number: both operands are
+    # tested for it before the modulo, which still computes through std::fmod
+    # as the chart does, and the result narrows into the 64-bit slot.
+    prefix = "_sec0_w = [&](){ auto _pf_v = (([&]() { auto _pna_l = (_sec0_w); auto _pna_r = ("
+    assert store.startswith(prefix), store
+    product = store[len(prefix):store.rindex("); using _pf_val_t = ")]
+    assert product.startswith("[&]() -> double { auto _pf_wide_l = ("), product
+    from tests._numeric_expected import int64_store, integer_arithmetic
+    assert store == "_sec0_w = " + int64_store(
+        integer_arithmetic("_sec0_w", "%", product)) + ";"
     compile_cpp(cpp)
 
 

@@ -22,6 +22,40 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- A `request.security` or `request.security_lower_tf` timeframe computed from
+  a global the script assigns again after a request is now registered with
+  the value the global has where that request is written. With
+  `int sec = 300`, a request of `str.tostring(sec / 60)`, `sec := 60` and a
+  second request of the same expression, the first registers `"5"` and the
+  second `"1"`; TradingView's intrabar counts for that script on a 60-minute
+  chart are 12 and 60. Both used to register the value the global's storage
+  held before the first bar, with the warning that the global "is assigned
+  after the first request". The same now holds for a global declared below an
+  earlier, unrelated request. A request keeps its earlier registration and
+  that warning when the global is `var` or `varip`, when a statement that
+  holds the request also assigns the global, when the request is in a
+  function or method and the global is assigned below that definition, or
+  when the timeframe names a global declared from the reassigned one and an
+  assignment lies between that declaration and the request. A script whose
+  assignments all precede its first request emits the same C++ as before.
+- A typed variable, an assignment and an object field keep the bool and
+  number conversions that compiled before the primitive slot check: a bool
+  stored in an `int` or `float` slot is 1 or 0, and a number computed at run
+  time is false in a `bool` slot when it is `na` or 0. TradingView refuses
+  both. A number written as a literal in a `bool` slot (`bool flag = 1.5`),
+  and a string or color in a slot of another type, are still refused with
+  PF-E2093.
+- A function whose body declares a name one of its parameters has
+  (`f(int q) =>` followed by `[q, z] = ...` or `q = ...`) now compiles: the
+  emitted body is a nested C++ block, where the declaration hides the
+  parameter from that statement on. It used to stop in the C++ compiler
+  ("shadows a parameter").
+- `ta.sma`, `ta.highest`, `ta.lowest`, `ta.highestbars`, `ta.lowestbars` and
+  `ta.percentile_nearest_rank` called through a helper inside
+  `request.security` now accept a length that reads a persistent (`var`)
+  global: the length is read on every requested bar, as it is for the direct
+  call. These calls were refused with "TA constructor args that depend on
+  rebound mutable globals"; every other `ta.*` function keeps that refusal.
 - Calls of an overloaded user function now run the declaration their
   arguments select. This applies to the declarations of one name when every
   parameter declares a scalar type or a user-defined type, no two declarations

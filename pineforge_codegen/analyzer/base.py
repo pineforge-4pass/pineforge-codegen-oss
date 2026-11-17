@@ -5588,6 +5588,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if (actual in {expected, "na"}
                 or (actual in numeric and expected in numeric)):
             return
+        # A bool and a number are converted where the two meet, and scripts
+        # that rely on it compiled before this check existed. A bool stored
+        # in an int or float slot is 1 or 0 (the float field of an object
+        # among them), and a number computed at run time is false in a bool
+        # slot when it is na or 0. Both keep that conversion in a declared
+        # variable, an assignment and a field alike. Only a number the script
+        # writes as a literal is refused in a bool slot.
+        if actual == "bool" and expected in ("int", "float"):
+            return
+        if (expected == "bool" and actual in numeric
+                and not isinstance(value, NumberLiteral)):
+            return
         self._slot_type_error(actual, expected, context, value.loc)
 
     def _check_builtin_enum_arguments(self, node, parameter_types=None):

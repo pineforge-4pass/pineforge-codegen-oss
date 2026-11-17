@@ -625,7 +625,7 @@ def clone_reference():
     (_BLOCK_MEMBER, "x__blk1"),
     (_RESERVED_CALLABLE, "_sec7"),
     (_FRESH_FIXNAN, None),
-])
+], ids=[f"{_VAR_CLONE}-acc_cs1", f"{_METHOD_CLONE}-f_cs1", None, None, None])
 def test_noncolliding_controls_keep_complete_reference_cpp(
     source, original, clone_reference, tmp_path
 ) -> None:
@@ -635,4 +635,11 @@ def test_noncolliding_controls_keep_complete_reference_cpp(
     pine.write_text(source, encoding="utf-8")
     reference = transpile_json(pine, root=clone_reference)
     assert reference["ok"], reference
-    assert transpile(source, check_support=True, libraries={}) == reference["cpp"]
+    # The reference predates the checked EMA-family objects: a control that
+    # holds an EMA is compared with the reference projected onto them, and
+    # only onto them (tests/_checked_ema_reference.py). The clone and member
+    # spellings this control guards are compared byte for byte either way.
+    from tests._checked_ema_reference import with_checked_ema_family
+
+    assert transpile(source, check_support=True, libraries={}) == with_checked_ema_family(
+        reference["cpp"])

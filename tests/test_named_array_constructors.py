@@ -413,4 +413,17 @@ def test_unrelated_lowerings_keep_cpp_diagnostics_and_manifests(tmp_path, body):
     pine.write_text(HEADER + body)
     current = transpile_json(pine)
     assert previous["ok"] and current["ok"], (previous, current)
+    if "strategy.order(" in body:
+        # An order forwards its comment to the engine as the host door's last
+        # argument, which the reference did not emit: an order without a
+        # comment passes the empty string there. That one argument is added to
+        # the reference's own call; every other byte of the C++, every
+        # diagnostic and the manifests are still compared whole.
+        calls = [line for line in previous["cpp"].splitlines()
+                 if line.strip().startswith("strategy_order(")]
+        assert len(calls) == 1, calls
+        assert calls[0].endswith(");") and not calls[0].endswith(', "");'), calls
+        previous = dict(previous)
+        previous["cpp"] = previous["cpp"].replace(
+            calls[0], calls[0][:-len(");")] + ', "");', 1)
     assert current == previous

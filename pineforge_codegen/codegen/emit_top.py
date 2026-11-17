@@ -2842,6 +2842,7 @@ class TopLevelEmitter:
         self._current_func_locals |= self._collect_binding_names(node.body)
 
         lines.append(f"    {ret_type} {func_name}({', '.join(param_strs)}) {{")
+        body_start = len(lines)
         self._emit_function_global_history_updates(fi, lines)
 
         # A session.* flag the body reads at an offset: its history is this
@@ -2998,6 +2999,19 @@ class TopLevelEmitter:
                     default_ret = self._default_for_type(ret_type)
                 lines.append(f"        return {default_ret};")
 
+        if self._callable_scope_redeclares_parameter(node):
+            # C++ refuses a declaration in a function's outermost block that
+            # reuses a parameter's name (``auto [q, z] = ...`` in ``f(int q)``:
+            # "shadows a parameter"), and allows it in a nested block. The
+            # body moves into one: every read before the declaration is still
+            # the parameter, every read after it the declared name, and the
+            # return statement leaves the function from inside the block.
+            lines[body_start:] = (
+                ["        {"]
+                + [line if not line or line.startswith("#") else "    " + line
+                   for line in lines[body_start:]]
+                + ["        }"]
+            )
         lines.append("    }")
         self._current_func_param_types = {}
         self._current_func_param_specs = {}
@@ -3024,6 +3038,22 @@ class TopLevelEmitter:
         self._active_fixnan_remap = {}
         self._active_call_site_idx = None
         self._current_instance_name = None
+
+    @staticmethod
+    def _callable_scope_redeclares_parameter(node) -> bool:
+        """Whether a declaration in the callable's own scope reuses the name
+        of one of its parameters: ``f(q) =>`` whose body declares ``q = 1``
+        or ``[q, z] = pair()``. A declaration in a nested block (an ``if``
+        arm, a loop) is a C++ block of its own already."""
+        params = set(node.params or ())
+        if not params:
+            return False
+        for stmt in node.body or ():
+            if isinstance(stmt, VarDecl) and stmt.name in params:
+                return True
+            if isinstance(stmt, TupleAssign) and params.intersection(stmt.names):
+                return True
+        return False
 
     def _emit_function_global_history_updates(
             self, fi: FuncInfo, lines: list[str]) -> None:

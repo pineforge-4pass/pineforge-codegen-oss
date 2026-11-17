@@ -8,6 +8,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen.codegen.run_stops import TIMEZONE_STOP_SHIM_CPP
+from tests._checked_ema_reference import with_checked_ema_family
 from tests._e2e import reference_codegen, transpile_json
 from tests.test_e2e_series_var_init import _SHAPES as _SERIES_INITIALIZERS
 from tests.test_runtime_var_initialization import _RUNTIME_PINE, _compile_and_run
@@ -407,7 +408,11 @@ def test_unaffected_scripts_keep_complete_cpp(source, reference, tmp_path):
     pine.write_text(source, encoding="utf-8")
     before = transpile_json(pine, root=reference)
     assert before["ok"], before
-    assert transpile(source) == before["cpp"]
+    # The reference predates the checked EMA-family objects. A script that
+    # holds one is compared with the reference projected onto them, and only
+    # onto them (tests/_checked_ema_reference.py); every other script is
+    # compared with the reference as it is.
+    assert transpile(source) == with_checked_ema_family(before["cpp"])
 
 
 def _undo_timestamp_stop(cpp: str) -> str:

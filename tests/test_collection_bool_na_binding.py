@@ -2,7 +2,9 @@
 
 Collection diagnostics and typed twins keep their authored contracts.
 Unqualified scalar cases compare complete outcomes with the pinned parent.
-No parent red, candidate green or TV outcome is claimed from this source.
+No parent red, candidate green or TV outcome is claimed from this source,
+with one exception that is stated where it is asserted: the keyword push on
+a receiver, which the parent refused and which binds its value now.
 """
 
 from __future__ import annotations
@@ -534,13 +536,17 @@ def test_currency_rate_na_flag_is_refused_at_its_argument():
 
 
 # These are the parent's three version-limited contracts, in namespace and
-# receiver form. Keep the keyword push's existing arity refusal alongside an
-# ordinary positional receiver control; the other receiver rows bind keywords.
+# receiver form. The parent dropped the keyword of a receiver push and stopped
+# with its arity error; the keyword binds the value slot now, as the other
+# receiver rows bind theirs. Where that row is accepted it is held to the
+# parent's outcome for the positional receiver spelling beside it.
+PUSH_KEYWORD = "values.push(value = {value})"
+PUSH_POSITIONAL = "values.push({value})"
 VERSIONED_PARENT_CALLS = (
     pytest.param("array", "array.push(values, {value})", id="push-namespace"),
-    pytest.param("array", "values.push(value = {value})", id="push-receiver"),
+    pytest.param("array", PUSH_KEYWORD, id="push-receiver"),
     pytest.param(
-        "array", "values.push({value})", id="push-receiver-positional",
+        "array", PUSH_POSITIONAL, id="push-receiver-positional",
     ),
     pytest.param("array", "array.set(values, 0, {value})", id="array-set-namespace"),
     pytest.param("array", "values.set(0, value = {value})", id="array-set-receiver"),
@@ -576,6 +582,41 @@ def _assert_parent_push_keyword_arity(outcome, *, filename, line, col):
     assert diagnostic["message"] == message, outcome
     assert diagnostic["severity"] == "error", outcome
     assert (diagnostic["line"], diagnostic["col"]) == (line, col), outcome
+
+
+def _assert_keyword_push_binds_its_value(
+    keyword, positional, reference, tmp_path, *, filename, line, col,
+):
+    """The receiver push with ``value =`` against its positional spelling.
+
+    ``keyword`` and ``positional`` are ``(source, extra_env)`` of one script
+    that differs only in how the push is spelled. The pinned parent refused
+    the keyword spelling (the old value, still asserted here on the parent),
+    and this tree gives it the complete C++ the parent gives the positional
+    spelling: the keyword names the same one value slot. The positional row
+    of the same test holds this tree to the parent's whole positional outcome.
+    """
+    def run(case, root, name):
+        source, extra_env = case
+        pine = tmp_path / name
+        pine.write_text(source, encoding="utf-8")
+        return transpile_json(pine, root=root, extra_env=extra_env)
+
+    _assert_parent_push_keyword_arity(
+        run(keyword, reference, "push_keyword.pine"),
+        filename=filename, line=line, col=col,
+    )
+    parent_positional = run(positional, reference, "push_positional.pine")
+    assert parent_positional["ok"] is True, parent_positional
+    assert isinstance(parent_positional["cpp"], str) and parent_positional["cpp"]
+    current_keyword = run(keyword, REPO_ROOT, "push_keyword.pine")
+    assert current_keyword["ok"] is True, current_keyword
+    assert not [
+        entry for entry in current_keyword["diagnostics"]
+        if entry["severity"] == "error"
+    ], current_keyword["diagnostics"]
+    # Complete C++, nothing normalized or discarded.
+    assert current_keyword["cpp"] == parent_positional["cpp"]
 
 
 @pytest.mark.parametrize("namespace,template", VERSIONED_PARENT_CALLS)
@@ -617,13 +658,17 @@ def test_parent_collection_v6_keeps_its_false_twin_outcome(
     namespace, template, scalar_parent_codegen, tmp_path,
 ):
     source = _collection_source(namespace, "bool", template.format(value="false"))
-    outcome = _assert_parent_outcome(source, scalar_parent_codegen, tmp_path)
-    if template == "values.push(value = {value})":
-        _assert_parent_push_keyword_arity(
-            outcome, filename="<input>", line=4, col=12,
+    if template == PUSH_KEYWORD:
+        positional = _collection_source(
+            namespace, "bool", PUSH_POSITIONAL.format(value="false"),
         )
-    else:
-        assert outcome["ok"] is True, outcome
+        _assert_keyword_push_binds_its_value(
+            (source, None), (positional, None), scalar_parent_codegen, tmp_path,
+            filename="<input>", line=4, col=12,
+        )
+        return
+    outcome = _assert_parent_outcome(source, scalar_parent_codegen, tmp_path)
+    assert outcome["ok"] is True, outcome
 
 
 @pytest.mark.parametrize("namespace,template", VERSIONED_PARENT_CALLS)
@@ -643,26 +688,35 @@ def test_parent_collection_imported_v5_keeps_its_whole_outcome(
             "matrix.get(values, 0, 0)",
         ),
     }[namespace]
-    library = (
-        '//@version=5\nlibrary("Legacy")\nexport check() =>\n'
-        + f"    {setup}\n    {template.format(value=value)}\n    {read}\n"
-    )
     source = (
         HEADER + "import local/Legacy/1 as legacy\n"
         + "value = legacy.check()\nplot(value ? 1 : 0)\n"
     )
-    layout = Layout(tmp_path / "library-env")
-    digest = layout.add_library("local/Legacy/1", data=library.encode("utf-8"))
-    layout.add_probe("legacy", source.encode("utf-8"), {"local/Legacy/1": digest})
-    outcome = _assert_parent_outcome(
-        source, scalar_parent_codegen, tmp_path, extra_env=layout.env,
-    )
-    if template == "values.push(value = {value})":
-        _assert_parent_push_keyword_arity(
-            outcome, filename="local/Legacy/1", line=5, col=16,
+
+    def imported(call, directory):
+        """The probe and the environment of the library spelling ``call``."""
+        library = (
+            '//@version=5\nlibrary("Legacy")\nexport check() =>\n'
+            + f"    {setup}\n    {call.format(value=value)}\n    {read}\n"
         )
-    else:
-        assert outcome["ok"] is True, outcome
+        layout = Layout(tmp_path / directory)
+        digest = layout.add_library("local/Legacy/1", data=library.encode("utf-8"))
+        layout.add_probe("legacy", source.encode("utf-8"), {"local/Legacy/1": digest})
+        return source, layout.env
+
+    if template == PUSH_KEYWORD:
+        _assert_keyword_push_binds_its_value(
+            imported(PUSH_KEYWORD, "library-env"),
+            imported(PUSH_POSITIONAL, "library-env-positional"),
+            scalar_parent_codegen, tmp_path,
+            filename="local/Legacy/1", line=5, col=16,
+        )
+        return
+    _source, extra_env = imported(template, "library-env")
+    outcome = _assert_parent_outcome(
+        source, scalar_parent_codegen, tmp_path, extra_env=extra_env,
+    )
+    assert outcome["ok"] is True, outcome
 
 
 @pytest.mark.parametrize("template", (

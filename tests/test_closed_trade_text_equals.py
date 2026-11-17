@@ -271,9 +271,16 @@ _FALLBACKS = [
     ('strategy.closedtrades.entry_comment(0)', 'closed_trade_entry_comment(0)'),
     # A stored exit comment remains the owning getter call.
     ('strategy.closedtrades.exit_comment(0)', 'closed_trade_exit_comment(0)'),
-    # Concatenation still constructs an owning string for its literal operand.
-    ('strategy.closedtrades.entry_id(0) + "!"',
-     '(closed_trade_entry_id(0) + std::string("!"))'),
+    # Concatenation still constructs an owning string for its literal operand:
+    # the owning getter plus the owning literal, never the comparison helper.
+    # A trade's text can carry a UTF-16 surrogate half, so the joined value
+    # goes through the pair normalization every such concatenation takes
+    # (``_string_concat_cpp``; tests/test_string_units.py holds its values).
+    pytest.param(
+        'strategy.closedtrades.entry_id(0) + "!"',
+        '_pf_u16_normalize(closed_trade_entry_id(0) + std::string("!"))',
+        id='strategy.closedtrades.entry_id(0) + "!"-(closed_trade_entry_id(0) + std::string("!"))',
+    ),
     # Open-trade text is outside the closed-trade comparison contract.
     ('strategy.opentrades.entry_id(0) == "L"',
      '(open_trade_entry_id(0) == std::string("L"))'),

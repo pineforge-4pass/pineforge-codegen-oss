@@ -5,6 +5,8 @@ import re
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.diagnostic_codes import UNCATALOGUED
+from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._compile import compile_cpp, run_emitted_tu
 from tests.test_array_retained_alias import _reference_cpp
 
@@ -222,3 +224,33 @@ plot(first)
         sec_id = re.search(r"_sec(\d+)_", member).group(1)
         assert f"{member}.begin_evaluation(security_series_slot_is_new({sec_id}));" in cpp
     compile_cpp(cpp, label="changing lengths in request-owning helpers")
+
+
+def test_misbound_series_sma_reaching_the_lowering_is_refused_at_its_call():
+    """Inside a switch's non-default arm the signature binder only warns about
+    a ta.* call that binds to no TradingView signature, and the analyzer routes
+    its arguments by position. Such an authored call still reaches the series
+    lowering, which answers with a located, coded refusal instead of C++ built
+    from the wrong arguments."""
+    call = "ta.sma(close, length, 3)"
+    source = (
+        '//@version=6\nstrategy("SMA arity in a switch arm")\n'
+        "length = 1 + bar_index % 5\n"
+        "value = switch\n"
+        f"    close > open => {call}\n"
+        "    => close\n"
+        "plot(value)\n"
+    )
+    with pytest.raises(CompileError) as refused:
+        transpile(source, filename="arity.pine")
+    errors = [d for d in refused.value.diagnostics if d.level == Level.ERROR]
+    assert len(errors) == 1
+    diagnostic = errors[0]
+    # The binder's finding for this call is a warning here, so the one error
+    # is the lowering's own.
+    assert diagnostic.phase == Phase.CODEGEN
+    assert "ta.sma" in diagnostic.message
+    assert "number of arguments" in diagnostic.message
+    assert diagnostic.location.file == "arity.pine"
+    assert call in source.splitlines()[diagnostic.location.line - 1]
+    assert diagnostic.code not in UNCATALOGUED.values()

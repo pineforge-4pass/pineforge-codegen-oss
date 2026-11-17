@@ -514,18 +514,18 @@ def test_real_interfaces_keep_notes_and_short_sentences(case):
         normalized["cpp"] = without_trade_history_policy(normalized["cpp"])
         expected_wire["cpp"] = without_trade_history_policy(expected_wire["cpp"])
         # The frozen diagnostic fixture predates checked EMA-family objects.
-        # Update only its concrete EMA type and required include; all
-        # diagnostic fields and the rest of the emitted bytes stay exact.
+        # Update only its concrete EMA type, the required include and the
+        # handler around the replay that precalculates the EMA
+        # (tests/_checked_ema_reference.py); all diagnostic fields and the
+        # rest of the emitted bytes stay exact.
         if "ta::EMA " in expected_wire["cpp"]:
-            expected_wire["cpp"] = re.sub(
-                r"\bta::EMA\b", "pineforge::source::PineEma", expected_wire["cpp"]
+            from tests._checked_ema_reference import (
+                TA_LENGTH_HEADER, with_checked_ema_family,
             )
-            header = "#include <pineforge/source/pine_ta_length.hpp>\n"
-            assert header not in expected_wire["cpp"]
-            expected_wire["cpp"] = expected_wire["cpp"].replace(
-                "#include <pineforge/math.hpp>\n",
-                header + "#include <pineforge/math.hpp>\n", 1,
-            )
+
+            assert TA_LENGTH_HEADER not in expected_wire["cpp"]
+            expected_wire["cpp"] = with_checked_ema_family(expected_wire["cpp"])
+            assert "ta::EMA" not in expected_wire["cpp"]
     assert json.dumps(normalized) == json.dumps(expected_wire)
     if failure:
         text = PRODUCT_BEFORE["text"][case["name"]]

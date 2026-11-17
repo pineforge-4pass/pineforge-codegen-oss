@@ -500,13 +500,16 @@ def test_constant_and_input_lengths_keep_their_cpp(tmp_path: Path) -> None:
         assert expected.count(previous) == 1
         expected = expected.replace(previous, assignment, 1)
     # Fixed and input EMA sites now require the checked source object. Keep
-    # the complete reference comparison with only that API substitution.
+    # the complete reference comparison with only that API substitution: the
+    # object's type, its header, and the handler around the replay that
+    # precalculates a checked object (tests/_checked_ema_reference.py).
+    from tests._checked_ema_reference import with_checked_ema_family
+
     assert "ta::EMA" in expected
-    expected = re.sub(r"\bta::EMA\b", "pineforge::source::PineEma", expected)
     header = "#include <pineforge/source/pine_ta_length.hpp>\n"
     assert header not in expected
-    expected = expected.replace("#include <pineforge/math.hpp>\n",
-                                header + "#include <pineforge/math.hpp>\n", 1)
+    expected = with_checked_ema_family(expected)
+    assert "ta::EMA" not in expected
     # The rollback hook leaves requested-evaluation state alone since the
     # fill-restore fix; everything else must stay identical.
     assert without_restore_script_state(

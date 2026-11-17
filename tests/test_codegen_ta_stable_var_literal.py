@@ -426,7 +426,10 @@ int main() {
     return strategy.observed == expected ? 0 : 2;
 }
 '''
-    run_emitted_tu(cpp, driver, label="immutable helper SMA length")
+    # The driver's exit status is the result: 0 only when the strategy ran
+    # without an error and its last value equals the engine's own series SMA
+    # of length 5 (run_emitted_tu fails on any other status).
+    run_emitted_tu(cpp, driver, opt="-O0", label="immutable helper SMA length")
 
 
 @pytest.mark.parametrize(

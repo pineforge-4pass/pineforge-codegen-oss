@@ -15,10 +15,18 @@ BINANCE:ETHUSDT.P 15) reads a "5" timeframe with three intrabars per chart
 bar through a declaration expression and through ``:=`` reassignments on all
 265 closes. The replay runs on the corpus 15m chart feed with the corpus 1m
 feed as the auxiliary lower-timeframe feed.
+
+A request reads a reassigned global where the request is written: a write
+after it does not reach it, and reaches the next request. TradingView compiled
+the two-request script below without errors or warnings on 2026-11-18. On
+BINANCE:BTCUSDT 60, all 188 completed aligned pairs showed 12 intrabars at the
+first request and 60 at the second: "5" before the write, "1" after it.
+This is one observation of that script and window.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -35,6 +43,29 @@ from tests._numeric_expected import (
 FIXTURES = Path(__file__).parent / "fixtures" / "security_ltf_tv"
 NAME = "w9sec_ltf_computed_tf"
 BASELINE_CODEGEN_REVISION = "fdcdcbb"  # main before this fix; it already contains 4e5d482
+
+# The two-request script observed on 2026-11-18.
+READ_ORDER_SOURCE = '''//@version=6
+strategy("lower timeframe request read order")
+int sec = 300
+beforeWrite = request.security_lower_tf(syminfo.tickerid, str.tostring(sec / 60), close)
+sec := 60
+afterWrite = request.security_lower_tf(syminfo.tickerid, str.tostring(sec / 60), close)
+plot(array.size(beforeWrite))
+plot(array.size(afterWrite))
+'''
+READ_ORDER_SOURCE_BYTES = 320
+READ_ORDER_PLOTS = "plot(array.size(beforeWrite))\nplot(array.size(afterWrite))\n"
+# A run's plots are not in its report: the two sizes travel in the comment of
+# a close, as the fixtures' values do.
+READ_ORDER_CLOSES = '''m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = str.tostring(array.size(beforeWrite)) + "|" + str.tostring(array.size(afterWrite)))
+'''
+READ_ORDER_TIMEFRAME = "str.tostring(sec / 60)"
+CHART_MINUTES = 15  # the corpus chart feed of ``tape_feed``
 
 
 def _aux_1m_feed(engine: Path, base: Path) -> Path:
@@ -98,6 +129,64 @@ def _configure(cpp: str) -> str:
     return cpp[start:cpp.index("\n    }\n", start)]
 
 
+def _registration(configure: str, sec_id: int) -> str:
+    """The lower-timeframe registration call of ``sec_id``: from its name to
+    the chart timeframe argument that follows its timeframe."""
+    start = configure.index(f"register_security_lower_tf_eval({sec_id}, ")
+    return configure[start:configure.index(", input_tf_);", start)]
+
+
+def _stores_above_each_request(pine: str, name: str) -> list[list[str]]:
+    """For each lower-timeframe request line of ``pine``, what the lines above
+    it declare and assign ``name`` with, in source order."""
+    stores: list[str] = []
+    above: list[list[str]] = []
+    for line in pine.splitlines():
+        store = re.fullmatch(rf"(?:int )?{name} :?= (.+)", line)
+        if store:
+            stores.append(store.group(1))
+        elif "request.security_lower_tf(" in line:
+            above.append(list(stores))
+    return above
+
+
+def _returned(call: str) -> str:
+    """The timeframe a registration call's own replay returns."""
+    returned = re.search(r"^ {12}return ", call, re.M)
+    assert returned, call
+    return call[returned.start():]
+
+
+def _replayed(call: str, name: str) -> list[str]:
+    """What a registration call stores into its own ``name``, in order,
+    between declaring it and returning its timeframe."""
+    declaration = f"decltype(this->{name}) {name}{{}};"
+    assert call.count(declaration) == 1, call
+    declared = call.index(declaration)
+    returned = len(call) - len(_returned(call))
+    stores = [(store.start(), store.group(1))
+              for store in re.finditer(rf"^ {{12}}{name} = (.+);$", call, re.M)]
+    assert all(declared < at < returned for at, _ in stores), call
+    return [value for _, value in stores]
+
+
+def _closes(pine: str) -> str:
+    """``pine`` with its two plots replaced by the closes that report them."""
+    assert pine.endswith(READ_ORDER_PLOTS)
+    return pine[:-len(READ_ORDER_PLOTS)] + READ_ORDER_CLOSES
+
+
+def _with_literal_timeframes(pine: str, *timeframes: str) -> str:
+    """``pine`` with each request's computed timeframe replaced, in source
+    order, by the literal given for it."""
+    parts = pine.split(READ_ORDER_TIMEFRAME)
+    assert len(parts) == len(timeframes) + 1
+    out = parts[0]
+    for timeframe, rest in zip(timeframes, parts[1:]):
+        out += f'"{timeframe}"' + rest
+    return out
+
+
 def test_registration_replays_the_first_bar_in_source_order():
     from pineforge_codegen import transpile_full
 
@@ -132,31 +221,171 @@ a = request.security_lower_tf(syminfo.tickerid, str.tostring(sec / 60), close)
 sec := 60
 plot(array.size(a))
 '''
+    # The write after the only request does not reach it: on every bar the
+    # request reads what the lines above it give ``sec``, and its registration
+    # replays exactly those. This case was pinned to the lane base's whole
+    # registration, which read the value the script writes last; ``READ_ORDER_SOURCE``'s
+    # request before its write reads the declared one (12 intrabars, not 60).
+    result = transpile_full(after)
+    configure = _configure(result["cpp"])
+    assert not [d.message for d in result["diagnostics"] if "reassigns" in d.message]
+    (above,) = _stores_above_each_request(after, "sec")
+    later = re.search(r"^sec := (.+)$", after, re.M).group(1)
+    assert len(above) == 1 and later not in above
+    call = _registration(configure, 0)
+    assert _replayed(call, "sec") == above
+    assert re.search(r"\bsec\b", _returned(call)), call
+    # Nothing but the request's own call declares or stores it.
+    assert configure.count("decltype(this->sec) sec{};") == 1
+    assert f"sec = {later};" not in configure
+
+    # A value registration cannot compute keeps its lowering and warns.
+    result = transpile_full(helper)
+    configure = _configure(result["cpp"])
+    assert "decltype(this->sec)" not in configure
+    warnings = [d.message for d in result["diagnostics"] if "reassigns" in d.message]
+    assert len(warnings) == 1 and "'sec'" in warnings[0], result["diagnostics"]
+    assert "is assigned a value it cannot compute there" in warnings[0], warnings
     legacy = reference_codegen(BASELINE_CODEGEN_REVISION)
-    cases = (
-        (helper, (("((double)(sec) / (double)(60))",
-                   integer_arithmetic("sec", "/", "60")),)),
-        (after, ()),
-    )
-    for i, (pine, replacements) in enumerate(cases):
+    if legacy is None:
+        pytest.skip(f"the lane base ({BASELINE_CODEGEN_REVISION}) is not in this checkout's history")
+    path = tmp_path / "s0.pine"
+    path.write_text(helper, encoding="utf-8")
+    # Registered as every earlier build registered it: an integer member read.
+    pinned = require_numeric_hunk(
+        configure, "((double)(sec) / (double)(60))", integer_arithmetic("sec", "/", "60"))
+    assert pinned == _configure(transpile_json(path, legacy)["cpp"])
+
+
+def test_two_requests_around_a_write_each_register_what_they_read():
+    from pineforge_codegen import transpile_full
+
+    assert len(READ_ORDER_SOURCE.encode("utf-8")) == READ_ORDER_SOURCE_BYTES
+    result = transpile_full(READ_ORDER_SOURCE)
+    configure = _configure(result["cpp"])
+    assert not [d.message for d in result["diagnostics"] if "reassigns" in d.message]
+    before, after = _stores_above_each_request(READ_ORDER_SOURCE, "sec")
+    # The second request sees one more store than the first: the write between.
+    assert before and after[:-1] == before and after[-1] not in before
+    first, second = _registration(configure, 0), _registration(configure, 1)
+    assert _replayed(first, "sec") == before
+    assert _replayed(second, "sec") == after
+    # Each call returns the timeframe computed from its own values; nothing is
+    # replayed ahead of the two calls for both to share.
+    assert re.search(r"\bsec\b", _returned(first)), first
+    assert re.search(r"\bsec\b", _returned(second)), second
+    assert configure.count("decltype(this->sec) sec{};") == 2
+    assert configure.index("decltype(this->sec) sec{};") > configure.index(first[:40])
+
+
+def test_a_request_replay_reads_inputs_and_declared_timeframes_where_it_is():
+    from pineforge_codegen import transpile_full
+
+    # The first request of the script is unrelated, so nothing below it
+    # precedes "the first request"; each timeframe is a global declared above
+    # its request, and the last write follows both.
+    result = transpile_full('''//@version=6
+strategy("declared timeframes")
+daily = request.security(syminfo.tickerid, "D", close)
+int sec = input.int(300, "Seconds")
+string early = str.tostring(sec / 60)
+a = request.security_lower_tf(syminfo.tickerid, early, close)
+sec := 60
+string late = str.tostring(sec / 60)
+b = request.security_lower_tf(syminfo.tickerid, late, close)
+sec := 120
+plot(daily)
+plot(array.size(a))
+plot(array.size(b))
+''')
+    configure = _configure(result["cpp"])
+    assert not [d.message for d in result["diagnostics"] if "reassigns" in d.message]
+    seconds = 'get_input_int("Seconds", 300)'
+    assert _replayed(_registration(configure, 1), "sec") == [seconds]
+    assert _replayed(_registration(configure, 2), "sec") == [seconds, "60"]
+    assert "sec = 120;" not in configure
+
+
+def test_a_request_replay_that_cannot_hold_keeps_its_lowering_and_warns():
+    from pineforge_codegen import transpile_full
+
+    # A ``var`` carries the later value into the next bar's request: "5" on
+    # the first bar and "1" from the second, which no one registration is.
+    kept = '''//@version=6
+strategy("kept across bars")
+var int sec = 300
+a = request.security_lower_tf(syminfo.tickerid, str.tostring(sec / 60), close)
+sec := 60
+plot(array.size(a))
+'''
+    # Where a function is called is not followed: a write after its
+    # definition may come before or after the request the function makes.
+    called = '''//@version=6
+strategy("requested in a function")
+int mins = 60
+f() => request.security(syminfo.tickerid, str.tostring(mins), close)
+v = f()
+mins := 120
+plot(v)
+'''
+    for pine, name in ((kept, "sec"), (called, "mins")):
         result = transpile_full(pine)
         configure = _configure(result["cpp"])
-        assert "decltype(this->sec)" not in configure
+        assert f"decltype(this->{name})" not in configure, pine
         warnings = [d.message for d in result["diagnostics"] if "reassigns" in d.message]
-        assert len(warnings) == 1 and "'sec'" in warnings[0], result["diagnostics"]
-        assert ("is assigned a value it cannot compute there" in warnings[0]
-                or "is assigned after the first request" in warnings[0]), warnings
-        if legacy is None:
-            pytest.skip(f"the lane base ({BASELINE_CODEGEN_REVISION}) is not in this checkout's history")
-        path = tmp_path / f"s{i}.pine"
-        path.write_text(pine, encoding="utf-8")
-        # Registered as every earlier build registered it.
-        # The helper leaves an integer member read; the later literal write
-        # is already expanded to a non-missing constant in both builds.
-        pinned = configure
-        for previous, expected in replacements:
-            pinned = require_numeric_hunk(pinned, previous, expected)
-        assert pinned == _configure(transpile_json(path, legacy)["cpp"])
+        assert len(warnings) == 1 and f"'{name}'" in warnings[0], result["diagnostics"]
+        assert "is assigned after the first request" in warnings[0], warnings
+
+
+def test_two_requests_around_a_write_read_the_intrabars_their_literals_do(tmp_path_factory):
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("request_read_order")
+    feed = tape_feed(engine, base)
+    aux = _aux_1m_feed(engine, base)
+    # What each request reads, from the script's own lines: the last value
+    # stored above it, in minutes.
+    timeframes = [str(int(stores[-1]) // 60)
+                  for stores in _stores_above_each_request(READ_ORDER_SOURCE, "sec")]
+    assert len(timeframes) == 2 and timeframes[0] != timeframes[1]
+    pine = _closes(READ_ORDER_SOURCE)
+    computed = _exits(engine, base, "computed", pine, feed, aux)
+    literal = _exits(
+        engine, base, "literal", _with_literal_timeframes(pine, *timeframes), feed, aux)
+    assert computed == literal
+    # Each request has its own count of intrabars on every close (the run's
+    # last close, at the end of the data, carries no comment).
+    sizes = "|".join(str(CHART_MINUTES // int(timeframe)) for timeframe in timeframes)
+    assert {comment for comment in literal.values() if comment} == {sizes}
+    print(f"two requests around a write: {len(computed)} exits equal the literal "
+          f"timeframes {timeframes}, {sizes} intrabars")
+
+
+def test_a_request_replay_reads_the_input_as_overridden(tmp_path_factory):
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("request_read_order_input")
+    feed = tape_feed(engine, base)
+    aux = _aux_1m_feed(engine, base)
+    declared = "int sec = 300"
+    assert READ_ORDER_SOURCE.count(declared) == 1
+    pine = _closes(READ_ORDER_SOURCE.replace(declared, 'int sec = input.int(300, "Seconds")'))
+    default = _exits(engine, base, "input", pine, feed, aux)
+    # The same build under Seconds=60: the first request reads the input, so
+    # both read "1", as the two literals "1" register it.
+    overridden = {
+        trade["exit_time"]: trade["exit_comment"]
+        for trade in closed_trades(
+            engine, base / "input", feed, {"Seconds": 60}, input_tf="15", script_tf="15",
+            aux_security_ohlcv_csv=aux, aux_security_input_tf="1")
+    }
+    literal = _exits(
+        engine, base, "literal", _with_literal_timeframes(_closes(READ_ORDER_SOURCE), "1", "1"), feed, aux)
+    assert overridden == literal
+    assert overridden != default
+    one = str(CHART_MINUTES // 1)
+    assert {comment for comment in literal.values() if comment} == {f"{one}|{one}"}
+    assert {comment for comment in default.values() if comment} == {
+        f"{CHART_MINUTES // (300 // 60)}|{one}"}
+    print(f"input override: {len(literal)} exits under Seconds=60 equal the literal \"1\"s")
 
 
 def test_a_global_built_from_a_reassigned_one_is_computed_at_its_declaration():
