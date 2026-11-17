@@ -5,9 +5,15 @@ from __future__ import annotations
 import pytest
 
 from pineforge_codegen import transpile
-from pineforge_codegen.ast_nodes import BoolLiteral, Identifier, MemberAccess, Ternary
+from pineforge_codegen.analyzer import Analyzer
+from pineforge_codegen.ast_nodes import (
+    BoolLiteral, Identifier, MemberAccess, StringLiteral, Ternary,
+)
+from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.codegen.security import SecurityEmitter
 from pineforge_codegen.errors import Phase, SourceLocation
+from pineforge_codegen.lexer import Lexer
+from pineforge_codegen.parser import Parser
 
 
 PRELUDE = '//@version=6\nstrategy("historical security")\n'
@@ -238,3 +244,45 @@ def test_projection_selection_accepts_optional_codegen_budget(with_budget):
     if with_budget:
         assert checks
         assert all(at == location and phase is Phase.CODEGEN for at, phase in checks)
+
+
+@pytest.mark.parametrize("metadata, lookahead, projection", [
+    pytest.param({}, "false", "", id="omitted-lookahead"),
+    pytest.param(
+        {"lookahead_value": None}, "false", "", id="null-lookahead-value"),
+    pytest.param(
+        {"lookahead_on": False}, "false", "", id="explicit-off"),
+    pytest.param(
+        {"lookahead_on": False, "lookahead_value": None},
+        "false", "", id="explicit-off-null-value"),
+    pytest.param(
+        {"lookahead_on": True}, "true", ", false, true", id="explicit-on"),
+    pytest.param(
+        {"lookahead_on": True, "lookahead_value": None},
+        "true", ", false, true", id="explicit-on-null-value"),
+])
+def test_sparse_lookahead_metadata_preserves_registration_contract(
+    metadata, lookahead, projection,
+):
+    # Analyze a script without requests so the supplied metadata stays sparse.
+    source = PRELUDE + "control = close\n"
+    ast = Parser(Lexer(source).tokenize(), source=source).parse()
+    gen = CodeGen(Analyzer(ast).analyze())
+    location = SourceLocation(file="<input>", line=3, col=1, end_col=8)
+    info = {
+        "sec_id": 3,
+        "symbol_node": StringLiteral(value="TEST:OTHER", loc=location),
+        **metadata,
+    }
+    assert gen._security_historical_projection_arg(info, '"120"') == projection
+
+    lines = []
+    gen._emit_foreign_security_registration(
+        info, '"120"', lookahead, "false", lines,
+    )
+    # Default/off keeps the five-argument chart call. Explicit on opts only
+    # that call into projection; the feed call retains ignore-invalid=false.
+    assert _registrations("\n".join(lines)) == [
+        f'register_security_eval(3, "120", input_tf_, {lookahead}, false{projection});',
+        f'register_security_eval(3, _pf_symbol, "120", input_tf_, {lookahead}, false, false);',
+    ]

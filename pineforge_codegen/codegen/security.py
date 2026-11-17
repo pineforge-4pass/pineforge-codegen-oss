@@ -1175,13 +1175,14 @@ class SecurityEmitter:
 
         The host checks the resolved timeframe against the chart at run time.
         Payload offsets and their requested-bar history stay in the evaluator.
+        Omitted lookahead metadata keeps the default-off registration.
         """
         if (info.get("gaps_on") or info.get("heikinashi")
                 or tf_expr in ("input_tf_", "script_tf_")):
             return ""
         value = info.get("lookahead_value")
         if value is None:
-            return ", false, true" if info["lookahead_on"] else ""
+            return ", false, true" if info.get("lookahead_on", False) else ""
         pending = [value]
         seen = set()
         while pending:

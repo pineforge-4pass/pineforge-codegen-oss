@@ -37,7 +37,7 @@ from tests import _compile as compile_env
 from tests._e2e import Build, reference_codegen, skip_unless_e2e_env
 from tests._security_tapes import mismatches, replay, source, tape_exits
 
-BASELINE_CODEGEN_REVISION = "7a39cb3"  # cg/popfix, this lane's base
+BASELINE_CODEGEN_REVISION = "7a39cb3"  # the revision this fix was built on
 
 
 def test_payload_calls_read_the_requested_bar_like_the_tape(tmp_path_factory):

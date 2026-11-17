@@ -140,6 +140,9 @@ SCALAR_CALLS = (
 )
 
 
+# Codegen main from before the collection-binding change. Its output for
+# these scripts differs from this tree only by that change; a tree that also
+# carries the collision-safe record names would differ for record methods.
 SCALAR_PARENT = "f848df52b05cd4118dfd90101080446d8a7582ad"
 
 
@@ -511,6 +514,23 @@ def test_unqualified_storage_slots_create_needs_not_refusal_intents(body, builti
         and reason == "no qualified new bool/na obligation; retain parent admission"
         for _owner, _location, name, reason in context.builtin_bool_na_needs
     ), f"{builtin} must be visited and retained as an unqualified obligation"
+
+
+def test_currency_rate_na_flag_is_refused_at_its_argument():
+    # The currency-rate flag is a declared bool parameter, and a Pine v6 bool
+    # cannot be na, so the call is refused at the na argument instead of being
+    # retained as an unqualified obligation.
+    body = 'value = request.currency_rate("USD", "EUR", na)\n'
+    with pytest.raises(CompileError) as caught:
+        transpile(HEADER + body + "plot(close)\n")
+    located = [
+        (d.location.line, d.location.col)
+        for d in caught.value.diagnostics
+        if "request.currency_rate" in d.message
+        and "ignore_invalid_currency" in d.message
+    ]
+    # Two header lines; na starts at the 45th column of the third line.
+    assert located == [(3, body.index("na") + 1)]
 
 
 # These are the parent's three version-limited contracts, in namespace and
