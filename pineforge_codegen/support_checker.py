@@ -320,6 +320,16 @@ UNSUPPORTED_NAMESPACES: dict[str, str] = {
     "volume_row": "volume_row.* is not supported in PineForge batch backtests; same reason as footprint.*.",
 }
 
+# On the checked program: the refusals of a built-in namespace's member that
+# ``SupportChecker`` holds behind the declaration that binds the receiver
+# (``_hold_behind_declaration``, ``refusals_await_analysis``), each named by
+# its ``id()``. The annotation holds no ``Diagnostic``: a pass that walks a
+# program's attributes walks its annotations too, and a diagnostic's ``Level``
+# refers to its enum class, whose members refer back to it. The identities are
+# lookup keys into the check's own diagnostics, which keep the held refusals
+# alive; nothing orders by them and nothing emits them.
+_HELD_REFUSALS_ANNOTATION = "pf_held_support_refusals"
+
 # Member-access references with no batch-mode equivalent. Reject loudly.
 # (Currently empty — the chart.* cosmetic reads moved to COSMETIC_MEMBERS.)
 UNSUPPORTED_MEMBERS: dict[tuple[str, str], str] = {}
@@ -711,10 +721,24 @@ class SupportChecker:
         self._user_func_defs: dict[int, FuncDef] = {}
         self._user_func_calls: dict[str, list[FuncCall]] = {}
         self._overloaded_user_funcs: set[str] = set()
+        # The test for a receiver a declaration statement binds, built at the
+        # first refusal that asks, and the refusals held behind such a
+        # declaration (``_hold_behind_declaration``).
+        self._bound_by_statement: Callable[[Identifier], bool] | None = None
+        self._held_refusals: list[Diagnostic] = []
 
     # -- Public API --
 
     def check(self) -> list[Diagnostic]:
+        # The held identities name this check's diagnostics only. An earlier
+        # check's go with it: its diagnostics may be gone, and an identity
+        # that outlived them could name another object.
+        annotations = self._ast.annotations or {}
+        if _HELD_REFUSALS_ANNOTATION in annotations:
+            self._ast.annotations = {
+                key: value for key, value in annotations.items()
+                if key != _HELD_REFUSALS_ANNOTATION
+            }
         # Refuse invalid math keywords before declaration folding or unrelated
         # request/visual diagnostics. Keep check() a diagnostic-returning API,
         # and check unused bodies and unselected arms as well.
@@ -745,6 +769,13 @@ class SupportChecker:
         self._strategy_constant_decls = declaration_only_constants(self._ast)
         for stmt in self._ast.body:
             self._visit(stmt)
+        if self._held_refusals:
+            self._ast.annotations = {
+                **(self._ast.annotations or {}),
+                _HELD_REFUSALS_ANNOTATION: tuple(
+                    id(refusal) for refusal in self._held_refusals
+                ),
+            }
         return self._diagnostics
 
     def check_or_raise(self) -> None:
@@ -1243,6 +1274,41 @@ class SupportChecker:
         self._err(node, msg_fmt(key, table[key]), hint=hint)
         self._visit_children(node)
         return True
+
+    def _hold_behind_declaration(
+        self, receiver: Identifier, refusal: Diagnostic,
+    ) -> None:
+        """Hold ``refusal``, of a built-in namespace's member read through
+        ``receiver``, behind the declaration that binds ``receiver``.
+
+        This check reads names before scoping, so it refuses the read by the
+        receiver's spelling. Where a plain or destructuring declaration of
+        the script binds the receiver at the read, the read is that
+        declaration's value and Pine judges the declaration first:
+        TradingView refuses an object declared under a namespace's name at
+        the name (CE10093), which the analyzer reports there (PF-E2065).
+
+        Nothing is dropped. The refusal stays in this check's diagnostics, at
+        its level and place. It is only raised after analysis, and only when
+        every error of the check is held (``refusals_await_analysis``); a
+        script analysis accepts, such as one that declares a number under the
+        name, is refused by it unchanged.
+
+        A receiver nothing binds is the built-in namespace, and a parameter
+        or a loop variable is not a declaration statement the object-name
+        rule judges: those refusals are raised at once, as before. So is
+        every read the lexical test cannot prove bound
+        (``value_bindings.declaration_statement_reads``).
+        """
+        if refusal.level is not Level.ERROR:
+            return
+        if self._bound_by_statement is None:
+            from .analyzer.value_bindings import declaration_statement_reads
+            self._bound_by_statement = declaration_statement_reads(
+                self._ast, self._filename,
+            )
+        if self._bound_by_statement(receiver):
+            self._held_refusals.append(refusal)
 
     # -- Visitor dispatch --
 
@@ -2232,13 +2298,20 @@ class SupportChecker:
                 hint=BARSTATE_APPROX_VARS[chain],
             )
         # Whole-namespace rejections via member access (e.g. footprint.SomeType).
-        if isinstance(node.object, Identifier) and self._reject_if_in(
-            UNSUPPORTED_NAMESPACES,
-            node.object.name,
-            node,
-            lambda k, v: f"{k}.{node.member}: {v}",
-        ):
-            return
+        if isinstance(node.object, Identifier):
+            refused = len(self._diagnostics)
+            if self._reject_if_in(
+                UNSUPPORTED_NAMESPACES,
+                node.object.name,
+                node,
+                lambda k, v: f"{k}.{node.member}: {v}",
+            ):
+                # The refusal is the first diagnostic of this read; the
+                # receiver's own visit may have added others after it.
+                self._hold_behind_declaration(
+                    node.object, self._diagnostics[refused],
+                )
+                return
         # Cosmetic / chart-only member reads (chart.fg_color/bg_color/visible
         # bar times). No backtest-logic effect; warn and let codegen emit the
         # benign default (chart.* -> 0 via SKIP_NAMESPACES in visit_expr.py).
@@ -3262,6 +3335,27 @@ def check_selection_value_arms(
 
 def check_support(ast: Program, filename: str = "<input>") -> list[Diagnostic]:
     return SupportChecker(ast, filename=filename).check()
+
+
+def refusals_await_analysis(ast: Program, diagnostics: list[Diagnostic]) -> bool:
+    """Whether analysis of ``ast`` runs before ``diagnostics`` are raised.
+
+    True only when ``diagnostics``, the support check of ``ast``, has errors
+    and holds every one of them behind the declaration that binds its
+    receiver (``SupportChecker._hold_behind_declaration``). The caller then
+    analyzes the script: a refusal of that declaration is the script's
+    diagnostic, and without one the caller raises ``diagnostics`` unchanged.
+    One error that is not held refuses the script at once, as before.
+
+    The program names its held refusals by identity, so ``diagnostics`` are
+    the ones that check returned: they keep every held refusal alive, and an
+    error is held only when it is that very object.
+    """
+    held = frozenset(
+        (ast.annotations or {}).get(_HELD_REFUSALS_ANNOTATION, ())
+    )
+    errors = [d for d in diagnostics if d.level == Level.ERROR]
+    return bool(errors) and all(id(error) in held for error in errors)
 
 
 def check_support_or_raise(ast: Program, filename: str = "<input>") -> None:

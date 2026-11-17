@@ -15,6 +15,12 @@ from .tables import BUILTIN_VARS
 # The annotation key of the map from a private declaration spelling to the
 # spelling the script authored; the code generator and the analyzer read it.
 AUTHORED_LOCAL_NAMES = "authored_local_names"
+# The annotation the overload pass leaves on each copy it makes of a function
+# declaration (``function_overloads.bind_scalar_overloads``). A copy declares
+# every name the declaration it was copied from does, and each binding its
+# body declares is the copy's own: it never shares generated state with the
+# binding of the same name in that declaration.
+OVERLOAD_COPY = "scalar_overload_copy"
 _AUTHORED_KEYWORDS = "authored_callable_keywords"
 _PARAMETER_ALIASES = "callable_parameter_aliases"
 _CLONE_SUFFIX = re.compile(r"_cs|__ni")
@@ -273,15 +279,165 @@ def restore_callable_diagnostics(program, diagnostics) -> bool:
     return changed
 
 
-def separate_callable_histories(program, bindings, primitive_histories) -> bool:
+def _private_storage(name, taken, sequence):
+    """The next ``name__pfhistN`` no spelling of the program occupies, and the
+    sequence it was allocated at."""
+    while True:
+        sequence += 1
+        storage = f"{name}__pfhist{sequence}"
+        # Cloning appends _csN / __niN. Protect the derived namespace too.
+        if not any(
+            storage == used
+            or used.startswith((storage + "_cs", storage + "__ni"))
+            or storage.startswith((used + "_cs", used + "__ni"))
+            for used in taken
+        ):
+            taken.add(storage)
+            return storage, sequence
+
+
+def _copied_bindings(program, bindings):
+    """(declaration, name) for every binding the body of an overload copy
+    declares, at every block depth and in source order.
+
+    The lexical inventory decides what a copy declares, so a body it does not
+    resolve keeps its spellings. Parameters keep theirs too: a callable's
+    parameter state is routed by the callable, which a copy already is. A
+    binding that already has a private spelling is left out, so one that
+    still shares storage under it reaches the storage diagnostic instead of
+    being named apart again.
+    """
+    from .value_bindings import _declared_names
+
+    copies = [
+        definition for definition in program.body
+        if isinstance(definition, FuncDef)
+        and (definition.annotations or {}).get(OVERLOAD_COPY)
+    ]
+    if not copies:
+        return []
+    owners = {definition.name for definition in copies}
+    owned = set()
+    for scope in bindings.scopes:
+        if bindings.budget is not None:
+            bindings.budget.check(phase=Phase.ANALYZER)
+        if scope.callable not in owners:
+            continue
+        for name, declarations in scope.declarations.items():
+            for declaration in declarations:
+                if declaration.kind in ("local", "loop"):
+                    owned.add((declaration.declaration, name))
+    found = []
+    for definition in copies:
+        for node, _ in iter_ast_nodes(definition):
+            if bindings.budget is not None:
+                bindings.budget.check(node.loc, Phase.ANALYZER)
+            private = (node.annotations or {}).get(AUTHORED_LOCAL_NAMES, {})
+            found.extend(
+                (node, name) for name in _declared_names(node)
+                if (id(node), name) in owned and name not in private
+            )
+    return found
+
+
+def _name_copied_bindings_apart(program, bindings, renamed) -> None:
+    """Give each (declaration, name, storage) of an overload copy its private
+    spelling: the declaration, every read and write the lexical inventory
+    binds to it, and the map diagnostics and input keys read it back by."""
+    bindings.rename_declarations({
+        (id(node), name): storage for node, name, storage in renamed
+    })
+    authored = dict((program.annotations or {}).get(AUTHORED_LOCAL_NAMES, {}))
+    for node, name, storage in renamed:
+        if bindings.budget is not None:
+            bindings.budget.check(node.loc, Phase.ANALYZER)
+        original = authored.get(name, name)
+        authored[storage] = original
+        node.annotations = {
+            **(node.annotations or {}),
+            AUTHORED_LOCAL_NAMES: {
+                **(node.annotations or {}).get(AUTHORED_LOCAL_NAMES, {}),
+                storage: original,
+            },
+        }
+        if isinstance(node, VarDecl):
+            node.name = storage
+        elif isinstance(node, TupleAssign):
+            node.names = [storage if bound == name else bound for bound in node.names]
+        elif isinstance(node, ForStmt):
+            node.var = storage
+        elif isinstance(node, ForInStmt):
+            if node.var == name:
+                node.var = storage
+            if node.vars:
+                node.vars = [storage if bound == name else bound for bound in node.vars]
+    program.annotations = {
+        **(program.annotations or {}), AUTHORED_LOCAL_NAMES: authored,
+    }
+
+
+def separate_copied_persistents(program, bindings, shared) -> bool:
+    """Name apart the persistent declarations an overload copy still shares.
+
+    ``shared`` holds the ids of the persistent declarations whose generated
+    member another lexical declaration also claims once the owner overlay has
+    qualified what it can (``Analyzer._qualify_colliding_func_var_members``).
+    A copy's declaration among them shares that member with the declaration it
+    was copied from, so it gets a private spelling by declaration identity and
+    the program is analyzed afresh. The declarations the script wrote keep
+    their spellings and are then judged as they are without the copy.
+    """
+    if not shared:
+        return False
+    selected = [
+        (node, name) for node, name in _copied_bindings(program, bindings)
+        if id(node) in shared and isinstance(node, VarDecl)
+    ]
+    if not selected:
+        return False
+    taken = set()
+    for node, _ in iter_ast_nodes(program):
+        if bindings.budget is not None:
+            bindings.budget.check(node.loc, Phase.ANALYZER)
+        for attr in ("name", "var", "member"):
+            value = getattr(node, attr, None)
+            if isinstance(value, str):
+                taken.add(value)
+        for attr in ("params", "names", "vars", "members"):
+            taken.update(v for v in (getattr(node, attr, None) or [])
+                         if isinstance(v, str))
+    renamed = []
+    sequence = 0
+    for node, name in selected:
+        if bindings.budget is not None:
+            bindings.budget.check(node.loc, Phase.ANALYZER)
+        storage, sequence = _private_storage(name, taken, sequence)
+        renamed.append((node, name, storage))
+    _name_copied_bindings_apart(program, bindings, renamed)
+    return True
+
+
+def separate_callable_histories(program, bindings, primitive_histories,
+                                copied_histories=frozenset()) -> bool:
     """Name apart declaration-owned scalar Series before rebuilding inventories.
 
     Existing call-site and nested-call cloning then operate on disjoint names.
     Only direct nonpersistent FuncDef declarations are migrated. If a history
     group also contains a callable block/tuple/loop declaration, leave the
     whole group to the existing declaration-exact storage diagnostic.
+
+    An overload copy is the one exception. ``copied_histories`` holds the
+    callable history bindings whose raw Series another lexical declaration
+    also claims; a copy's binding among them shares it with the declaration it
+    was copied from, so it gets a private spelling by declaration identity,
+    whatever its block depth, form or type. The declarations the script wrote
+    are then judged as they are without the copy.
     """
-    if not primitive_histories:
+    copied = [
+        (node, name) for node, name in _copied_bindings(program, bindings)
+        if (id(node), name) in copied_histories
+    ] if copied_histories else []
+    if not primitive_histories and not copied:
         return False
     nodes = [node for node, _ in iter_ast_nodes(program)]
     declarations = defaultdict(list)
@@ -348,28 +504,34 @@ def separate_callable_histories(program, bindings, primitive_histories) -> bool:
         if any(id(other) not in other_safe_declarations and id(other) not in direct
                for other in group):
             continue
-        while True:
-            sequence += 1
-            storage = f"{node.name}__pfhist{sequence}"
-            # Cloning appends _csN / __niN. Protect the derived namespace too.
-            if not any(
-                storage == used
-                or used.startswith((storage + "_cs", storage + "__ni"))
-                or storage.startswith((used + "_cs", used + "__ni"))
-                for used in taken
-            ):
-                break
-        taken.add(storage)
+        storage, sequence = _private_storage(node.name, taken, sequence)
         names[(id(node), node.name)] = storage
 
-    if not names:
+    # What the rule above leaves of a copy's colliding histories: a block,
+    # tuple or loop binding, one of another type, or one whose group the
+    # script's own declarations keep behind the storage diagnostic. A
+    # persistent declaration is not among them; its member is separated by
+    # ``separate_copied_persistents``.
+    renamed = []
+    for node, name in copied:
+        if (id(node), name) in names:
+            continue
+        if bindings.budget is not None:
+            bindings.budget.check(node.loc, Phase.ANALYZER)
+        storage, sequence = _private_storage(name, taken, sequence)
+        renamed.append((node, name, storage))
+
+    if not names and not renamed:
         return False
-    bindings.rename_declarations(names)
-    for node in direct.values():
-        key = (id(node), node.name)
-        if key in names:
-            node.annotations = {
-                **(node.annotations or {}), "authored_history_name": node.name,
-            }
-            node.name = names[key]
+    if names:
+        bindings.rename_declarations(names)
+        for node in direct.values():
+            key = (id(node), node.name)
+            if key in names:
+                node.annotations = {
+                    **(node.annotations or {}), "authored_history_name": node.name,
+                }
+                node.name = names[key]
+    if renamed:
+        _name_copied_bindings_apart(program, bindings, renamed)
     return True

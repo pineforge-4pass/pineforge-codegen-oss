@@ -8,6 +8,7 @@ retains its call-site environment.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass, field, replace
 
 from ..ast_nodes import (
@@ -15,7 +16,7 @@ from ..ast_nodes import (
     Identifier, IfStmt, MemberAccess, MethodDef, Program, StrategyDecl, SwitchStmt,
     TupleAssign, TypeDecl, VarDecl, WhileStmt,
 )
-from ..errors import Phase
+from ..errors import CompileError, Phase
 from ..limits import TimeBudget, iter_ast_nodes, syntax_children
 from .diagnostics import DiagnosticsHelper
 from .tables import BUILTIN_VARS
@@ -232,22 +233,7 @@ class ValueBindings(DiagnosticsHelper):
             return  # Analyzer owns missing/unsupported-version diagnostics.
         from .v6_forms import validate_v6_constant_arguments, validate_v6_forms
         validate_v6_forms(self.program, self._filename, self.budget)
-        # Import after Analyzer has loaded; reuse its namespace inventory.
-        from .base import _BUILTIN_NAMESPACE_NAMES
-
-        # Keep qualifiers until declarations are known: a visible value binds
-        # normally, and a missing value leaves namespace/type handling intact.
-        self.namespaces = _BUILTIN_NAMESPACE_NAMES | {
-            node.name for node, _ in iter_ast_nodes(self.program)
-            if isinstance(node, (TypeDecl, EnumDecl))
-        }
-        self.builtins = self._scope(None, "builtin")
-        self.builtins.declarations = {
-            name: [_Binding(name, 0, 0, "builtin")]
-            for name in BUILTIN_VARS
-        }
-        self.global_scope = self._scope(self.builtins, "global")
-        self._body(self.program.body, self.global_scope)
+        self._inventory()
         for node, scope, position, role in self.uses:
             if self.budget is not None:
                 self.budget.check(node.loc, Phase.ANALYZER)
@@ -269,6 +255,25 @@ class ValueBindings(DiagnosticsHelper):
         validate_v6_constant_arguments(
             self.program, self.declaration_bindings, self._filename, self.budget,
         )
+
+    def _inventory(self) -> None:
+        """Walk the program once: its scopes, declarations and authored uses."""
+        # Import after Analyzer has loaded; reuse its namespace inventory.
+        from .base import _BUILTIN_NAMESPACE_NAMES
+
+        # Keep qualifiers until declarations are known: a visible value binds
+        # normally, and a missing value leaves namespace/type handling intact.
+        self.namespaces = _BUILTIN_NAMESPACE_NAMES | {
+            node.name for node, _ in iter_ast_nodes(self.program)
+            if isinstance(node, (TypeDecl, EnumDecl))
+        }
+        self.builtins = self._scope(None, "builtin")
+        self.builtins.declarations = {
+            name: [_Binding(name, 0, 0, "builtin")]
+            for name in BUILTIN_VARS
+        }
+        self.global_scope = self._scope(self.builtins, "global")
+        self._body(self.program.body, self.global_scope)
 
     def _body(self, body: list, scope: _Scope) -> None:
         for stmt in body:
@@ -387,3 +392,57 @@ class ValueBindings(DiagnosticsHelper):
         else:
             for child in reversed(list(syntax_children(node))):
                 self._visit(child, scope)
+
+
+def _binding_position(binding: _Binding) -> int:
+    return binding.position
+
+
+def declaration_statement_reads(program: Program, filename: str):
+    """Return a test for the reads ``program`` binds to a declaration statement.
+
+    The support check runs before :meth:`ValueBindings.resolve` and judges a
+    member read by the spelling of its receiver. It asks this test whether the
+    script itself bound that receiver where it is read: a plain or
+    destructuring declaration that is visible there by the scope walk of
+    ``resolve``, the latest one before the read in its own scope or an
+    enclosing one. Only that walk is used: no read is annotated and no form is
+    judged.
+
+    The test answers False for every read it cannot prove. A parameter, a
+    loop variable and a field are no declaration statement. A declaration in
+    another callable, in a block that has closed, or after the read is not
+    visible at it. Nothing is proven for a program that is not version 6
+    (``resolve`` binds nothing then), for a read inside inlined version 5
+    code (the walk does not enter it), or when the walk itself refuses the
+    script.
+    """
+    reads: dict[int, tuple[_Scope, int]] = {}
+    if program.version == 6:
+        bindings = ValueBindings(program, filename)
+        try:
+            bindings._inventory()
+        except CompileError:
+            pass
+        else:
+            reads = {
+                id(node): (scope, position)
+                for node, scope, position, role in bindings.uses
+                if role != "write"
+            }
+
+    def bound_by_statement(node: Identifier) -> bool:
+        scope, position = reads.get(id(node), (None, 0))
+        while scope is not None:
+            if scope.kind != "fields":
+                # ``_Scope.resolve``'s answer, the latest declaration before
+                # the read: each list is in declaration order, so a search
+                # finds it without a scan this caller has no budget for.
+                declared = scope.declarations.get(node.name, ())
+                visible = bisect_left(declared, position, key=_binding_position)
+                if visible:
+                    return declared[visible - 1].kind in ("global", "local")
+            scope = scope.parent
+        return False
+
+    return bound_by_statement

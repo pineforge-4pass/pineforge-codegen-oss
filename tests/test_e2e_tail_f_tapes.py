@@ -47,6 +47,7 @@ REPLAYS = {
     "arm_commas_decl": "arm_commas_decl",
     "arm_line_import": "arm_commas",
     "array_ref_fresh": "array_ref_fresh",
+    "overload_qualifiers": "overload_qualifiers",
     "overloads_import": "overload_qualifiers",
     "barmerge_values": "barmerge_values",
     "block_local_types": "block_local_types",
