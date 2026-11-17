@@ -9,6 +9,7 @@ import pytest
 from tests._emitted_member_assertions import assert_int_member, assert_member_type
 from tests._legacy_cpp import legacy_cpp
 from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError
 
 # Resolve the engine corpus from the sibling checkout (../pineforge-engine)
 # or PINEFORGE_ENGINE_CORPUS.  The golden itself uses a checked-in fixture so
@@ -126,13 +127,10 @@ def test_g2_backadjustment_on_wrong_decl_type_control():
         assert_int_member(mutated, "x")
 
 
-@pytest.mark.parametrize(
-    "name", ["backadjustment", "settlement_as_close", "adjustment"])
-def test_g2_authored_instance_named_like_an_adjustment_namespace(name):
-    """A record instance bound to a name that spells a data-adjustment namespace
-    is an authored receiver, not the namespace: reading its float field keeps
-    floating storage instead of the namespace constants' integer storage."""
-    cpp = _gen(
+def _tuple_bound_holder(name: str) -> str:
+    """The body that binds a ``Holder`` record to ``name`` through a tuple and
+    reads its float field into ``v``."""
+    return (
         "type Holder\n"
         "    float factor = 0.0\n"
         "pair() =>\n"
@@ -140,6 +138,75 @@ def test_g2_authored_instance_named_like_an_adjustment_namespace(name):
         f"[{name}, k] = pair()\n"
         f"v = {name}.factor\n"
     )
+
+
+# TradingView has answered (relayed 2026-11-17 16:40): it refuses a record
+# that a tuple declaration names ``backadjustment`` or ``settlement_as_close``
+# with CE10093, at the name, through its last column 15 and 20. The name sits
+# at the same line and column here as in the shape TradingView was shown (the
+# first target of a tuple on line 7). These two rows pinned the acceptance of
+# this program until that answer.
+@pytest.mark.parametrize(
+    "name, last_col",
+    [("backadjustment", 15), ("settlement_as_close", 20)],
+    ids=["backadjustment", "settlement_as_close"],
+)
+def test_g2_authored_instance_named_like_an_adjustment_namespace(name, last_col):
+    """A record that a tuple declaration names like a data-adjustment namespace
+    is refused with PF-E2065 at the name itself, as TradingView refuses it."""
+    body = _tuple_bound_holder(name)
+    with pytest.raises(CompileError) as caught:
+        _gen(body)
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.code == "PF-E2065"
+    assert diagnostic.message == (
+        f"Invalid object name: {name}. Namespaces of built-ins cannot be used."
+    )
+    location = diagnostic.location
+    # TradingView counts the last column of the name; a location here ends one
+    # column after it. _gen puts two header lines before the body.
+    assert (location.line, location.col, location.end_col - 1) == (7, 2, last_col)
+    declaration = body.splitlines()[location.line - 3]
+    assert declaration == f"[{name}, k] = pair()"
+    assert declaration[location.col - 1:location.end_col - 1] == name
+
+
+def test_g2_authored_instance_named_adjustment_is_refused():
+    """TradingView refuses a record that a tuple declaration names
+    ``adjustment`` (CE10093, measured on the scripts pinned in
+    test_namespace_named_receivers.py). This program has that declaration
+    form, so its translation is refused with PF-E2065 at the name itself."""
+    body = _tuple_bound_holder("adjustment")
+    with pytest.raises(CompileError) as caught:
+        _gen(body)
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.code == "PF-E2065"
+    assert diagnostic.message == (
+        "Invalid object name: adjustment. Namespaces of built-ins cannot be used."
+    )
+    location = diagnostic.location
+    # The identifier as the script wrote it, in its declaration: neither the
+    # bracket before it nor the read on the next line. _gen puts two header
+    # lines before the body.
+    assert (location.line, location.col, location.end_col) == (7, 2, 12)
+    declaration = body.splitlines()[location.line - 3]
+    assert declaration == "[adjustment, k] = pair()"
+    assert declaration[location.col - 1:location.end_col - 1] == "adjustment"
+
+
+def test_g2_authored_instance_under_an_ordinary_name_keeps_float_field():
+    """The refused program with its record under a name that spells no built-in
+    namespace: reading the record's float field keeps floating storage."""
+    cpp = _gen(_tuple_bound_holder("holder"))
+    assert_member_type(cpp, "v", "double")
+
+
+def test_g2_authored_instance_named_time_keeps_float_field():
+    """``time`` is a built-in value that qualifies no member, not a namespace:
+    TradingView accepts a record that a tuple declaration names ``time``
+    (relayed 2026-11-17 16:40; it warns that the name shadows the built-in
+    variable). Reading the record's float field keeps floating storage."""
+    cpp = _gen(_tuple_bound_holder("time"))
     assert_member_type(cpp, "v", "double")
 
 

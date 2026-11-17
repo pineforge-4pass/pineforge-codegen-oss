@@ -1792,7 +1792,17 @@ class StmtVisitor:
         return None
 
     def _tuple_binding_cpp_types(self, node: TupleAssign) -> list[str]:
-        """Exact supported tuple element types for later lexical operations."""
+        """Exact supported tuple element types for later lexical operations.
+
+        Every tuple consumer asks here, so one outermost query infers each
+        declaration it reaches once per lexical context
+        (``_tuple_storage_query``)."""
+        return self._tuple_storage_query(
+            node, self._infer_tuple_binding_cpp_types
+        )
+
+    def _infer_tuple_binding_cpp_types(self, node: TupleAssign) -> list[str]:
+        """The element types of one declaration in the current context."""
         count = len(node.names)
         lower_types = (node.value.annotations or {}).get(
             "lower_tf_tuple_element_types", (),
@@ -1825,11 +1835,8 @@ class StmtVisitor:
             variant = self.ctx.func_callsite_param_types.get(
                 (fi.name, call_site), ()
             )
-            attrs = (
-                "_current_func_param_types", "_current_func_param_specs",
-                "_current_func_series_param_types", "_current_func_local_types",
-                "_active_func_name",
-            )
+            # The storage memo is keyed by exactly the state replaced here.
+            attrs = self._TUPLE_INFERENCE_CONTEXT
             saved = {attr: getattr(self, attr, None) for attr in attrs}
             param_types = {}
             param_specs = {}

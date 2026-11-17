@@ -22,6 +22,43 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- Calls of an overloaded user function now run the declaration their
+  arguments select. This applies to the declarations of one name when every
+  parameter declares a scalar type or a user-defined type, no two declarations
+  repeat the same types with the same qualifiers, and every call follows the
+  last declaration. A declaration takes a call when each argument has its
+  parameter's type (an `int` also fits a `float` parameter) and a qualifier no
+  stronger than the parameter declares (`const`, `input`, `simple`, `series`).
+  Of those, the one converting the fewest arguments runs, then the one with
+  the weakest qualifiers, then the later one. A parameter that declares no
+  type or qualifier holds its argument's, so the calls inside a function body
+  are bound for each different set of arguments the function receives; where
+  they bind differently the function is emitted once per binding, and each
+  copy keeps the history and `var` state its body declares to itself. A call
+  no declaration takes keeps the declaration it ran before. Groups that do not
+  meet the conditions above keep their previous lookup. Two shapes TradingView
+  compiles are covered by tests; rules TradingView was not shown are
+  PineForge's own.
+
+- An object declared under the name of a built-in namespace is refused at the
+  name with `PF-E2065` in a destructuring declaration as well
+  (`[adjustment, _] = pair(...)`), at chart scope and inside a function, as
+  TradingView refuses it (CE10093). Scripts that bound a record to such a name
+  through a tuple used to translate and are now refused. `time` and `timenow`
+  are built-in values that qualify no member, so an instance of a user-defined
+  type may be declared under them. Where a declaration statement binds the
+  receiver of an unsupported namespace's member (`footprint.x`,
+  `volume_row.x`), that member's refusal is now reported after analysis, so
+  the declaration's own refusal comes first; the refusal itself is unchanged.
+
+- A record bound by a destructuring declaration (`[holder, _] = pair(...)`)
+  is typed by that declaration wherever it is read, so a read through it
+  keeps its record lowering inside each function and block, and a name the
+  read is not bound to no longer takes a same-spelled record from another
+  function. The emitter also infers the stored types of one destructuring
+  declaration once per lexical context within a query, so helpers that
+  destructure each other's tuples many levels deep translate in bounded work.
+
 - `strategy.order(..., comment=...)` now forwards its comment to the engine's
   order instead of dropping it with a warning, so the trade the order opens or
   closes reports it through `strategy.opentrades.entry_comment`,

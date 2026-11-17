@@ -128,6 +128,20 @@ ARRAY_RESULT_METHODS = {
     "abs": "float", "standardize": "float", "sort_indices": "int",
 }
 
+
+class _TupleStorageInference:
+    """One tuple storage inference that is still running.
+
+    ``passed`` names the recursion guards it went through, and ``fallback``
+    records that one of them answered in place of a declaration's type
+    (``TypeInferer._tuple_storage_guard``).
+    """
+
+    def __init__(self) -> None:
+        self.passed: set[tuple[str, int]] = set()
+        self.fallback = False
+
+
 class TypeInferer:
     """Type-spec / C++-type inference helpers shared across visitor mixins.
 
@@ -913,6 +927,11 @@ class TypeInferer:
         leaves ``int(<floating value>)`` and the stored ``math.floor`` /
         ``ceil`` / ``round`` out of the wide sources, which an epoch-only scan
         otherwise counts (``_security_copy_is_arithmetic_wide``)."""
+        # The width answers grow only inside this scope, between the queries
+        # its scan makes. Tuple storage inferred before the scope is entered
+        # is shared with nothing inferred in or after it; each query the scan
+        # makes shares within itself (``_tuple_storage_query``).
+        self.__dict__.pop("_tuple_storage_memo", None)
         self._int_width_scan_depth = getattr(self, "_int_width_scan_depth", 0) + 1
         saved = getattr(self, "_wide_int_epoch_only", False)
         saved_float = getattr(self, "_wide_int_float_origins", True)
@@ -2853,6 +2872,20 @@ class TypeInferer:
         _ternary_arms: tuple[TypeSpec | None, TypeSpec | None, bool] | None = None,
     ) -> TypeSpec | None:
         spec = self._type_spec_from_expr_raw(node, _ternary_arms=_ternary_arms)
+        if (isinstance(node, Identifier)
+                and spec is not None and spec.kind == "udt"
+                # A requested result's spec is this node's own annotation
+                # (``_type_spec_from_expr_raw``), not a raw-name answer.
+                and (getattr(node, "annotations", None) or {}).get(
+                    "security_result_type_spec") is None):
+            bindings = getattr(
+                getattr(self, "ctx", None), "identifier_lexical_bindings", {}
+            )
+            # Raw-name UDT registries can retain an unrelated callable's
+            # declaration. An explicit unbound read cannot name that object.
+            # A missing entry is no evidence against the legacy lookup.
+            if id(node) in bindings and bindings[id(node)] is None:
+                return None
         plan = getattr(self, "_array_widths", None)
         if plan is None:
             return spec
@@ -2910,6 +2943,11 @@ class TypeInferer:
             )
             if primitive_type is not None:
                 return TypeSpec.primitive(primitive_type.value)
+            # A tuple statement tombstones each of its names below, whatever
+            # the element holds. This read's own declaration keeps a record.
+            tuple_udt = self._tuple_element_udt_type(node)
+            if tuple_udt is not None:
+                return TypeSpec.udt(tuple_udt)
             # An active lexical UDT/drawing binding must beat a same-spelled
             # top-level primitive or collection.  This is intentionally the
             # exact lexical prefix of _identifier_udt_binding(), not its raw-
@@ -5274,6 +5312,161 @@ class TypeInferer:
                 return func_name not in TA_RETURNS_BOOL
         return self._infer_type(node) == "double"
 
+    # The lexical state ``_infer_tuple_binding_cpp_types`` replaces with its
+    # callee's while it infers that callee, and restores afterwards.
+    _TUPLE_INFERENCE_CONTEXT = (
+        "_current_func_param_types", "_current_func_param_specs",
+        "_current_func_series_param_types", "_current_func_local_types",
+        "_active_func_name",
+    )
+
+    def _tuple_storage_context(self) -> tuple:
+        """What one tuple storage inference can differ by inside a query.
+
+        A query emits nothing, so the lexical registries of the code being
+        emitted hold still for its whole extent. What does change is the
+        callee context the inference itself swaps in and out
+        (``_TUPLE_INFERENCE_CONTEXT``; a caller may bind one of them too),
+        and the epoch-only width mode a caller sets around one declaration
+        (``_security_helper_var_state_type``).
+        """
+        context = []
+        for attr in self._TUPLE_INFERENCE_CONTEXT:
+            value = getattr(self, attr, None)
+            context.append(
+                frozenset(value.items()) if isinstance(value, dict) else value
+            )
+        return (
+            *context,
+            getattr(self, "_wide_int_epoch_only", False),
+            getattr(self, "_wide_int_float_origins", True),
+        )
+
+    def _tuple_storage_guard(self, guard: str, declaration: int) -> set | None:
+        """One tuple consumer's running declarations, or None when
+        ``declaration`` is already being answered there.
+
+        Both outcomes decide what a storage query may share. An inference
+        that met a running declaration holds that fallback in place of a
+        type, so nothing still being inferred is kept. One that passed
+        depends on the declaration not running, so its answer is not reused
+        while it does.
+        """
+        active = self.__dict__.setdefault(guard, set())
+        running = self.__dict__.get("_tuple_storage_inferences", ())
+        if declaration in active:
+            for inference in running:
+                inference.fallback = True
+            return None
+        if running:
+            running[-1].passed.add((guard, declaration))
+        return active
+
+    def _tuple_storage_query(self, node: TupleAssign, infer) -> list[str]:
+        """``infer(node)``, inferred once per lexical context in one query.
+
+        A helper's body reads each name of a tuple it destructures several
+        times. Inferring the callee again for every read visits a helper once
+        per call path: ``reads ** depth`` inferences for a nest of them. The
+        outermost call opens a memo that its nested calls share and that ends
+        with it, so no answer outlives the lexical state, the array width
+        plan or the type names it was inferred against. A width scan drops
+        the memo where it starts (``_int_width_scan``).
+
+        An answer is kept only when no recursion guard answered inside its
+        inference, and reused only while none of the guards it passed is
+        running (``_tuple_storage_guard``): a cycle keeps its uncached path.
+        The entry holds its node, so a node's id is never reused under it.
+        """
+        state = self.__dict__
+        memo = state.get("_tuple_storage_memo")
+        outermost = memo is None
+        if outermost:
+            memo = state["_tuple_storage_memo"] = {}
+        running = state.setdefault("_tuple_storage_inferences", [])
+        try:
+            key = (id(node), self._tuple_storage_context())
+            known = memo.get(key)
+            if known is not None:
+                _node, types, passed = known
+                if not any(declaration in state.get(guard, ())
+                           for guard, declaration in passed):
+                    if running:
+                        running[-1].passed.update(passed)
+                    return list(types)
+            inference = _TupleStorageInference()
+            running.append(inference)
+            try:
+                types = infer(node)
+            finally:
+                running.pop()
+                if running:
+                    running[-1].passed.update(inference.passed)
+            if (not inference.fallback
+                    and state.get("_tuple_storage_memo") is memo):
+                memo[key] = (node, tuple(types), frozenset(inference.passed))
+            return types
+        finally:
+            if outermost and state.get("_tuple_storage_memo") is memo:
+                del state["_tuple_storage_memo"]
+
+    def _tuple_element_udt_type(self, expr) -> str | None:
+        """The record type of the tuple element this exact read is bound to.
+
+        The name-keyed registries cannot type such a receiver: a tuple
+        statement tombstones every one of its names, and a raw name keeps one
+        declaration for the whole script, another callable's included. This
+        read's own declaration decides instead: the lexical resolver's
+        binding in the tree it walked, or the authored annotation of a copy
+        made after that walk. The element is a record exactly when its stored
+        handle is that record's (``_tuple_binding_cpp_types``), so a receiver
+        cannot disagree with its storage.
+
+        None leaves a scalar or collection element, every other declaration,
+        an unbound read and a read without metadata to the caller's lookups.
+        """
+        declarations = getattr(self, "_tuple_decl_nodes", None)
+        ctx = getattr(self, "ctx", None)
+        if (not isinstance(expr, Identifier) or not declarations
+                or ctx is None or not self._udt_defs
+                # Tuple storage is typed against the array width plan; a
+                # lookup made before the plan exists keeps the name registries.
+                or getattr(self, "_array_widths", None) is None):
+            return None
+        bindings = getattr(ctx, "identifier_lexical_bindings", {})
+        binding = (bindings[id(expr)] if id(expr) in bindings
+                   else ValueBindings.declaration_of(expr))
+        if binding is None:
+            return None
+        declaration, name = binding
+        node = declarations.get(declaration)
+        if node is None or name not in node.names:
+            return None
+        # Direct TA and request tuples store no record handle.
+        if self._get_ta_site(node.value) is not None:
+            return None
+        if (isinstance(node.value, FuncCall)
+                and self._resolve_callee(node.value.callee)
+                == ("security", "request")):
+            return None
+        active = self._tuple_storage_guard("_tuple_udt_type_queries", declaration)
+        if active is None:
+            return None
+        active.add(declaration)
+        try:
+            types = self._tuple_binding_cpp_types(node)
+        finally:
+            active.remove(declaration)
+        index = node.names.index(name)
+        cpp_type = types[index] if index < len(types) else None
+        # A spelling an engine header may still claim identifies no record.
+        pending = getattr(self, "_pending_udt_cpp_names", ())
+        return next(
+            (udt for udt in self._udt_defs
+             if udt not in pending and self._udt_cpp_name(udt) == cpp_type),
+            None,
+        )
+
     def _lexical_tuple_cpp_type(self, expr) -> str | None:
         """The storage of this exact lexical tuple element, including writes.
 
@@ -5310,8 +5503,10 @@ class TypeInferer:
                 if spec is not None:
                     return self._type_spec_to_cpp(spec)
             return None
-        active = self.__dict__.setdefault("_lexical_tuple_type_queries", set())
-        if declaration in active:
+        active = self._tuple_storage_guard(
+            "_lexical_tuple_type_queries", declaration
+        )
+        if active is None:
             return None
         active.add(declaration)
         try:
@@ -5345,8 +5540,10 @@ class TypeInferer:
                 if spec is not None:
                     return self._type_spec_to_cpp(spec)
             return None
-        active = self.__dict__.setdefault("_global_tuple_type_queries", set())
-        if id(node) in active:
+        active = self._tuple_storage_guard(
+            "_global_tuple_type_queries", id(node)
+        )
+        if active is None:
             return None
         active.add(id(node))
         try:

@@ -471,6 +471,16 @@ def test_untitled_persistent_local_input_keeps_authored_key(name):
 
 
 _OBJECT_NAMESPACE_LOCAL_NAMES = ("dayofweek", "time", "timenow")
+# Of those inventory names, the built-in variables that qualify no member:
+# values, not namespaces. An instance of a user-defined type may take one
+# (TradingView accepted a record named ``time``, relayed 2026-11-17 16:40).
+# An earlier note here said ``timenow`` was not measured. That is superseded:
+# TradingView has since compiled a chart-scope destructuring declaration of a
+# record named ``timenow``, with warning CW10011 (qualified 2026-11-17 19:31;
+# the measured script is pinned in test_namespace_named_receivers.py). The
+# value read through that record is unmeasured, and the typed declaration
+# inside a function that the rows below translate is not the measured form.
+_OBJECT_VALUE_LOCAL_NAMES = ("time", "timenow")
 
 
 def _object_local_source(name):
@@ -491,7 +501,27 @@ def test_object_local_namespace_rows_cover_the_builtin_intersection():
     assert "second" not in _BUILTIN_NAMESPACE_NAMES
 
 
-@pytest.mark.parametrize("name", _OBJECT_NAMESPACE_LOCAL_NAMES)
+def test_object_local_value_names_are_the_inventory_variables_without_members():
+    from pineforge_codegen.analyzer.base import (
+        _BUILTIN_NAMESPACE_NAMES, _VALUE_ONLY_BUILTIN_NAMES,
+    )
+    from pineforge_codegen.codegen.tables import DAYOFWEEK_MAP
+
+    # The census finds the inventory's bare built-in variables in tables the
+    # analyzer's inventory does not read. Of the three, only dayofweek also
+    # qualifies members (dayofweek.monday); time and timenow qualify none.
+    variables = set(_LOCAL_NAMES) & _BUILTIN_NAMESPACE_NAMES
+    assert variables == {"dayofweek", "time", "timenow"}
+    assert "monday" in DAYOFWEEK_MAP
+    assert _VALUE_ONLY_BUILTIN_NAMES == variables - {"dayofweek"}
+    assert set(_OBJECT_VALUE_LOCAL_NAMES) == _VALUE_ONLY_BUILTIN_NAMES
+
+
+@pytest.mark.parametrize(
+    "name",
+    [name for name in _OBJECT_NAMESPACE_LOCAL_NAMES
+     if name not in _OBJECT_VALUE_LOCAL_NAMES],
+)
 def test_builtin_named_object_local_preserves_namespace_refusal(name):
     with pytest.raises(CompileError) as caught:
         transpile(_object_local_source(name))
@@ -509,6 +539,30 @@ def test_non_namespace_builtin_named_object_local_matches_renamed_control():
     cpp = transpile(_object_local_source("second"))
     assert control.strip()
     assert _normalize_local(cpp, "second", control) == control
+
+
+@pytest.mark.parametrize("name", _OBJECT_VALUE_LOCAL_NAMES)
+def test_value_named_object_local_matches_renamed_control(name):
+    # A typed declaration of a user-defined-type instance inside a function.
+    control = transpile(_object_local_source("aa"))
+    cpp = transpile(_object_local_source(name))
+    assert control.strip()
+    assert _normalize_local(cpp, name, control) == control
+
+
+@pytest.mark.parametrize("name", _OBJECT_NAMESPACE_LOCAL_NAMES)
+def test_builtin_named_drawing_local_keeps_namespace_refusal(name):
+    # A drawing handle was not measured under a built-in value's name: it
+    # keeps the refusal of the whole inventory, time and timenow included.
+    with pytest.raises(CompileError) as caught:
+        transpile(_program(
+            f"h() =>\n    label {name} = na\n    1.0\n",
+            "plot(h())\n",
+        ))
+    assert len(caught.value.diagnostics) == 1
+    assert caught.value.diagnostics[0].message == (
+        f"Invalid object name: {name}. Namespaces of built-ins cannot be used."
+    )
 
 
 # Private storage allocation and authored diagnostic spellings.
@@ -1090,10 +1144,13 @@ def _object_history_source(name, shape):
     )
 
 
-# An object-typed local (a drawing or a user-defined-type instance) spelled like
-# a built-in namespace is refused by name (see the object-local namespace rows)
-# while its neutral control is accepted, so those names have nothing to compare
-# in these rows.
+# A drawing local spelled like an inventory name, and a user-defined-type
+# instance spelled like a built-in namespace, are refused by name (see the
+# object-local rows) while their neutral controls are accepted, so those names
+# have nothing to compare in these rows. A user-defined-type instance named
+# ``time`` or ``timenow`` is accepted; its comparison without a history read is
+# test_value_named_object_local_matches_renamed_control, and these rows do not
+# add its history read.
 _OBJECT_HISTORY_CASES = [
     pytest.param(name, shape, id=f"{shape}-{name}")
     for shape in ("drawing", "udt")

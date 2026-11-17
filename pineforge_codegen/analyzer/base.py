@@ -134,6 +134,17 @@ _BUILTIN_NAMESPACE_NAMES = frozenset({
     "dayofweek", "footprint", "volume_row", "timenow", "time",
 })
 
+# The names of that inventory that qualify no built-in member. The Pine v6
+# reference defines ``time`` as a variable and a function and ``timenow`` as a
+# variable; no built-in is spelled ``time.<member>`` or ``timenow.<member>``.
+# They are values, not namespaces: TradingView accepts an instance of a
+# user-defined type declared under ``time`` and only warns that the name
+# shadows the built-in variable (CW10011). ``timenow`` is placed here by that
+# same reference category; TradingView was not shown it. ``dayofweek`` is a
+# variable and a function too, but it also qualifies ``dayofweek.monday``, so
+# it is a namespace and is not listed.
+_VALUE_ONLY_BUILTIN_NAMES = frozenset({"time", "timenow"})
+
 
 # ---------------------------------------------------------------------------
 # Analyzer
@@ -711,9 +722,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._refresh_direct_terminal_array_temporary_returns()
         self._check_forward_tuple_helper_wrappers()
         self._check_top_level_block_shadow_boundaries()
-        self._qualify_colliding_func_var_members()
-        self._check_cross_callable_series_collection_collisions()
-        if self._check_declaration_exact_series_storage_boundaries():
+        separated = self._qualify_colliding_func_var_members()
+        if not separated:
+            self._check_cross_callable_series_collection_collisions()
+            separated = self._check_declaration_exact_series_storage_boundaries()
+        if separated:
             # Rebuild every inventory, including call-site clones, with the
             # newly separated declarations' private storage spellings.
             return Analyzer(
@@ -1307,8 +1320,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 element.loc,
             )
 
-    def _qualify_colliding_func_var_members(self) -> None:
+    def _qualify_colliding_func_var_members(self) -> bool:
         """Give colliding ordinary-UDF primitive/collection vars distinct storage.
+
+        Returns True when an overload copy's persistent declarations were
+        named apart instead and the program has to be analyzed afresh
+        (``callable_history_names.separate_copied_persistents``).
 
         Pine function locals are lexical, but persistent locals are lowered to
         generated class members.  Historically the direct FuncDef path used the
@@ -1593,6 +1610,25 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         for node_id, meta in self._var_member_metadata_by_node.items():
             remaining_by_member.setdefault(meta[1], []).append(node_id)
 
+        # An overload copy declares every name the declaration it was copied
+        # from does, so each persistent declaration the overlay above leaves
+        # it shares that declaration's member. Name the copy's apart by
+        # declaration identity and analyze afresh; what the script itself
+        # wrote is then refused, or not, as it is without the copy.
+        from .callable_history_names import separate_copied_persistents
+        if separate_copied_persistents(
+            self._ast, self._value_bindings,
+            {
+                node_id
+                for member_name, node_ids in remaining_by_member.items()
+                if len(node_ids) + int(
+                    member_name in ordinary_global_members
+                ) > 1
+                for node_id in node_ids
+            },
+        ):
+            return True
+
         for member_name, node_ids in remaining_by_member.items():
             binding_count = len(node_ids) + int(
                 member_name in ordinary_global_members
@@ -1622,6 +1658,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 "supported yet.",
                 node.loc,
             )
+        return False
 
     def _check_declaration_exact_series_storage_boundaries(self) -> bool:
         """Reject raw Series identities that still cross lexical owners.
@@ -1636,7 +1673,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         Direct primitive FuncDef locals can be named apart by declaration
         identity, then analyzed afresh so every clone owns its Series. Other
-        declaration shapes retain this fail-closed boundary. Already-isolated
+        declaration shapes retain this fail-closed boundary, except in an
+        overload copy, whose history bindings of every shape are named apart
+        from the declaration it was copied from. Already-isolated
         requested evaluators keep their spellings unless they shadow a builtin.
         """
         exact_series = set(self._series_decl_bindings)
@@ -1890,6 +1929,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._ast, self._value_bindings,
             {key for key in self._primitive_history_declarations
              if key[1] in collision_names},
+            # Every callable history binding in a collision, whatever its
+            # shape: an overload copy's is named apart from the declaration
+            # it was copied from.
+            {(id(stmt), name)
+             for name, bindings in callable_nonpersistent.items()
+             if name in collision_names
+             for _owner, stmt in bindings},
         ):
             return True
 
@@ -5150,6 +5196,54 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 node.loc,
             )
 
+    def _check_object_name(
+        self, node: VarDecl | TupleAssign, name: str, is_object: bool,
+        *, type_name: str | None = None, target: int | None = None,
+    ) -> None:
+        """Refuse an object declared under a built-in namespace's name.
+
+        TradingView refuses such a declaration with CE10093, plain or
+        destructuring, at chart scope and inside a callable. Only an object
+        is refused: TradingView accepts a float declared under such a name
+        (``float adjustment = close - open``).
+
+        ``type_name`` names the type of the declared object. An instance of
+        a user-defined type is refused under a namespace only: TradingView
+        accepts one under ``time``, a built-in value that qualifies no
+        member. A drawing handle was not measured under such a name and
+        keeps the whole inventory.
+
+        ``name`` is the declaration's current spelling. A callable local
+        named apart from a built-in variable is judged and reported by the
+        spelling the script wrote. ``target`` is the position of a
+        destructuring target, which is located by its own authored token
+        (the parser keeps every target's token in ``declaration_names``); a
+        plain declaration keeps its statement's location.
+        """
+        if (not is_object
+                or self._pine_version != 6
+                or self._in_v5_library_definition(node)):
+            return
+        notes = node.annotations or {}
+        # From here on ``name`` is the spelling the script wrote. The catalog
+        # derives this template's ``{name}`` argument from the placeholder.
+        name = notes.get(AUTHORED_LOCAL_NAMES, {}).get(name, name)
+        if name not in _BUILTIN_NAMESPACE_NAMES:
+            return
+        if (name in _VALUE_ONLY_BUILTIN_NAMES
+                and type_name in self._udt_fields):
+            return
+        location = node.loc
+        if target is not None:
+            written = notes.get("declaration_names", ())
+            if target < len(written) and written[target][0] == name:
+                location = written[target][1]
+        self._error(
+            f"Invalid object name: {name}. "
+            "Namespaces of built-ins cannot be used.",
+            location,
+        )
+
     def _check_na_bool_argument(self, node: FuncCall) -> None:
         """The na() predicate cannot receive a proven bool in v6."""
         if (not node.args
@@ -5461,9 +5555,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if (actual is None or actual == TypeSpec.primitive("na")
                 or join_value_types(actual, expected, invariant=True) is not None):
             return
+        self._slot_type_error(actual, expected, context, value.loc)
+
+    def _slot_type_error(self, actual, expected, context, location) -> None:
+        """Report a slot mismatch; both slot checks share this one sentence."""
+        # One spelling keeps the nominal and the primitive check under the
+        # same catalog template, with the slot as its ``context`` argument.
         self._error(
             f"Cannot use {actual} as {expected} for {context}.",
-            value.loc,
+            location,
         )
 
     def _check_primitive_slot(self, value, expected, context):
@@ -5478,13 +5578,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if actual is None or actual.kind != "primitive":
             return
         actual = public_type_name(actual)
+        # The operator proof describes the value: a quotient and a selection
+        # with a missing arm read float, an open overload reads "number".
+        # None of them is the type an int or float slot is checked against,
+        # so a numeric value keeps its existing conversion there. Only a
+        # float literal initializing an int declaration has a measured
+        # refusal, and that check is separate.
+        numeric = {"int", "float", "number"}
         if (actual in {expected, "na"}
-                or (actual == "int" and expected == "float")):
+                or (actual in numeric and expected in numeric)):
             return
-        self._error(
-            f"Cannot use {actual} as {expected} for {context}.",
-            value.loc,
-        )
+        self._slot_type_error(actual, expected, context, value.loc)
 
     def _check_builtin_enum_arguments(self, node, parameter_types=None):
         """Bind nominal argument contracts from the intrinsic signatures."""
@@ -5701,23 +5805,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 if udt_ctor is not None and type_spec is None:
                     type_spec = TypeSpec.udt(udt_ctor)
 
-        authored_name = (node.annotations or {}).get(
-            AUTHORED_LOCAL_NAMES, {}
-        ).get(node.name, node.name)
-        if (
-            self._pine_version == 6
-            and not self._in_v5_library_definition(node)
-            and authored_name in _BUILTIN_NAMESPACE_NAMES
-            and (
-                udt_ctor is not None
-                or (type_spec is not None and type_spec.kind == "udt")
-            )
-        ):
-            self._error(
-                f"Invalid object name: {node.name}. "
-                "Namespaces of built-ins cannot be used.",
-                node.loc,
-            )
+        self._check_object_name(
+            node, node.name,
+            udt_ctor is not None
+            or (type_spec is not None and type_spec.kind == "udt"),
+            type_name=udt_ctor or (
+                type_spec.name if type_spec is not None else None
+            ),
+        )
 
         # Establish storage before any reader, member or history snapshot.
         # A later quotient write can keep a fraction even with an int hint.
@@ -6188,6 +6283,22 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             )
             if name == "_":
                 continue
+            # The element's own type decides, as a plain declaration's does.
+            # TradingView's refusal is measured for an instance of a
+            # user-defined type; a drawing handle bound by a destructuring is
+            # not measured and stays accepted.
+            self._check_object_name(
+                node, name,
+                idx < len(tuple_specs) and tuple_specs[idx] is not None
+                and tuple_specs[idx].kind == "udt"
+                and tuple_specs[idx].name in self._udt_fields,
+                type_name=(
+                    tuple_specs[idx].name
+                    if idx < len(tuple_specs) and tuple_specs[idx] is not None
+                    else None
+                ),
+                target=idx,
+            )
             outer_symbol = self._symbols.resolve(name)
 
             if self._global_scope and is_val_static:
