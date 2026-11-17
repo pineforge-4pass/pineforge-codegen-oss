@@ -13,7 +13,7 @@ from pineforge_codegen.errors import CompileError
 from tests._e2e import reference_codegen, transpile_json
 
 
-BASE = "8d615dd27b31acd4fe92b57be7c1811cc42ecbda"
+BASE = "49ebac862df439725ad73e78d9f9d704c97580d3"
 HEADER = '//@version=6\nstrategy("storage capacity")\n'
 APIS = (transpile, transpile_full, transpile_with_request_inventory)
 OPTION_CODE = "PF-E5094"

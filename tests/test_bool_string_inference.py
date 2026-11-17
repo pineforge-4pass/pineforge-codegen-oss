@@ -23,7 +23,7 @@ from tests._pine_libraries import Layout
 
 
 HEADER = '//@version=6\nstrategy("Bool text", overlay=true)\n'
-NUMERIC_REFERENCE = "883221a00585e16a8e9802b4c16a7c85bf8fa4b8"
+NUMERIC_REFERENCE = "49ebac862df439725ad73e78d9f9d704c97580d3"
 TOSTRING_CALLS = (
     "str.tostring({value})",
     "str.tostring(value = {value})",
@@ -468,7 +468,7 @@ def test_native_timeframe_bool_values_match_pine_reference(
 def test_numeric_tostring_keeps_complete_reference_cpp(tmp_path, body, expression):
     # 493fde6 gives this inline history its checkpointed per-bar marker.
     revision = (
-        "493fde62b2aa54a052f45c23ed0c8f24f91c96d7"
+        "49ebac862df439725ad73e78d9f9d704c97580d3"
         if (body, expression) == ("", "str.tostring(ta.sma(close, 5)[1])")
         else NUMERIC_REFERENCE
     )

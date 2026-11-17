@@ -16,7 +16,7 @@ from tests.test_helper_series_words import (
 )
 
 
-CPP_REFERENCE = "7d7681dcef6918f0cb304831320e5d8e5b545285"
+CPP_REFERENCE = "49ebac862df439725ad73e78d9f9d704c97580d3"
 _BARE_BUILTINS = (
     set(BUILTIN_VARS) | set(BAR_BUILTINS) | set(BAR_FIELDS)
     | set(TIME_FIELD_EXPRS) | set(_REALTIME_ONLY_VARS)
