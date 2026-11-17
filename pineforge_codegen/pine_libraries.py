@@ -3,8 +3,7 @@
 ``transpile(source, libraries=...)`` takes them from the caller: a mapping of
 import path (``user/name/version``) to library source text. With
 ``libraries=None`` they come from the environment the campaign's case runner
-sets (pineforge-workflow ``docs/xsym-requests.md``, "The environment
-contract"):
+sets under the library-source manifest contract:
 
 - ``PINEFORGE_PINE_LIBRARIES=<dir>``: ``<dir>/libraries.json``
   (``pineforge-pine-libraries/v1``) and ``<dir>/<user>/<name>/<version>.pine``,

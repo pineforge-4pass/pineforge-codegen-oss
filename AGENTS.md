@@ -257,14 +257,13 @@ contract. Test extras (pytest, pytest-xdist) are the only allowed `[project.opti
 
 Pushes and PRs from this repo are gated by the PineForge parity campaign: a
 fresh (≤6h) PASS verdict must bind the exact (engine, codegen) HEADs, recorded
-on the campaign registry. The gate is maintainers' tooling: it lives in the
-private `pineforge-workflow` repository. Under Claude Code a PreToolUse hook
-(`.claude/settings.json`, calls `pineforge-workflow/campaign/hooks/pr-gate.mjs`
-from a checkout at `~/code/pineforge-workflow`) enforces this on `git push` /
+on the campaign registry. Maintainers provide the campaign tooling and its
+checkout location. Under Claude Code, the PreToolUse hook configured in
+`.claude/settings.json` enforces this on `git push` /
 `gh pr create|ready|merge`. Codex, OpenCode, and other harnesses run NO hook —
 the discipline is exactly as binding there: before any push, run the gate job
-and record its verdict as the `pr-gate` skill in that repository's
-`.claude/skills/` describes (plain markdown, readable anywhere), ending with:
+and record its verdict as the maintainer-provided `pr-gate` procedure
+describes, ending with:
 
 ```sh
 lab gate record --verdict <verdict.json> --engine <sha> --codegen <sha>

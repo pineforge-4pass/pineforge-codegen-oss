@@ -1,6 +1,6 @@
 """Input-dependent controls for the two delimited CONST leads.
 
-These are evidence contracts for a later Spark2 run.  They deliberately drive
+These are evidence contracts for a later native run. They deliberately drive
 the real parser, public ``transpile`` entrypoint, analyzer context, and
 codegen object.  The author lane does not execute them.
 """
