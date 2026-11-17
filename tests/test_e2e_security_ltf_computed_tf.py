@@ -16,12 +16,9 @@ bar through a declaration expression and through ``:=`` reassignments on all
 265 closes. The replay runs on the corpus 15m chart feed with the corpus 1m
 feed as the auxiliary lower-timeframe feed.
 
-A request reads a reassigned global where the request is written: a write
-after it does not reach it, and reaches the next request. TradingView compiled
-the two-request script below without errors or warnings on 2026-11-18. On
-BINANCE:BTCUSDT 60, all 188 completed aligned pairs showed 12 intrabars at the
-first request and 60 at the second: "5" before the write, "1" after it.
-This is one observation of that script and window.
+The read-order cases exercise two requests around a reassignment. The native
+test compares the computed requests with requests that use explicit timeframe
+literals derived from the earlier assignments in the script.
 """
 
 from __future__ import annotations
@@ -44,7 +41,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "security_ltf_tv"
 NAME = "w9sec_ltf_computed_tf"
 BASELINE_CODEGEN_REVISION = "fdcdcbb"  # main before this fix; it already contains 4e5d482
 
-# The two-request script observed on 2026-11-18.
+# The two-request source shared by the read-order cases.
 READ_ORDER_SOURCE = '''//@version=6
 strategy("lower timeframe request read order")
 int sec = 300

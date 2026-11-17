@@ -99,8 +99,7 @@ def _cpp_pair(source, paths, reference, tmp_path):
     return before["cpp"], after["cpp"]
 
 
-# The script of the ``scalar-overloads`` row as TradingView compiled it: the row's
-# source and two plot calls, which publish the two values the measurement compared.
+# The script of the ``scalar-overloads`` row with plots exposing both values.
 _FORWARD_PLOTS = "plot(unknownResult)\nplot(floatResult)\n"
 _MEASURED_FORWARD_SCRIPT = '''//@version=6
 strategy("function overloads")
@@ -187,16 +186,11 @@ def _assert_identity_forward_runs_the_float_declaration(source, before, after):
     call now binds by the value's type and runs ``probe(float)``, so this row's C++
     cannot equal the reference's any more.
 
-    Basis, measured on 2026-11-18. TradingView compiled ``_MEASURED_FORWARD_SCRIPT``
-    without an error or a warning. On all 187 completed, aligned pairs of its two
-    plots the values were equal, 180 of them with a fractional ``close - open``; a
-    bar without a plotted value is not in that count and is not taken as equal.
-    PineForge, run natively on the open and close of those 187 bars, returned
-    exactly ``close - open`` (the same binary64 number) for both names on every bar,
-    and 3 for ``probe(2)``. The measurement covers this script, not every untyped
-    forward.
+    The native check below computes the expected float result from the open and
+    close of each input bar. It compares both calls with that value and checks
+    the direct int call separately. This checks the generated code for this script.
     """
-    # The measured script is this row's source and the two plot calls, to the byte.
+    # The plotted script is this row's source and the two plot calls, to the byte.
     assert source + _FORWARD_PLOTS == _MEASURED_FORWARD_SCRIPT
     assert len(_MEASURED_FORWARD_SCRIPT.encode("utf-8")) == 266
 
