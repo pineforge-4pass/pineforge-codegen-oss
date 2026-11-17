@@ -5,8 +5,10 @@ name: Release
 # GitHub Release. VERSION is semver; scripts/release_version.py gives each
 # channel its spelling. A prerelease (override 1.0.0-rc.1) ships PyPI 1.0.0rc1,
 # tag v1.0.0-rc.1 as a GitHub prerelease and tells the hub prerelease=true:
-# never `latest`. npm 1.0.0-rc.1 on dist-tag next requires a separate manual
-# workflow_dispatch of publish-pyodide.yml on main with the existing tag.
+# never `latest`. npm follows in the same job: publish-pyodide.yml is dispatched
+# on main with the new tag as a dry run, then as the publish (1.0.0-rc.1 goes
+# to dist-tag next), the registry is read back, and only then is the hub
+# notified. A dry_run release publishes, tags and dispatches nothing.
 
 on:
   workflow_dispatch:
@@ -51,10 +53,11 @@ jobs:
       OVERRIDE:      ${{ inputs.override }}
       PYTHONHASHSEED: "0"   # deterministic gate runtime (match gate.yml)
     steps:
-      # Org GitHub App token (no PAT — never expires). Authorizes BOTH the
-      # release commit/tag push to protected main (the App is a bypass actor on
-      # the org ruleset) AND the downstream hub dispatch. Scoped to this repo +
-      # the hub. Minted first so checkout can push with it.
+      # Org GitHub App token (no PAT to rotate; each minted token lives one
+      # hour). This one authorizes the release commit/tag push to protected main
+      # (the App is a bypass actor on the org ruleset) and the GitHub Release.
+      # The npm and hub dispatches further down mint their own. Scoped to this
+      # repo + the hub. Minted first so checkout can push with it.
       - name: Mint org App token
         id: app
         uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
@@ -99,7 +102,7 @@ jobs:
       # Conformance gate (BLOCKING): the differential parity gate must pass
       # before anything is built, published, or tagged. A gate-broken codegen
       # fails the release here — nothing reaches PyPI, no tag is pushed, and no
-      # GitHub Release is created; npm requires a separate manual dispatch on main.
+      # GitHub Release is created; npm and the hub are never reached.
       - name: Run conformance gate (blocking)
         run: |
           python -m pip install -e .
@@ -123,16 +126,16 @@ jobs:
           ls "dist/pineforge_codegen-${PYPI_VERSION}-"*.whl >/dev/null \
             || { echo "::error::no wheel for ${PYPI_VERSION}"; exit 1; }
 
-      # Publish to PyPI BEFORE the tag is pushed. This release job then sends
-      # codegen-release to the hub after PyPI and BEFORE any npm publish; npm
-      # lags until the manual publish-pyodide.yml dispatch on main.
+      # Publish to PyPI BEFORE the tag is pushed. npm needs the tag, so it
+      # follows the GitHub Release; codegen-release goes to the hub only after
+      # the npm read-back further down.
       - name: Publish to PyPI
         if: ${{ !inputs.dry_run }}
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
 
-      # Commit + tag + push AFTER PyPI succeeds. A tag push publishes no npm;
-      # npm requires a manual workflow_dispatch of publish-pyodide.yml on main
-      # with the existing tag, and re-runs the gate before publishing.
+      # Commit + tag + push AFTER PyPI succeeds. A tag push publishes no npm:
+      # a later step dispatches publish-pyodide.yml on main with this tag, and
+      # that workflow re-runs the gate before publishing.
       - name: Commit + tag + push
         if: ${{ !inputs.dry_run }}
         env:
@@ -170,20 +173,333 @@ jobs:
             ${channel[@]+"${channel[@]}"} \
             dist/* "${catalog}"
 
+      # npm follows the tag and precedes the hub: publish-pyodide.yml as a dry
+      # run, then as the publish, then a read-back from the registry, and only
+      # then the hub. The historical 1.11.0 combined release could remain a
+      # draft because the hub was notified before the npm package was available
+      # (#181). A release dry run dispatches nothing: it makes the one read
+      # below and exercises the read-back.
+      #
+      # An App token lives one hour and one publish-pyodide.yml run can take
+      # longer, so no App token is carried across a wait. Each of the three
+      # dispatches (npm dry run, npm publish, hub) gets a token minted in the
+      # step right before it. Waiting for a run and reading it use this job's
+      # own token, which lasts as long as the job.
+      - name: Find the npm workflow
+        id: npm_workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO:     ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Retried: one failed read must not strand a release after its tag.
+          workflow_id=
+          for attempt in 1 2 3 4 5; do
+            if workflow_id=$(gh api "repos/${REPO}/actions/workflows/publish-pyodide.yml" \
+                --jq 'select(.state == "active" and .path == ".github/workflows/publish-pyodide.yml") | .id'); then
+              break
+            fi
+            sleep 10
+          done
+          if ! [[ "$workflow_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::publish-pyodide.yml is not an active workflow of ${REPO} that this job's token can read"
+            exit 1
+          fi
+          printf 'id=%s\n' "$workflow_id" >> "$GITHUB_OUTPUT"
+
+      - name: Mint org App token (npm dry run)
+        id: app_npm_dry
+        if: ${{ !inputs.dry_run }}
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
+        with:
+          app-id: ${{ secrets.PINEFORGE_APP_ID }}
+          private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: pineforge-codegen-oss,pineforge-release
+
+      - name: Dry-run npm for the tag
+        id: npm_dry
+        if: ${{ !inputs.dry_run }}
+        env:
+          # GH_TOKEN is this job's own token: it reads the run for as long as
+          # the run takes. APP_TOKEN, minted in the step above, makes the
+          # dispatch and nothing else; that needs the App's Actions write
+          # permission on this repository.
+          GH_TOKEN:        ${{ github.token }}
+          APP_TOKEN:       ${{ steps.app_npm_dry.outputs.token }}
+          REPO:            ${{ github.repository }}
+          RELEASE_DRY_RUN: ${{ inputs.dry_run }}
+          GIT_TAG:         ${{ steps.ver.outputs.git_tag }}
+          WORKFLOW_ID:     ${{ steps.npm_workflow.outputs.id }}
+        run: |
+          set -euo pipefail
+          # One publish-pyodide.yml run on main for this tag: dispatched, awaited
+          # and checked. It is a file because the publish step runs it again.
+          cat > "$RUNNER_TEMP/npm-run.sh" <<'SH'
+          set -euo pipefail
+          dry_run=${1-} label=${2-}
+          fail() { echo "::error::$1"; exit 1; }
+          # Never from a release dry run, whatever the step condition says.
+          [ "$RELEASE_DRY_RUN" = false ] \
+            || fail "a release dry run publishes no npm (dry_run='${RELEASE_DRY_RUN}')"
+          case "$dry_run" in true|false) ;; *) fail "no npm run kind ('${dry_run}')" ;; esac
+          [[ "$GIT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]] \
+            || fail "no release tag for the npm ${label} ('${GIT_TAG}')"
+          [[ "$WORKFLOW_ID" =~ ^[1-9][0-9]*$ ]] \
+            || fail "no publish-pyodide.yml workflow id for the npm ${label} ('${WORKFLOW_ID}')"
+          # The publish only follows this job's dry run of this very tag.
+          if [ "$dry_run" = false ] && [ "$DRY_RUN_TAG" != "$GIT_TAG" ]; then
+            fail "this job has no verified npm dry run of ${GIT_TAG} ('${DRY_RUN_TAG}'): nothing is published"
+          fi
+          [ -n "$APP_TOKEN" ] || fail "no App token for the npm ${label} dispatch"
+          # A read of the API, retried: one failed read must not strand a release.
+          api_get() {
+            local attempt out
+            for attempt in 1 2 3 4 5; do
+              if out=$(gh api "$@"); then printf '%s\n' "$out"; return 0; fi
+              sleep 10
+            done
+            return 1
+          }
+
+          # The dispatch answers with the id of the run it created, so no other
+          # run, older or concurrent, can stand in for it. It is the one request
+          # made with the App token; every read after it uses the job's token.
+          if ! run_id=$(GH_TOKEN="$APP_TOKEN" gh api --method POST "repos/${REPO}/actions/workflows/publish-pyodide.yml/dispatches" \
+            -f ref=main -F return_run_details=true \
+            -f "inputs[tag]=${GIT_TAG}" -f "inputs[dry_run]=${dry_run}" \
+            --jq .workflow_run_id); then
+            fail "the npm ${label} dispatch failed (gh names the reason above; a 403 means the App lacks Actions write on ${REPO}): no run is known and nothing further is done"
+          fi
+          [[ "$run_id" =~ ^[1-9][0-9]*$ ]] \
+            || fail "the npm ${label} dispatch returned no run id ('${run_id}'): its state is unknown and nothing further is done"
+          echo "npm ${label}: ${GITHUB_SERVER_URL}/${REPO}/actions/runs/${run_id}"
+          # 240 polls, 30 s apart: two hours for one run.
+          polls=0 unreadable=0
+          while :; do
+            status=unreadable
+            if state=$(gh api "repos/${REPO}/actions/runs/${run_id}" --jq \
+                '[.id, .status, (.conclusion // "none"), .event, .head_branch, .workflow_id] | map(tostring) | join(" ")'); then
+              read -r id status conclusion event branch wf <<<"$state"
+            fi
+            case "$status" in
+              completed) break ;;
+              queued|in_progress|waiting|requested|pending) unreadable=0 ;;
+              *) unreadable=$((unreadable + 1)) ;;
+            esac
+            polls=$((polls + 1))
+            [ "$unreadable" -lt 10 ] \
+              || fail "run ${run_id} of the npm ${label} could not be read 10 times in a row ('${status}'; this job's token must be able to read the Actions runs of ${REPO}): its state is unknown"
+            [ "$polls" -lt 240 ] \
+              || fail "the npm ${label} (run ${run_id}) is still '${status}' after ${polls} polls: its state is unknown"
+            sleep 30
+          done
+          if [ "$id" != "$run_id" ] || [ "$event" != workflow_dispatch ] \
+             || [ "$branch" != main ] || [ "$wf" != "$WORKFLOW_ID" ]; then
+            fail "run ${run_id} is not a publish-pyodide.yml dispatch on main"
+          fi
+          [ "$conclusion" = success ] \
+            || fail "the npm ${label} (run ${run_id}) concluded '${conclusion}': the hub is not notified"
+          # Green is not enough: the guard and the publish step must have run.
+          if ! proof=$(api_get "repos/${REPO}/actions/runs/${run_id}/jobs?per_page=100" --jq '
+            [ .jobs[] | select(.conclusion == "success")
+              | if .name == "tag-guard" then "guard"
+                elif .name == "publish" and ([.steps[]?
+                  | select(.name == "Publish (real on dispatch dry_run=false; dry-run otherwise)"
+                           and .conclusion == "success")] | length) == 1 then "publish"
+                else empty end
+            ] | sort | join(" ")'); then
+            fail "the jobs of run ${run_id} could not be read: the state of the npm ${label} is unknown"
+          fi
+          [ "$proof" = "guard publish" ] \
+            || fail "run ${run_id} succeeded without one tag-guard job and one publish job with its publish step ('${proof}')"
+          printf 'tag=%s\n' "$GIT_TAG" >> "$GITHUB_OUTPUT"
+          echo "npm ${label} of ${GIT_TAG}: run ${run_id} succeeded with its tag guard and its publish step"
+          SH
+          bash "$RUNNER_TEMP/npm-run.sh" true "dry run"
+
+      - name: Mint org App token (npm publish)
+        id: app_npm
+        if: ${{ !inputs.dry_run }}
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
+        with:
+          app-id: ${{ secrets.PINEFORGE_APP_ID }}
+          private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: pineforge-codegen-oss,pineforge-release
+
+      - name: Publish npm for the tag
+        id: npm
+        if: ${{ !inputs.dry_run }}
+        env:
+          # As in the dry-run step, with a token minted after that run ended.
+          GH_TOKEN:        ${{ github.token }}
+          APP_TOKEN:       ${{ steps.app_npm.outputs.token }}
+          REPO:            ${{ github.repository }}
+          RELEASE_DRY_RUN: ${{ inputs.dry_run }}
+          GIT_TAG:         ${{ steps.ver.outputs.git_tag }}
+          WORKFLOW_ID:     ${{ steps.npm_workflow.outputs.id }}
+          DRY_RUN_TAG:     ${{ steps.npm_dry.outputs.tag }}
+        run: |
+          set -euo pipefail
+          bash "$RUNNER_TEMP/npm-run.sh" false publish
+
+      # The read-back: the exact version, its dist-tag and its tarball, as the
+      # registry serves them. It only reads, so a release dry run runs it too.
+      - name: Read npm back from the registry
+        id: npm_readback
+        env:
+          RELEASE_DRY_RUN: ${{ inputs.dry_run }}
+          PUBLISHED_TAG:   ${{ steps.npm.outputs.tag }}
+          GIT_TAG:         ${{ steps.ver.outputs.git_tag }}
+          NPM_NAME:        "@pineforge/codegen-pyodide"
+          NPM_VERSION:     ${{ steps.ver.outputs.npm }}
+          NPM_DIST_TAG:    ${{ steps.ver.outputs.npm_dist_tag }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          [[ "$NPM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]] \
+            || fail "no npm version to read back ('${NPM_VERSION}')"
+          [ "v${NPM_VERSION}" = "$GIT_TAG" ] \
+            || fail "npm version '${NPM_VERSION}' is not the version of tag '${GIT_TAG}'"
+          case "$NPM_DIST_TAG" in latest|next) ;; *) fail "no npm dist-tag ('${NPM_DIST_TAG}')" ;; esac
+
+          registry=https://registry.npmjs.org
+          packument="${registry}/${NPM_NAME/\//%2f}"
+          work=$(mktemp -d "$RUNNER_TEMP/npm-readback.XXXXXXXX")
+          tarball_url() { printf '%s/%s/-/%s-%s.tgz' "$registry" "$NPM_NAME" "${NPM_NAME#*/}" "$1"; }
+          fetch() {
+            curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+              --speed-limit 1024 --speed-time 60 --output "$2" "$1"
+          }
+          cat > "$work/verify.py" <<'PY'
+          """Read one version of a package back from its registry document and tarball."""
+          import base64
+          import hashlib
+          import json
+          import sys
+          import tarfile
+
+
+          def refuse(reason):
+              print(f"npm read-back: {reason}", file=sys.stderr)
+              raise SystemExit(1)
+
+
+          command, document, name, version = sys.argv[1:5]
+          try:
+              with open(document, encoding="utf-8") as stream:
+                  packument = json.load(stream)
+          except (OSError, ValueError) as error:
+              refuse(f"unreadable registry document ({error})")
+          if not isinstance(packument, dict) or packument.get("name") != name:
+              refuse(f"the registry document is not {name}")
+          versions, tags = packument.get("versions"), packument.get("dist-tags")
+          if not isinstance(versions, dict) or not isinstance(tags, dict):
+              refuse("the registry document has no versions or dist-tags")
+          if command == "unpublished":
+              # A release dry run: the new version must still be free.
+              if version in versions or version in tags.values():
+                  refuse(f"{name}@{version} is already on npm")
+              print(tags.get("latest", ""))
+              raise SystemExit(0)
+          if command != "published":
+              refuse(f"unknown command {command!r}")
+          dist_tag, tarball_url, tarball = sys.argv[5:]
+          manifest = versions.get(version)
+          if not isinstance(manifest, dict):
+              refuse(f"{name}@{version} is not in the registry yet")
+          if manifest.get("name") != name or manifest.get("version") != version:
+              refuse(f"the registry entry of {version} names another package or version")
+          if tags.get(dist_tag) != version:
+              refuse(f"dist-tag {dist_tag} is {tags.get(dist_tag)!r}, not {version}")
+          dist = manifest.get("dist")
+          if not isinstance(dist, dict) or dist.get("tarball") != tarball_url:
+              refuse(f"the registry tarball of {version} is not {tarball_url}")
+          try:
+              with open(tarball, "rb") as stream:
+                  digest = hashlib.sha512(stream.read()).digest()
+              with tarfile.open(tarball, "r:gz") as archive:
+                  member = archive.extractfile("package/package.json")
+                  packed = json.load(member) if member is not None else None
+          except (EOFError, KeyError, OSError, ValueError, tarfile.TarError) as error:
+              refuse(f"the tarball of {version} is unreadable ({error})")
+          integrity = "sha512-" + base64.b64encode(digest).decode("ascii")
+          if dist.get("integrity") != integrity:
+              refuse(f"the tarball is {integrity}, the registry says {dist.get('integrity')!r}")
+          if not isinstance(packed, dict) or packed.get("name") != name or packed.get("version") != version:
+              refuse(f"the tarball's package.json is not {name}@{version}")
+          print(integrity)
+          PY
+          # Prints the sha512 integrity once the registry document, the dist-tag
+          # and the downloaded tarball all name this exact version.
+          verify() {
+            local version=$1 dist_tag=$2 url
+            url=$(tarball_url "$version")
+            fetch "$packument" "$work/packument.json" \
+              && fetch "$url" "$work/package.tgz" \
+              && python3 "$work/verify.py" published "$work/packument.json" "$NPM_NAME" "$version" \
+                   "$dist_tag" "$url" "$work/package.tgz"
+          }
+
+          if [ "$RELEASE_DRY_RUN" = true ]; then
+            # Nothing was published: the new version must still be free, and the
+            # read-back is exercised on the version that latest serves today.
+            fetch "$packument" "$work/packument.json"
+            latest=$(python3 "$work/verify.py" unpublished "$work/packument.json" "$NPM_NAME" "$NPM_VERSION")
+            [[ "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+              || fail "the registry serves no stable latest of ${NPM_NAME} ('${latest}')"
+            integrity=$(verify "$latest" latest)
+            echo "Release dry run: ${NPM_NAME}@${NPM_VERSION} is not on npm yet, as a release requires."
+            echo "Read-back exercised on the published ${NPM_NAME}@${latest} (latest): ${integrity}"
+            exit 0
+          fi
+          [ "$RELEASE_DRY_RUN" = false ] || fail "no dry_run verdict ('${RELEASE_DRY_RUN}')"
+          [ "$PUBLISHED_TAG" = "$GIT_TAG" ] \
+            || fail "this job has no verified npm publish of ${GIT_TAG} ('${PUBLISHED_TAG}'): nothing to read back"
+          # The registry can lag a publish: 40 reads, 15 s apart.
+          for attempt in $(seq 1 40); do
+            if integrity=$(verify "$NPM_VERSION" "$NPM_DIST_TAG"); then
+              echo "npm read-back: ${NPM_NAME}@${NPM_VERSION} on dist-tag ${NPM_DIST_TAG}, $(tarball_url "$NPM_VERSION") ${integrity}"
+              printf 'verified=%s@%s\n' "$NPM_NAME" "$NPM_VERSION" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "npm read-back ${attempt}/40: ${NPM_NAME}@${NPM_VERSION} is not verified yet"
+            sleep 15
+          done
+          fail "the registry never served ${NPM_NAME}@${NPM_VERSION} on dist-tag ${NPM_DIST_TAG} with its tarball: the hub is not notified"
+
       # Notify the pineforge-release hub: it bumps its CODEGEN_VERSION pin,
       # rebuilds the combined image, and fans out to the MCPs. FAIL LOUD (no
       # continue-on-error) — a dropped notify means downstream never picks up the
-      # new codegen. Uses the App token minted above (no PAT). Runs AFTER the
-      # PyPI publish so the version is installable.
+      # new codegen. Uses an App token minted right before it (no PAT; the npm
+      # runs can outlive an earlier one). Runs AFTER the PyPI publish and the
+      # npm read-back, so both packages are installable.
+      - name: Mint org App token (hub)
+        id: app_hub
+        if: ${{ !inputs.dry_run }}
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
+        with:
+          app-id: ${{ secrets.PINEFORGE_APP_ID }}
+          private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: pineforge-codegen-oss,pineforge-release
+
       - name: Dispatch codegen-release -> pineforge-release
         if: ${{ !inputs.dry_run }}
         env:
-          GH_TOKEN:    ${{ steps.app.outputs.token }}
+          GH_TOKEN:    ${{ steps.app_hub.outputs.token }}
           NEW_VERSION: ${{ steps.ver.outputs.new }}
           PRERELEASE:  ${{ steps.ver.outputs.prerelease }}
           RUN_ID:      ${{ github.run_id }}
+          NPM_VERIFIED: ${{ steps.npm_readback.outputs.verified }}
         run: |
           set -euo pipefail
+          # Fail closed: the hub hears of a version only after its npm read-back.
+          if [ "$NPM_VERIFIED" != "@pineforge/codegen-pyodide@${NEW_VERSION}" ]; then
+            echo "::error::no npm read-back of ${NEW_VERSION} ('${NPM_VERIFIED}'): the hub is not notified"
+            exit 1
+          fi
           # The hub pairs codegen X.Y.Z with engine vX.Y.Z (prerelease included).
           gh api repos/pineforge-4pass/pineforge-release/dispatches \
             -f event_type=codegen-release \
