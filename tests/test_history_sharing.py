@@ -745,11 +745,10 @@ var array<int> a = ''' + initializer + HISTORY)
 
 
 @pytest.mark.parametrize("choice", [
-    0,  # The explicit arm selects [2,5], but supplies no collection TypeSpec.
-    1,  # The default arm selects [7,9], with the same unresolved declaration.
+    0,  # The explicit arm selects [2,5].
+    1,  # The default arm selects [7,9].
 ])
-def test_untyped_selection_keeps_the_eager_history_output(choice, monkeypatch):
-    # A resolved seed must share while the unresolved selection keeps every byte.
+def test_untyped_selection_uses_shared_collection_history(choice):
     _shared(transpile(COOF_HEADER + SEED + HISTORY))
     source = COOF_HEADER + f'''choice = input.int({choice}, "Choice")
 var a = switch choice
@@ -757,15 +756,12 @@ var a = switch choice
     => array.from(7, 9)
 ''' + HISTORY
     cpp = transpile(source)
-    # 3ec62ae5 declares the member as the vector the arms build (a selection
-    # of arrays is an array variable); the history read is still the scalar
-    # one, with no collection history, and equal to the eager output below.
-    # That read of `(a[3]).size()` emits `None()` on main and on the release
-    # too (an invalid statement this pin has always held and does not judge).
+    # The old pin required no collection history and equality with eager
+    # output even though `(a[3]).size()` emitted invalid `None()`.
+    # Both arms prove array<int>, so history must use collection slots.
     assert "    std::vector<int> a;" in cpp
-    assert "_pf_collection_hist_a" not in cpp
-    assert "class _PFCachedCollectionHistory" not in cpp
-    assert cpp == _eager_cpp(source, monkeypatch)
+    _shared(cpp)
+    assert "None()" not in cpp
 
 
 @pytest.mark.parametrize("operation", [

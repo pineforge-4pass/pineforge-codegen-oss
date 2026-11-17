@@ -1,4 +1,4 @@
-"""Keyword validation and positional binding from intrinsic records."""
+"""Intrinsic binding and proven builtin argument-domain diagnostics."""
 
 from __future__ import annotations
 
@@ -216,6 +216,28 @@ def bind_intrinsic_call(
         unproved("overload remains ambiguous with the available argument types")
         return None
     return candidates[0]
+
+
+def array_method_domain_error(
+    method: str, receiver: TypeSpec | None,
+) -> tuple[str, str | None] | None:
+    """Return a proven builtin receiver mismatch, leaving other domains open.
+
+    Join independently admits string, int and float arrays and refuses bool
+    arrays. The bool refusal does not prove any other array domain invalid.
+    Callers resolve authored methods before applying this builtin contract.
+    """
+    if (method != "join" or receiver is None or receiver.kind != "array"
+            or receiver.element is None or receiver.element.kind != "primitive"
+            or receiver.element.name != "bool"):
+        return None
+    return render_diagnostic(
+        "PF-E1088", {
+            "name": "array.join",
+            "message": "cannot accept an array<bool> argument for parameter 'id'",
+            "spelled": "CE10123",
+        },
+    )
 
 
 def intrinsic_keyword_diagnostics(

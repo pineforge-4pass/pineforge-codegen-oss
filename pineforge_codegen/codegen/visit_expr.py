@@ -91,8 +91,9 @@ from .constant_fold import NON_CONSTANT, fold_constant_expression
 from .run_stops import checked_history_offset, history_offset_guard, request_stop
 from .capacities import literal_history_offset
 
+from ..analyzer.value_bindings import ValueBindings
 from ..errors import CodegenInvariantError, Phase
-from ..symbols import TypeSpec
+from ..symbols import PineType, TypeSpec
 from ..builtin_constants import builtin_constant
 from ..external_requests import UNPINNED_ANNOTATION
 from ..ast_nodes import (
@@ -577,11 +578,11 @@ class ExprVisitor:
         if spec is None and target_node is not None:
             spec = self._type_spec_from_expr(target_node)
         if spec is not None and spec.kind == "udt" and spec.name in self._udt_defs:
-            return self._safe_name(spec.name)
+            return self._udt_cpp_name(spec.name)
         if not target_name:
             return None
         udt_name = self._identifier_udt_type(target_name)
-        return self._safe_name(udt_name) if udt_name in self._udt_defs else None
+        return self._udt_cpp_name(udt_name) if udt_name in self._udt_defs else None
 
     def _tuple_literal_element(self, element) -> str:
         """One element of a tuple literal, as ``std::make_tuple`` takes it: a
@@ -688,11 +689,11 @@ class ExprVisitor:
         udt_target = None
         if (target_cpp_type in self._udt_defs
                 and target_cpp_type not in DRAWING_TYPE_TO_CPP.values()):
-            udt_target = self._safe_name(target_cpp_type)
+            udt_target = self._udt_cpp_name(target_cpp_type)
         elif target_cpp_type is not None:
             udt_target = next(
                 (target_cpp_type for name in self._udt_defs
-                 if self._safe_name(name) == target_cpp_type),
+                 if self._udt_cpp_name(name) == target_cpp_type),
                 None,
             )
         drawing_target = (
@@ -776,22 +777,53 @@ class ExprVisitor:
         if name in self._current_func_series_params:
             return True
         if (name in self._current_func_param_types
-                or (name in BAR_FIELDS and self._builtin_local_symbol(node) is None)
                 or self._reads_builtin_variable(node)):
             return False
         return self._binding_is_series(
             name, self._call_site_var_name(node, self._safe_name(name)))
 
     def _reads_builtin_variable(self, node: Identifier) -> bool:
-        """Whether ``node`` reads a builtin variable (``second``, ``hour``,
-        ``bar_index``...) and not a user variable of the same name
-        (``float second = na``). A read the analyzer bound to a user
-        declaration in scope is the user's: it carries the annotation a
-        tuple-destructured name does, or ``builtin_shadow_binding``."""
+        """Whether this read resolves to a builtin rather than an authored value.
+
+        Nonnumeric bar-name bindings need declaration-aware emission. Numeric
+        script bindings retain the established bar-field route; callable
+        locals already had their own route before the string lowering.
+        An explicit builtin binding before a later declaration stays builtin.
+        """
+        name = node.name
+        if ((name not in BAR_FIELDS and name not in BAR_BUILTINS)
+                or name in self._current_func_param_types
+                or name in self._current_func_series_params):
+            return False
+        binding = (
+            self.ctx.identifier_decl_bindings[id(node)]
+            if id(node) in self.ctx.identifier_decl_bindings
+            else ValueBindings.declaration_of(node)
+        )
+        if name in BAR_FIELDS and binding is not None:
+            declared = self._builtin_declaration_symbol(node)
+            spec = declared.type_spec if declared is not None else None
+            if (declared is not None
+                    and declared.pine_type in (PineType.INT, PineType.FLOAT, PineType.BOOL)
+                    and (spec is None or (
+                        spec.kind == "primitive" and spec.name in ("int", "float", "bool")))
+                    and self._builtin_local_symbol(node) is None):
+                return True
         annotations = node.annotations or {}
-        return (node.name in BAR_BUILTINS
+        return (binding is None
                 and not annotations.get("tuple_builtin_binding")
                 and not annotations.get("builtin_shadow_binding"))
+
+    def _stable_scalar_read_literal(self, node: Identifier) -> str | None:
+        notes = node.annotations or {}
+        literal = notes.get("stable_scalar_literal")
+        if (literal is not None
+                and notes.get("stable_scalar_fold") != self._derived_input_expr[node.name]
+                and self._infer_type(node) in ("double", "float")):
+            # The string folder does not retain intermediate float boundaries.
+            # The live prefix already has the statement visitor's evaluation.
+            return None
+        return literal
 
     def _visit_ident(self, node: Identifier) -> str:
         name = node.name
@@ -811,19 +843,27 @@ class ExprVisitor:
         if (retained and name in retained.aliases
                 and not self._known_var_is_lexically_shadowed(name)):
             return f"(*{self._safe_name(name)})"
-        if name in BAR_FIELDS and self._builtin_local_symbol(node) is None:
-            return BAR_FIELDS[name]
         if self._reads_builtin_variable(node):
-            return BAR_BUILTINS[name]
+            return BAR_FIELDS[name] if name in BAR_FIELDS else BAR_BUILTINS[name]
         binding = self.ctx.identifier_decl_bindings.get(id(node))
         primitive_shadow_read = (
             binding is not None
             and binding[0] in self.ctx.primitive_block_shadow_types
         )
+        # A reassigned scalar's final fold is not its value at earlier reads.
+        # Only an authored, positioned read carries a safe literal snapshot;
+        # callable/request reads and other copies fall through to live storage.
+        reassigned_stable = name in self._reassigned_stable_scalars
+        if (reassigned_stable and not primitive_shadow_read
+                and not self._known_var_is_lexically_shadowed(name)):
+            literal = self._stable_scalar_read_literal(node)
+            if literal is not None:
+                return literal
         # Inline known constants (literals). Input-backed names are NOT inlined
         # because strategy_set_input() can override them at runtime; emit the
         # variable name and let get_input_*() produce the current value.
         if (name in self._known_vars
+                and not reassigned_stable
                 and name not in self._input_backed_vars
                 and not primitive_shadow_read
                 and not self._known_var_is_lexically_shadowed(name)):
@@ -1534,6 +1574,8 @@ class ExprVisitor:
         if (isinstance(node, Identifier)
                 and node.name in self._known_vars
                 and node.name not in self._input_backed_vars
+                and (node.name not in self._reassigned_stable_scalars
+                     or self._stable_scalar_read_literal(node) is not None)
                 and not self._known_var_is_lexically_shadowed(node.name)):
             return None
         return "int" if cpp_type in ("int", "int64_t") else "float"
@@ -1970,6 +2012,87 @@ class ExprVisitor:
             )
         return memo[key]
 
+    def _concat_type(self, operand) -> str:
+        """The scalar type of a concatenation operand, including series locals."""
+        frame = getattr(self, "_security_fallback_frame", None)
+        if (frame is not None and id(operand) not in frame["chart"]
+                and self._security_value_is_string(
+                    operand, frame["args"][5], ())):
+            # A builtin's argument can stay in this visitor while its reads
+            # are delegated to requested storage. Type the operator in that
+            # same binding frame, including cloned callable locals.
+            return "std::string"
+        inferred = self._infer_type(operand)
+        if (inferred == "double"
+                and isinstance(operand, Identifier)
+                and operand.name in self._current_func_locals
+                and self._identifier_reads_series(operand)
+                and self._series_type_for(operand.name) == "std::string"):
+            # Series locals bypass the scalar local-type map. Their current
+            # slot has the same type as their history reads.
+            return "std::string"
+        return inferred
+
+    def _string_is_canonical(self, node, bindings=()) -> bool:
+        """Whether a string cannot carry isolated UTF-16 halves."""
+        from .string_values import StringValues
+
+        if node is None:
+            return False
+        facts = getattr(self, "_string_values", None)
+        if facts is None:
+            facts = self._string_values = StringValues(self)
+        if facts.is_canonical(node):
+            return True
+        frame = getattr(self, "_security_fallback_frame", None)
+        if not bindings and frame is not None and id(node) not in frame["chart"]:
+            bindings = frame["args"][5]
+        return bool(bindings) and self._security_string_is_canonical(node, bindings)
+
+    @staticmethod
+    def _string_operand_cpp(rendered: str, cpp_type: str | None) -> str:
+        """The existing string-addition conversion, shared by both visitors."""
+        if cpp_type == "std::string":
+            return rendered
+        if cpp_type == "bool":
+            return f'(({rendered}) ? std::string("true") : std::string("false"))'
+        if cpp_type is None:
+            # Requested binding inference can be incomplete. Dispatch on the
+            # rendered value's type rather than converting a string numerically.
+            return (
+                "([](const auto& _pf_value) { "
+                "if constexpr (std::is_same_v<std::decay_t<decltype(_pf_value)>, std::string>) "
+                "return _pf_value; "
+                "else if constexpr (std::is_same_v<std::decay_t<decltype(_pf_value)>, bool>) "
+                'return std::string(_pf_value ? "true" : "false"); '
+                "else return std::to_string(_pf_value); "
+                f"}}({rendered}))"
+            )
+        return f"std::to_string({rendered})"
+
+    def _string_concat_cpp(self, left: str, right: str, *,
+                           left_node=None, right_node=None, bindings=(),
+                           canonical: bool | None = None) -> str:
+        """Use unit concatenation only when a value can carry surrogate halves."""
+        if canonical is None:
+            canonical = all(self._string_is_canonical(operand, bindings)
+                            for operand in (left_node, right_node))
+        if canonical:
+            return f"({left} + {right})"
+        self._uses_tv_string_units = True
+        if any(
+            isinstance(operand, StringLiteral)
+            and operand.value
+            and operand.value.isascii()
+            for operand in (left_node, right_node)
+        ):
+            # A nonempty ASCII operand separates any surrogate halves:
+            # this boundary cannot need recomposition. Keep the native
+            # string expression and the operand types already inferred,
+            # normalizing any pairs formed earlier inside either operand.
+            return f"_pf_u16_normalize({left} + {right})"
+        return f"_pf_u16_concat({left}, {right})"
+
     def _lower_binop(self, node: BinOp, left: str, right: str,
                      widened: bool = False, na_checked: bool = False) -> str:
         """The C++ of ``node`` over its rendered operands; ``widened`` when
@@ -1990,29 +2113,17 @@ class ExprVisitor:
                         f"const bool _pf_v5_r = ({right}); "
                         f"return _pf_v5_l {op} _pf_v5_r; }}())")
         if node.op == "+":
-            def _concat_type(operand):
-                inferred = self._infer_type(operand)
-                if (inferred == "double"
-                        and isinstance(operand, Identifier)
-                        and operand.name in self._current_func_locals
-                        and self._identifier_reads_series(operand)
-                        and self._series_type_for(operand.name) == "std::string"):
-                    # Series locals bypass the scalar local-type map. Their
-                    # current slot has the same type as their history reads.
-                    return "std::string"
-                return inferred
-
-            lt = _concat_type(node.left)
-            rt = _concat_type(node.right)
+            lt = self._concat_type(node.left)
+            rt = self._concat_type(node.right)
             if lt == "std::string" or rt == "std::string":
-                def _as_string(rendered, inferred):
-                    if inferred == "std::string":
-                        return rendered
-                    if inferred == "bool":
-                        return f'(({rendered}) ? std::string("true") : std::string("false"))'
-                    return f"std::to_string({rendered})"
-
-                return f"({_as_string(left, lt)} + {_as_string(right, rt)})"
+                return self._string_concat_cpp(
+                    self._string_operand_cpp(left, lt),
+                    self._string_operand_cpp(right, rt),
+                    left_node=node.left, right_node=node.right,
+                    canonical=(
+                        (lt != "std::string" or self._string_is_canonical(node.left))
+                        and (rt != "std::string" or self._string_is_canonical(node.right))
+                    ))
         if (node.op in ("+", "-", "*", "/", "%")
                 and not widened and not na_checked
                 and any(self._integer_na_operand(side)
@@ -2239,6 +2350,18 @@ class ExprVisitor:
             pending = [index_node]
             while pending:
                 part = pending.pop()
+                if (isinstance(part, Identifier)
+                        and part.name in self._reassigned_stable_scalars):
+                    literal = self._stable_scalar_read_literal(part)
+                    if literal is None:
+                        known[part.name] = NON_CONSTANT
+                    elif literal in ("true", "false"):
+                        known[part.name] = literal == "true"
+                    else:
+                        known[part.name] = (
+                            float(literal) if any(c in literal for c in ".eE")
+                            else int(literal)
+                        )
                 if isinstance(part, Identifier) and part.name not in known and (
                     self.ctx.identifier_binding_nodes.get(id(part)) is not None
                     or part.name in self._current_func_param_types

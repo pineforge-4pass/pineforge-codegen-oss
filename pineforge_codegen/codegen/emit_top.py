@@ -111,10 +111,14 @@ from ..limits import iter_ast_nodes
 from .drawing import DRAWING_LIFETIME_CPP, POLYLINE_HANDLE_CPP
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 from .tv_string_units import TV_STRING_UNITS_CPP, TV_STRING_UNITS_MARKER
+from .unicode_regex import UNICODE_REGEX_CPP
 
 
 # Keep the late-selected include beside the headers the C++ allowlist reads.
 ENUM_STRING_INCLUDE = '#include <pineforge/source/pine_policy_support.hpp>'
+UNICODE_REGEX_INCLUDES = (
+    "#include <locale>", "#include <regex>", "#include <utility>",
+)
 _TRADE_HISTORY_POLICY_MARKER = "        /* __PINEFORGE_TRADE_HISTORY_POLICY__ */"
 
 
@@ -135,6 +139,9 @@ class TopLevelEmitter:
         self._uses_tv_number_format = any(
             (namespace == "str" and func_name in {"format", "tostring"})
             or (namespace is None and func_name == "tostring")
+            # Namespace and method joins can render numeric elements without
+            # an explicit str.tostring call, including in callable bodies.
+            or (isinstance(node.callee, MemberAccess) and node.callee.member == "join")
             or (namespace == "log" and func_name in {"info", "warning", "error"}
                 and len(node.args) > 1)
             for root in roots
@@ -161,8 +168,13 @@ class TopLevelEmitter:
         lines.append('#include <pineforge/ta.hpp>')
         lines.extend(['#if __has_include(<pineforge/checked_settings.hpp>)',
                       '#include <pineforge/checked_settings.hpp>', '#endif'])
-        if self._ta_uses_dynamic_lengths():
+        if self._ta_uses_dynamic_lengths() or any(
+            site.class_name in self._TA_CHECKED_CLASSES
+            for site in self.ctx.ta_call_sites
+        ):
             lines.append('#include <pineforge/source/pine_ta_length.hpp>')
+        if self._has_checked_precalculated_ta():
+            lines.extend(('#include <pineforge/run_failure.hpp>', '#include <exception>'))
         lines.append('#include <pineforge/math.hpp>')
         lines.append('#include <pineforge/series.hpp>')
         lines.append('#include <pineforge/na.hpp>')
@@ -264,6 +276,12 @@ class TopLevelEmitter:
         if self._uses_timestamp_calendar:
             lines.append(TIMEZONE_STOP_SHIM_CPP)
         self._emit_ta_compat_shims(lines)
+        if self._ta_uses_series_sma():
+            from .series_sma import SERIES_SMA_CPP
+            lines.append("#include <utility>")
+            lines.append(SERIES_SMA_CPP.replace(
+                "_PFSeriesSma", self._ta_series_sma_cpp_type()
+            ))
         if getattr(self, "_uses_drawing", False):
             lines.append(DRAWING_LIFETIME_CPP)
         if self._uses_polyline:
@@ -284,11 +302,8 @@ class TopLevelEmitter:
     def _emit_ta_compat_shims(self, lines: list[str]) -> None:
         """Emit source-level adapters for TA1 arguments and anchored forms.
 
-        The adapters are selected by feature macros exported from
-        ``pineforge/ta.hpp``. This lets one generated TU compile against the
-        TA1 engine and the previous engine while keeping the Pine call-site
-        shape identical. The old branch deliberately preserves the historical
-        lowering; it is only selected when the corresponding macro is absent.
+        Keltner calls require the paired checked source API. Other TA1
+        adapters retain their existing feature-macro compatibility branches.
         """
         classes = {
             site.class_name for site in getattr(self.ctx, "ta_call_sites", ())
@@ -318,59 +333,35 @@ class TopLevelEmitter:
                 "",
             ])
 
-        if "_PFKC" in classes:
+        for shim, adapter, result in (
+            ("_PFKC", "PineKc", "ta::KCResult"),
+            ("_PFKCW", "PineKcw", "double"),
+        ):
+            if shim not in classes:
+                continue
             lines.extend([
-                "#ifdef PF_KC_HAS_USE_TRUE_RANGE",
-                "class _PFKC {",
-                "    ta::KC impl_;",
+                f"class {shim} {{",
+                f"    pineforge::source::{adapter} impl_;",
                 "public:",
-                "    _PFKC(int length, double mult, bool use_true_range = true)"
+                f"    {shim}(int length, double mult, bool use_true_range = true)"
                 " : impl_(length, mult, use_true_range) {}",
-                "    ta::KCResult compute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "    ta::KCResult recompute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "};",
-                "#else",
-                "class _PFKC {",
-                "    ta::KC impl_;",
-                "public:",
-                "    _PFKC(int length, double mult, bool = true) : impl_(length, mult) {}",
-                "    ta::KCResult compute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "    ta::KCResult recompute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "};",
-                "#endif",
-                "",
+                "    void observe_owned_storage(pineforge::OwnedStorage& out) const noexcept"
+                " { impl_.observe_owned_storage(out); }",
             ])
-
-        if "_PFKCW" in classes:
-            lines.extend([
-                "#ifdef PF_KC_HAS_USE_TRUE_RANGE",
-                "class _PFKCW {",
-                "    ta::KCW impl_;",
-                "public:",
-                "    _PFKCW(int length, double mult, bool use_true_range = true)"
-                " : impl_(length, mult, use_true_range) {}",
-                "    double compute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "    double recompute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "};",
-                "#else",
-                "class _PFKCW {",
-                "    ta::KCW impl_;",
-                "public:",
-                "    _PFKCW(int length, double mult, bool = true) : impl_(length, mult) {}",
-                "    double compute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "    double recompute(double src, double high, double low, double close)"
-                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
-                "};",
-                "#endif",
-                "",
-            ])
+            for method in ("compute", "recompute"):
+                lines.extend([
+                    f"    {result} {method}(double src, double high, double low, double close) {{",
+                    # Preserve the existing Keltner seeding context on both
+                    # success and argument-validation exceptions.
+                    "        struct _pf_seed_scope {",
+                    "            bool _pf_prior = ta::ema_na_warmup_flag();",
+                    "            _pf_seed_scope() { ta::ema_na_warmup_flag() = true; }",
+                    "            ~_pf_seed_scope() { ta::ema_na_warmup_flag() = _pf_prior; }",
+                    "        } _pf_seed;",
+                    f"        return impl_.{method}(src, high, low, close);",
+                    "    }",
+                ])
+            lines.extend(["};", ""])
 
         if "_PFAnchoredVWAP" in classes:
             lines.extend([
@@ -1568,7 +1559,7 @@ class TopLevelEmitter:
             "    // invalid (na under ignore_invalid_symbol, a stopped run without it).",
             "    bool _pf_symbol_data_installed(const std::string& symbol,",
             "                                   const std::string& timeframe,",
-            "                                   const char* column = nullptr) const {",
+            "                                   const std::string* column = nullptr) const {",
             "        const auto facts = symbol_facts_.find(symbol);",
             "        if (facts != symbol_facts_.end() && facts->second.valid && !*facts->second.valid)",
             "            return true;",
@@ -1579,10 +1570,15 @@ class TopLevelEmitter:
             "            if (feed.instrument != symbol || feed.tf != tf) continue;",
             "            if (column == nullptr) return true;",
             "            for (const auto& named : feed.columns) {",
-            "                if (named.name == column) return true;",
+            "                if (named.name == *column) return true;",
             "            }",
             "        }",
             "        return false;",
+            "    }",
+            "    bool _pf_symbol_data_installed(const std::string& symbol,",
+            "                                   const std::string& timeframe,",
+            "                                   const std::string& column) const {",
+            "        return _pf_symbol_data_installed(symbol, timeframe, &column);",
             "    }",
             "    // Its payload seeds ta.ema as TradingView does in the requested context:",
             "    // na until `length` values, then their mean (EmaSeeding::SimpleAverage).",
@@ -1594,14 +1590,15 @@ class TopLevelEmitter:
             "        _PFForeignEmaSeeding& operator=(const _PFForeignEmaSeeding&) = delete;",
             "    };",
         ])
-        if any(self._security_footprint_column(info["sec_id"]) for info in self._security_eval_info):
+        if any(self._security_footprint_column(info["sec_id"]) is not None
+               for info in self._security_eval_info):
             lines.extend([
                 "    // A footprint's delta: the named column of the requested bar.",
-                "    double _pf_symbol_column(int sec_id, const char* name) const {",
+                "    double _pf_symbol_column(int sec_id, const std::string& name) const {",
                 "        return security_column_value(sec_id, name);",
                 "    }",
                 "#else",
-                "    double _pf_symbol_column(int, const char*) const { return na<double>(); }",
+                "    double _pf_symbol_column(int, const std::string&) const { return na<double>(); }",
             ])
         lines.append("#endif")
 
@@ -1615,7 +1612,7 @@ class TopLevelEmitter:
         sec_id = info["sec_id"]
         symbol = self._security_tf_runtime_expr(info["symbol_node"])
         column = self._security_footprint_column(sec_id)
-        column = f', "{self._cpp_string_escape(column)}"' if column else ""
+        column = f', {self._cpp_string_literal(column)}' if column is not None else ""
         ignore_node = info.get("ignore_invalid_node")
         if ignore_node is None:
             ignore = "false"
@@ -1704,6 +1701,7 @@ class TopLevelEmitter:
         self._lexical_series_bindings = {}
         self._lexical_known_var_tombstones = set()
         lines.append("    void on_source_bar(const Bar& bar) override {")
+        self._emit_series_sma_begin(lines)
 
         # A GeneratedStrategy handle may execute multiple batch runs or
         # streaming lifecycles. BacktestEngine resets broker/base state, but
@@ -1788,10 +1786,9 @@ class TopLevelEmitter:
         for _bname in sorted(self.ctx.series_vars):
             if _bname in self._var_names:
                 continue
-            # A history-bearing top-level tuple binding pushes its own value
+            # A history-bearing top-level declaration pushes its own value
             # at the declaration; a builtin push would add a second bar slot.
-            if (_bname in self._direct_program_tuple_binding_names
-                    and _bname in self._ordinary_global_series_names):
+            if _bname in self._ordinary_global_series_names:
                 continue
             _bexpr = BAR_BUILTINS.get(_bname)
             _bsafe = self._safe_name(_bname)
@@ -2187,6 +2184,10 @@ class TopLevelEmitter:
             ) from exc
         if self._uses_tv_string_units:
             lines[marker] = TV_STRING_UNITS_CPP
+            if self._uses_unicode_regex:
+                lines[marker] += "\n".join(
+                    header for header in UNICODE_REGEX_INCLUDES if header not in lines
+                ) + "\n" + UNICODE_REGEX_CPP
         else:
             del lines[marker:marker + 2]
 
@@ -2690,7 +2691,7 @@ class TopLevelEmitter:
             # struct (Line/Box/Label/Linefill), not the unknown lowercase name.
             ret_type = DRAWING_TYPE_TO_CPP.get(
                 return_udt_name,
-                self._safe_name(return_udt_name)
+                self._udt_cpp_name(return_udt_name)
                 if return_udt
                 else return_udt_name,
             )
@@ -2726,7 +2727,7 @@ class TopLevelEmitter:
         if return_udt:
             # Use the generated handle name so an authored type cannot be
             # confused with a drawing handle's C++ name.
-            rhs_return_cpp_type = self._safe_name(return_udt_name)
+            rhs_return_cpp_type = self._udt_cpp_name(return_udt_name)
         elif (self._is_nullable_collection_cpp_type(ret_type)
               or ret_type in DRAWING_TYPE_TO_CPP.values()
               or (ret_type == "std::vector<int64_t>"
@@ -3058,10 +3059,20 @@ class TopLevelEmitter:
             if _ti not in self._dead_ta_indices
         )
 
+    def _has_checked_precalculated_ta(self) -> bool:
+        """Whether replay can reach an execution-checked EMA-family length."""
+        return any(
+            site.class_name in self._TA_CHECKED_CLASSES
+            and self._ta_site_uses_precalc(site)
+            for _ti, site in enumerate(self.ctx.ta_call_sites)
+            if _ti not in self._dead_ta_indices
+        )
+
     def _emit_precalculate_and_run(self, lines: list[str]) -> None:
         if not self._has_precalculated_ta():
             return
 
+        checked_precalc = self._has_checked_precalculated_ta()
         replayed_source_series: list[str] = []
         for stmt in self.ctx.ast.body:
             if not isinstance(stmt, VarDecl):
@@ -3094,7 +3105,7 @@ class TopLevelEmitter:
                 continue
             if self._ta_site_uses_precalc(site):
                 run_args, _any_runtime = self._ta_run_ctor_args(site)
-                lines.append(f"        {site.member_name} = {site.class_name}({', '.join(run_args)});")
+                lines.append(f"        {site.member_name} = {self._ta_fixed_cpp_type(site)}({', '.join(run_args)});")
 
         # Clear series
         lines.append("")
@@ -3110,6 +3121,9 @@ class TopLevelEmitter:
 
         # Start precalculation loop
         lines.append("")
+        if checked_precalc:
+            lines.append("        try {")
+        replay_start = len(lines)
         lines.append("        for (int i = 0; i < n; ++i) {")
 
         # Push OHLCV into series
@@ -3203,6 +3217,23 @@ class TopLevelEmitter:
             self._precalc_loop_active = False
 
         lines.append("        }")
+        if checked_precalc:
+            for index in range(replay_start, len(lines)):
+                lines[index] = "    " + lines[index] if lines[index] else ""
+            lines.extend([
+                "            _use_precalc = true;",
+                "        } catch (const std::exception& _pf_precalc_error) {",
+                "            const auto* _pf_precalc_failure =",
+                "                dynamic_cast<const pineforge::RunFailureInfo*>(&_pf_precalc_error);",
+                "            if (!_pf_precalc_failure ||",
+                "                _pf_precalc_failure->run_failure_code() !=",
+                "                    pineforge::RunFailureCode::pine_invalid_argument) throw;",
+                "            // The real bar path checks the length at the original call.",
+            ])
+            for _ti, site in enumerate(self.ctx.ta_call_sites):
+                if _ti not in self._dead_ta_indices and self._ta_site_uses_precalc(site):
+                    lines.append(f"            _precalc_{site.member_name}.clear();")
+            lines.append("        }")
 
         # Reset indicators and series for the real backtest run
         lines.append("")
@@ -3211,7 +3242,7 @@ class TopLevelEmitter:
                 continue
             if self._ta_site_uses_precalc(site):
                 run_args, _any_runtime = self._ta_run_ctor_args(site)
-                lines.append(f"        {site.member_name} = {site.class_name}({', '.join(run_args)});")
+                lines.append(f"        {site.member_name} = {self._ta_fixed_cpp_type(site)}({', '.join(run_args)});")
 
         for field_name in sorted(self.ctx.series_bar_fields):
             lines.append(f"        _s_{field_name}.clear();")
@@ -3224,7 +3255,8 @@ class TopLevelEmitter:
             lines.append("        _src_ohlc4_.clear(); _src_hlcc4_.clear();")
 
         lines.append("")
-        lines.append("        _use_precalc = true;")
+        if not checked_precalc:
+            lines.append("        _use_precalc = true;")
         lines.append("    }")
         lines.append("")
 

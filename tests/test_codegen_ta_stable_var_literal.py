@@ -5,7 +5,8 @@ length when that binding is never reassigned.  The value is fixed for the
 entire run, so it has the same constructor-sizing semantics as an ordinary
 literal alias.  Keep the admission deliberately narrower than the general
 stable-runtime reset path: mutable, history-promoted, and dynamic persistent
-bindings must continue to fail closed.
+bindings must not acquire fixed constructor sizing. A changing SMA length
+uses the series primitive instead.
 """
 
 from __future__ import annotations
@@ -15,17 +16,21 @@ import re
 import pytest
 
 from pineforge_codegen import transpile
-from pineforge_codegen.ast_nodes import MethodDef
+from pineforge_codegen.ast_nodes import FuncCall, MemberAccess, MethodDef
 from pineforge_codegen.errors import CompileError, Level, Phase
 from pineforge_codegen.lexer import Lexer
+from pineforge_codegen.limits import iter_ast_nodes
 from pineforge_codegen.parser import Parser
-from tests._compile import compile_cpp
+from tests._compile import compile_cpp, run_emitted_tu
 
 
 def _constructor_initializers(cpp: str) -> str:
-    match = re.search(r"explicit GeneratedStrategy\(\) : ([^\n]+)", cpp)
+    match = re.search(
+        r"^[ \t]*explicit GeneratedStrategy\(\)(?: : ([^\n]*))? \{$",
+        cpp, re.M,
+    )
     assert match is not None, "generated strategy constructor not found"
-    return match.group(1)
+    return (match.group(1) or "").rstrip()
 
 
 def _assert_exact_pivot_ctor_rejection(
@@ -78,19 +83,25 @@ def _assert_method_declaration_fences_sma(
     assert (program.annotations or {}).get("parse_recovery_count", 0) == 0
     assert any(isinstance(node, MethodDef) for node in program.body)
 
-    with pytest.raises(CompileError) as caught:
-        transpile(source, filename="stable-var-method-declaration.pine")
-
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.phase is Phase.CODEGEN
-    assert diagnostic.location.line == expected_line
-    assert diagnostic.message == (
-        "Unsupported TA constructor length 'p' for ta.sma: it is neither a "
-        "compile-time constant nor derived from an input, so PineForge cannot "
-        "size the indicator buffer. TradingView accepts a series length for "
-        "ta.sma(); PineForge does not support it yet."
+    assert any(
+        isinstance(node, FuncCall)
+        and isinstance(node.callee, MemberAccess)
+        and node.callee.member == "sma" and node.loc.line == expected_line
+        for node, _ in iter_ast_nodes(program)
     )
+    cpp = transpile(source, filename="stable-var-method-declaration.pine")
+    _assert_series_sma_reads_length(cpp, "p")
+    compile_cpp(cpp, label="method-fenced SMA length")
+
+
+def _assert_series_sma_reads_length(cpp: str, length: str) -> None:
+    """A literal-admission fence keeps the live value, not a fallback period."""
+    members = re.findall(r"^    _PFSeriesSma (_ta_sma_\w+);$", cpp, re.M)
+    assert members, "the unfixed SMA must own a series-length state"
+    for member in members:
+        assert f"{member}.begin_evaluation(history_advances_new_bar());" in cpp
+    assert f"pineforge::source::ta_number({length})" in cpp
+    assert not re.search(r"^    ta::SMA _ta_sma_\w+;", cpp, re.M)
 
 
 @pytest.mark.parametrize(
@@ -361,8 +372,28 @@ unused = identity(p)
 x = ta.sma(close, p)
 '''
 
-    with pytest.raises(CompileError, match="Unsupported TA constructor length"):
-        transpile(source)
+    # Preserve this invalid program. The retained failure identifies the
+    # unresolved forward call before any SMA constructor optimization.
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="stable-var-recursive.pine")
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.level is Level.ERROR
+    assert diagnostic.phase is Phase.CODEGEN
+    assert diagnostic.code == "PF-E5034"
+    assert diagnostic.args == {"func_name": "identity_next"}
+    assert diagnostic.message == (
+        "Unknown function 'identity_next(...)' — not a PineForge builtin "
+        "or a user-defined function."
+    )
+    assert diagnostic.hint == (
+        "Check the spelling; the function may not be supported by PineForge, "
+        "or needs its namespace (e.g. math./str.)."
+    )
+    assert (
+        diagnostic.location.file,
+        diagnostic.location.line,
+        diagnostic.location.col,
+    ) == ("stable-var-recursive.pine", 3, 29)
 
 
 def test_even_immutable_helper_boundary_fails_closed() -> None:
@@ -373,8 +404,29 @@ var int p = 5
 observed = requested(p)
 '''
 
-    with pytest.raises(CompileError, match="Unsupported TA constructor length"):
-        transpile(source)
+    # The helper boundary still fences the narrow constructor optimization.
+    # TradingView accepts the unfixed length, so retain q as a compute input.
+    cpp = transpile(source)
+    _assert_series_sma_reads_length(cpp, "q")
+    driver = r'''
+#include <cmath>
+#include <vector>
+int main() {
+    GeneratedStrategy strategy;
+    pineforge::source::SeriesSma reference;
+    std::vector<Bar> bars;
+    double expected = na<double>();
+    for (int i = 0; i != 12; ++i) {
+        const double price = 10.0 + i;
+        bars.push_back(Bar{price, price, price, price, 1.0, 1704067200000LL + i * 60000LL});
+        expected = reference.compute(price, 5);
+    }
+    strategy.run(bars.data(), static_cast<int>(bars.size()), "1", "1");
+    if (!strategy.last_error().empty()) return 1;
+    return strategy.observed == expected ? 0 : 2;
+}
+'''
+    run_emitted_tu(cpp, driver, label="immutable helper SMA length")
 
 
 @pytest.mark.parametrize(
@@ -455,18 +507,9 @@ def test_callable_parameter_rebinding_fences_literal_specialization(
         + "\nobserved = requested(p)\n"
     )
 
-    with pytest.raises(CompileError) as caught:
-        transpile(source)
-
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.phase is Phase.CODEGEN
-    assert diagnostic.message == (
-        "Unsupported TA constructor length 'p' for ta.sma: it is neither a "
-        "compile-time constant nor derived from an input, so PineForge cannot "
-        "size the indicator buffer. TradingView accepts a series length for "
-        "ta.sma(); PineForge does not support it yet."
-    )
+    cpp = transpile(source)
+    _assert_series_sma_reads_length(cpp, "q")
+    compile_cpp(cpp, label="rebound callable SMA length")
 
 
 @pytest.mark.parametrize(
@@ -578,8 +621,21 @@ requested = request.security(
     syminfo.tickerid, "60", requestedSma(close, L))
 '''
 
-    with pytest.raises(CompileError, match="Unsupported TA constructor length"):
-        transpile(source)
+    cpp = transpile(source)
+    members = re.findall(r"^    _PFSeriesSma (_sec\d+__ta_sma_\w+);$", cpp, re.M)
+    assert members
+    for member in members:
+        sec_id = re.search(r"_sec(\d+)_", member).group(1)
+        assert f"{member}.begin_evaluation(security_series_slot_is_new({sec_id}));" in cpp
+        assert f"{member}.begin_evaluation(history_advances_new_bar());" not in cpp
+    # The requested helper's bound persistent L remains a live value.
+    lengths = re.findall(
+        r"const double _pf_length = pineforge::source::ta_number\(([^;]+)\);",
+        cpp,
+    )
+    assert lengths and any(re.search(r"\b(?:_sec\d+_)?L\b", value) for value in lengths)
+    assert not re.search(r"^    ta::SMA _sec\d+__ta_sma_\w+;", cpp, re.M)
+    compile_cpp(cpp, label="requested helper SMA length")
 
 
 @pytest.mark.parametrize(
@@ -598,18 +654,19 @@ strategy("requested stable literal negative")
 requested = request.security(syminfo.tickerid, "60", ta.sma(close, L))
 '''
 
-    with pytest.raises(CompileError) as caught:
-        transpile(source)
-
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.phase is Phase.CODEGEN
-    assert diagnostic.message == (
-        "Unsupported TA constructor length 'L' for ta.sma: it is neither a "
-        "compile-time constant nor derived from an input, so PineForge cannot "
-        "size the indicator buffer. TradingView accepts a series length for "
-        "ta.sma(); PineForge does not support it yet."
+    cpp = transpile(source)
+    members = re.findall(r"^    _PFSeriesSma (_sec\d+__ta_sma_\w+);$", cpp, re.M)
+    assert members
+    for member in members:
+        sec_id = re.search(r"_sec(\d+)_", member).group(1)
+        assert f"{member}.begin_evaluation(security_series_slot_is_new({sec_id}));" in cpp
+    assert not re.search(r"^    ta::SMA _sec\d+__ta_sma_\w+;", cpp, re.M)
+    lengths = re.findall(
+        r"const double _pf_length = pineforge::source::ta_number\(([^;]+)\);",
+        cpp,
     )
+    assert lengths and any(re.search(r"\b(?:_sec\d+_)?L\b", value) for value in lengths)
+    compile_cpp(cpp, label="requested nonliteral SMA length")
 
 
 def test_input_backed_parameter_keeps_override_aware_reset() -> None:

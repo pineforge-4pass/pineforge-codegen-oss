@@ -165,6 +165,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def __init__(self, ast: Program, filename: str = "<stdin>",
                  budget: TimeBudget | None = None,
                  session_clones: frozenset[str] | None = None) -> None:
+        TypeHelper.__init__(self)
         self._ast = ast
         self._filename = filename
         self._budget = budget
@@ -312,7 +313,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 defined_names.add(stmt.name)
         # Track user-defined function return types
         self._func_return_types: dict[str, PineType] = {}
-        self._ternary_int_fallbacks: set[int] = set()
         # Track user-defined function tuple returns
         self._func_returns_tuple: dict[str, bool] = {}
         self._func_tuple_element_count: dict[str, int] = {}
@@ -501,7 +501,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # request.security rebinding helpers for mutable globals
         self._global_binding_infos: dict[str, MutableGlobalInfo] = {}
         self._global_reassigned_names: set[str] = set()
-        self._current_top_level_stmt: ASTNode | None = None
         self._global_scope = True
         self._static_vars: set[str] = set()
         # Stack of enclosing user-function param-name sets, pushed while visiting
@@ -774,6 +773,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             global_expr_map=pure_global_expr_map,
             identifier_binding_scopes=dict(self._identifier_binding_scopes),
             identifier_decl_bindings=dict(self._identifier_decl_bindings),
+            identifier_lexical_bindings=dict(self._value_bindings.declaration_bindings),
             primitive_block_shadow_types=dict(self._primitive_block_shadow_types),
             for_counter_types=dict(self._for_counter_types),
             identifier_binding_nodes=dict(self._identifier_binding_nodes),
@@ -4502,6 +4502,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     returns_tuple=sec.returns_tuple,
                     tuple_size=sec.tuple_size,
                     tuple_element_types=sec.tuple_element_types,
+                    result_type_spec=sec.result_type_spec,
+                    tuple_element_specs=sec.tuple_element_specs,
                     gaps=sec.gaps,
                     lookahead=sec.lookahead,
                     ta_range=sec.ta_range,
@@ -4594,7 +4596,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return True
             sym = self._symbols.resolve(node.name)
             if sym is not None:
-                if sym.is_const or node.name.startswith("input"):
+                if sym.is_const:
                     return True
                 if getattr(sym, "is_static_series", False):
                     return True
@@ -4602,7 +4604,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         if isinstance(node, MemberAccess):
             if isinstance(node.object, Identifier):
-                if node.object.name.startswith("input") or node.object.name in self._enum_defs:
+                if node.object.name == "input" or node.object.name in self._enum_defs:
                     return True
             return self._is_static_expression(node.object)
 
@@ -5464,6 +5466,26 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             value.loc,
         )
 
+    def _check_primitive_slot(self, value, expected, context):
+        """Check proven scalar types without using legacy inference defaults."""
+        if (value is None or expected is None or expected.kind != "primitive"
+                or self._pine_version != 6 or self._in_v5_library_definition(value)):
+            return
+        expected = public_type_name(expected)
+        if expected not in {"int", "float", "bool", "string", "color"}:
+            return
+        actual = self._operator_operand_type(value)
+        if actual is None or actual.kind != "primitive":
+            return
+        actual = public_type_name(actual)
+        if (actual in {expected, "na"}
+                or (actual == "int" and expected == "float")):
+            return
+        self._error(
+            f"Cannot use {actual} as {expected} for {context}.",
+            value.loc,
+        )
+
     def _check_builtin_enum_arguments(self, node, parameter_types=None):
         """Bind nominal argument contracts from the intrinsic signatures."""
         if self._pine_version != 6 or self._in_v5_library_definition(node):
@@ -5616,6 +5638,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 node.loc,
             )
         type_spec = self._type_spec_from_hint(node.type_hint) if node.type_hint else None
+        if node.type_hint:
+            self._check_primitive_slot(
+                node.value, type_spec, f"declaration '{node.name}'",
+            )
         if type_spec is None:
             type_spec = self._type_spec_from_expr(node.value)
         if (type_spec is None and not node.type_hint
@@ -5641,12 +5667,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._collection_scope_stack[-1]
             )
 
-        # Check for type hint override
-        if node.type_hint:
-            hint_type = self._type_hint_to_pine(node.type_hint)
-            if hint_type != PineType.UNKNOWN:
-                val_type = hint_type
-
         # Check for input calls
         is_const = False
         const_value = None
@@ -5661,6 +5681,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             enum_name = node.value.object.name
             if node.value.member in self._enum_defs.get(enum_name, ()):
                 enum_type_name = enum_name
+
+        # An input initializer must also retain the declaration's type.
+        if node.type_hint:
+            hint_type = self._type_hint_to_pine(node.type_hint)
+            if hint_type != PineType.UNKNOWN:
+                val_type = hint_type
 
         udt_ctor = self._udt_name_from_ctor(node.value)
         # User function return propagation: if the value is a call to a user
@@ -5902,6 +5928,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._check_operator_operands(
                 node, node.op[:-1], (node.target, node.value),
             )
+        self._check_primitive_slot(
+            node.value, self._operator_operand_type(node.target), "assignment",
+        )
 
         udt_ctor = self._udt_name_from_ctor(node.value)
         if isinstance(node.target, Identifier) and udt_ctor is not None:
@@ -6131,7 +6160,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._func_tuple_element_specs.get(node.value.callee.name, ())
             if isinstance(node.value, FuncCall)
             and isinstance(node.value.callee, Identifier)
-            else ()
+            else (node.value.annotations or {}).get("security_tuple_element_specs", ())
         )
 
         for idx, name in enumerate(node.names):
@@ -6422,6 +6451,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     terminal_ret_expr.callee.name, ()
                 )
             )
+        elif isinstance(terminal_ret_expr, FuncCall):
+            requested_specs = (terminal_ret_expr.annotations or {}).get(
+                "security_tuple_element_specs", ()
+            )
+            if requested_specs:
+                self._func_tuple_element_specs[node.name] = requested_specs
         terminal_map_return = self._terminal_map_call_return(
             terminal_ret_expr,
             {
@@ -6947,24 +6982,26 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _top_level_branch_needs_lexical_scope(
         self, body: list[ASTNode]
     ) -> bool:
-        """Whether a top-level branch declares over a direct script binding.
+        """Whether a top-level branch declares over a script binding or builtin.
 
         Functions already own a symbol-table scope and ``for``/``for in``
         create one explicitly.  Top-level if/while/switch branches historically
         reused the global Scope, so a local declaration could overwrite the
         analyzer's outer Symbol even though codegen emits a C++ lexical local.
-        Add a child scope only for the collision shape handled by this change;
-        every unrelated program keeps the established analysis path.
+        Builtins need the same child scope as authored outer bindings, so
+        leaving a branch restores the builtin and its type.
         """
         if self._collection_scope_stack:
             return False
         for stmt in body:
             if (isinstance(stmt, VarDecl)
-                    and stmt.name in self._direct_program_binding_names):
+                    and (stmt.name in self._direct_program_binding_names
+                         or stmt.name in BUILTIN_VARS)):
                 return True
             if (isinstance(stmt, TupleAssign)
                     and any(
                         name in self._direct_program_binding_names
+                        or name in BUILTIN_VARS
                         for name in stmt.names
                         if name != "_"
                     )):
@@ -7562,7 +7599,43 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     # ------------------------------------------------------------------
 
     def _visit_ExprStmt(self, node: ExprStmt) -> PineType:
-        return self._visit(node.expr)
+        result = self._visit(node.expr)
+        self._record_security_array_stmt(node)
+        return result
+
+    def _record_security_array_stmt(self, node: ExprStmt) -> None:
+        """Keep standalone array operations beside their binding's stores.
+
+        A requested copy must replay these operations in source order, just
+        as a scalar copy replays assignments. Resolve the receiver while its
+        lexical scope is live; unrelated statements in the same block stay out.
+        """
+        call = node.expr
+        if (self._enclosing_func_names or self._current_top_level_stmt is None
+                or not isinstance(call, FuncCall)
+                or not isinstance(call.callee, MemberAccess)):
+            return
+        intrinsic = sigs.get_intrinsic("array", call.callee.member)
+        if intrinsic is None or intrinsic.receiver_kind != "array":
+            return
+        receiver = call.callee.object
+        if (isinstance(receiver, Identifier) and receiver.name == "array"
+                and self._value_bindings.declaration_bindings.get(id(receiver)) is None):
+            receiver = self._bind_callable_args(call, intrinsic.param_names)[0]
+        elif self._receiver_method_key(receiver, call.callee.member) is not None:
+            return
+        if not isinstance(receiver, Identifier):
+            return
+        symbol = self._symbols.resolve(receiver.name)
+        if (symbol is None or symbol.scope != "global"
+                or symbol.type_spec is None or symbol.type_spec.kind != "array"):
+            return
+        self._record_global_binding_stmt(
+            receiver.name, symbol.pine_type, symbol.is_var,
+        )
+        node.annotations = {
+            **(node.annotations or {}), "security_array_receiver": receiver.name,
+        }
 
     # ------------------------------------------------------------------
     # Expression visitors
@@ -8024,7 +8097,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._bool_na_error(token.loc)
 
     def _visit_Ternary(self, node: Ternary) -> PineType:
-        self._ternary_int_fallbacks.discard(id(node))
+        self._ternary_int_fallbacks.pop(id(node), None)
         condition_type = self._visit(node.condition)
         self._check_untyped_na_condition(node.condition, condition_type)
         true_type = self._visit(node.true_val)
@@ -8071,7 +8144,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             result_type = structured_type
         if result_type == PineType.INT and main_type != PineType.INT:
             # Keep the true arm's numeric fallback through later return queries.
-            self._ternary_int_fallbacks.add(id(node))
+            self._ternary_int_fallbacks[id(node)] = node
             return main_type
         return result_type
 
@@ -8176,6 +8249,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if isinstance(obj, Identifier) and obj.name == "str":
                 for arg in node.args:
                     self._visit(arg)
+                for value in node.kwargs.values():
+                    self._visit(value)
                 # Most str.* return a string, but predicates and index helpers
                 # are scalar. Keep this aligned with signatures.py and the C++
                 # emitter's _infer_type path.
@@ -8484,6 +8559,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         )
                         return PineType.UNKNOWN
                     return receiver_pine_type
+            # Preserve fixed scalar array results in the coarse return-type
+            # visitor as well as TypeSpec inference. Authored methods above
+            # retain precedence over builtin names.
+            fixed_array_result = self._fixed_array_call_result(node, receiver_spec)
+            if fixed_array_result is not None:
+                return self._element_pine_type(fixed_array_result)
             # Matrix method dispatch: ``m.get(0, 0)`` on ``matrix<int>`` must
             # type as INT, not VOID, so ``v = m.get(...)`` propagates the
             # element PineType. ``_type_spec_from_expr`` already carries the
@@ -9638,6 +9719,27 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.FLOAT
 
     def _visit_MemberAccess(self, node: MemberAccess) -> PineType:
+        if isinstance(node.object, Identifier):
+            sym = self._symbols.resolve(node.object.name)
+            # A field read's receiver is an identifier read like any other:
+            # codegen needs its binding scope (``_call_site_var_name``).
+            self._identifier_binding_scopes[id(node.object)] = (
+                getattr(sym, "scope", None) if sym is not None else None
+            )
+            udt_name = None
+            if sym is not None:
+                udt_name = sym.udt_type_name
+                if udt_name is None and sym.type_spec is not None and sym.type_spec.kind == "udt":
+                    udt_name = sym.type_spec.name
+            if udt_name:
+                field_type = (self._udt_fields.get(udt_name) or {}).get(node.member)
+                if field_type is not None:
+                    return field_type
+            # Untyped parameters can acquire their record type at a call site.
+            # An authored receiver's spelling cannot select a builtin namespace.
+            if self._value_bindings.declaration_bindings.get(id(node.object)) is not None:
+                return PineType.UNKNOWN
+
         constant = self._builtin_constant_info(node)
         if constant is not None:
             return constant.storage_type
@@ -9848,22 +9950,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # dividends.*, earnings.*, splits.* variables
             if ns in ("dividends", "earnings", "splits"):
                 return PineType.FLOAT
-
-            sym = self._symbols.resolve(ns)
-            # A field read's receiver is an identifier read like any other:
-            # codegen needs its binding scope (``_call_site_var_name``).
-            self._identifier_binding_scopes[id(node.object)] = (
-                getattr(sym, "scope", None) if sym is not None else None
-            )
-            udt_name = None
-            if sym is not None:
-                udt_name = sym.udt_type_name
-                if udt_name is None and sym.type_spec is not None and sym.type_spec.kind == "udt":
-                    udt_name = sym.type_spec.name
-            if udt_name:
-                field_type = (self._udt_fields.get(udt_name) or {}).get(node.member)
-                if field_type is not None:
-                    return field_type
 
         # Handle nested member access (e.g., strategy.oca.reduce,
         # strategy.closedtrades.profit, strategy.commission.percent)

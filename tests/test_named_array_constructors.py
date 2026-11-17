@@ -402,7 +402,7 @@ _REFERENCE_SPELLING = {
 def test_unrelated_lowerings_keep_cpp_diagnostics_and_manifests(tmp_path, body):
     from tests._e2e import reference_codegen, transpile_json
 
-    reference = reference_codegen("3ec62ae589f5b777122d03f1e7a706e7cda67ba8")
+    reference = reference_codegen("49ebac862df439725ad73e78d9f9d704c97580d3")
     assert reference is not None, "the source-preservation baseline must be available"
     pine = tmp_path / "strategy.pine"
     # The reference read the keywords of matrix.new by position, as a call with

@@ -84,7 +84,7 @@ ROWS = [
     ),
     pytest.param(
         f'enum Mode\n    fast = "f{NUL}t"\n    slow\n'
-        'e = Mode.fast\ntext = str.tostring(e)\nn = str.length(text)\nplot(n)\n',
+        'e = Mode.fast\ntitle_value = str.tostring(e)\nn = str.length(title_value)\nplot(n)\n',
         'std::cout << strategy.n << "\\n";', "3\n", id="length-of-an-enum-title",
     ),
     pytest.param(
@@ -98,13 +98,11 @@ ROWS = [
         'std::cout << strategy.n << "\\n";', "3\n",
         id="length-of-a-history-read-var-set-from-a-literal",
     ),
-    # A known limit, pinned so that a change of it is seen: the default of a
-    # string input is still cut at its first NUL, so the input no longer equals
-    # the literal it was given (the two were equal only while both were cut).
+    # The input's getter must preserve the same bytes as its authored default.
     pytest.param(
         f'm = input.string("a{NUL}b", "Text")\nu = m == "a{NUL}b" ? 1 : 0\n'
         'k = str.length(m)\nplot(u + k)\n',
-        'std::cout << strategy.u << " " << strategy.k << "\\n";', "0 1\n",
+        'std::cout << strategy.u << " " << strategy.k << "\\n";', "1 3\n",
         id="known-limit-an-input-default-is-cut-and-differs-from-its-literal",
     ),
 ]
@@ -180,3 +178,58 @@ def test_the_forms_above_keep_their_lengths_at_run_time():
         '<< strategy.viaheld << " " << strategy.joined << " " << strategy.chosen << "\\n";'
     )
     assert _run(script, observe) == "3 3 3 4 3\n"
+
+
+@pytest.mark.parametrize("value", [
+    "\0", "x\0" + "789", "x\0y\0z", 'é"\\\0中😀', "a\x01b", "60", "",
+], ids=["nul", "digits", "multiple", "utf8-escapes", "other-control", "ascii", "empty"])
+def test_length_aware_literal_consumers_keep_the_authored_bytes(value):
+    """Serializer units: a timeframe's grammar is a separate validation rule."""
+    from pineforge_codegen import Analyzer, CodeGen, Lexer, Parser
+    from pineforge_codegen.codegen.helpers import NamingHelper
+    from pineforge_codegen.codegen.input import InputHelper
+    from pineforge_codegen.codegen.security import SecurityEmitter
+
+    class Consumers(NamingHelper, InputHelper, SecurityEmitter):
+        pass
+
+    consumer = Consumers()
+    ast = Parser(Lexer(HEADER).tokenize(), source=HEADER).parse()
+    generator = CodeGen(Analyzer(ast).analyze())
+    generator._known_vars["sample"] = value
+    expressions = [
+        consumer._cpp_string_literal(value),
+        consumer._input_key_literal(value),
+        consumer._security_tf_literal(value),
+        generator._resolve_known("sample"),
+    ]
+    expected = "std::string{" + ", ".join(
+        f"static_cast<char>({byte})" for byte in value.encode("utf-8")
+    ) + "}"
+    body = "\n".join(
+        f'check("consumer{index}", {expression}, {expected});'
+        for index, expression in enumerate(expressions)
+    )
+    driver = r'''
+#include <iostream>
+#include <stdexcept>
+
+void check(const char* name, const std::string& value, const std::string& expected) {
+    if (value != expected) throw std::runtime_error("literal consumer changed bytes");
+    static const char digits[] = "0123456789abcdef";
+    std::cout << name << "=";
+    for (unsigned char byte : value)
+        std::cout << digits[byte >> 4] << digits[byte & 15];
+    std::cout << "\n";
+}
+
+int main() {
+    // BODY
+}
+'''.replace("// BODY", body)
+    output = run_emitted_tu(
+        transpile(HEADER), driver, opt="-O0", label="length-aware literal consumers",
+    )
+    assert output.splitlines() == [
+        f"consumer{index}={value.encode('utf-8').hex()}" for index in range(len(expressions))
+    ]

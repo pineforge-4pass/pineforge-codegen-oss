@@ -612,7 +612,7 @@ def test_var_member():
 def test_tuple_assign_macd():
     src = '//@version=6\nstrategy("T")\n[macdLine, signal, hist] = ta.macd(close, 12, 26, 9)\n'
     cpp = _generate(src)
-    assert "ta::MACD" in cpp
+    assert "pineforge::source::PineMacd" in cpp
 
 
 def test_switch_stmt():
@@ -789,18 +789,27 @@ def test_str_contains():
     cpp = _generate(src)
     assert "find" in cpp
     assert "npos" in cpp
+    assert "_pf_u16_contains(" not in cpp
 
 
 def test_str_lower():
     src = 'x = str.lower("HELLO")\n'
     cpp = _generate(src)
-    assert "tolower" in cpp
+    # The lowering carries a complete Unicode table even for an ASCII source.
+    assert "_pf_tolower_map" in cpp
+    assert "{0xC9u, 0x1u, 0xE9u}" in cpp
+    assert "{0x10400u, 0x1u, 0x10428u}" in cpp
+    assert "::tolower" not in cpp
 
 
 def test_str_upper():
     src = 'x = str.upper("hello")\n'
     cpp = _generate(src)
-    assert "toupper" in cpp
+    assert "_pf_toupper_map" in cpp
+    assert "{0xE9u, 0x1u, 0xC9u}" in cpp
+    assert "{0xDFu, 0x2u, 0x53u, 0x53u}" in cpp
+    assert "{0x10428u, 0x1u, 0x10400u}" in cpp
+    assert "::toupper" not in cpp
 
 
 def test_str_length():
@@ -814,19 +823,20 @@ def test_str_startswith():
     src = 'x = str.startswith("hello", "he")\n'
     cpp = _generate(src)
     assert "substr" in cpp
+    assert "_pf_u16_startswith(" not in cpp
 
 
 def test_str_endswith():
     src = 'x = str.endswith("hello", "lo")\n'
     cpp = _generate(src)
     assert "compare" in cpp
+    assert "_pf_u16_endswith(" not in cpp
 
 
 def test_str_pos():
     src = 'x = str.pos("hello", "ll")\n'
     cpp = _generate(src)
-    assert "find" in cpp
-    assert "npos" in cpp
+    assert "_pf_u16_pos(_pf_search_source, _pf_search_needle)" in cpp
 
 
 def test_str_substring():
@@ -850,9 +860,40 @@ def test_str_replace():
 
 
 def test_str_trim():
-    src = 'x = str.trim("  hello  ")\n'
-    cpp = _generate(src)
-    assert "erase" in cpp
+    from tests._compile import run_emitted_tu
+
+    src = (
+        '//@version=6\n'
+        'strategy("trim runtime input")\n'
+        'source_value = input.string("unused default", "Text")\n'
+        'x = str.trim(source_value)\n'
+        'plot(close)\n'
+    )
+    cpp = transpile(src)
+    driver = r'''
+#include <iostream>
+#include <string>
+
+int main() {
+    GeneratedStrategy strategy;
+    const char source_bytes[] = "\t \302\240hello  world\343\200\200\n";
+    strategy.set_input("Text", std::string(source_bytes, sizeof(source_bytes) - 1));
+    pineforge::Bar bar{};
+    bar.open = bar.high = bar.low = bar.close = 100.0;
+    bar.volume = 1.0;
+    bar.timestamp = 1704067200000LL;
+    strategy.run(&bar, 1, "1", "1");
+    if (!strategy.last_error().empty()) {
+        std::cerr << strategy.last_error() << "\n";
+        return 14;
+    }
+    std::cout << strategy.x << "\n";
+    return 0;
+}
+'''
+    assert run_emitted_tu(
+        cpp, driver, opt="-O0", label="str.trim runtime input",
+    ) == "hello  world\n"
 
 
 def test_str_repeat():
@@ -1296,13 +1337,28 @@ x = str.format("{0} is {1}", "hello", "world")
     assert "pine_str_format" in cpp
 
 
-def test_str_match_uses_runtime():
-    cpp = _generate("""
-//@version=6
-strategy("T")
-x = str.match("hello123", "\\\\d+")
-""")
-    assert "pine_str_match" in cpp
+@pytest.mark.parametrize("call", [
+    'str.match("hello123", "\\\\d+")',
+    'str.match("aéb", "a[é]b")',
+    'str.match(regex="a[à-ÿ]b", source="aéb")',
+    'str.match("😀", ".")',
+    'str.match(regex="a[😀-😇]b", source="a😀b")',
+])
+def test_str_match_uses_runtime(call):
+    cpp = _generate(f'x = {call}\ny = {call}\n')
+    assert "return ::_pf_regex::_pf_match(" in cpp
+    assert cpp.count("inline std::string _pf_match(") == 1
+    assert "::pineforge::pine_str_match(_pf_source_bytes, _pf_pattern_bytes)" in cpp
+
+
+def test_str_match_evaluates_both_arguments_once_in_parameter_order():
+    from pineforge_codegen.codegen.tables import STR_FUNC_MAP
+
+    expression = STR_FUNC_MAP["match"](["next_source()", "next_pattern()"])
+    assert expression.count("next_source()") == 1
+    assert expression.count("next_pattern()") == 1
+    assert expression.index("next_source()") < expression.index("next_pattern()")
+    assert expression.index("next_pattern()") < expression.index("return ::_pf_regex::_pf_match(")
 
 
 def test_str_split_uses_runtime():

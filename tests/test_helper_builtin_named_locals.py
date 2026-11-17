@@ -16,7 +16,7 @@ from tests.test_helper_series_words import (
 )
 
 
-CPP_REFERENCE = "7d7681dcef6918f0cb304831320e5d8e5b545285"
+CPP_REFERENCE = "49ebac862df439725ad73e78d9f9d704c97580d3"
 _BARE_BUILTINS = (
     set(BUILTIN_VARS) | set(BAR_BUILTINS) | set(BAR_FIELDS)
     | set(TIME_FIELD_EXPRS) | set(_REALTIME_ONLY_VARS)
@@ -91,10 +91,4 @@ def test_unshadowed_calendar_read_keeps_complete_cpp(
     before = transpile_json(pine, root=reference)
     assert before["ok"], before
     expected = before["cpp"]
-    if string:
-        from tests.test_string_local_history_concat import with_string_join_fixed
-
-        # The reference joined a string local with its previous value through
-        # std::to_string (issue #354); that one site is the whole difference.
-        expected = with_string_join_fixed(expected)
     assert transpile(source) == expected

@@ -486,6 +486,10 @@ def test_parent_eager_store_error_precedes_a_later_analyzer_error():
         "strategy.exit", id="unqualified-exit-disable-alert",
     ),
     pytest.param(
+        'value = request.currency_rate("USD", "EUR", na)\n',
+        "request.currency_rate", id="unqualified-request-flag",
+    ),
+    pytest.param(
         "value = input.int(1, confirm = na)\n",
         "input.int", id="unqualified-input-confirm",
     ),

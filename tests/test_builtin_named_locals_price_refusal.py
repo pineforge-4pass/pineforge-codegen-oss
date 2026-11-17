@@ -231,7 +231,6 @@ def test_price_named_string_library_local_history_keeps_the_base_outcome(
     _assert_keeps_the_base_outcome(
         _LIBRARY_SCRIPT, reference, tmp_path,
         libraries={_LIBRARY_PATH: _library_text(name)},
-        string_join_fixed=True,
     )
 
 

@@ -230,7 +230,7 @@ class ValueBindings(DiagnosticsHelper):
     def resolve(self) -> None:
         if self.program.version != 6:
             return  # Analyzer owns missing/unsupported-version diagnostics.
-        from .v6_forms import validate_v6_forms
+        from .v6_forms import validate_v6_constant_arguments, validate_v6_forms
         validate_v6_forms(self.program, self._filename, self.budget)
         # Import after Analyzer has loaded; reuse its namespace inventory.
         from .base import _BUILTIN_NAMESPACE_NAMES
@@ -266,6 +266,9 @@ class ValueBindings(DiagnosticsHelper):
                 )
                 node.annotations = {**(node.annotations or {}), _VALUE_USE: origin}
             self.check_use(node)
+        validate_v6_constant_arguments(
+            self.program, self.declaration_bindings, self._filename, self.budget,
+        )
 
     def _body(self, body: list, scope: _Scope) -> None:
         for stmt in body:

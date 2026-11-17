@@ -277,7 +277,7 @@ class TaSiteHelper:
             return expr.name in getattr(self, "_static_vars", set())
         if isinstance(expr, MemberAccess):
             if isinstance(expr.object, Identifier) and (
-                expr.object.name.startswith("input") or expr.object.name in getattr(self, "_enum_defs", {})
+                expr.object.name == "input" or expr.object.name in getattr(self, "_enum_defs", {})
             ):
                 return True
             return self._expr_safe_for_ta_precalc(expr.object)
@@ -1469,9 +1469,12 @@ class TaSiteHelper:
     # TradingView refuses a series length for ta.rma / ema / rsi / atr / dmi /
     # macd / kc / hma / tsi / rci and supertrend's atrPeriod at compile time,
     # so those only ever carry a simple one here. A series length for the
-    # other window functions (ta.sma, ta.wma, ...) keeps the refusal.
-    # Constant- and input-length sites never reach this path: their C++ is
-    # unchanged. An input.string choice of a length (``mode == "A" ? 5 : 10``)
+    # other window functions (ta.wma, ...) keeps the refusal. Series SMA uses
+    # the engine primitive with a caller-owned whole-evaluation checkpoint.
+    # Constant- and input-length sites never reach this plan: they retain
+    # their constructor/reset/precalculation cadence. EMA-family objects use
+    # the checked source adapters for every qualifier. An input.string choice
+    # of a length (``mode == "A" ? 5 : 10``)
     # is an input length since CG-SECURITY-2 spells string literals; the other
     # arguments those literals bring to the constructor stay here
     # (``_ta_arg_takes_plan``).
@@ -1538,7 +1541,7 @@ class TaSiteHelper:
         """The lowering of a site with a constructor argument the constructor
         cannot take, or None (the ordinary constructor / runtime-reset path).
         ``kind`` is ``first_call`` / ``series_extreme`` /
-        ``series_percentile`` / ``supertrend``, or ``refused`` (the
+        ``series_percentile`` / ``series_sma`` / ``supertrend``, or ``refused`` (the
         constructor guard reports it)."""
         cache = self.__dict__.setdefault("_ta_dynamic_plan_cache", {})
         key = id(site)
@@ -1647,6 +1650,27 @@ class TaSiteHelper:
                     and not self._ta_identifier_reads_top_level(read, scoped=True)
                     for read in self._walk_ast(node))
         }
+        # A constructor/reset has only the final fold. Earlier reads need the
+        # stable value at the actual call, captured once by first_call. A
+        # callable's substituted spelling has no unique execution position.
+        positioned = {
+            pos for pos, node in enumerate(nodes)
+            if any(
+                isinstance(read, Identifier)
+                and read.name in self._reassigned_stable_scalars
+                and self._ta_identifier_reads_top_level(read, scoped=True)
+                and (read.annotations or {}).get("stable_scalar_fold")
+                != self._derived_input_expr[read.name]
+                for read in self._walk_ast(node)
+            )
+        }
+        if site.owner_func is not None:
+            positioned.update(
+                pos for pos, arg in enumerate(site.ctor_args)
+                if self._reassigned_stable_scalars.intersection(
+                    re.findall(r"[A-Za-z_][A-Za-z_0-9]*", blank_string_literals(arg))
+                )
+            )
         refused = [
             pos for pos, arg in enumerate(site.ctor_args)
             if pos in shadowed
@@ -1654,10 +1678,10 @@ class TaSiteHelper:
                 and (self._runtime_ctor_arg_for_reset(arg) is None
                      or self._ta_arg_takes_plan(site, pos, arg)))
         ]
-        if not refused:
+        if not refused and not positioned:
             return None
         if len(nodes) != len(site.ctor_args):
-            return {"kind": "refused", "refused": refused}
+            return {"kind": "refused", "refused": sorted(set(refused) | positioned)}
         # A call outside every callable is spelled from its own nodes, whose
         # identifiers carry the analyzer's scope. A callable's constructor
         # arguments are its call site's spelling substituted into the body.
@@ -1667,7 +1691,25 @@ class TaSiteHelper:
                   if own_nodes else self._simple_ta_arg_cpp(site.ctor_args[pos]))
             for pos in refused
         }
-        return self._ta_plan_for(site, refused, simple)
+        return self._ta_plan_at_read(site, refused, simple, positioned)
+
+    def _ta_plan_at_read(self, site: "TACallSite", refused: list,
+                         simple: dict, positioned: set[int]) -> dict:
+        if not positioned:
+            return self._ta_plan_for(site, refused, simple)
+        # Positions the constructor already accepted are stable. Bind their
+        # actual reads once, without reclassifying them as series arguments or
+        # imposing a narrower simple-expression grammar.
+        plan = (
+            self._ta_plan_for(site, refused, simple) if refused
+            else {"kind": "first_call", "simple": simple,
+                  "family": self._ta_site_function(site)}
+        )
+        return {
+            **plan,
+            "refused": sorted(set(refused) | positioned),
+            "positioned": positioned.difference(refused),
+        }
 
     def _ta_plan_for(self, site: "TACallSite", refused: list, simple: dict) -> dict:
         """The plan of a site whose ``refused`` constructor arguments have the
@@ -1675,6 +1717,8 @@ class TaSiteHelper:
         family = self._ta_site_function(site)
         if family == "percentile_nearest_rank":
             kind = "series_percentile" if simple[refused[0]] is None else "first_call"
+        elif family == "sma":
+            kind = "series_sma" if simple[refused[0]] is None else "first_call"
         elif family in self._TA_SERIES_EXTREME_CLASSES:
             kind = "first_call" if simple[refused[0]] is not None else "series_extreme"
         elif family == "supertrend":
@@ -1727,7 +1771,9 @@ class TaSiteHelper:
                 ):
                     self._refuse_shared_security_ta_lengths(sec_id, site)
                 return None
-            self._refuse_shared_security_ta_lengths(sec_id, site)
+            if (not plan.get("positioned")
+                    or len(plan["positioned"]) != len(plan["refused"])):
+                self._refuse_shared_security_ta_lengths(sec_id, site)
             return {**plan, "site": ctor_site, "sec_id": sec_id}
         if not site.ctor_args:
             return None
@@ -1744,6 +1790,12 @@ class TaSiteHelper:
                 )
             return None
         bound = [self._security_helper_bound_ast(node, stack) for node in nodes]
+        positioned = {
+            pos for pos, node in enumerate(bound) if node is not None
+            and any(isinstance(read, Identifier)
+                    and read.name in self._reassigned_stable_scalars
+                    for read in self._walk_ast(node))
+        }
         # The positions the runtime-reset path would refuse
         # (``_collect_ta_runtime_resets``); none -> that path, unchanged.
         # ``ctor_args`` are rendered C++ here: the bound argument's Pine
@@ -1754,14 +1806,14 @@ class TaSiteHelper:
             and ((self._runtime_ctor_arg_for_reset(arg) is None and not stability[pos])
                  or self._ta_bound_arg_takes_plan(site, pos, bound[pos]))
         ]
-        if not refused:
+        if not refused and not positioned:
             return None
         bound_simple = {
             pos: self._simple_ta_arg_cpp_node(node, scoped=True)
             for pos, node in enumerate(bound) if node is not None
         }
-        plan = self._ta_plan_for(
-            site, refused, {pos: bound_simple.get(pos) for pos in refused})
+        plan = self._ta_plan_at_read(
+            site, refused, {pos: bound_simple.get(pos) for pos in refused}, positioned)
         if plan["kind"] == "refused":
             forced = [pos for pos in plan["refused"]
                       if stability[pos] or self._runtime_ctor_arg_for_reset(ctor_args[pos]) is not None]
@@ -1865,16 +1917,34 @@ class TaSiteHelper:
             for index, part in enumerate(parts)
         )
 
+    # Analyzer class identities also select signature/result/implicit-OHLC
+    # rules. Keep those identities and map the concrete execution type only
+    # at emission. The Keltner shims retain their existing seeding scope and
+    # wrap PineKc/PineKcw; all other families keep their current types.
+    _TA_CHECKED_CLASSES = {
+        "ta::EMA": "pineforge::source::PineEma",
+        "ta::TSI": "pineforge::source::PineTsi",
+        "ta::MACD": "pineforge::source::PineMacd",
+        "_PFKC": "_PFKC",
+        "_PFKCW": "_PFKCW",
+    }
+
+    def _ta_fixed_cpp_type(self, site: "TACallSite") -> str:
+        """The concrete fixed object used by declarations and every factory."""
+        return self._TA_CHECKED_CLASSES.get(site.class_name, site.class_name)
+
     def _ta_plan_cpp_type(self, site: "TACallSite", plan: dict | None) -> str:
         if plan is None:
-            return site.class_name
+            return self._ta_fixed_cpp_type(site)
         if plan["kind"] == "series_extreme":
             return self._TA_SERIES_EXTREME_CLASSES[plan["family"]]
         if plan["kind"] == "series_percentile":
             return self._TA_SERIES_PERCENTILE_CLASS
+        if plan["kind"] == "series_sma":
+            return self._ta_series_sma_cpp_type()
         if plan["kind"] == "supertrend":
             return "pineforge::source::PineSupertrend"
-        return f"pineforge::source::FirstCallBound<{site.class_name}>"
+        return f"pineforge::source::FirstCallBound<{self._ta_fixed_cpp_type(site)}>"
 
     def _ta_member_cpp_type(self, site: "TACallSite") -> str:
         """The C++ type a site's member is declared with."""
@@ -1885,6 +1955,49 @@ class TaSiteHelper:
         """The C++ type of one request.security copy of a site."""
         return self._ta_plan_cpp_type(
             site, self._ta_security_plan(sec_id, site, variant.get("binding_stack", ())))
+
+    def _ta_series_sma_cpp_type(self) -> str:
+        """Allocate the support type only for a live series-SMA lowering."""
+        return self._generated_helper_name(("series_sma", "type"), "_PFSeriesSma")
+
+    def _ta_series_sma_members(self, sec_id: int | None = None) -> list[str]:
+        """Series SMA objects owned by one chart/requested evaluator.
+
+        Callable clones already have distinct site records. Requested variants
+        retain their binding signatures and runtime-context member ownership.
+        """
+        if sec_id is None:
+            dead = getattr(self, "_dead_ta_indices", set())
+            return [
+                site.member_name
+                for index, site in enumerate(self.ctx.ta_call_sites)
+                if index not in dead
+                and (self._ta_dynamic_plan(site) or {}).get("kind") == "series_sma"
+            ]
+        return [
+            variant["member_name"]
+            for index, variants in (
+                self._security_eval_info[sec_id].get("ta_variants") or {}
+            ).items()
+            for variant in variants
+            if (self._ta_security_plan(
+                sec_id, self.ctx.ta_call_sites[index],
+                variant.get("binding_stack", ()),
+            ) or {}).get("kind") == "series_sma"
+        ]
+
+    def _ta_uses_series_sma(self) -> bool:
+        return bool(self._ta_series_sma_members()) or any(
+            self._ta_series_sma_members(info["sec_id"])
+            for info in self._security_eval_info
+        )
+
+    def _emit_series_sma_begin(self, lines: list[str],
+                               sec_id: int | None = None) -> None:
+        clock = ("history_advances_new_bar()" if sec_id is None
+                 else f"security_series_slot_is_new({sec_id})")
+        for member in self._ta_series_sma_members(sec_id):
+            lines.append(f"        {member}.begin_evaluation({clock});")
 
     def _ta_uses_dynamic_lengths(self) -> bool:
         """Whether any live site or request.security copy takes the lowering
@@ -1938,7 +2051,9 @@ class TaSiteHelper:
         copy reached through a helper call takes the argument that call
         binds (``ctor_args`` holds the first call site's); any request.security
         copy reads ``timeframe.*`` in its requested context."""
-        if "bound_simple" in plan:
+        if position in plan.get("positioned", ()):
+            value = None  # Render the live read in its actual emission context.
+        elif "bound_simple" in plan:
             value = plan["bound_simple"].get(position)
         elif position in plan.get("refused", ()):
             # A refused position takes its context-free spelling, else (a
@@ -1976,6 +2091,20 @@ class TaSiteHelper:
         if kind == "series_extreme":
             length = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
             return f"{base_args}, pineforge::source::ta_number({length})"
+        if kind == "series_sma":
+            if len(site.compute_args) != 1 or not base_args:
+                self._codegen_error(site.node, "ta.sma: wrong number of arguments")
+            length = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
+            length_name = self._generated_helper_name(
+                ("series_sma", "length"), "_pf_length"
+            )
+            # C++ does not order function arguments. Evaluate the Pine source
+            # and length once, in parameter order, before the primitive call.
+            return (
+                f"[&]() {{ const double _pf_source = ({base_args}); "
+                f"const double {length_name} = pineforge::source::ta_number({length}); "
+                f"return std::pair<double, double>{{_pf_source, {length_name}}}; }}"
+            )
         if kind == "series_percentile":
             if len(site.compute_args) != 2:
                 raise AssertionError(
@@ -2009,7 +2138,7 @@ class TaSiteHelper:
                 value = (f'pineforge::source::simple_ta_length({value}, '
                          f'"{family}", "{param.name}")')
             ctor.append(value)
-        make = f"[&]() {{ return {site.class_name}({', '.join(ctor)}); }}"
+        make = f"[&]() {{ return {self._ta_fixed_cpp_type(site)}({', '.join(ctor)}); }}"
         return f"{make}, {base_args}" if base_args else make
 
     def _simple_ta_top_level_decls(self) -> dict:
@@ -2089,6 +2218,12 @@ class TaSiteHelper:
             name = node.name
             if self._known_var_is_lexically_shadowed(name):
                 return None
+            if name in self._reassigned_stable_scalars:
+                if scoped and not self._ta_identifier_reads_top_level(node, scoped=True):
+                    return None
+                # Preserve the read's prefix literal if it has one; otherwise
+                # its live member is stable at this call's execution point.
+                return copy.deepcopy(node)
             if not self._ta_identifier_reads_top_level(node, scoped):
                 return None
             # A derived name tracked only since string literals are spelled

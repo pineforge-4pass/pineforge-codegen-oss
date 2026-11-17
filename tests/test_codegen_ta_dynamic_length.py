@@ -11,6 +11,8 @@ rules and their tapes are in the engine header
   ``pineforge::source::Series*``, the length passed on every call;
 * series length, ta.percentile_nearest_rank:
   ``pineforge::source::SeriesPercentileNearestRank`` appends on every call;
+* series length, ta.sma: the engine's ``SeriesSma`` with a caller-owned
+  checkpoint covering every invocation in one chart/requested evaluation;
 * ta.supertrend: ``pineforge::source::PineSupertrend``, factor and atrPeriod
   passed on the call and read on its first execution;
 * simple length (fixed for the run) of any family:
@@ -19,7 +21,8 @@ rules and their tapes are in the engine header
 * series length of another family: still refused (TradingView refuses it for
   the recursive ones; the other window functions are not lowered yet).
 
-Constant- and input-length calls keep their constructor, byte for byte.
+Constant- and input-length calls keep their constructor cadence; EMA-family
+objects use the paired checked source adapters for every qualifier.
 """
 
 from __future__ import annotations
@@ -89,15 +92,8 @@ plot(acc)
     assert 'get_input_int("Length"' not in line
 
 
-def test_series_percentile_keeps_sma_and_ema_refusals() -> None:
+def test_series_percentile_keeps_the_ema_refusal() -> None:
     cases = (
-        (
-            "ta.sma(close, length)",
-            "PF-E5092",
-            "ta.sma",
-            "TradingView accepts a series length for ta.sma(); "
-            "PineForge does not support it yet.",
-        ),
         (
             "ta.ema(close, length)",
             "PF-E5009",
@@ -127,6 +123,26 @@ def test_series_percentile_keeps_sma_and_ema_refusals() -> None:
         if suffix:
             expected += f" {suffix}"
         assert diagnostic.message == expected
+
+
+@pytest.mark.parametrize("counter", ["len", "length"])
+def test_series_sma_loop_length_uses_the_written_counter(counter) -> None:
+    src = (
+        '//@version=6\nstrategy("series SMA loop")\n'
+        'length = input.int(20, "Length")\n'
+        "float acc = 0.0\n"
+        f"for {counter} = 2 to 4\n"
+        f"    acc += ta.sma(close, {counter})\n"
+        "plot(acc)\n"
+    )
+    cpp = transpile(src)
+    [member] = _members(cpp, "_PFSeriesSma")
+    line = _compute_line(cpp, member)
+    assert f"pineforge::source::ta_number({counter})" in line
+    assert 'get_input_int("Length"' not in line
+    assert f"{member}.begin_evaluation(history_advances_new_bar());" in cpp
+    assert f"_precalc_{member}" not in cpp
+    compile_cpp(cpp, label=f"series_sma_counter_{counter}")
 
 
 def test_series_length_extremes_take_the_series_classes() -> None:
@@ -178,14 +194,14 @@ lo = ta.lowest(low, len)
 plot(r + e + m + a + adx + mc + w + s + lo)
 """
     cpp = transpile(src)
-    for cls in ("ta::RSI", "ta::RMA", "ta::ATR", "ta::DMI", "ta::MACD",
+    for cls in ("ta::RSI", "ta::RMA", "ta::ATR", "ta::DMI", "pineforge::source::PineMacd",
                 "ta::WMA", "ta::SMA", "ta::Lowest"):
         assert _members(cpp, f"pineforge::source::FirstCallBound<{cls}>"), cls
     # ``lenP`` alone is an input.string choice: input-derived, so its EMA keeps
     # the constructor and the runtime reset re-reads the input (the
     # request.security helpers row; tests/test_e2e_lane_compositions.py).
-    [ema] = _members(cpp, "ta::EMA")
-    assert re.search(rf"^\s*{ema} = ta::EMA\(.*get_input_string\(\"Preset\"", cpp, re.M)
+    [ema] = _members(cpp, "pineforge::source::PineEma")
+    assert re.search(rf"^\s*{ema} = pineforge::source::PineEma\(.*get_input_string\(\"Preset\"", cpp, re.M)
     # The factory spells the length context-free: the input through its
     # override-aware getter, syminfo through the engine's record.
     assert 'simple_ta_length(' in cpp and '"rsi", "length")' in cpp
@@ -272,7 +288,7 @@ plot(a + b)
 """
     cpp = transpile(src)
     factories = re.findall(
-        r"(_sec\d+__ta_ema_\w+)\.compute\(\[&\]\(\) \{ return ta::EMA\(pineforge::source::"
+        r"(_sec\d+__ta_ema_\w+)\.compute\(\[&\]\(\) \{ return pineforge::source::PineEma\(pineforge::source::"
         r"simple_ta_length\((.*?), \"ema\", \"length\"\)\); \}", cpp)
     assert factories
     lengths = {member.split("__")[0]: args for member, args in factories}
@@ -318,7 +334,7 @@ if out + acc > top
     compile_cpp(cpp, label="shadowed_lengths")
 
 
-def test_a_series_length_shadowed_in_a_block_keeps_the_refusal() -> None:
+def test_a_series_sma_length_shadowed_in_a_block_reads_the_block() -> None:
     src = """//@version=6
 strategy("shadowed sma")
 n = syminfo.type == "crypto" ? 10 : 20
@@ -328,8 +344,11 @@ if close > open
     out := ta.sma(close, n)
 plot(out)
 """
-    with pytest.raises(CompileError, match="Unsupported TA constructor length 'n'"):
-        transpile(src)
+    cpp = transpile(src)
+    [member] = _members(cpp, "_PFSeriesSma")
+    assert "ta_number(n)" in _compute_line(cpp, member)
+    assert '"crypto"' not in _compute_line(cpp, member)
+    compile_cpp(cpp, label="shadowed_series_sma")
 
 
 def test_an_explicit_series_declaration_is_rewindowed() -> None:
@@ -425,7 +444,7 @@ plot(a + b)
 
 
 @pytest.mark.parametrize("call", [
-    "ta.sma(close, n)", "ta.wma(close, n)", "ta.stdev(close, n)",
+    "ta.wma(close, n)", "ta.stdev(close, n)",
     "ta.rsi(close, n)", "ta.ema(close, n)", "ta.atr(n)",
 ])
 def test_other_series_lengths_stay_refused(call: str) -> None:
@@ -480,9 +499,17 @@ def test_constant_and_input_lengths_keep_their_cpp(tmp_path: Path) -> None:
         previous = "double " + assignment
         assert expected.count(previous) == 1
         expected = expected.replace(previous, assignment, 1)
+    # Fixed and input EMA sites now require the checked source object. Keep
+    # the complete reference comparison with only that API substitution.
+    assert "ta::EMA" in expected
+    expected = re.sub(r"\bta::EMA\b", "pineforge::source::PineEma", expected)
+    header = "#include <pineforge/source/pine_ta_length.hpp>\n"
+    assert header not in expected
+    expected = expected.replace("#include <pineforge/math.hpp>\n",
+                                header + "#include <pineforge/math.hpp>\n", 1)
     # The rollback hook leaves requested-evaluation state alone since the
     # fill-restore fix; everything else must stay identical.
     assert without_restore_script_state(
         without_trade_history_policy(ours["cpp"])
     ) == without_restore_script_state(without_trade_history_policy(expected))
-    assert "pine_ta_length.hpp" not in ours["cpp"]
+    assert header in ours["cpp"]

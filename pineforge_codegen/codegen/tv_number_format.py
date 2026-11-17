@@ -48,7 +48,7 @@ static void _pf_tv_increment_digits(std::string& digits) {
 
 static std::string _pf_tv_decimal(double value, int min_fraction,
                                   int max_fraction, bool grouping,
-                                  int decimal_shift = 0) {
+                                  int decimal_shift = 0, int min_integer = 0) {
     if (std::isnan(value)) return "NaN";
     if (std::isinf(value)) return value < 0 ? "-Infinity" : "Infinity";
     max_fraction = std::max(0, std::min(max_fraction, 15));
@@ -128,12 +128,14 @@ static std::string _pf_tv_decimal(double value, int min_fraction,
     const size_t integer_size = units.size() - static_cast<size_t>(max_fraction);
     std::string integer = units.substr(0, integer_size);
     std::string fraction = units.substr(integer_size);
+    if (min_integer > 0 && integer.size() < static_cast<size_t>(min_integer))
+        integer.insert(0, static_cast<size_t>(min_integer) - integer.size(), '0');
     while (fraction.size() > static_cast<size_t>(min_fraction)
            && fraction.back() == '0') fraction.pop_back();
     if (grouping) {
         std::string grouped;
-        for (size_t i = 0; i < integer_size; ++i) {
-            if (i && (integer_size - i) % 3 == 0) grouped += ',';
+        for (size_t i = 0; i < integer.size(); ++i) {
+            if (i && (integer.size() - i) % 3 == 0) grouped += ',';
             grouped += integer[i];
         }
         integer = grouped;
@@ -151,10 +153,11 @@ static std::string _pf_tv_pattern(double value, const std::string& pattern) {
     const int max_fraction = static_cast<int>(std::count_if(
         fraction.begin(), fraction.end(), [](char c) { return c == '0' || c == '#'; }));
     const int min_fraction = static_cast<int>(std::count(fraction.begin(), fraction.end(), '0'));
+    const int min_integer = static_cast<int>(std::count(integer.begin(), integer.end(), '0'));
     const bool grouping = integer.find(',') != std::string::npos;
     const bool percent = fmt.find('%') != std::string::npos;
     return _pf_tv_decimal(value, min_fraction, max_fraction, grouping,
-                          percent ? 2 : 0)
+                          percent ? 2 : 0, min_integer)
         + (percent ? "%" : "");
 }
 

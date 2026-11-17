@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._compile import compile_cpp
 from tests._e2e import (
     Build, Outcome, derive_chart_feed, digest, execute_all,
     skip_unless_e2e_env, trade_count, transpile_json,
@@ -426,22 +427,32 @@ def test_inline_input_matches_bound_spelling(case_name: str, case_runs) -> None:
 # when an inline input is one of its leaves: the input is a stable leaf, the
 # rest of the expression is not.
 #
-# A recorded TradingView result says a series length compiles for ta.sma, and
-# the refusal says so; TradingView refuses one for ta.ema and ta.rsi, and there
-# is no recorded result for ta.wma, so those refusals keep the plain wording
+# TradingView refuses one for ta.ema and ta.rsi, and there is no recorded
+# result here for ta.wma, so those refusals keep the plain wording
 # (the second element of a row is the name the refusal gives the call).
 SERIES_LENGTHS = (
     ('ta.ema(close, close > open ? input.int(2, "A") : input.int(4, "B"))',
      "ta::EMA", '(close > open) ? input.int(2, "A") : input.int(4, "B")', ""),
-    ('ta.sma(close, input.int(9, "Base") + bar_index % 5)',
-     "ta.sma", 'input.int(9, "Base") + (bar_index % 5)',
-     " TradingView accepts a series length for ta.sma(); "
-     "PineForge does not support it yet."),
     ('ta.rsi(close, math.max(input.int(14, "Len"), int(volume)))',
      "ta::RSI", 'math.max(input.int(14, "Len"), int(volume))', ""),
     ('ta.wma(close, input.source(close, "Src"))',
      "ta::WMA", 'input.source(close, "Src")', ""),
 )
+
+
+def test_series_sma_with_an_inline_input_keeps_its_live_getter(tmp_path: Path) -> None:
+    pine = tmp_path / "strategy.pine"
+    pine.write_text(
+        '//@version=6\nstrategy("e2e-inline-refused")\n'
+        'x = ta.sma(close, input.int(9, "Base") + bar_index % 5)\n'
+        'if ta.crossover(close, x)\n    strategy.entry("L", strategy.long)\n'
+    )
+    result = transpile_json(pine)
+    assert result["ok"], result["diagnostics"]
+    assert any(item["title"] == "Base" for item in result["inputs"])
+    assert "_PFSeriesSma _ta_sma_" in result["cpp"]
+    assert 'get_input_int("Base", 9)' in result["cpp"]
+    compile_cpp(result["cpp"], label="series SMA with inline input")
 
 
 @pytest.mark.parametrize("expr,class_name,arg,tradingview", SERIES_LENGTHS)

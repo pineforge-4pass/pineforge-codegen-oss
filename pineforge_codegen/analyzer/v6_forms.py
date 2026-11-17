@@ -9,7 +9,9 @@ from ..ast_nodes import (
 from ..diagnostic_codes import render_diagnostic
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from ..limits import TimeBudget, syntax_children
+from ..loop_types import IntegerConstants, LoopTypeSources
 from ..pine_spelling import expr_start
+from ..signatures import STR_FUNCTIONS
 
 
 def _refuse(code: str, node: ASTNode, filename: str,
@@ -110,6 +112,66 @@ def validate_v6_forms(program: Program, filename: str,
         stack.extend(syntax_children(node))
         if isinstance(node, (FuncDef, MethodDef)):
             # Parameter defaults live in annotations rather than syntax fields.
+            stack.extend(
+                value for value in notes.get("param_defaults", ())
+                if isinstance(value, ASTNode)
+            )
+
+
+def _substring_begin(node: FuncCall) -> ASTNode | None:
+    """Read the begin slot of a call that binds to a declared signature."""
+    for signature in STR_FUNCTIONS["substring"].signatures:
+        names = [parameter.name for parameter in signature.params]
+        if (len(node.args) > len(names)
+                or set(node.kwargs) - set(names)
+                or set(names[:len(node.args)]) & set(node.kwargs)):
+            continue
+        bound = dict(zip(names, node.args))
+        bound.update(node.kwargs)
+        if any(parameter.default is None and parameter.name not in bound
+               for parameter in signature.params):
+            continue
+        return bound["begin_pos"]
+    # Malformed calls retain their existing argument-binding handling.
+    return None
+
+
+def validate_v6_constant_arguments(
+    program: Program, bindings: dict[int, tuple[int, str] | None],
+    filename: str, budget: TimeBudget | None = None,
+) -> None:
+    """Check constant domains after lexical resolution, before call lowering."""
+    if program.version != 6:
+        return
+    constants = None
+    stack = [program]
+    while stack:
+        node = stack.pop()
+        if budget is not None:
+            budget.check(node.loc, Phase.ANALYZER)
+        notes = node.annotations or {}
+        if notes.get("pine_version") == 5:
+            continue
+        if (isinstance(node, FuncCall) and _callee_name(node) == "str.substring"
+                and bindings.get(id(node.callee.object)) is None):
+            begin = _substring_begin(node)
+            if begin is not None:
+                if constants is None:
+                    constants = IntegerConstants(LoopTypeSources(program), bindings, budget)
+                value = constants.value(begin)
+                if value is not None and value < 0:
+                    raise CompileError([Diagnostic(
+                        level=Level.ERROR,
+                        phase=Phase.ANALYZER,
+                        location=(expr_start(begin).loc or begin.loc or node.loc
+                                  or SourceLocation(filename, 1, 1, 1)),
+                        message=(
+                            "str.substring() requires 'begin_pos' "
+                            "to be greater than or equal to 0."
+                        ),
+                    )])
+        stack.extend(syntax_children(node))
+        if isinstance(node, (FuncDef, MethodDef)):
             stack.extend(
                 value for value in notes.get("param_defaults", ())
                 if isinstance(value, ASTNode)

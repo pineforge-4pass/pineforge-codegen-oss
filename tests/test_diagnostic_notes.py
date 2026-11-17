@@ -513,6 +513,19 @@ def test_real_interfaces_keep_notes_and_short_sentences(case):
     if "cpp" in normalized and "cpp" in expected_wire:
         normalized["cpp"] = without_trade_history_policy(normalized["cpp"])
         expected_wire["cpp"] = without_trade_history_policy(expected_wire["cpp"])
+        # The frozen diagnostic fixture predates checked EMA-family objects.
+        # Update only its concrete EMA type and required include; all
+        # diagnostic fields and the rest of the emitted bytes stay exact.
+        if "ta::EMA " in expected_wire["cpp"]:
+            expected_wire["cpp"] = re.sub(
+                r"\bta::EMA\b", "pineforge::source::PineEma", expected_wire["cpp"]
+            )
+            header = "#include <pineforge/source/pine_ta_length.hpp>\n"
+            assert header not in expected_wire["cpp"]
+            expected_wire["cpp"] = expected_wire["cpp"].replace(
+                "#include <pineforge/math.hpp>\n",
+                header + "#include <pineforge/math.hpp>\n", 1,
+            )
     assert json.dumps(normalized) == json.dumps(expected_wire)
     if failure:
         text = PRODUCT_BEFORE["text"][case["name"]]

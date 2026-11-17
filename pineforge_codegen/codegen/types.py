@@ -50,6 +50,7 @@ from ..collection_history import history_annotation
 from ..cpp_names import cpp_identifier_fragment
 from ..errors import CodegenInvariantError, Phase
 from ..external_requests import UNPINNED_ANNOTATION
+from ..intrinsic_binding import array_method_domain_error
 from ..limits import iter_ast_nodes
 from ..builtin_constants import BUILTIN_ENUM_STORAGE, builtin_constant, is_builtin_enum
 from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
@@ -62,8 +63,11 @@ from ..symbols import (
     unify_type_specs,
 )
 from .helpers import (
+    BUILTIN_ACCESSOR_NAMES,
+    CPP_RESERVED,
     NA_PRESERVING_INT_TYPES,
     evaluate_args_once,
+    is_emitter_temporary,
     na_preserving_int_cast,
     pine_truth_cast,
 )
@@ -84,6 +88,7 @@ from .tables import (
     PINE_TYPE_TO_CPP,
     STRATEGY_DIRECTION_VALUES,
     TA_RETURNS_BOOL,
+    _array_join,
     _matrix_functional_receiver,
     checked_array_slice,
     ARRAY_JOURNAL_DELTA_METHODS,
@@ -198,7 +203,7 @@ class TypeInferer:
             # of the old collapse to double / unknown-type-name.
             if spec.name in DRAWING_TYPE_TO_CPP:
                 return DRAWING_TYPE_TO_CPP[spec.name]
-            return (self._safe_name(spec.name)
+            return (self._udt_cpp_name(spec.name)
                     if spec.name in self._udt_defs else "double")
         if spec.kind == "array":
             return f"std::vector<{self._type_spec_to_cpp(spec.element)}>"
@@ -220,15 +225,21 @@ class TypeInferer:
 
     def _udt_arena_member_name(self, type_name: str) -> str:
         """Per-strategy arena member owning one user-defined object's records."""
-        return getattr(self, "_udt_arena_member_names", {}).get(
-            type_name, f"_pf_udt_{self._safe_name(type_name)}"
-        )
+        allocated = getattr(self, "_udt_arena_member_names", {}).get(type_name)
+        if allocated is not None:
+            return allocated
+        # Keep historical reserved-name fragments, but escaping every handle
+        # type must not rename otherwise non-colliding arena helpers.
+        if (type_name in CPP_RESERVED or type_name in BUILTIN_ACCESSOR_NAMES
+                or is_emitter_temporary(type_name)):
+            type_name = self._safe_name(type_name)
+        return f"_pf_udt_{cpp_identifier_fragment(type_name)}"
 
     def _udt_arena_cpp_type(self, type_name: str) -> str:
         """Generated arena specialization for one user-defined object type."""
         return (
             f"{getattr(self, '_udt_arena_template_cpp_name', '_PFUdtArena')}<"
-            f"{self._safe_name(type_name)}, "
+            f"{self._udt_cpp_name(type_name)}, "
             f"{self._udt_record_cpp_type(type_name)}>"
         )
 
@@ -565,7 +576,7 @@ class TypeInferer:
                 # not the integer sentinel, which a double does not carry.
                 return "na<double>()"
             if spec.name in getattr(self, "_udt_defs", ()):
-                return f"{self._safe_name(spec.name)}{{}}"
+                return f"{self._udt_cpp_name(spec.name)}{{}}"
             return self._default_for_type(self._type_spec_to_cpp(spec))
         cpp_type = self._type_spec_to_cpp(spec)
         if cpp_type.startswith("std::vector") or cpp_type.startswith("PineMap"):
@@ -2761,7 +2772,7 @@ class TypeInferer:
                 spec = TypeSpec.primitive("color")
             if spec is None:
                 return None
-            if (not nullable and spec.kind not in {"map", "matrix"}
+            if (not nullable and spec.kind not in {"array", "map", "matrix"}
                     and spec != TypeSpec.primitive("string")
                     and not is_builtin_enum(spec)):
                 return None
@@ -2777,11 +2788,9 @@ class TypeInferer:
     def _array_selection_spec(self, node) -> TypeSpec | None:
         """The one array type every value arm of a selection returns, else None.
 
-        ``_selection_type_spec`` keeps only map and matrix joins outside ``na``
-        (an array is typed by its declaration), so a global declared by a
-        ``switch`` or an ``if`` of arrays had no spec to register it as an
-        array variable. An arm that is ``na`` adds nothing; any other arm that
-        is not an array of the same type makes the selection no array."""
+        This declaration fallback follows ``_selection_type_spec``'s exact
+        array join rule. An arm that is ``na`` adds nothing; any other arm
+        that is not an array of the same type makes the selection no array."""
         arms: list[ASTNode] = []
         pending = [node]
         while pending:
@@ -2870,6 +2879,11 @@ class TypeInferer:
         drawing_spec = drawing_all_result_spec(node)
         if drawing_spec is not None:
             return drawing_spec
+        requested_spec = (getattr(node, "annotations", None) or {}).get(
+            "security_result_type_spec"
+        )
+        if requested_spec is not None:
+            return requested_spec
         budget = getattr(self, "_budget", None)
         if budget is not None:
             # A method chain re-infers each receiver more than once, so this
@@ -3541,6 +3555,9 @@ class TypeInferer:
             if method in ("covariance", "concat") and args:
                 args = [f"_pf_array_id({args[0]})", *args[1:]]
         spec = spec or TypeSpec.array(TypeSpec.primitive("float"))
+        problem = array_method_domain_error(method, spec)
+        if problem is not None:
+            self._codegen_error(node, problem[0], hint=problem[1])
         arr_cpp_type = self._type_spec_to_cpp(spec)
         elem_cpp = self._type_spec_to_cpp(spec.element) if spec.element is not None else "double"
         if method == "copy":
@@ -3572,13 +3589,14 @@ class TypeInferer:
                 recv, args, result_type=arr_cpp_type,
                 view_function=view_function,
             )
-        elif method == "join" and elem_cpp == "std::string":
-            join_args = list(args) or ['std::string(",")']
-            lower_receiver = lambda recv: evaluate_args_once(
-                join_args, ARRAY_ARGS_READ_REPEATEDLY["join"],
-                lambda a: f"[&](){{ std::string __pf_r; for(size_t __pf_i=0;__pf_i<{recv}.size();__pf_i++){{ if(__pf_i>0)__pf_r+={a[0]}; __pf_r+={recv}[__pf_i]; }} return __pf_r; }}()",
-                "_pf_array_a",
+        elif method == "join":
+            self._uses_tv_string_units = True
+            stringify = (
+                None if elem_cpp == "std::string"
+                else "pine_str_tostring_tv" if elem_cpp in ("double", "int", "int64_t")
+                else "std::to_string"
             )
+            lower_receiver = lambda recv: _array_join(recv, args, stringify=stringify)
         else:
             numeric_only = {
                 "sum", "avg", "min", "max", "range", "stdev", "variance", "median",
@@ -3968,12 +3986,12 @@ class TypeInferer:
                 _dret = self._drawing_call_return_cpp(node.value)
                 if _dret is not None:
                     return _dret
-        local = self._builtin_local_symbol(node)
-        if local is not None:
-            if local.type_spec is not None:
-                return promote_wide_int(self._type_spec_to_cpp(local.type_spec))
-            if local.pine_type not in (PineType.UNKNOWN, PineType.VOID):
-                return promote_wide_int(PINE_TYPE_TO_CPP[local.pine_type])
+        declared = self._builtin_declaration_symbol(node)
+        if declared is not None:
+            if declared.type_spec is not None:
+                return promote_wide_int(self._type_spec_to_cpp(declared.type_spec))
+            if declared.pine_type not in (PineType.UNKNOWN, PineType.VOID):
+                return promote_wide_int(PINE_TYPE_TO_CPP[declared.pine_type])
         # Analyzer scopes are popped before codegen, so ctx.symbols.resolve may
         # find a same-named global instead of this active callable's plain
         # local.  The local binding is known from the emitted body inventory;
@@ -3983,7 +4001,7 @@ class TypeInferer:
         sym = self.ctx.symbols.resolve(node.name)
         if sym is not None:
             inferred = self._infer_type(node.value)
-            if inferred == "std::vector<double>":
+            if inferred in ("std::vector<double>", "std::string"):
                 return inferred
             cpp_type = PINE_TYPE_TO_CPP.get(sym.pine_type, "double")
             if cpp_type != "double" or sym.pine_type != PineType.UNKNOWN:
@@ -4068,7 +4086,7 @@ class TypeInferer:
         udt = self._series_handle_type_name(name)
         if udt is None:
             return None
-        return DRAWING_TYPE_TO_CPP.get(udt) or self._safe_name(udt)
+        return DRAWING_TYPE_TO_CPP.get(udt) or self._udt_cpp_name(udt)
 
     def _series_handle_target(self, name: str) -> str | None:
         """``_visit_rhs_value``'s target for a value stored in such a
@@ -4078,32 +4096,45 @@ class TypeInferer:
             return None
         return DRAWING_TYPE_TO_CPP.get(udt, udt)
 
-    def _builtin_local_symbol(self, node):
-        """Recover a builtin-shadowing declaration from its own callable scope."""
+    def _builtin_declaration_symbol(self, node):
+        """Recover this builtin-named variable's exact authored declaration."""
         if node.name not in sigs.BUILTIN_VARIABLES:
             return None
-        declaration = (
-            node if isinstance(node, VarDecl)
-            else self.ctx.identifier_binding_nodes.get(id(node))
-        )
-        if declaration is None:
-            return None
-        symbols = getattr(self, "_builtin_local_symbols", None)
+        if isinstance(node, VarDecl):
+            declaration = id(node)
+        else:
+            binding = (
+                self.ctx.identifier_decl_bindings[id(node)]
+                if id(node) in self.ctx.identifier_decl_bindings
+                else ValueBindings.declaration_of(node)
+            )
+            if binding is None:
+                return None
+            declaration = binding[0]
+        symbols = getattr(self, "_builtin_declaration_symbols", None)
         if symbols is None:
-            symbols = self._builtin_local_symbols = {}
+            symbols = self._builtin_declaration_symbols = {}
+            local_symbols = self._builtin_local_symbols = {}
             for scope in self.ctx.symbols.all_scopes:
                 owner = scope
                 while (owner is not None
                        and not owner.name.startswith(("func_", "method_"))):
                     owner = owner.parent
-                if owner is None:
-                    continue
                 for symbol in scope.symbols.values():
                     declared = getattr(symbol, "_pf_decl_node", None)
                     if (symbol.name in sigs.BUILTIN_VARIABLES
                             and isinstance(declared, VarDecl)):
                         symbols[id(declared)] = symbol
-        return symbols.get(id(declaration))
+                        if owner is not None:
+                            local_symbols[id(declared)] = symbol
+        return symbols.get(declaration)
+
+    def _builtin_local_symbol(self, node):
+        """Recover a builtin-shadowing declaration from its own callable scope."""
+        symbol = self._builtin_declaration_symbol(node)
+        if symbol is None:
+            return None
+        return self._builtin_local_symbols.get(id(symbol._pf_decl_node))
 
     def _variable_symbol(self, name: str):
         """The symbol the variable ``name`` resolves to.
@@ -5267,12 +5298,17 @@ class TypeInferer:
                 or declaration in self._direct_program_tuple_decl_nodes
                 or self._decl_binding_is_series(declaration, name)):
             return None
-        # Direct TA/request tuples keep their established type contracts.
+        # Direct TA and scalar request tuples keep their established types.
         if self._get_ta_site(node.value) is not None:
             return None
         if (isinstance(node.value, FuncCall)
                 and self._resolve_callee(node.value.callee)
                 == ("security", "request")):
+            item = self._security_call_for_request(node.value)
+            if item is not None:
+                spec = self._security_result_spec(item, node.names.index(name))
+                if spec is not None:
+                    return self._type_spec_to_cpp(spec)
             return None
         active = self.__dict__.setdefault("_lexical_tuple_type_queries", set())
         if declaration in active:
@@ -5286,12 +5322,13 @@ class TypeInferer:
             active.remove(declaration)
 
     def _ordinary_global_tuple_cpp_type(self, name: str) -> str | None:
-        """The declared element type of an ordinary Program-global tuple.
+        """The stored element type of an ordinary Program-global tuple.
 
         Infer the element, rather than the whole tuple-returning call. This
         shares the helper/selection tuple contract, including wide-int
         provenance, with both member layout and later scalar writes.
-        Requested and TA tuples retain their existing storage contracts.
+        Integer storage also accounts for writes bound to this declaration.
+        Scalar requested and TA tuples retain their existing storage contracts.
         """
         binding = self._direct_program_tuple_bindings.get(name)
         if binding is None:
@@ -5302,6 +5339,11 @@ class TypeInferer:
         if (isinstance(node.value, FuncCall)
                 and self._resolve_callee(node.value.callee)
                 == ("security", "request")):
+            item = self._security_call_for_request(node.value)
+            if item is not None:
+                spec = self._security_result_spec(item, index)
+                if spec is not None:
+                    return self._type_spec_to_cpp(spec)
             return None
         active = self.__dict__.setdefault("_global_tuple_type_queries", set())
         if id(node) in active:
@@ -5309,7 +5351,10 @@ class TypeInferer:
         active.add(id(node))
         try:
             types = self._tuple_binding_cpp_types(node)
-            return types[index] if index < len(types) else None
+            cpp_type = types[index] if index < len(types) else None
+            if cpp_type == "int" and self._is_int64_builtin_init(name, node):
+                return "int64_t"
+            return cpp_type
         finally:
             active.remove(id(node))
 
@@ -6328,9 +6373,13 @@ class TypeInferer:
             lexical_tuple_type = self._lexical_tuple_cpp_type(node)
             if lexical_tuple_type is not None:
                 return lexical_tuple_type
-            local = self._builtin_local_symbol(node)
-            if local is not None:
-                return self._type_for_decl(local._pf_decl_node)
+            if node.name in BAR_FIELDS and self._reads_builtin_variable(node):
+                # Keep the type of the selected numeric bar read, rather
+                # than the type of a declaration its legacy route bypasses.
+                return "double"
+            declared = self._builtin_declaration_symbol(node)
+            if declared is not None:
+                return self._type_for_decl(declared._pf_decl_node)
             binding = self.ctx.identifier_decl_bindings.get(id(node))
             if (binding is not None
                     and binding[0] in self.ctx.primitive_block_shadow_types):
@@ -6344,10 +6393,10 @@ class TypeInferer:
             )
             if tuple_type is not None:
                 return tuple_type
-            if not tuple_binding and node.name in ("time", "time_close", "timenow"):
+            builtin_read = self._reads_builtin_variable(node)
+            if builtin_read and node.name in ("time", "time_close", "timenow"):
                 return "int64_t"
-            if (node.name in BAR_FIELDS
-                    or (node.name in BAR_BUILTINS and not tuple_binding)):
+            if builtin_read:
                 return "double"
             if (node.name in self._known_vars
                     and not self._known_var_is_lexically_shadowed(node.name)):
@@ -6385,6 +6434,18 @@ class TypeInferer:
                          or (sym.scope == "global"
                              and self._numeric_na_global(node.name)))):
                 return "double"
+            if sym is not None and sym.pine_type in (PineType.UNKNOWN, PineType.VOID):
+                # A coarse analyzer type must not turn string storage into a
+                # numeric operand. Prefer this read's lexical declaration;
+                # synthetic identifiers can recover the emitted member type.
+                declaration = self.ctx.identifier_binding_nodes.get(id(node))
+                storage_type = (
+                    self._type_for_decl(declaration)
+                    if isinstance(declaration, VarDecl)
+                    else self._slot_scalar_cpp_type(node.name)
+                )
+                if storage_type == "std::string":
+                    return storage_type
             if sym is not None and getattr(sym, "type_spec", None) is not None:
                 return self._type_spec_to_cpp(sym.type_spec)
             if sym is not None and sym.pine_type != PineType.UNKNOWN:
@@ -6402,6 +6463,9 @@ class TypeInferer:
             if (namespace == "request" and func_name == "security"
                     and self._security_call_returns_string(node)):
                 return "std::string"
+            requested_spec = (node.annotations or {}).get("security_result_type_spec")
+            if requested_spec is not None:
+                return self._type_spec_to_cpp(self._type_spec_from_expr(node))
             # Nested trade-accessor calls bypass the flat namespace signature
             # table.  Their textual metadata accessors return std::string from
             # the runtime, so hintless locals must not use the double fallback.
@@ -6817,13 +6881,7 @@ class TypeInferer:
             # read stores it (``_req_sec_N`` or its per-element members).
             item = self._security_call_for_request(request)
             if item is not None and item.get("returns_tuple"):
-                payload = item["expr_node"]
-                if isinstance(payload, TupleLiteral):
-                    return ["double" if item.get("foreign") and cpp_t == "int" else cpp_t
-                            for cpp_t in map(self._infer_cpp_type_for_security_elem,
-                                             payload.elements)]
-                return self._security_tuple_element_cpp_types(
-                    count, item.get("tuple_element_types", ()))
+                return self._security_tuple_cpp_types(item)
         if expr is not None:
             return [
                 self._tuple_literal_element_cpp_type(

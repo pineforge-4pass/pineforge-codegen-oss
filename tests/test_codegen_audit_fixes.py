@@ -297,21 +297,73 @@ def test_array_variance_biased_arg():
 # B16/B17 — array.join / copy / slice honor the element type
 # ---------------------------------------------------------------------------
 
-def test_array_join_string_elements():
-    cpp = _gen(
-        'sa = array.new<string>(0)\narray.push(sa, "a")\n'
-        's = array.join(sa, ",")\nplot(close)\n'
-    )
-    assert "__pf_r+=sa[__pf_i];" in cpp
-    assert "std::to_string(sa[__pf_i])" not in cpp
+JOIN_CALLS = [
+    pytest.param('array.join(items, "|")', 'std::string("|")', id="namespace-positional"),
+    pytest.param('array.join(id=items, separator="|")', 'std::string("|")',
+                 id="namespace-named"),
+    pytest.param('array.join(separator="|", id=items)', 'std::string("|")',
+                 id="namespace-reordered"),
+    pytest.param('array.join(items, separator="|")', 'std::string("|")',
+                 id="namespace-mixed"),
+    pytest.param('array.join(items)', 'std::string("")', id="namespace-default"),
+    pytest.param('items.join("|")', 'std::string("|")', id="method-positional"),
+    pytest.param('items.join(separator="|")', 'std::string("|")', id="method-named"),
+    pytest.param('items.join()', 'std::string("")', id="method-default"),
+]
 
 
-def test_array_join_numeric_elements():
+@pytest.mark.parametrize("call, separator", JOIN_CALLS)
+def test_array_join_string_elements(call, separator):
+    # Independent TV string sources admit all eight forms. In particular,
+    # omitted namespace/method separators produce "1.25-2.5", not a comma.
     cpp = _gen(
-        "fa = array.new<float>(0)\narray.push(fa, close)\n"
-        's = array.join(fa, ",")\nplot(close)\n'
+        'items = array.from("1.25", "-2.5")\n'
+        f's = {call}\nplot(close)\n'
     )
-    assert "std::to_string(fa[__pf_i])" in cpp
+    assert "const auto& _pf_join_parts = (items);" in cpp
+    assert f"const std::string _pf_join_separator = ({separator});" in cpp
+    assert "return _pf_u16_join(_pf_join_parts, _pf_join_separator);" in cpp
+    assert "std::to_string(_pf_join_parts[" not in cpp
+
+
+@pytest.mark.parametrize("element, values", [("int", "1, -2"), ("float", "1.25, -2.5")])
+@pytest.mark.parametrize("call, separator", JOIN_CALLS)
+def test_array_join_numeric_elements(element, values, call, separator):
+    # Direct int and float outputs are measured independently. Other call
+    # forms here test the shared lowering, not separate TV value admissions.
+    cpp = _gen(
+        f"array<{element}> items = array.from({values})\n"
+        f's = {call}\nplot(close)\n'
+    )
+    assert "static std::string pine_str_tostring_tv(" in cpp
+    assert "const auto& _pf_join_parts = (items);" in cpp
+    assert f"const std::string _pf_join_separator = ({separator});" in cpp
+    assert "_pf_join_number(_pf_join_parts[_pf_join_i])" in cpp
+    assert "pine_str_tostring_tv(_pf_join_value)" in cpp
+    assert "if (!is_na(_pf_join_value)) return std::to_string(_pf_join_value);" in cpp
+    assert "std::to_string(_pf_join_parts[" not in cpp
+
+
+@pytest.mark.parametrize("call", [
+    "array.join(read_items(items, calls), read_separator(calls))",
+    "array.join(separator=read_separator(calls), id=read_items(items, calls))",
+    "read_items(items, calls).join(separator=read_separator(calls))",
+])
+def test_array_join_binds_receiver_before_separator_outside_the_loop(call):
+    cpp = _gen(
+        "read_items(array<float> values, array<int> calls) =>\n"
+        "    array.push(calls, 1)\n"
+        "    values\n"
+        "read_separator(array<int> calls) =>\n"
+        "    array.push(calls, 2)\n"
+        '    "|"\n'
+        "items = array.new_float(0)\ncalls = array.new_int(0)\n"
+        f"observed = {call}\nplot(close)\n"
+    )
+    lowered = next(line for line in cpp.splitlines()
+                   if "observed = " in line and "_pf_join_parts" in line)
+    assert lowered.count("read_items") == lowered.count("read_separator") == 1
+    assert lowered.index("read_items") < lowered.index("read_separator") < lowered.index("for (")
 
 
 def test_array_copy_int_elements():

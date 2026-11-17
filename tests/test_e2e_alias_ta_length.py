@@ -60,8 +60,8 @@ def test_an_alias_of_a_direct_input_keeps_its_input_read():
         '//@version=6\nstrategy("alias of an input")\n'
         'n = input.int(7, "N")\nlen = n\nlen2 = len\n'
         "plot(ta.ema(close, len2))\n")
-    line = next(ln for ln in _resets(cpp) if "= ta::EMA(" in ln)
-    assert 'ta::EMA(get_input_int("N", 7))' in line, line
+    line = next(ln for ln in _resets(cpp) if "= pineforge::source::PineEma(" in ln)
+    assert 'pineforge::source::PineEma(get_input_int("N", 7))' in line, line
     compile_cpp(cpp)
 
 
