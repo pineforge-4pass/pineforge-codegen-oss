@@ -263,6 +263,11 @@ class StmtVisitor:
             ).get(id(node))
             if metadata is not None:
                 member_name = metadata[1]
+                if metadata[4] and metadata[2] == PineType.STRING:
+                    # Persistent callable locals bypass ordinary scalar
+                    # declarations. Activate their member's string family only
+                    # after the initializer, for later reads and write targets.
+                    self._current_func_local_types[node.name] = "std::string"
                 if member_name != node.name:
                     # The declaration RHS was emitted against the inherited
                     # binding.  Only now activate the collision-safe member for
@@ -1040,6 +1045,8 @@ class StmtVisitor:
                 self._int_slot_cpp_type(None, self._series_type_for(node.name)),
             )
             self._emit_history_series_write(lines, pad, safe, cpp_val)
+            if target_cpp_type == "std::string":
+                remember_local_type(target_cpp_type)
             return
 
         # If/switch expression: x = if cond ... else ...
@@ -1152,6 +1159,8 @@ class StmtVisitor:
 
     def _compound_assign_rhs(self, target_read: str, op: str, val_cpp: str,
                              target_node=None, value_node=None, *,
+                             target_cpp_type: str | None = None,
+                             string_bindings=(),
                              target_is_double: bool = False,
                              value_is_double: bool = False) -> str | None:
         """RHS for a compound assignment that must NOT lower to the C++
@@ -1161,10 +1170,27 @@ class StmtVisitor:
         fmod-like — the binary-operator lowering in visit_expr casts both
         sides to double / uses std::fmod. ``a /= b`` and ``a %= b`` must
         match those semantics (C++ ``/=`` would do integer division on int
-        operands; ``%=`` does not even compile for doubles). Returns None
-        for operators where the native C++ compound form is correct
-        (+=, -=, *=).
+        operands; ``%=`` does not even compile for doubles). String ``+=``
+        rejoins UTF-16 halves like string ``+``. The caller can supply its
+        emitted storage type when a requested binding differs from the chart
+        AST's type. Returns None when the native compound form is correct.
         """
+        if (op == "+="
+                and (target_cpp_type or self._concat_type(target_node)) == "std::string"):
+            # A bare na takes the string slot's type; other values keep the
+            # assignment writer's already-rendered RHS.
+            missing_string = self._is_na_expr(value_node)
+            if missing_string:
+                val_cpp = "na<std::string>()"
+            if (not missing_string
+                    and all(self._string_is_canonical(operand, string_bindings)
+                            for operand in (target_node, value_node))):
+                return None
+            # Keep the typed compound writer on the established unit path.
+            # Its RHS has already adopted the target's string family; a bare
+            # na or an unproved state value must not return to numeric +=.
+            return self._string_concat_cpp(
+                target_read, val_cpp, canonical=False)
         # Requested helper state already stores numeric values as doubles.
         # Its caller supplies the emitted operand families after converting
         # the RHS; the chart AST's int hint cannot type those series reads.
@@ -1766,7 +1792,17 @@ class StmtVisitor:
         return None
 
     def _tuple_binding_cpp_types(self, node: TupleAssign) -> list[str]:
-        """Exact supported tuple element types for later lexical operations."""
+        """Exact supported tuple element types for later lexical operations.
+
+        Every tuple consumer asks here, so one outermost query infers each
+        declaration it reaches once per lexical context
+        (``_tuple_storage_query``)."""
+        return self._tuple_storage_query(
+            node, self._infer_tuple_binding_cpp_types
+        )
+
+    def _infer_tuple_binding_cpp_types(self, node: TupleAssign) -> list[str]:
+        """The element types of one declaration in the current context."""
         count = len(node.names)
         lower_types = (node.value.annotations or {}).get(
             "lower_tf_tuple_element_types", (),
@@ -1776,6 +1812,13 @@ class StmtVisitor:
                 f"std::vector<{ctype}>"
                 for ctype in self._lower_tf_tuple_cpp_types(lower_types)
             ]
+        if (isinstance(node.value, FuncCall)
+                and self._resolve_callee(node.value.callee) == ("security", "request")):
+            item = self._security_call_for_request(node.value)
+            if item is not None and any(
+                    self._security_result_spec(item, index) is not None
+                    for index in range(count)):
+                return self._security_tuple_cpp_types(item)
         if isinstance(node.value, (IfStmt, SwitchStmt)):
             return self._infer_selection_tuple_types(node.value, count)
         if not isinstance(node.value, FuncCall):
@@ -1792,11 +1835,8 @@ class StmtVisitor:
             variant = self.ctx.func_callsite_param_types.get(
                 (fi.name, call_site), ()
             )
-            attrs = (
-                "_current_func_param_types", "_current_func_param_specs",
-                "_current_func_series_param_types", "_current_func_local_types",
-                "_active_func_name",
-            )
+            # The storage memo is keyed by exactly the state replaced here.
+            attrs = self._TUPLE_INFERENCE_CONTEXT
             saved = {attr: getattr(self, attr, None) for attr in attrs}
             param_types = {}
             param_specs = {}
@@ -2678,7 +2718,7 @@ class StmtVisitor:
         saved = getattr(self, "_unmatched_value_na", None)
         # TradingView: an if without else (a switch without default) is na
         # when no arm runs, so a loop whose body ends in one is na after an
-        # iteration that ran none (lab tv probe pf-w2-f04_if_tails).
+        # iteration that ran none.
         self._unmatched_value_na = (
             (target, self._na_value_for_type(value_cpp))
             if value_cpp is not None else None
@@ -2704,7 +2744,7 @@ class StmtVisitor:
         TradingView makes it the value its body's last statement produced on
         the last iteration that reached that statement -- a ``break`` or
         ``continue`` before it keeps the previous value -- and ``na`` when
-        none did (lab tv probes pf-w2-f04_loop_tail / f04_loop_edges).
+        none did.
         """
         visit = {
             ForStmt: self._visit_for,
@@ -2749,8 +2789,8 @@ class StmtVisitor:
         else or a switch without default is na when no arm runs -- a numeric
         or string na, false for a bool -- as a function's last statement,
         nested in a taken arm, and as the value a global, reassigned or local
-        variable takes, which does not keep its previous bar's value (lab tv
-        probe pf-oi-if-tail-na). ``slot_cpp_type`` is the target's C++ type;
+        variable takes, which does not keep its previous bar's value.
+        ``slot_cpp_type`` is the target's C++ type;
         a handle or collection slot keeps its existing lowering. An ``int``
         an epoch reaches is stored ``int64_t`` (``target_cpp_type``, the
         slot's integer width), and its na is the 64-bit sentinel: ``na<int>()``
@@ -2881,8 +2921,7 @@ class StmtVisitor:
         TradingView makes the last statement of a function or an if/switch
         arm its value: ``x := e`` and ``x += e`` (every compound operator)
         yield the target's new value, ``obj.f := e`` the field's, and a
-        declaration ``[var] [T] x = e`` the declared variable's (lab tv probes
-        pf-w2-f04_tails / f04_decl_tail / f04_var_decl_tail).
+        declaration ``[var] [T] x = e`` the declared variable's value.
         """
         if isinstance(stmt, Assignment) and isinstance(
                 stmt.target, (Identifier, MemberAccess)):

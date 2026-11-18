@@ -11,8 +11,7 @@ declaration's or reassignment's target only inside the arms, so a global
 kept the previous bar's value on every bar no arm ran (only a map or matrix
 target got its na, ``emit_implicit_na_fallback``).
 
-TradingView's tape of ``fixtures/open_items_tv/if_tail_na`` (lab tv
---no-note) spells every shape on each exit bar: ``NaN`` for the float tails
+TradingView's tape of ``fixtures/open_items_tv/if_tail_na`` spells every shape on each exit bar: ``NaN`` for the float tails
 (an if, one nested in a taken arm, a switch, an else-if chain), ``na`` for
 ``na()`` of the int and string tails, ``F`` for the bool tail, -7 for ``nz``
 of a local if-value, and ``NaN`` for the global declaration, switch and

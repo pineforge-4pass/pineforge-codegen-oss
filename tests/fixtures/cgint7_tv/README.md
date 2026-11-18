@@ -2,12 +2,9 @@
 
 Synthetic integration probes picked onto codegen main 90bfa0b and their
 unedited TradingView trade exports. They contain no closed or scraped source.
-Each was exported on 2026-09-29 with
+Each was exported on 2026-09-29.
 
-```bash
-lab tv --pine <name>.pine --slug pf-<name, underscores as dashes> --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to <end>
-```
+The intraday fixtures use `BINANCE:ETHUSDT.P` on a 15-minute chart starting 2025-04-01; the end date is listed per fixture.
 
 TradingView ran each from 2025-04-01 00:00 UTC (the export's requested and
 returned range, `rangeProof: covered`). Every probe trades a fixed quantity

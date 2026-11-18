@@ -30,6 +30,7 @@ from .security_contexts import (
 from .block_locals import rename_block_locals
 from .support_checker import check_support as _support_diagnostics
 from .support_checker import check_support_or_raise
+from .support_checker import refusals_await_analysis as _support_refusals_await_analysis
 
 
 def _parse_bounded(pine_source: str, filename: str, budget: TimeBudget | None = None):
@@ -85,10 +86,19 @@ def _generate(pine_source: str, check_support: bool, filename: str,
         ast = bind_scalar_overloads(ast, budget=budget)
         rename_block_locals(ast, renamed)
         support_diagnostics = []
+        # Refusals the support check holds behind the declaration that binds
+        # their receiver are raised after analysis, unchanged, unless analysis
+        # refuses the script first (an object declared under a namespace's
+        # name, at the name). Any other support error refuses at once.
+        support_refusals_held = False
         if check_support:
             support_diagnostics = _support_diagnostics(ast, filename=filename)
             if any(d.level == Level.ERROR for d in support_diagnostics):
-                raise CompileError(support_diagnostics)
+                support_refusals_held = _support_refusals_await_analysis(
+                    ast, support_diagnostics,
+                )
+                if not support_refusals_held:
+                    raise CompileError(support_diagnostics)
         budget.check(phase=Phase.ANALYZER)
         ValueBindings(ast, filename, budget).resolve()
         # Freeze declaration keys before request copies and TA argument text
@@ -102,6 +112,8 @@ def _generate(pine_source: str, check_support: bool, filename: str,
         budget.check(phase=Phase.ANALYZER)
         ctx = Analyzer(ast, filename=filename, budget=budget,
                        session_clones=clones).analyze()
+        if support_refusals_held:
+            raise CompileError(support_diagnostics)
         # Typed receiver dispatch is known only after analysis. Resolve method
         # payload arguments with those bindings, then type the rewritten bodies.
         if specialize_method_security_payloads(

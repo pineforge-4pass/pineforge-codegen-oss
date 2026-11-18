@@ -63,7 +63,7 @@ def _diag(error: CompileError, needle: str):
     return found[0]
 
 
-# Every spelling below compiles on TradingView (pine-facade, 2026-10-01).
+# Every spelling below compiled on TradingView on October 1, 2026.
 SHAPES = {
     # --- arrays: methods and namespace functions reading the history ---
     "method_size": (
@@ -362,7 +362,7 @@ def test_a_method_straight_after_a_collection_history_cites_ce10011(body, line):
 
 
 # An array where TradingView expects something else: each refused there with
-# the code named (pine-facade, 2026-10-01).
+# the code named (TradingView, October 1, 2026).
 SCALAR_CONTEXTS = {
     # These CE10123 forms now stop at the common operator table.
     "equality": ("r = a == a[1] ? 1 : 0\n", "PF-E2066"),
@@ -537,7 +537,7 @@ def test_the_function_scope_probes_are_refused_by_name(name):
     assert any(d.location is not None for d in error.diagnostics)
 
 
-# Forms TradingView accepts (pine-facade, 2026-10-01) that PineForge does not
+# Forms TradingView accepted on October 1, 2026, that PineForge does not
 # lower here, whose earlier lowering compiled: they keep it, with its
 # warning. An array variable's history outside the scopes kept, or read
 # through na() or str.tostring() where only an element was lowered, reads an
@@ -679,7 +679,7 @@ def test_a_read_in_an_emitted_uncalled_body_is_decided_as_emitted(name):
                                   "an_uncalled_function_s_argument_to_a_called_helper": 5}[name]
 
 
-# Uses TradingView refuses (pine-facade, 2026-10-01), each with its code: an
+# Uses TradingView refused on October 1, 2026, each with its code: an
 # array where an element, a number or a string is expected.
 TRADINGVIEW_REFUSED_USES = {
     "push_into_another": ("c = array.new<float>()\nc.push(a[1])\nr = c.size()\n", "CE10123"),

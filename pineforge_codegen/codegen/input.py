@@ -11,7 +11,7 @@ Mixin contract — host class must provide:
 - ``self._resolve_callee`` (``NamingHelper``).
 - ``self._visit_expr`` (visitor mixin, currently on ``base.py``;
   used to render the title-arg fallback expression).
-- ``self._cpp_string_escape`` (``NamingHelper``).
+- ``self._cpp_string_literal`` (``NamingHelper``).
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from ..ast_nodes import (
     MemberAccess,
     NumberLiteral,
     StringLiteral,
+    TupleLiteral,
     UnaryOp,
     VarDecl,
 )
@@ -405,10 +406,6 @@ class InputHelper:
             if proof is not None:
                 return f"0x{proof.value:08X}LL", proof.value
         cpp = self._visit_expr(default) if default is not None else "0"
-        if getter == "get_input_string":
-            # An input's default stays a C string, cut at its first NUL as the
-            # settings receipt documents; the manifest equals both.
-            cpp = self._unsized_std_string(cpp)
         color = (self._literal_color_value(default)
                  if namespace == "input" and func_name == "color" else None)
         return cpp, color
@@ -452,9 +449,7 @@ class InputHelper:
 
         The generic ``input(...)`` overload is typed by its defval in Pine
         v6: ``input("x")`` is a string input, ``input(3)`` an int one and
-        ``input(true)`` a bool one (lab tv tape te_generic_input: its
-        ``str.tostring(n / 2)`` reads "1.5" and its string input spells the
-        order comments). The static getter table cannot see the default, so
+        ``input(true)`` a bool one. The static getter table cannot see the default, so
         the getter follows the default's literal type here. This matters for
         TA lengths too: ``input(15)`` must route to ``get_input_int`` so the
         RMA/EMA ctor receives an int."""
@@ -482,13 +477,14 @@ class InputHelper:
         return self._GETTER_CPP_TYPE[self._input_getter_for_call(node, "input", None)]
 
     def _input_key_literal(self, title: str) -> str:
-        """An assigned key (or option value) as a C++ string literal.
+        """An assigned key (or option value) as a C++ string expression.
 
         Key assignment happens once before lowering, never during escaping.
         A key is arbitrary Pine string text; pasted verbatim, a quote in it
         ends the literal early and a backslash escapes the next character, so
-        the TU no longer compiles."""
-        return f'"{self._cpp_string_escape(title)}"'
+        the TU no longer compiles. A NUL-bearing key also needs its byte count
+        when converted to the getter's or descriptor's std::string."""
+        return self._cpp_string_literal(title)
 
     def _coerce_string_input_default(self, getter: str, default_cpp: str) -> str:
         """String getters take a ``std::string`` default. An unresolved default
@@ -563,6 +559,12 @@ class InputHelper:
         """
         if namespace == "input" and func_name in sigs.INPUT_FUNCTIONS:
             names = sigs.get_param_names("input", func_name)
+            if ("options" in node.kwargs
+                    or (len(node.args) > 2 and isinstance(node.args[2], TupleLiteral))):
+                for signature in sigs.INPUT_FUNCTIONS[func_name].signatures:
+                    if any(param.name == "options" for param in signature.params):
+                        names = [param.name for param in signature.params]
+                        break
         elif func_name == "input" and namespace is None:
             names = sigs.get_param_names(None, "input")
         else:

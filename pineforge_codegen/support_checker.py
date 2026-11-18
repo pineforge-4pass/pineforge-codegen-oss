@@ -260,7 +260,7 @@ BARSTATE_APPROX_VARS: dict[str, str] = {
 
 STRATEGY_UNSUPPORTED_PARAMS: dict[str, set[str]] = {
     "entry": {"alert_message", "disable_alert"},
-    "order": {"comment", "alert_message", "disable_alert", "qty_type"},
+    "order": {"alert_message", "disable_alert", "qty_type"},
     "exit": {"comment_profit", "comment_loss", "comment_trailing", "alert_message", "alert_profit", "alert_loss", "alert_trailing", "disable_alert"},
     "close": {"alert_message", "disable_alert"},
     "close_all": {"alert_message", "disable_alert"},
@@ -319,6 +319,16 @@ UNSUPPORTED_NAMESPACES: dict[str, str] = {
     "footprint":  "footprint.* (bid/ask volume rows) is not supported in PineForge batch backtests; it requires tick-level data the engine does not consume.",
     "volume_row": "volume_row.* is not supported in PineForge batch backtests; same reason as footprint.*.",
 }
+
+# On the checked program: the refusals of a built-in namespace's member that
+# ``SupportChecker`` holds behind the declaration that binds the receiver
+# (``_hold_behind_declaration``, ``refusals_await_analysis``), each named by
+# its ``id()``. The annotation holds no ``Diagnostic``: a pass that walks a
+# program's attributes walks its annotations too, and a diagnostic's ``Level``
+# refers to its enum class, whose members refer back to it. The identities are
+# lookup keys into the check's own diagnostics, which keep the held refusals
+# alive; nothing orders by them and nothing emits them.
+_HELD_REFUSALS_ANNOTATION = "pf_held_support_refusals"
 
 # Member-access references with no batch-mode equivalent. Reject loudly.
 # (Currently empty — the chart.* cosmetic reads moved to COSMETIC_MEMBERS.)
@@ -434,10 +444,9 @@ SECURITY_ADJUSTMENT_ALLOWED_VALUES: dict[str, frozenset[str]] = {
 SECURITY_CURRENT_SYMBOL_NAMES: frozenset[str] = frozenset({"syminfo.tickerid", "syminfo.ticker"})
 
 # Built-in namespaces a library import may alias, with their built-in
-# members. TradingView's pine-facade compile of ``import TradingView/ta/7``
-# links no library (``metaInfo.usedLibs`` stays empty) when the script names
-# only built-in ``ta.*`` members, and links it for a library-only name such
-# as ``ta.dema`` (XSYM-DESIGN report 1.3): such an import is a no-op. Every
+# members. TradingView's compiler links no library for ``import TradingView/ta/7``
+# when the script names only built-in ``ta.*`` members. It links the library
+# for a library-only name such as ``ta.dema``. The first form is a no-op. Every
 # other import stays refused.
 BUILTIN_NAMESPACE_IMPORT_MEMBERS: dict[str, frozenset[str]] = {
     "ta": frozenset(sigs.TA_FUNCTIONS) | TA_PROPERTY_VARIABLES,
@@ -711,10 +720,24 @@ class SupportChecker:
         self._user_func_defs: dict[int, FuncDef] = {}
         self._user_func_calls: dict[str, list[FuncCall]] = {}
         self._overloaded_user_funcs: set[str] = set()
+        # The test for a receiver a declaration statement binds, built at the
+        # first refusal that asks, and the refusals held behind such a
+        # declaration (``_hold_behind_declaration``).
+        self._bound_by_statement: Callable[[Identifier], bool] | None = None
+        self._held_refusals: list[Diagnostic] = []
 
     # -- Public API --
 
     def check(self) -> list[Diagnostic]:
+        # The held identities name this check's diagnostics only. An earlier
+        # check's go with it: its diagnostics may be gone, and an identity
+        # that outlived them could name another object.
+        annotations = self._ast.annotations or {}
+        if _HELD_REFUSALS_ANNOTATION in annotations:
+            self._ast.annotations = {
+                key: value for key, value in annotations.items()
+                if key != _HELD_REFUSALS_ANNOTATION
+            }
         # Refuse invalid math keywords before declaration folding or unrelated
         # request/visual diagnostics. Keep check() a diagnostic-returning API,
         # and check unused bodies and unselected arms as well.
@@ -745,6 +768,13 @@ class SupportChecker:
         self._strategy_constant_decls = declaration_only_constants(self._ast)
         for stmt in self._ast.body:
             self._visit(stmt)
+        if self._held_refusals:
+            self._ast.annotations = {
+                **(self._ast.annotations or {}),
+                _HELD_REFUSALS_ANNOTATION: tuple(
+                    id(refusal) for refusal in self._held_refusals
+                ),
+            }
         return self._diagnostics
 
     def check_or_raise(self) -> None:
@@ -1244,6 +1274,41 @@ class SupportChecker:
         self._visit_children(node)
         return True
 
+    def _hold_behind_declaration(
+        self, receiver: Identifier, refusal: Diagnostic,
+    ) -> None:
+        """Hold ``refusal``, of a built-in namespace's member read through
+        ``receiver``, behind the declaration that binds ``receiver``.
+
+        This check reads names before scoping, so it refuses the read by the
+        receiver's spelling. Where a plain or destructuring declaration of
+        the script binds the receiver at the read, the read is that
+        declaration's value and Pine judges the declaration first:
+        TradingView refuses an object declared under a namespace's name at
+        the name (CE10093), which the analyzer reports there (PF-E2065).
+
+        Nothing is dropped. The refusal stays in this check's diagnostics, at
+        its level and place. It is only raised after analysis, and only when
+        every error of the check is held (``refusals_await_analysis``); a
+        script analysis accepts, such as one that declares a number under the
+        name, is refused by it unchanged.
+
+        A receiver nothing binds is the built-in namespace, and a parameter
+        or a loop variable is not a declaration statement the object-name
+        rule judges: those refusals are raised at once, as before. So is
+        every read the lexical test cannot prove bound
+        (``value_bindings.declaration_statement_reads``).
+        """
+        if refusal.level is not Level.ERROR:
+            return
+        if self._bound_by_statement is None:
+            from .analyzer.value_bindings import declaration_statement_reads
+            self._bound_by_statement = declaration_statement_reads(
+                self._ast, self._filename,
+            )
+        if self._bound_by_statement(receiver):
+            self._held_refusals.append(refusal)
+
     # -- Visitor dispatch --
 
     def _visit(self, node: ASTNode | None) -> None:
@@ -1528,7 +1593,7 @@ class SupportChecker:
         if/switch arm's value and as a request.security expression:
         ``[a, b] = [close, open]`` and ``t = [close, open]`` are "Syntax
         error at input '['" (CE10156), ``[a, b] = c ? [x, y] : [y, x]`` is
-        "Ternary operations cannot return tuples" (lab tv --no-note). The
+        "Ternary operations cannot return tuples". The
         tuple declarations reached the C++ as a dropped statement ("/*
         unsupported tuple assignment */", their names left at 0), the plain
         declaration a tuple assigned to a double.
@@ -1861,11 +1926,12 @@ class SupportChecker:
             self._visit_children(node)
             return
 
-        if ns == "strategy" and name == "default_entry_qty":
-            # One numeric price, as TradingView binds it: a call that binds
-            # to nothing (no price, a second price, an unknown or repeated
-            # argument name) has no value to lower. A registered namespace
-            # signature must bind even in a non-default switch arm
+        if ns == "strategy" and name in (
+            "default_entry_qty", "convert_to_account", "convert_to_symbol",
+        ):
+            # Each signature requires one numeric value: a missing, extra,
+            # unknown or repeated argument has no valid binding to lower.
+            # A registered namespace signature must bind even in a non-default switch arm
             # (``_check_builtin_arguments``), so the refusal stays an error there.
             if not self._check_builtin_arguments(
                     node, full, func=sigs.STRATEGY_FUNCTIONS[name]):
@@ -1904,8 +1970,8 @@ class SupportChecker:
             self._visit_children_const_ok(node)
             return
         if ns == "request" and name in sigs.REQUEST_FUNCTIONS:
-            # Currency rates have no feed: codegen stops the run only where
-            # the call is evaluated, including when its value reaches a trade.
+            # The host supplies currency rates. Validate all arguments even
+            # when a lazy branch will skip the runtime query.
             self._check_builtin_arguments(node, full, func=sigs.REQUEST_FUNCTIONS[name])
             self._visit_children(node)
             return
@@ -2231,13 +2297,20 @@ class SupportChecker:
                 hint=BARSTATE_APPROX_VARS[chain],
             )
         # Whole-namespace rejections via member access (e.g. footprint.SomeType).
-        if isinstance(node.object, Identifier) and self._reject_if_in(
-            UNSUPPORTED_NAMESPACES,
-            node.object.name,
-            node,
-            lambda k, v: f"{k}.{node.member}: {v}",
-        ):
-            return
+        if isinstance(node.object, Identifier):
+            refused = len(self._diagnostics)
+            if self._reject_if_in(
+                UNSUPPORTED_NAMESPACES,
+                node.object.name,
+                node,
+                lambda k, v: f"{k}.{node.member}: {v}",
+            ):
+                # The refusal is the first diagnostic of this read; the
+                # receiver's own visit may have added others after it.
+                self._hold_behind_declaration(
+                    node.object, self._diagnostics[refused],
+                )
+                return
         # Cosmetic / chart-only member reads (chart.fg_color/bg_color/visible
         # bar times). No backtest-logic effect; warn and let codegen emit the
         # benign default (chart.* -> 0 via SKIP_NAMESPACES in visit_expr.py).
@@ -2775,7 +2848,7 @@ class SupportChecker:
 
         Registered bare builtins and unary math calls that bind are
         rewritten positionally by ``builtin_keywords``; request.currency_rate
-        uses the same validation before its evaluation-time stop.
+        uses the same validation before its evaluation-time host query.
         Returns True when the arguments bind.
         """
         if func is None:
@@ -3261,6 +3334,27 @@ def check_selection_value_arms(
 
 def check_support(ast: Program, filename: str = "<input>") -> list[Diagnostic]:
     return SupportChecker(ast, filename=filename).check()
+
+
+def refusals_await_analysis(ast: Program, diagnostics: list[Diagnostic]) -> bool:
+    """Whether analysis of ``ast`` runs before ``diagnostics`` are raised.
+
+    True only when ``diagnostics``, the support check of ``ast``, has errors
+    and holds every one of them behind the declaration that binds its
+    receiver (``SupportChecker._hold_behind_declaration``). The caller then
+    analyzes the script: a refusal of that declaration is the script's
+    diagnostic, and without one the caller raises ``diagnostics`` unchanged.
+    One error that is not held refuses the script at once, as before.
+
+    The program names its held refusals by identity, so ``diagnostics`` are
+    the ones that check returned: they keep every held refusal alive, and an
+    error is held only when it is that very object.
+    """
+    held = frozenset(
+        (ast.annotations or {}).get(_HELD_REFUSALS_ANNOTATION, ())
+    )
+    errors = [d for d in diagnostics if d.level == Level.ERROR]
+    return bool(errors) and all(id(error) in held for error in errors)
 
 
 def check_support_or_raise(ast: Program, filename: str = "<input>") -> None:

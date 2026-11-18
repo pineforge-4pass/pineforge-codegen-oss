@@ -330,16 +330,17 @@ def test_grouping_around_consecutive_not_keeps_the_refusal(
     )
 
 
-def test_string_ordering_reports_the_first_string_operand() -> None:
+@pytest.mark.parametrize("operator", ["<", "<=", ">", ">="])
+def test_string_ordering_reports_the_first_string_operand(operator: str) -> None:
     _assert_diagnostic(
         _script(
             'string a = "a"\n'
             'string b = "b"\n'
-            "value = a < b\n"
+            f"value = a {operator} b\n"
         ),
         "PF-E2052",
-        "Cannot order string values with <.",
-        {"op": "<"},
+        f"Cannot order string values with {operator}.",
+        {"op": operator},
         5,
         9,  # a is the first operand of the ordered comparison.
     )

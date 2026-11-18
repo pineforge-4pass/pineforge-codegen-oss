@@ -1,21 +1,10 @@
 # Drawing lifetime tapes
 
-Which drawings does TradingView delete, and what does a deleted one read? Each
-directory is one `lab tv --no-note` export (channel `ws-report-v1`,
-`rangeProof: covered`, BINANCE:ETHUSDT.P 15, 2025-04-01 .. 2025-05-01), byte
-for byte: `strategy.pine`, `tv_trades.csv` (times at UTC+8), `metrics.json`,
-`meta.json`. The probes are synthetic, written for these lanes; no closed or
-scraped strategy is involved. Every readout is an entry whose comment carries
-the values the script read on its bar (the entry fills at the next bar's open).
-The `w8b-*` tapes are copied from
-`exec/W8B-SIGSTATE-2-scratch/synth/tapes/`), the `w9dg-*` tapes lane
-CG-W9-MISC's.
-
-```sh
-source ~/code/pineforge-workflow/campaign/env.sh
-lab tv --pine <probe>.pine --symbol BINANCE:ETHUSDT.P --interval 15 \
-  --from 2025-04-01 --to 2025-05-01 --out <dir>/<tape> --slug <tape> --no-note --json
-```
+Which drawings does TradingView delete, and what does a deleted one read?
+These synthetic examples use 15-minute BINANCE:ETHUSDT.P bars from April 1
+through May 1, 2025. Each directory contains `strategy.pine`, `tv_trades.csv`
+(times at UTC+8), `metrics.json`, and `meta.json`. The entry comments record
+the values read on the bar before each entry fills.
 
 The rules, and the tapes that pin them:
 

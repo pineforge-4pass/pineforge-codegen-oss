@@ -2,12 +2,9 @@
 
 Synthetic probes for user-defined-type history: the history-referencing
 operator `[]` on a user-defined object or a drawing reference. They contain no
-closed or scraped source. The twelve tapes were exported on 2026-10-01 with
+closed or scraped source. The twelve tapes were exported on 2026-10-01.
 
-```bash
-lab tv --pine <name>.pine --slug pf-<name, underscores as dashes> --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-08
-```
+The fixtures use `BINANCE:ETHUSDT.P` on a 15-minute chart, from 2025-04-01 through 2025-04-08.
 
 TradingView ran each from 2025-04-01 00:00 UTC (the export's requested and
 returned range, `rangeProof: covered`). Every probe trades a fixed quantity
@@ -143,8 +140,8 @@ probes' `-1` / `x` placeholders):
 
 ## Spellings TradingView refuses or stops on
 
-TradingView's pine-facade compiler (`save/new_draft`, 2026-10-01) refuses
-these probes, so they have no tape:
+TradingView's compiler refused these examples on October 1, 2026, so
+there are no runtime samples for them:
 
 | Probe | TradingView's answer |
 |---|---|

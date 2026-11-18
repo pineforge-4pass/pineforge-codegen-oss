@@ -1,11 +1,21 @@
-"""Unrelated callable C++ stays byte-identical to the reference tree."""
+"""Unrelated callable C++ stays byte-identical to the reference tree.
+
+One row is no longer unrelated: a call of an overloaded function with the result
+of an untyped function now binds by the type of that result. That row keeps the
+part of its reference comparison that still holds, and pins the new binding and
+the values it computes (``_assert_identity_forward_runs_the_float_declaration``).
+"""
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
+from pineforge_codegen import transpile
 from pineforge_codegen.ast_nodes import FuncDef
 from pineforge_codegen.library_modules import parse_library_module
+from tests._compile import run_emitted_tu
 from tests._e2e import reference_codegen, transpile_json
 from tests._pine_libraries import Layout, library_text
 from tests.test_builtin_named_locals_scope import (
@@ -89,11 +99,149 @@ def _cpp_pair(source, paths, reference, tmp_path):
     return before["cpp"], after["cpp"]
 
 
+# The script of the ``scalar-overloads`` row with plots exposing both values.
+_FORWARD_PLOTS = "plot(unknownResult)\nplot(floatResult)\n"
+_MEASURED_FORWARD_SCRIPT = '''//@version=6
+strategy("function overloads")
+probe(float value) => value
+probe(int value) => value + 1
+identity(value) => value
+floatResult = probe(close - open)
+intResult = probe(2)
+unknownResult = probe(identity(close - open))
+plot(unknownResult)
+plot(floatResult)
+'''
+# The bars of the native run, as (open, high, low, close). Every close - open has a
+# fraction, of either sign and at several magnitudes. Some are not the decimal
+# difference of the prices written here: in binary64, 2094.88 - 2105.37 is not -10.49.
+_FORWARD_BARS = (
+    (10.0, 15.0, 9.0, 12.5),
+    (100.1, 103.0, 99.0, 102.35),
+    (2105.37, 2110.0, 2090.0, 2094.88),
+    (0.75, 1.0, 0.25, 0.3),
+    (64250.1, 64260.0, 64249.0, 64250.4),
+)
+
+
+def _naming(cpp: str, name: str) -> list[str]:
+    """The lines of ``cpp`` that name ``name`` and do not name the forwarded result."""
+    return [
+        line for line in cpp.splitlines()
+        if re.search(rf"\b{name}\b", line) and not re.search(r"\bunknownResult\b", line)
+    ]
+
+
+def _assignments(cpp: str, name: str) -> list[str]:
+    """The statements of ``cpp`` that assign the script variable ``name``."""
+    return [
+        line.strip() for line in cpp.splitlines()
+        if line.strip().startswith(name + " = ")
+    ]
+
+
+def _forwarded_declarations(cpp: str) -> list[str]:
+    """The ``probe`` declarations, by their emitted names, that the one statement
+    assigning ``unknownResult`` from the overloaded call runs."""
+    statements = [line for line in _assignments(cpp, "unknownResult") if "probe" in line]
+    assert len(statements) == 1, statements
+    return re.findall(r"\b(\w*probe\w*)\(", statements[0])
+
+
+def _forward_driver() -> str:
+    """Runs each bar on a strategy of its own and prints the three results, the
+    floats with every digit a binary64 number needs to be read back exactly."""
+    bars = "".join(
+        f"        {{{bar[0]!r}, {bar[1]!r}, {bar[2]!r}, {bar[3]!r}, 1.0, {index * 60000}}},\n"
+        for index, bar in enumerate(_FORWARD_BARS)
+    )
+    return r'''
+#include <iomanip>
+#include <iostream>
+#include <limits>
+int main() {
+    Bar bars[] = {
+''' + bars + r'''    };
+    std::cout << std::setprecision(std::numeric_limits<double>::max_digits10);
+    for (Bar& bar : bars) {
+        GeneratedStrategy strategy;
+        strategy.run(&bar, 1, "", "");
+        if (!strategy.last_error().empty()) {
+            std::cerr << strategy.last_error() << "\n";
+            return 1;
+        }
+        std::cout << strategy.unknownResult << " " << strategy.floatResult << " "
+                  << strategy.intResult << "\n";
+    }
+}
+'''
+
+
+def _assert_identity_forward_runs_the_float_declaration(source, before, after):
+    """The ``scalar-overloads`` row: what replaced its whole-C++ comparison.
+
+    ``identity`` declares no type and returns its argument, here the float
+    ``close - open``. The reference tree could not prove that type and left the call
+    on the last declaration, ``probe(int)``, so it stored the result as an int. The
+    call now binds by the value's type and runs ``probe(float)``, so this row's C++
+    cannot equal the reference's any more.
+
+    The native check below computes the expected float result from the open and
+    close of each input bar. It compares both calls with that value and checks
+    the direct int call separately. This checks the generated code for this script.
+    """
+    # The plotted script is this row's source and the two plot calls, to the byte.
+    assert source + _FORWARD_PLOTS == _MEASURED_FORWARD_SCRIPT
+    assert len(_MEASURED_FORWARD_SCRIPT.encode("utf-8")) == 266
+
+    # What still equals the reference: everything before the storage of the
+    # forwarded result, and every line of the two calls the change does not reach.
+    reference_storage = "    int unknownResult = 0;\n"
+    current_storage = "    double unknownResult = 0.0;\n"
+    assert before.count(reference_storage) == 1 and current_storage not in before
+    assert after.count(current_storage) == 1 and reference_storage not in after
+    assert after[:after.index(current_storage)] == before[:before.index(reference_storage)]
+    for name in ("floatResult", "intResult"):
+        unchanged = _naming(before, name)
+        # At least the member and the statement that assigns it.
+        assert len(unchanged) >= 2, unchanged
+        assert _naming(after, name) == unchanged
+
+    # The binding: the reference ran the last declaration, this tree runs the first,
+    # which is the float one. The plot calls leave the three assignments as they are.
+    assert _forwarded_declarations(before) == ["probe"]
+    assert _forwarded_declarations(after) == ["pf_overload_probe_1"]
+    assert "    double pf_overload_probe_1(double value) {\n" in after
+    measured = transpile(_MEASURED_FORWARD_SCRIPT)
+    for name in ("floatResult", "intResult", "unknownResult"):
+        assert _assignments(after, name), name
+        assert _assignments(measured, name) == _assignments(after, name)
+
+    # The values, from the bars this test feeds: the forwarded result and the direct
+    # float call are both close - open, bit for bit, where the int declaration could
+    # only return a whole number. probe(2) is the int declaration's own 2 + 1.
+    rows = run_emitted_tu(
+        after, _forward_driver(), opt="-O0",
+        label="identity result forwarded to an overload",
+    ).splitlines()
+    assert len(rows) == len(_FORWARD_BARS), rows
+    for (open_, _high, _low, close), row in zip(_FORWARD_BARS, rows):
+        difference = close - open_
+        assert difference != int(difference), "each bar needs a fractional close - open"
+        unknown, direct, integer = row.split()
+        assert float(unknown) == difference, (row, difference)
+        assert float(direct) == difference, (row, difference)
+        assert int(integer) == 2 + 1, row
+
+
 @pytest.mark.parametrize("source,paths", _SOURCES)
 def test_scripts_without_builtin_named_parameters_keep_complete_cpp(
     source, paths, reference, tmp_path,
 ):
     before, after = _cpp_pair(source, paths, reference, tmp_path)
+    if source == PROBE:
+        _assert_identity_forward_runs_the_float_declaration(source, before, after)
+        return
     assert after == before
 
 

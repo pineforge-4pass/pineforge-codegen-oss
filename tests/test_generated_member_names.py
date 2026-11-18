@@ -91,6 +91,8 @@ _ALLOCATED_FAMILIES = (
      "base.py allocates UDT support against authored and generated names"),
     (r"_PFSliceArray(?:__pf\d+)?|_pf_slice_(?:view|copy)(?:__pf\d+)?",
      "array_slice.py allocates support names against authored names"),
+    (r"_PFSeriesSma(?:__pf\d+)?",
+     "ta.py allocates the series SMA support type against authored names"),
     (r"_PF(?:ArrayJournal|CachedCollectionHistory|HistoryVersionClock)"
      r"(?:__pf\d+)?|_pf_(?:array_journal|history_versions|next_generation)\w*",
      "base.py and history_sharing.py allocate against authored names"),
@@ -187,6 +189,24 @@ def _emitted_fixed_names():
 
 _FIXED_NAMES = _emitted_fixed_names()
 
+# Keep the existing binding cases for this allocated name even though it
+# is no longer part of the fixed-name census.
+_ALLOCATED_BINDING_CONTROLS = {"_PFSeriesSma"}
+
+# base.py declares the four drawing arenas in a (record, member) loop, so the
+# census above sees only an interpolated declarator and drops them. They stay
+# in the census as these explicit witnesses. Every binding case that names one
+# reads the C++ the compiler emits and checks the witnesses against the real
+# declarations, so a removed, misspelled or retyped arena goes red.
+_DRAWING_ARENA_MEMBERS = {
+    "_pf_lines_": "LineRec",
+    "_pf_boxes_": "BoxRec",
+    "_pf_labels_": "LabelRec",
+    "_pf_linefills_": "LinefillRec",
+}
+for _arena in _DRAWING_ARENA_MEMBERS:
+    _FIXED_NAMES.setdefault(_arena, set()).add("base.py:drawing arena declarations")
+
 # Representatives of the unallocated families, including nested requested
 # state, tuple results, TA variants and the legacy inline-history kinds.
 # Locations name their declaration or the naming expression it interpolates.
@@ -267,17 +287,39 @@ def _spelling(source, name):
     return generator._safe_name(name)
 
 
+_ARENA_DECLARATION = re.compile(
+    r"(?m)^ {4}(?:pineforge::)?DrawingArena<(?:pineforge::)?(?P<record>\w+)> "
+    r"(?P<member>\w+)\{_PF_DRAWING_UNBOUNDED\};$"
+)
+
+
+def _declared_arenas(cpp):
+    """The (member, record) pairs of the arenas the generated class declares."""
+    return sorted(
+        (match["member"], match["record"])
+        for match in _ARENA_DECLARATION.finditer(cpp)
+    )
+
+
 # Pine keywords cannot be authored bindings, even when they appear in emitted C++.
 @pytest.mark.parametrize("name", sorted(
-    (_FIXED_NAMES.keys() | _NUMBERED_NAMES.keys()) - KEYWORDS.keys()
+    (_FIXED_NAMES.keys() | _NUMBERED_NAMES.keys() | _ALLOCATED_BINDING_CONTROLS)
+    - KEYWORDS.keys()
 ))
 @pytest.mark.parametrize("position", ["global-var", "helper-local", "parameter"])
 @pytest.mark.parametrize("string", [False, True], ids=["numeric", "string"])
 def test_generated_name_bindings_preserve_complete_cpp(name, position, string):
     source = _source(name, position, string)
     spelling = _spelling(source, name)
+    if name in _ALLOCATED_BINDING_CONTROLS:
+        assert spelling == name
     cpp = transpile(source)
     control = transpile(_source("aa", position, string))
+    if name in _DRAWING_ARENA_MEMBERS:
+        # The reserved arena member must not be the binding's spelling, and the
+        # class around that binding still declares exactly the witnessed arenas.
+        assert spelling != name, "the binding rule must move the authored name aside"
+        assert _declared_arenas(cpp) == sorted(_DRAWING_ARENA_MEMBERS.items())
     assert re.search(rf"\b{re.escape(spelling)}\b", cpp), spelling
     # Include declarations, all uses, history keys and checkpoint/reset code.
     # Names derived from a binding (state flags, store keys) hold its spelling
@@ -310,7 +352,7 @@ def test_ordinary_names_keep_reference_cpp(position, string, reference, tmp_path
         from tests.test_string_local_history_concat import with_string_join_fixed
 
         # The reference joined a string local with its previous value through
-        # std::to_string (issue #354); that one site is the whole difference.
+        # std::to_string (issue #354).
         expected = with_string_join_fixed(expected)
         # It also counted str.length in bytes, through no unit helper.
         expected = with_utf16_units(expected)

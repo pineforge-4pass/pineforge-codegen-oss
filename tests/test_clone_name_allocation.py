@@ -625,7 +625,7 @@ def clone_reference():
     (_BLOCK_MEMBER, "x__blk1"),
     (_RESERVED_CALLABLE, "_sec7"),
     (_FRESH_FIXNAN, None),
-])
+], ids=[f"{_VAR_CLONE}-acc_cs1", f"{_METHOD_CLONE}-f_cs1", None, None, None])
 def test_noncolliding_controls_keep_complete_reference_cpp(
     source, original, clone_reference, tmp_path
 ) -> None:

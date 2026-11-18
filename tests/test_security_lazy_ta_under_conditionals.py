@@ -244,7 +244,7 @@ def test_chart_context_conditional_ta_is_inline_without_history_read():
 
 def test_chart_context_conditional_ta_with_history_read_is_hoisted_every_bar():
     """With ``[1]`` on the call TradingView advances the built-in every bar
-    (lab tv 2026-09-03, ``... and close > ta.ema(close, 5)[1]`` 23/23 vs
+    (2026-09-03, TradingView: ``... and close > ta.ema(close, 5)[1]`` 23/23 vs
     per-call 27): codegen hoists it before the statement."""
     cpp = transpile(_strategy(
         "c = close > open\n"

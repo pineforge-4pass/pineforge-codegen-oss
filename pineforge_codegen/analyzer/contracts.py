@@ -24,6 +24,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..errors import Diagnostic, SourceLocation
+from ..intrinsic_binding import BoundIntrinsicCall
 from ..symbols import PineType, TypeSpec
 
 
@@ -199,6 +201,9 @@ class SecurityCallInfo:
     # The request call's source location (``request_discovery`` names the
     # site by its line).
     loc: Any = None
+    # Structured payloads cannot use the legacy scalar float storage.
+    result_type_spec: TypeSpec | None = None
+    tuple_element_specs: tuple[TypeSpec | None, ...] = ()
 
 
 @dataclass
@@ -253,6 +258,11 @@ class AnalyzerContext:
     # First lexical resolution to an exact declaration binder. Scope names
     # such as "for" are shared by sibling and nested loops.
     identifier_decl_bindings: dict = field(default_factory=dict)  # id(Identifier) -> (id(declaration), name) | None
+    # The lexical resolver's binding of every authored use in this tree, a
+    # write target or an unvisited read included: its declaration, its loop,
+    # or the callable declaring it as a parameter. None names a builtin or
+    # nothing. A callable's nested blocks own their scopes here.
+    identifier_lexical_bindings: dict = field(default_factory=dict)  # id(Identifier) -> (id(declaring node), name) | None
     # id(VarDecl) -> PineType for accepted differing primitive block shadows
     # and their direct script declarations. Other storage keeps its gates.
     primitive_block_shadow_types: dict = field(default_factory=dict)
@@ -416,3 +426,14 @@ class AnalyzerContext:
     # emitted. Stored as ``list`` (not ``list[PfTracePragma]``) to
     # keep this module free of imports back into ``pragmas.py``.
     pf_trace_pragmas: list = field(default_factory=list)
+    # (lexical owner, selected binding, parameter index, located diagnostic).
+    # Only newly qualified element-store errors are deferred. Existing parent
+    # refusals stay eager and never enter this list.
+    builtin_bool_na_intents: list[
+        tuple[str | None, BoundIntrinsicCall, int, Diagnostic]
+    ] = field(default_factory=list)
+    # Unproved bindings retain admission; these are internal source gaps,
+    # not new warnings or refusals: (owner, location, builtin name, reason).
+    builtin_bool_na_needs: list[
+        tuple[str | None, SourceLocation, str, str]
+    ] = field(default_factory=list)

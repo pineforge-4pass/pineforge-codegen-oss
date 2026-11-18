@@ -2,8 +2,8 @@
 
 TradingView names the parameters ``nz(source, replacement)`` and
 ``fixnan(source)``, and evaluates a call's arguments in parameter order
-whatever order they are written in (lab tv probes pf-oi-kw-names and
-pf-oi-kw-order: ``nz(replacement = r(), source = s())`` runs ``s`` first).
+whatever order they are written in: ``nz(replacement = r(), source = s())``
+runs ``s`` first.
 The analyzer and the codegen read these calls by position, so a keyword
 form reached them as a call without its source (``nz(source = x)`` and
 ``fixnan(source = x)`` raised IndexError) or with its replacement dropped
@@ -13,6 +13,9 @@ rewrites every call that binds with its arguments in parameter order.
 Registered math records with complete keyword sets use the same binding,
 so their supplied expressions reach analysis and requested-helper emission
 positionally, including both overloads of ``math.round``.
+
+The same binding gives ``na(x = value)`` its operand before bool checking
+and emission.
 
 The calls whose single parameter is a timeframe or a trade number
 (``timeframe.change``, ``timeframe.in_seconds``, the accessors of
@@ -36,6 +39,7 @@ from .limits import iter_ast_nodes
 from . import signatures as sigs
 
 POSITIONAL_BUILTINS = {
+    "na": sigs.BUILTIN_FUNCTIONS["na"],
     "nz": sigs.BUILTIN_FUNCTIONS["nz"],
     "fixnan": sigs.BUILTIN_FUNCTIONS["fixnan"],
 }

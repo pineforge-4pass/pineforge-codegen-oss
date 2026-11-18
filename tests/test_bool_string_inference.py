@@ -9,6 +9,9 @@ Complete-C++ compatibility controls deliberately retain their frozen reference.
 from __future__ import annotations
 
 import datetime as dt
+import difflib
+import hashlib
+import json
 
 import pytest
 
@@ -560,12 +563,408 @@ def test_string_consumers_keep_explicit_bool_conversion(
         _assert_native_text(tmp_path, native_env, body, expression, condition)
 
 
+def _one_call(statement: str, name: str) -> str:
+    """The one emitted ``name(...)`` statement of a script placing ``statement``."""
+    cpp = transpile(HEADER + statement + "\n")
+    lines = [line.strip() for line in cpp.splitlines() if line.strip().startswith(name + "(")]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
+@pytest.mark.parametrize("comment", ('"plain"', "str.tostring(close)", 'str.format("{0}", close)'))
+def test_order_comment_lowers_as_the_entry_comment_does(comment):
+    """An order forwards its comment, lowered exactly as an entry's comment is.
+
+    These comments were frozen-C++ controls while the order's comment was not
+    emitted. It is emitted now, once, as the host door's last argument, so the
+    control is the lowering the same build gives the same expression as a
+    ``strategy.entry`` comment. The calls without a comment locate the argument:
+    no emitted text is spelled here.
+    """
+    entry_tail = ', "", 0, -1);'  # after an entry's comment: oca_name, oca_type, qty_type
+    bare_entry = _one_call('strategy.entry("L", strategy.long, qty = 1)', "strategy_entry")
+    bare_order = _one_call('strategy.order("L", strategy.long, qty = 1)', "strategy_order")
+    assert bare_entry.endswith('""' + entry_tail), bare_entry
+    assert bare_order.endswith(', "");'), bare_order
+    entry = _one_call(
+        f'strategy.entry("L", strategy.long, qty = 1, comment = {comment})', "strategy_entry")
+    entry_head = bare_entry[:-len('""' + entry_tail)]
+    assert entry.startswith(entry_head) and entry.endswith(entry_tail), entry
+    lowered = entry[len(entry_head):-len(entry_tail)]
+    assert lowered and lowered != '""', entry
+    order = _one_call(
+        f'strategy.order("L", strategy.long, qty = 1, comment = {comment})', "strategy_order")
+    assert order == bare_order[:-len('"");')] + lowered + ");"
+
+
+# The compiler whose complete output is the baseline of an order that has a
+# comment. It is an ancestor of main; its ``strategy_order`` has seven arguments
+# and it never lowers an order's comment. It is pinned here, apart from
+# NUMERIC_REFERENCE, which other repairs move: this pin must stay a commit that
+# does not emit an order's comment.
+ORDER_COMMENT_REFERENCE = "883221a00585e16a8e9802b4c16a7c85bf8fa4b8"
+_REFERENCE_ORDER_ARGUMENTS = 7  # id, direction, qty, limit, stop, oca_name, oca_type
+_ORDER_COMMENT_KEYWORD = ", comment = "
+# How that compiler writes the order-shapes receipt into its C++: one function
+# whose one statement passes ``checked_settings::receipt`` a string literal. The
+# literal holds the receipt document's JSON text, itself written as a JSON
+# string, so the document's own quotes are escaped inside it.
+_ORDER_SHAPES_FUNCTION = "int strategy_order_shapes_receipt("
+_RECEIPT_CALL = "::pineforge::checked_settings::receipt("
+_RECEIPT_ARGUMENTS = ", json, capacity, required);"
+
+
+def _argument_spans(statement: str) -> list[tuple[int, int]]:
+    """Where each top-level argument of the call statement ``name(...);`` sits.
+
+    A comma splits two arguments only outside every bracket and every string or
+    character literal, so a lowering with commas inside either stays whole.
+    """
+    assert statement.endswith(");"), statement
+    spans = []
+    depth = 0
+    start = statement.index("(") + 1
+    stop = len(statement) - len(");")
+    index = start
+    while index < stop:
+        char = statement[index]
+        if char in "\"'":
+            index += 1
+            while statement[index] != char:
+                index += 2 if statement[index] == "\\" else 1
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            spans.append((start, index))
+            start = index + 1
+            while statement[start] == " ":
+                start += 1
+        index += 1
+    assert depth == 0, statement
+    spans.append((start, stop))
+    return spans
+
+
+def _the_call(cpp: str, name: str) -> tuple[list[str], int]:
+    """``cpp`` split at newlines, and the index of its one ``name(...)`` statement."""
+    lines = cpp.split("\n")
+    found = [index for index, line in enumerate(lines) if line.strip().startswith(name + "(")]
+    assert len(found) == 1, (name, [lines[index] for index in found])
+    return lines, found[0]
+
+
+def _reference_cpp(reference, tmp_path, label: str, statement: str) -> str:
+    """The real C++ the reference compiler emits for ``statement`` under ``HEADER``."""
+    pine = tmp_path / f"{label}.pine"
+    pine.write_text(HEADER + statement + "\n", encoding="utf-8")
+    emitted = transpile_json(pine, reference)
+    assert emitted["ok"], (label, emitted.get("diagnostics"))
+    assert isinstance(emitted["cpp"], str) and emitted["cpp"].strip(), label
+    return emitted["cpp"]
+
+
+def _entry_comment_lowering(control_cpp: str, commented_cpp: str) -> str:
+    """What the reference puts where an entry's empty comment ``""`` was, once it has one.
+
+    The two outputs are of one entry with and without a ``comment``. Their one
+    ``strategy_entry`` call each must agree argument for argument but one, and
+    that one is ``""`` in the control: it is the comment's slot, and its text in
+    the commented call is the reference's own lowering of the comment.
+    """
+    control_lines, control_at = _the_call(control_cpp, "strategy_entry")
+    commented_lines, commented_at = _the_call(commented_cpp, "strategy_entry")
+    control = control_lines[control_at].strip()
+    commented = commented_lines[commented_at].strip()
+    control_spans, commented_spans = _argument_spans(control), _argument_spans(commented)
+    control_arguments = [control[start:stop] for start, stop in control_spans]
+    commented_arguments = [commented[start:stop] for start, stop in commented_spans]
+    shared = min(len(control_arguments), len(commented_arguments))
+    head = 0
+    while head < shared and control_arguments[head] == commented_arguments[head]:
+        head += 1
+    tail = 0
+    while (tail < shared - head
+           and control_arguments[-1 - tail] == commented_arguments[-1 - tail]):
+        tail += 1
+    assert control_arguments[head:len(control_arguments) - tail] == ['""'], (control, commented)
+    assert len(commented_arguments) - tail > head, (control, commented)
+    first = commented_spans[head][0]
+    last = commented_spans[len(commented_arguments) - tail - 1][1]
+    assert commented[:first] == control[:control_spans[head][0]], (control, commented)
+    assert commented[last:] == control[control_spans[head][1]:], (control, commented)
+    slot = commented[first:last]
+    assert slot and slot != '""', commented
+    return slot
+
+
+def _receipt_text(document: dict) -> str:
+    """The JSON text the reference writes a receipt document as."""
+    return json.dumps(document, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _receipt_document(line: str) -> dict:
+    """The document in a ``receipt(<literal>, ...)`` line, once both writings round-trip.
+
+    The literal is parsed and written again, and so is the document text it
+    holds; neither may change by one byte, escapes included, so no spelling of
+    the reference's is assumed. That is what lets a rewrite of one field leave
+    every other byte of the line as the reference wrote it.
+    """
+    indent, call, rest = line.partition(_RECEIPT_CALL)
+    assert call and not indent.strip() and rest.endswith(_RECEIPT_ARGUMENTS), line[:160]
+    literal = rest[:-len(_RECEIPT_ARGUMENTS)]
+    text = json.loads(literal)
+    assert isinstance(text, str) and json.dumps(text) == literal, (
+        "the receipt's string literal is not written as json.dumps writes it", line[:160])
+    document = json.loads(text)
+    assert isinstance(document, dict) and _receipt_text(document) == text, (
+        "the receipt's document is not written as the reference writes it", line[:160])
+    return document
+
+
+def _receipt_line(line: str, document: dict) -> str:
+    """``line`` with ``document`` written in place of the document it holds."""
+    indent, call, _rest = line.partition(_RECEIPT_CALL)
+    return indent + call + json.dumps(_receipt_text(document)) + _RECEIPT_ARGUMENTS
+
+
+def _order_shapes_function(lines: list[str]) -> int:
+    """The index of the one line that opens the order-shapes receipt function."""
+    heads = [index for index, line in enumerate(lines)
+             if line.strip().startswith(_ORDER_SHAPES_FUNCTION)]
+    assert len(heads) == 1, ("order-shapes receipt functions", [lines[index] for index in heads])
+    return heads[0]
+
+
+def _order_shapes_receipt(lines: list[str]) -> tuple[int, dict]:
+    """Where the one order-shapes receipt of ``lines`` is, and its document.
+
+    It is the one ``receipt(<literal>, ...)`` statement between the one
+    ``strategy_order_shapes_receipt`` definition and that function's own closing
+    brace. Two definitions, two statements or none are refused, never picked
+    from, and so is a ``host_reads`` that is not a sorted list of distinct names.
+    """
+    head = _order_shapes_function(lines)
+    closing = [index for index in range(head + 1, len(lines)) if lines[index].strip() == "}"]
+    assert closing, "the order-shapes receipt function is never closed"
+    found = [index for index in range(head + 1, closing[0])
+             if lines[index].strip().startswith(_RECEIPT_CALL)]
+    assert len(found) == 1, ("order-shapes receipts", [lines[index][:120] for index in found])
+    document = _receipt_document(lines[found[0]])
+    reads = document.get("host_reads")
+    assert (isinstance(reads, list) and all(isinstance(name, str) for name in reads)
+            and reads == sorted(set(reads))), ("host_reads", reads)
+    return found[0], document
+
+
+def _apart_from_the_comment(document: dict) -> dict:
+    """A receipt document less what a comment changes: ``host_reads``, each call's ``comment``."""
+    return {
+        name: ([{field: item for field, item in call.items() if field != "comment"}
+                for call in value] if name == "calls" else value)
+        for name, value in document.items() if name != "host_reads"
+    }
+
+
+def _entry_comment_host_reads(
+        control_cpp: str, commented_cpp: str) -> tuple[list[str], list[str], list[str]]:
+    """The host members the reference's entry reads only because it has a comment.
+
+    The two outputs are of one entry with and without a ``comment``, and each
+    carries the reference's order-shapes receipt, whose ``host_reads`` lists the
+    host members the emitted code reads. The two receipts must describe the same
+    program but for that comment: one ``entry`` call each, and every field equal
+    but the call's ``comment`` class and ``host_reads``. Then what the commented
+    entry reads and the control does not is what the comment's lowering reads.
+    Returns the control's reads, the commented entry's reads and that
+    difference, each sorted.
+    """
+    _, control = _order_shapes_receipt(control_cpp.split("\n"))
+    _, commented = _order_shapes_receipt(commented_cpp.split("\n"))
+    for document in (control, commented):
+        assert [call["call"] for call in document["calls"]] == ["entry"], document["calls"]
+    assert _apart_from_the_comment(control) == _apart_from_the_comment(commented), (
+        control, commented)
+    without, with_comment = control["host_reads"], commented["host_reads"]
+    assert set(without) <= set(with_comment), (without, with_comment)
+    return without, with_comment, sorted(set(with_comment) - set(without))
+
+
+def _refused_receipts(lines: list[str]) -> list[str]:
+    """Receipts the reference did not write, each of which ``_order_shapes_receipt`` must refuse.
+
+    Each variant is the reference's own ``lines`` with one change, so a refusal
+    is for that change and not for a malformed fixture. Returns what was refused.
+    """
+    head = _order_shapes_function(lines)
+    at, document = _order_shapes_receipt(lines)
+    line = lines[at]
+    unsorted = _receipt_line(line, {**document, "host_reads": ["b_", "a_"]})
+    variants = {
+        "no receipt": (lines[:at] + lines[at + 1:], "order-shapes receipts"),
+        "two receipts": (lines[:at] + [line, line] + lines[at + 1:], "order-shapes receipts"),
+        "two receipt functions": (
+            lines[:head] + [lines[head]] + lines[head:], "order-shapes receipt functions"),
+        "literal escaped another way": (
+            lines[:at] + [line.replace('\\"', "\\u0022", 1)] + lines[at + 1:], "string literal"),
+        "document spaced another way": (
+            lines[:at] + [line.replace(",", ", ", 1)] + lines[at + 1:], "document is not written"),
+        "host reads unsorted": (lines[:at] + [unsorted] + lines[at + 1:], "host_reads"),
+    }
+    refused = []
+    for what, (variant, message) in variants.items():
+        assert variant != lines, what
+        with pytest.raises(AssertionError, match=message):
+            _order_shapes_receipt(variant)
+        refused.append(what)
+    return refused
+
+
+def _assert_same_cpp(actual: str, expected: str) -> None:
+    """Byte for byte and complete: nothing is normalized and nothing is skipped."""
+    shown = "" if actual == expected else "\n".join(list(difflib.unified_diff(
+        expected.split("\n"), actual.split("\n"), "expected", "actual", n=1, lineterm=""))[:80])
+    assert actual == expected, shown
+
+
+def _wrong_outputs(expected: str, slot: str, reference_receipt: str) -> dict[str, str]:
+    """Outputs that are wrong each in one way, which a complete comparison must refuse."""
+    lines = expected.split("\n")
+    order_at = _the_call(expected, "strategy_order")[1]
+    assert lines[order_at].endswith(slot + ");"), lines[order_at]
+    receipt_at, receipt = _order_shapes_receipt(lines)
+    reads = receipt["host_reads"]
+    elsewhere = [index for index in range(len(lines)) if index != order_at]
+    wrong_comment = list(lines)
+    wrong_comment[order_at] = lines[order_at][:-len(slot + ");")] + '"not the comment");'
+    first = list(lines)
+    first[elsewhere[0]] += " "
+    middle = list(lines)
+    middle_at = elsewhere[len(elsewhere) // 2]
+    middle[middle_at] = " " + middle[middle_at]
+    wrong = {
+        "wrong comment": "\n".join(wrong_comment),
+        "first line": "\n".join(first),
+        "middle line": "\n".join(middle),
+        "end of output": expected + "\n",
+    }
+    unread = "not_a_host_member_"
+    assert unread not in reads, reads
+    for what, names in (
+        ("one fewer", reads[:-1] if reads else None),
+        ("one more", sorted(reads + [unread])),
+        ("one repeated", reads + reads[-1:] if reads else None),
+    ):
+        if names is not None:
+            output = list(lines)
+            output[receipt_at] = _receipt_line(lines[receipt_at], {**receipt, "host_reads": names})
+            wrong[f"host reads: {what}"] = "\n".join(output)
+    if reference_receipt != lines[receipt_at]:
+        output = list(lines)
+        output[receipt_at] = reference_receipt
+        wrong["host reads: not merged"] = "\n".join(output)
+    return wrong
+
+
+def _with_the_reference_comment(tmp_path, reference, statement: str, reference_cpp: str) -> str:
+    """``reference_cpp``, the reference's output for ``statement``, plus its order's comment.
+
+    ``statement`` is ``strategy.order(<arguments>, comment = <comment>)`` and
+    ``reference_cpp`` is what the ORDER_COMMENT_REFERENCE compiler emits for it.
+    That compiler never emitted the comment: its one ``strategy_order`` call has
+    seven arguments and the comment is not lowered. It does lower it in
+    ``strategy.entry``, so the lowering is read from that compiler alone, as the
+    one argument that differs between the entry with the comment and the entry
+    without it. This build is not asked, and no emitted text is spelled here.
+    That lowering is added to the order call as its last argument, the engine's
+    trailing ``comment`` of ``strategy_order``.
+
+    Emitting the comment also makes the program read the host members the
+    comment reads, and the order-shapes receipt lists the host members the
+    emitted code reads. The reference's order receipt cannot list the comment's
+    reads, for it never emitted the comment, so they too are read from that
+    compiler alone: the host members its entry's receipt gains by having the
+    comment (the entry with the comment, less the entry without it) are merged
+    into the order receipt's sorted ``host_reads``. The receipt is located as the
+    one ``receipt(...)`` of the one ``strategy_order_shapes_receipt`` function,
+    and it is rewritten only once it and the document in it are shown to
+    round-trip byte for byte. No other field of it and no other byte of
+    ``reference_cpp`` changes. The result is the complete output this build must
+    give; nothing in it is derived from the output under test.
+    """
+    assert reference == reference_codegen(ORDER_COMMENT_REFERENCE), reference
+    assert reference_cpp.strip(), "the reference emitted nothing"
+    assert statement.startswith("strategy.order(") and statement.endswith(")"), statement
+    assert statement.count(_ORDER_COMMENT_KEYWORD) == 1, statement
+    arguments = statement[len("strategy.order("):-1]
+    without_comment = arguments.split(_ORDER_COMMENT_KEYWORD)[0]
+    control_cpp = _reference_cpp(reference, tmp_path, "entry-without-comment",
+                                 f"strategy.entry({without_comment})")
+    commented_cpp = _reference_cpp(reference, tmp_path, "entry-with-comment",
+                                   f"strategy.entry({arguments})")
+    slot = _entry_comment_lowering(control_cpp, commented_cpp)
+    reads_without, reads_with, added = _entry_comment_host_reads(control_cpp, commented_cpp)
+    lines, order_at = _the_call(reference_cpp, "strategy_order")
+    order = lines[order_at]
+    assert order.endswith(");") and slot not in order, order
+    assert len(_argument_spans(order.strip())) == _REFERENCE_ORDER_ARGUMENTS, order
+    lines[order_at] = order[:-len(");")] + ", " + slot + ");"
+    receipt_at, receipt = _order_shapes_receipt(lines)
+    assert [call["call"] for call in receipt["calls"]] == ["order"], receipt["calls"]
+    reference_receipt = lines[receipt_at]
+    merged = sorted(set(receipt["host_reads"]) | set(added))
+    lines[receipt_at] = _receipt_line(reference_receipt, {**receipt, "host_reads": merged})
+    assert _receipt_document(lines[receipt_at]) == {**receipt, "host_reads": merged}
+    assert (lines[receipt_at] == reference_receipt) == (merged == receipt["host_reads"])
+    expected = "\n".join(lines)
+    rejected = []
+    for what, wrong in _wrong_outputs(expected, slot, reference_receipt).items():
+        with pytest.raises(AssertionError):
+            _assert_same_cpp(wrong, expected)
+        rejected.append(what)
+    print(json.dumps({
+        "reference": ORDER_COMMENT_REFERENCE, "statement": statement, "comment_slot": slot,
+        "expected_sha256": hashlib.sha256(expected.encode("utf-8")).hexdigest(),
+        "rejected": rejected,
+        "receipt_refused": _refused_receipts(reference_cpp.split("\n")),
+        "host_reads_reference": receipt["host_reads"],
+        "host_reads_entry_without_comment": reads_without,
+        "host_reads_entry_with_comment": reads_with,
+        "host_reads_added": added,
+        "host_reads_expected": merged,
+        "receipt_sha256_reference": hashlib.sha256(reference_receipt.encode("utf-8")).hexdigest(),
+        "receipt_sha256_expected": hashlib.sha256(lines[receipt_at].encode("utf-8")).hexdigest(),
+    }, sort_keys=True))
+    return expected
+
+
 @pytest.mark.parametrize("comment", ('"plain"', "str.tostring(close)", 'str.format("{0}", close)'))
 def test_order_comments_without_bool_conversion_keep_reference_cpp(tmp_path, comment):
-    _assert_reference_cpp(
-        tmp_path, HEADER
-        + f'strategy.order("L", strategy.long, qty = 1, comment = {comment})\n',
-    )
+    """An order with a comment keeps the reference's complete output and adds the comment.
+
+    This was a frozen-C++ control while an order's comment was not emitted.
+    The comment is forwarded now, so the control is the complete output of the
+    reference compiler with that comment added to its order call and the host
+    members the comment reads added to its order-shapes receipt. The comment's
+    spelling and those reads are the reference's own, read from its entry call
+    and its entry's receipt by _with_the_reference_comment, never this build's.
+    The extra check that this build lowers an order's comment as it lowers an
+    entry's is test_order_comment_lowers_as_the_entry_comment_does; it is not
+    the baseline.
+    """
+    statement = f'strategy.order("L", strategy.long, qty = 1, comment = {comment})'
+    reference = reference_codegen(ORDER_COMMENT_REFERENCE)
+    assert reference is not None, "required C++ reference is unavailable"
+    pine = tmp_path / "strategy.pine"
+    pine.write_text(HEADER + statement + "\n", encoding="utf-8")
+    current = transpile_json(pine)
+    previous = transpile_json(pine, reference)
+    assert current["ok"], current.get("diagnostics")
+    assert previous["ok"], previous.get("diagnostics")
+    expected = _with_the_reference_comment(tmp_path, reference, statement, previous["cpp"])
+    _assert_same_cpp(current["cpp"], expected)
 
 
 def test_concatenation_keeps_explicit_bool_conversion(tmp_path, native_env):
@@ -609,8 +1008,17 @@ def test_log_format_arguments_keep_their_cpp_bool_type(tmp_path, native_env, cha
     'strategy.order("L", strategy.long, qty = 1, comment = str.tostring(session.isfirstbar_regular))',
 ))
 def test_omitted_text_sinks_keep_reference_cpp(tmp_path, statement):
-    """Frozen-C++ control: alerts, constructor tooltip and order comment are omitted."""
-    reference = reference_codegen(NUMERIC_REFERENCE)
+    """Frozen-C++ control: alerts and the constructor tooltip are omitted.
+
+    An order's comment was omitted too and is forwarded to the engine now. Its
+    row keeps its place and its complete comparison, against the reference
+    compiler that never emitted it, with the reference's own lowering of the
+    row's comment added to the order call as the one argument it gains, and the
+    host members that lowering reads added to the order-shapes receipt. Every
+    row ends in the same comparison of the complete output.
+    """
+    order = statement.startswith("strategy.order(")
+    reference = reference_codegen(ORDER_COMMENT_REFERENCE if order else NUMERIC_REFERENCE)
     assert reference is not None, "required C++ reference is unavailable"
     pine = tmp_path / "strategy.pine"
     pine.write_text(HEADER + statement + "\n", encoding="utf-8")
@@ -618,8 +1026,10 @@ def test_omitted_text_sinks_keep_reference_cpp(tmp_path, statement):
     previous = transpile_json(pine, reference)
     assert current["ok"], current.get("diagnostics")
     assert previous["ok"], previous.get("diagnostics")
-    cpp = current["cpp"]
-    assert cpp == previous["cpp"]
+    expected = previous["cpp"]
+    if order:
+        expected = _with_the_reference_comment(tmp_path, reference, statement, expected)
+    _assert_same_cpp(current["cpp"], expected)
 
 
 @pytest.mark.parametrize("body,comment", (
@@ -631,10 +1041,11 @@ def test_omitted_text_sinks_keep_reference_cpp(tmp_path, statement):
 ))
 def test_order_with_a_bool_text_comment_compiles_and_runs(
         tmp_path, native_env, body, comment):
-    """The engine's order carries no comment, so a bool text there must not break the build.
+    """A bool text in an order's comment must not break the build.
 
-    A script that compiled and ran before the bool-text change keeps compiling and
-    running, and the order itself is still placed: the position grows.
+    The comment is forwarded to the engine's order. A script that compiled and
+    ran before keeps compiling and running, and the order itself is still
+    placed: the position grows.
     """
     source = (
         HEADER + body

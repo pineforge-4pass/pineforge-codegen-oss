@@ -8,11 +8,9 @@
   "deepBacktesting": true,
   "trades": 320,
   "tvTradesCsv": "tv_trades.csv",
-  "tapeChannel": "ws-report-v1",
-  "sourceCanonicalization": "pine-facade-v1",
   "sourceArtifactHash": "078260c1d036e6a4671f53a373a4f4437239fedc6baddde5f317c0b210c8a24c",
   "tvTradesCsvHash": "d50e51f3d69a885d3fc861437309efd5ed94d0af8c368c88c708f3e6682ddabc",
-  "wsProvenance": {
+  "rangeEvidence": {
     "schemaVersion": 1,
     "symbol": "BINANCE:ETHUSDT.P",
     "interval": "15",
@@ -25,11 +23,7 @@
       "to": 1746057600000
     },
     "rangeProof": "covered",
-    "rawFrameSha256": "a0e586c8b4b84ee7bb08b3cc08c6e905dbd874de55ab318e1423e54d2743e700",
-    "decodedReportSha256": "c322b38f300d94c439752c939e42d46fab03cd473588b1844f85e9c9f9de0ea2",
-    "closedTrades": 320,
-    "proves": "which compile bytecode and which from/to window were sent to TradingView, and the exact trades TradingView returned for it (re-derivable from rawFrameSha256)",
-    "doesNotProve": "chart activation or the displayed applied range (browser-only); CSV byte identity and priceExact are lab renderings, screen-only until a parity study"
+    "closedTrades": 320
   },
   "backtestedAt": "2026-09-26T13:22:39.361Z"
 }

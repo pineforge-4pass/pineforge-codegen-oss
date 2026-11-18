@@ -1,8 +1,7 @@
 """A tuple literal is refused where TradingView refuses it.
 
 TradingView takes a tuple literal only as a function's or an if/switch arm's
-value and as a request.security expression. ``lab tv --no-note`` exports of
-the three probes in ``fixtures/open_items_tv`` fail at TradingView's compiler:
+value and as a request.security expression. The three probes in ``fixtures/open_items_tv`` fail at TradingView's compiler:
 
 - ``tuple_literal_decl``: ``[a, b] = [close, open]`` is "Syntax error at input
   '['" (CE10156) at line 5, column 10;

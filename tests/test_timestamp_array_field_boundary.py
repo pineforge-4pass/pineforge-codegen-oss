@@ -35,14 +35,28 @@ def test_epoch_field_storage_preserves_value(write, read):
 
 
 def test_array_method_named_argument_is_a_known_gap():
-    # Named arguments on array method calls retain their existing arity error.
-    # Namespace calls bind their receiver and value by keyword separately.
-    # Unchanged pin: push has no keyword slots, so args=[] raises the arity error.
-    with pytest.raises(CompileError, match=r"array\.push: wrong number of arguments$"):
-        transpile(HEADER + '''var arr = array.new<float>()
-arr.push(value = 1.0)
-plot(close)
-''')
+    # The gap this test pinned is closed, and the test keeps its name so its
+    # id stays comparable. ``push`` has a keyword slot now
+    # (tables.CHECKED_ARRAY_METHOD_KWARGS), as ``unshift`` had: TradingView
+    # accepts ``arr.push(value = x)``, and it used to stop with the arity
+    # error because the keyword was dropped and no value was left.
+    keyword = HEADER + '''var arr = array.new<float>()
+arr.push(value = 1.5)
+ok = arr.size() == 1 and arr.get(0) == 1.5 ? 1 : 0
+'''
+    cpp = transpile(keyword)
+    # The keyword binds the one value slot: the same C++ as the positional call.
+    assert cpp == transpile(keyword.replace("arr.push(value = 1.5)", "arr.push(1.5)"))
+    compile_cpp(cpp)
+    # One bar pushes 1.5 once into the persistent array and reads it back.
+    assert _run(cpp) == "1"
+    # A push that really has no value keeps the arity error, at the call.
+    missing = HEADER + "var arr = array.new<float>()\narr.push()\nplot(close)\n"
+    with pytest.raises(CompileError, match=r"array\.push: wrong number of arguments$") as error:
+        transpile(missing)
+    diagnostic = error.value.diagnostics[0]
+    assert diagnostic.location.line == len(HEADER.splitlines()) + 2
+    assert diagnostic.location.col > 0
 
 
 @pytest.mark.parametrize("constructor", [

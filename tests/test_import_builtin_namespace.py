@@ -4,12 +4,11 @@ namespace while the script references only that namespace's built-ins.
 
 The parser used to join the rest of the line, so ``import
 jdehorty/MLExtensions/2 as ml`` became the path ``jdehorty/MLExtensions/2asml``
-and every import was refused. TradingView's pine-facade compile of
-``import TradingView/ta/7`` links no library (``metaInfo.usedLibs`` stays
-empty) when the script calls only built-in ``ta.*`` names, and links the
-library for a library-only name such as ``ta.dema`` (XSYM-DESIGN report
-section 1.3): such an import is a no-op, and the script is the same script
-without it. Every other import keeps the refusal.
+and every import was refused. TradingView compiles
+``import TradingView/ta/7`` without linking the library when the script
+calls only built-in ``ta.*`` names. It links the library for a library-only
+name such as ``ta.dema``. In the built-in-only case the import is a no-op.
+Every other import keeps the refusal.
 """
 
 from __future__ import annotations

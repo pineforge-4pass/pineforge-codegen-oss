@@ -7,16 +7,8 @@ carries the level value while the Signal column carries the type and level.
 The first completed period is also exported as `Period-O/H/L/C` and the open of
 the next period as `Anchor-O`.
 
-Export command:
-
-```text
-source <pineforge-workflow checkout>/campaign/env.sh   # private maintainers' tooling
-lab tv --pine tests/fixtures/c7_tv_evidence/pivot_levels_probe.pine \
-  --slug c7-pivot-levels-formula-4 --symbol BINANCE:ETHUSDT.P --interval 15 \
-  --from 2025-04-01 --to 2025-04-08 --out /tmp/c7-tv-pivot4 --no-note --json
-```
-
-The export was covered and returned 55 closed trades (110 CSV rows). The first
+The 15-minute BINANCE:ETHUSDT.P fixture covers April 1–8, 2025, and contains
+55 closed trades (110 CSV rows). The first
 period tape was `O=1821.59, H=1842.57, L=1816.64, C=1837.47`, and the next
 period open was `1837.48`. Values below are the exported level values, rounded
 to four decimals by the CSV quantity field.

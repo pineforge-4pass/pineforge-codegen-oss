@@ -2,12 +2,9 @@
 
 Synthetic probes for requested-context evaluation and their unedited TradingView trade
 exports. They contain no closed or scraped source. Each was exported on
-2026-09-28 / 09-29 (UTC) with
+2026-09-28 / 09-29 (UTC).
 
-```bash
-lab tv --pine <name>.pine --slug pf-<name, underscores as dashes>-<chart> --no-note \
-  --symbol <symbol> --interval <interval> --from <from> --to <to>
-```
+The table below lists each fixture's symbol, chart interval and date range.
 
 TradingView ran each from the `from` date at 00:00 UTC (the export's
 requested and returned range, `rangeProof: covered`). The tapes' `Date and

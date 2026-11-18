@@ -14,8 +14,8 @@ history where the payload reaches it once; one it reaches twice (``h() +
 h()``) would need a series per inline and is refused where it is lowered, a
 located refusal where the visitor used to crash.
 
-TradingView's tape of ``fixtures/open_items_tv/sec_helper_body_hist`` (lab
-tv --no-note, BINANCE:ETHUSDT.P 15, 265 closes) spells ``h()``, ``k()`` and
+TradingView's tape of ``fixtures/open_items_tv/sec_helper_body_hist``
+(BINANCE:ETHUSDT.P 15, 265 closes) spells ``h()``, ``k()`` and
 ``close[1]`` requested on "60" on every close; the replay compares all 265.
 """
 

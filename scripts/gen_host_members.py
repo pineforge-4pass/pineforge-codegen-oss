@@ -223,7 +223,7 @@ def emitter_vocabulary(repo: Path) -> tuple[frozenset[str], frozenset[str]]:
     spelled: set[str] = set()
     whole: set[str] = set()
     for path in sorted((repo / EMITTER).rglob("*.py")):
-        if path == repo / OUTPUT:
+        if path == repo / OUTPUT or path.name == "engine_names.py":
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         prose, matched = _names(tree)

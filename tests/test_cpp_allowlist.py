@@ -28,12 +28,14 @@ COMMITTED_GENERATED_CPP = sorted((ROOT / "tests").rglob("*.cpp"))
 # predates the unconditional settings and run-stop blocks, so it cannot show
 # those paths.  These fixtures are transpiled here, against the current
 # emitter, for the positive corpus: settings/inputs (which emit ``<::``),
-# timezone use (the sealed timestamp calendar run), drawing and request.
+# timezone use (the sealed timestamp calendar run), drawing, request and the
+# late-emitted ordinary-byte regex helpers.
 CURRENT_CODEGEN_FIXTURES = (
     "tests/fixtures/matrix_eigen_pca.pine",
     "tests/fixtures/input_metadata_numeric.pine",
     "tests/fixtures/drawing_lifetime/w9dg-label-collect/strategy.pine",
     "tests/fixtures/request_discovery/case_strategy.pine",
+    "tests/gate-corpus/ok/validation__ta-str-match-regex-filter-01.pine",
 )
 
 

@@ -12,7 +12,7 @@ position or by keyword.
 The call now evaluates every argument that is not a side-effect-free read,
 once, in TradingView's parameter order, and yields the na colour; a call
 whose arguments are all plain reads keeps its ``0`` spelling. TradingView's
-tape of ``fixtures/open_items_tv/from_gradient_args`` (lab tv --no-note)
+tape of ``fixtures/open_items_tv/from_gradient_args``
 spells each counting probe's lag behind ``bar_index + 1`` (0: once per
 bar), by position and by keyword, and a helper's series stored on every
 bar; the replay compares every exit comment.

@@ -111,10 +111,14 @@ from ..limits import iter_ast_nodes
 from .drawing import DRAWING_LIFETIME_CPP, POLYLINE_HANDLE_CPP
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 from .tv_string_units import TV_STRING_UNITS_CPP, TV_STRING_UNITS_MARKER
+from .unicode_regex import UNICODE_REGEX_CPP
 
 
 # Keep the late-selected include beside the headers the C++ allowlist reads.
 ENUM_STRING_INCLUDE = '#include <pineforge/source/pine_policy_support.hpp>'
+UNICODE_REGEX_INCLUDES = (
+    "#include <locale>", "#include <regex>", "#include <utility>",
+)
 _TRADE_HISTORY_POLICY_MARKER = "        /* __PINEFORGE_TRADE_HISTORY_POLICY__ */"
 
 
@@ -135,6 +139,9 @@ class TopLevelEmitter:
         self._uses_tv_number_format = any(
             (namespace == "str" and func_name in {"format", "tostring"})
             or (namespace is None and func_name == "tostring")
+            # Namespace and method joins can render numeric elements without
+            # an explicit str.tostring call, including in callable bodies.
+            or (isinstance(node.callee, MemberAccess) and node.callee.member == "join")
             or (namespace == "log" and func_name in {"info", "warning", "error"}
                 and len(node.args) > 1)
             for root in roots
@@ -264,6 +271,12 @@ class TopLevelEmitter:
         if self._uses_timestamp_calendar:
             lines.append(TIMEZONE_STOP_SHIM_CPP)
         self._emit_ta_compat_shims(lines)
+        if self._ta_uses_series_sma():
+            from .series_sma import SERIES_SMA_CPP
+            lines.append("#include <utility>")
+            lines.append(SERIES_SMA_CPP.replace(
+                "_PFSeriesSma", self._ta_series_sma_cpp_type()
+            ))
         if getattr(self, "_uses_drawing", False):
             lines.append(DRAWING_LIFETIME_CPP)
         if self._uses_polyline:
@@ -1159,7 +1172,8 @@ class TopLevelEmitter:
             return cpp_val
         return f"na<{cpp_type}>()"
 
-    def _emit_constructor(self, lines: list[str]) -> None:
+    def _chart_ta_initializers(self) -> list[str]:
+        """Validate chart TA arguments and keep their constructor entries."""
         init_parts: list[str] = []
         # TA members with ctor args
         for ta_idx, site in enumerate(self.ctx.ta_call_sites):
@@ -1245,6 +1259,10 @@ class TopLevelEmitter:
                         rendered = self._ta_ctor_bool_cpp(rendered)
                     safe_resolved.append(rendered)
                 init_parts.append(f"{site.member_name}({', '.join(safe_resolved)})")
+        return init_parts
+
+    def _emit_constructor(self, lines: list[str], chart_ta_initializers: list[str]) -> None:
+        init_parts = list(chart_ta_initializers)
         # Security evaluator TA ctor args (skip for user function call expressions)
         for info in self._security_eval_info:
             for idx, variants in (info.get("ta_variants") or {}).items():
@@ -1568,7 +1586,7 @@ class TopLevelEmitter:
             "    // invalid (na under ignore_invalid_symbol, a stopped run without it).",
             "    bool _pf_symbol_data_installed(const std::string& symbol,",
             "                                   const std::string& timeframe,",
-            "                                   const char* column = nullptr) const {",
+            "                                   const std::string* column = nullptr) const {",
             "        const auto facts = symbol_facts_.find(symbol);",
             "        if (facts != symbol_facts_.end() && facts->second.valid && !*facts->second.valid)",
             "            return true;",
@@ -1579,10 +1597,15 @@ class TopLevelEmitter:
             "            if (feed.instrument != symbol || feed.tf != tf) continue;",
             "            if (column == nullptr) return true;",
             "            for (const auto& named : feed.columns) {",
-            "                if (named.name == column) return true;",
+            "                if (named.name == *column) return true;",
             "            }",
             "        }",
             "        return false;",
+            "    }",
+            "    bool _pf_symbol_data_installed(const std::string& symbol,",
+            "                                   const std::string& timeframe,",
+            "                                   const std::string& column) const {",
+            "        return _pf_symbol_data_installed(symbol, timeframe, &column);",
             "    }",
             "    // Its payload seeds ta.ema as TradingView does in the requested context:",
             "    // na until `length` values, then their mean (EmaSeeding::SimpleAverage).",
@@ -1594,14 +1617,15 @@ class TopLevelEmitter:
             "        _PFForeignEmaSeeding& operator=(const _PFForeignEmaSeeding&) = delete;",
             "    };",
         ])
-        if any(self._security_footprint_column(info["sec_id"]) for info in self._security_eval_info):
+        if any(self._security_footprint_column(info["sec_id"]) is not None
+               for info in self._security_eval_info):
             lines.extend([
                 "    // A footprint's delta: the named column of the requested bar.",
-                "    double _pf_symbol_column(int sec_id, const char* name) const {",
+                "    double _pf_symbol_column(int sec_id, const std::string& name) const {",
                 "        return security_column_value(sec_id, name);",
                 "    }",
                 "#else",
-                "    double _pf_symbol_column(int, const char*) const { return na<double>(); }",
+                "    double _pf_symbol_column(int, const std::string&) const { return na<double>(); }",
             ])
         lines.append("#endif")
 
@@ -1615,7 +1639,7 @@ class TopLevelEmitter:
         sec_id = info["sec_id"]
         symbol = self._security_tf_runtime_expr(info["symbol_node"])
         column = self._security_footprint_column(sec_id)
-        column = f', "{self._cpp_string_escape(column)}"' if column else ""
+        column = f', {self._cpp_string_literal(column)}' if column is not None else ""
         ignore_node = info.get("ignore_invalid_node")
         if ignore_node is None:
             ignore = "false"
@@ -1702,6 +1726,7 @@ class TopLevelEmitter:
         self._lexical_series_bindings = {}
         self._lexical_known_var_tombstones = set()
         lines.append("    void on_source_bar(const Bar& bar) override {")
+        self._emit_series_sma_begin(lines)
 
         # A GeneratedStrategy handle may execute multiple batch runs or
         # streaming lifecycles. BacktestEngine resets broker/base state, but
@@ -1786,10 +1811,9 @@ class TopLevelEmitter:
         for _bname in sorted(self.ctx.series_vars):
             if _bname in self._var_names:
                 continue
-            # A history-bearing top-level tuple binding pushes its own value
+            # A history-bearing top-level declaration pushes its own value
             # at the declaration; a builtin push would add a second bar slot.
-            if (_bname in self._direct_program_tuple_binding_names
-                    and _bname in self._ordinary_global_series_names):
+            if _bname in self._ordinary_global_series_names:
                 continue
             _bexpr = BAR_BUILTINS.get(_bname)
             _bsafe = self._safe_name(_bname)
@@ -2185,6 +2209,10 @@ class TopLevelEmitter:
             ) from exc
         if self._uses_tv_string_units:
             lines[marker] = TV_STRING_UNITS_CPP
+            if self._uses_unicode_regex:
+                lines[marker] += "\n".join(
+                    header for header in UNICODE_REGEX_INCLUDES if header not in lines
+                ) + "\n" + UNICODE_REGEX_CPP
         else:
             del lines[marker:marker + 2]
 
@@ -2688,7 +2716,7 @@ class TopLevelEmitter:
             # struct (Line/Box/Label/Linefill), not the unknown lowercase name.
             ret_type = DRAWING_TYPE_TO_CPP.get(
                 return_udt_name,
-                self._safe_name(return_udt_name)
+                self._udt_cpp_name(return_udt_name)
                 if return_udt
                 else return_udt_name,
             )
@@ -2724,7 +2752,7 @@ class TopLevelEmitter:
         if return_udt:
             # Use the generated handle name so an authored type cannot be
             # confused with a drawing handle's C++ name.
-            rhs_return_cpp_type = self._safe_name(return_udt_name)
+            rhs_return_cpp_type = self._udt_cpp_name(return_udt_name)
         elif (self._is_nullable_collection_cpp_type(ret_type)
               or ret_type in DRAWING_TYPE_TO_CPP.values()
               or (ret_type == "std::vector<int64_t>"
@@ -2839,6 +2867,7 @@ class TopLevelEmitter:
         self._current_func_locals |= self._collect_binding_names(node.body)
 
         lines.append(f"    {ret_type} {func_name}({', '.join(param_strs)}) {{")
+        body_start = len(lines)
         self._emit_function_global_history_updates(fi, lines)
 
         # A session.* flag the body reads at an offset: its history is this
@@ -2995,6 +3024,19 @@ class TopLevelEmitter:
                     default_ret = self._default_for_type(ret_type)
                 lines.append(f"        return {default_ret};")
 
+        if self._callable_scope_redeclares_parameter(node):
+            # C++ refuses a declaration in a function's outermost block that
+            # reuses a parameter's name (``auto [q, z] = ...`` in ``f(int q)``:
+            # "shadows a parameter"), and allows it in a nested block. The
+            # body moves into one: every read before the declaration is still
+            # the parameter, every read after it the declared name, and the
+            # return statement leaves the function from inside the block.
+            lines[body_start:] = (
+                ["        {"]
+                + [line if not line or line.startswith("#") else "    " + line
+                   for line in lines[body_start:]]
+                + ["        }"]
+            )
         lines.append("    }")
         self._current_func_param_types = {}
         self._current_func_param_specs = {}
@@ -3021,6 +3063,22 @@ class TopLevelEmitter:
         self._active_fixnan_remap = {}
         self._active_call_site_idx = None
         self._current_instance_name = None
+
+    @staticmethod
+    def _callable_scope_redeclares_parameter(node) -> bool:
+        """Whether a declaration in the callable's own scope reuses the name
+        of one of its parameters: ``f(q) =>`` whose body declares ``q = 1``
+        or ``[q, z] = pair()``. A declaration in a nested block (an ``if``
+        arm, a loop) is a C++ block of its own already."""
+        params = set(node.params or ())
+        if not params:
+            return False
+        for stmt in node.body or ():
+            if isinstance(stmt, VarDecl) and stmt.name in params:
+                return True
+            if isinstance(stmt, TupleAssign) and params.intersection(stmt.names):
+                return True
+        return False
 
     def _emit_function_global_history_updates(
             self, fi: FuncInfo, lines: list[str]) -> None:

@@ -11,7 +11,7 @@ and the TU did not compile. cs-lev-tradleware-gaussian-channel-stochrsi-eth's
 open findings). ``_history_offset_cpp`` now parenthesizes a lambda offset.
 
 TradingView truncates a fractional index toward zero: its tape of
-``fixtures/open_items_tv/dyn_hist_index`` (lab tv --no-note) spells every
+``fixtures/open_items_tv/dyn_hist_index`` spells every
 read at 5.5 or 2.9 beside the reads at the integers on either side, and each
 equals the lower one. The replay compares every exit comment on the corpus
 ETH 15m feed from TradingView's first bar.

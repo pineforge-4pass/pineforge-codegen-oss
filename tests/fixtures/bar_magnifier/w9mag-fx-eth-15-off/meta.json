@@ -1,8 +1,7 @@
 {
   "title": "w9mag-fx-eth-15-off",
   "slug": "w9mag-fx-eth-15-off",
-  "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
+  "source": "TradingView",
   "exportedAt": "2026-09-27T18:07:15.598Z",
   "chart": {
     "symbol": "BINANCE:ETHUSDT.P",

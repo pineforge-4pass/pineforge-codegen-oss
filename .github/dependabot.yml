@@ -2,7 +2,7 @@ version: 2
 updates:
   # Keep the SHA-pinned GitHub Actions in workflows up to date with
   # reviewable PRs (security review: pinned actions need a bump path).
-  # One grouped PR a month: the workflows are pineforge-workflow's templates,
+  # One grouped PR a month: the workflows share maintainer-managed templates,
   # so every bump goes there too and needs a measured pr-gate here.
   - package-ecosystem: "github-actions"
     directory: "/"

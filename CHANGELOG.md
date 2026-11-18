@@ -22,6 +22,99 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- A `request.security` or `request.security_lower_tf` timeframe computed from
+  a global the script assigns again after a request is now registered with
+  the value the global has where that request is written. With
+  `int sec = 300`, a request of `str.tostring(sec / 60)`, `sec := 60` and a
+  second request of the same expression, PineForge registers `"5"` for the
+  first and `"1"` for the second. Both used to register the value the global's storage
+  held before the first bar, with the warning that the global "is assigned
+  after the first request". The same now holds for a global declared below an
+  earlier, unrelated request. A request keeps its earlier registration and
+  that warning when the global is `var` or `varip`, when a statement that
+  holds the request also assigns the global, when the request is in a
+  function or method and the global is assigned below that definition, or
+  when the timeframe names a global declared from the reassigned one and an
+  assignment lies between that declaration and the request. A script whose
+  assignments all precede its first request emits the same C++ as before.
+- A typed variable, an assignment and an object field keep the bool and
+  number conversions that compiled before the primitive slot check: a bool
+  stored in an `int` or `float` slot is 1 or 0, and a number computed at run
+  time is false in a `bool` slot when it is `na` or 0. TradingView refuses
+  both. A number written as a literal in a `bool` slot (`bool flag = 1.5`),
+  and a string or color in a slot of another type, are still refused with
+  PF-E2093.
+- A function whose body declares a name one of its parameters has
+  (`f(int q) =>` followed by `[q, z] = ...` or `q = ...`) now compiles: the
+  emitted body is a nested C++ block, where the declaration hides the
+  parameter from that statement on. It used to stop in the C++ compiler
+  ("shadows a parameter").
+- `ta.sma`, `ta.highest`, `ta.lowest`, `ta.highestbars`, `ta.lowestbars` and
+  `ta.percentile_nearest_rank` called through a helper inside
+  `request.security` now accept a length that reads a persistent (`var`)
+  global: the length is read on every requested bar, as it is for the direct
+  call. These calls were refused with "TA constructor args that depend on
+  rebound mutable globals"; every other `ta.*` function keeps that refusal.
+- Calls of an overloaded user function now run the declaration their
+  arguments select. This applies to the declarations of one name when every
+  parameter declares a scalar type or a user-defined type, no two declarations
+  repeat the same types with the same qualifiers, and every call follows the
+  last declaration. A declaration takes a call when each argument has its
+  parameter's type (an `int` also fits a `float` parameter) and a qualifier no
+  stronger than the parameter declares (`const`, `input`, `simple`, `series`).
+  Of those, the one converting the fewest arguments runs, then the one with
+  the weakest qualifiers, then the later one. A parameter that declares no
+  type or qualifier holds its argument's, so the calls inside a function body
+  are bound for each different set of arguments the function receives; where
+  they bind differently the function is emitted once per binding, and each
+  copy keeps the history and `var` state its body declares to itself. A call
+  no declaration takes keeps the declaration it ran before. Groups that do not
+  meet the conditions above keep their previous lookup. Two shapes TradingView
+  compiles are covered by tests; rules TradingView was not shown are
+  PineForge's own.
+
+- An object declared under the name of a built-in namespace is refused at the
+  name with `PF-E2065` in a destructuring declaration as well
+  (`[adjustment, _] = pair(...)`), at chart scope and inside a function, as
+  TradingView refuses it (CE10093). Scripts that bound a record to such a name
+  through a tuple used to translate and are now refused. `time` and `timenow`
+  are built-in values that qualify no member, so an instance of a user-defined
+  type may be declared under them. Where a declaration statement binds the
+  receiver of an unsupported namespace's member (`footprint.x`,
+  `volume_row.x`), that member's refusal is now reported after analysis, so
+  the declaration's own refusal comes first; the refusal itself is unchanged.
+
+- A record bound by a destructuring declaration (`[holder, _] = pair(...)`)
+  is typed by that declaration wherever it is read, so a read through it
+  keeps its record lowering inside each function and block, and a name the
+  read is not bound to no longer takes a same-spelled record from another
+  function. The emitter also infers the stored types of one destructuring
+  declaration once per lexical context within a query, so helpers that
+  destructure each other's tuples many levels deep translate in bounded work.
+
+- `strategy.order(..., comment=...)` now forwards its comment to the engine's
+  order instead of dropping it with a warning, so the trade the order opens or
+  closes reports it through `strategy.opentrades.entry_comment`,
+  `strategy.closedtrades.entry_comment` and `strategy.closedtrades.exit_comment`.
+  The order-shapes receipt keeps its version 1 fields: a `strategy.order` entry
+  has no `comment` field, with a comment or without. Order comment expressions
+  now evaluate; their host reads appear in `host_reads`. Generated C++ now passes
+  the comment as the eighth argument of `strategy_order`, so it needs the paired
+  engine whose host accepts it: regenerate every strategy and relink (#291).
+
+- `strategy.convert_to_account`, `strategy.convert_to_symbol` and
+  `request.currency_rate` now emit calls to the paired engine's host conversion
+  API with the resolved account currency and Pine evaluation time. Arguments
+  execute once in PineForge's built-in parameter order, only when the call is
+  evaluated. Codegen supplies no rate, identity shortcut or FX feed. The engine's
+  host contract governs supplied-rate availability, matching-currency identity
+  and failure reporting, including ignored requests. Conversion refusals retain
+  the engine's `currency_conversion_rate_unavailable` code and structured
+  currency/time arguments. Invalid currency-request
+  argument types and malformed strategy-conversion bindings receive located
+  translation diagnostics. Requires matching engine headers and runtime with
+  these APIs; regenerate C++ and relink. (#376)
+
 - Strategy sizing constants retain their string values in expressions, aliases
   and helper calls. Host order and risk settings convert these values to their
   numeric representation only at the setting boundary.
@@ -77,6 +170,82 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `array.sort_indices` honors a supplied sort direction.
   Scalar function overloads no longer crash during type checking.
   Regenerate C++ and relink affected strategies.
+- User-defined object types receive collision-aware generated names, so a Pine
+  type such as `Trade` cannot collide with a type imported from the engine.
+  Types without a collision retain their existing C++ spelling. Conditional
+  headers determine which extra type names need escaping; value and parameter
+  names keep their own identities. Series-SMA helper names are allocated only
+  when the helper is emitted.
+- `ta.sma` accepts a changing series length through the paired engine's
+  `pineforge::source::SeriesSma` implementation. Each written call and requested
+  context retains its own history, including repeated loop/helper reaches and
+  replacement evaluations. Constant and input-stable lengths keep the existing
+  fixed-length SMA implementation. Regenerate C++ and relink with an engine
+  release that includes the series SMA primitive.
+
+- Requested helpers preserve declared string argument types when inferring
+  local variables, including string `na` values, so these expressions emit
+  string storage and string missing values.
+
+- String `+`, `+=` and string-array joins recompose adjacent UTF-16 surrogate
+  halves, including across array parts and separators. Unpaired halves are
+  preserved; string search predicates compare UTF-16 units. Regenerate C++
+  and relink affected strategies.
+- Persistent string locals initialized from helper parameters retain their
+  storage type in compound assignments and `request.security()` expressions.
+- Array joins retain string return types through helper and method forwarding.
+  Named, mixed and reordered receiver/separator arguments use their declared
+  slots. Numeric elements use Pine number
+  formatting without fixed trailing zeros, and receiver and separator are
+  evaluated once in parameter order, including for empty arrays.
+  Builtin joins refuse boolean arrays during translation; authored methods
+  retain their own overloads and defaults.
+- `str.length` validates named arguments against its declared `string`
+  parameter; unknown names produce the standard located argument diagnostic.
+- `str.upper` and `str.lower` use pinned Unicode 14.0.0 mappings and properties,
+  including supplementary letters, expansions and contextual final sigma.
+  Translating Python versions and the native locale do not select the data.
+  The context crosses decimal runs; locale tailoring and normalization are
+  not applied. The data pin does not identify TradingView's whole dialect.
+- `str.match` lowers its literals, character classes, ranges and repeated
+  atoms as Unicode characters, including complete supplementary characters,
+  so matches no longer depend on UTF-8 byte lengths. Word classes remain ASCII;
+  string lengths and substring offsets still count UTF-16 units.
+  Matches return the complete match while preserving user captures and
+  backreferences for pattern evaluation.
+  Regenerate C++ and relink affected strategies to use this correction.
+- String input defaults, options and titles preserve embedded NUL bytes in
+  getters, metadata and checked receipts. Internal timeframe and footprint
+  column consumers carry literal byte lengths; their validation is unchanged.
+  Public C input setters retain their NUL-terminated contract.
+- `str.split` applies string context to missing arguments, including literal
+  `na` in positional, named and helper calls.
+
+- `str.pos` returns integer `na` when the substring is absent, so `na()` detects
+  the missing match and `nz()` uses its replacement (#382, item 5). It returned
+  `-1`; found positions retain their UTF-16 offsets. The TradingView expectation
+  comes from the reporter's readings. Regenerate C++ and relink affected
+  strategies.
+
+- `str.substring` checks an explicit `na` end before boundary arithmetic and
+  returns the engine's canonical string `na` (stored as the empty string).
+  An `na` start becomes zero, including a wide integer `na` propagated from
+  `str.pos(...) + 1`, so the two-argument form returns the whole text. Finite
+  endpoints are ordered before computing the count; an end before the start
+  stops the run. UTF-16 slicing, end clamping and invalid-begin stops use the
+  existing helper. The oracle is the reporter's #382 item 9 readings.
+- `str.substring` refuses a provably negative constant `begin_pos` during
+  analysis, including integer arithmetic, constant aliases and named arguments.
+  Dynamic negative starts retain their runtime error, and missing positions
+  retain their existing handling.
+- `str.trim` additionally removes VT (U+000B), FF (U+000C), U+00A0, U+1680,
+  U+2003, U+2028, U+3000 and U+FEFF from the ends. Interior bytes and kept
+  characters are preserved; other Unicode spaces remain unchanged (#382, item 8).
+
+- Reads of authored variables named like bar fields use their lexical
+  declarations and types. A string binding passed to `array.from()` previously
+  read the numeric bar field, which could fail to compile or produce a wrong
+  value. Leaving a block that shadows a builtin restores the builtin.
 - A zone name the engine rejects now makes calendar-form `timestamp()` stop the
   run at its first evaluation, instead of silently calculating a UTC value.
   The paired engine reports a typed timezone error identifying the failed bar.

@@ -13,10 +13,10 @@ before the if.
 
 Each such local is now a value of the requested bar, as the evaluator keeps
 it: ``ta.highest`` / ``ta.lowest`` (and the ``bars`` forms) re-window every
-call with it (``pineforge::source::Series*``), and any other ``ta.*`` is
-refused naming the local. TradingView refuses such a length for
-``ta.ema`` (a series int where a simple int is expected) and computes
-``ta.sma`` over it, which PineForge does not lower.
+call with it (``pineforge::source::Series*``). SMA uses its series-length
+primitive and the requested evaluator's checkpoint. TradingView refuses
+such a length for ``ta.ema`` / ``ta.rsi`` (a series int where a simple int
+is expected); those remain refused naming the local.
 
 TradingView's tape of ``fixtures/silent_tv/cgs_sec_var_len`` reads each
 shape on the 60- and 240-minute bars, one with ``lookahead_on``, beside the
@@ -103,17 +103,38 @@ def test_a_self_reading_var_update_plans_without_recursing():
 @pytest.mark.parametrize("update", ["c += 1", "c := c % 5 + 1"])
 @pytest.mark.parametrize("call", ["ta.sma(close, c)", "ta.ema(close, c)", "ta.rsi(close, c)"])
 def test_another_family_is_refused_naming_the_local(update, call):
+    pine = (
+        "//@version=6\n"
+        'strategy("var length refused")\n'
+        "f() =>\n"
+        "    var int c = 1\n"
+        f"    {update}\n"
+        f"    {call}\n"
+        'x = request.security(syminfo.tickerid, "60", f())\n'
+        "plot(x)\n"
+    )
+    if call == "ta.sma(close, c)":
+        # Keep both originally refused SMA inputs. Their requested helper
+        # local is the per-call length, including its authored update.
+        cpp = transpile(pine)
+        members = re.findall(r"^    _PFSeriesSma (_sec0__ta_sma_\w+);$", cpp, re.M)
+        assert members
+        for member in members:
+            assert f"{member}.begin_evaluation(security_series_slot_is_new(0));" in cpp
+            lengths = re.findall(
+                rf"\b{member}\.(?:compute|recompute)\(\[&\]\(\) \{{ "
+                r"const double _pf_source = [^;]+; "
+                r"const double _pf_length = pineforge::source::ta_number\(([^;]+)\);",
+                cpp,
+            )
+            assert lengths and all(
+                re.search(r"\b_sec0_f_\d+_c\b", value) for value in lengths
+            )
+        assert not re.search(r"^    ta::SMA _sec0__ta_sma_\w+;", cpp, re.M)
+        compile_cpp(cpp, label="requested mutable helper SMA length")
+        return
     with pytest.raises(CompileError) as caught:
-        transpile(
-            "//@version=6\n"
-            'strategy("var length refused")\n'
-            "f() =>\n"
-            "    var int c = 1\n"
-            f"    {update}\n"
-            f"    {call}\n"
-            'x = request.security(syminfo.tickerid, "60", f())\n'
-            "plot(x)\n"
-        )
+        transpile(pine)
     message = str(caught.value)
     assert "requested-context TA constructor length 'c'" in message
     assert "it reads 'c', a helper local holding a value of each requested bar" in message

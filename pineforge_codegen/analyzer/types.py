@@ -46,17 +46,19 @@ from ..ast_nodes import (
     SwitchStmt, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..errors import Phase
+from ..intrinsic_binding import array_method_domain_error
 from ..limits import iter_ast_nodes
 from ..builtin_constants import builtin_constant, is_builtin_enum
 from ..matrix_overloads import matrix_sum_has_rhs
 from ..reference_casts import na_reference_cast_kind
+from ..pine_spelling import expr_start
 from ..symbols import (
     PineType,
     TypeSpec,
     method_receiver_type_name,
     unify_type_specs,
 )
-from .operators import join_value_types, reference_value_type
+from .operators import fixed_builtin_result, join_value_types, reference_value_type
 
 # Drawing-objects-as-data type names (spec §4.1). Defined locally — the
 # analyzer must not import from ``codegen`` (codegen imports analyzer, so the
@@ -94,6 +96,10 @@ class TypeHelper:
     ``self._enum_defs``) document the contract in the module
     docstring above.
     """
+
+    def __init__(self) -> None:
+        self._current_top_level_stmt: ASTNode | None = None
+        self._ternary_int_fallbacks: dict[int, Ternary] = {}
 
     def _builtin_sizing_constant(self, value):
         if not (isinstance(value, MemberAccess)
@@ -212,6 +218,48 @@ class TypeHelper:
         ann = getattr(callee, "annotations", None) or {}
         raw = ann.get("template_args") or []
         return [str(x).replace(" ", "") for x in raw]
+
+    def _fixed_array_call_result(
+        self, call: FuncCall, receiver_spec: TypeSpec | None,
+    ) -> TypeSpec | None:
+        """Validate a builtin receiver and read its fixed result after methods."""
+        callee = call.callee
+        if not isinstance(callee, MemberAccess):
+            return None
+        namespace_call = (
+            isinstance(callee.object, Identifier)
+            and callee.object.name == "array"
+            and self._symbols.resolve("array") is None
+            and self._value_bindings.declaration_bindings.get(
+                id(callee.object)
+            ) is None
+        )
+        if not namespace_call and (
+            receiver_spec is None or receiver_spec.kind != "array"
+        ):
+            return None
+        if callee.member == "join":
+            receiver = (
+                call.args[0] if call.args else call.kwargs.get("id")
+            ) if namespace_call else callee.object
+            # A namespace receiver can be a constructor containing TA or
+            # request calls already visited above. Read its type without
+            # registering those calls again; preserve call-site type overlays.
+            query = (self if isinstance(self, OperatorTypeQuery)
+                     else OperatorTypeQuery(self, {}))
+            actual_spec = (
+                query._type_spec_from_expr(receiver)
+                if namespace_call else receiver_spec
+            )
+            problem = array_method_domain_error(callee.member, actual_spec)
+            if problem is not None:
+                self._error(
+                    problem[0], expr_start(receiver).loc or call.loc,
+                    hint=problem[1],
+                )
+        return fixed_builtin_result(
+            "array", callee.member, len(call.args) + len(call.kwargs),
+        )
 
     def _array_from_element_spec(self, value: ASTNode | None) -> TypeSpec | None:
         """Exact scalar element type for one ``array.from`` argument.
@@ -436,7 +484,7 @@ class TypeHelper:
             if selection_spec is not None:
                 if (selection_spec.kind == "primitive"
                         and selection_spec.name in {"int", "int64"}
-                        and id(value) in getattr(self, "_ternary_int_fallbacks", ())):
+                        and id(value) in self._ternary_int_fallbacks):
                     # An integer spec must not retype the analyzed missing arm.
                     return None
                 return selection_spec
@@ -634,6 +682,11 @@ class TypeHelper:
                     # Its body-derived return type is not available yet, but a
                     # same-named builtin must not lend it a false type.
                     return None
+                fixed_array_result = self._fixed_array_call_result(
+                    value, typed_receiver_spec,
+                )
+                if fixed_array_result is not None:
+                    return fixed_array_result
                 if (
                     typed_receiver_spec is not None
                     and typed_receiver_spec.kind == "udt"
@@ -755,6 +808,10 @@ class TypeHelper:
                 return TypeSpec.array(TypeSpec.primitive("string"))
             if ns == "ta" and func == "pivot_point_levels":
                 return TypeSpec.array(TypeSpec.primitive("float"))
+            if ns == "request" and func == "security":
+                requested_spec = (value.annotations or {}).get("security_result_type_spec")
+                if requested_spec is not None:
+                    return requested_spec
             if ns == "request" and func == "security_lower_tf":
                 # ``request.security_lower_tf`` returns array<T> where T
                 # is the Pine type of the expression argument. We use the
@@ -1737,6 +1794,7 @@ class OperatorTypeQuery(TypeHelper):
             op, operands = "?:", (node.condition, node.true_val, node.false_val)
         elif isinstance(node, FuncCall):
             self._analyzer._check_timeframe_string_arguments(node, self._parameter_types)
+            self._analyzer._check_currency_rate_arguments(node, self._parameter_types)
             return
         else:
             return

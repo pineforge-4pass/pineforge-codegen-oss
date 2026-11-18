@@ -136,6 +136,11 @@ def reference_codegen(commit: str) -> Path | None:
 
 def build_strategy_library(cpp: str, workdir: Path, *,
                            extra_flags: tuple[str, ...] = ()) -> None:
+    """Instrument the strategy TU with the shared flags, then link the engine.
+
+    Float-cast-overflow traps in the strategy itself; no UBSan reporting
+    runtime needs to be supplied by the Python process loading the library.
+    """
     (workdir / "generated.cpp").write_text(cpp)
     lib = str(compile_env._ENGINE_LIB)
     if sys.platform == "darwin":

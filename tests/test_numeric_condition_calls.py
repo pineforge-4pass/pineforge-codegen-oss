@@ -7,7 +7,15 @@ from pineforge_codegen.diagnostic_codes import render_diagnostic
 from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._compile import compile_cpp, run_emitted_tu
 from tests._e2e import reference_codegen, transpile_json
-from tests.test_helper_builtin_named_locals import CPP_REFERENCE
+
+# The accepted scripts below must keep the complete C++ of a tree from before
+# statement conditions were typed. That revision is this file's own pin: the
+# pin shared through test_helper_builtin_named_locals follows other work and
+# now names a tree that routes EMA-family calls through checked adapters,
+# which this codegen does not emit, so it cannot be the reference for a script
+# that calls ta.ema. The revision is an ancestor of this tree, so a checkout
+# that holds this history holds it.
+CPP_REFERENCE = "7d7681dcef6918f0cb304831320e5d8e5b545285"
 
 
 FLOAT_CHANGE_SCRIPT = """//@version=6

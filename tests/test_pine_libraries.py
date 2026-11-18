@@ -2,11 +2,10 @@
 
 ``transpile(source, libraries={path: text})`` takes the sources from the
 caller. With ``libraries=None`` they come from the environment the case
-runner sets (pineforge-workflow ``docs/xsym-requests.md``, "The environment
-contract"): a case-wide ``PINEFORGE_PINE_LIBRARIES`` directory holding every
+runner sets: a case-wide ``PINEFORGE_PINE_LIBRARIES`` directory holding every
 library any probe of the case pins, and one
 ``PINEFORGE_REQUESTS_ROOT/<slug>/requests.json`` per probe. A script resolves
-its imports ONLY through its own manifest (review XSYM-B P2-3): otherwise a
+its imports ONLY through its own manifest: otherwise a
 probe pinning nothing would transpile on a shard neighbour's pin and measure
 differently by case composition.
 

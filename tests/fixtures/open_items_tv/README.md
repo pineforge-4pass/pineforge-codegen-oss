@@ -1,15 +1,10 @@
 # CG-OPEN-ITEMS TradingView trade evidence
 
 Synthetic public probes for open items and their unedited
-TradingView trade exports. They contain no closed or scraped source. Each was
-exported with
+TradingView trade exports. They contain no closed or scraped source.
 
-```bash
-lab tv --pine <name>.pine --slug pf-oi-<name> --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-03
-```
-
-(range proof `covered`); the tapes' `Date and time` column is the exporting
+The fixtures use `BINANCE:ETHUSDT.P` on a 15-minute chart, from 2025-04-01 through 2025-04-03
+(range proof `covered`). The tapes' `Date and time` column is the exporting
 account's chart timezone, Asia/Taipei (UTC+8). Every probe enters a long at
 00:00, 06:00, 12:00 and 18:00 UTC and closes it a bar later with an exit
 comment spelling the values under test (7 trades each).
@@ -51,8 +46,8 @@ the float formatter (`pf-oi-if-tail-na`) read `NaN` on TradingView.
 
 ## Tuple literals TradingView refuses
 
-These three probes have no tape: `lab tv --no-note` (2026-09-27) failed at
-TradingView's compiler, whose error `tests/test_tuple_literal_value.py` pins.
+These three probes have no tape: TradingView rejected them on 2026-09-27.
+`tests/test_tuple_literal_value.py` checks the compiler error.
 
 | File | sha256 | TradingView |
 |---|---|---|

@@ -154,7 +154,7 @@ from ..ast_nodes import (
 from ..collection_history import history_annotation, literal_offset
 from ..array_binding import bind_array_constructor_arguments
 from ..diagnostic_codes import render_diagnostic
-from ..external_requests import RECORDED_KEY_ANNOTATION, request_stop_marker
+from ..external_requests import RECORDED_KEY_ANNOTATION
 from ..intrinsic_binding import bind_intrinsic_arguments, validate_intrinsic_keywords
 from ..limits import iter_ast_nodes
 from ..reference_casts import na_reference_cast_kind
@@ -181,7 +181,6 @@ from .helpers import (
     na_preserving_int_cast, pine_truth_cast,
 )
 from .id_sites import BUILTIN_NAMESPACES
-from .run_stops import request_stop
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_NEW_CTORS,
@@ -206,6 +205,8 @@ from .tables import (
     SKIP_NAMESPACES,
     SKIP_VAR_TYPES,
     STR_ARGS_READ_REPEATEDLY,
+    STR_BYTE_SEARCH_MAP,
+    STR_BYTE_SEARCH_REPEATED,
     STR_FUNC_MAP,
     TIME_FIELD_EXPRS,
     TIMESTAMP_CALENDAR_BODY,
@@ -550,9 +551,8 @@ class CallVisitor:
 
         A ``bars_back`` / ``timeframe_bars_back`` that is not a literal 0 reads
         another bar's time: the host's ``pine_time_offset`` steps the chart's
-        bars and the requested timeframe's (a future bar included, as
-        TradingView reads it: lab tv tapes te_time_bb_chart / te_time_bb_tf,
-        tests/fixtures/time_bars_back). None when the call reads the current
+        bars and the requested timeframe's, including a future bar.
+        None when the call reads the current
         bar -- no offset, or literal-0 offsets -- for the plain lowering."""
         bound = self._bind_time_call(node)
         offsets = [bound[name] for name in ("bars_back", "timeframe_bars_back")
@@ -872,11 +872,11 @@ class CallVisitor:
         ]
 
     def _array_method_arg_nodes(self, method: str, node: FuncCall) -> list:
-        """Merge checked-array method kwargs into Pine signature order."""
+        """Merge registered array method kwargs into Pine signature order."""
         return self._collection_arg_nodes("array", method, node, False)
 
     def _collection_arg_nodes(self, namespace, method, node, functional):
-        """The arguments of a matrix or checked-array method call in Pine's
+        """The arguments of a matrix or registered array method call in Pine's
         parameter order (the receiver first in the namespace form).
 
         A keyword argument binds to its parameter's own slot, never shifted
@@ -885,7 +885,7 @@ class CallVisitor:
         receiver's own extent, which the method's template reads). A keyword
         the lowering does not consume -- an unknown name, a parameter given
         twice -- is refused, as is a gap before a required parameter. A call
-        without keywords, and an array method outside the checked-index
+        without keywords, and an array method outside the keyword signature
         table, keep their arguments as written."""
         if not node.kwargs:
             return list(node.args)
@@ -899,10 +899,8 @@ class CallVisitor:
             optional = {"size": 0, "initial_value": None}
             aliases = {}
             receiver = "id"
-        elif (method in CHECKED_ARRAY_METHOD_KWARGS
-              or (functional and method == "push")):
-            slots = (["value"] if method == "push"
-                     else list(CHECKED_ARRAY_METHOD_KWARGS[method]))
+        elif method in CHECKED_ARRAY_METHOD_KWARGS:
+            slots = list(CHECKED_ARRAY_METHOD_KWARGS[method])
             optional = ARRAY_OPTIONAL_PARAMS.get(method, {})
             aliases = {}
             receiver = "id"
@@ -926,7 +924,14 @@ class CallVisitor:
             if slots[index] not in optional:
                 self._collection_argument_error(node, namespace, method, "missing", slots[index])
             default = optional[slots[index]]
-            arguments[index] = None if default is None else NumberLiteral(value=default)
+            if default is None:
+                arguments[index] = None
+            elif isinstance(default, str):
+                arguments[index] = StringLiteral(value=default)
+            elif isinstance(default, bool):
+                arguments[index] = BoolLiteral(value=default)
+            else:
+                arguments[index] = NumberLiteral(value=default)
         return arguments
 
     def _collection_argument_error(self, node, namespace, method, problem, name):
@@ -1209,7 +1214,14 @@ class CallVisitor:
         argument in source/signature order, while retaining lvalue aliases and
         extending temporary receiver lifetime through the operation.
         """
-        args = [self._visit_expr(arg) for arg in arg_nodes]
+        # Bind bare na to the value type before the argument lambdas infer it.
+        args = [
+            self._array_init_value_expr(spec.value, arg)
+            if (method == "put" and index == 1 and spec is not None
+                and isinstance(arg, NaLiteral))
+            else self._visit_expr(arg)
+            for index, arg in enumerate(arg_nodes)
+        ]
         if (method == "put" and arg_nodes and spec is not None
                 and spec.value is not None and spec.value.kind == "primitive"
                 and spec.value.name == "float"):
@@ -1738,32 +1750,21 @@ class CallVisitor:
                 or self._type_spec_to_cpp(param_spec)
             )
             cpp = self._visit_rhs_value(arg_node, target_cpp_type=target_cpp_type)
+            # Numeric selections still emit a double NaN after target-typed
+            # lowering. Convert at the actual integer parameter boundary,
+            # preserving both its declared width and exactly-once evaluation.
             return (self._coerce_int_slot(cpp, arg_node, target_cpp_type)
-                    if target_cpp_type == "int64_t" else cpp)
+                    if target_cpp_type in {"int", "int64_t"} else cpp)
         if param_name not in method_series:
             cpp = self._visit_expr(arg_node)
             int_cpp = self._func_param_int_cpp_type(
                 func_info, param_index,
                 self._callable_target_callsite_idx(func_info, call_node))
-            if int_cpp == "double":
-                return self._coerce_int_slot(cpp, arg_node, int_cpp)
-            if int_cpp == "int64_t":
-                cpp = self._coerce_int_slot(cpp, arg_node, int_cpp)
-            elif (int_cpp is not None
-                    and (self._holds_na_aware_wide_double(arg_node)
-                         or isinstance(arg_node, (Identifier, Subscript)))
-                    and self._emitted_value_is_double(arg_node)):
-                # An integer stored as double (including a bare-na global)
-                # must translate NaN to the parameter's integer sentinel.
-                # Same-width integer reads and direct numeric selections
-                # retain their existing argument expression.
-                cpp = na_preserving_int_cast(cpp, int_cpp)
-            elif int_cpp == "int" and isinstance(arg_node, MemberAccess):
-                # A UDT ``int`` field is ``int64_t`` storage: its na
-                # (INT64_MIN) passed into an ``int`` parameter would truncate
-                # to 0. ``_coerce_int_slot`` narrows exactly such a field read.
-                cpp = self._coerce_int_slot(cpp, arg_node, int_cpp)
-            return cpp
+            # Calls and compound expressions can emit double even when Pine
+            # types them as int and their AST contains no literal na. The
+            # shared slot conversion checks emitted type and integer-width
+            # provenance, including the original sentinel of wide UDT fields.
+            return self._coerce_int_slot(cpp, arg_node, int_cpp)
         expected_cpp_type = self._series_param_element_cpp_type(
             func_info,
             param_index,
@@ -2598,22 +2599,7 @@ class CallVisitor:
         # request.* calls
         if namespace == "request":
             if func_name == "currency_rate":
-                # Keep argument effects and the stop in the expression, so a
-                # skipped branch evaluates neither. The comma's final operand
-                # supplies Pine's float type; the no-data shim never returns.
-                marker = request_stop_marker(node)
-                marker["message"] = (
-                    "request.currency_rate needs currency conversion data "
-                    "that PineForge does not have."
-                )
-                args = _merge_kwargs(
-                    node.args, node.kwargs,
-                    sigs.get_param_names("request", func_name), self._visit_expr,
-                    intrinsic=sigs.get_intrinsic("request", func_name),
-                )
-                effects = [f"(void)({arg})" for arg in args]
-                effects += [request_stop(marker), "na<double>()"]
-                return f"({', '.join(effects)})"
+                return self._visit_host_currency_call(func_name, node)
             if func_name == "security":
                 param_names = ["symbol", "timeframe", "expression", "gaps", "lookahead", "ignore_invalid_symbol", "currency"]
                 all_args = list(node.args)
@@ -3839,12 +3825,62 @@ class CallVisitor:
             'throw std::invalid_argument("Unknown strategy sizing value"); }())'
         )
 
+    def _visit_host_currency_call(self, func_name: str, node: FuncCall) -> str:
+        """Query supplied host data at Pine's evaluation time, lazily.
+
+        Follow the parameter-order staging used by other builtins, including
+        builtin_keywords, array.new and color.from_gradient, independently of
+        keyword spelling. C++ call arguments alone would not guarantee that
+        order. Account resolution is shared with strategy.account_currency.
+        The security renderer rewrites the existing Pine time expression to
+        the requested bar, just as it rewrites authored time/price reads.
+        """
+        methods = {
+            "convert_to_account": "strategy_convert_to_account",
+            "convert_to_symbol": "strategy_convert_to_symbol",
+            "currency_rate": "request_currency_rate",
+        }
+        is_request = func_name == "currency_rate"
+        namespace = "request" if is_request else "strategy"
+        bound = self._resolve_func_args(node, f"{namespace}.{func_name}")
+        declarations = []
+        if is_request:
+            for param in ("from", "to"):
+                value = self._strategy_string_arg(bound[param])
+                declarations.append(
+                    f"const std::string _pf_currency_{param} = ({value});"
+                )
+            ignore_node = bound.get("ignore_invalid_currency")
+            ignore = (
+                self._coerce_bool_expr(self._visit_expr(ignore_node), ignore_node)
+                if ignore_node is not None else "false"
+            )
+            declarations.append(f"const bool _pf_currency_ignore = ({ignore});")
+            arguments = ["_pf_currency_from", "_pf_currency_to"]
+        else:
+            value = self._visit_float_arg(bound["value"])
+            declarations.append(f"const double _pf_currency_value = ({value});")
+            arguments = ["_pf_currency_value"]
+        declarations.extend((
+            "const std::string _pf_currency_account = "
+            f"({self._strategy_account_currency_expr()});",
+            "const std::int64_t _pf_currency_time = "
+            f"({BAR_BUILTINS['time']});",
+        ))
+        arguments.extend(("_pf_currency_account", "_pf_currency_time"))
+        if is_request:
+            arguments.append("_pf_currency_ignore")
+        call = f"this->{methods[func_name]}({', '.join(arguments)})"
+        # Let the run boundary preserve the host's coded<std::runtime_error>
+        # and RunFailureInfo unchanged. The currency API has no call-site
+        # attachment method; a no-data stop would replace its code and args.
+        result = f"return {call};"
+        return f"([&]() -> double {{ {' '.join(declarations)} {result} }}())"
+
     def _visit_strategy_call(self, func_name: str, node: FuncCall) -> str:
         from .order_shapes import record_order_call
         if func_name in ("convert_to_account", "convert_to_symbol"):
-            p = self._resolve_func_args(node, f"strategy.{func_name}")
-            v = self._visit_float_arg(p.get("value"), "0.0")
-            return f"({v})"
+            return self._visit_host_currency_call(func_name, node)
         if func_name == "default_entry_qty":
             # The host's query of the default order size at a price. The support
             # checker has bound exactly one price, so none is invented here.
@@ -4038,6 +4074,12 @@ class CallVisitor:
             stop_arg = self._visit_float_arg(p.get("stop"))
             oca_name = self._strategy_string_arg(p.get("oca_name"))
             oca_type = self._visit_expr(p.get("oca_type")) if "oca_type" in p else "0"
+            # The order's comment is the host door's trailing argument: the
+            # trade a fill of this order opens or closes carries it. The
+            # version 1 order-shapes receipt has no comment field for an
+            # order, so the comment is lowered here and not recorded below.
+            comment_n = p.get("comment")
+            comment = self._strategy_string_arg(comment_n)
             record_order_call(self, node, "order", {
                 "id": (order_id, p.get("id")), "direction": (direction, direction_node),
                 "qty": (qty, p.get("qty"), "na<double>()"),
@@ -4046,7 +4088,8 @@ class CallVisitor:
                 "oca_name": (oca_name, p.get("oca_name"), '""'),
                 "oca_type": (oca_type, p.get("oca_type"), "0"),
             })
-            return f"strategy_order({order_id}, {direction}, {qty}, {limit_arg}, {stop_arg}, {oca_name}, {oca_type})"
+            return (f"strategy_order({order_id}, {direction}, {qty}, {limit_arg}, {stop_arg}, "
+                    f"{oca_name}, {oca_type}, {comment})")
 
         if func_name == "risk":
             return "/* skip */"
@@ -4297,8 +4340,14 @@ class CallVisitor:
     def _visit_str_call(self, func_name: str, node) -> str:
         if func_name == "format_time":
             return self._visit_format_time_call(node)
+        visit_arg = self._visit_expr
+        if func_name == "split":
+            # Both parameters are strings; use their contextual type for na
+            # just as for a string declaration or assignment.
+            visit_arg = lambda arg: self._visit_rhs_value(
+                arg, target_cpp_type="std::string")
         args = _merge_kwargs(node.args, node.kwargs,
-                             sigs.get_param_names("str", func_name), self._visit_expr,
+                             sigs.get_param_names("str", func_name), visit_arg,
                              intrinsic=sigs.get_intrinsic("str", func_name))
         arg_nodes = _merge_kwargs(
             node.args, node.kwargs,
@@ -4365,12 +4414,44 @@ class CallVisitor:
         if func_name == "substring":
             if len(args) in (2, 3):
                 end_parameter = ", auto _pf_substring_end" if len(args) == 3 else ""
-                count = ", _pf_substring_end - _pf_substring_begin" if len(args) == 3 else ""
+                # Test sentinels in their original types: arithmetic can carry
+                # an int64_t na even when str.pos itself returned an int na.
+                end_guard = (
+                    "if (is_na(_pf_substring_end)) return na<std::string>(); "
+                    if len(args) == 3 else ""
+                )
+                begin = na_preserving_int_cast("_pf_substring_begin", "int64_t")
+                count = ""
+                count_guard = ""
+                if len(args) == 3:
+                    # Byte length bounds UTF-16 length from above. Beyond it,
+                    # use the existing helper's end clamp without converting
+                    # the end. Otherwise ordered nonnegative size_t operands
+                    # give a count without signed overflow or unsigned wrap.
+                    count_guard = (
+                        "if (_pf_substring_end < _pf_substring_start) "
+                        'throw std::out_of_range("str.substring: end_pos is less than begin_pos"); '
+                        "const std::size_t _pf_substring_count = "
+                        "_pf_substring_end > _pf_substring_text.size() ? std::string::npos : "
+                        "static_cast<std::size_t>(_pf_substring_end) - "
+                        "static_cast<std::size_t>(_pf_substring_start); "
+                    )
+                    count = ", _pf_substring_count"
 
                 def checked_substring(bound):
                     return (
                         f"[&](const std::string& _pf_substring_text, auto _pf_substring_begin{end_parameter}){{ "
-                        "try { return _pf_u16_substr(_pf_substring_text, _pf_substring_begin"
+                        f"{end_guard}"
+                        "const int64_t _pf_substring_start = "
+                        f"is_na(_pf_substring_begin) ? int64_t{{0}} : {begin}; "
+                        "try { "
+                        # Preserve the helper's existing invalid-begin stop,
+                        # including its unsigned position and UTF-16 size.
+                        "if (_pf_substring_start < 0) return _pf_u16_substr("
+                        "_pf_substring_text, static_cast<std::size_t>(_pf_substring_start)); "
+                        f"{count_guard}"
+                        "return _pf_u16_substr(_pf_substring_text, "
+                        "static_cast<std::size_t>(_pf_substring_start)"
                         f"{count}); }} catch (const std::out_of_range& _pf_substring_error) {{ "
                         '_PF_STRING_STOP("substring_out_of_range", _pf_substring_error.what()); '
                         "return std::string(); } "
@@ -4411,10 +4492,18 @@ class CallVisitor:
                     "_pf_str_a")
             return 'std::string("")'
 
+        if (func_name in STR_BYTE_SEARCH_MAP
+                and all(self._string_is_canonical(argument) for argument in arg_nodes)):
+            return evaluate_args_once(
+                args, STR_BYTE_SEARCH_REPEATED.get(func_name, ()),
+                STR_BYTE_SEARCH_MAP[func_name], "_pf_str_a")
+
         if func_name in STR_FUNC_MAP and STR_FUNC_MAP[func_name] is not None:
-            if func_name in ("length", "pos"):
-                # These two count in UTF-16 units through tv_string_units.
+            if func_name in ("length", "pos", "contains", "startswith", "endswith", "match"):
+                # Measurement/searches use units; matching decodes characters.
                 self._uses_tv_string_units = True
+            if func_name == "match":
+                self._uses_unicode_regex = True
             return evaluate_args_once(
                 args, STR_ARGS_READ_REPEATEDLY.get(func_name, ()),
                 STR_FUNC_MAP[func_name], "_pf_str_a")

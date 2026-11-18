@@ -15,8 +15,7 @@ fractional one goes through the byte (`color.new(c, 10.5)` reads 11 and
 `color.red` (#FF5252), `color.teal` (#00897B) and `color.yellow` (#FFEB3B)
 only.
 
-Each directory is one `lab tv --no-note` export (channel `ws-report-v1`,
-`rangeProof` covered), byte for byte: `strategy.pine`, `tv_trades.csv` (times
+Each fixture contains `strategy.pine`, `tv_trades.csv` (times
 at UTC+8), `metrics.json` and `meta.json`, on BINANCE:ETHUSDT.P 15 from
 2025-04-01 00:00 UTC. Each probe opens positions on even bars and closes them
 on odd bars, and each exit's comment spells what the script read on the bar

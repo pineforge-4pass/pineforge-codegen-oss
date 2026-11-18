@@ -192,7 +192,7 @@ int main() {
 
 
 def test_color_na_conversions_match_tradingview_rows() -> None:
-    """The covered `lab tv` color probe pins these five observable rows.
+    """The TradingView color fixture pins these five observable rows.
 
     Missing alpha means transparency 100, a missing RGB channel becomes 0,
     and a missing base color remains `na`.  The sixth row pins the typed
@@ -288,7 +288,7 @@ def test_repeat_with_na_count_warns_about_nullable_string_gap() -> None:
 
 
 def test_repeat_keyword_count_and_invalid_number_spelling() -> None:
-    # TradingView names the count `repeat` (lab tv probe pf-oi-kw-names).
+    # TradingView names the count `repeat`.
     valid = transpile_full(
         '//@version=6\nstrategy("repeat keyword")\n'
         's = str.repeat("x", repeat=int(na))\n'

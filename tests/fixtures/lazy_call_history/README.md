@@ -7,18 +7,10 @@ inside a function. The lazy edge gates only the read; the call runs on every
 execution of its scope. So `isNew(s) => inS(s) and not inS(s)[1]` is true on
 the first bar of every session.
 
-`tg-lazyhist-btc15` is one `lab tv` export (channel `ws-report-v1`,
-`rangeProof` covered), byte for byte: `strategy.pine`, `tv_trades.csv` (times
-at UTC+8), `metrics.json`, `meta.json`. `metrics.json` `tvTradesCsvHash` is
-the sha256 of `tv_trades.csv`. The probe is synthetic; no closed
-or scraped strategy is involved. The command (`--no-note`: no campaign note was
-recorded):
-
-```sh
-source ~/code/pineforge-workflow/campaign/env.sh
-lab tv --pine tg-lazyhist-btc15.pine --symbol BINANCE:BTCUSDT --interval 15 \
-  --from 2025-04-07 --to 2025-04-10 --slug tg-lazyhist-btc15 --out <dir>/tg-lazyhist-btc15 --no-note --json
-```
+The synthetic `tg-lazyhist-btc15` example uses 15-minute BINANCE:BTCUSDT
+bars from April 7 through April 10, 2025. Its fixture contains `strategy.pine`,
+`tv_trades.csv` (times at UTC+8), `metrics.json`, and `meta.json`.
+`tvTradesCsvHash` in `metrics.json` is the SHA-256 of `tv_trades.csv`.
 
 | tape | trades | tv_trades.csv sha256 |
 |---|---:|---|

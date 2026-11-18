@@ -1,6 +1,5 @@
 """Library sources for tests, laid out as the campaign's case runner lays
-them out (pineforge-workflow ``docs/xsym-requests.md``, "The environment
-contract"): a case-wide ``PINEFORGE_PINE_LIBRARIES`` directory and one
+them out: a case-wide ``PINEFORGE_PINE_LIBRARIES`` directory and one
 ``PINEFORGE_REQUESTS_ROOT/<slug>/requests.json`` per probe that pins data.
 
 Only the clean-room synthetic libraries of ``fixtures/pine_libraries`` are

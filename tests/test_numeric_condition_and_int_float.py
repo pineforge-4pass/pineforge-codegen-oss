@@ -120,6 +120,11 @@ _ACCEPTED = [
         id="na_initializer",
     ),
     pytest.param(
+        '//@version=6\nstrategy("Open overload initializer")\nfloat x = math.avg(close, open)\nplot(x)\n',
+        # math.avg leaves its int/float overload open; that is no evidence against a float slot.
+        id="open_overload_float_initializer",
+    ),
+    pytest.param(
         '//@version=6\nstrategy("Comparison condition")\nif close > open\n    strategy.entry("L", strategy.long)\n',
         # The comparison returns bool even though both operands are floats.
         id="comparison_condition",

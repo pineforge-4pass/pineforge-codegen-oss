@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from pineforge_codegen import transpile
 from tests._compile import compile_cpp, run_emitted_tu
-from tests._numeric_expected import integer_arithmetic, integer_to_double
+from tests._numeric_expected import integer_arithmetic, integer_store, integer_to_double
 
 
 def _source(body: str) -> str:
@@ -608,8 +610,9 @@ _METHOD_CONSUMER_ROWS = [
         "method take(Holder self, int value) => self, value\n"
         "holder = Holder.new(0)\n"
         "selected = holder.take(c ? 1 : na)\n",
-        "selected = _udt_Holder_take(holder, ((c) ? (1) : (na<double>())));",
-        # The method takes an int; its numeric ternary argument retains the implicit conversion.
+        "selected = _udt_Holder_take(holder, "
+        + integer_store("((c) ? (1) : (na<double>()))") + ");",
+        # The double selection crosses into the unchanged int parameter through its na guard.
         id="method-parameter",
     ),
     pytest.param(
@@ -619,8 +622,9 @@ _METHOD_CONSUMER_ROWS = [
         "holder = Holder.new(0)\n"
         "selected = c ? holder.take(1) : holder.take()\n",
         "selected = ((c) ? (_udt_Holder_take(holder, 1)) : "
-        "(_udt_Holder_take(holder, ((true) ? (na<double>()) : (1)))));",
-        # The omitted int parameter receives its authored numeric selection at the call.
+        "(_udt_Holder_take(holder, "
+        + integer_store("((true) ? (na<double>()) : (1))") + ")));",
+        # The omitted default needs the same guard at the actual int boundary.
         id="method-parameter-default",
     ),
 ]
@@ -813,3 +817,173 @@ def test_method_integer_consumers_keep_their_signature_and_argument_expression(
     assert "direct_plot_value = k;" in cpp
     assert "pine_str_tostring_tv(selected, std::string(), syminfo_mintick_)" in cpp
     compile_cpp(cpp, label="method-integer-consumers")
+
+
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+@pytest.mark.parametrize("body,expected_assignment", _METHOD_CONSUMER_ROWS)
+def test_method_integer_consumers_on_bear_and_bull_bars(
+    body: str, expected_assignment: str, opt: str,
+) -> None:
+    assert run_emitted_tu(
+        transpile(_source(body + _CONSUMERS)),
+        _FUNCTION_CONSUMER_DRIVER.replace("_EXPECTED_INT_TYPE", "int"),
+        opt=opt, label="method-integer-consumers",
+    ) == (
+        "-2147483648 nan 0 NaN nan nan -2147483648 1\n"
+        "1 2 1 1 1 1 1 0\n"
+    )
+
+
+def _method_numeric_input_source(receiver_type: str) -> str:
+    declarations = "type Holder\n    int seed\n" if receiver_type == "Holder" else ""
+    receiver = "Holder.new(0)" if receiver_type == "Holder" else "0"
+    return _source(declarations + f"""
+method take({receiver_type} self, int value) => self, value
+method defaulted({receiver_type} self, int value = true ? na : 1) => self, value
+method wide({receiver_type} self, int value) => self, value
+method floating({receiver_type} self, float value) => self, value
+method difference({receiver_type} self, int first, int second) => self, first - second
+next_value(map<string, int> counts) =>
+    value = counts.get("next")
+    counts.put("next", value + 1)
+    value
+receiver = {receiver}
+selected_pos = receiver.take(c ? bar_index : na)
+selected_kw = receiver.take(value = c ? bar_index : na)
+bare_value = c ? receiver.take(bar_index) : receiver.take(na)
+bare_keyword = c ? receiver.take(value = bar_index) : receiver.take(value = na)
+default_value = c ? receiver.defaulted(bar_index) : receiver.defaulted()
+default_keyword = c ? receiver.defaulted(value = bar_index) : receiver.defaulted()
+since_pos = receiver.take(ta.barssince(c))
+since_kw = receiver.take(value = ta.barssince(c))
+empty_selection = receiver.take(c ? bar_index : array.min(array.new_int(0)))
+wide_value = receiver.wide(c ? time : na)
+float_value = receiver.floating(c ? volume : na)
+counts = map.new<string, int>()
+counts.put("next", bar_index)
+ordered_pos = receiver.difference(c ? next_value(counts) : na, c ? next_value(counts) : na)
+ordered_kw = receiver.difference(second = c ? next_value(counts) : na, first = c ? next_value(counts) : na)
+effects_after = counts.get("next")
+y = selected_pos + 1
+""")
+
+
+_METHOD_INPUT_DRIVER = r"""
+#include <array>
+#include <cmath>
+#include <cstdio>
+#include <cstdint>
+#include <iostream>
+#include <limits>
+#include <type_traits>
+
+int main() {
+    const std::array<std::array<bool, 8>, 2> schedules{{
+        {{false, false, true, false, false, true, false, true}},
+        {{true, false, false, true, false, true, false, false}},
+    }};
+    for (unsigned schedule = 0; schedule < schedules.size(); ++schedule) {
+        std::array<pineforge::Bar, 8> bars;
+        for (unsigned index = 0; index < bars.size(); ++index) {
+            const double base = 100.0 + 50.0 * schedule;
+            bars[index] = {
+                base, base + 5.0, base - 5.0,
+                base + (schedules[schedule][index] ? 3.0 : -3.0),
+                10.0 + 3.0 * index,
+                1700000000000LL + 60000LL * index,
+            };
+        }
+        int last_true = -1;
+        for (unsigned count = 1; count <= bars.size(); ++count) {
+            const int index = static_cast<int>(count) - 1;
+            const bool choose = bars[index].close > bars[index].open;
+            if (choose) last_true = index;
+            const int missing = std::numeric_limits<int>::min();
+            const int selected = choose ? index : missing;
+            const int since = last_true < 0 ? missing : index - last_true;
+            GeneratedStrategy strategy;
+            static_assert(std::is_same_v<decltype(strategy.selected_pos), int>);
+            static_assert(std::is_same_v<decltype(strategy.selected_kw), int>);
+            static_assert(std::is_same_v<decltype(strategy.bare_value), int>);
+            static_assert(std::is_same_v<decltype(strategy.bare_keyword), int>);
+            static_assert(std::is_same_v<decltype(strategy.default_value), int>);
+            static_assert(std::is_same_v<decltype(strategy.default_keyword), int>);
+            static_assert(std::is_same_v<decltype(strategy.since_pos), int>);
+            static_assert(std::is_same_v<decltype(strategy.since_kw), int>);
+            static_assert(std::is_same_v<decltype(strategy.empty_selection), int>);
+            static_assert(std::is_same_v<decltype(strategy.wide_value), int64_t>);
+            static_assert(std::is_same_v<decltype(strategy.float_value), double>);
+            strategy.run(bars.data(), count, "1", "1");
+            if (!strategy.last_error().empty()) {
+                std::cerr << strategy.last_error() << "\n";
+                return 1;
+            }
+            const auto fail = [&](int code) {
+                std::cerr << "schedule=" << schedule << " prefix=" << count
+                          << " selected=" << strategy.selected_pos << ","
+                          << strategy.selected_kw << " expected=" << selected
+                          << " bare=" << strategy.bare_value << ","
+                          << strategy.bare_keyword
+                          << " default=" << strategy.default_value << ","
+                          << strategy.default_keyword
+                          << " since=" << strategy.since_pos << ","
+                          << strategy.since_kw << " expected_since=" << since
+                          << " empty=" << strategy.empty_selection
+                          << " wide=" << strategy.wide_value
+                          << " float=" << strategy.float_value << " y=" << strategy.y
+                          << " ordered=" << strategy.ordered_pos << ","
+                          << strategy.ordered_kw
+                          << " effects=" << strategy.effects_after << "\n";
+                return code;
+            };
+            if (strategy.selected_pos != selected || strategy.selected_kw != selected
+                    || strategy.bare_value != selected || strategy.bare_keyword != selected
+                    || strategy.default_value != selected || strategy.default_keyword != selected
+                    || strategy.empty_selection != selected)
+                return fail(2);
+            if (strategy.since_pos != since || strategy.since_kw != since)
+                return fail(3);
+            if (choose) {
+                if (strategy.wide_value != bars[index].timestamp
+                        || strategy.float_value != bars[index].volume
+                        || strategy.y != index + 1
+                        || strategy.ordered_pos != -1 || strategy.ordered_kw != 1)
+                    return fail(4);
+            } else {
+                if (strategy.wide_value != std::numeric_limits<int64_t>::min()
+                        || !std::isnan(strategy.float_value) || !std::isnan(strategy.y)
+                        || !is_na(strategy.ordered_pos) || !is_na(strategy.ordered_kw))
+                    return fail(5);
+            }
+            if (strategy.effects_after != index + (choose ? 4 : 0))
+                return fail(6);
+        }
+    }
+    std::puts("ok");
+}
+"""
+
+
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+@pytest.mark.parametrize("receiver_type", ["Holder", "int"], ids=["udt", "primitive"])
+def test_method_numeric_boundaries_follow_input_values_and_order(
+    receiver_type: str, opt: str,
+) -> None:
+    cpp = transpile(_method_numeric_input_source(receiver_type))
+    # Run the ordinary emitted TU before checking its spelling, so an old
+    # implementation can reach the native comparison as a control.
+    assert run_emitted_tu(
+        cpp, _METHOD_INPUT_DRIVER, opt=opt, label=f"method-input-{receiver_type}",
+    ) == "ok\n"
+    # Assert the actual method ABI as well as each result's width in the driver.
+    # Wide and floating controls have independent methods so their provenance
+    # cannot silently widen the narrow method under test.
+    for name, cpp_type in (
+        ("take", "int"), ("defaulted", "int"),
+        ("wide", "int64_t"), ("floating", "double"),
+    ):
+        assert re.search(
+            rf"{cpp_type} _udt_{receiver_type}_{name}(?:_cs\d+)?"
+            rf"\({receiver_type} self, {cpp_type} value\)",
+            cpp,
+        )

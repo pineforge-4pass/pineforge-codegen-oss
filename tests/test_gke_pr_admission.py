@@ -1091,6 +1091,51 @@ def native_success(outputs, env):
     )
 
 
+def check_public_text_added(root, env):
+    event_path = env.get("GITHUB_EVENT_PATH")
+    require(isinstance(event_path, str) and bool(event_path),
+            "public-text-added: FAIL event_path count=1")
+    try:
+        event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        require(False, "public-text-added: FAIL event_read count=1")
+    require(isinstance(event, dict) and isinstance(event.get("pull_request"), dict),
+            "public-text-added: FAIL event_pull_request count=1")
+    pull_request = event["pull_request"]
+    base = pull_request.get("base")
+    head = pull_request.get("head")
+    require(isinstance(base, dict) and isinstance(base.get("sha"), str)
+            and SHA.fullmatch(base["sha"]),
+            "public-text-added: FAIL event_base_sha count=1")
+    require(isinstance(head, dict) and isinstance(head.get("sha"), str)
+            and SHA.fullmatch(head["sha"]),
+            "public-text-added: FAIL event_head_sha count=1")
+    try:
+        checkout = subprocess.run(
+            ["git", "--no-replace-objects", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+            check=True, capture_output=True, text=True,
+        )
+    except (OSError, UnicodeError, subprocess.CalledProcessError):
+        require(False, "public-text-added: FAIL checkout_read count=1")
+    require(checkout.stdout.strip() == head["sha"],
+            "public-text-added: FAIL checkout_head count=1")
+    script = Path(__file__).resolve().parents[1] / "scripts/check_public_text_added.py"
+    require(script.is_file(), "public-text-added: FAIL checker_missing count=1")
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", str(script), "--root", str(root),
+             "--base", base["sha"], "--head", head["sha"]],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        print(error.stdout, end="")
+        print(error.stderr, end="", file=sys.stderr)
+        raise
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result
+
+
 def main():
     require(len(sys.argv) == 2, "expected one admission mode")
     env = dict(os.environ)
@@ -1123,6 +1168,7 @@ def main():
         subprocess.run([str(binary), "-config-file", str(config), "-shellcheck=", "-pyflakes=", *workflow_files],
                        check=True)
         subprocess.run(["python3", str(script)], check=True)
+        check_public_text_added(root, env)
     else:
         raise ValueError("unknown admission mode")
     return 0

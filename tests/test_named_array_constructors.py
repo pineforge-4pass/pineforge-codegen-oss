@@ -395,12 +395,14 @@ _REFERENCE_SPELLING = {
     "values = array.from(year(time), hour(time = time, timezone = \"UTC\"))\n",
     "strategy.entry(\"L\", strategy.long, qty = 1)\nstrategy.order(\"O\", strategy.short, qty = 2)\n",
     "strategy.exit(\"X\", \"L\", stop = close)\nstrategy.close(\"L\", immediately = true)\nstrategy.close_all()\n",
-    "strategy.cancel(\"L\")\nstrategy.cancel_all()\nx = strategy.convert_to_account(close)\n",
+    # Currency conversion now queries the host and is intentionally different
+    # from this reference. Keep an unrelated scalar lowering under full equality.
+    "strategy.cancel(\"L\")\nstrategy.cancel_all()\nx = math.abs(close)\n",
 ])
 def test_unrelated_lowerings_keep_cpp_diagnostics_and_manifests(tmp_path, body):
     from tests._e2e import reference_codegen, transpile_json
 
-    reference = reference_codegen("3ec62ae589f5b777122d03f1e7a706e7cda67ba8")
+    reference = reference_codegen("49ebac862df439725ad73e78d9f9d704c97580d3")
     assert reference is not None, "the source-preservation baseline must be available"
     pine = tmp_path / "strategy.pine"
     # The reference read the keywords of matrix.new by position, as a call with
@@ -411,4 +413,17 @@ def test_unrelated_lowerings_keep_cpp_diagnostics_and_manifests(tmp_path, body):
     pine.write_text(HEADER + body)
     current = transpile_json(pine)
     assert previous["ok"] and current["ok"], (previous, current)
+    if "strategy.order(" in body:
+        # An order forwards its comment to the engine as the host door's last
+        # argument, which the reference did not emit: an order without a
+        # comment passes the empty string there. That one argument is added to
+        # the reference's own call; every other byte of the C++, every
+        # diagnostic and the manifests are still compared whole.
+        calls = [line for line in previous["cpp"].splitlines()
+                 if line.strip().startswith("strategy_order(")]
+        assert len(calls) == 1, calls
+        assert calls[0].endswith(");") and not calls[0].endswith(', "");'), calls
+        previous = dict(previous)
+        previous["cpp"] = previous["cpp"].replace(
+            calls[0], calls[0][:-len(");")] + ', "");', 1)
     assert current == previous

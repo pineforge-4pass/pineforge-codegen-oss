@@ -824,7 +824,7 @@ def test_temporal_outer_alias_avoids_user_name_and_routes_the_read() -> None:
 
 def test_an_array_history_as_an_element_of_array_from_is_refused() -> None:
     # ``slot[0]`` is the array itself, which TradingView refuses as an
-    # element of array.from (CE10122, pine-facade 2026-10-01); this test's
+    # element of array.from (CE10122, TradingView, October 1, 2026); this test's
     # outer alias used to read it as the array's element 0.
     from pineforge_codegen.errors import CompileError
 

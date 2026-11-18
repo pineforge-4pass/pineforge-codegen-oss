@@ -2,12 +2,9 @@
 
 A synthetic probe for lower-timeframe security and its unedited TradingView
 trade export. It contains no closed or scraped source. It was exported on
-2026-09-28 with
+2026-09-28.
 
-```bash
-lab tv --pine w9sec_ltf_computed_tf.pine --slug pf-w9sec-ltf-computed-tf --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-08
-```
+`w9sec_ltf_computed_tf.pine`: `BINANCE:ETHUSDT.P` on a 15-minute chart, from 2025-04-01 through 2025-04-08.
 
 TradingView ran it from 2025-04-01 00:00 UTC (`rangeProof: covered`). The
 probe enters on the bars at minute 0 and 30 and closes on the bars at minute

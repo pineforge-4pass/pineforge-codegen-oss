@@ -99,14 +99,10 @@ defects or authorize new refusals of TradingView-valid, compiling scripts.
 
 ## Array range and slice follow-up (2026-09-25)
 
-`lab tv` probes on `BINANCE:ETHUSDT.P`, 15 minutes, 2025-04-01 through
-2025-04-08 used the operation's result in each order signal. An earlier
-unobserved probe let TradingView eliminate the operation and was discarded.
-
-| Operation | TradingView evidence | PineForge behavior |
+| Operation | Observed TradingView behavior | PineForge behavior |
 |---|---|---|
-| Primitive `array<float>` slice, then write through slice and source | 32/32 entries signal `both-alias`; covered tape SHA-256 `fbd83309262bfd1a8a06e8f3cc82228fad1b1358b03b135b200246d5f4cfb7c0` | The same source run against the built engine signals `no-alias`. Both syntax forms emit a located warning in `transpile_full` / `transpile_json`. |
-| `array.fill(a, 9, 2, 1)` on `[1,2,3]` | 32/32 entries signal `123` (no-op); covered tape SHA-256 `83243e37dd66678e1b9127baac2ba42ef74815d31097c0c2095a08efffca575e` | Guarded no-op, without invalid STL iterator arithmetic. |
+| Primitive `array<float>` slice, then write through slice and source | Writes through either reference are visible through the other. | The slice is copied. Both syntax forms emit a located warning in `transpile_full` / `transpile_json`. |
+| `array.fill(a, 9, 2, 1)` on `[1,2,3]` | Leaves the array unchanged. | Guarded no-op, without invalid STL iterator arithmetic. |
 | `array.slice(a, 2, 1)` | `request_error` RE10044, “Index 'from' should be less than index 'to'.” | Runtime error with the same message. |
 | Negative `index_from` or `index_to` in `fill` / `slice` | Four observed probes return `request_error` RE10045, index `-1` out of bounds for size 3. | Both endpoints reject before iterator arithmetic; existing guard was correct. |
 
@@ -114,21 +110,20 @@ The slice copy remains a semantic gap. A safe alias requires a collection view
 whose source storage survives slice lifetime and mutations, including source
 resizing and temporary receivers. The current `std::vector` representation is
 used throughout codegen, so the implementation preserves the compiling
-lowering and warns at each slice call. The probe establishes that primitive elements alias
-in TradingView; the earlier “UDTs only” possibility is refuted.
+lowering and warns at each slice call. This limitation affects primitive
+element types as well as user-defined types.
 
 ## request.security symbol follow-up (2026-09-25)
 
 The support checker now indexes declarations, reads and rebinds by lexical
 binding for the security symbol argument. A local `sym` inside a function no
 longer taints an unrelated global `sym`; a rebind of the global inside an `if`
-still disqualifies it. A TradingView probe with the local rebind and a global
-chart-symbol request recorded 32/32 `chart-feed` entries (covered tape SHA-256
-`8a0492f71ffc489e45c3eb80907bf796658719e2ef7efa7c0df312e8eeb28917`).
+still disqualifies it. In TradingView, a request that uses the global chart
+symbol still reads the chart feed even when a function reassigns its local
+`sym`.
 
-A second TradingView probe chose `BINANCE:BTCUSDT.P` in the true ternary arm
-on an ETH chart and recorded 32/32 `alternate-feed` entries (covered tape
-SHA-256 `a9aa27e13b64260eba08cafec3e345ddc7e06f378f5c6b94e5f6955eb32abaf3`).
+In TradingView, choosing `BINANCE:BTCUSDT.P` in the true arm of a ternary
+expression on an ETH chart reads the alternate feed.
 The generated security evaluation has no alternate-symbol feed. The checker
 therefore tests *both* ternary arms, including arms reached through aliases,
 and warns when any path can select another symbol. It preserves previously

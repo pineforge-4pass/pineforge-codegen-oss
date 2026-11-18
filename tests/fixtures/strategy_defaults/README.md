@@ -16,20 +16,13 @@ BINANCE:ETHUSDT.P 15 and CME_MINI:ES1! 15, each parameter omitted,
 at its old default and at a value that moves the tape) is the engine lane
 TV-DEFAULTS report; these seven tapes are the rows this repository replays.
 
-Each directory is one `lab tv` export (channel `ws-report-v1`, `rangeProof`
-covered), byte for byte: `strategy.pine`, `tv_trades.csv` (times at UTC+8),
+Each fixture contains `strategy.pine`, `tv_trades.csv` (times at UTC+8),
 `metrics.json`, `meta.json`. `metrics.json` `tvTradesCsvHash` is the sha256
 of `tv_trades.csv`. The probes are synthetic, written for this lane; no closed
 or scraped strategy is involved. Every probe trades the same signal (a
 10/30-bar SMA cross, long only, entered from flat and closed on the opposite
 cross), so the tapes differ only in how TradingView sized each entry. The
-command, run once per row (`--no-note`: no campaign note was recorded):
-
-```sh
-source ~/code/pineforge-workflow/campaign/env.sh
-lab tv --pine <probe>.pine --symbol BINANCE:ETHUSDT.P --interval 15 \
-  --from 2025-04-01 --to 2025-05-01 --out <dir>/<tape> --slug <tape> --no-note --json
-```
+fixtures use 15-minute BINANCE:ETHUSDT.P bars from April 1 through May 1, 2025.
 
 | tape | trades | `strategy()` declares | first entry (2025-04-01 23:30 UTC+8, 1910) | tv_trades.csv sha256 |
 |---|---:|---|---|---|

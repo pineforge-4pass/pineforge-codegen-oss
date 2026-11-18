@@ -8,8 +8,7 @@ alone and holds a ``barmerge`` constant it passes as a request's gaps; the
 script importing it declares ``k`` with two types in two blocks and draws a
 Park-Miller generator whose products leave int32. ``thequantscience/
 XGBoostMini/1`` passes ``matrix.row(X, i)`` to a method's array parameter.
-Each rule is pinned by a synthetic probe's tape (``fixtures/tail_f_tv``,
-lab tv --no-note), replayed here on the corpus ETH 15m feed from
+Each rule is pinned by a synthetic probe's tape (``fixtures/tail_f_tv``), replayed here on the corpus ETH 15m feed from
 TradingView's first bar, 2025-04-01 00:00 UTC: every TradingView trade's
 entry, exit and exit comment. Two replays read the synthetic libraries
 ``pftest/ArmLine/1`` and ``pftest/Overloads/1`` through the verifier's path
@@ -47,6 +46,7 @@ REPLAYS = {
     "arm_commas_decl": "arm_commas_decl",
     "arm_line_import": "arm_commas",
     "array_ref_fresh": "array_ref_fresh",
+    "overload_qualifiers": "overload_qualifiers",
     "overloads_import": "overload_qualifiers",
     "barmerge_values": "barmerge_values",
     "block_local_types": "block_local_types",

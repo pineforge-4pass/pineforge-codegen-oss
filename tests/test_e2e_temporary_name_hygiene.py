@@ -19,7 +19,7 @@ declares -- ``CPP_TEMPORARY_NAMES`` and the numbered forms, the templates'
 short locals renamed ``__pf_*`` (C++ reserves double-underscore names) --
 and ``_safe_name`` escapes an authored spelling of one. TradingView's
 tapes of ``fixtures/open_items_tv/temp_names`` and ``temp_names_array``
-(lab tv --no-note) spell every such read on each exit bar; the replay
+spell every such read on each exit bar; the replay
 compares every exit comment. A guard derives the temporaries from emitted
 C++ and requires each to be reserved.
 """
@@ -108,8 +108,36 @@ def test_names_outside_the_temporaries_keep_their_spelling():
         assert not is_emitter_temporary(name), name
 
 
+@pytest.mark.parametrize("name, initializer, call, target", [
+    ("_pf_currency_value", "close",
+     "strategy.convert_to_account(_pf_currency_value)", "_pf_currency_value"),
+    ("_pf_currency_value", "close",
+     "strategy.convert_to_symbol(_pf_currency_value)", "_pf_currency_value"),
+    # A literal initializer need not leave an authored read in the call to
+    # escape; a runtime value (the symbol's currency) does.
+    ("_pf_currency_from", "syminfo.currency",
+     'request.currency_rate("EUR", _pf_currency_from)', "_pf_currency_to"),
+])
+def test_currency_arguments_cannot_capture_authored_temporaries(
+    name, initializer, call, target,
+):
+    # Before: the amount initialized itself, or the target read the lambda's
+    # origin instead of the script's target. The authored read must be escaped.
+    cpp = transpile(HEAD + f"{name} = {initializer}\nobserved = {call}\n")
+    statement = next(line.strip() for line in cpp.splitlines()
+                     if line.strip().startswith("observed = "))
+    declared = re.search(rf"\b{target} = \((.*?)\);", statement)
+    assert declared, statement
+    # The lambda's target reads the escaped authored name, never the bare
+    # spelling, which inside the lambda is the lowering's own temporary.
+    assert re.search(rf"\bpf_safe_{name}\b", declared.group(1)), declared.group(0)
+    assert not re.search(rf"\b{name}\b", declared.group(1)), declared.group(0)
+    assert re.search(rf"^\s+pf_safe_{name} = ", cpp, re.M)
+
+
+# Currency failures propagate directly; no std::runtime_error catch local remains.
 DECL = re.compile(
-    r"(?<![\w:])(?:(?:auto|double|int|int64_t|bool|std::string|std::size_t|size_t"
+    r"(?<![\w:])(?:(?:auto|double|int|int64_t|std::int64_t|bool|std::string|std::size_t|size_t"
     r"|long double)\s+|auto&&\s*|auto&\s*)(_\w+)\s*(?:=|;|\()")
 
 
@@ -129,6 +157,11 @@ def test_every_temporary_the_emitter_declares_is_reserved():
         HEAD + 'qtyMode = input.string("cash", options = ["cash", "percent_of_equity"])\n'
         'strategy.entry("L", strategy.long, qty = 1, qty_type = qtyMode)\n'
     )
+    sources.append(
+        HEAD + 'accountAmount = strategy.convert_to_account(close)\n'
+        'symbolAmount = strategy.convert_to_symbol(open)\n'
+        'currencyRate = request.currency_rate("USD", "EUR", ignore_invalid_currency = true)\n'
+    )
     for source in sources:
         authored = {t.value for t in Lexer(source).tokenize() if t.type.name == "IDENT"}
         for line in transpile(source).splitlines():
@@ -137,4 +170,8 @@ def test_every_temporary_the_emitter_declares_is_reserved():
                           if n not in authored and not n.startswith("pf_safe_")}
     assert names, "the tapes' C++ declares no temporary"
     assert "_pf_timeframe_arg" in names
+    assert {
+        "_pf_currency_from", "_pf_currency_to", "_pf_currency_ignore",
+        "_pf_currency_value", "_pf_currency_account", "_pf_currency_time",
+    } <= names
     assert sorted(n for n in names if not is_emitter_temporary(n)) == []

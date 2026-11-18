@@ -10,8 +10,7 @@ pre-existing defects). Each evaluator that reads it now keeps a counter
 (``_sec<N>_bar_index_``) advanced where it opens a requested slot, as its TA
 sites advance.
 
-TradingView's tape of ``fixtures/open_items_tv/sec_bar_index`` (lab tv
---no-note, BINANCE:ETHUSDT.P 15, 265 closes) spells the payload's
+TradingView's tape of ``fixtures/open_items_tv/sec_bar_index`` (BINANCE:ETHUSDT.P 15, 265 closes) spells the payload's
 ``bar_index`` on "60" and "240", ``nz(bar_index) + 1``, a helper's
 ``bar_index * 2``, ``bar_index[1]`` and the chart timeframe's, beside the
 chart's own; the replay compares all 265 closes.

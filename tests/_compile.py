@@ -181,11 +181,20 @@ _COMPILER = _resolve_compiler()
 _GENERATED_INC = _resolve_generated_include(_ENGINE_INC)
 _ENGINE_LIB = _resolve_engine_lib()
 
-# Every compile that emits code for a strategy TU passes these. The engine
-# builds libpineforge with -ffp-contract=off and hands it to every CMake
-# consumer (TradingView's runtime has no FMA, so each multiply-add rounds
+# Shared by the runtime helpers and direct strategy/fragment test builds.
+# The engine builds libpineforge with -ffp-contract=off and hands it to every
+# CMake consumer (TradingView's runtime has no FMA, so each multiply-add rounds
 # twice); without it AppleClang and aarch64 g++ fuse a * b + c even at -O0.
-STRATEGY_FP_FLAGS = ("-ffp-contract=off",)
+# Instrument the test TU itself: engine archive flags do not propagate here.
+# GCC's undefined group omits float-cast-overflow, so enable it explicitly.
+# The GCC/Clang trap spelling avoids a UBSan runtime dependency in shared
+# strategies loaded by Python. Unsupported compilers fail; never drop flags.
+STRATEGY_FP_FLAGS = (
+    "-ffp-contract=off",
+    "-fsanitize=float-cast-overflow",
+    "-fno-sanitize-recover=float-cast-overflow",
+    "-fsanitize-undefined-trap-on-error",
+)
 
 
 def have_compile_env() -> bool:
@@ -362,7 +371,9 @@ def run_emitted_tu(cpp_source: str, driver_main: str, *, opt: str,
     binary is linked against the real engine runtime. ``opt`` is a single
     optimisation flag (``-O0`` … ``-O3``): the na->int narrowing class resolves
     differently per optimisation level, so a behavioural check is only
-    meaningful when it pins more than one.
+    meaningful when it pins more than one. ``STRATEGY_FP_FLAGS`` instruments
+    floating-to-integer overflow in this TU and makes it trap rather than
+    continue with a platform-dependent integer.
 
     Returns the program's stdout.
     """

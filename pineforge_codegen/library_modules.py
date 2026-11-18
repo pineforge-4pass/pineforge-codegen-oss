@@ -62,7 +62,7 @@ def _module_error(path: str, message: str, loc: SourceLocation | None = None) ->
 def normalize_library_text(text: str) -> str:
     """A leading byte-order mark dropped and every line end spelled ``\\n``:
     TradingView ends a line at ``\\r\\n``, ``\\r`` or ``\\n``, and pinned
-    library sources keep the bytes pine-facade served (CRLF for some)."""
+    library sources keep their original line endings (CRLF for some)."""
     if text.startswith("﻿"):
         text = text[1:]
     return text.replace("\r\n", "\n").replace("\r", "\n")

@@ -78,7 +78,7 @@ def test_what_is_not_a_library_is_refused_by_name(text, message):
 
 
 def test_line_ends_are_tradingviews():
-    """pine-facade serves some sources with CRLF line ends; TradingView ends a
+    """Some library sources use CRLF line endings; TradingView ends a
     line at CRLF, CR or LF, and the lexer reads LF."""
     lf = _lib("pftest/Base/1")
     for form in (lf.replace("\n", "\r\n"), lf.replace("\n", "\r"), "﻿" + lf):

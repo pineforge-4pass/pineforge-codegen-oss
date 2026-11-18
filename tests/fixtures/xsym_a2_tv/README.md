@@ -2,12 +2,9 @@
 
 Synthetic probes for a `request.security` payload
 defects XSYM-A left open) and their unedited TradingView trade exports. They
-contain no closed or scraped source. Each was exported on 2026-09-28 with
+contain no closed or scraped source. Each was exported on 2026-09-28.
 
-```bash
-lab tv --pine <name>.pine --slug pf-<name, underscores as dashes>-eth15 --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-08
-```
+The fixtures use `BINANCE:ETHUSDT.P` on a 15-minute chart, from 2025-04-01 through 2025-04-08.
 
 TradingView ran each from 2025-04-01 00:00 UTC to 2025-04-08 00:00 UTC (the
 export's requested and returned range, `rangeProof: covered`). The tapes'

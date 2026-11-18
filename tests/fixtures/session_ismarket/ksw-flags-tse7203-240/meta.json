@@ -1,8 +1,7 @@
 {
   "title": "K-SESSION-WINDOWS session flags",
   "slug": "ksw-flags-tse7203-240",
-  "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
+  "source": "TradingView",
   "exportedAt": "2026-09-27T14:56:29.041Z",
   "chart": {
     "symbol": "TSE:7203",

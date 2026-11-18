@@ -95,7 +95,7 @@ def lower_storage(cpp: str, gen) -> str:
     elements = {
         "double", "int", "int64_t", "bool", "std::string",
         "T", "E", "_PFElement",
-        *(gen._safe_name(name) for name in gen._udt_defs),
+        *(gen._udt_cpp_name(name) for name in gen._udt_defs),
         *DRAWING_TYPE_TO_CPP.values(),
     }
 

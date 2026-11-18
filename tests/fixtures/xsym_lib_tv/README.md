@@ -2,15 +2,11 @@
 
 Synthetic probes for Pine libraries inlined at transpile
 time) and their unedited TradingView trade exports. They contain no closed,
-scraped or third-party source. Each was exported on 2026-09-28 with
+scraped or third-party source. Each was exported on 2026-09-28.
 
-```bash
-lab tv --pine <name>.pine --slug pf-<name, underscores as dashes>-eth15 --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to <to>
-```
+The intraday fixtures use `BINANCE:ETHUSDT.P` on a 15-minute chart starting 2025-04-01; the end date is listed per fixture.
 
-`xc_v5_lib`'s daily tape (`xc_v5_lib_eth1d_tv_trades.csv`) was exported with
-`--slug pf-xc-v5-lib-eth1d --interval 1D`. TradingView ran each from
+`xc_v5_lib`'s daily tape (`xc_v5_lib_eth1d_tv_trades.csv`) uses the daily chart. TradingView ran each from
 2025-04-01 00:00 UTC (the export's requested and returned range). The tapes'
 `Date and time` column is the exporting account's chart timezone,
 Asia/Taipei (UTC+8). A probe enters on even bars and closes on odd bars, each

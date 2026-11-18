@@ -308,7 +308,7 @@ plot(a + b)
 def test_earlier_unrelated_ordinary_ta_length_error_keeps_precedence() -> None:
     source = '''//@version=6
 strategy("two length errors")
-bad(int n) => ta.sma(close, n)
+bad(int n) => ta.rma(close, n)
 ordinary = bad(int(close))
 e(float src, int len) => ta.ema(src, len)
 four(float src, int p) => [e(src, p), e(src, p + int(close))]
@@ -368,7 +368,7 @@ plot(a + b)
     assert sum('get_input_int("Slow", 13)' in line for line in resets) == 2
 
 
-def test_series_dynamic_length_remains_rejected_through_method_wrapper() -> None:
+def test_series_sma_length_is_lowered_through_method_wrappers() -> None:
     source = '''//@version=6
 strategy("dynamic method length guard")
 type Holder
@@ -379,9 +379,10 @@ var Holder holder = Holder.new(0.0)
 out = holder.outer(int(ta.atr(14)))
 plot(out)
 '''
-    with pytest.raises(CompileError) as exc:
-        transpile(source)
-    assert "Unsupported TA constructor length" in str(exc.value)
+    cpp = transpile(source)
+    assert re.search(r"_PFSeriesSma _ta_sma_\w+;", cpp)
+    assert "ta_number(len)" in cpp
+    compile_cpp(cpp, label="method-forwarded series SMA length")
 
 
 def test_two_method_callsites_run_with_distinct_forwarded_lengths() -> None:

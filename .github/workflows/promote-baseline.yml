@@ -39,9 +39,9 @@
 # Required in each product repo:
 #   secrets PINEFORGE_APP_ID + PINEFORGE_APP_PRIVATE_KEY  the org App (already
 #          present for release.yml) — the job mints a short-lived, read-only
-#          token from it to check out the private pineforge-workflow repo, so
+#          token from it to check out the configured tooling repository, so
 #          NO personal access token is needed
-#   var    WORKFLOW_REPO         optional override, defaults to pineforge-4pass/pineforge-workflow
+#   var    WORKFLOW_REPO         optional tooling repository override
 #   var    GCP_WORKLOAD_IDENTITY_PROVIDER
 #          the full provider resource name — terraform/gcp output
 #          `github_workload_identity_provider`
@@ -63,8 +63,8 @@
 # so installing it under another name, or running another branch's copy,
 # mints no token — and no other workflow in the repo can mint one either.
 #
-# (Optionally pin WORKFLOW_REF, defaults to main; and PINEFORGE_EVIDENCE_BUCKET,
-#  defaults to pineforge-workflow-evidence.)
+# (Optionally pin WORKFLOW_REF, which defaults to main, and override
+#  PINEFORGE_EVIDENCE_BUCKET.)
 
 name: promote-baseline
 
@@ -566,7 +566,7 @@ jobs:
           fi
           echo "green=true" >> "$GITHUB_OUTPUT"
 
-      # The campaign tooling lives in the private pineforge-workflow repo. Rather
+      # The campaign tooling lives in a separate repository. Rather
       # than a long-lived PAT, mint a short-lived, read-only token from the org
       # App already installed here (the same app-id/private-key release.yml
       # uses), scoped to just that one repo and to reading its contents: without
@@ -583,7 +583,7 @@ jobs:
           repositories: pineforge-workflow
           permission-contents: read
 
-      - name: Checkout campaign tooling (pineforge-workflow)
+      - name: Checkout campaign tooling
         if: steps.ci.outputs.green == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

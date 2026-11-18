@@ -78,6 +78,19 @@ def test_func_call_kwargs():
     assert "stop" in node.kwargs
 
 
+def test_func_call_to_keyword_label():
+    node = _parse_expr('request.currency_rate(from = "USD", to = "EUR")')
+    assert isinstance(node, FuncCall)
+    assert node.args == []
+    assert list(node.kwargs) == ["from", "to"]
+    for name, value in (("from", "USD"), ("to", "EUR")):
+        assert isinstance(node.kwargs[name], StringLiteral)
+        assert node.kwargs[name].value == value
+    assert tuple(node.annotations["call_arg_order"]) == (
+        node.kwargs["from"], node.kwargs["to"],
+    )
+
+
 def test_subscript():
     node = _parse_expr("close[1]")
     assert isinstance(node, Subscript)
@@ -123,6 +136,18 @@ def test_for_loop_var_field():
     prog = _parse("for i = 0 to 10\n    x = i\n")
     stmt = prog.body[0]
     assert stmt.var == "i"
+
+
+def test_for_loop_to_bound():
+    prog = _parse("for i = 0 to 3\n    x = i\n")
+    stmt, = prog.body
+    assert isinstance(stmt, ForStmt)
+    assert stmt.var == "i"
+    assert isinstance(stmt.start, NumberLiteral)
+    assert stmt.start.value == 0
+    assert isinstance(stmt.end, NumberLiteral)
+    assert stmt.end.value == 3
+    assert stmt.step is None
 
 
 def test_parens():

@@ -35,8 +35,8 @@ def _refusal(source: str) -> CompileError:
 
 # The web lane's four probes (blog fact-check, codegen 1.0.0): each reads a
 # field straight after the history operator, which TradingView refuses with
-# CE10011 at the dot (pine-facade, 2026-10-01).
-LANE_PROBES = {
+# CE10011 at the dot (TradingView, October 1, 2026).
+HISTORY_PROBES = {
     "t13_ne_hist": (
         "//@version=6\n"
         'strategy("t13 ne and udt history", overlay=true)\n'
@@ -85,9 +85,9 @@ LANE_PROBES = {
 }
 
 
-@pytest.mark.parametrize("name", sorted(LANE_PROBES))
+@pytest.mark.parametrize("name", sorted(HISTORY_PROBES))
 def test_a_field_straight_after_a_history_reference_is_refused(name):
-    template, hist, line = LANE_PROBES[name]
+    template, hist, line = HISTORY_PROBES[name]
     error = _refusal(template.replace("{hist}", hist))
     [diag] = [d for d in error.diagnostics if "history-referencing" in d.message]
     assert "CE10011" in diag.message
@@ -95,9 +95,9 @@ def test_a_field_straight_after_a_history_reference_is_refused(name):
     assert f"({hist})." in (diag.hint or "")
 
 
-@pytest.mark.parametrize("name", sorted(LANE_PROBES))
+@pytest.mark.parametrize("name", sorted(HISTORY_PROBES))
 def test_the_parenthesized_lane_probes_compile(name):
-    template, hist, _line = LANE_PROBES[name]
+    template, hist, _line = HISTORY_PROBES[name]
     cpp = transpile(template.replace("{hist}", f"({hist})"))
     compile_cpp(cpp, label=name)
 
@@ -165,7 +165,7 @@ def test_line_and_label_references_compare_by_identity():
     compile_cpp(cpp, label="line/label identity")
 
 
-# Every spelling below compiles on TradingView (pine-facade, 2026-10-01).
+# Every spelling below compiled on TradingView on October 1, 2026.
 SHAPES = {
     "typed": (
         "type Cell\n    float v\n"

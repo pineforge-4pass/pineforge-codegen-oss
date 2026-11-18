@@ -4,12 +4,9 @@ Synthetic probes for the constructs of two open library
 chains the population imports: `TradingView/Request/3` with
 `TradingView/LibraryCOT/5`, and `thequantscience/XGBoostMini/1`) and their
 unedited TradingView trade exports. They contain no closed, scraped or
-third-party source. Each was exported on 2026-09-29 with
+third-party source. Each was exported on 2026-09-29.
 
-```bash
-lab tv --pine <name>.pine --slug pf-tail-f-<name, underscores as dashes> --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-03
-```
+The fixtures use `BINANCE:ETHUSDT.P` on a 15-minute chart, from 2025-04-01 through 2025-04-03.
 
 TradingView ran each from 2025-04-01 00:00 UTC to 2025-04-03 00:00 UTC (the
 export's requested and returned range, `rangeProof: covered`). The tapes'
