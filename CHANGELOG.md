@@ -22,6 +22,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- `ta.sma` accepts supported lengths that vary by bar, including lengths from inline inputs, local variables, and loop counters. Unsupported lengths that depend on `var` or `varip` still report an error, and tuple declarations that reuse a parameter name in the same function body are rejected before C++ is generated. This also fixes Unicode handling in `str.match` and `na` separators in `str.split`.
 - `strategy.convert_to_account` and `strategy.convert_to_symbol` now warn in the run report and return the input unchanged, still in its original currency, when no conversion rate is available ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
 - Strategy sizing constants retain their string values in expressions, aliases
   and helper calls. Host order and risk settings convert these values to their

@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pytest
 
+from tests import _series_sma_oracle as oracle
+from tests._compile import run_emitted_tu
 from tests._e2e import (
     Build, Outcome, derive_chart_feed, digest, execute_all,
     skip_unless_e2e_env, trade_count, transpile_json,
@@ -426,17 +428,13 @@ def test_inline_input_matches_bound_spelling(case_name: str, case_runs) -> None:
 # when an inline input is one of its leaves: the input is a stable leaf, the
 # rest of the expression is not.
 #
-# A recorded TradingView result says a series length compiles for ta.sma, and
-# the refusal says so; TradingView refuses one for ta.ema and ta.rsi, and there
-# is no recorded result for ta.wma, so those refusals keep the plain wording
-# (the second element of a row is the name the refusal gives the call).
+# TradingView refuses a series length for ta.ema and ta.rsi, and there is no
+# recorded result for ta.wma, so these refusals keep the plain wording (the
+# second element of a row is the name the refusal gives the call). The ta.sma
+# row that stood here is lowered on the chart: its test follows this one.
 SERIES_LENGTHS = (
     ('ta.ema(close, close > open ? input.int(2, "A") : input.int(4, "B"))',
      "ta::EMA", '(close > open) ? input.int(2, "A") : input.int(4, "B")', ""),
-    ('ta.sma(close, input.int(9, "Base") + bar_index % 5)',
-     "ta.sma", 'input.int(9, "Base") + (bar_index % 5)',
-     " TradingView accepts a series length for ta.sma(); "
-     "PineForge does not support it yet."),
     ('ta.rsi(close, math.max(input.int(14, "Len"), int(volume)))',
      "ta::RSI", 'math.max(input.int(14, "Len"), int(volume))', ""),
     ('ta.wma(close, input.source(close, "Src"))',
@@ -459,3 +457,69 @@ def test_series_length_with_inline_input_is_still_refused(
         "neither a compile-time constant nor derived from an input, so "
         f"PineForge cannot size the indicator buffer.{tradingview} — Use a "
         "literal, an input.*() value, or arithmetic over those for TA lengths."]
+
+
+# The ta.sma row that was refused above: the same script bytes, written to the
+# same file and transpiled through the same glue call. ``Base + bar_index % 5``
+# gives every bar its own window over the eighteen bars of
+# tests/_series_sma_oracle.py. A row is (length, the sum of the last
+# ``length`` closes), with no sum while fewer closes than that exist.
+#
+# Base = 9, the default: lengths 9 .. 13, repeating. Bar 9 has ten closes and
+# asks for thirteen, so the first mean is bar 10's (nine closes, bars 2 .. 10).
+INLINE_DEFAULT_WINDOWS = (
+    (9, None), (10, None), (11, None), (12, None), (13, None),
+    (9, None), (10, None), (11, None), (12, None), (13, None),
+    (9, 146), (10, 165), (11, 190), (12, 211), (13, 235),
+    (9, 192), (10, 215), (11, 242),
+)
+# Base = 3, set by its title before the run: lengths 3 .. 7, repeating. Bar 4
+# has five closes and asks for seven, so the first mean is bar 5's (bars
+# 3 .. 5). A length that kept the default would answer the table above.
+INLINE_OVERRIDE_WINDOWS = (
+    (3, None), (4, None), (5, None), (6, None), (7, None),
+    (3, 47), (4, 60), (5, 77), (6, 97), (7, 113),
+    (3, 58), (4, 77), (5, 102), (6, 123), (7, 147),
+    (3, 73), (4, 96), (5, 123),
+)
+
+
+def _per_bar(cpp: str, members, label: str, inputs=()):
+    return oracle.per_bar_rows(
+        run_emitted_tu(cpp, oracle.per_bar_driver(members, inputs),
+                       opt="-O0", label=label),
+        len(members))
+
+
+def test_series_sma_length_with_inline_input_averages_each_bars_own_window(
+        tmp_path: Path) -> None:
+    # Both tables first, against constant-length calls on the same bars.
+    reference_pine = tmp_path / "reference.pine"
+    reference_pine.write_text(oracle.EVERY_BAR_REFERENCE)
+    reference = transpile_json(reference_pine)
+    assert reference["ok"], reference["diagnostics"]
+    fixed = _per_bar(
+        reference["cpp"], oracle.EVERY_BAR_MEMBERS, "constant_length_reference")
+    for table in (INLINE_DEFAULT_WINDOWS, INLINE_OVERRIDE_WINDOWS):
+        oracle.assert_per_bar(
+            oracle.scheduled(fixed, table), table,
+            "ta.sma(close, <constant length>)")
+
+    expr = 'ta.sma(close, input.int(9, "Base") + bar_index % 5)'
+    pine = tmp_path / "strategy.pine"
+    pine.write_text('//@version=6\nstrategy("e2e-inline-refused")\n'
+                    f"x = {expr}\n"
+                    'if ta.crossover(close, x)\n    strategy.entry("L", strategy.long)\n')
+    result = transpile_json(pine)
+    assert result["ok"], [d["message"] for d in result["diagnostics"]]
+    assert [entry["title"] for entry in result["inputs"]] == ["Base"]
+
+    default = _per_bar(result["cpp"], ("x",), "inline_input_series_sma")
+    oracle.assert_per_bar(
+        oracle.column(default), INLINE_DEFAULT_WINDOWS, f"{expr} at Base = 9")
+    overridden = _per_bar(
+        result["cpp"], ("x",), "inline_input_series_sma_override",
+        inputs=(("Base", "3"),))
+    oracle.assert_per_bar(
+        oracle.column(overridden), INLINE_OVERRIDE_WINDOWS,
+        f"{expr} at Base = 3")

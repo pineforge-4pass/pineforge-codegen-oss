@@ -4328,9 +4328,28 @@ class CallVisitor:
     def _visit_str_call(self, func_name: str, node) -> str:
         if func_name == "format_time":
             return self._visit_format_time_call(node)
-        args = _merge_kwargs(node.args, node.kwargs,
-                             sigs.get_param_names("str", func_name), self._visit_expr,
-                             intrinsic=sigs.get_intrinsic("str", func_name))
+        param_names = sigs.get_param_names("str", func_name)
+        intrinsic = sigs.get_intrinsic("str", func_name)
+        # A bare ``na`` str.split separator is the string na (the empty text,
+        # an empty separator), not the numeric one: ``na<double>()`` has no
+        # conversion to std::string (issue #382).
+        string_na = set()
+        if func_name == "split" and intrinsic is not None:
+            aligned = _bind_kwargs_aligned(
+                node.args, node.kwargs, param_names, intrinsic=intrinsic)
+            for position, arg in enumerate(aligned):
+                if arg is None or not self._is_na_expr(arg):
+                    continue
+                types = {
+                    sig.params[position].pine_type
+                    for sig in intrinsic.signatures if position < len(sig.params)
+                }
+                if types == {PineType.STRING}:
+                    string_na.add(id(arg))
+        args = _merge_kwargs(
+            node.args, node.kwargs, param_names,
+            lambda a: "na<std::string>()" if id(a) in string_na else self._visit_expr(a),
+            intrinsic=intrinsic)
         arg_nodes = _merge_kwargs(
             node.args, node.kwargs,
             sigs.get_param_names("str", func_name), lambda a: a,
@@ -4443,8 +4462,9 @@ class CallVisitor:
             return 'std::string("")'
 
         if func_name in STR_FUNC_MAP and STR_FUNC_MAP[func_name] is not None:
-            if func_name in ("length", "pos"):
-                # These two count in UTF-16 units through tv_string_units.
+            if func_name in ("length", "pos", "match"):
+                # These count or match in UTF-16 units / characters through
+                # tv_string_units.
                 self._uses_tv_string_units = True
             return evaluate_args_once(
                 args, STR_ARGS_READ_REPEATEDLY.get(func_name, ()),

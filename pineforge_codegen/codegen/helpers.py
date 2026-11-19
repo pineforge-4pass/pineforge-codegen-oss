@@ -461,12 +461,13 @@ CPP_EMITTER_NAMES = frozenset("""
     _pf_tv_trim _pf_tv_increment_digits _pf_tv_decimal _pf_tv_pattern
     _pf_tv_number_style
     _pf_u16_length _pf_u16_pos _pf_u16_decode _pf_u16_encode _pf_u16_substr
+    _pf_u8_decode_points _pf_u8_match
     _security_helper_series_ _security_helper_series_str_
     _use_precalc _var_initialized _ta_initialized_ _inputs_initialized_
     _pf_lines_ _pf_boxes_ _pf_labels_ _pf_linefills_
     _PFPolyline _pf_polyline_next_id_
     _pf_script_state_checkpoint_ _PFScriptState _PFForeignEmaSeeding
-    _PFALMA _PFKC _PFKCW _PFAnchoredVWAP _PFAnchoredVWAPBands
+    _PFALMA _PFKC _PFKCW _PFAnchoredVWAP _PFAnchoredVWAPBands _PFSeriesSma
     _PFPivotPointLevels _PFArrayField _PFTvFormatValue
     _PFCollectionTraits _PFArrayHistoryValue _PFCollectionHistory
     _pf_collection_history_changed kLoopTimeLimitMs kTvFloatStepEnd

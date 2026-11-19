@@ -294,6 +294,26 @@ class TopLevelEmitter:
             site.class_name for site in getattr(self.ctx, "ta_call_sites", ())
         }
 
+        if any(
+            self._ta_member_cpp_type(site) == "_PFSeriesSma"
+            for index, site in enumerate(getattr(self.ctx, "ta_call_sites", ()))
+            if index not in getattr(self, "_dead_ta_indices", set())
+        ):
+            # ta.sma with a series length: the engine's SeriesSma, which
+            # takes the length on every call (``_ta_dynamic_plan``).
+            lines.extend([
+                "class _PFSeriesSma {",
+                "    pineforge::source::SeriesSma impl_;",
+                "public:",
+                "    double compute(double src, double length)"
+                " { return impl_.compute(src, length); }",
+                "    double recompute(double src, double length)"
+                " { return impl_.recompute(src, length); }",
+                "    void observe_owned_storage(pineforge::OwnedStorage& out) const noexcept"
+                " { impl_.observe_owned_storage(out); }",
+                "};",
+                "",
+            ])
         if "_PFALMA" in classes:
             lines.extend([
                 "#ifdef PF_ALMA_HAS_FLOOR",

@@ -37,8 +37,88 @@ inline int _pf_u16_length(const std::string& text) {
 
 inline int _pf_u16_pos(const std::string& text, const std::string& needle) {
     const std::size_t at = text.find(needle);
-    if (at == std::string::npos) return -1;
+    // Absent: na, as TradingView answers (issue #382).
+    if (at == std::string::npos) return na<int>();
     return _pf_u16_length(text.substr(0, at));
+}
+
+// str.match over characters, not UTF-8 bytes (issue #382). The engine's
+// matcher reads bytes, so a regex atom would consume one byte of a multi-byte
+// character. Each distinct non-ASCII code point of the source and the pattern
+// is given one byte of 0x80..0xFF, in ascending code-point order (a range
+// between two characters keeps the characters between them), the engine
+// matches the mapped text, and the answer is mapped back. ASCII text, and text
+// with more distinct non-ASCII characters than there are such bytes, is passed
+// to the engine as it is.
+inline std::vector<uint32_t> _pf_u8_decode_points(const std::string& text) {
+    std::vector<uint32_t> points;
+    std::size_t i = 0;
+    while (i < text.size()) {
+        const unsigned char lead = static_cast<unsigned char>(text[i]);
+        std::size_t width = lead >= 0xF0u ? 4 : lead >= 0xE0u ? 3 : lead >= 0xC0u ? 2 : 1;
+        uint32_t code = lead;
+        if (width > text.size() - i) {
+            width = 1;
+        } else if (width > 1) {
+            code = lead & (0xFFu >> (width + 1));
+            for (std::size_t k = 1; k < width; ++k)
+                code = (code << 6) | (static_cast<unsigned char>(text[i + k]) & 0x3Fu);
+        }
+        i += width;
+        points.push_back(code);
+    }
+    return points;
+}
+
+inline std::string _pf_u8_match(const std::string& source, const std::string& pattern) {
+    bool ascii = true;
+    for (const char c : source) if (static_cast<unsigned char>(c) >= 0x80u) { ascii = false; break; }
+    for (const char c : pattern) if (static_cast<unsigned char>(c) >= 0x80u) { ascii = false; break; }
+    if (ascii) return pine_str_match(source, pattern);
+    const std::vector<uint32_t> source_points = _pf_u8_decode_points(source);
+    const std::vector<uint32_t> pattern_points = _pf_u8_decode_points(pattern);
+    std::vector<uint32_t> wide;
+    for (const uint32_t p : source_points) if (p >= 0x80u) wide.push_back(p);
+    for (const uint32_t p : pattern_points) if (p >= 0x80u) wide.push_back(p);
+    std::sort(wide.begin(), wide.end());
+    wide.erase(std::unique(wide.begin(), wide.end()), wide.end());
+    if (wide.size() > 0x80u) return pine_str_match(source, pattern);
+    const auto narrow = [&](const std::vector<uint32_t>& points) {
+        std::string out;
+        out.reserve(points.size());
+        for (const uint32_t p : points) {
+            if (p < 0x80u) {
+                out.push_back(static_cast<char>(p));
+            } else {
+                const std::size_t slot = static_cast<std::size_t>(
+                    std::lower_bound(wide.begin(), wide.end(), p) - wide.begin());
+                out.push_back(static_cast<char>(0x80u + slot));
+            }
+        }
+        return out;
+    };
+    const std::string mapped = pine_str_match(narrow(source_points), narrow(pattern_points));
+    std::string text;
+    for (const char c : mapped) {
+        const unsigned char byte = static_cast<unsigned char>(c);
+        uint32_t code = byte < 0x80u ? byte : wide[byte - 0x80u];
+        if (code < 0x80u) {
+            text.push_back(static_cast<char>(code));
+        } else if (code < 0x800u) {
+            text.push_back(static_cast<char>(0xC0u | (code >> 6)));
+            text.push_back(static_cast<char>(0x80u | (code & 0x3Fu)));
+        } else if (code < 0x10000u) {
+            text.push_back(static_cast<char>(0xE0u | (code >> 12)));
+            text.push_back(static_cast<char>(0x80u | ((code >> 6) & 0x3Fu)));
+            text.push_back(static_cast<char>(0x80u | (code & 0x3Fu)));
+        } else {
+            text.push_back(static_cast<char>(0xF0u | (code >> 18)));
+            text.push_back(static_cast<char>(0x80u | ((code >> 12) & 0x3Fu)));
+            text.push_back(static_cast<char>(0x80u | ((code >> 6) & 0x3Fu)));
+            text.push_back(static_cast<char>(0x80u | (code & 0x3Fu)));
+        }
+    }
+    return text;
 }
 
 inline std::vector<uint16_t> _pf_u16_decode(const std::string& text) {
