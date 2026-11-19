@@ -167,6 +167,7 @@ HOST_MEMBER_NAMES = frozenset({
     "strategy_cancel",
     "strategy_cancel_all",
     "strategy_close",
+    "strategy_convert_identity_or_warn",
     "strategy_entry",
     "strategy_exit",
     "strategy_exit_cancel_bracket",

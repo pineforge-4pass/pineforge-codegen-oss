@@ -562,15 +562,63 @@ def test_priceless_strategy_exit_cancels_bracket_with_default_from_entry_and_com
     assert "strategy_close(" not in cpp
 
 
-def test_strategy_convert_to_account_and_symbol_remain_identity_lowerings():
+_CONVERT_DIR = "pineforge::source::PineStrategyHost::CurrencyConversionDirection::"
+
+
+def test_strategy_convert_lowers_to_identity_or_warn_with_direction_and_site():
     cpp = _generate(
         "to_account = strategy.convert_to_account(close)\n"
         "to_symbol = strategy.convert_to_symbol(open)"
     )
-    assert "to_account = (current_bar_.close);" in cpp
-    assert "to_symbol = (current_bar_.open);" in cpp
-    assert "strategy_convert_to_account" not in cpp
-    assert "strategy_convert_to_symbol" not in cpp
+    assert (
+        "to_account = strategy_convert_identity_or_warn((current_bar_.close), "
+        f"{_CONVERT_DIR}to_account, /*call_site=*/0, syminfo_.currency, "
+        "current_bar_.timestamp);"
+    ) in cpp
+    assert (
+        "to_symbol = strategy_convert_identity_or_warn((current_bar_.open), "
+        f"{_CONVERT_DIR}to_symbol, /*call_site=*/1, syminfo_.currency, "
+        "current_bar_.timestamp);"
+    ) in cpp
+    # The refusing host conversions stay unused.
+    assert "strategy_convert_to_account(" not in cpp
+    assert "strategy_convert_to_symbol(" not in cpp
+
+
+def test_strategy_convert_passes_declared_account_currency():
+    src = (
+        '//@version=6\nstrategy("T", currency=currency.EUR)\n'
+        "a = strategy.convert_to_symbol(high)\n"
+    )
+    cpp = _generate(src)
+    assert (
+        "strategy_convert_identity_or_warn((current_bar_.high), "
+        f"{_CONVERT_DIR}to_symbol, /*call_site=*/0, "
+    ) in cpp
+    line = next(l for l in cpp.splitlines() if "strategy_convert_identity_or_warn" in l)
+    assert "syminfo_.currency" not in line
+    assert '"EUR"' in line
+
+
+def test_strategy_convert_sites_follow_source_order_and_value_appears_once():
+    cpp = _generate(
+        "a = strategy.convert_to_symbol(close * 2)\n"
+        "b = strategy.convert_to_account(ta.sma(close, 3))\n"
+        "c = strategy.convert_to_account(low)"
+    )
+    lines = [l for l in cpp.splitlines() if "strategy_convert_identity_or_warn(" in l]
+    assert len(lines) == 3
+    assert f"{_CONVERT_DIR}to_symbol, /*call_site=*/0," in lines[0]
+    assert f"{_CONVERT_DIR}to_account, /*call_site=*/1," in lines[1]
+    assert f"{_CONVERT_DIR}to_account, /*call_site=*/2," in lines[2]
+    # The value expression is the helper's single by-value argument.
+    assert lines[2].count("current_bar_.low") == 1
+    assert lines[0].count("current_bar_.close") == 1
+
+
+def test_scripts_without_conversion_do_not_name_the_helper():
+    cpp = _generate("y = close\nz = strategy.account_currency")
+    assert "strategy_convert_identity_or_warn" not in cpp
 
 
 def test_strategy_position_size():
