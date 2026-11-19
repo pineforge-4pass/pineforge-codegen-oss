@@ -767,8 +767,7 @@ def test_unresolved_record_groups_keep_their_declared_names(body: str) -> None:
 
 SIMPLE_INT = "f(simple int n) => n + 100\n"
 RECORD_AND_FLOAT = "f(Holder h) => h.factor\nf(float y) => y * 2.0\n"
-# The script TradingView compiles without an error or a warning (capture f2,
-# source sha256 2ae5a736b40cf5052d51423282e7a3aff4e7291006c0574a1f87165157fe1e0a).
+# The script TradingView compiles without an error or a warning.
 # TradingView's plot values of it were not measured.
 MEASURED_SERIES_CALL = (
     '//@version=6\nstrategy("overload review diagnostic")\n'
@@ -912,9 +911,7 @@ SIMPLE_CALLEE = "h(simple int m) => m + 1\nh(float z) => z * 3.0\n"
 SIMPLE_FUNCTION = "g(simple int m) => m + 1\n"
 HELD_AND_FLOAT = "f(Holder k) => k.factor\nf(float y) => y * 2.0\n"
 THROUGH_CALLEE = "f(int n) => h(n)\n" + HELD_AND_FLOAT
-# The script TradingView compiles without an error or a warning and plots
-# (capture n1, source sha256
-# 36b7d9d4c5d91b78490a9f93c7ec4452792670e9d327185d1ca675b85bedbbe6).
+# The script TradingView compiles without an error or a warning and plots.
 MEASURED_NESTED_CALL = (
     '//@version=6\nstrategy("nested qualifier")\n'
     "type Holder\n    float factor\n" + SIMPLE_CALLEE + THROUGH_CALLEE
