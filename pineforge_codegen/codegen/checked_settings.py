@@ -180,10 +180,11 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
             "get_input_double": "float", "get_input_bool": "bool",
             "get_input_string": "string",
         }[getter]
-        kind = emitter._FORM_TYPE.get(func_name, value_type) if namespace == "input" else value_type
-        if namespace == "input" and func_name == "color":
-            # The native descriptor's historical kind is part of the emitted
-            # C++: only the Python/JSON manifest changes for #231.
+        family = emitter._input_scalar_family(node, func_name, namespace)
+        kind = emitter._FORM_TYPE.get(family, value_type)
+        if family == "color":
+            # Preserve the typed color ABI: an integer descriptor with the
+            # historical UI kind. The Python/JSON manifest uses "color".
             kind = "string"
         options = []
         numeric_options = []
@@ -280,7 +281,7 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
             manifest["options"] = [_string_setting_value(option) for option in options]
         elif value_type == "enum":
             manifest["options"] = [_string_setting_value(option) for option in options]
-        elif namespace == "input" and func_name == "color":
+        elif family == "color":
             if color_default is not None:
                 manifest["default"] = color_default
         elif namespace == "input" and kind in ("int", "float", "bool"):

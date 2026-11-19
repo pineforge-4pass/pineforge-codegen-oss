@@ -48,6 +48,7 @@ from ..ast_nodes import (
 from ..errors import Phase
 from ..limits import iter_ast_nodes
 from ..builtin_constants import builtin_constant, is_builtin_enum
+from ..input_defaults import plain_input_default, plain_input_type
 from ..matrix_overloads import matrix_sum_has_rhs
 from ..reference_casts import na_reference_cast_kind
 from ..symbols import (
@@ -57,6 +58,7 @@ from ..symbols import (
     unify_type_specs,
 )
 from .operators import join_value_types, reference_value_type
+from .value_bindings import ValueBindings
 
 # Drawing-objects-as-data type names (spec §4.1). Defined locally — the
 # analyzer must not import from ``codegen`` (codegen imports analyzer, so the
@@ -578,6 +580,12 @@ class TypeHelper:
             if exact is not None:
                 return exact
             cal = value.callee
+            if isinstance(cal, Identifier) and cal.name == "input":
+                kind = plain_input_type(
+                    plain_input_default(value), is_bound=ValueBindings.has_value_binding)
+                if kind == PineType.COLOR:
+                    # Keep the semantic color distinct from its int64 storage.
+                    return TypeSpec.primitive(kind.value)
             if (isinstance(cal, Identifier) and cal.name in ("line", "box")
                     and len(value.args) == 1 and not value.kwargs
                     and isinstance(value.args[0], NaLiteral)):
