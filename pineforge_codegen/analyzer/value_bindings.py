@@ -138,6 +138,12 @@ class ValueBindings(DiagnosticsHelper):
         return BindingInfo(use.binding.kind, use.binding.callable)
 
     @staticmethod
+    def has_value_binding(node: Identifier) -> bool:
+        """Whether a namespace-shaped receiver names an authored value."""
+        use = (node.annotations or {}).get(_VALUE_USE)
+        return isinstance(use, _ValueUse) and use.binding is not None
+
+    @staticmethod
     def declaration_of(node: Identifier) -> tuple[int, str] | None:
         """Read an authored variable declaration without visiting its use."""
         use = (node.annotations or {}).get(_VALUE_USE)

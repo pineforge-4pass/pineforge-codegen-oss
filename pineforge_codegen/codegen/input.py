@@ -29,6 +29,8 @@ from ..ast_nodes import (
     VarDecl,
 )
 from .. import signatures as sigs
+from ..analyzer.value_bindings import ValueBindings
+from ..input_defaults import plain_input_default, plain_input_type
 from ..pine_spelling import expr_start, global_input_calls, input_binding_names
 from ..symbols import PineType
 from .color_constants import literal_color_value
@@ -77,7 +79,7 @@ class InputHelper:
         if namespace == "input" and func_name in sigs.INPUT_FUNCTIONS:
             param_names = sigs.get_param_names("input", func_name)
         elif func_name == "input" and namespace is None:
-            param_names = sigs.get_param_names(None, "input")
+            return plain_input_default(node)
         if param_names:
             merged = list(node.args)
             for i, pname in enumerate(param_names):
@@ -390,7 +392,8 @@ class InputHelper:
         """
         default = self._get_input_default(node)
         func_name, namespace = self._resolve_callee(node.callee)
-        getter = self._input_getter_for_call(node, func_name, namespace)
+        family = self._input_scalar_family(node, func_name, namespace)
+        getter = self._input_type_to_getter(family, namespace)
         string_input = namespace == "input" and getter == "get_input_string"
         if string_input:
             default = self._string_input_argument(default)
@@ -409,8 +412,10 @@ class InputHelper:
             # An input's default stays a C string, cut at its first NUL as the
             # settings receipt documents; the manifest equals both.
             cpp = self._unsized_std_string(cpp)
-        color = (self._literal_color_value(default)
-                 if namespace == "input" and func_name == "color" else None)
+        color = None
+        if family == "color":
+            binding_check = ValueBindings.has_value_binding if namespace is None else None
+            color = literal_color_value(default, is_bound=binding_check)
         return cpp, color
 
     def _string_input_argument(self, expr, *, refuse_unproven: bool = True):
@@ -437,42 +442,27 @@ class InputHelper:
                  "or write the literal in the call.",
         )
 
-    def _literal_color_value(self, node) -> int | None:
-        """The unchanged literal evaluator, also used by constant proofs."""
-        return literal_color_value(node)
+    def _input_scalar_family(self, node: FuncCall, func_name: str | None,
+                             namespace: str | None) -> str | None:
+        """Typed input spelling or the proven static overload of bare input."""
+        if namespace == "input":
+            return func_name
+        if namespace is None and func_name == "input":
+            kind = plain_input_type(
+                self._get_input_default(node), is_bound=ValueBindings.has_value_binding)
+            return kind.value if kind is not None else None
+        return None
 
     _GETTER_CPP_TYPE = {
-        "get_input_bool": "bool", "get_input_int": "int",
+        "get_input_bool": "bool", "get_input_int": "int", "get_input_int64": "int64_t",
         "get_input_string": "std::string", "get_input_double": "double",
     }
 
     def _input_getter_for_call(self, node: FuncCall, func_name: str | None,
                                namespace: str | None) -> str:
-        """The scalar getter an ``input`` call reads through.
-
-        The generic ``input(...)`` overload is typed by its defval in Pine
-        v6: ``input("x")`` is a string input, ``input(3)`` an int one and
-        ``input(true)`` a bool one (lab tv tape te_generic_input: its
-        ``str.tostring(n / 2)`` reads "1.5" and its string input spells the
-        order comments). The static getter table cannot see the default, so
-        the getter follows the default's literal type here. This matters for
-        TA lengths too: ``input(15)`` must route to ``get_input_int`` so the
-        RMA/EMA ctor receives an int."""
-        getter = self._input_type_to_getter(func_name, namespace)
-        if func_name == "input" and namespace is None:
-            default = self._get_input_default(node)
-            if isinstance(default, BoolLiteral):
-                getter = "get_input_bool"
-            elif isinstance(default, NumberLiteral):
-                if isinstance(default.value, bool):
-                    getter = "get_input_bool"
-                elif isinstance(default.value, int):
-                    getter = "get_input_int"
-                else:
-                    getter = "get_input_double"
-            elif isinstance(default, StringLiteral):
-                getter = "get_input_string"
-        return getter
+        """Use the same getter for explicit and proven generic scalar types."""
+        return self._input_type_to_getter(
+            self._input_scalar_family(node, func_name, namespace), namespace)
 
     def _generic_input_cpp_type(self, node: FuncCall) -> str:
         """The C++ storage of a generic ``input(...)`` value: its getter's
@@ -619,25 +609,17 @@ class InputHelper:
             if default_node is not None
             else None
         )
-        if namespace == "input":
-            form_type = self._FORM_TYPE.get(func_name, "string")
+        family = self._input_scalar_family(node, func_name, namespace)
+        if family is not None:
+            form_type = self._FORM_TYPE.get(family, "string")
         else:
-            # Plain ``input(...)``: Pine types the result by its defval.
-            # The codegen already emits the matching scalar getter, so the
-            # manifest must mirror that — infer from the resolved default's
-            # Python type. ``bool`` MUST be tested before ``int`` because
-            # ``isinstance(True, int)`` is True. A None/non-literal default
-            # falls back to "string".
-            if isinstance(default_val, bool):
-                form_type = "bool"
-            elif isinstance(default_val, int):
-                form_type = "int"
-            elif isinstance(default_val, float):
-                form_type = "float"
-            elif isinstance(default_val, str):
-                form_type = "string"
-            else:
-                form_type = "string"
+            # Keep historical manifest values for defaults without a proven
+            # scalar overload (including signed numbers and native sources).
+            form_type = {bool: "bool", int: "int", float: "float"}.get(
+                type(default_val), "string")
+        if family == "color" and namespace is None:
+            # The checked-settings descriptor supplies the packed value.
+            default_val = None
         entry: dict = {
             "title": title,
             "type": form_type,

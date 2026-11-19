@@ -23,6 +23,7 @@ from ..intrinsic_binding import validate_intrinsic_keywords
 from ..signatures import IntrinsicFunc
 from ..symbols import PineType
 from ..builtin_constants import ENUM_CONSTANT_VALUES
+from ..color_constants import COLOR_CONSTANT_VALUES
 from .helpers import (
     evaluate_args_once, na_preserving_int_cast, pine_index_int_cast,
     pine_truth_cast,
@@ -597,30 +598,9 @@ SYMINFO_MEMBER_MAP = {
     "country": "_pf_derive_country(syminfo_.tickerid)",
 }
 
-# One palette for emission and input defaults: (existing C++ symbol, ARGB).
-# Values are the Pine v6 r,g,b,t readouts in tests/fixtures/color_tv/
-# w11-color-v6-eth15, n0/n1/n2. The native receipt test checks them against
-# the engine's own evaluation of these unchanged symbols.
 _COLOR_CONSTANTS = {
-    "red": ("pine_color::red", 0xFFF23645),
-    "green": ("pine_color::green", 0xFF4CAF50),
-    "blue": ("pine_color::blue", 0xFF2962FF),
-    "white": ("pine_color::white", 0xFFFFFFFF),
-    "black": ("pine_color::black", 0xFF363A45),
-    "yellow": ("pine_color::yellow", 0xFFFDD835),
-    "orange": ("pine_color::orange", 0xFFFF9800),
-    "purple": ("pine_color::purple", 0xFF9C27B0),
-    "aqua": ("pine_color::aqua", 0xFF00BCD4),
-    "gray": ("pine_color::gray", 0xFF787B86),
-    "lime": ("pine_color::lime", 0xFF00E676),
-    "maroon": ("pine_color::maroon", 0xFF880E4F),
-    "navy": ("pine_color::navy", 0xFF311B92),
-    "olive": ("pine_color::olive", 0xFF808000),
-    "silver": ("pine_color::silver", 0xFFB2B5BE),
-    "teal": ("pine_color::teal", 0xFF089981),
-    "fuchsia": ("pine_color::fuchsia", 0xFFE040FB),
+    name: (f"pine_color::{name}", value) for name, value in COLOR_CONSTANT_VALUES.items()
 }
-# Keep the re-exported C++ dispatch map's string values and order unchanged.
 COLOR_CONST_MAP = {name: cpp for name, (cpp, _) in _COLOR_CONSTANTS.items()}
 
 # dayofweek.* constants — Pine uses 1=Sunday .. 7=Saturday. Unknown member

@@ -70,6 +70,7 @@ from ..ast_nodes import (
     Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, NaLiteral,
 )
 from ..method_binding import bind_function_defaults
+from ..input_defaults import plain_input_default, plain_input_type
 from ..loop_types import FLOAT_REASSIGNMENT, has_fractional_int_value
 from ..pine_spelling import sub_outside_literals
 from ..external_requests import FEED_LOWERING, LOWERING_ANNOTATION
@@ -1139,48 +1140,25 @@ class CallHandlers:
 
     def _handle_input_call(self, node: FuncCall) -> PineType:
         """Handle input() calls without qualifier."""
-        # First arg is defval
-        if node.args:
-            defval = node.args[0]
+        defval = plain_input_default(node)
+        if defval is not None:
             self._visit(defval)
-            # Infer type from defval
-            if isinstance(defval, NumberLiteral):
-                if isinstance(defval.value, float):
-                    return PineType.FLOAT
-                return PineType.INT
-            if isinstance(defval, StringLiteral):
-                return PineType.STRING
-            if isinstance(defval, BoolLiteral):
-                return PineType.BOOL
-            if isinstance(defval, Identifier):
-                # input(close) => source input
-                self._validate_plain_input_source(defval, node)
+        static_type = plain_input_type(
+            defval, is_bound=self._value_bindings.has_value_binding)
+        if static_type is not None and static_type != PineType.COLOR:
+            return static_type
+        if isinstance(defval, Identifier):
+            self._validate_plain_input_source(defval, node)
+            if node.args:
                 sym = self._symbols.resolve(defval.name)
-                if sym:
-                    return sym.pine_type
-                return PineType.FLOAT
-        # Check kwargs for defval
-        if "defval" in node.kwargs:
-            defval = node.kwargs["defval"]
-            self._visit(defval)
-            if isinstance(defval, Identifier):
-                self._validate_plain_input_source(defval, node)
-            if isinstance(defval, NumberLiteral):
-                if isinstance(defval.value, float):
-                    return PineType.FLOAT
-                return PineType.INT
-            if isinstance(defval, StringLiteral):
-                return PineType.STRING
-            if isinstance(defval, BoolLiteral):
-                return PineType.BOOL
+                return sym.pine_type if sym is not None else PineType.FLOAT
 
-        # Visit remaining args
         for arg in node.args[1:]:
             self._visit(arg)
         for val in node.kwargs.values():
             self._visit(val)
 
-        return PineType.FLOAT  # default
+        return static_type or PineType.FLOAT
 
     def _merge_input_params(self, member: str | None, node: FuncCall) -> dict[str, Any]:
         """Positional + kwargs merged like codegen (for input.* validation)."""
