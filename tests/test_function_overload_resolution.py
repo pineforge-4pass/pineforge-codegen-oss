@@ -921,9 +921,7 @@ MEASURED_NESTED_CALL = (
     + "actual = f(bar_index)\nplot(actual)\n"
 )
 # TradingView's plot of that script on BINANCE:BTCUSDT, 60, at its first four
-# received hourly epochs, as (epoch, value): answers sha256
-# 7da2828cefa94729d85a5e07ef3d60bffa7fc8988b98bbebf0c209ba32ddac14, cell n1,
-# raw frames sha256 fcda3c9ea51a463c72dbeca3ae714eec3fc74a9e2c2d732077b038e25cb738d9.
+# hourly epochs, as (epoch, value).
 N1_TRADINGVIEW_ROWS = (
     (1794268800, 22536.0), (1794272400, 22539.0),
     (1794276000, 22542.0), (1794279600, 22545.0),

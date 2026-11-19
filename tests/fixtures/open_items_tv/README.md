@@ -3,8 +3,8 @@
 Synthetic public probes for open items and their unedited
 TradingView trade exports. They contain no closed or scraped source.
 
-The fixtures use `BINANCE:ETHUSDT.P` on a 15-minute chart, from 2025-04-01 through 2025-04-03
-(range proof `covered`). The tapes' `Date and time` column is the exporting
+The fixtures use `BINANCE:ETHUSDT.P` on a 15-minute chart, from 2025-04-01 through 2025-04-03.
+The tapes' `Date and time` column is the exporting
 account's chart timezone, Asia/Taipei (UTC+8). Every probe enters a long at
 00:00, 06:00, 12:00 and 18:00 UTC and closes it a bar later with an exit
 comment spelling the values under test (7 trades each).
