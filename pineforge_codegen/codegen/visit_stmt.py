@@ -643,6 +643,14 @@ class StmtVisitor:
         if node.is_var or node.is_varip:
             info = self._runtime_scalar_var_init_by_node.get(id(node))
             if info is not None:
+                type_spec = info.get("type_spec")
+                if (info.get("is_callable_scoped")
+                        and type_spec is not None
+                        and type_spec.kind == "primitive"
+                        and type_spec.name == "string"):
+                    # The member already stores a string. Keep that type
+                    # visible to later reads of the callable-local binding.
+                    self._current_func_local_types[node.name] = self._type_for_decl(node)
                 member_name = info["member_name"]
                 target = self._safe_name(member_name)
                 if self._active_var_remap and target in self._active_var_remap:
