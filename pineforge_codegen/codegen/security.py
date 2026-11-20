@@ -4622,9 +4622,10 @@ class SecurityEmitter:
                 global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
                 if n.name in global_expr_map and n.name not in resolving:
                     resolving.add(n.name)
-                    # A global's declaration runs on every requested bar, whatever
-                    # the position of the read that names it: its calls are not
-                    # conditional because the payload reads it under a condition.
+                    # A global's declaration does not depend on the position of the
+                    # read that names it (a plain global is evaluated on every
+                    # requested bar, a var once): its calls are not conditional
+                    # because the payload reads the global under a condition.
                     walk(global_expr_map[n.name])
                     resolving.remove(n.name)
                 return
