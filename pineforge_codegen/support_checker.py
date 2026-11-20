@@ -1904,8 +1904,7 @@ class SupportChecker:
             self._visit_children_const_ok(node)
             return
         if ns == "request" and name in sigs.REQUEST_FUNCTIONS:
-            # Currency rates have no feed: codegen stops the run only where
-            # the call is evaluated, including when its value reaches a trade.
+            # The host rate and currency pair are known only when evaluated.
             self._check_builtin_arguments(node, full, func=sigs.REQUEST_FUNCTIONS[name])
             self._visit_children(node)
             return
@@ -2775,7 +2774,7 @@ class SupportChecker:
 
         Registered bare builtins and unary math calls that bind are
         rewritten positionally by ``builtin_keywords``; request.currency_rate
-        uses the same validation before its evaluation-time stop.
+        uses the same validation before its runtime currency lookup.
         Returns True when the arguments bind.
         """
         if func is None:

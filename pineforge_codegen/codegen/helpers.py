@@ -536,6 +536,7 @@ CPP_TEMPORARY_NAMES = frozenset("""
     _pf_hist_offset_raw _pf_hist_offset_numeric _pf_hist_offset _pf_hist_bar
     _pf_calendar_ts _pf_calendar_tz
     _pf_timeframe_arg _pf_qty_type
+    _pf_fx_from _pf_fx_to _pf_fx_ignore _pf_fx_account _pf_fx_error
     _tz _yr _mo _dy _hr _min _sc _res _old _old_tz _had_old _secs
     _last_tz _last_yr _last_mo _last_dy _last_hr _last_min _last_sc
     _last_res
