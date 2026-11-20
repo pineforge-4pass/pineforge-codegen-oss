@@ -3839,6 +3839,14 @@ class CallVisitor:
             'throw std::invalid_argument("Unknown strategy sizing value"); }())'
         )
 
+    @staticmethod
+    def _currency_conversion_identity(call: FuncCall):
+        """A conversion call by its source position, not its node object: the
+        translator rebuilds calls after the source walk (security timeframe-input
+        substitution, replayed globals) and a rebuilt copy keeps its call site."""
+        loc = call.loc
+        return (loc.file, loc.line, loc.col) if loc is not None else id(call)
+
     def _currency_conversion_site(self, node: FuncCall) -> int:
         """0-based source-order ordinal shared by both conversion builtins."""
         sites = getattr(self, "_currency_conversion_sites", None)
@@ -3855,11 +3863,14 @@ class CallVisitor:
                     key = (loc.line, loc.col) if loc is not None else (1 << 62, walk_index)
                     calls.append((key, walk_index, candidate))
             calls.sort(key=lambda item: (item[0], item[1]))
-            sites = {id(call): ordinal for ordinal, (_k, _w, call) in enumerate(calls)}
+            sites = {}
+            for _k, _w, call in calls:
+                sites.setdefault(self._currency_conversion_identity(call), len(sites))
             self._currency_conversion_sites = sites
-        if id(node) not in sites:
+        identity = self._currency_conversion_identity(node)
+        if identity not in sites:
             raise AssertionError("strategy currency conversion call missing from the source walk")
-        return sites[id(node)]
+        return sites[identity]
 
     def _visit_strategy_call(self, func_name: str, node: FuncCall) -> str:
         from .order_shapes import record_order_call
