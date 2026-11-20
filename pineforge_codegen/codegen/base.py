@@ -3577,29 +3577,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 self._input_backed_vars.add(target_name)
 
     def _find_reassigned_vars(self) -> set[str]:
-        """Scan AST to find all variable names that are targets of := or compound assignment."""
-        reassigned: set[str] = set()
-        def walk(node):
-            if isinstance(node, Assignment):
-                if isinstance(node.target, Identifier):
-                    reassigned.add(node.target.name)
-            # Recurse into child nodes
-            if hasattr(node, 'body') and isinstance(node.body, list):
-                for child in node.body:
-                    walk(child)
-            if hasattr(node, 'else_body') and isinstance(node.else_body, list):
-                for child in node.else_body:
-                    walk(child)
-            if hasattr(node, 'cases') and isinstance(node.cases, list):
-                for expr, stmts in node.cases:
-                    for child in stmts:
-                        walk(child)
-            if hasattr(node, 'default_body') and isinstance(node.default_body, list):
-                for child in node.default_body:
-                    walk(child)
-        for stmt in self.ctx.ast.body:
-            walk(stmt)
-        return reassigned
+        """Collect bare assignment targets, including writes inside expression values."""
+        return {
+            node.target.name
+            for node in self._walk_candidate_surface(self.ctx.ast)
+            if isinstance(node, Assignment) and isinstance(node.target, Identifier)
+        }
 
     # ``math.*`` members that are pure functions over their (stable) args, or
     # stable constants. Anything outside this set (e.g. ``math.random``) is

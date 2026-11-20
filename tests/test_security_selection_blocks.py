@@ -301,7 +301,11 @@ def test_let_bound_string_selector_has_string_comparisons(position, selected, ex
 
 UNSAFE_ARMS = (
     # Calls are located at '('; history reads at '['; statements at their first word.
-    ('    pick := false\n    "60"\n', 5, 5, "outer assignment"),
+    # The arm assigns the variable that its own condition reads: the assignment inside the
+    # expression is counted as a reassignment, so the condition's read is the first node that
+    # is not a value fixed before the first bar (the arm below, a different variable, keeps
+    # the outer-assignment refusal at the assignment).
+    ('    pick := false\n    "60"\n', 4, 9, "non-setup name pick"),
     ('    candidate = "1D"\n    for idx = 0 to 1\n        candidate := "60"\n'
      '    candidate\n', 6, 5, "ForStmt"),
     ('    candidate = str.tostring(math.random())\n    candidate\n',
@@ -345,6 +349,21 @@ def assert_located_refusal(header, arm, line, col, construct):
 @pytest.mark.parametrize("arm,line,col,construct", UNSAFE_ARMS)
 def test_registration_unsafe_arm_is_a_located_refusal(arm, line, col, construct):
     assert_located_refusal(HEADER_V6, arm, line, col, construct)
+
+
+def test_registration_outer_assignment_of_another_variable_is_located_at_the_assignment():
+    # The arm assigns a variable that the condition does not read, so the first node that is
+    # not a value fixed before the first bar is the assignment itself.
+    pine = (HEADER_V6 + 'pick = input.bool(true)\nother = 1\n'
+            'tf = if pick\n    other := 2\n    "60"\nelse\n    "1D"\n'
+            'value = request.security(syminfo.tickerid, tf, close)\nplot(value)\n')
+    with pytest.raises(CompileError) as caught:
+        transpile_full(pine)
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E3083"
+    assert (diagnostic.location.line, diagnostic.location.col) == (6, 5)
+    assert "outer assignment" in diagnostic.message
 
 
 @pytest.mark.parametrize("header", HEADERS_WITHOUT_DYNAMIC_REQUESTS.values(),
