@@ -135,6 +135,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
   Compound assignments in requested selections retain the lexical binding
   of their target and its request-owned `var` or `varip` storage.
   See [#393](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/393).
+- Since 1.11.0, `array.new` with an `na` size creates an empty array without stopping the script, matching TradingView; invalid non-missing sizes still stop the script ([#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
 
 ## 1.12.0 — 2026-11-12
 
@@ -317,9 +318,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
 - `request.security` registers input-derived `lookahead` selections using the
   selected input values, including overrides; choices that depend on bar data
-  still report `PF-E1085`. A scalar empty timeframe still uses the chart
-  timeframe; an `if`/`switch` timeframe arm known to be empty still reports
-  `PF-E3105`.
+  still report `PF-E1085`. A literal empty timeframe (`""`) now uses the chart
+  timeframe instead of being refused; an `if`/`switch` timeframe arm known to
+  be empty still reports `PF-E3105`.
   History reads of requested values now compile inside another request's TA
   expression, including aliases and repeated reads. Uncalled request wrappers
   no longer interfere with compiling unrelated direct requests (#294;
