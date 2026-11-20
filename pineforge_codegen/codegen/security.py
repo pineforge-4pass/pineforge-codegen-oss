@@ -1681,7 +1681,8 @@ class SecurityEmitter:
                 if isinstance(known, (int, float, bool)):
                     literal = BoolLiteral if isinstance(known, bool) else NumberLiteral
                     return literal(value=known, loc=value.loc)
-                if value.name in BAR_BUILTINS or value.name in self.ctx.series_vars:
+                if ((value.name in BAR_BUILTINS and self._reads_builtin_variable(value))
+                        or value.name in self.ctx.series_vars):
                     fail(value, "series", f"bar-state read {value.name}")
                 fail(value, "name", f"undefined or non-setup name {value.name}")
             if isinstance(value, (NumberLiteral, StringLiteral, BoolLiteral,
@@ -2156,7 +2157,7 @@ class SecurityEmitter:
                 if name in local and not global_binding:
                     # The enclosing body also inspects every local definition.
                     return False
-                if name in BAR_BUILTINS or name in SECURITY_BAR_FIELDS:
+                if self._reads_builtin_variable(value):
                     return True
                 if self._binding_is_series(name):
                     return True
@@ -2911,8 +2912,10 @@ class SecurityEmitter:
         """
         scopes = getattr(self.ctx, "identifier_binding_scopes", {}) or {}
         scope = scopes.get(id(node))
+        annotations = node.annotations or {}
         return scope == "global" or (
-            scope is None and bool((node.annotations or {}).get(GLOBAL_ANNOTATION))
+            (scope is None or self._has_builtin_shadow_binding(node))
+            and bool(annotations.get(GLOBAL_ANNOTATION))
         )
 
     def _security_warn_unbound_param(self, node: Identifier) -> None:
@@ -4223,6 +4226,7 @@ class SecurityEmitter:
             isinstance(node, Identifier)
             and node.name not in seen
             and self._security_identifier_is_global_binding(node)
+            and not self._reads_builtin_variable(node)
             and node.name not in self._global_mutable_infos
         ):
             value = (getattr(self.ctx, "global_expr_map", {}) or {}).get(node.name)
@@ -4256,7 +4260,7 @@ class SecurityEmitter:
         """The requested-bar series a payload's ``node[k]`` reads the history
         of: a bar field, or a source input's selected series (its own
         ``_sec<N>_hist_`` member, one per input); else None."""
-        if node.name in SECURITY_BAR_FIELDS:
+        if node.name in SECURITY_BAR_FIELDS and self._reads_builtin_variable(node):
             return node.name
         call = self._security_source_input_call(node)
         if call is None:
@@ -6205,7 +6209,7 @@ class SecurityEmitter:
             if isinstance(n, Identifier):
                 if self._security_identifier_is_global_binding(n):
                     # A builtin name the builder spells from ``bar``.
-                    if n.name in _SECURITY_SHARED_BAR_FIELDS:
+                    if n.name in _SECURITY_SHARED_BAR_FIELDS and self._reads_builtin_variable(n):
                         continue
                 elif n.name in params:
                     continue
@@ -6389,7 +6393,7 @@ class SecurityEmitter:
                         return None
                     value = self._security_canonical_value(bound, bound_stack)
                     return None if value is None else ("argument", self._infer_type(node), value)
-            if node.name in _SECURITY_SHARED_BAR_FIELDS:
+            if node.name in _SECURITY_SHARED_BAR_FIELDS and self._reads_builtin_variable(node):
                 return ("bar", node.name)
             return None
         if isinstance(node, BinOp):
@@ -9300,7 +9304,7 @@ class SecurityEmitter:
             if isinstance(node, Identifier):
                 if not self._security_identifier_is_global_binding(node):
                     return False
-                if node.name in _SECURITY_SHARED_BAR_FIELDS:
+                if node.name in _SECURITY_SHARED_BAR_FIELDS and self._reads_builtin_variable(node):
                     continue
                 if node.name not in expressions or node.name in self._global_mutable_infos:
                     return False
@@ -9526,12 +9530,14 @@ class SecurityEmitter:
                 "hlc3": "((bar.high + bar.low + bar.close) / 3.0)",
                 "ohlc4": "((bar.open + bar.high + bar.low + bar.close) / 4.0)",
             }
-            if expr_node.name in bar_fields:
-                return bar_fields[expr_node.name]
-            if expr_node.name == "time_close":
-                return self._security_bar_field_expr("time_close", sec_id)
+            reads_builtin = self._reads_builtin_variable(expr_node)
+            if reads_builtin:
+                if expr_node.name in bar_fields:
+                    return bar_fields[expr_node.name]
+                if expr_node.name == "time_close":
+                    return self._security_bar_field_expr("time_close", sec_id)
 
-            if expr_node.name in security_mutable_names:
+            if not reads_builtin and expr_node.name in security_mutable_names:
                 info = self._global_mutable_infos.get(expr_node.name)
                 state_name = self._security_state_name(sec_id, expr_node.name)
                 if info is not None and getattr(info, "is_series", False):
@@ -9551,6 +9557,7 @@ class SecurityEmitter:
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
             if (
                 self._security_identifier_is_global_binding(expr_node)
+                and not reads_builtin
                 and expr_node.name in global_expr_map
                 and expr_node.name not in resolving
             ):
@@ -11240,7 +11247,7 @@ class SecurityEmitter:
                     )
                 )
                 if bound is None and (
-                    n.name in _SECURITY_REQUESTED_NAMES
+                    (n.name in _SECURITY_REQUESTED_NAMES and self._reads_builtin_variable(n))
                     or n.name in mutable_names
                     or (self._expr_is_stable(n)
                         and not self._security_global_reads_timeframe(n.name))
@@ -11460,8 +11467,9 @@ class SecurityEmitter:
                     or (self._security_identifier_is_global_binding(node)
                         and node.name in (getattr(self.ctx, "global_expr_map", {}) or {}))):
                 return True
-            if isinstance(node, Identifier) and node.name in (
-                    set(SECURITY_BAR_FIELD_EXPRS) | {"hl2", "hlc3", "ohlc4", "time_close"}):
+            if (isinstance(node, Identifier)
+                    and node.name in _SECURITY_SHARED_BAR_FIELDS | {"time_close"}
+                    and self._reads_builtin_variable(node)):
                 return True
             if (isinstance(node, MemberAccess) and isinstance(node.object, Identifier)
                     and node.object.name == "timeframe"):
@@ -11554,7 +11562,8 @@ class SecurityEmitter:
             )
             if binding is not None:
                 return self._security_bound_is_scalar(*binding)
-        if node.name == "time_close" or self._security_source_input_call(node) is not None:
+        if ((node.name == "time_close" and self._reads_builtin_variable(node))
+                or self._security_source_input_call(node) is not None):
             return True
         return (
             self._security_index_inputs
@@ -11639,7 +11648,8 @@ class SecurityEmitter:
         return (
             node.name in global_expr_map
             and node.name not in self._global_mutable_infos
-            and node.name not in _SECURITY_REQUESTED_NAMES
+            and not (node.name in _SECURITY_REQUESTED_NAMES
+                     and self._reads_builtin_variable(node))
             and not self._expr_is_stable(node)
         )
 
@@ -11700,7 +11710,7 @@ class SecurityEmitter:
     def _security_is_bar_index(self, node) -> bool:
         """The built-in ``bar_index``, where no declaration binds the name."""
         return (isinstance(node, Identifier) and node.name == "bar_index"
-                and "bar_index" not in getattr(self, "_safe_name_bound", ()))
+                and self._reads_builtin_variable(node))
 
     def _security_reads_bar_index(self, expr_node, mutable_names=()) -> bool:
         """Whether a payload reads ``bar_index``: in itself, the globals it

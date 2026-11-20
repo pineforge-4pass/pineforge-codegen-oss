@@ -5,9 +5,11 @@ A requested helper's non-``var`` string local named ``open``, ``high``,
 whose history it reads keeps the base commit's PF-E3011 refusal at that read.
 Every other built-in-named local, the numeric locals of those names and their
 string locals without a history read keep the neutral control's C++. A string
-global, a string parameter and a library local of those names, read with
-history in a requested helper, are not such locals and keep what the base
-commit gives. Sources come from the scope comparison's builders. The base rows
+parameter and a library local of those names, read with history in a requested
+helper, keep what the base commit gives. A string global of those names read
+with history in a requested helper is refused with PF-E5005 (history of a script
+variable is not supported there). Sources come from
+the scope comparison's builders. The base rows
 read the base commit's outcome (its refusal, or its C++ where it accepts the
 script) through the glue run on that commit's tree; every other row runs this
 checkout's transpiler only, and no row compiles C++.
@@ -180,8 +182,7 @@ def test_price_named_string_local_positional_history_keeps_the_base_refusal(
 
 # The refusal is keyed on a non-``var`` string local declared in the helper
 # whose authored spelling is a price name. A string global, a string parameter
-# and a library local of those spellings are other bindings: whatever the base
-# commit gives them, they keep.
+# and a library local of those spellings are other bindings.
 def _string_global_source(name):
     return _requested_source(
         f"    bb = {name}[1]\n    str.length(bb)\n", string=False,
@@ -215,8 +216,21 @@ def _library_text(name):
 
 
 @pytest.mark.parametrize("name", PRICE_FIELD_NAMES)
-def test_price_named_string_global_history_keeps_the_base_outcome(name, reference, tmp_path):
-    _assert_keeps_the_base_outcome(_string_global_source(name), reference, tmp_path)
+def test_price_named_string_global_history_in_requested_helper_is_refused(name):
+    # PineForge does not support history of a script variable inside a requested
+    # helper, so it refuses the script. The base read the built-in float's
+    # history instead of the script's string. TradingView rejects the ``close``
+    # form (a built-in read before its declaration); for ``open`` and ``hl2`` it
+    # accepts the script and returns the script's string history.
+    with pytest.raises(CompileError) as caught:
+        transpile(_string_global_source(name))
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.phase == Phase.CODEGEN
+    assert _glue_entry(diagnostic)[:3] == (
+        Level.ERROR.value,
+        "PF-E5005",
+        "request.security helper call history is only supported in the payload itself",
+    )
 
 
 @pytest.mark.parametrize("name", PRICE_FIELD_NAMES)

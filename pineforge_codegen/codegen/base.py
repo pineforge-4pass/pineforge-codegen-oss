@@ -61,7 +61,6 @@ class _StableVarCtorLiteral:
 
 from .tables import (
     BAR_FIELDS,
-    BAR_BUILTINS,
     BAR_SERIES_PUSH,
     DRAWING_TYPE_TO_CPP,
     SECURITY_OHLC_BAR_FIELDS,
@@ -1462,7 +1461,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if isinstance(init_ast, StringLiteral):
             return True
         if isinstance(init_ast, Identifier) and init_ast.name in BAR_FIELDS:
-            return True
+            return (
+                self._reads_builtin_variable(init_ast)
+                and init_ast.name not in self._direct_program_binding_names
+            )
         return self._is_compile_time_value(self._resolve_known(init_str))
 
     def _is_default_drawing_initializer(self, node) -> bool:
@@ -1516,6 +1518,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return (
             not self._is_compile_time_value(ctor_val)
             or self._scalar_var_init_depends_on_runtime_input(init_ast)
+            or any(
+                isinstance(part, Identifier)
+                and (
+                    self._has_builtin_shadow_binding(part)
+                    or (part.name in self._direct_program_binding_names
+                        and self._reads_builtin_variable(part))
+                )
+                for part in self._walk_ast(init_ast)
+            )
             # A history-read var in a block (its member may be renamed,
             # ``k__blk1``): its history is na until the first bar that
             # reaches it (``_series_var_init_keeps_preamble``).
@@ -3740,6 +3751,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return True
         if isinstance(node, Identifier):
             name = node.name
+            if self._reads_builtin_variable(node):
+                return False
             if self._known_var_is_lexically_shadowed(name):
                 return False
             if (name in self._known_vars
@@ -3753,8 +3766,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 return False
             if name in self._var_names:
                 # var/varip persistent state — mutable across bars.
-                return False
-            if name in BAR_FIELDS or name in BAR_BUILTINS:
                 return False
             # Unrecognised bare identifier: be conservative so we never
             # silently allow an undeclared / dynamic length through.
@@ -3969,6 +3980,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         elif isinstance(node.value, StringLiteral):
             self._known_vars[node.name] = node.value.value
         elif isinstance(node.value, Identifier):
+            if self._reads_builtin_variable(node.value):
+                return
             if node.value.name in self._known_vars:
                 self._known_vars[node.name] = self._known_vars[node.value.name]
                 if node.value.name in self._input_backed_vars:
@@ -4642,6 +4655,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                                 arg.name in BAR_FIELDS
                                 or arg.name in BAR_SERIES_PUSH
                             )
+                            and self._reads_builtin_variable(arg)
                             and expected_cpp_type == "double"
                         ):
                             needs_bridge = False
@@ -4690,6 +4704,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # once (never called) or only for a requested context keeps the
         # chart's history.
         global_reads = getattr(self.ctx, "func_global_history_reads", {}) or {}
+        builtin_history_reads = {
+            (owner, name)
+            for owner, name, subscript in self.ctx.func_global_history_nodes.values()
+            if name in self.ctx.series_shadowed_builtins
+            and self._reads_builtin_variable(subscript.object)
+        }
         for fi in self.ctx.func_infos:
             names = global_reads.get(fi.name)
             if not names or fi.node is None:
@@ -4699,10 +4719,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         in self._requested_context_only_inline_contexts):
                     continue
                 for name in names:
+                    cpp_type = (
+                        self._scalar_builtin_history_cpp_type(name)
+                        if (fi.name, name) in builtin_history_reads
+                        else self._series_type_for(name)
+                    )
                     register_one(
                         "fn_global_hist",
                         (id(fi.node), name),
-                        self._series_type_for(name),
+                        cpp_type,
                         context,
                     )
 
@@ -5986,6 +6011,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 4. Series members for bar field history
         for field_name in sorted(self.ctx.series_bar_fields):
             lines.append(f"    Series<double> _s_{field_name}{_mbb};")
+        for name in sorted(self.ctx.series_shadowed_builtins):
+            cpp_type = self._scalar_builtin_history_cpp_type(name)
+            lines.append(f"    Series<{cpp_type}> _pf_builtin_hist_{name}{_mbb};")
 
         # 5. var/varip members (deduplicate by name)
         # Sections 5-6 and 8c-8c2 declare the script's var/varip and

@@ -191,6 +191,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._series_decl_bindings: set[tuple[int, str]] = set()
         self._primitive_history_declarations: set[tuple[int, str]] = set()
         self._series_bar_fields: set[str] = set()
+        self._series_shadowed_builtins: set[str] = set()
         self._var_members: list[tuple[str, PineType, str]] = []
         self._func_infos: list[FuncInfo] = []
         self._fixnan_sites: list[FixnanCallSite] = []
@@ -749,6 +750,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             series_decl_nodes=self._series_decl_nodes,
             series_decl_bindings=self._series_decl_bindings,
             series_bar_fields=self._series_bar_fields,
+            series_shadowed_builtins=self._series_shadowed_builtins,
             var_members=self._var_members,
             func_infos=self._func_infos,
             fixnan_sites=self._fixnan_sites,
@@ -3153,7 +3155,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     actual = actuals[index]
                     if not isinstance(actual, Identifier):
                         continue
-                    if actual.name in BAR_FIELDS:
+                    if (actual.name in BAR_FIELDS
+                            and not self._builtin_variable_is_shadowed(actual)):
                         self._series_bar_fields.add(actual.name)
                     if owner is None:
                         continue
@@ -4575,7 +4578,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return True
 
         if isinstance(node, Identifier):
-            if node.name in ("open", "high", "low", "close", "volume", "hl2", "hlc3", "ohlc4", "time", "time_close"):
+            if (node.name in (
+                    "open", "high", "low", "close", "volume", "hl2",
+                    "hlc3", "ohlc4", "time", "time_close",
+                ) and not self._builtin_variable_is_shadowed(node)):
                 return True
             if node.name in self._static_vars:
                 return True
@@ -5750,6 +5756,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 # the destination as a read; ValueBindings already retains
                 # the write's authored declaration identity.
                 self._identifier_binding_scopes.setdefault(id(node.target), sym.scope)
+                if self._builtin_variable_is_shadowed(node.target):
+                    self._record_builtin_shadow(node.target, sym)
                 if (node.op in (":=", "+=", "-=", "*=", "/=", "%=")
                         and self._pine_version == 6
                         and not self._in_v5_library_definition(node)
@@ -6777,7 +6785,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _top_level_branch_needs_lexical_scope(
         self, body: list[ASTNode]
     ) -> bool:
-        """Whether a top-level branch declares over a direct script binding.
+        """Whether a top-level branch declares over a script or builtin binding.
 
         Functions already own a symbol-table scope and ``for``/``for in``
         create one explicitly.  Top-level if/while/switch branches historically
@@ -6790,13 +6798,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return False
         for stmt in body:
             if (isinstance(stmt, VarDecl)
-                    and stmt.name in self._direct_program_binding_names):
+                    and (stmt.name in self._direct_program_binding_names
+                         or stmt.name in BUILTIN_VARS)):
                 return True
             if (isinstance(stmt, TupleAssign)
                     and any(
-                        name in self._direct_program_binding_names
-                        for name in stmt.names
-                        if name != "_"
+                        name in self._direct_program_binding_names or name in BUILTIN_VARS
+                        for name in stmt.names if name != "_"
                     )):
                 return True
         return False
@@ -8263,7 +8271,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         ):
                             continue
                         arg = full_bound[index]
-                        if isinstance(arg, Identifier) and arg.name in BAR_FIELDS:
+                        if (isinstance(arg, Identifier) and arg.name in BAR_FIELDS
+                                and not self._builtin_variable_is_shadowed(arg)):
                             self._series_bar_fields.add(arg.name)
                         elif isinstance(arg, Identifier):
                             arg_sym = self._symbols.resolve(arg.name)
@@ -9132,13 +9141,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if isinstance(node.object, Identifier):
             name = node.object.name
             sym = self._symbols.resolve(name)
-            local_declaration = (
-                sym is not None and sym.scope != "global"
-                and bool(self._collection_scope_stack)
-                and getattr(sym, "_pf_decl_node_id", None) is not None
+            reads_builtin = (
+                name != "na" and name in BUILTIN_VARS
+                and not self._builtin_variable_is_shadowed(node.object)
             )
-            if name in BAR_FIELDS and not local_declaration:
+            if name in BAR_FIELDS and reads_builtin:
                 self._series_bar_fields.add(name)
+            elif reads_builtin and name in self._direct_program_binding_names:
+                # The builtin read and the later script declaration cannot
+                # share the ordinary name-keyed history buffer.
+                self._series_shadowed_builtins.add(name)
+                if name == "bar_index" and sym is not None:
+                    self._note_function_global_history_read(node, name, sym)
             else:
                 if sym is not None:
                     if getattr(sym, "_pf_shadows_map_state", False):
@@ -9390,15 +9404,39 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             reads.append(name)
         self._func_global_history_nodes[id(node)] = (owner, name, node)
 
+    def _builtin_variable_is_shadowed(self, node: Identifier) -> bool:
+        if node.name == "na" or node.name not in BUILTIN_VARS:
+            return False
+        bindings = self._value_bindings.declaration_bindings
+        if (node.annotations or {}).get(GLOBAL_ANNOTATION):
+            # A specialization can place an argument's global read before
+            # that global's declaration in the copied helper's source order.
+            return True
+        if id(node) in bindings:
+            return bindings[id(node)] is not None
+        if self._in_v5_library_definition(node):
+            # ValueBindings does not visit inlined v5 bodies. Keep the
+            # symbol-based resolution of those authored reads.
+            symbol = self._symbols.resolve(node.name)
+            return getattr(symbol, "_pf_decl_node_id", None) is not None
+        return False
+
+    @staticmethod
+    def _record_builtin_shadow(node: Identifier, sym: Symbol | None) -> None:
+        # Keep the source binding on the read, including in expression copies.
+        node.annotations = {
+            **(node.annotations or {}), "builtin_shadow_binding": True,
+        }
+        if getattr(sym, "_pf_tuple_binding", False):
+            node.annotations["tuple_builtin_binding"] = True
+
     def _visit_Identifier(self, node: Identifier) -> PineType:
         sym = self._symbols.resolve(node.name)
-        local_builtin = (
-            node.name in BUILTIN_VARS and sym is not None
-            and sym.scope != "global" and bool(self._collection_scope_stack)
-            and getattr(sym, "_pf_decl_node_id", None) is not None
-        )
+        declaration = getattr(sym, "_pf_decl_node_id", None)
+        bindings = self._value_bindings.declaration_bindings
+        shadows_builtin = self._builtin_variable_is_shadowed(node)
         # Some identifiers are namespace prefixes handled elsewhere
-        if not local_builtin and node.name in (
+        if not shadows_builtin and node.name in (
                 "strategy", "ta", "input", "math", "str", "color",
                 "display", "syminfo", "timeframe", "plot",
                 "alert", "barstate", "position", "shape", "location",
@@ -9407,43 +9445,22 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 "table", "ticker", "request", "runtime", "chart",
                 "barmerge", "adjustment", "earnings", "dividends",
                 "splits", "session", "scale", "font",
-                "hline", "backadjustment", "settlement_as_close",
-                "dayofweek"):
+                "hline", "backadjustment", "settlement_as_close", "dayofweek"):
             return PineType.VOID
 
-        block_owner = getattr(sym, "_pf_script_block_owner", None)
         if id(node) not in self._identifier_decl_bindings:
             # Later type queries can revisit this node after its source scope
             # unwinds. Preserve the declaration resolved in that source scope.
-            declaration = getattr(sym, "_pf_decl_node_id", None)
-            self._identifier_decl_bindings[id(node)] = (
-                (declaration, getattr(sym, "_pf_decl_binding_name", node.name))
-                if declaration is not None else None
-            )
-        if (id(node) not in self._identifier_binding_scopes
-                and node.name in BUILTIN_VARS
-                and (node.name not in BAR_FIELDS or local_builtin)
-                and getattr(sym, "_pf_tuple_binding", False)
-                and (block_owner is None or any(
-                    id(body) == block_owner for body in self._block_node_stack
-                ))):
-            # Retain this exact tuple read after its lexical scope unwinds.
-            node.annotations = {
-                **(node.annotations or {}), "tuple_builtin_binding": True,
-            }
-        elif (id(node) not in self._identifier_binding_scopes
-                and node.name in BUILTIN_VARS
-                and (node.name not in BAR_FIELDS or local_builtin)
-                and getattr(sym, "_pf_decl_node_id", None) is not None
-                and (block_owner is None or any(
-                    id(body) == block_owner for body in self._block_node_stack
-                ))):
-            # A script variable named like a builtin variable (``float second
-            # = na``): this read, while its declaration is in scope, is the
-            # user's, not the builtin's. Retained like the tuple form above.
-            node.annotations = {
-                **(node.annotations or {}), "builtin_shadow_binding": True,
-            }
+            if node.name in BUILTIN_VARS and id(node) in bindings:
+                binding = bindings[id(node)]
+            else:
+                binding = (
+                    (declaration, getattr(sym, "_pf_decl_binding_name", node.name))
+                    if declaration is not None else None
+                )
+            self._identifier_decl_bindings[id(node)] = binding
+        if shadows_builtin and id(node) not in self._identifier_binding_scopes:
+            self._record_builtin_shadow(node, sym)
         # Later type queries can revisit a read after its source scope ended.
         # Validate only its first visit, while lexical ownership is live.
         if (self._pine_version == 6

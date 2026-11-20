@@ -270,10 +270,14 @@ class TaSiteHelper:
         if isinstance(expr, (NumberLiteral, StringLiteral, BoolLiteral, NaLiteral, ColorLiteral)):
             return True
         if isinstance(expr, Identifier):
-            if expr.name in self._PRECALC_BAR_IDENTIFIERS:
+            if (expr.name in self._PRECALC_BAR_IDENTIFIERS
+                    and self._reads_builtin_variable(expr)):
                 return True
             if self._is_precalc_replayed_source_var(expr.name):
                 return True
+            if self._has_builtin_shadow_binding(expr):
+                # Authored members are assigned in on_bar, not this loop.
+                return False
             if expr.name in getattr(self.ctx, "series_vars", set()):
                 return False
             return expr.name in getattr(self, "_static_vars", set())
@@ -294,6 +298,10 @@ class TaSiteHelper:
                 and self._expr_safe_for_ta_precalc(expr.false_val)
             )
         if isinstance(expr, Subscript):
+            if (isinstance(expr.object, Identifier)
+                    and expr.object.name in getattr(self.ctx, "series_shadowed_builtins", ())
+                    and self._reads_builtin_variable(expr.object)):
+                return False
             return self._expr_safe_for_ta_precalc(expr.object) and self._expr_safe_for_ta_precalc(expr.index)
         if isinstance(expr, TupleLiteral):
             return all(self._expr_safe_for_ta_precalc(elem) for elem in expr.elements)
@@ -1120,8 +1128,10 @@ class TaSiteHelper:
                               ColorLiteral)):
                 continue
             if isinstance(n, Identifier):
-                if (params is None or n.name in params or n.name in BAR_SERIES_PUSH
-                        or n.name in ("bar_index", "time")):
+                if (params is None or n.name in params
+                        or (self._reads_builtin_variable(n)
+                            and (n.name in BAR_SERIES_PUSH
+                                 or n.name in ("bar_index", "time")))):
                     continue
                 return False
             if isinstance(n, MemberAccess):

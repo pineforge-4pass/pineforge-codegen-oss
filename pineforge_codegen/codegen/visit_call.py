@@ -1773,6 +1773,7 @@ class CallVisitor:
             arg_name = arg_node.name
             if (
                 (arg_name in BAR_FIELDS or arg_name in BAR_SERIES_PUSH)
+                and self._reads_builtin_variable(arg_node)
                 and expected_cpp_type == "double"
             ):
                 return f"_s_{arg_name}"
@@ -3464,6 +3465,7 @@ class CallVisitor:
                     aname = arg_node.name
                     if (
                         (aname in BAR_FIELDS or aname in BAR_SERIES_PUSH)
+                        and self._reads_builtin_variable(arg_node)
                         and expected_cpp_type == "double"
                     ):
                         return f"_s_{aname}"

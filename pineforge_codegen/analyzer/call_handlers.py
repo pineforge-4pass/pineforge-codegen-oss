@@ -794,10 +794,11 @@ class CallHandlers:
 
         def arg_type(arg) -> PineType:
             if isinstance(arg, Identifier):
-                if arg.name in BAR_FIELDS:
-                    return PineType.FLOAT
-                if arg.name == "time":
-                    return PineType.INT
+                if not self._builtin_variable_is_shadowed(arg):
+                    if arg.name in BAR_FIELDS:
+                        return PineType.FLOAT
+                    if arg.name == "time":
+                        return PineType.INT
                 sym = self._symbols.resolve(arg.name)
                 if sym is not None and sym.pine_type in _SECURITY_TUPLE_ELEMENT_TYPES:
                     return sym.pine_type
@@ -1997,7 +1998,8 @@ class CallHandlers:
                     arg = bound_args[p_idx]
                     if arg is None:
                         continue
-                    if isinstance(arg, Identifier) and arg.name in BAR_FIELDS:
+                    if (isinstance(arg, Identifier) and arg.name in BAR_FIELDS
+                            and not self._builtin_variable_is_shadowed(arg)):
                         self._series_bar_fields.add(arg.name)
                     elif isinstance(arg, Identifier):
                         sym = self._symbols.resolve(arg.name)

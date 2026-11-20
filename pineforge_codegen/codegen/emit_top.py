@@ -1783,13 +1783,19 @@ class TopLevelEmitter:
         #     lowering still calls the host; a lowering that would call its
         #     own member is skipped.
         from .tables import BAR_BUILTINS
+        for name in sorted(self.ctx.series_shadowed_builtins):
+            member = f"_pf_builtin_hist_{name}"
+            lines.append(
+                f"        if (history_advances_new_bar() && bar_index_ == 0) {member}.clear();"
+            )
+            self._emit_history_series_write(lines, "        ", member, BAR_BUILTINS[name])
+        script_series_names = {
+            name for _, name in self.ctx.series_decl_bindings if name in BAR_BUILTINS
+        }
         for _bname in sorted(self.ctx.series_vars):
-            if _bname in self._var_names:
-                continue
-            # A history-bearing top-level tuple binding pushes its own value
+            # A history-bearing script binding pushes its own value
             # at the declaration; a builtin push would add a second bar slot.
-            if (_bname in self._direct_program_tuple_binding_names
-                    and _bname in self._ordinary_global_series_names):
+            if _bname in self._var_names or _bname in script_series_names:
                 continue
             _bexpr = BAR_BUILTINS.get(_bname)
             _bsafe = self._safe_name(_bname)

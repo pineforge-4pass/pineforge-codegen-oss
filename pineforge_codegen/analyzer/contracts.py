@@ -230,6 +230,8 @@ class AnalyzerContext:
     # callable, both of which also appear in legacy raw series inventories.
     nonpersistent_series_decl_names: set = field(default_factory=set)
     series_bar_fields: set = field(default_factory=set)
+    # Scalar built-ins whose history cannot share a same-named script slot.
+    series_shadowed_builtins: set = field(default_factory=set)
     var_members: list = field(default_factory=list)   # [(name, PineType, init_expr_str)]
     func_infos: list = field(default_factory=list)
     fixnan_sites: list = field(default_factory=list)

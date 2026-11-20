@@ -45,6 +45,7 @@ from ..ast_nodes import (
     MemberAccess, MethodDef, NaLiteral, NumberLiteral, StringLiteral, SwitchStmt,
     Subscript, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, WhileStmt,
 )
+from ..analyzer.tables import BUILTIN_VARS
 from ..analyzer.value_bindings import ValueBindings
 from ..collection_history import history_annotation
 from ..cpp_names import cpp_identifier_fragment
@@ -647,7 +648,7 @@ class TypeInferer:
         if isinstance(node, Identifier):
             if not names:
                 return None
-            return (self._global_int_constant(node.name) if global_scope
+            return (self._global_int_constant(node) if global_scope
                     else self._inlined_int_constant(node))
         if isinstance(node, UnaryOp) and node.op == "-":
             inner = self._pure_int_literal_value(node.operand, names, global_scope)
@@ -683,7 +684,7 @@ class TypeInferer:
             return None
         if (name in getattr(self, "_current_func_series_params", ())
                 or name in getattr(self, "_current_func_param_types", ())
-                or name in BAR_FIELDS or name in BAR_BUILTINS):
+                or self._reads_builtin_variable(node)):
             return None
         known = getattr(self, "_known_vars", {})
         if (name not in known
@@ -695,10 +696,10 @@ class TypeInferer:
             return None
         return value
 
-    def _global_int_constant(self, name: str) -> int | None:
-        """The int constant a top-level name is inlined as (``_known_vars``,
-        not an input, a bar field or a built-in), read at the top level."""
-        if name == "na" or name in BAR_FIELDS or name in BAR_BUILTINS:
+    def _global_int_constant(self, node: Identifier) -> int | None:
+        """The int constant a top-level read is inlined as, excluding inputs."""
+        name = node.name
+        if name == "na" or self._reads_builtin_variable(node):
             return None
         known = getattr(self, "_known_vars", {})
         if name not in known or name in getattr(self, "_input_backed_vars", ()):
@@ -865,7 +866,7 @@ class TypeInferer:
                     for arm in (node.true_val, node.false_val)]
             return None if None in arms else max(arms)
         if isinstance(node, Identifier):
-            bound = self._narrow_int_name_bound(node.name, owner_info)
+            bound = self._narrow_int_name_bound(node.name, owner_info, read=node)
             if bound is not None:
                 return bound
             declaration = self.ctx.identifier_binding_nodes.get(id(node))
@@ -916,13 +917,16 @@ class TypeInferer:
             self._wide_int_epoch_only = saved
             self._wide_int_float_origins = saved_float
 
-    def _narrow_int_name_bound(self, name: str, owner_info=None) -> int | None:
+    def _narrow_int_name_bound(
+        self, name: str, owner_info=None, *, read: Identifier | None = None,
+    ) -> int | None:
         """``_narrow_int_bound`` of a bare name (``_narrow_int_name_info``)."""
-        info = self._narrow_int_name_info(name, owner_info)
+        info = self._narrow_int_name_info(name, owner_info, read=read)
         return info[0] if info is not None else None
 
-    def _narrow_int_name_info(self, name: str,
-                              owner_info=None) -> tuple[int, bool] | None:
+    def _narrow_int_name_info(
+        self, name: str, owner_info=None, *, read: Identifier | None = None,
+    ) -> tuple[int, bool] | None:
         """``(bound, may_be_na)`` of a bare name the C++ holds in a 32-bit
         ``int``: a parameter or local of the callable being emitted (or
         ``owner_info``'s), a counted loop's binder, an inlined int constant,
@@ -997,12 +1001,9 @@ class TypeInferer:
                 # result type is decided before its locals are registered):
                 # a declared ``int`` is 32-bit, anything else unknown.
                 return (runtime, True) if hints == {"int"} else None
-        if name in BAR_FIELDS:
-            return None
-        if name in ("bar_index", "last_bar_index"):
-            return runtime, False
-        if name in BAR_BUILTINS or name in self._INTEGRAL_BUILTINS:
-            return None
+        if ((name in BAR_FIELDS or name in BAR_BUILTINS)
+                and (read is None or self._reads_builtin_variable(read))):
+            return (runtime, False) if name in ("bar_index", "last_bar_index") else None
         if owner_node is None and self._known_var_is_lexically_shadowed(name):
             # A block's local of that spelling: its type is not the global's.
             return None
@@ -1014,6 +1015,9 @@ class TypeInferer:
             value = known[name]
             if type(value) is int and self._int_fits_int32(value):
                 return abs(value), False
+            return None
+        if read is not None and (read.annotations or {}).get("tuple_builtin_binding"):
+            # The spelling alone cannot prove a tuple element's slot or range.
             return None
         if name in self._wide_int_provenance()[0]:
             return None
@@ -1049,6 +1053,7 @@ class TypeInferer:
         key = (
             "local" if node.name in getattr(self, "_current_func_local_types", {}) else "global",
             node.name, id(scope_info), getattr(self, "_active_func_name", None),
+            self._reads_builtin_variable(node),
             bool((node.annotations or {}).get("tuple_builtin_binding")),
         )
         if node.name in _seen or (key in _memo and _memo[key] is None):
@@ -1087,7 +1092,7 @@ class TypeInferer:
                     and not self._known_var_is_lexically_shadowed(node.name)
                     and node.name not in self._current_func_param_types
                     and node.name not in self._known_vars
-                    and not (node.annotations or {}).get("tuple_builtin_binding")):
+                    and self._reads_builtin_variable(node)):
                 return False
             if (scope_info is None and not getattr(self, "_int_width_scan_depth", 0)
                     and node.name not in _seen
@@ -1124,7 +1129,7 @@ class TypeInferer:
                                 and not self._int_operand_may_be_na(
                                     value, _seen=_seen | {node.name}, _memo=_memo)):
                             return False
-            info = self._narrow_int_name_info(node.name, scope_info)
+            info = self._narrow_int_name_info(node.name, scope_info, read=node)
             return info is None or info[1]
         if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
             if node.object.name == "timeframe" and node.member == "multiplier":
@@ -2886,6 +2891,14 @@ class TypeInferer:
         if isinstance(node, Identifier):
             # A bare emitter without an analysis context has no block shadows.
             shadow_ctx = getattr(self, "ctx", None)
+            if (shadow_ctx is not None
+                    and node.name in BUILTIN_VARS
+                    and self._reads_builtin_variable(node)):
+                symbol = shadow_ctx.symbols.resolve(node.name)
+                if getattr(symbol, "_pf_decl_node", None) is not None:
+                    # The final global table now points at the declaration
+                    # after this read. It cannot describe the builtin's type.
+                    return TypeSpec.primitive(BUILTIN_VARS[node.name].value)
             binding = (
                 shadow_ctx.identifier_decl_bindings.get(id(node))
                 if shadow_ctx is not None else None
@@ -3998,7 +4011,12 @@ class TypeInferer:
         # misdetected. ``_is_int64_builtin_init`` only matches user vars whose
         # init RHS is such a builtin, so also match the builtin name directly.
         if name in INT64_BUILTINS:
-            return "int64_t"
+            declared_series = name in BUILTIN_VARS and (
+                name in self._ordinary_global_series_names
+                or self._safe_name(name) in self._series_var_member_names
+            )
+            if not declared_series:
+                return "int64_t"
         if self._numeric_na_member(name) or self._numeric_na_global(name):
             return "double"
         handle = self._series_handle_cpp_type(name)
@@ -4104,6 +4122,24 @@ class TypeInferer:
                             and isinstance(declared, VarDecl)):
                         symbols[id(declared)] = symbol
         return symbols.get(id(declaration))
+
+    @staticmethod
+    def _has_builtin_shadow_binding(node: Identifier) -> bool:
+        annotations = node.annotations or {}
+        return bool(annotations.get("builtin_shadow_binding")
+                    or annotations.get("tuple_builtin_binding"))
+
+    def _reads_builtin_variable(self, node: Identifier) -> bool:
+        """A chart variable read whose source scope did not bind a script value."""
+        return ((node.name in BAR_FIELDS or node.name in BAR_BUILTINS)
+                and not self._has_builtin_shadow_binding(node))
+
+    @staticmethod
+    def _scalar_builtin_history_cpp_type(name: str) -> str:
+        # The other scalar bar builtins return calendar fields or bar indices.
+        return "int64_t" if name in {
+            "time", "time_close", "timenow", "last_bar_time", "time_tradingday",
+        } else "int"
 
     def _variable_symbol(self, name: str):
         """The symbol the variable ``name`` resolves to.
@@ -4657,7 +4693,8 @@ class TypeInferer:
             return ((namespace is None and func_name in INT64_BUILTINS)
                     or (namespace == "input" and func_name == "time"))
         if isinstance(expr, Identifier):
-            return expr.name in INT64_BUILTIN_IDENTIFIERS
+            return (expr.name in INT64_BUILTIN_IDENTIFIERS
+                    and self._reads_builtin_variable(expr))
         return False
 
     def _fixnan_site_cpp_type(self, site) -> str:
@@ -5030,6 +5067,7 @@ class TypeInferer:
             return self._udt_field_is_double(node)
         if isinstance(node, Identifier):
             if (node.name in self._FLOAT_SERIES_BUILTINS
+                    and self._reads_builtin_variable(node)
                     and node.name not in self._known_vars
                     and node.name not in getattr(self, "_current_func_param_types", {})):
                 return True
@@ -5131,8 +5169,12 @@ class TypeInferer:
             parameters = getattr(self, "_current_func_series_param_types", {})
             if base in parameters:
                 return parameters[base] == "double"
-            if base in self._INTEGRAL_BUILTINS:
+            if (base in self._INTEGRAL_BUILTINS
+                    and self._reads_builtin_variable(node.object)):
                 return False
+            if (base in self.ctx.series_bar_fields
+                    and self._reads_builtin_variable(node.object)):
+                return True
             if base in self.ctx.series_vars or base in self.ctx.series_bar_fields:
                 return self._series_type_for(base) == "double"
         if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
@@ -5178,18 +5220,23 @@ class TypeInferer:
                 spec = getattr(self, "_current_loop_var_specs", {}).get(name)
                 return spec is not None and spec.kind == "primitive" and spec.name == "float"
             if (name in self._INTEGRAL_BUILTINS
+                    and self._reads_builtin_variable(node)
                     and name not in self._current_func_param_types
-                    and name not in self._known_vars):
+                    and (name not in self._known_vars
+                         or name in self._direct_program_binding_names)):
                 return False
             # Builtins, constants and parameters are resolved precisely by
             # ``_infer_type``; a user variable's *storage* is what the read
             # emits, and that can be a double where the Pine type is an int
             # (a hoisted global is declared from its initializer).
-            if not (name in BAR_FIELDS or name in BAR_BUILTINS
+            if not (self._reads_builtin_variable(node)
                     or name in self._known_vars
                     or name in getattr(
                         self, "_current_func_series_param_types", {})
                     or name in self._current_func_param_types):
+                if (self._has_builtin_shadow_binding(node)
+                        and self._identifier_reads_series(node)):
+                    return self._series_type_for(name) == "double"
                 declared = self._slot_scalar_cpp_type(name)
                 if declared is not None:
                     return declared == "double"
@@ -6234,6 +6281,9 @@ class TypeInferer:
             param = self._current_func_param_types.get(name)
             if param is not None:
                 return param
+            if (self._reads_builtin_variable(node)
+                    and name in getattr(self, "_direct_program_binding_names", ())):
+                return self._infer_type(node)
             if self._identifier_reads_series(node):
                 return self._series_type_for(name)
             local = self._current_func_local_types.get(name)
@@ -6299,10 +6349,13 @@ class TypeInferer:
             local = self._builtin_local_symbol(node.object)
             if local is not None:
                 return self._type_for_decl(local._pf_decl_node)
+            if self._reads_builtin_variable(node.object):
+                if name in self.ctx.series_shadowed_builtins:
+                    return self._scalar_builtin_history_cpp_type(name)
+                if name in self.ctx.series_bar_fields:
+                    return "double"
             if name in self.ctx.series_vars:
                 return self._series_type_for(name)
-            if name in self.ctx.series_bar_fields:
-                return "double"
         if (isinstance(node, Subscript)
                 and isinstance(node.object, (FuncCall, Ternary, MemberAccess))):
             # The history of an expression whose value is an object or a
@@ -6344,11 +6397,8 @@ class TypeInferer:
             )
             if tuple_type is not None:
                 return tuple_type
-            if not tuple_binding and node.name in ("time", "time_close", "timenow"):
-                return "int64_t"
-            if (node.name in BAR_FIELDS
-                    or (node.name in BAR_BUILTINS and not tuple_binding)):
-                return "double"
+            if self._reads_builtin_variable(node):
+                return "int64_t" if self._expr_is_int64_builtin(node) else "double"
             if (node.name in self._known_vars
                     and not self._known_var_is_lexically_shadowed(node.name)):
                 val = self._known_vars[node.name]
@@ -6385,6 +6435,12 @@ class TypeInferer:
                          or (sym.scope == "global"
                              and self._numeric_na_global(node.name)))):
                 return "double"
+            if (sym is not None and sym.pine_type == PineType.INT
+                    and self._has_builtin_shadow_binding(node)
+                    and self._is_int64_builtin_init(
+                        node.name, self.ctx.identifier_binding_nodes.get(id(node))
+                    )):
+                return "int64_t"
             if sym is not None and getattr(sym, "type_spec", None) is not None:
                 return self._type_spec_to_cpp(sym.type_spec)
             if sym is not None and sym.pine_type != PineType.UNKNOWN:

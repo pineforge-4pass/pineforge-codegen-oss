@@ -4,8 +4,8 @@ Preservation rows compare complete C++, including embedded manifests;
 sibling readers also retain their reference definitions. Local variants
 compare complete C++ after renaming, or compare tuple-history refusal text
 with the control. Compile rows using these same source builders live in
-test_builtin_named_locals_compile.py. These checks do not run the emitted
-code or supply hosted-engine evidence.
+test_builtin_named_locals_compile.py. One native row checks the value read
+by a helper from a shadowing global's history.
 """
 
 import re
@@ -19,6 +19,7 @@ from pineforge_codegen.codegen.visit_expr import _REALTIME_ONLY_VARS
 from pineforge_codegen.errors import CompileError
 from pineforge_codegen.lexer import KEYWORDS
 from pineforge_codegen.signatures import BUILTIN_VARIABLES
+from tests._compile import run_emitted_tu
 from tests._e2e import reference_codegen, transpile_json
 from tests.test_helper_builtin_named_locals import CPP_REFERENCE
 from tests.test_helper_series_words import _REFERENCE
@@ -316,10 +317,6 @@ def _reference_cpp(source, reference, tmp_path):
     pytest.param(_builtin_history_source(requested=True), id="requested-builtin-history"),
     pytest.param(_builtin_history_source(), id="chart-builtin-history"),
     pytest.param(
-        _builtin_history_source(global_high=True),
-        id="chart-global-high-builtin-history",
-    ),
-    pytest.param(
         _program("f() =>\n    close[1] + high[2] + bar_index[1]\n", "plot(f())\n"),
         id="chart-builtin-reader",
     ),
@@ -333,6 +330,40 @@ def test_outer_bindings_and_builtin_reads_keep_complete_cpp(source, reference, t
     assert cpp == before
     expected_reads = _HISTORY_READ.findall(before)
     assert cpp.strip() and expected_reads and _HISTORY_READ.findall(cpp) == expected_reads
+
+
+def test_chart_helper_reads_script_high_history():
+    source = (
+        '//@version=6\nstrategy("Global high history", initial_capital = 100000)\n'
+        "high = 3.0\n"
+        "f() => high[2]\n"
+        "out = f()\n"
+    )
+    driver = r'''
+#include <iostream>
+#include <vector>
+int main() {
+    std::vector<pineforge::Bar> bars(5);
+    for (std::size_t i = 0; i < bars.size(); ++i) {
+        bars[i].open = 100.0;
+        bars[i].high = 103.0;
+        bars[i].low = 97.0;
+        bars[i].close = i % 2 == 0 ? 101.0 : 99.0;
+        bars[i].volume = 1.0;
+        bars[i].timestamp = 1704067200000LL + static_cast<long long>(i) * 3600000LL;
+    }
+    GeneratedStrategy strategy;
+    strategy.run(bars.data(), bars.size(), "60", "60");
+    if (!strategy.last_error().empty()) {
+        std::cerr << strategy.last_error() << "\n";
+        return 1;
+    }
+    std::cout << strategy.out << "\n";
+}
+'''
+    # TradingView returns 3 once the two bars of history are available.
+    cpp = transpile(source)
+    assert run_emitted_tu(cpp, driver, opt="-O0", label="global high history") == "3\n"
 
 
 @pytest.mark.parametrize("name,string", [

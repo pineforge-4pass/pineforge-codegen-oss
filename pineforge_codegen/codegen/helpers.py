@@ -572,6 +572,7 @@ _CPP_TEMPORARY_PATTERN = re.compile(
     r"|_prev_fixnan_\d+(?:(?:_cs|__ni|_u)\d+)*|_result__ta_\w+"
     r"|_(?:hist_call|series_arg|udf_series_arg|fn_global_hist)_\d+"
     r"|_s_(?:open|high|low|close|volume|hl2|hlc3|ohlc4|hlcc4)"
+    r"|_pf_builtin_hist_\w+"
     r"|_strat_\w+|_pf_ctf\d+_\w+|_pf_selection__pf_var_init_\w+"
 )
 
