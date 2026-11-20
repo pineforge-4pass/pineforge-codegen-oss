@@ -51,8 +51,12 @@ int main() {
 )
 
 
-def _source(body: str, declaration: str = "p = 5") -> str:
-    return HEADER + f"{declaration}\n{body}\n{SMA}\nout = p\n"
+def _source(
+    body: str,
+    declaration: str = "p = 5",
+    ta_call: str = SMA,
+) -> str:
+    return HEADER + f"{declaration}\n{body}\n{ta_call}\nout = p\n"
 
 
 def _check_bars(cpp: str, lengths: list[int], label: str) -> None:
@@ -150,6 +154,99 @@ def test_stable_fold_alone_keeps_constructor_and_reset():
         cpp,
     )
     _check_bars(cpp, [5] * len(CLOSES), "mixed-stable-control")
+
+
+def _stable_constructor(cpp: str, family: str) -> None:
+    assert re.search(
+        rf'explicit GeneratedStrategy\(\) : [^\n]*(_ta_{family}_\d+)\(1\)'
+        rf'[\s\S]*\1 = .*get_input_bool\("Big", false\)',
+        cpp,
+    )
+
+
+def _function_local_writer() -> str:
+    return """f(x) =>
+    p = x
+    p := p + 1
+    p
+y = f(1)"""
+
+
+def test_function_local_writer_keeps_stable_ema_fold():
+    declaration = 'big = input.bool(false, "Big")\np = 5'
+    source = _source(
+        _function_local_writer() + "\n" + "if big\n    p := 6",
+        declaration,
+        "z = ta.ema(close, p)",
+    )
+    cpp = transpile(source)
+    _stable_constructor(cpp, "ema")
+    control = transpile(_source("if big\n    p := 6", declaration, "z = ta.ema(close, p)"))
+    assert run_emitted_tu(cpp, DRIVER, opt="-O0", label="mixed-stable-function-ema") == (
+        run_emitted_tu(control, DRIVER, opt="-O0", label="mixed-stable-control-ema")
+    )
+
+
+def test_function_local_writer_keeps_stable_sma_fold():
+    declaration = 'big = input.bool(false, "Big")\np = 5'
+    source = _source(
+        _function_local_writer() + "\n" + "if big\n    p := 6",
+        declaration,
+    )
+    cpp = transpile(source)
+    _stable_constructor(cpp, "sma")
+    _check_bars(cpp, [5] * len(CLOSES), "mixed-stable-function-sma")
+
+
+def test_method_local_writer_keeps_stable_sma_fold():
+    declaration = 'big = input.bool(false, "Big")\np = 5'
+    method = """method m(float self, float x) =>
+    p = self + x
+    p := p + 1
+    p
+y = 0.0.m(1.0)"""
+    source = _source(
+        method + "\n" + "if big\n    p := 6",
+        declaration,
+    )
+    cpp = transpile(source)
+    _stable_constructor(cpp, "sma")
+    _check_bars(cpp, [5] * len(CLOSES), "mixed-stable-method-sma")
+
+
+def test_outside_function_writer_still_refuses_ema():
+    declaration = 'big = input.bool(false, "Big")\np = 5'
+    body = _function_local_writer() + """
+if big
+    p := 6
+x = if close > open
+    p := p + 1
+    0
+else
+    0"""
+    with pytest.raises(CompileError) as caught:
+        transpile(_source(body, declaration, "z = ta.ema(close, p)"))
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.code == "PF-E5009"
+    assert diagnostic.message == (
+        "Unsupported TA constructor length 'p' for ta::EMA: it is neither a "
+        "compile-time constant nor derived from an input, so PineForge cannot "
+        "size the indicator buffer."
+    )
+
+
+def test_outside_function_writer_keeps_sma_dynamic_plan():
+    declaration = 'big = input.bool(false, "Big")\np = 5'
+    body = _function_local_writer() + """
+if big
+    p := 6
+x = if close > open
+    p := p + 1
+    0
+else
+    0"""
+    cpp = transpile(_source(body, declaration))
+    _check_bars(cpp, _up_lengths(), "mixed-stable-outside-function-sma")
 
 
 def test_var_mixed_script_keeps_pf_e5092_refusal():

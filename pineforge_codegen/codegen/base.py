@@ -3558,6 +3558,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         return True
             return False
 
+        definition_node_ids = {
+            id(node)
+            for definition in self._walk_candidate_surface(self.ctx.ast)
+            if isinstance(definition, (FuncDef, MethodDef))
+            for node in self._walk_candidate_surface(definition)
+        }
+
         for target_name, init_node in inits.items():
             init_str = self._arith_expr_to_str(init_node)
             if init_str is None:
@@ -3570,7 +3577,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 id(node) not in consumed_assignments
                 for node in self._walk_candidate_surface(self.ctx.ast)
                 if (
-                    isinstance(node, Assignment)
+                    id(node) not in definition_node_ids
+                    and isinstance(node, Assignment)
                     and isinstance(node.target, Identifier)
                     and node.target.name == target_name
                 )
