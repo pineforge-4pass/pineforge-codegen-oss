@@ -137,7 +137,7 @@ def test_an_indirect_self_reading_update_plans_without_recursing():
 
 @pytest.mark.parametrize("call, member", [
     # (The requested EMA's seeding wrapper is not this rule's.)
-    ("ta.ema(close, q)", r"(_PFRequestedEma<)?ta::EMA>? _sec0__ta_ema_1;"),
+    ("ta.ema(close, q)", r"pineforge::source::PineEma _sec0__ta_ema_1;"),
     ("ta.highest(high, q)", r"ta::Highest _sec0__ta_highest_1;"),
 ])
 def test_a_local_an_arm_only_declares_keeps_its_value(call, member):

@@ -13,6 +13,7 @@ from pineforge_codegen import diagnostics_catalog, transpile_full
 from pineforge_codegen.errors import CompileError, Level
 from pineforge_codegen.errors import Diagnostic, Phase, SourceLocation
 from pineforge_codegen.diagnostic_codes import classify, parse_template, render, render_diagnostic
+from tests._checked_ta_cpp import with_checked_ta
 from tests._legacy_cpp import without_trade_history_policy
 
 
@@ -513,6 +514,10 @@ def test_real_interfaces_keep_notes_and_short_sentences(case):
     if "cpp" in normalized and "cpp" in expected_wire:
         normalized["cpp"] = without_trade_history_policy(normalized["cpp"])
         expected_wire["cpp"] = without_trade_history_policy(expected_wire["cpp"])
+        # The frozen chart EMA fixture includes precalculation. Expect the
+        # checked EMA type and guarded replay together on the frozen side.
+        if "ta::EMA " in expected_wire["cpp"]:
+            expected_wire["cpp"] = with_checked_ta(expected_wire["cpp"], precalc=True)
     assert json.dumps(normalized) == json.dumps(expected_wire)
     if failure:
         text = PRODUCT_BEFORE["text"][case["name"]]

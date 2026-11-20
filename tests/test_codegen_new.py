@@ -655,7 +655,7 @@ def test_var_member():
 def test_tuple_assign_macd():
     src = '//@version=6\nstrategy("T")\n[macdLine, signal, hist] = ta.macd(close, 12, 26, 9)\n'
     cpp = _generate(src)
-    assert "ta::MACD" in cpp
+    assert "pineforge::source::PineMacd" in cpp
 
 
 def test_switch_stmt():

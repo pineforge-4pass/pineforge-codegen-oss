@@ -11,6 +11,7 @@ import pytest
 from pineforge_codegen import transpile
 from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.codegen.helpers import is_emitter_temporary
+from tests._checked_ta_cpp import with_checked_ta
 from tests._compile import compile_cpp
 from tests._e2e import reference_codegen, transpile_json
 
@@ -635,4 +636,7 @@ def test_noncolliding_controls_keep_complete_reference_cpp(
     pine.write_text(source, encoding="utf-8")
     reference = transpile_json(pine, root=clone_reference)
     assert reference["ok"], reference
-    assert transpile(source, check_support=True, libraries={}) == reference["cpp"]
+    expected = reference["cpp"]
+    if original in ("acc_cs1", "f_cs1"):
+        expected = with_checked_ta(expected, precalc=False)
+    assert transpile(source, check_support=True, libraries={}) == expected

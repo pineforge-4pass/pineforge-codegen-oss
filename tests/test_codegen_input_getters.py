@@ -219,5 +219,5 @@ def test_untitled_var_input_ta_reset_reads_the_member_key():
     cpp = transpile('//@version=6\nstrategy("t")\nvar n = input.int(9)\n'
                     "plot(ta.ema(close, n))\n")
     assert 'n = get_input_int("n", 9);' in cpp
-    assert '_ta_ema_1 = ta::EMA(get_input_int("n", 9));' in cpp
+    assert '_ta_ema_1 = pineforge::source::PineEma(get_input_int("n", 9));' in cpp
     assert 'get_input_int("", ' not in cpp

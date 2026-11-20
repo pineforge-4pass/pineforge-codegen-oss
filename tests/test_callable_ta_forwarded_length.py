@@ -25,12 +25,12 @@ def _ctor_periods(cpp: str, ta_name: str = "sma") -> list[str]:
     return periods
 
 
-def _reset_lines(cpp: str, ta_name: str = "sma") -> list[str]:
+def _reset_lines(cpp: str, ta_name: str = "sma", *, factory: str = "ta::") -> list[str]:
     return [
         line.strip()
         for line in cpp.splitlines()
         if re.match(
-            rf"_ta_{ta_name}_\d+(?:_[A-Za-z0-9]+)*\s*=\s*ta::",
+            rf"_ta_{ta_name}_\d+(?:_[A-Za-z0-9]+)*\s*=\s*{re.escape(factory)}",
             line.strip(),
         )
     ]
@@ -183,7 +183,10 @@ plot(out + unrelatedOut)
     assert _ctor_periods(cpp, "sma") == ["2"]
     assert _ctor_periods(cpp, "rma") == ["2"]
     assert _ctor_periods(cpp, "ema") == ["20"]
-    assert _reset_lines(cpp, "ema") == []
+    resets = _reset_lines(cpp, "ema") + _reset_lines(
+        cpp, "ema", factory="pineforge::source::PineEma("
+    )
+    assert resets == []
     driver = r'''
 #include <iostream>
 #include <vector>
@@ -240,7 +243,8 @@ plot(out)
     assert _ctor_periods(cpp, "ema") == ["11"]
     assert _ctor_periods(cpp, "sma") == ["11"]
     assert any(
-        'get_input_int("Len", 11)' in line for line in _reset_lines(cpp, "ema")
+        'get_input_int("Len", 11)' in line
+        for line in _reset_lines(cpp, "ema", factory="pineforge::source::PineEma(")
     )
     assert any(
         'get_input_int("Len", 11)' in line for line in _reset_lines(cpp, "sma")
@@ -363,7 +367,7 @@ plot(a + b)
     cpp = transpile(source)
     periods = _ctor_periods(cpp, "ema")
     assert periods == ["8", "9", "13", "14"]
-    resets = _reset_lines(cpp, "ema")
+    resets = _reset_lines(cpp, "ema", factory="pineforge::source::PineEma(")
     assert sum('get_input_int("Fast", 8)' in line for line in resets) == 2
     assert sum('get_input_int("Slow", 13)' in line for line in resets) == 2
 

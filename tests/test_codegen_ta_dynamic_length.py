@@ -19,7 +19,8 @@ rules and their tapes are in the engine header
 * series length of another family: still refused (TradingView refuses it for
   the recursive ones; the other window functions are not lowered yet).
 
-Constant- and input-length calls keep their constructor, byte for byte.
+Constant- and input-length calls keep their constructor cadence; EMA-family
+objects use the paired checked source adapters for every qualifier.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ import pytest
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp, run_emitted_tu
+from tests._checked_ta_cpp import with_checked_ta
 from tests._e2e import reference_codegen, transpile_json
 from tests._legacy_cpp import without_restore_script_state, without_trade_history_policy
 
@@ -188,14 +190,14 @@ lo = ta.lowest(low, len)
 plot(r + e + m + a + adx + mc + w + s + lo)
 """
     cpp = transpile(src)
-    for cls in ("ta::RSI", "ta::RMA", "ta::ATR", "ta::DMI", "ta::MACD",
+    for cls in ("ta::RSI", "ta::RMA", "ta::ATR", "ta::DMI", "pineforge::source::PineMacd",
                 "ta::WMA", "ta::SMA", "ta::Lowest"):
         assert _members(cpp, f"pineforge::source::FirstCallBound<{cls}>"), cls
     # ``lenP`` alone is an input.string choice: input-derived, so its EMA keeps
     # the constructor and the runtime reset re-reads the input (the
     # request.security helpers row; tests/test_e2e_lane_compositions.py).
-    [ema] = _members(cpp, "ta::EMA")
-    assert re.search(rf"^\s*{ema} = ta::EMA\(.*get_input_string\(\"Preset\"", cpp, re.M)
+    [ema] = _members(cpp, "pineforge::source::PineEma")
+    assert re.search(rf"^\s*{ema} = pineforge::source::PineEma\(.*get_input_string\(\"Preset\"", cpp, re.M)
     # The factory spells the length context-free: the input through its
     # override-aware getter, syminfo through the engine's record.
     assert 'simple_ta_length(' in cpp and '"rsi", "length")' in cpp
@@ -282,7 +284,7 @@ plot(a + b)
 """
     cpp = transpile(src)
     factories = re.findall(
-        r"(_sec\d+__ta_ema_\w+)\.compute\(\[&\]\(\) \{ return ta::EMA\(pineforge::source::"
+        r"(_sec\d+__ta_ema_\w+)\.compute\(\[&\]\(\) \{ return pineforge::source::PineEma\(pineforge::source::"
         r"simple_ta_length\((.*?), \"ema\", \"length\"\)\); \}", cpp)
     assert factories
     lengths = {member.split("__")[0]: args for member, args in factories}
@@ -560,9 +562,13 @@ def test_constant_and_input_lengths_keep_their_cpp(tmp_path: Path) -> None:
         previous = "double " + assignment
         assert expected.count(previous) == 1
         expected = expected.replace(previous, assignment, 1)
+    # The checked replay is the documented emission: its source adapter,
+    # failure headers, guarded replay, typed invalid-argument catch and cache
+    # clearing are all part of the expected C++.
+    expected = with_checked_ta(expected, precalc=True)
     # The rollback hook leaves requested-evaluation state alone since the
     # fill-restore fix; everything else must stay identical.
     assert without_restore_script_state(
         without_trade_history_policy(ours["cpp"])
     ) == without_restore_script_state(without_trade_history_policy(expected))
-    assert "pine_ta_length.hpp" not in ours["cpp"]
+    assert "#include <pineforge/source/pine_ta_length.hpp>" in ours["cpp"]

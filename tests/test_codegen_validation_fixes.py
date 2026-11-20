@@ -1052,7 +1052,7 @@ def test_recursive_ema_lazy_edges_preserve_eager_operand_positions():
         assert f"std::vector<double> _precalc__ta_ema_{idx}" in cpp
         assert f"_use_precalc ? _precalc__ta_ema_{idx}" in cpp
     for idx in (2, 4, 5):
-        assert f"ta::EMA _ta_ema_{idx};" in cpp
+        assert f"pineforge::source::PineEma _ta_ema_{idx};" in cpp
         assert f"std::vector<double> _precalc__ta_ema_{idx}" not in cpp
         assert f"_use_precalc ? _precalc__ta_ema_{idx}" not in cpp
         assert f"_ta_ema_{idx}.compute(current_bar_.close)" in cpp
@@ -1070,7 +1070,7 @@ def test_lazy_chart_ema_does_not_reclassify_security_evaluator_ema():
     assert "std::vector<double> _precalc__ta_ema_1" not in cpp
     assert "_ta_ema_1.compute(current_bar_.close)" in cpp
     security_body = cpp.split("void _eval_security_0", 1)[1].split("\n    }", 1)[0]
-    assert "ta::EMA _sec0__ta_ema_2;" in cpp
+    assert "pineforge::source::PineEma _sec0__ta_ema_2;" in cpp
     assert "_sec0__ta_ema_2.compute(bar.close)" in security_body
     assert " || " in security_body
 
@@ -1086,8 +1086,8 @@ def test_lazy_udf_ema_uses_callsite_state_without_precalc():
         "plot(lazy ? eager : close)"
     )
     assert "std::vector<double> _precalc__ta_ema" not in cpp
-    assert "ta::EMA _ta_ema_1;" in cpp
-    assert "ta::EMA _ta_ema_1_cs1;" in cpp
+    assert "pineforge::source::PineEma _ta_ema_1;" in cpp
+    assert "pineforge::source::PineEma _ta_ema_1_cs1;" in cpp
     lazy_body = cpp.split("double f_cs0()", 1)[1].split("\n    }", 1)[0]
     eager_body = cpp.split("double f_cs1()", 1)[1].split("\n    }", 1)[0]
     assert "_ta_ema_1.compute(current_bar_.close)" in lazy_body

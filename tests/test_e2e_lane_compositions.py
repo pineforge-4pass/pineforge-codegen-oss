@@ -412,8 +412,8 @@ def test_each_ta_length_takes_its_lanes_lowering() -> None:
     choice = 'get_input_string("Mode", std::string("B")) == std::string("A")'
     # CG-SECURITY-2: the input.string choice keeps the constructor, reset
     # from the input, on the chart and in the payload.
-    assert _member_type(cpp, "_ta_ema_2") == "ta::EMA"
-    assert choice in _line(cpp, r"^\s*_ta_ema_2 = ta::EMA\(")
+    assert _member_type(cpp, "_ta_ema_2") == "pineforge::source::PineEma"
+    assert choice in _line(cpp, r"^\s*_ta_ema_2 = pineforge::source::PineEma\(")
     assert _member_type(cpp, "_sec0__ta_sma_1") == "ta::SMA"
     assert choice in _line(cpp, r"^\s*_sec0__ta_sma_1 = ta::SMA\(")
     # K-TA-DYNLEN: the syminfo comparison is built on the call's first
@@ -494,4 +494,4 @@ if close > e
     strategy.entry("L", strategy.long)
 '''
     cpp = transpile(src)
-    assert _member_type(cpp, "_ta_ema_1") == "ta::EMA"
+    assert _member_type(cpp, "_ta_ema_1") == "pineforge::source::PineEma"

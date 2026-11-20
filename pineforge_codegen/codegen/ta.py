@@ -1480,8 +1480,10 @@ class TaSiteHelper:
     # forwarded ta.sma (``_ta_length_is_forwarded``) or one that reads a
     # script-level ``var`` (``_ta_length_reads_script_var``), keeps the
     # refusal.
-    # Constant- and input-length sites never reach this path: their C++ is
-    # unchanged. An input.string choice of a length (``mode == "A" ? 5 : 10``)
+    # Constant- and input-length sites never reach this plan: they retain
+    # their constructor/reset/precalculation cadence. EMA-family objects use
+    # the checked source adapters for every qualifier. An input.string choice
+    # of a length (``mode == "A" ? 5 : 10``)
     # is an input length since CG-SECURITY-2 spells string literals; the other
     # arguments those literals bring to the constructor stay here
     # (``_ta_arg_takes_plan``).
@@ -2030,9 +2032,25 @@ class TaSiteHelper:
             for index, part in enumerate(parts)
         )
 
+    # Analyzer class identities also select signature/result/implicit-OHLC
+    # rules. Keep those identities and map the concrete execution type only
+    # at emission. The Keltner shims retain their existing seeding scope and
+    # wrap PineKc/PineKcw; all other families keep their current types.
+    _TA_CHECKED_CLASSES = {
+        "ta::EMA": "pineforge::source::PineEma",
+        "ta::TSI": "pineforge::source::PineTsi",
+        "ta::MACD": "pineforge::source::PineMacd",
+        "_PFKC": "_PFKC",
+        "_PFKCW": "_PFKCW",
+    }
+
+    def _ta_fixed_cpp_type(self, site: "TACallSite") -> str:
+        """The concrete fixed object used by declarations and every factory."""
+        return self._TA_CHECKED_CLASSES.get(site.class_name, site.class_name)
+
     def _ta_plan_cpp_type(self, site: "TACallSite", plan: dict | None) -> str:
         if plan is None:
-            return site.class_name
+            return self._ta_fixed_cpp_type(site)
         if plan["kind"] == "series_extreme":
             return self._TA_SERIES_EXTREME_CLASSES[plan["family"]]
         if plan["kind"] == "series_percentile":
@@ -2041,7 +2059,7 @@ class TaSiteHelper:
             return "_PFSeriesSma"
         if plan["kind"] == "supertrend":
             return "pineforge::source::PineSupertrend"
-        return f"pineforge::source::FirstCallBound<{site.class_name}>"
+        return f"pineforge::source::FirstCallBound<{self._ta_fixed_cpp_type(site)}>"
 
     def _ta_member_cpp_type(self, site: "TACallSite") -> str:
         """The C++ type a site's member is declared with."""
@@ -2184,7 +2202,7 @@ class TaSiteHelper:
                 value = (f'pineforge::source::simple_ta_length({value}, '
                          f'"{family}", "{param.name}")')
             ctor.append(value)
-        make = f"[&]() {{ return {site.class_name}({', '.join(ctor)}); }}"
+        make = f"[&]() {{ return {self._ta_fixed_cpp_type(site)}({', '.join(ctor)}); }}"
         return f"{make}, {base_args}" if base_args else make
 
     def _simple_ta_top_level_decls(self) -> dict:
