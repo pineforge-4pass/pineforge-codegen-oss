@@ -4578,7 +4578,10 @@ class SecurityEmitter:
         is kept only where the payload reaches it once: two inlines of it
         (``h() + h()``) would each need their own history, and are refused
         where lowered, as every earlier build refused them. A sampled global
-        can share its history: it does not depend on the helper's arguments."""
+        can share its history: it does not depend on the helper's arguments.
+        A helper reached through a lazy expression edge cannot share that
+        history: its call count, rather than the requested bar count, advances
+        the history of a global it reads."""
         if node is None:
             return []
         if resolving is None:
@@ -4589,6 +4592,11 @@ class SecurityEmitter:
         in_helper: set[int] = set()
         reached: dict[int, int] = {}
         helpers: list[str] = []
+        sampled_payload_nodes = getattr(
+            self, "_security_payload_numeric_call_nodes", None
+        )
+        if sampled_payload_nodes is None:
+            sampled_payload_nodes = self._security_payload_numeric_call_nodes = set()
 
         def add(n: Subscript) -> None:
             if (n is node
@@ -4607,14 +4615,14 @@ class SecurityEmitter:
                 seen.add(key)
                 out.append(n)
 
-        def walk(n) -> None:
+        def walk(n, conditional: bool = False) -> None:
             if n is None:
                 return
             if isinstance(n, Identifier):
                 global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
                 if n.name in global_expr_map and n.name not in resolving:
                     resolving.add(n.name)
-                    walk(global_expr_map[n.name])
+                    walk(global_expr_map[n.name], conditional)
                     resolving.remove(n.name)
                 return
             if (isinstance(n, FuncCall) and isinstance(n.callee, Identifier)
@@ -4623,56 +4631,189 @@ class SecurityEmitter:
                 info = self._func_info_map.get(n.callee.name)
                 if (info is not None and getattr(info, "node", None) is not None
                         and not self._security_pure_body(info.node)):
+                    if conditional and self._security_helper_reads_numeric_call_global(
+                        info.node
+                    ):
+                        self._codegen_error(
+                            n,
+                            "request.security helper call history is only supported "
+                            "in the payload itself",
+                        )
                     helpers.append(n.callee.name)
-                    walk(info.node.body)
+                    walk(info.node.body, conditional)
                     helpers.pop()
+            global_history = None
             if (
                 isinstance(n, Subscript)
                 and (
                     (isinstance(n.object, FuncCall)
                      and self._get_ta_site(n.object) is None)
                     or self._is_compound_history_object(n.object)
-                    or self._security_global_history_value(n) is not None
+                    or (
+                        (global_history := self._security_global_history_value(
+                            n, allow_payload=not helpers
+                        )) is not None
+                    )
                 )
             ):
+                if (
+                    not helpers
+                    and global_history is not None
+                    and self._security_numeric_call_global(
+                        n, global_history, allow_payload=True
+                    )
+                ):
+                    sampled_payload_nodes.add(id(n))
                 add(n)
             if isinstance(n, (list, tuple)):
                 for x in n:
-                    walk(x)
+                    walk(x, conditional)
+                return
+            if isinstance(n, Ternary):
+                walk(n.condition, conditional)
+                walk(n.true_val, True)
+                walk(n.false_val, True)
+                return
+            if isinstance(n, BinOp) and n.op in ("and", "or"):
+                walk(n.left, conditional)
+                walk(n.right, True)
+                return
+            if isinstance(n, IfStmt):
+                walk(n.condition, conditional)
+                walk(n.body, True)
+                walk(n.else_body, True)
+                return
+            if isinstance(n, SwitchStmt):
+                walk(n.expr, conditional)
+                for case_expr, body in n.cases:
+                    walk(case_expr, conditional)
+                    walk(body, True)
+                walk(n.default_body, True)
+                return
+            if isinstance(n, (ForStmt, ForInStmt, WhileStmt)):
+                if isinstance(n, ForStmt):
+                    walk(n.start, conditional)
+                    walk(n.end, conditional)
+                    walk(n.step, conditional)
+                    walk(n.body, True)
+                elif isinstance(n, ForInStmt):
+                    walk(n.iterable, conditional)
+                    walk(n.body, True)
+                else:
+                    walk(n.condition, conditional)
+                    walk(n.body, True)
                 return
             for _k, v in getattr(n, "__dict__", {}).items():
                 if isinstance(v, ASTNode):
-                    walk(v)
+                    walk(v, conditional)
                 elif isinstance(v, (list, tuple)):
                     for x in v:
                         if isinstance(x, ASTNode):
-                            walk(x)
+                            walk(x, conditional)
 
         walk(node)
         return [
             n for n in out
             if id(n) not in in_helper or reached[id(n)] == 1
-            or (value := self._security_global_history_value(n)) is n.object
-            or self._security_numeric_call_global(n, value)
+            or (
+                (value := self._security_global_history_value(
+                    n, allow_payload=id(n) in sampled_payload_nodes
+                )) is n.object
+            )
+            or self._security_numeric_call_global(
+                n,
+                value,
+                allow_payload=id(n) in sampled_payload_nodes,
+            )
         ]
 
-    def _security_numeric_call_global(self, node, value) -> bool:
-        """A plain helper's bound global read, initialized by a numeric builtin
-        call without dedicated TA, request or selected-source history."""
+    def _security_helper_reads_numeric_call_global(
+        self, func_node, resolving: set[str] | None = None
+    ) -> bool:
+        """Whether a helper body, including helpers it calls, reads with
+        history a global initialized by a pure numeric builtin call (the kind
+        ``_security_numeric_call_global`` samples). Globals bound to other
+        values keep the sampling they already had."""
+        if resolving is None:
+            resolving = set()
+        key = id(func_node)
+        if key in resolving:
+            return False
+        resolving.add(key)
+        try:
+            body = func_node.body
+            statements = body if isinstance(body, (list, tuple)) else [body]
+            for statement in statements:
+                if statement is None:
+                    continue
+                for child, _ in iter_ast_nodes(statement):
+                    if isinstance(child, Subscript):
+                        value = self._security_global_history_value(child)
+                        if value is not None and self._security_numeric_call_global(
+                            child, value
+                        ):
+                            return True
+                    if (
+                        isinstance(child, FuncCall)
+                        and isinstance(child.callee, Identifier)
+                        and child.callee.name in self._func_names
+                    ):
+                        info = self._func_info_map.get(child.callee.name)
+                        if (
+                            info is not None
+                            and getattr(info, "node", None) is not None
+                            and self._security_helper_reads_numeric_call_global(
+                                info.node, resolving
+                            )
+                        ):
+                            return True
+            return False
+        finally:
+            resolving.remove(key)
+
+    def _security_numeric_call_global(
+        self, node, value, *, allow_payload: bool = False
+    ) -> bool:
+        """A global numeric value initialized by a pure builtin call.
+
+        The read may be in a requested helper body, where the analyzer records
+        it in ``func_global_history_nodes``, or directly in the payload, where
+        this collector records its node in
+        ``_security_payload_numeric_call_nodes``. ``allow_payload`` admits the
+        latter shape. Stateful and chart-fallback calls stay on their
+        established lowering.
+        """
         if (not isinstance(value, FuncCall)
-                or id(node) not in self.ctx.func_global_history_nodes
+                or (
+                    id(node) not in self.ctx.func_global_history_nodes
+                    and id(node) not in getattr(
+                        self, "_security_payload_numeric_call_nodes", ()
+                    )
+                    and not allow_payload
+                )
                 or self._reads_builtin_variable(node.object)
                 or self._get_ta_site(value) is not None
                 or self._resolve_callee(value.callee)[1] in ("request", "ta")
                 or self._security_user_call_site(value)
                 or self._security_source_input_call(value) is not None):
             return False
+        func_name, namespace = self._resolve_callee(value.callee)
+        if not (
+            (namespace is None and func_name in _SECURITY_PURE_CALLS)
+            or (
+                namespace in _SECURITY_PURE_CALL_NAMESPACES
+                and (namespace, func_name) not in _SECURITY_IMPURE_CALLS
+            )
+        ):
+            return False
         symbol = self.ctx.symbols.global_scope.symbols.get(node.object.name)
         return (symbol is not None and symbol.pine_type in (PineType.INT, PineType.FLOAT)
                 and symbol.enum_type_name is None and symbol.udt_type_name is None
                 and (symbol.type_spec is None or symbol.type_spec.kind == "primitive"))
 
-    def _security_global_history_value(self, node) -> ASTNode | None:
+    def _security_global_history_value(
+        self, node, *, allow_payload: bool = False
+    ) -> ASTNode | None:
         """The value of ``g`` in a payload's ``g[k]`` when ``g`` is a global
         bound to a helper, a request, an operator expression or (in a
         requested helper) a numeric builtin call, else None.
@@ -4727,7 +4868,18 @@ class SecurityEmitter:
                 # Keep the authored subscript: a synthetic one has no slot
                 # in the expression-history inventory.
                 return value
-            if value is original and self._security_numeric_call_global(node, value):
+            if value is original and (
+                self._security_numeric_call_global(
+                    node,
+                    value,
+                    allow_payload=(
+                        allow_payload
+                        or id(node) in getattr(
+                            self, "_security_payload_numeric_call_nodes", ()
+                        )
+                    ),
+                )
+            ):
                 return value
         if (not isinstance(original, Identifier)
                 and isinstance(value, (BinOp, UnaryOp, Ternary))
@@ -4900,7 +5052,13 @@ class SecurityEmitter:
                 "type": cpp_t,
                 "object": node.object,
                 "tuple_global": value is node.object,
-                "sample_call": self._security_numeric_call_global(node, value),
+                "sample_call": self._security_numeric_call_global(
+                    node,
+                    value,
+                    allow_payload=id(node) in getattr(
+                        self, "_security_payload_numeric_call_nodes", ()
+                    ),
+                ),
             }
             lines.append(f"    Series<{cpp_t}> {name}{mbb_suffix};")
 
