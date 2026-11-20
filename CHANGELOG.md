@@ -36,6 +36,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - A TA length inside a `request.security` payload that reads a timeframe built-in is sized in the requested context, like the rest of the payload: `request.security(syminfo.tickerid, "D", ta.sma(close, timeframe.isdaily ? 5 : 3))` is `ta.sma(close, 5)` and `ta.ema(close, timeframe.isdaily ? 0 : 3)` stops; both used the chart's timeframe ([#291](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/291)).
 
+- A compound argument that is passed to a function whose TA length uses the parameter keeps its grouping. With `f(simple int n) => ta.sma(close, 2 * n)`, `f(1 + 2)` builds the length 6, not `2 * 1 + 2 = 4`, and `f(2 - 2)` with `ta.ema` stops like `f(0)` instead of building a length of 2; an argument that is an identifier or a literal generates the same code as before ([#291](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/291)).
+
 - A bare built-in name such as `close`, `hl2` or `dayofweek` reads the script
   variable after its declaration. Earlier reads still use the chart value, and
   string variables named `hour`, `minute` or `second` keep their string type
