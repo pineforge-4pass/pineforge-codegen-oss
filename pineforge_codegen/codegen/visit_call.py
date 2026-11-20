@@ -4486,6 +4486,14 @@ class CallVisitor:
                 return self._str_format_expr(format_node, node.args[1:])
             return 'std::string("")'
 
+        if func_name in ("lower", "upper"):
+            self._uses_case_mapping = True
+            helper = "_pf_case_lower" if func_name == "lower" else "_pf_case_upper"
+            return evaluate_args_once(
+                args, range(len(args)),
+                lambda bound: f"{helper}({bound[0]})" if bound else 'std::string("")',
+                "_pf_case_arg")
+
         if func_name == "replace":
             if len(args) >= 4:
                 # 4-arg form: replace the Nth occurrence (0-based, per Pine

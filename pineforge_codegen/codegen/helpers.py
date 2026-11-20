@@ -462,6 +462,9 @@ CPP_EMITTER_NAMES = frozenset("""
     _pf_tv_number_style
     _pf_u16_length _pf_u16_pos _pf_u16_decode _pf_u16_encode _pf_u16_substr
     _pf_u16_substr_position _pf_u16_substr_checked
+    _pf_case_range_contains _pf_case_full_map _pf_case_simple_map
+    _pf_case_decode _pf_case_encode _pf_case_before_cased _pf_case_after_cased
+    _pf_case_map _pf_case_upper _pf_case_lower _pf_case_char
     _pf_u8_decode_points _pf_u8_match _pf_u8_trim
     _security_helper_series_ _security_helper_series_str_
     _use_precalc _var_initialized _ta_initialized_ _inputs_initialized_
@@ -565,7 +568,7 @@ _CPP_TEMPORARY_PATTERN = re.compile(
     r"|_pf_(?:str|array|round)_a\d+|_pf_slot_open_\d+"
     r"|_pf_every_bar_ta_\d+|_pf_shared_\d+_\d+|__pf_array\w*|__pf_raw_\w+"
     r"|_pf_collection_hist_\w+"
-    r"|_pf_substring_arg\d+"
+    r"|_pf_substring_arg\d+|_pf_case_arg\d+"
     r"|_pf_w_+"
     r"|_req_sec_(?:lower_tf_)?\d+(?:_\d+)?|_precalc_\w+|_sec\d+_\w+"
     r"|_pf_(?:sec|rec)_missing_\d+|_eval_security_\d+"

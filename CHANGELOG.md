@@ -28,6 +28,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - `str.substring` now stops the run when the begin position is after the end position, and counts a `na` begin or end as 0, as TradingView does ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
 
+- `str.upper` and `str.lower` now apply the Unicode case mappings (Unicode 15.0, no locale rules), including é and É, ß to SS and the final sigma, where they previously changed only ASCII letters ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
+
 - A bare built-in name such as `close`, `hl2` or `dayofweek` reads the script
   variable after its declaration. Earlier reads still use the chart value, and
   string variables named `hour`, `minute` or `second` keep their string type

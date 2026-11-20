@@ -839,13 +839,13 @@ def test_str_contains():
 def test_str_lower():
     src = 'x = str.lower("HELLO")\n'
     cpp = _generate(src)
-    assert "tolower" in cpp
+    assert "_pf_case_lower" in cpp
 
 
 def test_str_upper():
     src = 'x = str.upper("hello")\n'
     cpp = _generate(src)
-    assert "toupper" in cpp
+    assert "_pf_case_upper" in cpp
 
 
 def test_str_length():
@@ -1170,7 +1170,7 @@ dd = strategy.max_drawdown
     assert "Signal_Buy" in cpp or "Signal" in cpp
     assert "OBV" in cpp
     assert "Dev" in cpp
-    assert "tolower" in cpp or "toupper" in cpp
+    assert "_pf_case_lower" in cpp or "_pf_case_upper" in cpp
     assert "max_drawdown_" in cpp
     assert "strategy_entry" in cpp or "entry" in cpp.lower()
 
