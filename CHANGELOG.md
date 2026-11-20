@@ -35,6 +35,14 @@ supported as exact pairs; on the 0.x line they are independent. See the
   string variables named `hour`, `minute` or `second` keep their string type
   ([#423](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/423)).
 
+- A `var` or `varip` `string` declared inside a function keeps its string type for the reads that follow it: `timeframe.in_seconds(s)` and `timeframe.change(s)` no longer refuse it, and `s + "x"` and `str.tostring(s) + "y"` build ([#424](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/424)).
+
+- A global that is bound to a numeric function call (for example `float open = math.max(close, 1.0)`) and read with history (`open[1]`) inside a function that a `request.security` call uses now reads the script's variable on the requested bars, as TradingView does. A global named like a built-in price field used to be read as the built-in's history (a different series, with no error), and a global with another name was refused with `PF-E5005` ([#423](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/423)).
+
+- A string variable named like a built-in price field (`open`, `hl2`, and so on) whose history is read inside a function that a `request.security` call uses is refused with `PF-E5005`; it used to be translated to C++ that read the built-in's numeric history and did not compile ([#423](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/423)).
+
+- A field of a user type named `bar_index` no longer changes how a bare `bar_index` is read inside a `request.security` payload: the read is the built-in when it is bound to the built-in ([#423](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/423)).
+
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked
   source adapters for fixed, input and simple lengths, including helper and
   requested-context copies and precalculation. Invalid lengths are checked

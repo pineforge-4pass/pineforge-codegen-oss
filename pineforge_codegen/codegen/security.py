@@ -4563,7 +4563,8 @@ class SecurityEmitter:
         functions it calls (``h() => nz(g()[1])``). One inside a helper body
         is kept only where the payload reaches it once: two inlines of it
         (``h() + h()``) would each need their own history, and are refused
-        where lowered, as every earlier build refused them."""
+        where lowered, as every earlier build refused them. A sampled global
+        can share its history: it does not depend on the helper's arguments."""
         if node is None:
             return []
         if resolving is None:
@@ -4637,12 +4638,30 @@ class SecurityEmitter:
         return [
             n for n in out
             if id(n) not in in_helper or reached[id(n)] == 1
-            or self._security_global_history_value(n) is n.object
+            or (value := self._security_global_history_value(n)) is n.object
+            or self._security_numeric_call_global(n, value)
         ]
+
+    def _security_numeric_call_global(self, node, value) -> bool:
+        """A plain helper's bound global read, initialized by a numeric builtin
+        call without dedicated TA, request or selected-source history."""
+        if (not isinstance(value, FuncCall)
+                or id(node) not in self.ctx.func_global_history_nodes
+                or self._reads_builtin_variable(node.object)
+                or self._get_ta_site(value) is not None
+                or self._resolve_callee(value.callee)[1] in ("request", "ta")
+                or self._security_user_call_site(value)
+                or self._security_source_input_call(value) is not None):
+            return False
+        symbol = self.ctx.symbols.global_scope.symbols.get(node.object.name)
+        return (symbol is not None and symbol.pine_type in (PineType.INT, PineType.FLOAT)
+                and symbol.enum_type_name is None and symbol.udt_type_name is None
+                and (symbol.type_spec is None or symbol.type_spec.kind == "primitive"))
 
     def _security_global_history_value(self, node) -> ASTNode | None:
         """The value of ``g`` in a payload's ``g[k]`` when ``g`` is a global
-        bound to a helper, a request or an operator expression, else None.
+        bound to a helper, a request, an operator expression or (in a
+        requested helper) a numeric builtin call, else None.
 
         TradingView evaluates ``g`` on every requested bar and ``g[k]`` reads
         it ``k`` requested bars back. Such a value has no series on the
@@ -4693,6 +4712,8 @@ class SecurityEmitter:
                 # evaluator's clock, just like a helper's returned value.
                 # Keep the authored subscript: a synthetic one has no slot
                 # in the expression-history inventory.
+                return value
+            if value is original and self._security_numeric_call_global(node, value):
                 return value
         if (not isinstance(original, Identifier)
                 and isinstance(value, (BinOp, UnaryOp, Ternary))
@@ -4865,6 +4886,7 @@ class SecurityEmitter:
                 "type": cpp_t,
                 "object": node.object,
                 "tuple_global": value is node.object,
+                "sample_call": self._security_numeric_call_global(node, value),
             }
             lines.append(f"    Series<{cpp_t}> {name}{mbb_suffix};")
 
@@ -8856,8 +8878,13 @@ class SecurityEmitter:
                     )
         # Global tuple declarations run on every requested bar, even when
         # a lazy payload does not read their history on that bar.
+        call_histories: dict[str, list[str]] = {}
         for (sid, _node_id), meta in self._security_expr_hist_by_node.items():
             obj = meta.get("object")
+            if sid == sec_id and meta["sample_call"]:
+                self._security_arg_globals[obj.name] = obj
+                call_histories.setdefault(obj.name, []).append(meta["name"])
+                continue
             if (sid != sec_id or not isinstance(obj, Identifier)
                     or not meta.get("tuple_global")):
                 continue
@@ -8885,9 +8912,15 @@ class SecurityEmitter:
         # Its sampled dependencies keep declaration order and one value.
         for stmt in self.ctx.ast.body:
             if isinstance(stmt, VarDecl) and stmt.name in self._security_arg_globals:
-                self._build_security_expr(
+                value = self._build_security_expr(
                     sec_id, self._security_arg_globals[stmt.name], None, ta_results,
                     security_mutable_names=security_mutable_names, emitted_lines=lines)
+                for hist in call_histories.get(stmt.name, ()):
+                    # The current sample serves offset zero on partial bars
+                    # too. Publish it only after all reads of a completed bar.
+                    self._security_global_hist_pushes.append((hist, "double"))
+                    lines.append(f"        {hist}_next = is_na({value}) ? na<double>() "
+                                 f": static_cast<double>({value}); {hist}_set = is_complete;")
         returns_tuple = item.get("returns_tuple", False)
         tuple_size = item.get("tuple_size", 0)
         if (
@@ -9968,6 +10001,12 @@ class SecurityEmitter:
                         expr_node.object.name)
                     self._security_check_double_lowering(
                         expr_node, sec_id, expr_node.object.name)
+                if meta["sample_call"]:
+                    return (
+                        f"([&]() -> double {{ int _hidx = {index_cpp}; {offset_check}"
+                        f"if (is_na(_hidx)) return na<double>(); "
+                        f"return (_hidx <= 0) ? {hist}_next : {hist}[_hidx - 1]; }}())"
+                    )
                 inner = self._build_security_expr(
                     sec_id,
                     expr_node.object,
@@ -11510,6 +11549,9 @@ class SecurityEmitter:
         if isinstance(node, Subscript):
             obj = node.object
             if isinstance(obj, Identifier):
+                meta = self._security_expr_hist_by_node.get((sec_id, id(node)))
+                if meta is not None and meta["sample_call"]:
+                    return True
                 if not self._security_identifier_is_global_binding(obj):
                     binding = self._security_lookup_helper_binding_context(
                         obj.name, helper_binding_stack
