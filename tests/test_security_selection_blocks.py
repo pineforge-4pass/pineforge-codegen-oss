@@ -301,11 +301,8 @@ def test_let_bound_string_selector_has_string_comparisons(position, selected, ex
 
 UNSAFE_ARMS = (
     # Calls are located at '('; history reads at '['; statements at their first word.
-    # The arm assigns the variable that its own condition reads: the assignment inside the
-    # expression is counted as a reassignment, so the condition's read is the first node that
-    # is not a value fixed before the first bar (the arm below, a different variable, keeps
-    # the outer-assignment refusal at the assignment).
-    ('    pick := false\n    "60"\n', 4, 9, "non-setup name pick"),
+    # The arm assigns the variable its condition reads, so refusal stays at that assignment.
+    ('    pick := false\n    "60"\n', 5, 5, "outer assignment"),
     ('    candidate = "1D"\n    for idx = 0 to 1\n        candidate := "60"\n'
      '    candidate\n', 6, 5, "ForStmt"),
     ('    candidate = str.tostring(math.random())\n    candidate\n',
@@ -363,6 +360,24 @@ def test_registration_outer_assignment_of_another_variable_is_located_at_the_ass
     diagnostic = caught.value.diagnostics[0]
     assert diagnostic.code == "PF-E3083"
     assert (diagnostic.location.line, diagnostic.location.col) == (6, 5)
+    assert "outer assignment" in diagnostic.message
+
+
+def test_registration_switch_assignment_of_condition_variable_is_located_at_the_assignment():
+    pine = (HEADER_V6 + 'pick = input.bool(true)\n'
+            'tf = switch pick\n'
+            '    true =>\n'
+            '        pick := false\n'
+            '        "60"\n'
+            '    =>\n'
+            '        "1D"\n'
+            'value = request.security(syminfo.tickerid, tf, close)\nplot(value)\n')
+    with pytest.raises(CompileError) as caught:
+        transpile_full(pine)
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E3083"
+    assert (diagnostic.location.line, diagnostic.location.col) == (6, 9)
     assert "outer assignment" in diagnostic.message
 
 

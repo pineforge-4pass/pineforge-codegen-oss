@@ -1668,6 +1668,14 @@ class SecurityEmitter:
         def fail(value, kind, detail):
             self._security_selection_refusal(value, kind, detail)
 
+        def selection_assignment(name):
+            for candidate in self._walk_candidate_surface(node):
+                if (isinstance(candidate, Assignment)
+                        and isinstance(candidate.target, Identifier)
+                        and candidate.target.name == name):
+                    return candidate
+            return None
+
         def expression(value, env):
             if isinstance(value, Identifier):
                 if value.name in env:
@@ -1683,7 +1691,13 @@ class SecurityEmitter:
                     return literal(value=known, loc=value.loc)
                 if ((value.name in BAR_BUILTINS and self._reads_builtin_variable(value))
                         or value.name in self.ctx.series_vars):
+                    assignment = selection_assignment(value.name)
+                    if assignment is not None:
+                        fail(assignment, "statement", "outer assignment")
                     fail(value, "series", f"bar-state read {value.name}")
+                assignment = selection_assignment(value.name)
+                if assignment is not None:
+                    fail(assignment, "statement", "outer assignment")
                 fail(value, "name", f"undefined or non-setup name {value.name}")
             if isinstance(value, (NumberLiteral, StringLiteral, BoolLiteral,
                                   ColorLiteral, NaLiteral)):
