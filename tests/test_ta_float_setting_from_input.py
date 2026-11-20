@@ -13,6 +13,7 @@ from pineforge_codegen import transpile
 from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.errors import CompileError
 from pineforge_codegen.symbols import PineType
+from tests._checked_ta_cpp import with_checked_ta
 from tests._e2e import reference_codegen, transpile_json
 from tests.test_runtime_var_initialization import _compile_and_run
 
@@ -1010,28 +1011,41 @@ def reference():
     return tree
 
 
-def _assert_reference_cpp(source, reference, tmp_path):
+def _assert_reference_cpp(source, reference, tmp_path, *, checked=None):
     pine = tmp_path / "strategy.pine"
     pine.write_text(source, encoding="utf-8")
     before = transpile_json(pine, root=reference)
     assert before["ok"], before
     after = transpile_json(pine)
     assert after["ok"], after
-    assert after["cpp"] == before["cpp"]
+    expected = before["cpp"]
+    if checked is not None:
+        expected = with_checked_ta(expected, **checked)
+    assert after["cpp"] == expected
 
 
 @pytest.mark.parametrize("source", _IDENTITY_CASES)
-def test_other_ta_and_input_scripts_keep_complete_cpp(source, reference, tmp_path):
-    _assert_reference_cpp(source, reference, tmp_path)
+def test_other_ta_and_input_scripts_keep_complete_cpp(source, reference, tmp_path, request):
+    checked = {
+        "function-derived-integer": {"precalc": False},
+        "integer-arithmetic": {"precalc": True},
+        "kc-plain-multiplier-input": {"precalc": True, "kc": True},
+        "literal-float-settings": {"precalc": True, "kc": True},
+        "requested-integer-history": {"precalc": True},
+    }
+    _assert_reference_cpp(
+        source, reference, tmp_path, checked=checked.get(request.node.callspec.id),
+    )
 
 
 @pytest.mark.parametrize(
     "source,control,override_control,member,override", _INTEGER_CASES,
 )
 def test_integer_lengths_keep_complete_cpp_and_values(
-    source, control, override_control, member, override, reference, tmp_path,
+    source, control, override_control, member, override, reference, tmp_path, request,
 ):
-    _assert_reference_cpp(source, reference, tmp_path)
+    checked = {"precalc": True} if request.node.callspec.id == "rounded-integer-length" else None
+    _assert_reference_cpp(source, reference, tmp_path, checked=checked)
     actual = _observe(source, (member,), override)
     (expected,) = _observe(control, (member,))
     (expected_override,) = _observe(override_control, (member,))

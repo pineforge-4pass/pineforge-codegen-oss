@@ -3839,12 +3839,54 @@ class CallVisitor:
             'throw std::invalid_argument("Unknown strategy sizing value"); }())'
         )
 
+    @staticmethod
+    def _currency_conversion_identity(call: FuncCall):
+        """A conversion call by its source position, not its node object: the
+        translator rebuilds calls after the source walk (security timeframe-input
+        substitution, replayed globals) and a rebuilt copy keeps its call site."""
+        loc = call.loc
+        return (loc.file, loc.line, loc.col) if loc is not None else id(call)
+
+    def _currency_conversion_site(self, node: FuncCall) -> int:
+        """0-based source-order ordinal shared by both conversion builtins."""
+        sites = getattr(self, "_currency_conversion_sites", None)
+        if sites is None:
+            calls = []
+            for walk_index, (candidate, _depth) in enumerate(iter_ast_nodes(self.ctx.ast)):
+                callee = getattr(candidate, "callee", None)
+                if (isinstance(candidate, FuncCall)
+                        and isinstance(callee, MemberAccess)
+                        and isinstance(callee.object, Identifier)
+                        and callee.object.name == "strategy"
+                        and callee.member in ("convert_to_account", "convert_to_symbol")):
+                    loc = candidate.loc
+                    key = (loc.line, loc.col) if loc is not None else (1 << 62, walk_index)
+                    calls.append((key, walk_index, candidate))
+            calls.sort(key=lambda item: (item[0], item[1]))
+            sites = {}
+            for _k, _w, call in calls:
+                sites.setdefault(self._currency_conversion_identity(call), len(sites))
+            self._currency_conversion_sites = sites
+        identity = self._currency_conversion_identity(node)
+        if identity not in sites:
+            raise AssertionError("strategy currency conversion call missing from the source walk")
+        return sites[identity]
+
     def _visit_strategy_call(self, func_name: str, node: FuncCall) -> str:
         from .order_shapes import record_order_call
         if func_name in ("convert_to_account", "convert_to_symbol"):
             p = self._resolve_func_args(node, f"strategy.{func_name}")
             v = self._visit_float_arg(p.get("value"), "0.0")
-            return f"({v})"
+            # The engine helper takes the value by copy, so the Pine argument
+            # runs once; it returns that value and warns once per call site
+            # when no account-currency rate covers this bar.
+            direction = "to_account" if func_name == "convert_to_account" else "to_symbol"
+            return (
+                f"strategy_convert_identity_or_warn(({v}), "
+                "pineforge::source::PineStrategyHost::CurrencyConversionDirection::"
+                f"{direction}, /*call_site=*/{self._currency_conversion_site(node)}, "
+                f"{self._strategy_account_currency_expr()}, current_bar_.timestamp)"
+            )
         if func_name == "default_entry_qty":
             # The host's query of the default order size at a price. The support
             # checker has bound exactly one price, so none is invented here.
@@ -4297,9 +4339,28 @@ class CallVisitor:
     def _visit_str_call(self, func_name: str, node) -> str:
         if func_name == "format_time":
             return self._visit_format_time_call(node)
-        args = _merge_kwargs(node.args, node.kwargs,
-                             sigs.get_param_names("str", func_name), self._visit_expr,
-                             intrinsic=sigs.get_intrinsic("str", func_name))
+        param_names = sigs.get_param_names("str", func_name)
+        intrinsic = sigs.get_intrinsic("str", func_name)
+        # A bare ``na`` str.split separator is the string na (the empty text,
+        # an empty separator), not the numeric one: ``na<double>()`` has no
+        # conversion to std::string (issue #382).
+        string_na = set()
+        if func_name == "split" and intrinsic is not None:
+            aligned = _bind_kwargs_aligned(
+                node.args, node.kwargs, param_names, intrinsic=intrinsic)
+            for position, arg in enumerate(aligned):
+                if arg is None or not self._is_na_expr(arg):
+                    continue
+                types = {
+                    sig.params[position].pine_type
+                    for sig in intrinsic.signatures if position < len(sig.params)
+                }
+                if types == {PineType.STRING}:
+                    string_na.add(id(arg))
+        args = _merge_kwargs(
+            node.args, node.kwargs, param_names,
+            lambda a: "na<std::string>()" if id(a) in string_na else self._visit_expr(a),
+            intrinsic=intrinsic)
         arg_nodes = _merge_kwargs(
             node.args, node.kwargs,
             sigs.get_param_names("str", func_name), lambda a: a,
@@ -4412,8 +4473,9 @@ class CallVisitor:
             return 'std::string("")'
 
         if func_name in STR_FUNC_MAP and STR_FUNC_MAP[func_name] is not None:
-            if func_name in ("length", "pos"):
-                # These two count in UTF-16 units through tv_string_units.
+            if func_name in ("length", "pos", "match"):
+                # These count or match in UTF-16 units / characters through
+                # tv_string_units.
                 self._uses_tv_string_units = True
             return evaluate_args_once(
                 args, STR_ARGS_READ_REPEATEDLY.get(func_name, ()),

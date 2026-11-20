@@ -5894,6 +5894,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return size, tuple(element_types)
 
     def _visit_TupleAssign(self, node: TupleAssign) -> PineType:
+        # The callable's outermost body shares its parameter scope in C++.
+        # A nested Pine block is a separate scope, and "_" binds nothing.
+        if self._enclosing_func_params and not self._block_node_stack:
+            parameters = self._enclosing_func_params[-1]
+            for name in node.names:
+                if name != "_" and name in parameters:
+                    self._error(
+                        f"Tuple declaration for '{name}' collides with a parameter in the same callable scope.",
+                        node.loc,
+                    )
         val_type = self._visit(node.value)
         lower_types = (node.value.annotations or {}).get(
             "lower_tf_tuple_element_types", (),

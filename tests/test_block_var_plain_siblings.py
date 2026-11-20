@@ -8,6 +8,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen.codegen.run_stops import TIMEZONE_STOP_SHIM_CPP
+from tests._checked_ta_cpp import with_checked_ta
 from tests._e2e import reference_codegen, transpile_json
 from tests.test_e2e_series_var_init import _SHAPES as _SERIES_INITIALIZERS
 from tests.test_runtime_var_initialization import _RUNTIME_PINE, _compile_and_run
@@ -402,12 +403,15 @@ float result = switch
 
 
 @pytest.mark.parametrize("source", _UNCHANGED_PAIRS + _UNCHANGED_SCRIPTS)
-def test_unaffected_scripts_keep_complete_cpp(source, reference, tmp_path):
+def test_unaffected_scripts_keep_complete_cpp(source, reference, tmp_path, request):
     pine = tmp_path / "strategy.pine"
     pine.write_text(source, encoding="utf-8")
     before = transpile_json(pine, root=reference)
     assert before["ok"], before
-    assert transpile(source) == before["cpp"]
+    expected = before["cpp"]
+    if request.node.callspec.id == "runtime-dependencies":
+        expected = with_checked_ta(expected, precalc=True)
+    assert transpile(source) == expected
 
 
 def _undo_timestamp_stop(cpp: str) -> str:

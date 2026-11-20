@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -381,6 +382,108 @@ _REFERENCE_SPELLING = {
 }
 
 
+# The one case whose emission changes on purpose (#376). Its script declares no
+# account currency, so exactly two lines of its C++ differ from the reference:
+# the assignment `x = (current_bar_.close);` becomes the _NEW_TO_ACCOUNT call
+# of the warning host helper, whose account currency operand is
+# syminfo_.currency; and the one receipt line that lists host_reads gains
+# strategy_convert_identity_or_warn, plus syminfo_ (read by that operand) if
+# and only if the reference does not already list it, each in sorted position.
+# Everything else, the other three receipts included, is held to the reference.
+_CONVERSION_BODY = (
+    "strategy.cancel(\"L\")\nstrategy.cancel_all()\nx = strategy.convert_to_account(close)\n"
+)
+_CONVERSION_HELPER = "strategy_convert_identity_or_warn"
+_CONVERSION_OPERAND_HOST = "syminfo_"
+_OLD_TO_ACCOUNT = re.compile(r"^([ \t]*)x = \(current_bar_\.close\);$", re.M)
+_NEW_TO_ACCOUNT = (
+    "x = strategy_convert_identity_or_warn((current_bar_.close), "
+    "pineforge::source::PineStrategyHost::CurrencyConversionDirection::to_account, "
+    "/*call_site=*/0, syminfo_.currency, current_bar_.timestamp);"
+)
+# The emission makes four checked-settings receipt calls whose first argument
+# is a JSON document in a C++ string literal. Exactly one of them lists
+# host_reads, and only that one may change.
+_RECEIPT_COUNT = 4
+_RECEIPT_OPEN = '::pineforge::checked_settings::receipt("'
+_RECEIPT_CALL = re.compile(
+    r'::pineforge::checked_settings::receipt\("((?:[^"\\\n]|\\.)*)"[^;\n]*\);')
+_CPP_STRING_BODY = re.compile(r'(?:[^"\\]|\\["\\])*')
+_CPP_ESCAPE = re.compile(r'\\(["\\])')
+_HOST_READ_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _decode_cpp_string(literal):
+    """The text a C++ string literal body stands for. Only an escaped quote
+    and an escaped backslash are accepted; any other escape fails."""
+    assert _CPP_STRING_BODY.fullmatch(literal), "unsupported escape in a receipt payload"
+    return _CPP_ESCAPE.sub(lambda escape: escape.group(1), literal)
+
+
+def _render_host_reads(names):
+    """The host_reads member as the emission spells it inside the literal."""
+    return '\\"host_reads\\":[' + ",".join(f'\\"{name}\\"' for name in names) + "]"
+
+
+def _literal_receipts(cpp):
+    """The four literal receipt calls of one emission, their decoded JSON
+    documents, and the index of the single call that lists host_reads."""
+    calls = list(_RECEIPT_CALL.finditer(cpp))
+    assert len(calls) == _RECEIPT_COUNT, f"expected four receipt calls, found {len(calls)}"
+    assert cpp.count(_RECEIPT_OPEN) == _RECEIPT_COUNT, "a receipt call has another shape"
+    documents = [json.loads(_decode_cpp_string(call.group(1))) for call in calls]
+    assert all(isinstance(document, dict) for document in documents), "a receipt is not an object"
+    listed = [index for index, document in enumerate(documents) if "host_reads" in document]
+    assert len(listed) == 1, f"expected one receipt with host_reads, found {len(listed)}"
+    names = documents[listed[0]]["host_reads"]
+    assert isinstance(names, list) and names, "host_reads is not a non-empty list"
+    assert all(isinstance(name, str) and _HOST_READ_NAME.fullmatch(name) for name in names), names
+    assert names == sorted(set(names)), "host_reads is not sorted and unique"
+    return calls, documents, listed[0]
+
+
+def _expected_conversion_cpp(reference_cpp):
+    """The reference C++ with exactly the two #376 changes; any other shape fails."""
+    assert _CONVERSION_HELPER not in reference_cpp
+    calls, documents, selected = _literal_receipts(reference_cpp)
+    names = documents[selected]["host_reads"]
+    added = [_CONVERSION_HELPER]
+    if _CONVERSION_OPERAND_HOST not in names:
+        added.append(_CONVERSION_OPERAND_HOST)
+    wanted = sorted(names + added)
+    payload = calls[selected].group(1)
+    assert payload.count(_render_host_reads(names)) == 1, "host_reads is not spelled as parsed"
+    changed = payload.replace(_render_host_reads(names), _render_host_reads(wanted))
+    assert json.loads(_decode_cpp_string(changed)) == dict(documents[selected], host_reads=wanted)
+    start, end = calls[selected].span(1)
+    expected = reference_cpp[:start] + changed + reference_cpp[end:]
+
+    olds = list(_OLD_TO_ACCOUNT.finditer(expected))
+    assert len(olds) == 1, "expected exactly one reference conversion assignment"
+    old = olds[0]
+    expected = (expected[:old.start()] + old.group(1) + _NEW_TO_ACCOUNT
+                + expected[old.end():])
+    assert expected.count(_CONVERSION_HELPER + "(") == 1
+    assert expected != reference_cpp
+    return expected
+
+
+def _assert_matches_reference(body, previous, current):
+    if body != _CONVERSION_BODY:
+        assert current == previous
+        return
+    expected = dict(previous, cpp=_expected_conversion_cpp(previous["cpp"]))
+    assert set(current) == set(expected)
+    reference_calls, _, reference_listed = _literal_receipts(previous["cpp"])
+    current_calls, _, current_listed = _literal_receipts(current["cpp"])
+    assert current_listed == reference_listed, "host_reads moved to another receipt"
+    others = [index for index in range(_RECEIPT_COUNT) if index != reference_listed]
+    assert ([current_calls[index].group(0) for index in others]
+            == [reference_calls[index].group(0) for index in others]), "another receipt changed"
+    assert current["cpp"] == expected["cpp"]
+    assert current == expected
+
+
 @pytest.mark.parametrize("body", [
     "values = array.new<float>()\n",
     "values = array.new<float>(3)\n",
@@ -411,4 +514,4 @@ def test_unrelated_lowerings_keep_cpp_diagnostics_and_manifests(tmp_path, body):
     pine.write_text(HEADER + body)
     current = transpile_json(pine)
     assert previous["ok"] and current["ok"], (previous, current)
-    assert current == previous
+    _assert_matches_reference(body, previous, current)

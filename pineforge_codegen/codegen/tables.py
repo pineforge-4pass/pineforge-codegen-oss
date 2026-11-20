@@ -1588,7 +1588,7 @@ STR_FUNC_MAP = {
         if len(args) < 3 else
         f"[&](){{ std::string __pf_r; for(int __pf_i=0;__pf_i<{na_preserving_int_cast(args[1])};__pf_i++){{ if(__pf_i>0) __pf_r+={args[2]}; __pf_r+={args[0]}; }} return __pf_r; }}()"
     ),
-    "match":       lambda args: f'pine_str_match({args[0]}, {args[1]})',
+    "match":       lambda args: f'_pf_u8_match({args[0]}, {args[1]})',
     "split":       _str_split_expr,
     "format":      None,  # handled separately
 }

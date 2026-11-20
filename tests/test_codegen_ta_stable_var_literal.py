@@ -19,7 +19,8 @@ from pineforge_codegen.ast_nodes import MethodDef
 from pineforge_codegen.errors import CompileError, Level, Phase
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
-from tests._compile import compile_cpp
+from tests import _series_sma_oracle as oracle
+from tests._compile import compile_cpp, run_emitted_tu
 
 
 def _constructor_initializers(cpp: str) -> str:
@@ -424,6 +425,42 @@ observed = requested(p)
     assert (diagnostic.location.line, diagnostic.location.col) == (5, 5)
 
 
+def _per_bar(cpp: str, members, label: str):
+    return oracle.per_bar_rows(
+        run_emitted_tu(cpp, oracle.per_bar_driver(members), opt="-O0", label=label),
+        len(members))
+
+
+# What ``requested(p)`` answers under each rebinding of ``q`` below, on the
+# eighteen bars of tests/_series_sma_oracle.py: the constant-length reference
+# that shares the call's clock, its member, how its rows give the column, and
+# the table. A row is (window length, sum of the values in the window), with
+# no sum where the call answers na. No table is the call site's literal: a
+# window of ``p`` = 5 first answers where five values are held, and averages
+# five of them.
+REBOUND_LENGTHS = {
+    # ``for q = 1 to 3`` calls ta.sma three times on every bar, and each call
+    # is given the bar's close. The value kept is the third call's (q = 3):
+    # the mean of that close three times over.
+    "loop-binder": (
+        oracle.LOOP_REFERENCE, ("picked",), lambda rows, table: oracle.column(rows),
+        ((3, 30), (3, 36), (3, 33), (3, 45), (3, 42), (3, 54),
+         (3, 39), (3, 51), (3, 60), (3, 48), (3, 66), (3, 57),
+         (3, 75), (3, 63), (3, 72), (3, 84), (3, 69), (3, 81)),
+    ),
+    # ``int q = 7`` inside ``if close > open``: the call runs on the rising
+    # bars only (0, 1, 3, 5, 7, 8, 10, 12, 14, 15, 17) and is given their
+    # closes (10, 12, 15, 18, 17, 20, 22, 25, 24, 28, 27). The seventh of them
+    # is bar 10; every other bar leaves ``out`` na.
+    "block-local": (
+        oracle.RISING_BAR_REFERENCE, ("gated",), lambda rows, table: oracle.column(rows),
+        ((7, None), (7, None), (7, None), (7, None), (7, None), (7, None),
+         (7, None), (7, None), (7, None), (7, None), (7, 114), (7, None),
+         (7, 129), (7, None), (7, 141), (7, 154), (7, None), (7, 163)),
+    ),
+}
+
+
 @pytest.mark.parametrize(
     "helper_body",
     [
@@ -445,7 +482,7 @@ observed = requested(p)
     ids=["loop-binder", "block-local", "tuple-binder"],
 )
 def test_callable_parameter_rebinding_fences_literal_specialization(
-    helper_body: str,
+    helper_body: str, request: pytest.FixtureRequest,
 ) -> None:
     source = (
         '//@version=6\nstrategy("rebound helper parameter")\n'
@@ -455,18 +492,30 @@ def test_callable_parameter_rebinding_fences_literal_specialization(
         + "\nobserved = requested(p)\n"
     )
 
-    with pytest.raises(CompileError) as caught:
-        transpile(source)
+    case = request.node.callspec.id
+    if case == "tuple-binder":
+        with pytest.raises(CompileError) as caught:
+            transpile(source, filename="tuple-binder.pine")
 
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.phase is Phase.CODEGEN
-    assert diagnostic.message == (
-        "Unsupported TA constructor length 'p' for ta.sma: it is neither a "
-        "compile-time constant nor derived from an input, so PineForge cannot "
-        "size the indicator buffer. TradingView accepts a series length for "
-        "ta.sma(); PineForge does not support it yet."
-    )
+        [diagnostic] = caught.value.diagnostics
+        assert diagnostic.code == "PF-E2096"
+        assert diagnostic.message == (
+            "Tuple declaration for 'q' collides with a parameter in the same callable scope."
+        )
+        assert diagnostic.level is Level.ERROR
+        assert diagnostic.phase is Phase.ANALYZER
+        assert diagnostic.location.file == "tuple-binder.pine"
+        assert (diagnostic.location.line, diagnostic.location.col) == (5, 5)
+        return
+
+    reference, members, column, windows = REBOUND_LENGTHS[case]
+    # The table first, against a constant-length call on the same clock.
+    fixed = _per_bar(transpile(reference), members, f"constant_length_{case}")
+    oracle.assert_per_bar(
+        column(fixed, windows), windows, "the constant-length reference")
+
+    observed = _per_bar(transpile(source), ("observed",), f"rebound_{case}")
+    oracle.assert_per_bar(oracle.column(observed), windows, "requested(p)")
 
 
 @pytest.mark.parametrize(

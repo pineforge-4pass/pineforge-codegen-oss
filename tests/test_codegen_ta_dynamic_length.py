@@ -19,7 +19,8 @@ rules and their tapes are in the engine header
 * series length of another family: still refused (TradingView refuses it for
   the recursive ones; the other window functions are not lowered yet).
 
-Constant- and input-length calls keep their constructor, byte for byte.
+Constant- and input-length calls keep their constructor cadence; EMA-family
+objects use the paired checked source adapters for every qualifier.
 """
 
 from __future__ import annotations
@@ -31,7 +32,8 @@ import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
-from tests._compile import compile_cpp
+from tests._compile import compile_cpp, run_emitted_tu
+from tests._checked_ta_cpp import with_checked_ta
 from tests._e2e import reference_codegen, transpile_json
 from tests._legacy_cpp import without_restore_script_state, without_trade_history_policy
 
@@ -89,15 +91,8 @@ plot(acc)
     assert 'get_input_int("Length"' not in line
 
 
-def test_series_percentile_keeps_sma_and_ema_refusals() -> None:
+def test_series_percentile_keeps_the_ema_refusal() -> None:
     cases = (
-        (
-            "ta.sma(close, length)",
-            "PF-E5092",
-            "ta.sma",
-            "TradingView accepts a series length for ta.sma(); "
-            "PineForge does not support it yet.",
-        ),
         (
             "ta.ema(close, length)",
             "PF-E5009",
@@ -127,6 +122,23 @@ def test_series_percentile_keeps_sma_and_ema_refusals() -> None:
         if suffix:
             expected += f" {suffix}"
         assert diagnostic.message == expected
+
+
+def test_series_sma_loop_length_reads_the_loop_counter() -> None:
+    # Same script bytes as the former ta.sma arm of the refusal test above.
+    src = (
+        '//@version=6\nstrategy("refused loop length")\n'
+        "float out = 0.0\n"
+        "for length = 2 to 4\n"
+        "    out += ta.sma(close, length)\n"
+        "plot(out)\n"
+    )
+    cpp = transpile(src)
+    [member] = _members(cpp, "_PFSeriesSma")
+    line = _compute_line(cpp, member)
+    assert "current_bar_.close" in line
+    assert "pineforge::source::ta_number(length)" in line
+    compile_cpp(cpp, label="series_sma_loop_length")
 
 
 def test_series_length_extremes_take_the_series_classes() -> None:
@@ -178,14 +190,14 @@ lo = ta.lowest(low, len)
 plot(r + e + m + a + adx + mc + w + s + lo)
 """
     cpp = transpile(src)
-    for cls in ("ta::RSI", "ta::RMA", "ta::ATR", "ta::DMI", "ta::MACD",
+    for cls in ("ta::RSI", "ta::RMA", "ta::ATR", "ta::DMI", "pineforge::source::PineMacd",
                 "ta::WMA", "ta::SMA", "ta::Lowest"):
         assert _members(cpp, f"pineforge::source::FirstCallBound<{cls}>"), cls
     # ``lenP`` alone is an input.string choice: input-derived, so its EMA keeps
     # the constructor and the runtime reset re-reads the input (the
     # request.security helpers row; tests/test_e2e_lane_compositions.py).
-    [ema] = _members(cpp, "ta::EMA")
-    assert re.search(rf"^\s*{ema} = ta::EMA\(.*get_input_string\(\"Preset\"", cpp, re.M)
+    [ema] = _members(cpp, "pineforge::source::PineEma")
+    assert re.search(rf"^\s*{ema} = pineforge::source::PineEma\(.*get_input_string\(\"Preset\"", cpp, re.M)
     # The factory spells the length context-free: the input through its
     # override-aware getter, syminfo through the engine's record.
     assert 'simple_ta_length(' in cpp and '"rsi", "length")' in cpp
@@ -272,7 +284,7 @@ plot(a + b)
 """
     cpp = transpile(src)
     factories = re.findall(
-        r"(_sec\d+__ta_ema_\w+)\.compute\(\[&\]\(\) \{ return ta::EMA\(pineforge::source::"
+        r"(_sec\d+__ta_ema_\w+)\.compute\(\[&\]\(\) \{ return pineforge::source::PineEma\(pineforge::source::"
         r"simple_ta_length\((.*?), \"ema\", \"length\"\)\); \}", cpp)
     assert factories
     lengths = {member.split("__")[0]: args for member, args in factories}
@@ -318,7 +330,7 @@ if out + acc > top
     compile_cpp(cpp, label="shadowed_lengths")
 
 
-def test_a_series_length_shadowed_in_a_block_keeps_the_refusal() -> None:
+def test_a_series_sma_length_shadowed_in_a_block_reads_the_block() -> None:
     src = """//@version=6
 strategy("shadowed sma")
 n = syminfo.type == "crypto" ? 10 : 20
@@ -328,8 +340,13 @@ if close > open
     out := ta.sma(close, n)
 plot(out)
 """
-    with pytest.raises(CompileError, match="Unsupported TA constructor length 'n'"):
-        transpile(src)
+    cpp = transpile(src)
+    [member] = _members(cpp, "_PFSeriesSma")
+    line = _compute_line(cpp, member)
+    assert "current_bar_.close" in line
+    assert "pineforge::source::ta_number(n)" in line
+    assert '"crypto"' not in line
+    compile_cpp(cpp, label="shadowed_series_sma")
 
 
 def test_an_explicit_series_declaration_is_rewindowed() -> None:
@@ -425,7 +442,7 @@ plot(a + b)
 
 
 @pytest.mark.parametrize("call", [
-    "ta.sma(close, n)", "ta.wma(close, n)", "ta.stdev(close, n)",
+    "ta.wma(close, n)", "ta.stdev(close, n)",
     "ta.rsi(close, n)", "ta.ema(close, n)", "ta.atr(n)",
 ])
 def test_other_series_lengths_stay_refused(call: str) -> None:
@@ -434,6 +451,71 @@ def test_other_series_lengths_stay_refused(call: str) -> None:
            f"x = {call}\nplot(x)\n")
     with pytest.raises(CompileError, match="Unsupported TA constructor length"):
         transpile(src)
+
+
+def test_a_barssince_series_sma_length_is_bound_per_call() -> None:
+    # Same script bytes as the former ta.sma parameter of the test above.
+    src = ("//@version=6\nstrategy(\"refused\")\n"
+           "n = math.max(1, ta.barssince(close > open) + 1)\n"
+           "x = ta.sma(close, n)\nplot(x)\n")
+    cpp = transpile(src)
+    [member] = _members(cpp, "_PFSeriesSma")
+    line = _compute_line(cpp, member)
+    assert "current_bar_.close" in line
+    assert "pineforge::source::ta_number(n)" in line
+    compile_cpp(cpp, label="barssince_series_sma")
+
+
+_SERIES_SMA_VALUE_DRIVER = r"""
+#include <iostream>
+
+int main() {
+    std::vector<pineforge::Bar> bars(6);
+    for (std::size_t i = 0; i < bars.size(); ++i) {
+        bars[i].open = bars[i].high = bars[i].low = bars[i].close = double(i + 1);
+        bars[i].volume = 1.0;
+        bars[i].timestamp = 1704067200000LL + static_cast<long long>(i) * 60000LL;
+    }
+    GeneratedStrategy strategy;
+    strategy.run(bars.data(), bars.size(), "1", "1");
+    if (!strategy.last_error().empty()) {
+        std::cerr << strategy.last_error() << "\n";
+        return 14;
+    }
+    std::cout << strategy.outer_trace << "\n" << strategy.inner_trace << "\n";
+    return 0;
+}
+"""
+
+
+def test_series_sma_values_follow_each_bars_length_and_binding() -> None:
+    # Closes are 1..6. The top-level call reads n = bar_index % 3 + 1
+    # (1, 2, 3, 1, 2, 3); the block call reads its own n = bar_index % 2 + 1
+    # (1, 2, 1, 2, 1, 2). Each is the mean of the last n closes:
+    #   outer: 1, (1+2)/2, (1+2+3)/3, 4, (4+5)/2, (4+5+6)/3
+    #   inner: 1, (1+2)/2, 3, (3+4)/2, 5, (5+6)/2
+    # A constant length, a length of 1, or the block call reading the
+    # top-level n (bar 2 would be 2, not 3) all print different rows.
+    src = (
+        '//@version=6\nstrategy("series sma values")\n'
+        "n = bar_index % 3 + 1\n"
+        "s = ta.sma(close, n)\n"
+        "float t = na\n"
+        "if close > 0\n"
+        "    n = bar_index % 2 + 1\n"
+        "    t := ta.sma(close, n)\n"
+        'var string outer_trace = ""\n'
+        'var string inner_trace = ""\n'
+        'outer_trace := outer_trace + str.tostring(s, "#.##") + ","\n'
+        'inner_trace := inner_trace + str.tostring(t, "#.##") + ","\n'
+        "plot(s + t)\n"
+    )
+    cpp = transpile(src)
+    assert len(_members(cpp, "_PFSeriesSma")) == 2
+    output = run_emitted_tu(
+        cpp, _SERIES_SMA_VALUE_DRIVER, opt="-O0", label="series_sma_values",
+    )
+    assert output == "1,1.5,2,4,4.5,5,\n1,1.5,3,3.5,5,5.5,\n"
 
 
 # Explicit sizing originally isolated TA lengths from LEGACY (7a39cb3):
@@ -480,9 +562,13 @@ def test_constant_and_input_lengths_keep_their_cpp(tmp_path: Path) -> None:
         previous = "double " + assignment
         assert expected.count(previous) == 1
         expected = expected.replace(previous, assignment, 1)
+    # The checked replay is the documented emission: its source adapter,
+    # failure headers, guarded replay, typed invalid-argument catch and cache
+    # clearing are all part of the expected C++.
+    expected = with_checked_ta(expected, precalc=True)
     # The rollback hook leaves requested-evaluation state alone since the
     # fill-restore fix; everything else must stay identical.
     assert without_restore_script_state(
         without_trade_history_policy(ours["cpp"])
     ) == without_restore_script_state(without_trade_history_policy(expected))
-    assert "pine_ta_length.hpp" not in ours["cpp"]
+    assert "#include <pineforge/source/pine_ta_length.hpp>" in ours["cpp"]

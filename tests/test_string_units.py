@@ -103,15 +103,21 @@ POS_ROWS = [
     pytest.param("aab", "b", 2, id="measured-after-an-ascii-letter"),
     pytest.param(f"{EMOJI}{EMOJI}b", "b", 4, id="derived-after-two-emoji"),
     pytest.param(f"a{EMOJI}b", EMOJI, 1, id="derived-the-emoji-itself"),
-    pytest.param(f"a{EMOJI}b", "x", -1, id="control-not-found"),
+    # Issue #382 item 5: an absent match is na, including after non-ASCII text.
+    pytest.param(f"a{EMOJI}b", "x", "na", id="control-not-found"),
     pytest.param(f"a{CJK}b", CJK, 1, id="control-the-bmp-character-itself"),
 ]
 
 
 @pytest.mark.parametrize("text, needle, expected", POS_ROWS)
 def test_pos_counts_utf16_units(text, needle, expected):
-    script = f'p = str.pos("{text}", "{needle}")\nplot(p)\n'
-    assert _run(script, 'std::cout << strategy.p << "\\n";') == f"{expected}\n"
+    script = (f'p = str.pos("{text}", "{needle}")\n'
+              'missing = na(p)\nplot(p)\n')
+    observe = (
+        'if (strategy.missing) std::cout << "na\\n"; '
+        'else std::cout << strategy.p << "\\n";'
+    )
+    assert _run(script, observe) == f"{expected}\n"
 
 
 TAIL_ROWS = [

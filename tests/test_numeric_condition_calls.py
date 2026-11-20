@@ -5,6 +5,7 @@ import pytest
 from pineforge_codegen import transpile
 from pineforge_codegen.diagnostic_codes import render_diagnostic
 from pineforge_codegen.errors import CompileError, Level, Phase
+from tests._checked_ta_cpp import with_checked_ta
 from tests._compile import compile_cpp, run_emitted_tu
 from tests._e2e import reference_codegen, transpile_json
 from tests.test_helper_builtin_named_locals import CPP_REFERENCE
@@ -258,9 +259,13 @@ def reference():
         ),
     ],
 )
-def test_accepted_scripts_keep_complete_cpp(source, reference, tmp_path):
+def test_accepted_scripts_keep_complete_cpp(source, reference, tmp_path, request):
     pine = tmp_path / "strategy.pine"
     pine.write_text(source, encoding="utf-8")
     before = transpile_json(pine, root=reference)
     assert before["ok"], before
-    assert transpile(source) == before["cpp"]
+    expected = before["cpp"]
+    case = request.node.callspec.id
+    if case in ("unchanged_comparison", "unchanged_template"):
+        expected = with_checked_ta(expected, precalc=case == "unchanged_comparison")
+    assert transpile(source) == expected

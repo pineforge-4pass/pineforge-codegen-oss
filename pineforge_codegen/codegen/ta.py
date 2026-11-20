@@ -33,6 +33,8 @@ from ..ast_nodes import (
     Ternary, TupleAssign, TupleLiteral, TypeDecl, TypeField, UnaryOp, VarDecl,
     WhileStmt,
 )
+from ..analyzer.value_bindings import ValueBindings
+from ..errors import Phase
 from ..pine_spelling import blank_string_literals
 from ..symbols import PineType
 from .helpers import pine_index_int_cast
@@ -1463,15 +1465,25 @@ class TaSiteHelper:
     # * series, for ta.percentile_nearest_rank: each call appends to its own
     #   buffer and passes source, length and percentage to
     #   ``pineforge::source::SeriesPercentileNearestRank``.
+    # * series, for ta.sma (outside request.security, and neither a length a
+    #   callable receives from its call sites nor one that reads a
+    #   script-level ``var`` / ``varip``): each call passes its source and
+    #   the length its call site binds to ``pineforge::source::SeriesSma``
+    #   (through ``_PFSeriesSma``).
     # * ta.supertrend: the factor (series or simple) of the first execution is
     #   the run's -- ``pineforge::source::PineSupertrend``.
     #
     # TradingView refuses a series length for ta.rma / ema / rsi / atr / dmi /
     # macd / kc / hma / tsi / rci and supertrend's atrPeriod at compile time,
     # so those only ever carry a simple one here. A series length for the
-    # other window functions (ta.sma, ta.wma, ...) keeps the refusal.
-    # Constant- and input-length sites never reach this path: their C++ is
-    # unchanged. An input.string choice of a length (``mode == "A" ? 5 : 10``)
+    # other window functions (ta.wma, ...), and for a requested-context or
+    # forwarded ta.sma (``_ta_length_is_forwarded``) or one that reads a
+    # script-level ``var`` (``_ta_length_reads_script_var``), keeps the
+    # refusal.
+    # Constant- and input-length sites never reach this plan: they retain
+    # their constructor/reset/precalculation cadence. EMA-family objects use
+    # the checked source adapters for every qualifier. An input.string choice
+    # of a length (``mode == "A" ? 5 : 10``)
     # is an input length since CG-SECURITY-2 spells string literals; the other
     # arguments those literals bring to the constructor stay here
     # (``_ta_arg_takes_plan``).
@@ -1667,11 +1679,161 @@ class TaSiteHelper:
                   if own_nodes else self._simple_ta_arg_cpp(site.ctor_args[pos]))
             for pos in refused
         }
-        return self._ta_plan_for(site, refused, simple)
+        return self._ta_plan_for(site, refused, simple,
+                                 requested=self._ta_site_is_requested(site),
+                                 forwarded=self._ta_length_is_forwarded(site),
+                                 persistent=self._ta_length_reads_script_var(site))
 
-    def _ta_plan_for(self, site: "TACallSite", refused: list, simple: dict) -> dict:
+    def _ta_site_is_requested(self, site: "TACallSite") -> bool:
+        """Whether a request.security evaluator computes a copy of ``site``
+        (the same Pine call node)."""
+        node = getattr(site, "node", None)
+        for info in getattr(self, "_security_eval_info", ()) or ():
+            for idx in info.get("ta_variants") or {}:
+                other = self.ctx.ta_call_sites[idx]
+                if other is site or (node is not None and other.node is node):
+                    return True
+        return False
+
+    def _ta_length_is_forwarded(self, site: "TACallSite") -> bool:
+        """Whether a callable's site takes its constructor arguments from the
+        callable's call sites: an authored argument reads a parameter of the
+        callable, itself or through the declaration of a local it reads. Each
+        identifier answers from the declaration the analyzer bound it to, so a
+        name the body declares again (a loop counter, a block local, a tuple)
+        is that declaration's, not the parameter's. True as well for a
+        callable whose parameters are unknown here."""
+        owner = getattr(site, "owner_func", None)
+        if owner is None:
+            return False
+        info = self._func_info_map.get(owner)
+        params = getattr(getattr(info, "node", None), "params", None)
+        if params is None:
+            return True
+        declared = getattr(self.ctx, "identifier_decl_bindings", {}) or {}
+        declarations = getattr(self.ctx, "identifier_binding_nodes", {}) or {}
+        pending = list(getattr(site, "ctor_nodes", None) or ())
+        seen: set[int] = set()
+        while pending:
+            for read in self._walk_ast(pending.pop()):
+                if not isinstance(read, Identifier):
+                    continue
+                if read.name in params and declared.get(id(read)) is None:
+                    return True
+                local = declarations.get(id(read))
+                if isinstance(local, VarDecl) and id(local) not in seen:
+                    seen.add(id(local))
+                    pending.append(local.value)
+        return False
+
+    # What ``_ta_read_declaration`` answers for a read the lexical binder
+    # bound to a declaration that is not a statement of this program.
+    _TA_UNPLACED_DECLARATION = object()
+
+    def _ta_declarations(self) -> dict:
+        """Each declaration statement of the program (a ``VarDecl``, or a
+        tuple declaration under each of its names), keyed as the lexical
+        binder names it: ``(id(statement), name)``."""
+        cached = self.__dict__.get("_ta_declarations_cache")
+        if cached is None:
+            cached = {}
+            for node in self._walk_ast(self.ctx.ast):
+                if isinstance(node, VarDecl):
+                    cached[(id(node), node.name)] = node
+                elif isinstance(node, TupleAssign):
+                    for name in node.names:
+                        cached[(id(node), name)] = node
+            self.__dict__["_ta_declarations_cache"] = cached
+        return cached
+
+    def _ta_read_declaration(self, read: Identifier):
+        """The declaration the read ``read`` is bound to, or None for a read
+        of nothing a statement declares (a built-in, a parameter, a loop
+        counter, a namespace prefix).
+
+        The analyzer's record of the read's first visit
+        (``identifier_binding_nodes``) is authoritative, None included. Its
+        type visit records nothing for a read it leaves to a namespace
+        handler (a variable spelled like a built-in namespace:
+        ``Analyzer._visit_Identifier``) or does not reach (a keyword value a
+        dispatcher does not visit). Such a read answers from the lexical
+        binder, which resolved every authored identifier by scope and
+        position before the type visit (``ValueBindings.declaration_of``, as
+        ``bool_text`` and ``types`` read it). The binder names a declaration
+        by identity and name: one that is not a statement of this program (a
+        lowering replaced it after the binder ran) answers
+        ``_TA_UNPLACED_DECLARATION``, which a caller must not take for an
+        absent binding."""
+        declarations = getattr(self.ctx, "identifier_binding_nodes", {}) or {}
+        if id(read) in declarations:
+            return declarations[id(read)]
+        bound = ValueBindings.declaration_of(read)
+        if bound is None:
+            return None
+        return self._ta_declarations().get(bound, self._TA_UNPLACED_DECLARATION)
+
+    def _ta_script_var_decls(self) -> frozenset:
+        """``id`` of each script-level persistent declaration (``var`` /
+        ``varip``): the declarations whose TA sizing the stable-var path
+        decides (``_collect_stable_var_scalars`` and its literal admission,
+        ``_admitted_stable_var_ctor_literals``)."""
+        cached = self.__dict__.get("_ta_script_var_decls_cache")
+        if cached is None:
+            cached = frozenset(
+                id(stmt) for stmt in self.ctx.ast.body or []
+                if isinstance(stmt, VarDecl) and (stmt.is_var or stmt.is_varip)
+            )
+            self.__dict__["_ta_script_var_decls_cache"] = cached
+        return cached
+
+    def _ta_length_reads_script_var(self, site: "TACallSite") -> bool:
+        """Whether an authored constructor argument reads a script-level
+        persistent declaration (``var`` / ``varip``), itself or through the
+        declaration of a name it reads. Each identifier answers from the
+        declaration the analyzer bound it to (``_ta_read_declaration``), so a
+        parameter, a loop counter, a block local or a tuple spelled like such
+        a declaration is not one, whatever the call site's spelling of the
+        argument. A read whose declaration cannot be placed answers true: it
+        is not shown to be bound where the call runs."""
+        persistent = self._ta_script_var_decls()
+        if not persistent:
+            return False
+        pending = list(getattr(site, "ctor_nodes", None) or ())
+        seen: set[int] = set()
+        while pending:
+            if self._budget is not None:
+                self._budget.check(phase=Phase.CODEGEN)
+            for read in self._walk_ast(pending.pop()):
+                if not isinstance(read, Identifier):
+                    continue
+                declaration = self._ta_read_declaration(read)
+                if declaration is self._TA_UNPLACED_DECLARATION:
+                    return True
+                if not isinstance(declaration, VarDecl):
+                    continue
+                if id(declaration) in persistent:
+                    return True
+                if id(declaration) not in seen:
+                    seen.add(id(declaration))
+                    pending.append(declaration.value)
+        return False
+
+    def _ta_plan_for(self, site: "TACallSite", refused: list, simple: dict,
+                     requested: bool = False, forwarded: bool = False,
+                     persistent: bool = False) -> dict:
         """The plan of a site whose ``refused`` constructor arguments have the
-        context-free C++ ``simple`` (None: series)."""
+        context-free C++ ``simple`` (None: series). A ``requested`` copy (a
+        request.security evaluator's) keeps the refusal of a series ta.sma
+        length: the chart-context lowering is not qualified there. So does a
+        ``forwarded`` one (``_ta_length_is_forwarded``): the length a callable
+        receives from its call sites stays with the constructor path, which
+        sizes the site from the call site's argument. And so does a
+        ``persistent`` one (``_ta_length_reads_script_var``): a script-level
+        ``var`` / ``varip`` is the stable-var path's binding, which sizes the
+        constructor from it (the literal admission, a runtime reset) or leaves
+        the constructor guard's refusal. The simple spelling leaves those
+        declarations out (``_simple_ta_top_level_decls``), so ``simple`` being
+        None does not say that such a length varies by bar."""
         family = self._ta_site_function(site)
         if family == "percentile_nearest_rank":
             kind = "series_percentile" if simple[refused[0]] is None else "first_call"
@@ -1681,6 +1843,10 @@ class TaSiteHelper:
             kind = "supertrend"
         elif all(simple[pos] is not None for pos in refused):
             kind = "first_call"
+        elif (family == "sma" and not requested and not forwarded
+                and not persistent
+                and refused == [0] and len(site.ctor_args) == 1):
+            kind = "series_sma"
         else:
             return {"kind": "refused", "refused": refused}
         return {"kind": kind, "refused": refused, "simple": simple, "family": family}
@@ -1761,7 +1927,8 @@ class TaSiteHelper:
             for pos, node in enumerate(bound) if node is not None
         }
         plan = self._ta_plan_for(
-            site, refused, {pos: bound_simple.get(pos) for pos in refused})
+            site, refused, {pos: bound_simple.get(pos) for pos in refused},
+            requested=True)
         if plan["kind"] == "refused":
             forced = [pos for pos in plan["refused"]
                       if stability[pos] or self._runtime_ctor_arg_for_reset(ctor_args[pos]) is not None]
@@ -1865,16 +2032,34 @@ class TaSiteHelper:
             for index, part in enumerate(parts)
         )
 
+    # Analyzer class identities also select signature/result/implicit-OHLC
+    # rules. Keep those identities and map the concrete execution type only
+    # at emission. The Keltner shims retain their existing seeding scope and
+    # wrap PineKc/PineKcw; all other families keep their current types.
+    _TA_CHECKED_CLASSES = {
+        "ta::EMA": "pineforge::source::PineEma",
+        "ta::TSI": "pineforge::source::PineTsi",
+        "ta::MACD": "pineforge::source::PineMacd",
+        "_PFKC": "_PFKC",
+        "_PFKCW": "_PFKCW",
+    }
+
+    def _ta_fixed_cpp_type(self, site: "TACallSite") -> str:
+        """The concrete fixed object used by declarations and every factory."""
+        return self._TA_CHECKED_CLASSES.get(site.class_name, site.class_name)
+
     def _ta_plan_cpp_type(self, site: "TACallSite", plan: dict | None) -> str:
         if plan is None:
-            return site.class_name
+            return self._ta_fixed_cpp_type(site)
         if plan["kind"] == "series_extreme":
             return self._TA_SERIES_EXTREME_CLASSES[plan["family"]]
         if plan["kind"] == "series_percentile":
             return self._TA_SERIES_PERCENTILE_CLASS
+        if plan["kind"] == "series_sma":
+            return "_PFSeriesSma"
         if plan["kind"] == "supertrend":
             return "pineforge::source::PineSupertrend"
-        return f"pineforge::source::FirstCallBound<{site.class_name}>"
+        return f"pineforge::source::FirstCallBound<{self._ta_fixed_cpp_type(site)}>"
 
     def _ta_member_cpp_type(self, site: "TACallSite") -> str:
         """The C++ type a site's member is declared with."""
@@ -1976,6 +2161,14 @@ class TaSiteHelper:
         if kind == "series_extreme":
             length = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
             return f"{base_args}, pineforge::source::ta_number({length})"
+        if kind == "series_sma":
+            # The source is the call's own (``base_args``); the length is the
+            # call site's binding, read on every call
+            # (pineforge::source::SeriesSma).
+            if len(site.compute_args) != 1 or not base_args:
+                raise AssertionError("series ta.sma site must have one source")
+            length = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
+            return f"{base_args}, pineforge::source::ta_number({length})"
         if kind == "series_percentile":
             if len(site.compute_args) != 2:
                 raise AssertionError(
@@ -2009,7 +2202,7 @@ class TaSiteHelper:
                 value = (f'pineforge::source::simple_ta_length({value}, '
                          f'"{family}", "{param.name}")')
             ctor.append(value)
-        make = f"[&]() {{ return {site.class_name}({', '.join(ctor)}); }}"
+        make = f"[&]() {{ return {self._ta_fixed_cpp_type(site)}({', '.join(ctor)}); }}"
         return f"{make}, {base_args}" if base_args else make
 
     def _simple_ta_top_level_decls(self) -> dict:

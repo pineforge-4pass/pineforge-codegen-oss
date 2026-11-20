@@ -46,11 +46,11 @@ def _resets(cpp: str) -> list[str]:
 def test_the_reset_reads_the_alias_through_the_inputs():
     cpp = transpile(source(NAME, FIXTURES))
     resets = "\n".join(_resets(cpp))
-    for cls in ("EMA", "SMA", "RSI", "Highest"):
-        line = next(ln for ln in resets.splitlines() if f"= ta::{cls}(" in ln)
+    for cls in ("pineforge::source::PineEma", "ta::SMA", "ta::RSI", "ta::Highest"):
+        line = next(ln for ln in resets.splitlines() if f"= {cls}(" in ln)
         # The alias's own member is never the length: it is 0 until the body
         # assigns it, after the reset has run.
-        assert not re.search(rf"ta::{cls}\((len|len2)\)", line), line
+        assert not re.search(rf"{re.escape(cls)}\((len|len2)\)", line), line
         assert 'get_input_int("A", 3)' in line and 'get_input_int("B", 4)' in line, line
     compile_cpp(cpp)
 
@@ -60,8 +60,8 @@ def test_an_alias_of_a_direct_input_keeps_its_input_read():
         '//@version=6\nstrategy("alias of an input")\n'
         'n = input.int(7, "N")\nlen = n\nlen2 = len\n'
         "plot(ta.ema(close, len2))\n")
-    line = next(ln for ln in _resets(cpp) if "= ta::EMA(" in ln)
-    assert 'ta::EMA(get_input_int("N", 7))' in line, line
+    line = next(ln for ln in _resets(cpp) if "= pineforge::source::PineEma(" in ln)
+    assert 'pineforge::source::PineEma(get_input_int("N", 7))' in line, line
     compile_cpp(cpp)
 
 
