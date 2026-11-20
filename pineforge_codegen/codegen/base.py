@@ -3493,7 +3493,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         def _value_after(stmts, fallback: str | None) -> str | None:
             """Fold a statement list into the final value expression for the
             target var, given ``fallback`` as the value on entry. Returns None
-            if any condition / assignment is non-stable or unrenderable."""
+            if any condition / assignment is non-stable or unrenderable.
+
+            Record every assignment consumed by the fold.  The complete
+            candidate-surface walk below uses that record to reject a fold
+            that overlooks a write in an expression value or another
+            statement shape.
+            """
             current = fallback
             for s in stmts or []:
                 if isinstance(s, Assignment) and isinstance(s.target, Identifier):
@@ -3507,6 +3513,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     if rhs is None:
                         return None
                     current = rhs
+                    consumed_assignments.add(id(s))
                 elif isinstance(s, IfStmt):
                     # Only model IfStmts that actually reassign the target var;
                     # an unrelated IfStmt (e.g. entry/exit logic with a series
@@ -3527,8 +3534,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         return None
                     current = f"({cond} ? {then_val} : {else_val})"
                 # Other statement shapes (for/while/switch/var decls of
-                # other vars) are ignored for this var's value fold; they
-                # do not reassign ``target_name`` in a way we model.
+                # other vars) are ignored for this var's value fold. Any
+                # target assignment in one is left unconsumed and rejects
+                # this candidate after the fold.
             return current
 
         def _reassigns(node, name: str) -> bool:
@@ -3553,8 +3561,19 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             init_str = self._arith_expr_to_str(init_node)
             if init_str is None:
                 continue
+            consumed_assignments: set[int] = set()
             final = _value_after(body, init_str)
             if final is None:
+                continue
+            if any(
+                id(node) not in consumed_assignments
+                for node in self._walk_candidate_surface(self.ctx.ast)
+                if (
+                    isinstance(node, Assignment)
+                    and isinstance(node.target, Identifier)
+                    and node.target.name == target_name
+                )
+            ):
                 continue
             # Sanity: the fold must actually differ from the bare init,
             # otherwise there were no stable reassignments and the var is
