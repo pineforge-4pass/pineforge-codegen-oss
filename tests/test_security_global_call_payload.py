@@ -110,6 +110,13 @@ def _conditional_helper_source(position: str) -> str:
         payload = "bar_index % 2 == 0 ? h() : na"
     elif position == "and":
         payload = "bar_index % 2 == 0 and h() > 0"
+    elif position == "switch":
+        payload = "g()"
+        extra = "g() =>\n    switch bar_index % 2\n        0 => h()\n        => na\n"
+    elif position == "loop":
+        payload = "g()"
+        extra = ("g() =>\n    float result = na\n    for index = 0 to 0\n"
+                 "        result := h()\n    result\n")
     else:
         payload = "g()"
         extra = "g() =>\n    if bar_index % 2 == 0\n        h()\n    else\n        na\n"
@@ -122,7 +129,8 @@ def _conditional_helper_source(position: str) -> str:
     )
 
 
-@pytest.mark.parametrize("position", ("ternary", "and", "if"), ids=("ternary", "and", "if"))
+@pytest.mark.parametrize("position", ("ternary", "and", "if", "switch", "loop"),
+                         ids=("ternary", "and", "if", "switch", "loop"))
 def test_conditional_helper_call_history_is_refused(position):
     source = _conditional_helper_source(position)
     with pytest.raises(CompileError) as caught:
