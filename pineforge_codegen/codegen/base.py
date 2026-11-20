@@ -3325,13 +3325,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """Whether authored metadata would require cross-boundary dataflow.
 
         Stable-var constructor folding is deliberately declaration-local.  A
-        user function, method, type, or enum introduces defaults, aliases, or
-        receiver effects that require a wider proof, so this narrow feature
-        fails closed for the whole script instead of approximating that proof.
+        user function, type, or enum still fails closed for the whole script;
+        that admission has not been proven yet.  A method declaration does not
+        fence the script: the scalar used as a method receiver is refused by
+        ``_stable_var_literal_has_unsupported_receiver_use``, a method
+        parameter or local of its name by the binding count, and a statement
+        in a method body that assigns it by ``_find_reassigned_vars``.
         """
 
         return any(
-            isinstance(node, (FuncDef, MethodDef, TypeDecl, EnumDecl))
+            isinstance(node, (FuncDef, TypeDecl, EnumDecl))
             for node in self._walk_candidate_surface(self.ctx.ast)
         )
 

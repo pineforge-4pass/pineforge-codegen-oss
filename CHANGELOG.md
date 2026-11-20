@@ -22,6 +22,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- A TA length held in a never-reassigned top-level `var int` literal is no longer refused with PF-E5092 when the script also declares a `method`; a script that declares a user function, `type` or `enum` still refuses it ([#422](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/422)).
+
 - A bare built-in name such as `close`, `hl2` or `dayofweek` reads the script
   variable after its declaration. Earlier reads still use the chart value, and
   string variables named `hour`, `minute` or `second` keep their string type
