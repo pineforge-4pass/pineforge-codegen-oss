@@ -165,7 +165,13 @@ def test_argument_effects_stay_in_the_untaken_expression():
     assert stop in untaken
     assert "bump" in untaken and "ignoreCurrency" in untaken
     assert "bump" not in before and "ignoreCurrency" not in before
-    assert untaken.count("(void)(") == 3
+    effects, refusal = untaken.split("if (", 1)
+    assert effects.count("bump") == 2 and effects.count("ignoreCurrency") == 1
+    # and no duplicate after the pair decision: over the whole untaken text too,
+    # except inside the stop marker, which carries the source text of the call
+    rest = untaken.replace(stop, "")
+    assert rest.count("bump") == 2 and rest.count("ignoreCurrency") == 1
+    assert stop in refusal
     assert (untaken.index('"GBP"') < untaken.index('"JPY"')
             < untaken.index("ignoreCurrency") < untaken.index(stop))
 

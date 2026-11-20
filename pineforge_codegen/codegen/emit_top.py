@@ -109,8 +109,11 @@ from .tables import (
 )
 from ..limits import iter_ast_nodes
 from .drawing import DRAWING_LIFETIME_CPP, POLYLINE_HANDLE_CPP
+from .helpers import cpp_code_only
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
+from .tv_string_trim import TV_STRING_TRIM_CPP, TV_STRING_TRIM_MARKER, TV_STRING_TRIM_NAME
 from .tv_string_units import TV_STRING_UNITS_CPP, TV_STRING_UNITS_MARKER
+from .unicode_case import CASE_MAPPING_CPP, CASE_MAPPING_MARKER
 
 
 # Keep the late-selected include beside the headers the C++ allowlist reads.
@@ -281,6 +284,9 @@ class TopLevelEmitter:
         # those calls is known only after it is generated, so this place holds a
         # marker that ``_settle_tv_string_units`` resolves.
         lines.append(TV_STRING_UNITS_MARKER)
+        lines.append("")
+        lines.extend((TV_STRING_TRIM_MARKER, ""))
+        lines.append(CASE_MAPPING_MARKER)
         lines.append("")
         # Syminfo derivation helpers (_pf_derive_main_tickerid, _pf_derive_country)
         from .helpers_syminfo import emit_syminfo_helpers
@@ -1783,13 +1789,19 @@ class TopLevelEmitter:
         #     lowering still calls the host; a lowering that would call its
         #     own member is skipped.
         from .tables import BAR_BUILTINS
+        for name in sorted(self.ctx.series_shadowed_builtins):
+            member = f"_pf_builtin_hist_{name}"
+            lines.append(
+                f"        if (history_advances_new_bar() && bar_index_ == 0) {member}.clear();"
+            )
+            self._emit_history_series_write(lines, "        ", member, BAR_BUILTINS[name])
+        script_series_names = {
+            name for _, name in self.ctx.series_decl_bindings if name in BAR_BUILTINS
+        }
         for _bname in sorted(self.ctx.series_vars):
-            if _bname in self._var_names:
-                continue
-            # A history-bearing top-level tuple binding pushes its own value
+            # A history-bearing script binding pushes its own value
             # at the declaration; a builtin push would add a second bar slot.
-            if (_bname in self._direct_program_tuple_binding_names
-                    and _bname in self._ordinary_global_series_names):
+            if _bname in self._var_names or _bname in script_series_names:
                 continue
             _bexpr = BAR_BUILTINS.get(_bname)
             _bsafe = self._safe_name(_bname)
@@ -2183,10 +2195,43 @@ class TopLevelEmitter:
             raise AssertionError(
                 "generated file lost the place of its UTF-16 unit helpers"
             ) from exc
-        if self._uses_tv_string_units:
+        # A bookkeeping visit may set the flag but discard its expression.
+        if self._uses_tv_string_units and re.search(
+            r"\b(?:_pf_u16_length|_pf_u16_pos|_pf_u16_substr_checked|_pf_u8_match)\(",
+            cpp_code_only("\n".join(lines)),
+        ):
             lines[marker] = TV_STRING_UNITS_CPP
         else:
             del lines[marker:marker + 2]
+
+    def _settle_tv_string_trim(self, lines: list[str]) -> None:
+        """Keep the trim helper only if an emitted expression calls it."""
+        marker = lines.index(TV_STRING_TRIM_MARKER)
+        if self._uses_tv_string_trim:
+            name = self._tv_string_trim_name
+            # Some paths visit expressions for bookkeeping and discard the
+            # resulting C++; a helper is needed only for a surviving call.
+            if f"::{name}(" in cpp_code_only("\n".join(lines)):
+                lines[marker] = TV_STRING_TRIM_CPP.replace(TV_STRING_TRIM_NAME, name)
+                return
+        del lines[marker:marker + 2]
+
+    def _settle_case_mapping(self, lines: list[str]) -> None:
+        """Resolve the marker for Unicode ``str.upper``/``str.lower`` helpers."""
+        try:
+            marker = lines.index(CASE_MAPPING_MARKER)
+        except ValueError as exc:  # pragma: no cover - generation invariant
+            raise AssertionError(
+                "generated file lost the place of its Unicode case helpers"
+            ) from exc
+        if self._uses_case_mapping:
+            # Some paths visit expressions for bookkeeping and discard the
+            # resulting C++; the block is needed only for a surviving call.
+            code = cpp_code_only("\n".join(lines))
+            if "_pf_case_upper(" in code or "_pf_case_lower(" in code:
+                lines[marker] = CASE_MAPPING_CPP
+                return
+        del lines[marker:marker + 2]
 
     def _emit_extern_c(self, lines: list[str]) -> None:
         lines.append('extern "C" {')

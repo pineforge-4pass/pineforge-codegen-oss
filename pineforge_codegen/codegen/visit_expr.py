@@ -775,23 +775,10 @@ class ExprVisitor:
         name = node.name
         if name in self._current_func_series_params:
             return True
-        if (name in self._current_func_param_types
-                or (name in BAR_FIELDS and self._builtin_local_symbol(node) is None)
-                or self._reads_builtin_variable(node)):
+        if name in self._current_func_param_types or self._reads_builtin_variable(node):
             return False
         return self._binding_is_series(
             name, self._call_site_var_name(node, self._safe_name(name)))
-
-    def _reads_builtin_variable(self, node: Identifier) -> bool:
-        """Whether ``node`` reads a builtin variable (``second``, ``hour``,
-        ``bar_index``...) and not a user variable of the same name
-        (``float second = na``). A read the analyzer bound to a user
-        declaration in scope is the user's: it carries the annotation a
-        tuple-destructured name does, or ``builtin_shadow_binding``."""
-        annotations = node.annotations or {}
-        return (node.name in BAR_BUILTINS
-                and not annotations.get("tuple_builtin_binding")
-                and not annotations.get("builtin_shadow_binding"))
 
     def _visit_ident(self, node: Identifier) -> str:
         name = node.name
@@ -811,10 +798,8 @@ class ExprVisitor:
         if (retained and name in retained.aliases
                 and not self._known_var_is_lexically_shadowed(name)):
             return f"(*{self._safe_name(name)})"
-        if name in BAR_FIELDS and self._builtin_local_symbol(node) is None:
-            return BAR_FIELDS[name]
         if self._reads_builtin_variable(node):
-            return BAR_BUILTINS[name]
+            return BAR_FIELDS[name] if name in BAR_FIELDS else BAR_BUILTINS[name]
         binding = self.ctx.identifier_decl_bindings.get(id(node))
         primitive_shadow_read = (
             binding is not None
@@ -2437,10 +2422,12 @@ class ExprVisitor:
             if name in self._current_func_param_types:
                 self._warn_untracked_reference_history(node)
                 return self._safe_name(name)
-            if ((name in BAR_FIELDS or name in BAR_SERIES_PUSH)
-                    and self._builtin_local_symbol(node.object) is None):
-                # Index matches Pine: [0] current bar, [k] k bars ago (runtime Series deque).
-                return f"_s_{name}[{series_idx}]"
+            if self._reads_builtin_variable(node.object):
+                # Index matches Pine: [0] current bar, [k] k bars ago.
+                if name in BAR_SERIES_PUSH:
+                    return f"_s_{name}[{series_idx}]"
+                if name in self.ctx.series_shadowed_builtins:
+                    return f"_pf_builtin_hist_{name}[{series_idx}]"
             # Apply per-call-site / exact block-member remap before deciding
             # whether the current lexical binding is a Series.
             safe = self._call_site_var_name(node.object, self._safe_name(name))

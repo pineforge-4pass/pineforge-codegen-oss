@@ -348,7 +348,8 @@ class InputHelper:
         if func_name == "input" and namespace is None:
             default = self._get_input_default(node)
             if (isinstance(default, Identifier)
-                    and default.name in self._NATIVE_SOURCE_SERIES):
+                    and default.name in self._NATIVE_SOURCE_SERIES
+                    and self._reads_builtin_variable(default)):
                 return True
         return False
 

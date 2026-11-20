@@ -61,7 +61,6 @@ class _StableVarCtorLiteral:
 
 from .tables import (
     BAR_FIELDS,
-    BAR_BUILTINS,
     BAR_SERIES_PUSH,
     DRAWING_TYPE_TO_CPP,
     SECURITY_OHLC_BAR_FIELDS,
@@ -848,6 +847,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._random_call_counter = 0
         self._for_counter = 0
         self._uses_tv_float_step_end = False
+        # Request timeframe expressions can be rendered and cached in __init__,
+        # before _generate_cpp runs: these flags are initialized only here.
+        self._uses_tv_string_units = False
+        self._uses_tv_string_trim = False
+        self._uses_case_mapping = False
         # Retain each loop node alongside its plan; ids are lookup keys only.
         self._closed_trade_folds: dict[int, tuple[ForStmt, object]] = {}
         self._tuple_assign_counter = 0
@@ -1462,7 +1466,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if isinstance(init_ast, StringLiteral):
             return True
         if isinstance(init_ast, Identifier) and init_ast.name in BAR_FIELDS:
-            return True
+            return (
+                self._reads_builtin_variable(init_ast)
+                and init_ast.name not in self._direct_program_binding_names
+            )
         return self._is_compile_time_value(self._resolve_known(init_str))
 
     def _is_default_drawing_initializer(self, node) -> bool:
@@ -1516,6 +1523,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return (
             not self._is_compile_time_value(ctor_val)
             or self._scalar_var_init_depends_on_runtime_input(init_ast)
+            or any(
+                isinstance(part, Identifier)
+                and (
+                    self._has_builtin_shadow_binding(part)
+                    or (part.name in self._direct_program_binding_names
+                        and self._reads_builtin_variable(part))
+                )
+                for part in self._walk_ast(init_ast)
+            )
             # A history-read var in a block (its member may be renamed,
             # ``k__blk1``): its history is na until the first bar that
             # reaches it (``_series_var_init_keeps_preamble``).
@@ -3314,13 +3330,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """Whether authored metadata would require cross-boundary dataflow.
 
         Stable-var constructor folding is deliberately declaration-local.  A
-        user function, method, type, or enum introduces defaults, aliases, or
-        receiver effects that require a wider proof, so this narrow feature
-        fails closed for the whole script instead of approximating that proof.
+        user function, type, or enum still fails closed for the whole script;
+        that admission has not been proven yet.  A method declaration does not
+        fence the script: the scalar used as a method receiver is refused by
+        ``_stable_var_literal_has_unsupported_receiver_use``, a method
+        parameter or local of its name by the binding count, and a statement
+        in a method body that assigns it by ``_find_reassigned_vars``.
         """
 
         return any(
-            isinstance(node, (FuncDef, MethodDef, TypeDecl, EnumDecl))
+            isinstance(node, (FuncDef, TypeDecl, EnumDecl))
             for node in self._walk_candidate_surface(self.ctx.ast)
         )
 
@@ -3475,7 +3494,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         def _value_after(stmts, fallback: str | None) -> str | None:
             """Fold a statement list into the final value expression for the
             target var, given ``fallback`` as the value on entry. Returns None
-            if any condition / assignment is non-stable or unrenderable."""
+            if any condition / assignment is non-stable or unrenderable.
+
+            Record every assignment consumed by the fold.  The complete
+            candidate-surface walk below uses that record to reject a fold
+            that overlooks a write in an expression value or another
+            statement shape.
+            """
             current = fallback
             for s in stmts or []:
                 if isinstance(s, Assignment) and isinstance(s.target, Identifier):
@@ -3489,6 +3514,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     if rhs is None:
                         return None
                     current = rhs
+                    consumed_assignments.add(id(s))
                 elif isinstance(s, IfStmt):
                     # Only model IfStmts that actually reassign the target var;
                     # an unrelated IfStmt (e.g. entry/exit logic with a series
@@ -3509,8 +3535,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         return None
                     current = f"({cond} ? {then_val} : {else_val})"
                 # Other statement shapes (for/while/switch/var decls of
-                # other vars) are ignored for this var's value fold; they
-                # do not reassign ``target_name`` in a way we model.
+                # other vars) are ignored for this var's value fold. Any
+                # target assignment in one is left unconsumed and rejects
+                # this candidate after the fold.
             return current
 
         def _reassigns(node, name: str) -> bool:
@@ -3531,12 +3558,31 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         return True
             return False
 
+        definition_node_ids = {
+            id(node)
+            for definition in self._walk_candidate_surface(self.ctx.ast)
+            if isinstance(definition, (FuncDef, MethodDef))
+            for node in self._walk_candidate_surface(definition)
+        }
+
         for target_name, init_node in inits.items():
             init_str = self._arith_expr_to_str(init_node)
             if init_str is None:
                 continue
+            consumed_assignments: set[int] = set()
             final = _value_after(body, init_str)
             if final is None:
+                continue
+            if any(
+                id(node) not in consumed_assignments
+                for node in self._walk_candidate_surface(self.ctx.ast)
+                if (
+                    id(node) not in definition_node_ids
+                    and isinstance(node, Assignment)
+                    and isinstance(node.target, Identifier)
+                    and node.target.name == target_name
+                )
+            ):
                 continue
             # Sanity: the fold must actually differ from the bare init,
             # otherwise there were no stable reassignments and the var is
@@ -3563,29 +3609,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 self._input_backed_vars.add(target_name)
 
     def _find_reassigned_vars(self) -> set[str]:
-        """Scan AST to find all variable names that are targets of := or compound assignment."""
-        reassigned: set[str] = set()
-        def walk(node):
-            if isinstance(node, Assignment):
-                if isinstance(node.target, Identifier):
-                    reassigned.add(node.target.name)
-            # Recurse into child nodes
-            if hasattr(node, 'body') and isinstance(node.body, list):
-                for child in node.body:
-                    walk(child)
-            if hasattr(node, 'else_body') and isinstance(node.else_body, list):
-                for child in node.else_body:
-                    walk(child)
-            if hasattr(node, 'cases') and isinstance(node.cases, list):
-                for expr, stmts in node.cases:
-                    for child in stmts:
-                        walk(child)
-            if hasattr(node, 'default_body') and isinstance(node.default_body, list):
-                for child in node.default_body:
-                    walk(child)
-        for stmt in self.ctx.ast.body:
-            walk(stmt)
-        return reassigned
+        """Collect bare assignment targets, including writes inside expression values."""
+        return {
+            node.target.name
+            for node in self._walk_candidate_surface(self.ctx.ast)
+            if isinstance(node, Assignment) and isinstance(node.target, Identifier)
+        }
 
     # ``math.*`` members that are pure functions over their (stable) args, or
     # stable constants. Anything outside this set (e.g. ``math.random``) is
@@ -3740,6 +3769,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return True
         if isinstance(node, Identifier):
             name = node.name
+            if self._reads_builtin_variable(node):
+                return False
             if self._known_var_is_lexically_shadowed(name):
                 return False
             if (name in self._known_vars
@@ -3753,8 +3784,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 return False
             if name in self._var_names:
                 # var/varip persistent state — mutable across bars.
-                return False
-            if name in BAR_FIELDS or name in BAR_BUILTINS:
                 return False
             # Unrecognised bare identifier: be conservative so we never
             # silently allow an undeclared / dynamic length through.
@@ -3969,6 +3998,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         elif isinstance(node.value, StringLiteral):
             self._known_vars[node.name] = node.value.value
         elif isinstance(node.value, Identifier):
+            if self._reads_builtin_variable(node.value):
+                return
             if node.value.name in self._known_vars:
                 self._known_vars[node.name] = self._known_vars[node.value.name]
                 if node.value.name in self._input_backed_vars:
@@ -4642,6 +4673,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                                 arg.name in BAR_FIELDS
                                 or arg.name in BAR_SERIES_PUSH
                             )
+                            and self._reads_builtin_variable(arg)
                             and expected_cpp_type == "double"
                         ):
                             needs_bridge = False
@@ -4690,6 +4722,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # once (never called) or only for a requested context keeps the
         # chart's history.
         global_reads = getattr(self.ctx, "func_global_history_reads", {}) or {}
+        builtin_history_reads = {
+            (owner, name)
+            for owner, name, subscript in self.ctx.func_global_history_nodes.values()
+            if name in self.ctx.series_shadowed_builtins
+            and self._reads_builtin_variable(subscript.object)
+        }
         for fi in self.ctx.func_infos:
             names = global_reads.get(fi.name)
             if not names or fi.node is None:
@@ -4699,10 +4737,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         in self._requested_context_only_inline_contexts):
                     continue
                 for name in names:
+                    cpp_type = (
+                        self._scalar_builtin_history_cpp_type(name)
+                        if (fi.name, name) in builtin_history_reads
+                        else self._series_type_for(name)
+                    )
                     register_one(
                         "fn_global_hist",
                         (id(fi.node), name),
-                        self._series_type_for(name),
+                        cpp_type,
                         context,
                     )
 
@@ -5405,7 +5448,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
     def _generate_cpp(self) -> str:
         self._uses_enum_string_lookup = False
-        self._uses_tv_string_units = False
         # Titles already carry assigned declaration keys. Refuse an unproved
         # title first, then flag any remaining shared fallback/suffix keys.
         self._check_input_titles()
@@ -5986,6 +6028,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 4. Series members for bar field history
         for field_name in sorted(self.ctx.series_bar_fields):
             lines.append(f"    Series<double> _s_{field_name}{_mbb};")
+        for name in sorted(self.ctx.series_shadowed_builtins):
+            cpp_type = self._scalar_builtin_history_cpp_type(name)
+            lines.append(f"    Series<{cpp_type}> _pf_builtin_hist_{name}{_mbb};")
 
         # 5. var/varip members (deduplicate by name)
         # Sections 5-6 and 8c-8c2 declare the script's var/varip and
@@ -6582,6 +6627,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # The same for the UTF-16 unit helpers of str.length, str.pos and
         # str.substring: any body or evaluator may emit one of those calls.
         self._settle_tv_string_units(lines)
+        self._settle_tv_string_trim(lines)
+        self._settle_case_mapping(lines)
         cpp = "\n".join(lines)
         if self._uses_array_slice_views:
             from .array_slice import lower_storage
@@ -7315,7 +7362,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                                 variant.get("binding_stack", ()),
                             )
                         if rt is not None:
-                            rendered = rt
+                            # A direct request.security payload has no helper
+                            # binding stack. Closed requests use the
+                            # requested-context lowering used by the dynamic TA
+                            # path; runtime requests keep the chart-context
+                            # reset because their evaluator owns the requested
+                            # state.
+                            rendered = (
+                                rt
+                                if info.get("runtime_context")
+                                else self._ta_payload_cpp(rt, info["sec_id"])
+                            )
                             any_runtime = True
                         else:
                             rendered = (

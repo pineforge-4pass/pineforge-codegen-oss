@@ -18,7 +18,7 @@ from pineforge_codegen.ast_nodes import Identifier
 from pineforge_codegen.errors import CompileError, Level, Phase
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
-from tests._compile import compile_cpp
+from tests._compile import compile_cpp, run_emitted_tu
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "lexical_scope"
@@ -178,21 +178,66 @@ def accepted_cpp_baseline():
 # end or step expression) does not compile, and the counted-loop lowering that
 # declares the counter before its end and step fixes it on purpose, so their
 # C++ differs from main's. Their native compile is checked below and they run
-# in test_e2e_for_counter_headers.py; every other accepted script keeps main's C++.
+# in test_e2e_for_counter_headers.py.
 CPP_CHANGED_BY_HEADER_COUNTER_LOWERING = frozenset({
     "block_scope/open_counter_header_end",
     "block_scope/open_counter_header_step",
 })
+# The pinned C++ read the bar field inside a block where a local of the same
+# name is in scope.
+CPP_CHANGED_BY_BLOCK_LOCAL_BUILTIN_BINDING = frozenset({
+    "block_scope/accept_outer_restore",
+})
 
 
 @pytest.mark.parametrize(
-    "probe", [probe for probe in ACCEPTED if probe not in CPP_CHANGED_BY_HEADER_COUNTER_LOWERING])
+    "probe", [
+        probe for probe in ACCEPTED
+        if probe not in CPP_CHANGED_BY_HEADER_COUNTER_LOWERING
+        and probe not in CPP_CHANGED_BY_BLOCK_LOCAL_BUILTIN_BINDING
+    ],
+)
 def test_measured_acceptance_keeps_fixed_main_cpp(probe, accepted_cpp_baseline):
     source = (FIXTURES / (probe + ".pine")).read_text()
     expected = accepted_cpp_baseline[probe]
     assert hashlib.sha256(source.encode()).hexdigest() == expected["source_sha256"]
     cpp = transpile(source, filename=probe + ".pine")
     assert hashlib.sha256(cpp.encode()).hexdigest() == expected["cpp_sha256"], probe
+
+
+def test_block_local_close_and_outer_bindings_run(accepted_cpp_baseline):
+    probe = "block_scope/accept_outer_restore"
+    filename = probe + ".pine"
+    source = (FIXTURES / filename).read_text()
+    assert hashlib.sha256(source.encode()).hexdigest() == accepted_cpp_baseline[probe]["source_sha256"]
+    source = source.replace("plot(signalValue)", "out = signalValue")
+    driver = r'''
+#include <iostream>
+#include <vector>
+int main() {
+    std::vector<pineforge::Bar> bars(3);
+    for (std::size_t i = 0; i < bars.size(); ++i) {
+        bars[i].open = 100.0;
+        bars[i].high = 103.0;
+        bars[i].low = 97.0;
+        bars[i].close = i % 2 == 0 ? 101.0 : 99.0;
+        bars[i].volume = 1.0;
+        bars[i].timestamp = 1704067200000LL + static_cast<long long>(i) * 3600000LL;
+    }
+    for (std::size_t count = 1; count <= bars.size(); ++count) {
+        GeneratedStrategy strategy;
+        strategy.run(bars.data(), count, "60", "60");
+        if (!strategy.last_error().empty()) {
+            std::cerr << strategy.last_error() << "\n";
+            return 1;
+        }
+        std::cout << strategy.out << "\n";
+    }
+}
+'''
+    # The block sets 1 + 2 = 3; outside it, add each bar's close and open (100).
+    cpp = transpile(source, filename=filename)
+    assert run_emitted_tu(cpp, driver, opt="-O0", label=probe) == "204\n202\n204\n"
 
 
 @pytest.mark.parametrize("probe", ACCEPTED)

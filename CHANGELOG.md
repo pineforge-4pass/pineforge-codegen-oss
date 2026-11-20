@@ -22,6 +22,37 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (next release)
 
+- A TA length held in a never-reassigned top-level `var int` literal is no longer refused with PF-E5092 when the script also declares a `method`; a script that declares a user function, `type` or `enum` still refuses it ([#422](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/422)).
+
+- A variable assigned inside an `if` or `switch` block that is used as a value (`x = if ...`, `x := if ...`, `[a, b] = if ...`, at any nesting depth) now counts as reassigned, like the same assignment in an `if` statement. In every release tested, from v0.10.1 to v1.14.0, PineForge treated it as never reassigned: a plain `p = 5` was read as `5` everywhere (`out = p` became `out = 5;`), and a TA length built from it, or from a `var` variable, used the initial value, while TradingView uses the current one. A read now uses the current value, and `ta.sma` with such a plain variable in its length uses the per-bar length. `ta.highest`, `ta.lowest`, `ta.highestbars`, `ta.lowestbars` and `ta.supertrend` are built as in the `if`-statement form. Every other such length, including a `var` length used bare, in arithmetic (`p + input.int(0)`, `p * timeframe.multiplier`) or initialized from `timeframe.in_seconds()`, is now refused (`PF-E5092` for `ta.sma`, `PF-E5009` for the other functions) instead of being built with its initial value ([#426](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/426)).
+
+- A plain variable that the script assigns under a stable condition (an input or a timeframe value) and also assigns somewhere the stable fold does not read (inside an `if` or `switch` expression, or inside a `switch`, `for` or `while` statement) is no longer folded from the stable assignment alone. Before, `p = 5`, `if big` with `p := 6`, and `x = if close > open` with `p := p + 1` gave `ta.sma(close, p)` the length 5 on every bar, while TradingView uses 6 on the bars where the second assignment runs. Now `ta.sma` and the five functions that take a run-time length (`ta.highest`, `ta.lowest`, `ta.highestbars`, `ta.lowestbars`, `ta.supertrend`) are built as in the same assignments written in an `if` statement, and every other TA length built from such a variable is refused (`PF-E5009`). An assignment to a variable of the same name inside a function or method is a write to that function's own local, not to the script's variable, and does not change this ([#426](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/426)).
+
+- `str.substring` now stops the run when the begin position is after the end position, and counts a `na` begin or end as 0, as TradingView does ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
+
+- `str.upper` and `str.lower` now apply the Unicode case mappings (Unicode 15.0, no locale rules), including é and É, ß to SS and the final sigma, where they previously changed only ASCII letters ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
+
+- A script whose only `str.length`, `str.pos`, `str.match` or `str.substring` call is inside a `request.security` timeframe that the script computes (for example from `input.timeframe`) no longer fails to build: the helper block that those calls need is kept.
+
+- A TA length inside a `request.security` payload that reads a timeframe built-in is sized in the requested context, like the rest of the payload, when the request's timeframe is known before the first bar (a literal, or a value chosen from a closed set of timeframes): `request.security(syminfo.tickerid, "D", ta.sma(close, timeframe.isdaily ? 5 : 3))` is `ta.sma(close, 5)` and `ta.ema(close, timeframe.isdaily ? 0 : 3)` stops; both used the chart's timeframe. A request whose timeframe is chosen at run time from an open set of values keeps the code it had, so such a length is still sized from the chart's timeframe (with a run-time-chosen `"D"` on a chart that is not daily, the same payload computes the length 3 where the requested context's is 5); sizing it in the requested context is not done here ([#291](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/291)).
+
+- A compound argument that is passed to a function whose TA length uses the parameter keeps its grouping. With `f(simple int n) => ta.sma(close, 2 * n)`, `f(1 + 2)` builds the length 6, not `2 * 1 + 2 = 4`, and `f(2 - 2)` with `ta.ema` stops like `f(0)` instead of building a length of 2; an argument that is an identifier or a literal generates the same code as before ([#291](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/291)).
+
+- `math.round` in a constant TA length rounds like TradingView, half away from zero (and decimal-aware with a precision): `ta.sma(close, math.round(9 / 2))` is `ta.sma(close, 5)`, `ta.ema(close, math.round(2.5))` is `ta.ema(close, 3)`, and `ta.ema(close, 1 - math.round(0.5))` stops; the constant folder used Python's rounding (4, 2 and 1). The same rule applies to every constant the generator folds with `math.round` or `round`, including negative ties (`math.round(-2.5)` is -3) ([#291](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/291)).
+
+- A bare built-in name such as `close`, `hl2` or `dayofweek` reads the script
+  variable after its declaration. Earlier reads still use the chart value, and
+  string variables named `hour`, `minute` or `second` keep their string type
+  ([#423](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/423)).
+
+- A `var` or `varip` `string` declared inside a function keeps its string type for the reads that follow it: `timeframe.in_seconds(s)` and `timeframe.change(s)` no longer refuse it, and `s + "x"` and `str.tostring(s) + "y"` build ([#424](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/424)).
+
+- A global that is bound to a pure numeric builtin call (for example `float open = math.max(close, 1.0)` or `float bodySize = math.abs(close - open)`) and read with history (`open[1]`) in a `request.security` payload, or in a function that the payload calls on every requested bar (including one that reads it only under a condition), now reads the script's own series on the requested bars, as TradingView does in those forms. A global named like a built-in price field used to be read as the built-in's history (a different series, with no error), and a global with another name was refused with `PF-E5005`. A function that the payload calls only under a condition (an arm of `?:`, the right operand of `and` or `or`, a branch of `if` or `switch`, a `switch` condition after the first one, a loop) and that reads such a global with history is refused with `PF-E5005`: TradingView advances the history of a global that a function reads once per bar in which the function is called, and the payload would sample it on every requested bar. For a global named like a built-in price field that is a refusal of a script that compiled at v1.14.0, where it read the built-in's history. The same holds for a global bound to a builtin call that is not pure and has no lowering of its own, for example `math.random()`, and read with history in a payload or a helper: it is refused with `PF-E5005`, not sampled (a global bound to a `ta.*`, `request.security`, `input.*` or user-function call keeps its existing lowering); a price-named one compiled at v1.14.0 and read the built-in's history ([#423](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/423)).
+
+- A string variable named like a built-in price field (`open`, `hl2`, and so on) whose history is read inside a function that a `request.security` call uses is refused with `PF-E5005`; it used to be translated to C++ that read the built-in's numeric history and did not compile ([#423](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/423)).
+
+- A field of a user type named `bar_index` no longer changes how a bare `bar_index` is read inside a `request.security` payload: the read is the built-in when it is bound to the built-in ([#423](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/423)).
+
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked
   source adapters for fixed, input and simple lengths, including helper and
   requested-context copies and precalculation. Invalid lengths are checked
@@ -32,9 +63,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - `ta.sma` accepts supported lengths that vary by bar, including lengths from inline inputs, local variables, and loop counters. Unsupported lengths that depend on `var` or `varip` still report an error, and tuple declarations that reuse a parameter name in the same function body are rejected before C++ is generated. This also fixes Unicode handling in `str.match` and `na` separators in `str.split`.
 - `strategy.convert_to_account` and `strategy.convert_to_symbol` now warn in the run report and return the input unchanged, still in its original currency, when no conversion rate is available ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
+- Both strategy conversions and `request.currency_rate` use the host's rate in effect on each bar for the chart and account currencies, in either direction. Without a rate for the pair the request stops the run with the currency-conversion error, or returns `na` with a run warning when `ignore_invalid_currency` is true; other pairs still stop the run ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
 - Strategy sizing constants retain their string values in expressions, aliases
   and helper calls. Host order and risk settings convert these values to their
   numeric representation only at the setting boundary.
+- `str.trim` also removes the other white space and line terminators of the ECMAScript `trim` set, such as U+3000 and U+FEFF, which TradingView removes. It previously removed only space, tab, LF and CR ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
 
 - `timeframe.in_seconds` and `timeframe.change` resolve an evaluated empty
   string to the chart period, including input, variable, function-return and
@@ -120,6 +153,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
   Compound assignments in requested selections retain the lexical binding
   of their target and its request-owned `var` or `varip` storage.
   See [#393](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/393).
+- Since 1.11.0, `array.new` with an `na` size creates an empty array without stopping the script, matching TradingView; invalid non-missing sizes still stop the script ([#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
 
 ## 1.12.0 — 2026-11-12
 
@@ -302,9 +336,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
 - `request.security` registers input-derived `lookahead` selections using the
   selected input values, including overrides; choices that depend on bar data
-  still report `PF-E1085`. A scalar empty timeframe still uses the chart
-  timeframe; an `if`/`switch` timeframe arm known to be empty still reports
-  `PF-E3105`.
+  still report `PF-E1085`. A literal empty timeframe (`""`) now uses the chart
+  timeframe instead of being refused; an `if`/`switch` timeframe arm known to
+  be empty still reports `PF-E3105`.
   History reads of requested values now compile inside another request's TA
   expression, including aliases and repeated reads. Uncalled request wrappers
   no longer interfere with compiling unrelated direct requests (#294;

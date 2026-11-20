@@ -1668,6 +1668,14 @@ class SecurityEmitter:
         def fail(value, kind, detail):
             self._security_selection_refusal(value, kind, detail)
 
+        def selection_assignment(name):
+            for candidate in self._walk_candidate_surface(node):
+                if (isinstance(candidate, Assignment)
+                        and isinstance(candidate.target, Identifier)
+                        and candidate.target.name == name):
+                    return candidate
+            return None
+
         def expression(value, env):
             if isinstance(value, Identifier):
                 if value.name in env:
@@ -1681,8 +1689,15 @@ class SecurityEmitter:
                 if isinstance(known, (int, float, bool)):
                     literal = BoolLiteral if isinstance(known, bool) else NumberLiteral
                     return literal(value=known, loc=value.loc)
-                if value.name in BAR_BUILTINS or value.name in self.ctx.series_vars:
+                if ((value.name in BAR_BUILTINS and self._reads_builtin_variable(value))
+                        or value.name in self.ctx.series_vars):
+                    assignment = selection_assignment(value.name)
+                    if assignment is not None:
+                        fail(assignment, "statement", "outer assignment")
                     fail(value, "series", f"bar-state read {value.name}")
+                assignment = selection_assignment(value.name)
+                if assignment is not None:
+                    fail(assignment, "statement", "outer assignment")
                 fail(value, "name", f"undefined or non-setup name {value.name}")
             if isinstance(value, (NumberLiteral, StringLiteral, BoolLiteral,
                                   ColorLiteral, NaLiteral)):
@@ -2156,7 +2171,7 @@ class SecurityEmitter:
                 if name in local and not global_binding:
                     # The enclosing body also inspects every local definition.
                     return False
-                if name in BAR_BUILTINS or name in SECURITY_BAR_FIELDS:
+                if self._reads_builtin_variable(value):
                     return True
                 if self._binding_is_series(name):
                     return True
@@ -2911,8 +2926,10 @@ class SecurityEmitter:
         """
         scopes = getattr(self.ctx, "identifier_binding_scopes", {}) or {}
         scope = scopes.get(id(node))
+        annotations = node.annotations or {}
         return scope == "global" or (
-            scope is None and bool((node.annotations or {}).get(GLOBAL_ANNOTATION))
+            (scope is None or self._has_builtin_shadow_binding(node))
+            and bool(annotations.get(GLOBAL_ANNOTATION))
         )
 
     def _security_warn_unbound_param(self, node: Identifier) -> None:
@@ -4223,6 +4240,7 @@ class SecurityEmitter:
             isinstance(node, Identifier)
             and node.name not in seen
             and self._security_identifier_is_global_binding(node)
+            and not self._reads_builtin_variable(node)
             and node.name not in self._global_mutable_infos
         ):
             value = (getattr(self.ctx, "global_expr_map", {}) or {}).get(node.name)
@@ -4256,7 +4274,7 @@ class SecurityEmitter:
         """The requested-bar series a payload's ``node[k]`` reads the history
         of: a bar field, or a source input's selected series (its own
         ``_sec<N>_hist_`` member, one per input); else None."""
-        if node.name in SECURITY_BAR_FIELDS:
+        if node.name in SECURITY_BAR_FIELDS and self._reads_builtin_variable(node):
             return node.name
         call = self._security_source_input_call(node)
         if call is None:
@@ -4559,7 +4577,11 @@ class SecurityEmitter:
         functions it calls (``h() => nz(g()[1])``). One inside a helper body
         is kept only where the payload reaches it once: two inlines of it
         (``h() + h()``) would each need their own history, and are refused
-        where lowered, as every earlier build refused them."""
+        where lowered, as every earlier build refused them. A sampled global
+        can share its history: it does not depend on the helper's arguments.
+        A helper reached through a lazy expression edge cannot share that
+        history: its call count, rather than the requested bar count, advances
+        the history of a global it reads."""
         if node is None:
             return []
         if resolving is None:
@@ -4570,6 +4592,11 @@ class SecurityEmitter:
         in_helper: set[int] = set()
         reached: dict[int, int] = {}
         helpers: list[str] = []
+        sampled_payload_nodes = getattr(
+            self, "_security_payload_numeric_call_nodes", None
+        )
+        if sampled_payload_nodes is None:
+            sampled_payload_nodes = self._security_payload_numeric_call_nodes = set()
 
         def add(n: Subscript) -> None:
             if (n is node
@@ -4588,13 +4615,17 @@ class SecurityEmitter:
                 seen.add(key)
                 out.append(n)
 
-        def walk(n) -> None:
+        def walk(n, conditional: bool = False) -> None:
             if n is None:
                 return
             if isinstance(n, Identifier):
                 global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
                 if n.name in global_expr_map and n.name not in resolving:
                     resolving.add(n.name)
+                    # A global's declaration does not depend on the position of the
+                    # read that names it (a plain global is evaluated on every
+                    # requested bar, a var once): its calls are not conditional
+                    # because the payload reads the global under a condition.
                     walk(global_expr_map[n.name])
                     resolving.remove(n.name)
                 return
@@ -4604,41 +4635,196 @@ class SecurityEmitter:
                 info = self._func_info_map.get(n.callee.name)
                 if (info is not None and getattr(info, "node", None) is not None
                         and not self._security_pure_body(info.node)):
+                    if conditional and self._security_helper_reads_numeric_call_global(
+                        info.node
+                    ):
+                        self._codegen_error(
+                            n,
+                            "request.security helper call history is only supported "
+                            "in the payload itself",
+                        )
                     helpers.append(n.callee.name)
-                    walk(info.node.body)
+                    walk(info.node.body, conditional)
                     helpers.pop()
+            global_history = None
             if (
                 isinstance(n, Subscript)
                 and (
                     (isinstance(n.object, FuncCall)
                      and self._get_ta_site(n.object) is None)
                     or self._is_compound_history_object(n.object)
-                    or self._security_global_history_value(n) is not None
+                    or (
+                        (global_history := self._security_global_history_value(
+                            n, allow_payload=not helpers
+                        )) is not None
+                    )
                 )
             ):
+                if (
+                    not helpers
+                    and global_history is not None
+                    and self._security_numeric_call_global(
+                        n, global_history, allow_payload=True
+                    )
+                ):
+                    sampled_payload_nodes.add(id(n))
                 add(n)
             if isinstance(n, (list, tuple)):
                 for x in n:
-                    walk(x)
+                    walk(x, conditional)
+                return
+            if isinstance(n, Ternary):
+                walk(n.condition, conditional)
+                walk(n.true_val, True)
+                walk(n.false_val, True)
+                return
+            if isinstance(n, BinOp) and n.op in ("and", "or"):
+                walk(n.left, conditional)
+                walk(n.right, True)
+                return
+            if isinstance(n, IfStmt):
+                walk(n.condition, conditional)
+                walk(n.body, True)
+                walk(n.else_body, True)
+                return
+            if isinstance(n, SwitchStmt):
+                walk(n.expr, conditional)
+                for position, (case_expr, body) in enumerate(n.cases):
+                    # A switch stops at its first match: only the first case
+                    # condition is evaluated on every pass, a later one only when
+                    # the cases before it did not match (as the ternary chain that
+                    # the selection lowering builds from it).
+                    walk(case_expr, conditional or position > 0)
+                    walk(body, True)
+                walk(n.default_body, True)
+                return
+            if isinstance(n, (ForStmt, ForInStmt, WhileStmt)):
+                if isinstance(n, ForStmt):
+                    walk(n.start, conditional)
+                    walk(n.end, conditional)
+                    walk(n.step, conditional)
+                    walk(n.body, True)
+                elif isinstance(n, ForInStmt):
+                    walk(n.iterable, conditional)
+                    walk(n.body, True)
+                else:
+                    walk(n.condition, conditional)
+                    walk(n.body, True)
                 return
             for _k, v in getattr(n, "__dict__", {}).items():
                 if isinstance(v, ASTNode):
-                    walk(v)
+                    walk(v, conditional)
                 elif isinstance(v, (list, tuple)):
                     for x in v:
                         if isinstance(x, ASTNode):
-                            walk(x)
+                            walk(x, conditional)
 
         walk(node)
         return [
             n for n in out
             if id(n) not in in_helper or reached[id(n)] == 1
-            or self._security_global_history_value(n) is n.object
+            or (
+                (value := self._security_global_history_value(
+                    n, allow_payload=id(n) in sampled_payload_nodes
+                )) is n.object
+            )
+            or self._security_numeric_call_global(
+                n,
+                value,
+                allow_payload=id(n) in sampled_payload_nodes,
+            )
         ]
 
-    def _security_global_history_value(self, node) -> ASTNode | None:
+    def _security_helper_reads_numeric_call_global(
+        self, func_node, resolving: set[str] | None = None
+    ) -> bool:
+        """Whether a helper body, including helpers it calls, reads with
+        history a global initialized by a pure numeric builtin call (the kind
+        ``_security_numeric_call_global`` samples). Globals bound to other
+        values keep the sampling they already had."""
+        if resolving is None:
+            resolving = set()
+        key = id(func_node)
+        if key in resolving:
+            return False
+        resolving.add(key)
+        try:
+            body = func_node.body
+            statements = body if isinstance(body, (list, tuple)) else [body]
+            for statement in statements:
+                if statement is None:
+                    continue
+                for child, _ in iter_ast_nodes(statement):
+                    if isinstance(child, Subscript):
+                        value = self._security_global_history_value(child)
+                        if value is not None and self._security_numeric_call_global(
+                            child, value
+                        ):
+                            return True
+                    if (
+                        isinstance(child, FuncCall)
+                        and isinstance(child.callee, Identifier)
+                        and child.callee.name in self._func_names
+                    ):
+                        info = self._func_info_map.get(child.callee.name)
+                        if (
+                            info is not None
+                            and getattr(info, "node", None) is not None
+                            and self._security_helper_reads_numeric_call_global(
+                                info.node, resolving
+                            )
+                        ):
+                            return True
+            return False
+        finally:
+            resolving.remove(key)
+
+    def _security_numeric_call_global(
+        self, node, value, *, allow_payload: bool = False
+    ) -> bool:
+        """A global numeric value initialized by a pure builtin call.
+
+        The read may be in a requested helper body, where the analyzer records
+        it in ``func_global_history_nodes``, or directly in the payload, where
+        this collector records its node in
+        ``_security_payload_numeric_call_nodes``. ``allow_payload`` admits the
+        latter shape. Stateful and chart-fallback calls stay on their
+        established lowering.
+        """
+        if (not isinstance(value, FuncCall)
+                or (
+                    id(node) not in self.ctx.func_global_history_nodes
+                    and id(node) not in getattr(
+                        self, "_security_payload_numeric_call_nodes", ()
+                    )
+                    and not allow_payload
+                )
+                or self._reads_builtin_variable(node.object)
+                or self._get_ta_site(value) is not None
+                or self._resolve_callee(value.callee)[1] in ("request", "ta")
+                or self._security_user_call_site(value)
+                or self._security_source_input_call(value) is not None):
+            return False
+        func_name, namespace = self._resolve_callee(value.callee)
+        if not (
+            (namespace is None and func_name in _SECURITY_PURE_CALLS)
+            or (
+                namespace in _SECURITY_PURE_CALL_NAMESPACES
+                and (namespace, func_name) not in _SECURITY_IMPURE_CALLS
+            )
+        ):
+            return False
+        symbol = self.ctx.symbols.global_scope.symbols.get(node.object.name)
+        return (symbol is not None and symbol.pine_type in (PineType.INT, PineType.FLOAT)
+                and symbol.enum_type_name is None and symbol.udt_type_name is None
+                and (symbol.type_spec is None or symbol.type_spec.kind == "primitive"))
+
+    def _security_global_history_value(
+        self, node, *, allow_payload: bool = False
+    ) -> ASTNode | None:
         """The value of ``g`` in a payload's ``g[k]`` when ``g`` is a global
-        bound to a helper, a request or an operator expression, else None.
+        bound to a helper, a request, an operator expression or (in a
+        requested helper) a numeric builtin call, else None.
 
         TradingView evaluates ``g`` on every requested bar and ``g[k]`` reads
         it ``k`` requested bars back. Such a value has no series on the
@@ -4689,6 +4875,19 @@ class SecurityEmitter:
                 # evaluator's clock, just like a helper's returned value.
                 # Keep the authored subscript: a synthetic one has no slot
                 # in the expression-history inventory.
+                return value
+            if value is original and (
+                self._security_numeric_call_global(
+                    node,
+                    value,
+                    allow_payload=(
+                        allow_payload
+                        or id(node) in getattr(
+                            self, "_security_payload_numeric_call_nodes", ()
+                        )
+                    ),
+                )
+            ):
                 return value
         if (not isinstance(original, Identifier)
                 and isinstance(value, (BinOp, UnaryOp, Ternary))
@@ -4861,6 +5060,13 @@ class SecurityEmitter:
                 "type": cpp_t,
                 "object": node.object,
                 "tuple_global": value is node.object,
+                "sample_call": self._security_numeric_call_global(
+                    node,
+                    value,
+                    allow_payload=id(node) in getattr(
+                        self, "_security_payload_numeric_call_nodes", ()
+                    ),
+                ),
             }
             lines.append(f"    Series<{cpp_t}> {name}{mbb_suffix};")
 
@@ -6205,7 +6411,7 @@ class SecurityEmitter:
             if isinstance(n, Identifier):
                 if self._security_identifier_is_global_binding(n):
                     # A builtin name the builder spells from ``bar``.
-                    if n.name in _SECURITY_SHARED_BAR_FIELDS:
+                    if n.name in _SECURITY_SHARED_BAR_FIELDS and self._reads_builtin_variable(n):
                         continue
                 elif n.name in params:
                     continue
@@ -6389,7 +6595,7 @@ class SecurityEmitter:
                         return None
                     value = self._security_canonical_value(bound, bound_stack)
                     return None if value is None else ("argument", self._infer_type(node), value)
-            if node.name in _SECURITY_SHARED_BAR_FIELDS:
+            if node.name in _SECURITY_SHARED_BAR_FIELDS and self._reads_builtin_variable(node):
                 return ("bar", node.name)
             return None
         if isinstance(node, BinOp):
@@ -8852,8 +9058,13 @@ class SecurityEmitter:
                     )
         # Global tuple declarations run on every requested bar, even when
         # a lazy payload does not read their history on that bar.
+        call_histories: dict[str, list[str]] = {}
         for (sid, _node_id), meta in self._security_expr_hist_by_node.items():
             obj = meta.get("object")
+            if sid == sec_id and meta["sample_call"]:
+                self._security_arg_globals[obj.name] = obj
+                call_histories.setdefault(obj.name, []).append(meta["name"])
+                continue
             if (sid != sec_id or not isinstance(obj, Identifier)
                     or not meta.get("tuple_global")):
                 continue
@@ -8881,9 +9092,15 @@ class SecurityEmitter:
         # Its sampled dependencies keep declaration order and one value.
         for stmt in self.ctx.ast.body:
             if isinstance(stmt, VarDecl) and stmt.name in self._security_arg_globals:
-                self._build_security_expr(
+                value = self._build_security_expr(
                     sec_id, self._security_arg_globals[stmt.name], None, ta_results,
                     security_mutable_names=security_mutable_names, emitted_lines=lines)
+                for hist in call_histories.get(stmt.name, ()):
+                    # The current sample serves offset zero on partial bars
+                    # too. Publish it only after all reads of a completed bar.
+                    self._security_global_hist_pushes.append((hist, "double"))
+                    lines.append(f"        {hist}_next = is_na({value}) ? na<double>() "
+                                 f": static_cast<double>({value}); {hist}_set = is_complete;")
         returns_tuple = item.get("returns_tuple", False)
         tuple_size = item.get("tuple_size", 0)
         if (
@@ -9300,7 +9517,7 @@ class SecurityEmitter:
             if isinstance(node, Identifier):
                 if not self._security_identifier_is_global_binding(node):
                     return False
-                if node.name in _SECURITY_SHARED_BAR_FIELDS:
+                if node.name in _SECURITY_SHARED_BAR_FIELDS and self._reads_builtin_variable(node):
                     continue
                 if node.name not in expressions or node.name in self._global_mutable_infos:
                     return False
@@ -9526,12 +9743,14 @@ class SecurityEmitter:
                 "hlc3": "((bar.high + bar.low + bar.close) / 3.0)",
                 "ohlc4": "((bar.open + bar.high + bar.low + bar.close) / 4.0)",
             }
-            if expr_node.name in bar_fields:
-                return bar_fields[expr_node.name]
-            if expr_node.name == "time_close":
-                return self._security_bar_field_expr("time_close", sec_id)
+            reads_builtin = self._reads_builtin_variable(expr_node)
+            if reads_builtin:
+                if expr_node.name in bar_fields:
+                    return bar_fields[expr_node.name]
+                if expr_node.name == "time_close":
+                    return self._security_bar_field_expr("time_close", sec_id)
 
-            if expr_node.name in security_mutable_names:
+            if not reads_builtin and expr_node.name in security_mutable_names:
                 info = self._global_mutable_infos.get(expr_node.name)
                 state_name = self._security_state_name(sec_id, expr_node.name)
                 if info is not None and getattr(info, "is_series", False):
@@ -9551,6 +9770,7 @@ class SecurityEmitter:
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
             if (
                 self._security_identifier_is_global_binding(expr_node)
+                and not reads_builtin
                 and expr_node.name in global_expr_map
                 and expr_node.name not in resolving
             ):
@@ -9961,6 +10181,12 @@ class SecurityEmitter:
                         expr_node.object.name)
                     self._security_check_double_lowering(
                         expr_node, sec_id, expr_node.object.name)
+                if meta["sample_call"]:
+                    return (
+                        f"([&]() -> double {{ int _hidx = {index_cpp}; {offset_check}"
+                        f"if (is_na(_hidx)) return na<double>(); "
+                        f"return (_hidx <= 0) ? {hist}_next : {hist}[_hidx - 1]; }}())"
+                    )
                 inner = self._build_security_expr(
                     sec_id,
                     expr_node.object,
@@ -11240,7 +11466,7 @@ class SecurityEmitter:
                     )
                 )
                 if bound is None and (
-                    n.name in _SECURITY_REQUESTED_NAMES
+                    (n.name in _SECURITY_REQUESTED_NAMES and self._reads_builtin_variable(n))
                     or n.name in mutable_names
                     or (self._expr_is_stable(n)
                         and not self._security_global_reads_timeframe(n.name))
@@ -11460,8 +11686,9 @@ class SecurityEmitter:
                     or (self._security_identifier_is_global_binding(node)
                         and node.name in (getattr(self.ctx, "global_expr_map", {}) or {}))):
                 return True
-            if isinstance(node, Identifier) and node.name in (
-                    set(SECURITY_BAR_FIELD_EXPRS) | {"hl2", "hlc3", "ohlc4", "time_close"}):
+            if (isinstance(node, Identifier)
+                    and node.name in _SECURITY_SHARED_BAR_FIELDS | {"time_close"}
+                    and self._reads_builtin_variable(node)):
                 return True
             if (isinstance(node, MemberAccess) and isinstance(node.object, Identifier)
                     and node.object.name == "timeframe"):
@@ -11502,6 +11729,9 @@ class SecurityEmitter:
         if isinstance(node, Subscript):
             obj = node.object
             if isinstance(obj, Identifier):
+                meta = self._security_expr_hist_by_node.get((sec_id, id(node)))
+                if meta is not None and meta["sample_call"]:
+                    return True
                 if not self._security_identifier_is_global_binding(obj):
                     binding = self._security_lookup_helper_binding_context(
                         obj.name, helper_binding_stack
@@ -11554,7 +11784,8 @@ class SecurityEmitter:
             )
             if binding is not None:
                 return self._security_bound_is_scalar(*binding)
-        if node.name == "time_close" or self._security_source_input_call(node) is not None:
+        if ((node.name == "time_close" and self._reads_builtin_variable(node))
+                or self._security_source_input_call(node) is not None):
             return True
         return (
             self._security_index_inputs
@@ -11639,7 +11870,8 @@ class SecurityEmitter:
         return (
             node.name in global_expr_map
             and node.name not in self._global_mutable_infos
-            and node.name not in _SECURITY_REQUESTED_NAMES
+            and not (node.name in _SECURITY_REQUESTED_NAMES
+                     and self._reads_builtin_variable(node))
             and not self._expr_is_stable(node)
         )
 
@@ -11700,7 +11932,7 @@ class SecurityEmitter:
     def _security_is_bar_index(self, node) -> bool:
         """The built-in ``bar_index``, where no declaration binds the name."""
         return (isinstance(node, Identifier) and node.name == "bar_index"
-                and "bar_index" not in getattr(self, "_safe_name_bound", ()))
+                and self._reads_builtin_variable(node))
 
     def _security_reads_bar_index(self, expr_node, mutable_names=()) -> bool:
         """Whether a payload reads ``bar_index``: in itself, the globals it

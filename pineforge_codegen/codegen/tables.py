@@ -28,6 +28,7 @@ from .helpers import (
     evaluate_args_once, na_preserving_int_cast, pine_index_int_cast,
     pine_truth_cast,
 )
+from .tv_string_trim import TV_STRING_TRIM_NAME
 
 
 _PROVEN_INT_ARG = re.compile(
@@ -1580,9 +1581,9 @@ STR_FUNC_MAP = {
     "substring":   None,  # handled separately (2 vs 3 args)
     "replace_all": lambda args: f"[&](){{ std::string __pf_s={args[0]}; size_t __pf_p=0; while((__pf_p=__pf_s.find({args[1]},__pf_p))!=std::string::npos){{ __pf_s.replace(__pf_p,{args[1]}.length(),{args[2]}); __pf_p+={args[2]}.length(); }} return __pf_s; }}()",
     "replace":     None,  # handled separately (3 vs 4 args)
-    "lower":       lambda args: f"[&](){{ std::string __pf_s={args[0]}; std::transform(__pf_s.begin(),__pf_s.end(),__pf_s.begin(),::tolower); return __pf_s; }}()",
-    "upper":       lambda args: f"[&](){{ std::string __pf_s={args[0]}; std::transform(__pf_s.begin(),__pf_s.end(),__pf_s.begin(),::toupper); return __pf_s; }}()",
-    "trim":        lambda args: f'[&](){{ std::string __pf_s={args[0]}; __pf_s.erase(0,__pf_s.find_first_not_of(" \\t\\n\\r")); __pf_s.erase(__pf_s.find_last_not_of(" \\t\\n\\r")+1); return __pf_s; }}()',
+    "lower":       None,  # handled by the Unicode case-mapping helper
+    "upper":       None,  # handled by the Unicode case-mapping helper
+    "trim":        lambda args, helper=TV_STRING_TRIM_NAME: f"::{helper}({args[0]})",
     "repeat":      lambda args: (
         f"[&](){{ std::string __pf_r; for(int __pf_i=0;__pf_i<{na_preserving_int_cast(args[1])};__pf_i++) __pf_r+={args[0]}; return __pf_r; }}()"
         if len(args) < 3 else

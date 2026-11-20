@@ -461,7 +461,11 @@ CPP_EMITTER_NAMES = frozenset("""
     _pf_tv_trim _pf_tv_increment_digits _pf_tv_decimal _pf_tv_pattern
     _pf_tv_number_style
     _pf_u16_length _pf_u16_pos _pf_u16_decode _pf_u16_encode _pf_u16_substr
-    _pf_u8_decode_points _pf_u8_match
+    _pf_u16_substr_position _pf_u16_substr_checked
+    _pf_case_range_contains _pf_case_full_map _pf_case_simple_map
+    _pf_case_decode _pf_case_encode _pf_case_before_cased _pf_case_after_cased
+    _pf_case_map _pf_case_upper _pf_case_lower _pf_case_char
+    _pf_u8_decode_points _pf_u8_match _pf_u8_trim
     _security_helper_series_ _security_helper_series_str_
     _use_precalc _var_initialized _ta_initialized_ _inputs_initialized_
     _pf_lines_ _pf_boxes_ _pf_labels_ _pf_linefills_
@@ -536,6 +540,7 @@ CPP_TEMPORARY_NAMES = frozenset("""
     _pf_hist_offset_raw _pf_hist_offset_numeric _pf_hist_offset _pf_hist_bar
     _pf_calendar_ts _pf_calendar_tz
     _pf_timeframe_arg _pf_qty_type
+    _pf_fx_from _pf_fx_to _pf_fx_ignore _pf_fx_account _pf_fx_error
     _tz _yr _mo _dy _hr _min _sc _res _old _old_tz _had_old _secs
     _last_tz _last_yr _last_mo _last_dy _last_hr _last_min _last_sc
     _last_res
@@ -563,7 +568,7 @@ _CPP_TEMPORARY_PATTERN = re.compile(
     r"|_pf_(?:str|array|round)_a\d+|_pf_slot_open_\d+"
     r"|_pf_every_bar_ta_\d+|_pf_shared_\d+_\d+|__pf_array\w*|__pf_raw_\w+"
     r"|_pf_collection_hist_\w+"
-    r"|_pf_substring_arg\d+"
+    r"|_pf_substring_arg\d+|_pf_case_arg\d+"
     r"|_pf_w_+"
     r"|_req_sec_(?:lower_tf_)?\d+(?:_\d+)?|_precalc_\w+|_sec\d+_\w+"
     r"|_pf_(?:sec|rec)_missing_\d+|_eval_security_\d+"
@@ -572,6 +577,7 @@ _CPP_TEMPORARY_PATTERN = re.compile(
     r"|_prev_fixnan_\d+(?:(?:_cs|__ni|_u)\d+)*|_result__ta_\w+"
     r"|_(?:hist_call|series_arg|udf_series_arg|fn_global_hist)_\d+"
     r"|_s_(?:open|high|low|close|volume|hl2|hlc3|ohlc4|hlcc4)"
+    r"|_pf_builtin_hist_\w+"
     r"|_strat_\w+|_pf_ctf\d+_\w+|_pf_selection__pf_var_init_\w+"
 )
 
