@@ -47,6 +47,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - Strategy sizing constants retain their string values in expressions, aliases
   and helper calls. Host order and risk settings convert these values to their
   numeric representation only at the setting boundary.
+- `str.trim` also removes the other white space and line terminators of the ECMAScript `trim` set, such as U+3000 and U+FEFF, which TradingView removes. It previously removed only space, tab, LF and CR ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
 
 - `timeframe.in_seconds` and `timeframe.change` resolve an evaluated empty
   string to the chart period, including input, variable, function-return and

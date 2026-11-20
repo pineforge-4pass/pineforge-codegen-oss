@@ -182,6 +182,7 @@ from .helpers import (
 )
 from .id_sites import BUILTIN_NAMESPACES
 from .run_stops import request_stop
+from .tv_string_trim import TV_STRING_TRIM_NAME
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_NEW_CTORS,
@@ -4512,6 +4513,14 @@ class CallVisitor:
                 # These count or match in UTF-16 units / characters through
                 # tv_string_units.
                 self._uses_tv_string_units = True
+            if func_name == "trim":
+                if not self._uses_tv_string_trim:
+                    # Requested evaluators rewrite authored identifier
+                    # tokens, including inside a qualified expression.
+                    self._tv_string_trim_name = self._allocate_generated_cpp_name(
+                        TV_STRING_TRIM_NAME, self._safe_name_occupied.copy())
+                self._uses_tv_string_trim = True
+                return STR_FUNC_MAP[func_name](args, self._tv_string_trim_name)
             return evaluate_args_once(
                 args, STR_ARGS_READ_REPEATEDLY.get(func_name, ()),
                 STR_FUNC_MAP[func_name], "_pf_str_a")

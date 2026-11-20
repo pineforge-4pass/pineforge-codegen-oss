@@ -897,7 +897,7 @@ def test_str_replace():
 def test_str_trim():
     src = 'x = str.trim("  hello  ")\n'
     cpp = _generate(src)
-    assert "erase" in cpp
+    assert '::_pf_u8_trim(std::string("  hello  "))' in cpp
 
 
 def test_str_repeat():
