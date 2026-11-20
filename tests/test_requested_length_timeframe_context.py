@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import math
+import re
 
 import pytest
 
+from pineforge_codegen import transpile
 from tests._e2e import (
     Build,
     assert_run_stopped_with,
@@ -18,6 +20,20 @@ from tests._e2e import (
 
 
 BARS = 1500
+
+SMA_RUNTIME_CONTEXT = """//@version=6
+strategy("runtime requested SMA timeframe")
+chosen_tf = close > open ? str.tostring(75) : str.tostring(bar_index)
+x = request.security(syminfo.tickerid, chosen_tf, ta.sma(close, timeframe.isdaily ? 5 : 3))
+plot(x)
+"""
+
+SMA_CLOSED_CONTEXT = """//@version=6
+strategy("closed requested SMA timeframe")
+chosen_tf = close > open ? "D" : "W"
+x = request.security(syminfo.tickerid, chosen_tf, ta.sma(close, timeframe.isdaily ? 5 : 3))
+plot(x)
+"""
 
 SMA_REQUESTED = """//@version=6
 strategy("requested SMA timeframe")
@@ -80,6 +96,67 @@ def _column(outcome, name: str) -> dict[int, float]:
         for record in outcome.traces["default"]
         if record["name"] == name
     }
+
+
+def _cpp_block(cpp: str, line_pattern: str) -> str:
+    match = re.search(line_pattern, cpp, re.MULTILINE)
+    assert match is not None, f"missing C++ block matching {line_pattern!r}"
+    opening = cpp.find("{", match.start())
+    assert opening >= 0
+    depth = 1
+    for token in re.finditer(
+            r"""//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[{}]""",
+            cpp[opening + 1:], re.DOTALL):
+        if token.group() == "{":
+            depth += 1
+        elif token.group() == "}":
+            depth -= 1
+            if depth == 0:
+                return cpp[match.start():opening + 1 + token.start()]
+    raise AssertionError(f"unterminated C++ block matching {line_pattern!r}")
+
+
+def test_runtime_requested_timeframe_length_compiles():
+    from tests._compile import compile_cpp
+
+    cpp = transpile(SMA_RUNTIME_CONTEXT)
+    assert cpp and "_runtime_request_0(chosen_tf" in cpp
+    assert "ta::SMA" in cpp
+    compile_cpp(cpp, label="runtime-requested-timeframe-length")
+
+
+def test_runtime_requested_timeframe_length_reset_does_not_read_the_evaluator_state():
+    cpp = transpile(SMA_RUNTIME_CONTEXT)
+    needle = "_pf_state.cursor.timeframe"
+    assert cpp and "ta::SMA" in cpp
+    assert "_runtime_request_0(chosen_tf" in cpp
+
+    runtime_struct = _cpp_block(
+        cpp, r"^    struct _RuntimeSec0 : pineforge::RuntimeContextEvaluator \{")
+    runtime_evaluator = _cpp_block(
+        cpp, r"^    void _eval_security_0\(_RuntimeSec0& _pf_state,")
+    assert needle not in _cpp_block(
+        cpp, r"^    void on_source_bar\(const Bar& bar\) override \{")
+    assert needle not in _cpp_block(
+        cpp, r"^    void evaluate_security\(int sec_id,")
+    assert needle not in _cpp_block(
+        cpp, r"^    .*_runtime_request_0\(const std::string& authored_tf,")
+    assert cpp.count(needle) == (
+        runtime_struct.count(needle) + runtime_evaluator.count(needle)
+    )
+
+
+def test_closed_requested_timeframe_length_keeps_requested_context_path():
+    cpp = transpile(SMA_CLOSED_CONTEXT)
+    assert cpp and "ta::SMA" in cpp
+    reset_lines = [
+        line for line in cpp.splitlines()
+        if " = ta::SMA(" in line and "_sec" in line
+    ]
+    assert reset_lines
+    assert any('tf_is_daily("D")' in line for line in reset_lines)
+    assert any('tf_is_daily("W")' in line for line in reset_lines)
+    assert all("script_tf_" not in line for line in reset_lines)
 
 
 @pytest.fixture(scope="module")
