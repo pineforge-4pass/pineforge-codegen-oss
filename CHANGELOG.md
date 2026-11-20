@@ -34,6 +34,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - A script whose only `str.length`, `str.pos`, `str.match` or `str.substring` call is inside a non-constant `request.security` timeframe no longer fails to build: the helper block that those calls need is kept.
 
+- A TA length inside a `request.security` payload that reads a timeframe built-in is sized in the requested context, like the rest of the payload: `request.security(syminfo.tickerid, "D", ta.sma(close, timeframe.isdaily ? 5 : 3))` is `ta.sma(close, 5)` and `ta.ema(close, timeframe.isdaily ? 0 : 3)` stops; both used the chart's timeframe ([#291](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/291)).
+
 - A bare built-in name such as `close`, `hl2` or `dayofweek` reads the script
   variable after its declaration. Earlier reads still use the chart value, and
   string variables named `hour`, `minute` or `second` keep their string type
