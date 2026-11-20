@@ -849,6 +849,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._uses_tv_float_step_end = False
         # Request timeframe expressions can be rendered and cached in __init__,
         # before _generate_cpp runs: these flags are initialized only here.
+        self._uses_tv_string_units = False
         self._uses_tv_string_trim = False
         self._uses_case_mapping = False
         # Retain each loop node alongside its plan; ids are lookup keys only.
@@ -5439,7 +5440,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
     def _generate_cpp(self) -> str:
         self._uses_enum_string_lookup = False
-        self._uses_tv_string_units = False
         # Titles already carry assigned declaration keys. Refuse an unproved
         # title first, then flag any remaining shared fallback/suffix keys.
         self._check_input_titles()
