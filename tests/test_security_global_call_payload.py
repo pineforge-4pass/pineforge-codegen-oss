@@ -230,3 +230,78 @@ def test_conditional_helper_reading_another_kind_of_global_is_not_refused(declar
     )
     diagnostics = transpile_full(source)["diagnostics"]
     assert not [d for d in diagnostics if d.code == "PF-E5005"], diagnostics
+
+
+def test_helper_called_by_a_global_stays_unconditional_when_the_payload_reads_it_under_a_condition(
+        chart, tmp_path):
+    """A global's declaration runs on every requested bar, so the helper that it calls is called
+    on every bar even when the payload reads the global only under a condition: the per-bar
+    sample is right and equals the inline control."""
+    engine, feed = chart
+    declarations = (
+        "float bodySize = math.abs(close - open)\n"
+        "h() => bodySize[1]\n"
+        "x = h()\n"
+    )
+    runs = execute_all(engine, feed, tmp_path, {
+        "subject": Build(_single("bar_index % 2 == 0 ? x : na", declarations), trace=True),
+        "control": Build(
+            _single("bar_index % 2 == 0 ? math.abs(close[1] - open[1]) : na"), trace=True),
+    })
+    actual = _values(runs, "subject", "v")
+    expected = _values(runs, "control", "v")
+    assert len(actual) == BARS
+    assert actual.keys() == expected.keys()
+    assert any(math.isfinite(value) for value in actual.values())
+    for bar, value in actual.items():
+        assert same(value, expected[bar]), (bar, value, expected[bar])
+
+
+def test_conditional_call_inside_a_global_declaration_is_still_refused():
+    """The declaration is walked with the flag off, so a `?:` inside it still makes its helper call
+    conditional."""
+    source = _single(
+        "x",
+        "float bodySize = math.abs(close - open)\n"
+        "h() => bodySize[1]\n"
+        "x = bar_index % 2 == 0 ? h() : na\n",
+    )
+    with pytest.raises(CompileError) as caught:
+        transpile(source)
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E5005"
+    assert diagnostic.message == REFUSAL
+
+
+def _switch_condition_source(first: str, second: str) -> str:
+    return (
+        HEADER
+        + "float bodySize = math.abs(close - open)\n"
+        "h() => bodySize[1]\n"
+        "g() =>\n"
+        "    switch\n"
+        f"        {first} => 1.0\n"
+        f"        {second} => 2.0\n"
+        "        => 3.0\n"
+        'result = request.security(syminfo.tickerid, "60", g())\n'
+    )
+
+
+def test_helper_in_a_later_switch_case_condition_is_refused():
+    """A switch stops at its first match, so the condition of a later case is evaluated only when
+    the cases before it did not match: a helper called there is conditional."""
+    source = _switch_condition_source("bar_index % 2 == 0", "h() > 0")
+    with pytest.raises(CompileError) as caught:
+        transpile(source)
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.code == "PF-E5005"
+    assert diagnostic.message == REFUSAL
+
+
+def test_helper_in_the_first_switch_case_condition_is_not_refused():
+    """The condition of the first case is evaluated on every pass."""
+    source = _switch_condition_source("h() > 0", "bar_index % 2 == 0")
+    diagnostics = transpile_full(source)["diagnostics"]
+    assert not [d for d in diagnostics if d.code == "PF-E5005"], diagnostics

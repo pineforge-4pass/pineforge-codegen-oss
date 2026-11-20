@@ -4622,7 +4622,10 @@ class SecurityEmitter:
                 global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
                 if n.name in global_expr_map and n.name not in resolving:
                     resolving.add(n.name)
-                    walk(global_expr_map[n.name], conditional)
+                    # A global's declaration runs on every requested bar, whatever
+                    # the position of the read that names it: its calls are not
+                    # conditional because the payload reads it under a condition.
+                    walk(global_expr_map[n.name])
                     resolving.remove(n.name)
                 return
             if (isinstance(n, FuncCall) and isinstance(n.callee, Identifier)
@@ -4685,8 +4688,12 @@ class SecurityEmitter:
                 return
             if isinstance(n, SwitchStmt):
                 walk(n.expr, conditional)
-                for case_expr, body in n.cases:
-                    walk(case_expr, conditional)
+                for position, (case_expr, body) in enumerate(n.cases):
+                    # A switch stops at its first match: only the first case
+                    # condition is evaluated on every pass, a later one only when
+                    # the cases before it did not match (as the ternary chain that
+                    # the selection lowering builds from it).
+                    walk(case_expr, conditional or position > 0)
                     walk(body, True)
                 walk(n.default_body, True)
                 return

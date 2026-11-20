@@ -204,7 +204,7 @@ def test_method_local_writer_keeps_stable_sma_fold():
     p = self + x
     p := p + 1
     p
-y = 0.0.m(1.0)"""
+y = close.m(1.0)"""
     source = _source(
         method + "\n" + "if big\n    p := 6",
         declaration,
