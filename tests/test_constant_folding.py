@@ -64,7 +64,8 @@ def test_folding_does_not_invoke_python_expression_execution(monkeypatch) -> Non
         folded = gen._resolve_known("math.abs(-7) + round(2.5)")
         refused = gen._resolve_known("round(abs.__class__.__name__)")
     assert calls == []
-    assert folded == "9"
+    # TradingView capture: math.abs(-7) + math.round(2.5) is 10.
+    assert folded == "10"
     assert refused == "round(abs.__class__.__name__)"
 
 
@@ -77,7 +78,8 @@ def test_folding_does_not_invoke_python_expression_execution(monkeypatch) -> Non
     ("math.abs(-length)", "16"),
     ("round(length / 3)", "5"),
     ("math.round(length / 3)", "5"),
-    ("round(2.5)", "2"),
+    # TradingView capture: math.round(2.5) is 3.
+    ("round(2.5)", "3"),
     ("math.pow(2, 3)", "8"),
     ("math.sin(math.pi / 2)", "1"),
     ("math.log(1) + math.exp(0)", "1"),
@@ -134,9 +136,11 @@ def test_round_precision_is_bounded_before_callable_dispatch(monkeypatch, name, 
 
 
 @pytest.mark.parametrize(("expression", "expected"), [
-    ("round(125, -1)", "120"),
+    # Uniform Decimal ROUND_HALF_UP rule: round(125, -1) is 130.
+    ("round(125, -1)", "130"),
     ("round(135, -1)", "140"),
-    ("math.round(1.25, 1)", "1.2"),
+    # TradingView capture: math.round(1.25, 1) is 1.3.
+    ("math.round(1.25, 1)", "1.3"),
     ("round(1, -1024)", "0"),
     ("round(1, 1024)", "1"),
 ])
