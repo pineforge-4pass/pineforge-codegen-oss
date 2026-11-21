@@ -113,6 +113,7 @@ from .helpers import cpp_code_only
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 from .tv_string_trim import TV_STRING_TRIM_CPP, TV_STRING_TRIM_MARKER, TV_STRING_TRIM_NAME
 from .tv_string_units import TV_STRING_UNITS_CPP, TV_STRING_UNITS_MARKER
+from .unicode_case import CASE_MAPPING_CPP, CASE_MAPPING_MARKER
 
 
 # Keep the late-selected include beside the headers the C++ allowlist reads.
@@ -285,6 +286,8 @@ class TopLevelEmitter:
         lines.append(TV_STRING_UNITS_MARKER)
         lines.append("")
         lines.extend((TV_STRING_TRIM_MARKER, ""))
+        lines.append(CASE_MAPPING_MARKER)
+        lines.append("")
         # Syminfo derivation helpers (_pf_derive_main_tickerid, _pf_derive_country)
         from .helpers_syminfo import emit_syminfo_helpers
         lines.extend(emit_syminfo_helpers())
@@ -2200,6 +2203,23 @@ class TopLevelEmitter:
             # resulting C++; a helper is needed only for a surviving call.
             if f"::{name}(" in cpp_code_only("\n".join(lines)):
                 lines[marker] = TV_STRING_TRIM_CPP.replace(TV_STRING_TRIM_NAME, name)
+                return
+        del lines[marker:marker + 2]
+
+    def _settle_case_mapping(self, lines: list[str]) -> None:
+        """Resolve the marker for Unicode ``str.upper``/``str.lower`` helpers."""
+        try:
+            marker = lines.index(CASE_MAPPING_MARKER)
+        except ValueError as exc:  # pragma: no cover - generation invariant
+            raise AssertionError(
+                "generated file lost the place of its Unicode case helpers"
+            ) from exc
+        if self._uses_case_mapping:
+            # Some paths visit expressions for bookkeeping and discard the
+            # resulting C++; the block is needed only for a surviving call.
+            code = cpp_code_only("\n".join(lines))
+            if "_pf_case_upper(" in code or "_pf_case_lower(" in code:
+                lines[marker] = CASE_MAPPING_CPP
                 return
         del lines[marker:marker + 2]
 
