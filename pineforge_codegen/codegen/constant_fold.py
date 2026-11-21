@@ -12,6 +12,7 @@ import math
 import operator
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 
 from ..ast_nodes import (
     BinOp, BoolLiteral, FuncCall, Identifier, MemberAccess, NaLiteral,
@@ -42,16 +43,34 @@ _BINARY = {
     ast.Mod: _pine_remainder,
 }
 _UNARY = {ast.UAdd: operator.pos, ast.USub: operator.neg}
+
+
+def _pine_round(value: int | float | bool, precision: int | bool = 0):
+    """Round like Pine, using decimal half-away-from-zero ties."""
+    decimal_value = Decimal(repr(int(value) if type(value) is bool else value))
+    exponent = -int(precision)
+    quantum = Decimal(1).scaleb(exponent)
+    # quantize needs enough precision for the complete result, including
+    # trailing decimal places and large integral values.
+    result_digits = max(
+        len(decimal_value.as_tuple().digits),
+        decimal_value.adjusted() - quantum.as_tuple().exponent + 1,
+        1,
+    )
+    with localcontext() as context:
+        context.prec = max(28, result_digits)
+        rounded = decimal_value.quantize(quantum, rounding=ROUND_HALF_UP)
+    return int(rounded) if exponent == 0 else float(rounded)
+
+
 _FUNCTIONS = {
     "abs": abs,
-    "round": round,
+    "round": _pine_round,
     "math.abs": abs,
-    # Keep the existing folder's rounding behavior; this repair does not
-    # change numeric semantics to match a different rounding convention.
-    "math.round": round,
+    "math.round": _pine_round,
     # sqrt/ceil/floor previously took a failed import rewrite and did not
-    # fold. Keep that domain unchanged: newly admitting sqrt under Python's
-    # round, for example, can disagree with the existing C++ runtime round.
+    # fold. Keep that domain unchanged: newly admitting sqrt under a numeric
+    # fold, for example, can disagree with the existing C++ runtime round.
     "math.pow": math.pow,
     "math.exp": math.exp,
     "math.log": math.log,
@@ -204,11 +223,6 @@ def _constant_arguments(call):
     return [bound[name] for name in names[:last + 1]]
 
 
-def _round_ties_up(value):
-    lower = math.floor(value)
-    return lower + int(value - lower >= 0.5)
-
-
 def fold_constant_expression(node, known_values: Mapping[str, object],
                              named_constants: Mapping[str, object]):
     """Fold a Pine constant, returning (value, proven).
@@ -216,7 +230,8 @@ def fold_constant_expression(node, known_values: Mapping[str, object],
     All dependencies must be constant, even in an unselected arm. Evaluation
     then follows Pine's lazy boolean and conditional operators. Numeric
     operators and the existing math whitelist use the bounded numeric folder;
-    declaration-only casts and rounding leave constructor folding unchanged.
+    declaration-only casts use their own whitelist and rounding uses the
+    shared Pine rounding helper.
     NON_CONSTANT bindings shadow builtins without becoming constant values.
     """
     def constant(expr, depth=0):
@@ -314,11 +329,7 @@ def fold_constant_expression(node, known_values: Mapping[str, object],
                                        or abs(args[1]) > _MAX_ROUND_DIGITS)
                 ):
                     raise ValueError("unsupported constant rounding precision")
-                # Pine rounds ties toward positive infinity.
-                if len(args) == 1:
-                    return _numeric(_round_ties_up(args[0]))
-                factor = 10.0 ** args[1]
-                return _numeric(_round_ties_up(args[0] * factor) / factor)
+                return _numeric(_pine_round(*args))
             if spelling in _DECLARATION_FUNCTIONS:
                 if spelling in ("math.min", "math.max", "math.avg"):
                     if not args:
