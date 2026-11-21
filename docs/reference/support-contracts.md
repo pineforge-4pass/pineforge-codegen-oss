@@ -386,3 +386,10 @@ signature in `signatures.py`, then wire the dispatch in
 namespace-specific visitor module). The cross-namespace official-surface
 test will fail at PR time if you forget any of these steps.
 
+### Array constructor sizes
+
+`array.new<T>(size, ...)` and supported typed aliases such as
+`array.new_float(size, ...)` create an empty array when `size` is `na`, and
+execution continues. With `int n = na` and `a = array.new<float>(n)`,
+`a.size()` returns 0. A size other than `na` stops the run if it is not finite,
+is negative, or exceeds the runtime container's limit.
