@@ -182,6 +182,7 @@ from .helpers import (
 )
 from .id_sites import BUILTIN_NAMESPACES
 from .run_stops import request_stop
+from .tv_string_trim import TV_STRING_TRIM_NAME
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_NEW_CTORS,
@@ -2598,22 +2599,40 @@ class CallVisitor:
         # request.* calls
         if namespace == "request":
             if func_name == "currency_rate":
-                # Keep argument effects and the stop in the expression, so a
-                # skipped branch evaluates neither. The comma's final operand
-                # supplies Pine's float type; the no-data shim never returns.
                 marker = request_stop_marker(node)
                 marker["message"] = (
                     "request.currency_rate needs currency conversion data "
                     "that PineForge does not have."
                 )
-                args = _merge_kwargs(
-                    node.args, node.kwargs,
-                    sigs.get_param_names("request", func_name), self._visit_expr,
-                    intrinsic=sigs.get_intrinsic("request", func_name),
+                ordered = _merge_kwargs(
+                    node.args, node.kwargs, sigs.get_param_names("request", func_name),
+                    lambda arg: arg, intrinsic=sigs.get_intrinsic("request", func_name),
                 )
-                effects = [f"(void)({arg})" for arg in args]
-                effects += [request_stop(marker), "na<double>()"]
-                return f"({', '.join(effects)})"
+                args = [self._visit_expr(arg) for arg in ordered]
+                refusal = f"{request_stop(marker)}, na<double>()"
+                # The old no-data lowering can also evaluate non-string
+                # operands. They cannot name a currency pair.
+                if (len(args) not in (2, 3)
+                        or any(self._infer_type(arg) != "std::string" for arg in ordered[:2])
+                        or (len(args) == 3 and self._infer_type(ordered[2]) not in
+                            ("bool", "int", "int64_t", "double"))):
+                    effects = [f"(void)({arg})" for arg in args]
+                    return f"({', '.join([*effects, refusal])})"
+                # Snapshot each operand before evaluating the next. Keeping the
+                # entire decision in the expression preserves lazy branches.
+                ignore = self._coerce_bool_expr(args[2], ordered[2]) if len(args) == 3 else "false"
+                account = self._strategy_account_currency_expr()
+                return (
+                    f"([&]() {{ const std::string _pf_fx_from = {args[0]}; "
+                    f"const std::string _pf_fx_to = {args[1]}; "
+                    f"const bool _pf_fx_ignore = {ignore}; "
+                    f"const auto& _pf_fx_account = {account}; "
+                    "if ((_pf_fx_from == syminfo_.currency && _pf_fx_to == _pf_fx_account) || "
+                    "(_pf_fx_to == syminfo_.currency && _pf_fx_from == _pf_fx_account)) "
+                    "return request_currency_rate("
+                    "_pf_fx_from, _pf_fx_to, _pf_fx_account, current_bar_.timestamp, _pf_fx_ignore); "
+                    f"return ({refusal}); }}())"
+                )
             if func_name == "security":
                 param_names = ["symbol", "timeframe", "expression", "gaps", "lookahead", "ignore_invalid_symbol", "currency"]
                 all_args = list(node.args)
@@ -3877,15 +3896,30 @@ class CallVisitor:
         if func_name in ("convert_to_account", "convert_to_symbol"):
             p = self._resolve_func_args(node, f"strategy.{func_name}")
             v = self._visit_float_arg(p.get("value"), "0.0")
-            # The engine helper takes the value by copy, so the Pine argument
-            # runs once; it returns that value and warns once per call site
-            # when no account-currency rate covers this bar.
             direction = "to_account" if func_name == "convert_to_account" else "to_symbol"
-            return (
-                f"strategy_convert_identity_or_warn(({v}), "
+            account = self._strategy_account_currency_expr()
+            fallback_args = (
                 "pineforge::source::PineStrategyHost::CurrencyConversionDirection::"
                 f"{direction}, /*call_site=*/{self._currency_conversion_site(node)}, "
-                f"{self._strategy_account_currency_expr()}, current_bar_.timestamp)"
+                f"{account}, current_bar_.timestamp"
+            )
+            if account == "syminfo_.currency":
+                # Same by declaration: the host already handles identity and
+                # any invalid chart code without stopping the run.
+                return f"strategy_convert_identity_or_warn(({v}), {fallback_args})"
+            convert = ("strategy_convert_to_account" if func_name == "convert_to_account"
+                       else "strategy_convert_to_symbol")
+            # The by-value lambda argument runs before the rate lookup. A
+            # supplied rate with bad currency metadata still gets #421's
+            # warning. No unrelated engine exception is absorbed.
+            return (
+                "([&](double _pf_v) { "
+                "if (has_account_currency_fx_at(current_bar_.timestamp)) { "
+                f"try {{ return {convert}(_pf_v, {account}, current_bar_.timestamp); }} "
+                "catch (const pineforge::RunFailureInfo& _pf_fx_error) { "
+                "if (_pf_fx_error.run_failure_code() != "
+                "pineforge::RunFailureCode::currency_conversion_rate_unavailable) throw; } } "
+                f"return strategy_convert_identity_or_warn(_pf_v, {fallback_args}); }}({v}))"
             )
         if func_name == "default_entry_qty":
             # The host's query of the default order size at a price. The support
@@ -4426,13 +4460,13 @@ class CallVisitor:
         if func_name == "substring":
             if len(args) in (2, 3):
                 end_parameter = ", auto _pf_substring_end" if len(args) == 3 else ""
-                count = ", _pf_substring_end - _pf_substring_begin" if len(args) == 3 else ""
+                end_arg = ", _pf_substring_end" if len(args) == 3 else ""
 
                 def checked_substring(bound):
                     return (
                         f"[&](const std::string& _pf_substring_text, auto _pf_substring_begin{end_parameter}){{ "
-                        "try { return _pf_u16_substr(_pf_substring_text, _pf_substring_begin"
-                        f"{count}); }} catch (const std::out_of_range& _pf_substring_error) {{ "
+                        "try { return _pf_u16_substr_checked(_pf_substring_text, _pf_substring_begin"
+                        f"{end_arg}); }} catch (const std::out_of_range& _pf_substring_error) {{ "
                         '_PF_STRING_STOP("substring_out_of_range", _pf_substring_error.what()); '
                         "return std::string(); } "
                         "}(" + ", ".join(f"({arg})" for arg in bound) + ")"
@@ -4449,6 +4483,14 @@ class CallVisitor:
             if format_node is not None:
                 return self._str_format_expr(format_node, node.args[1:])
             return 'std::string("")'
+
+        if func_name in ("lower", "upper"):
+            self._uses_case_mapping = True
+            helper = "_pf_case_lower" if func_name == "lower" else "_pf_case_upper"
+            return evaluate_args_once(
+                args, range(len(args)),
+                lambda bound: f"{helper}({bound[0]})" if bound else 'std::string("")',
+                "_pf_case_arg")
 
         if func_name == "replace":
             if len(args) >= 4:
@@ -4477,6 +4519,14 @@ class CallVisitor:
                 # These count or match in UTF-16 units / characters through
                 # tv_string_units.
                 self._uses_tv_string_units = True
+            if func_name == "trim":
+                if not self._uses_tv_string_trim:
+                    # Requested evaluators rewrite authored identifier
+                    # tokens, including inside a qualified expression.
+                    self._tv_string_trim_name = self._allocate_generated_cpp_name(
+                        TV_STRING_TRIM_NAME, self._safe_name_occupied.copy())
+                self._uses_tv_string_trim = True
+                return STR_FUNC_MAP[func_name](args, self._tv_string_trim_name)
             return evaluate_args_once(
                 args, STR_ARGS_READ_REPEATEDLY.get(func_name, ()),
                 STR_FUNC_MAP[func_name], "_pf_str_a")

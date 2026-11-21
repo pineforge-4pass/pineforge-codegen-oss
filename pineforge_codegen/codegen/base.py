@@ -848,6 +848,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._random_call_counter = 0
         self._for_counter = 0
         self._uses_tv_float_step_end = False
+        # Request timeframe expressions can be rendered and cached in __init__,
+        # before _generate_cpp runs: these flags are initialized only here.
+        self._uses_tv_string_units = False
+        self._uses_tv_string_trim = False
+        self._uses_case_mapping = False
         # Retain each loop node alongside its plan; ids are lookup keys only.
         self._closed_trade_folds: dict[int, tuple[ForStmt, object]] = {}
         self._tuple_assign_counter = 0
@@ -3314,13 +3319,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """Whether authored metadata would require cross-boundary dataflow.
 
         Stable-var constructor folding is deliberately declaration-local.  A
-        user function, method, type, or enum introduces defaults, aliases, or
-        receiver effects that require a wider proof, so this narrow feature
-        fails closed for the whole script instead of approximating that proof.
+        user function, type, or enum still fails closed for the whole script;
+        that admission has not been proven yet.  A method declaration does not
+        fence the script: the scalar used as a method receiver is refused by
+        ``_stable_var_literal_has_unsupported_receiver_use``, a method
+        parameter or local of its name by the binding count, and a statement
+        in a method body that assigns it by ``_find_reassigned_vars``.
         """
 
         return any(
-            isinstance(node, (FuncDef, MethodDef, TypeDecl, EnumDecl))
+            isinstance(node, (FuncDef, TypeDecl, EnumDecl))
             for node in self._walk_candidate_surface(self.ctx.ast)
         )
 
@@ -3423,10 +3431,26 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if bound_name in binding_counts:
                     binding_counts[bound_name] += 1
 
+        # ``reassigned`` comes from ``_find_reassigned_vars``, which reads
+        # statement lists only: an assignment inside an ``if`` or ``switch``
+        # block used as a value is not in it. Before methods were admitted, a
+        # method declaration kept such a script on its earlier lowering (a
+        # refusal, or a per-bar length for the functions that take a run-time
+        # length). Keep that for a name the script assigns anywhere until the
+        # reassignment set sees every assignment. A script without a method is
+        # decided as before.
+        surface = list(self._walk_candidate_surface(self.ctx.ast))
+        unseen_writes: set[str] = set()
+        if any(isinstance(node, MethodDef) for node in surface):
+            unseen_writes = {
+                node.target.name for node in surface
+                if isinstance(node, Assignment) and isinstance(node.target, Identifier)
+            }
         admitted: dict[str, _StableVarCtorLiteral] = {}
         for name, (index, declaration) in unique.items():
             if (
                 name in reassigned
+                or name in unseen_writes
                 or binding_counts.get(name) != 1
                 or self._decl_binding_is_series(id(declaration), name)
                 or self._stable_var_literal_has_earlier_use(name, index)
@@ -5405,7 +5429,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
     def _generate_cpp(self) -> str:
         self._uses_enum_string_lookup = False
-        self._uses_tv_string_units = False
         # Titles already carry assigned declaration keys. Refuse an unproved
         # title first, then flag any remaining shared fallback/suffix keys.
         self._check_input_titles()
@@ -6582,6 +6605,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # The same for the UTF-16 unit helpers of str.length, str.pos and
         # str.substring: any body or evaluator may emit one of those calls.
         self._settle_tv_string_units(lines)
+        self._settle_tv_string_trim(lines)
+        self._settle_case_mapping(lines)
         cpp = "\n".join(lines)
         if self._uses_array_slice_views:
             from .array_slice import lower_storage

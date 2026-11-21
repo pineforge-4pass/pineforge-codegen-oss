@@ -22,6 +22,19 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (1.15.0)
 
+- Both strategy conversions and `request.currency_rate` use the host's rate in effect on each bar for the chart and account currencies, in either direction. Without a rate for the pair the request stops the run with the currency-conversion error, or returns `na` with a run warning when `ignore_invalid_currency` is true; other pairs still stop the run ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
+
+- A TA length held in a never-reassigned top-level `var int` literal is no longer refused with PF-E5092 when the script also declares a `method`; a script that declares a user function, `type` or `enum` still refuses it ([#422](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/422)).
+
+- `str.substring` now stops the run when the begin position is after the end position, and counts a `na` begin or end as 0, as TradingView does ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
+
+- `str.trim` also removes the other white space and line terminators of the ECMAScript `trim` set, such as U+3000 and U+FEFF, which TradingView removes. It previously removed only space, tab, LF and CR ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
+
+
+- `str.upper` and `str.lower` now apply the Unicode case mappings (Unicode 15.0, no locale rules), including é and É, ß to SS and the final sigma, where they previously changed only ASCII letters ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
+
+- A script whose only `str.length`, `str.pos`, `str.match` or `str.substring` call is inside a non-constant `request.security` timeframe no longer fails to build: the helper block that those calls need is kept.
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked
@@ -317,9 +330,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   [#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
 - `request.security` registers input-derived `lookahead` selections using the
   selected input values, including overrides; choices that depend on bar data
-  still report `PF-E1085`. A scalar empty timeframe still uses the chart
-  timeframe; an `if`/`switch` timeframe arm known to be empty still reports
-  `PF-E3105`.
+  still report `PF-E1085`. A literal empty timeframe (`""`) now uses the chart
+  timeframe instead of being refused; an `if`/`switch` timeframe arm known to
+  be empty still reports `PF-E3105`.
   History reads of requested values now compile inside another request's TA
   expression, including aliases and repeated reads. Uncalled request wrappers
   no longer interfere with compiling unrelated direct requests (#294;

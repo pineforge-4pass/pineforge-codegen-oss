@@ -70,28 +70,23 @@ def _assert_parse_error_precedes_sma(source: str, *, expected_line: int) -> None
     assert "Expected IDENT" in diagnostic.message
 
 
-def _assert_method_declaration_fences_sma(
-    source: str,
-    *,
-    expected_line: int,
-) -> None:
+def _assert_method_declaration_does_not_fence_sma(source: str, control: str) -> None:
+    # A method declaration used to close the whole-script admission (issue #422:
+    # TradingView accepts both scripts and computes the 5-bar average, as
+    # captured). It no longer does:
+    # the literal length is folded exactly as in the script without the method.
     program = Parser(Lexer(source).tokenize(), source=source).parse()
     assert (program.annotations or {}).get("parse_recovery_count", 0) == 0
     assert any(isinstance(node, MethodDef) for node in program.body)
 
-    with pytest.raises(CompileError) as caught:
-        transpile(source, filename="stable-var-method-declaration.pine")
-
-    assert len(caught.value.diagnostics) == 1
-    diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.phase is Phase.CODEGEN
-    assert diagnostic.location.line == expected_line
-    assert diagnostic.message == (
-        "Unsupported TA constructor length 'p' for ta.sma: it is neither a "
-        "compile-time constant nor derived from an input, so PineForge cannot "
-        "size the indicator buffer. TradingView accepts a series length for "
-        "ta.sma(); PineForge does not support it yet."
-    )
+    cpp = transpile(source, filename="stable-var-method-declaration.pine")
+    twin = transpile(control, filename="stable-var-method-free-control.pine")
+    pattern = r"_ta_sma_\d+\([^)]*\)"
+    folded = re.search(pattern, _constructor_initializers(cpp))
+    expected = re.search(pattern, _constructor_initializers(twin))
+    assert folded is not None and expected is not None
+    assert folded.group(0) == expected.group(0)
+    compile_cpp(cpp, label="stable-var-method-declaration")
 
 
 @pytest.mark.parametrize(
@@ -265,7 +260,7 @@ def test_any_user_declaration_fences_narrow_literal_admission(
     )
 
 
-def test_primitive_method_declaration_fences_narrow_literal_admission() -> None:
+def test_primitive_method_declaration_does_not_fence_narrow_literal_admission() -> None:
     source = '''//@version=6
 strategy("parse recovery receiver mask")
 method id(int self) => self
@@ -274,11 +269,16 @@ y = x.id()
 var int p = 5
 z = ta.sma(close, p)
 '''
+    control = '''//@version=6
+strategy("parse recovery receiver mask")
+var int p = 5
+z = ta.sma(close, p)
+'''
 
-    _assert_method_declaration_fences_sma(source, expected_line=7)
+    _assert_method_declaration_does_not_fence_sma(source, control)
 
 
-def test_collection_method_declaration_fences_narrow_literal_admission() -> None:
+def test_collection_method_declaration_does_not_fence_narrow_literal_admission() -> None:
     source = '''//@version=6
 strategy("parse recovery builtin collision")
 method push(array<int> self, int x) => array.unshift(self, x)
@@ -287,8 +287,13 @@ a.push(1)
 var int p = 5
 z = ta.sma(close, p)
 '''
+    control = '''//@version=6
+strategy("parse recovery builtin collision")
+var int p = 5
+z = ta.sma(close, p)
+'''
 
-    _assert_method_declaration_fences_sma(source, expected_line=7)
+    _assert_method_declaration_does_not_fence_sma(source, control)
 
 
 @pytest.mark.parametrize(

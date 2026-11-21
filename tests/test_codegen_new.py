@@ -580,7 +580,9 @@ def test_strategy_convert_lowers_to_identity_or_warn_with_direction_and_site():
         f"{_CONVERT_DIR}to_symbol, /*call_site=*/1, syminfo_.currency, "
         "current_bar_.timestamp);"
     ) in cpp
-    # The refusing host conversions stay unused.
+    # With the account tied to the chart, the warning helper already
+    # implements identity; no rate lookup or refusing conversion is needed.
+    assert "has_account_currency_fx_at(" not in cpp
     assert "strategy_convert_to_account(" not in cpp
     assert "strategy_convert_to_symbol(" not in cpp
 
@@ -591,13 +593,13 @@ def test_strategy_convert_passes_declared_account_currency():
         "a = strategy.convert_to_symbol(high)\n"
     )
     cpp = _generate(src)
-    assert (
-        "strategy_convert_identity_or_warn((current_bar_.high), "
-        f"{_CONVERT_DIR}to_symbol, /*call_site=*/0, "
-    ) in cpp
-    line = next(l for l in cpp.splitlines() if "strategy_convert_identity_or_warn" in l)
+    line = next(l for l in cpp.splitlines() if "strategy_convert_identity_or_warn(" in l)
     assert "syminfo_.currency" not in line
-    assert '"EUR"' in line
+    assert 'strategy_convert_to_symbol(_pf_v, std::string("EUR"), current_bar_.timestamp)' in line
+    assert (f"strategy_convert_identity_or_warn(_pf_v, {_CONVERT_DIR}to_symbol, "
+            '/*call_site=*/0, std::string("EUR"), current_bar_.timestamp)') in line
+    assert line.count("current_bar_.high") == 1
+    assert line.endswith("}(current_bar_.high));")
 
 
 def test_strategy_convert_sites_follow_source_order_and_value_appears_once():
@@ -837,13 +839,13 @@ def test_str_contains():
 def test_str_lower():
     src = 'x = str.lower("HELLO")\n'
     cpp = _generate(src)
-    assert "tolower" in cpp
+    assert "_pf_case_lower" in cpp
 
 
 def test_str_upper():
     src = 'x = str.upper("hello")\n'
     cpp = _generate(src)
-    assert "toupper" in cpp
+    assert "_pf_case_upper" in cpp
 
 
 def test_str_length():
@@ -895,7 +897,7 @@ def test_str_replace():
 def test_str_trim():
     src = 'x = str.trim("  hello  ")\n'
     cpp = _generate(src)
-    assert "erase" in cpp
+    assert '::_pf_u8_trim(std::string("  hello  "))' in cpp
 
 
 def test_str_repeat():
@@ -1168,7 +1170,7 @@ dd = strategy.max_drawdown
     assert "Signal_Buy" in cpp or "Signal" in cpp
     assert "OBV" in cpp
     assert "Dev" in cpp
-    assert "tolower" in cpp or "toupper" in cpp
+    assert "_pf_case_lower" in cpp or "_pf_case_upper" in cpp
     assert "max_drawdown_" in cpp
     assert "strategy_entry" in cpp or "entry" in cpp.lower()
 
