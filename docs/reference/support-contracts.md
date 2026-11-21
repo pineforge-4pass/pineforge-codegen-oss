@@ -77,6 +77,10 @@ These checks change no accepted script's emission. The controls in
 `tests/test_series_to_simple_parameter_refusal.py` compare complete C++ to
 the pinned reference.
 
+`strategy.risk.allow_entry_in()` must be called at global scope. A call in a
+function, method or other local block raises PF-E2097 at the start of the
+call, matching TradingView's CE10188.
+
 In `//@version=6` scripts and libraries, user-defined type field defaults
 containing a call or an authored variable reference raise PF-E2087 at the
 default expression's first token, including within operators and ternaries.

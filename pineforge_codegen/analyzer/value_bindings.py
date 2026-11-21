@@ -22,6 +22,7 @@ from .tables import BUILTIN_VARS
 
 
 _VALUE_USE = "pf_authored_value_use"
+_GLOBAL_ONLY_CALLS = frozenset({"strategy.risk.allow_entry_in"})
 
 
 @dataclass(frozen=True)
@@ -93,7 +94,7 @@ def _declared_names(node: ASTNode):
 
 
 class ValueBindings(DiagnosticsHelper):
-    """One scope walk for reads, receivers, and reassignment targets.
+    """Resolve reads, receivers and writes, and validate built-in call scope.
 
     A declaration is visible only at later positions in its own scope and
     descendant scopes. Inventorying the whole tree lets diagnostics retain
@@ -110,6 +111,7 @@ class ValueBindings(DiagnosticsHelper):
         self.position = 0
         self.scopes: list[_Scope] = []
         self.uses: list[tuple[Identifier, _Scope, int, str]] = []
+        self._local_global_only_calls: dict[int, str] = {}
         # Current-tree identities for numeric source queries. Authored-use
         # annotations can retain pre-lowering identities through a copy.
         self.declaration_bindings: dict[int, tuple[int, str] | None] = {}
@@ -264,6 +266,11 @@ class ValueBindings(DiagnosticsHelper):
             )
             origin = (node.annotations or {}).get(_VALUE_USE)
             if not isinstance(origin, _ValueUse):
+                # Check the written scope once. Lowering can copy an authored
+                # argument into a different scope without moving its Pine call.
+                function_name = self._local_global_only_calls.get(id(node))
+                if function_name is not None and binding is None:
+                    self._error(f"Cannot use '{function_name}' in local scope.", node.loc)
                 origin = _ValueUse(
                     binding,
                     None if binding is not None else self._missing(
@@ -272,6 +279,17 @@ class ValueBindings(DiagnosticsHelper):
                 )
                 node.annotations = {**(node.annotations or {}), _VALUE_USE: origin}
             self.check_use(node)
+
+    def _record_local_namespace_call(self, callee: ASTNode) -> None:
+        members = []
+        root = callee
+        while isinstance(root, MemberAccess):
+            members.append(root.member)
+            root = root.object
+        if isinstance(root, Identifier):
+            name = ".".join((root.name, *reversed(members)))
+            if name in _GLOBAL_ONLY_CALLS:
+                self._local_global_only_calls[id(root)] = name
 
     def _body(self, body: list, scope: _Scope) -> None:
         for stmt in body:
@@ -376,6 +394,8 @@ class ValueBindings(DiagnosticsHelper):
         elif isinstance(node, FuncCall):
             # A bare callee is a callable label, not a value-variable read.
             if not isinstance(node.callee, Identifier):
+                if scope.kind != "global":
+                    self._record_local_namespace_call(node.callee)
                 self._visit(node.callee, scope)
             order = (node.annotations or {}).get("call_arg_order")
             for arg in order if order is not None else [*node.args, *node.kwargs.values()]:

@@ -140,6 +140,7 @@ CATALOG_ADDITIONS = {"PF-E0038", "PF-E0039", "PF-E0040", "PF-E0041", "PF-E0042",
                      "PF-E2083", "PF-E2084", "PF-E2085", "PF-E2086",  # A non-numeric strategy.default_entry_qty price.
                      "PF-E2087",  # A type field default contains a call or authored variable.
                      "PF-E2088", "PF-E2089", "PF-E2090", "PF-E2091", "PF-E2092",  # Pine v6 forms that TradingView refuses and PineForge translated.
+                     "PF-E2097",  # A global-scope-only built-in called in local scope.
                      "PF-E3102", "PF-E3103", "PF-E3104", "PF-E3105", "PF-E3110",
                      "PF-E3111",
                      "PF-E5093",  # max_bars_back(): num must resolve to a positive compile-time integer.
