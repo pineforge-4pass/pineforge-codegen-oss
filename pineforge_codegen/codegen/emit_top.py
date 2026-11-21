@@ -109,7 +109,9 @@ from .tables import (
 )
 from ..limits import iter_ast_nodes
 from .drawing import DRAWING_LIFETIME_CPP, POLYLINE_HANDLE_CPP
+from .helpers import cpp_code_only
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
+from .tv_string_trim import TV_STRING_TRIM_CPP, TV_STRING_TRIM_MARKER, TV_STRING_TRIM_NAME
 from .tv_string_units import TV_STRING_UNITS_CPP, TV_STRING_UNITS_MARKER
 
 
@@ -282,6 +284,7 @@ class TopLevelEmitter:
         # marker that ``_settle_tv_string_units`` resolves.
         lines.append(TV_STRING_UNITS_MARKER)
         lines.append("")
+        lines.extend((TV_STRING_TRIM_MARKER, ""))
         # Syminfo derivation helpers (_pf_derive_main_tickerid, _pf_derive_country)
         from .helpers_syminfo import emit_syminfo_helpers
         lines.extend(emit_syminfo_helpers())
@@ -2187,6 +2190,18 @@ class TopLevelEmitter:
             lines[marker] = TV_STRING_UNITS_CPP
         else:
             del lines[marker:marker + 2]
+
+    def _settle_tv_string_trim(self, lines: list[str]) -> None:
+        """Keep the trim helper only if an emitted expression calls it."""
+        marker = lines.index(TV_STRING_TRIM_MARKER)
+        if self._uses_tv_string_trim:
+            name = self._tv_string_trim_name
+            # Some paths visit expressions for bookkeeping and discard the
+            # resulting C++; a helper is needed only for a surviving call.
+            if f"::{name}(" in cpp_code_only("\n".join(lines)):
+                lines[marker] = TV_STRING_TRIM_CPP.replace(TV_STRING_TRIM_NAME, name)
+                return
+        del lines[marker:marker + 2]
 
     def _emit_extern_c(self, lines: list[str]) -> None:
         lines.append('extern "C" {')

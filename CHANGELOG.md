@@ -28,6 +28,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - `str.substring` now stops the run when the begin position is after the end position, and counts a `na` begin or end as 0, as TradingView does ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
 
+- `str.trim` also removes the other white space and line terminators of the ECMAScript `trim` set, such as U+3000 and U+FEFF, which TradingView removes. It previously removed only space, tab, LF and CR ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked
