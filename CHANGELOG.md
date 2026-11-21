@@ -41,6 +41,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - A TA length inside a `request.security` payload that reads a timeframe built-in is sized in the requested context, like the rest of the payload, when the request's timeframe is known before the first bar (a literal, or a value chosen from a closed set of timeframes): `request.security(syminfo.tickerid, "D", ta.sma(close, timeframe.isdaily ? 5 : 3))` is `ta.sma(close, 5)` and `ta.ema(close, timeframe.isdaily ? 0 : 3)` stops; both used the chart's timeframe. A request whose timeframe is chosen at run time from an open set of values keeps the code it had, so such a length is still sized from the chart's timeframe (with a run-time-chosen `"D"` on a chart that is not daily, the same payload computes the length 3 where the requested context's is 5); sizing it in the requested context is not done here ([#429](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/429); see also [#291](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/291)).
 
+- String literals containing lone surrogate code points now produce a located compile diagnostic (`PF-E0046`) instead of escaping `transpile()` as `UnicodeEncodeError` ([#435](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/435)).
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked
