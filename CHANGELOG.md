@@ -35,6 +35,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - A script whose only `str.length`, `str.pos`, `str.match` or `str.substring` call is inside a non-constant `request.security` timeframe no longer fails to build: the helper block that those calls need is kept.
 
+- Numeric inputs with positional options compile with their choices in the declared order, and `input()` preserves constant string defaults.
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked

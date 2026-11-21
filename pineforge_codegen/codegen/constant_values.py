@@ -131,6 +131,20 @@ class ConstantResolver:
         result = self.string_cache[binding]
         return read if isinstance(result, Identifier) else result
 
+    def plain_string_default(self, expr) -> str | None:
+        """Prove a bare input's string without using a runtime default."""
+        proof = self.expression(expr)
+        if proof is not None and proof.pine_type == PineType.STRING:
+            return proof.value
+        if isinstance(expr, Identifier):
+            declaration = self.index.decls.get(self.index.refs.get(id(expr)))
+            if (declaration is not None and not declaration.is_var
+                    and not (declaration.annotations or {}).get("qualifier")):
+                literal = self.string_input_argument(expr)
+                if isinstance(literal, StringLiteral):
+                    return literal.value
+        return None
+
     def input_default(self, call):
         contract = input_default_contract(call)
         default = call.args[0] if call.args else call.kwargs.get("defval")
