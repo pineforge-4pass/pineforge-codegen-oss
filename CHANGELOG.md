@@ -37,6 +37,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - A compound argument that is passed to a function whose TA length uses the parameter keeps its grouping. With `f(simple int n) => ta.sma(close, 2 * n)`, `f(1 + 2)` builds the length 6, not `2 * 1 + 2 = 4`, and `f(2 - 2)` with `ta.ema` stops like `f(0)` instead of building a length of 2; an argument that is an identifier or a literal generates the same code as before ([#291](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/291)).
 
+- `math.round` in a constant TA length rounds like TradingView, half away from zero (and decimal-aware with a precision): `ta.sma(close, math.round(9 / 2))` is `ta.sma(close, 5)`, `ta.ema(close, math.round(2.5))` is `ta.ema(close, 3)`, and `ta.ema(close, 1 - math.round(0.5))` stops; the constant folder used Python's rounding (4, 2 and 1). The same rule applies to every constant the generator folds with `math.round` or `round`, including negative ties (`math.round(-2.5)` is -3) ([#291](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/291)).
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked
