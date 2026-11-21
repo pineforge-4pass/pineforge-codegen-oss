@@ -33,6 +33,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - `str.upper` and `str.lower` now apply the Unicode case mappings (Unicode 15.0, no locale rules), including é and É, ß to SS and the final sigma, where they previously changed only ASCII letters ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
 
+- A script whose only `str.length`, `str.pos`, `str.match` or `str.substring` call is inside a non-constant `request.security` timeframe no longer fails to build: the helper block that those calls need is kept.
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked

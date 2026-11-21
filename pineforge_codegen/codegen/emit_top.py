@@ -2189,7 +2189,11 @@ class TopLevelEmitter:
             raise AssertionError(
                 "generated file lost the place of its UTF-16 unit helpers"
             ) from exc
-        if self._uses_tv_string_units:
+        # A bookkeeping visit may set the flag but discard its expression.
+        if self._uses_tv_string_units and re.search(
+            r"\b(?:_pf_u16_length|_pf_u16_pos|_pf_u16_substr_checked|_pf_u8_match)\(",
+            cpp_code_only("\n".join(lines)),
+        ):
             lines[marker] = TV_STRING_UNITS_CPP
         else:
             del lines[marker:marker + 2]
