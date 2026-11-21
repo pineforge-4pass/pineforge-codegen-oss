@@ -134,7 +134,8 @@ class DiagnosticsHelper:
         if isinstance(node, BinOp):
             return f"{self._operand_to_str(node.left)} {node.op} {self._operand_to_str(node.right)}"
         if isinstance(node, UnaryOp):
-            return f"{node.op}{self._operand_to_str(node.operand)}"
+            operand = self._operand_to_str(node.operand)
+            return f"{node.op} {operand}" if node.op == "not" else f"{node.op}{operand}"
         if isinstance(node, FuncCall):
             args = [self._expr_to_str(a) for a in node.args]
             if is_input_call(node):

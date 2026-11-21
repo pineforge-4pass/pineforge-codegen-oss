@@ -22,6 +22,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (1.15.0)
 
+- Stable TA length expressions preserve the required space after the Pine `not` operator when their runtime reset is reconstructed.
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked
