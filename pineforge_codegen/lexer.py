@@ -788,6 +788,17 @@ class Lexer:
         ch = self._advance()
         buf.append(self._STRING_ESCAPES.get(ch, ch))
 
+    def _emit_string(self, value: str, start_line: int, start_col: int,
+                     end_col: int) -> None:
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            self._emit_diagnostic(
+                "String literal text is not valid Unicode.",
+                start_line, start_col, end_col,
+            )
+        self._emit(TokenType.STRING, value, start_line, start_col, end_col)
+
     # Pine v6 User Manual, Strings: "In Pine v6, programmers can use line
     # wrapping to define single-line literal strings across multiple code
     # lines, where each wrapped line has an indentation of one or more spaces.
@@ -826,7 +837,7 @@ class Lexer:
         else:
             self._advance()  # consume the closing quote
         value = "".join(buf)
-        self._emit(TokenType.STRING, value, start_line, start_col, self.col)
+        self._emit_string(value, start_line, start_col, self.col)
 
     # Pine v6 User Manual, Strings, "Multiline strings": "A multiline string
     # is a literal character sequence enclosed by three pairs of ASCII
@@ -843,7 +854,7 @@ class Lexer:
         while not self._at_end():
             if self.source.startswith(delimiter, self.pos):
                 self._advance_to(self.pos + 3)
-                self._emit(TokenType.STRING, "".join(buf), start_line, start_col, self.col)
+                self._emit_string("".join(buf), start_line, start_col, self.col)
                 return
             if self.source[self.pos] == "\\" and self.pos + 1 < len(self.source):
                 self._read_escape(buf)
@@ -857,7 +868,7 @@ class Lexer:
                   f"for one opened with {chr(39) * 3}); escape a quote that would end "
                   "it early."),
         )
-        self._emit(TokenType.STRING, "".join(buf), start_line, start_col, self.col)
+        self._emit_string("".join(buf), start_line, start_col, self.col)
 
     def _read_ident(self, start_line: int, start_col: int) -> None:
         buf: list[str] = []

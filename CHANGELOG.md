@@ -22,6 +22,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (1.15.0)
 
+- String literals containing lone surrogate code points now produce a located compile diagnostic (`PF-E0046`) instead of escaping `transpile()` as `UnicodeEncodeError` ([#435](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/435)).
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked
