@@ -3920,7 +3920,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             o = self._arith_operand_to_str(node.operand, _udf_stack, _depth)
             if o is None:
                 return None
-            return f"{node.op}{o}"
+            return f"{node.op} {o}" if node.op == "not" else f"{node.op}{o}"
         if isinstance(node, Ternary):
             c = self._arith_operand_to_str(node.condition, _udf_stack, _depth)
             t = self._arith_operand_to_str(node.true_val, _udf_stack, _depth)
