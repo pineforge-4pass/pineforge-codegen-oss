@@ -39,6 +39,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - `math.round` in a constant TA length rounds like TradingView, half away from zero (and decimal-aware with a precision): `ta.sma(close, math.round(9 / 2))` is `ta.sma(close, 5)`, `ta.ema(close, math.round(2.5))` is `ta.ema(close, 3)`, and `ta.ema(close, 1 - math.round(0.5))` stops; the constant folder used Python's rounding (4, 2 and 1). The same rule applies to every constant the generator folds with `math.round` or `round`, including negative ties (`math.round(-2.5)` is -3) ([#291](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/291)).
 
+- A TA length inside a `request.security` payload that reads a timeframe built-in is sized in the requested context, like the rest of the payload: `request.security(syminfo.tickerid, "D", ta.sma(close, timeframe.isdaily ? 5 : 3))` is `ta.sma(close, 5)` and `ta.ema(close, timeframe.isdaily ? 0 : 3)` stops; both used the chart's timeframe ([#291](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/291)).
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked

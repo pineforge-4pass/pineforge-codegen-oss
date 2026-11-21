@@ -7340,7 +7340,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                                 variant.get("binding_stack", ()),
                             )
                         if rt is not None:
-                            rendered = rt
+                            # A direct request.security payload has no helper
+                            # binding stack, so its ordinary reset rendering
+                            # spells the chart's script_tf_. Match the
+                            # requested-context lowering used by the dynamic
+                            # TA path before rebuilding the requested copy.
+                            rendered = self._ta_payload_cpp(rt, info["sec_id"])
                             any_runtime = True
                         else:
                             rendered = (
