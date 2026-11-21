@@ -265,6 +265,28 @@ def test_unicode_string_preserves_its_compiled_bytes(text, spelling, expected_by
     assert decoded.encode("utf-8") == expected_bytes
 
 
+@pytest.mark.parametrize(("literal", "end_col"), (
+    ('"a\ud800b"', 10),
+    ('"a\0\ud800b"', 11),
+    ('"""a\ud800b"""', 14),
+))
+def test_lone_surrogate_in_a_string_literal_is_a_located_compile_error(
+        literal, end_col,
+):
+    with pytest.raises(CompileError) as error:
+        transpile(HEADER + f"s = {literal}\n" + TRADE, filename="surrogate.pine")
+
+    [diagnostic] = error.value.diagnostics
+    assert diagnostic.code == "PF-E0046"
+    assert diagnostic.message == "String literal text is not valid Unicode."
+    assert diagnostic.level == Level.ERROR
+    assert diagnostic.phase == Phase.LEXER
+    assert diagnostic.location.file == "surrogate.pine"
+    assert diagnostic.location.line == 3
+    assert diagnostic.location.col == 5
+    assert diagnostic.location.end_col == end_col
+
+
 @pytest.mark.parametrize("text,spelling,expected_bytes,array_size", STRINGS)
 def test_unicode_literal_compiler_decodes_the_authored_bytes(
         text, spelling, expected_bytes, array_size):
