@@ -45,10 +45,14 @@ _BINARY = {
 _UNARY = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 
 
-def _pine_round(value: int | float | bool, precision: int | bool = 0):
+def _pine_round(value: int | float | bool, precision: int | bool | None = None):
     """Round like Pine, using decimal half-away-from-zero ties."""
-    decimal_value = Decimal(repr(int(value) if type(value) is bool else value))
-    exponent = -int(precision)
+    # An integral float's shortest repr can omit significant integer digits.
+    if type(value) is float and value.is_integer():
+        decimal_value = Decimal(value)
+    else:
+        decimal_value = Decimal(repr(int(value) if type(value) is bool else value))
+    exponent = 0 if precision is None else -int(precision)
     quantum = Decimal(1).scaleb(exponent)
     # quantize needs enough precision for the complete result, including
     # trailing decimal places and large integral values.
@@ -60,7 +64,7 @@ def _pine_round(value: int | float | bool, precision: int | bool = 0):
     with localcontext() as context:
         context.prec = max(28, result_digits)
         rounded = decimal_value.quantize(quantum, rounding=ROUND_HALF_UP)
-    return int(rounded) if exponent == 0 else float(rounded)
+    return int(rounded) if precision is None else float(rounded)
 
 
 _FUNCTIONS = {

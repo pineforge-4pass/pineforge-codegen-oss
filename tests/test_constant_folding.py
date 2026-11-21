@@ -11,8 +11,8 @@ from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
 
 
-def _generator() -> CodeGen:
-    source = '//@version=6\nstrategy("numeric folding")\n'
+def _generator(body: str = "") -> CodeGen:
+    source = '//@version=6\nstrategy("numeric folding")\n' + body
     ast = Parser(Lexer(source).tokenize(), source=source).parse()
     return CodeGen(Analyzer(ast).analyze())
 
@@ -64,7 +64,7 @@ def test_folding_does_not_invoke_python_expression_execution(monkeypatch) -> Non
         folded = gen._resolve_known("math.abs(-7) + round(2.5)")
         refused = gen._resolve_known("round(abs.__class__.__name__)")
     assert calls == []
-    # TradingView capture: math.abs(-7) + math.round(2.5) is 10.
+    # The sum is 7 + 3, using the captured TradingView result math.round(2.5) = 3.
     assert folded == "10"
     assert refused == "round(abs.__class__.__name__)"
 
@@ -80,6 +80,8 @@ def test_folding_does_not_invoke_python_expression_execution(monkeypatch) -> Non
     ("math.round(length / 3)", "5"),
     # TradingView capture: math.round(2.5) is 3.
     ("round(2.5)", "3"),
+    ("math.round(math.pow(2, 60))", "1152921504606846976"),
+    ("math.round(math.pow(2, 60)) % 7 + 1", "2"),
     ("math.pow(2, 3)", "8"),
     ("math.sin(math.pi / 2)", "1"),
     ("math.log(1) + math.exp(0)", "1"),
@@ -146,6 +148,18 @@ def test_round_precision_is_bounded_before_callable_dispatch(monkeypatch, name, 
 ])
 def test_bounded_round_precision_preserves_existing_values(expression: str, expected: str) -> None:
     assert _generator()._resolve_known(expression) == expected
+
+
+def test_round_result_type_depends_on_presence_of_precision() -> None:
+    whole = constant_fold.fold_numeric_expression("math.round(2.5)", {})
+    assert type(whole) is int and whole == 3
+    result = constant_fold.fold_numeric_expression("math.round(2.5, 0)", {})
+    assert isinstance(result, float) and result == 3.0
+
+
+def test_rounded_float_input_default_keeps_float_text() -> None:
+    gen = _generator('amount = input.float(math.round(2.5, 0), "Amount")\n')
+    assert gen._resolve_known("amount") == "3.0"
 
 
 @pytest.mark.parametrize("expression", [
