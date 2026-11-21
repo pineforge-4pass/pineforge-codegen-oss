@@ -48,13 +48,7 @@ def _with_call(declarations: str, argument: str) -> str:
     return HEADER + EMA + declarations + f"{CALL}({argument})\n" + ENTRIES + TRACE
 
 
-def _without_call(declarations: str) -> str:
-    # The call is inside a helper the declarations run every bar.
-    return HEADER + EMA + declarations + ENTRIES + TRACE
-
-
-# (id, declarations, argument or None, the value the argument means).
-# None: the declarations hold the call, inside a helper.
+# (id, declarations, argument, the value the argument means).
 SHAPES = [
     ("literal-condition", "", f"true ? {LONG} : {ALL}", "long"),
     ("const-direction", f"const chosen = {LONG}\n", "chosen", "long"),
@@ -73,20 +67,18 @@ SHAPES = [
      f"isPositive(1.0) ? {LONG} : {ALL}", "long"),
     ("unknown-helper-return", f"direction() => {LONG}\n", "direction()", "long"),
     ("forwarded-input",
-     "relay(bool enabled) =>\n"
-     f"    {CALL}(enabled ? {LONG} : {ALL})\n    1\nx = relay(input.bool(true))\n",
-     None, "long"),
+     "relay(bool enabled) => enabled\ngate = input.bool(true)\n",
+     f"relay(gate) ? {LONG} : {ALL}", "long"),
     ("forwarded-method-input",
-     "method relay(bool enabled) =>\n"
-     f"    {CALL}(enabled ? {LONG} : {ALL})\n    1\ngate = input.bool(true)\nx = gate.relay()\n",
-     None, "long"),
+     "method relay(bool enabled) => enabled\ngate = input.bool(true)\n",
+     f"gate.relay() ? {LONG} : {ALL}", "long"),
     ("parameter-shadows-builtin",
-     f"run(float close) =>\n    {CALL}(close > 0 ? {LONG} : {ALL})\n    1\nx = run(1.0)\n",
-     None, "long"),
+     "run(float close) => close > 0\n",
+     f"run(1.0) ? {LONG} : {ALL}", "long"),
     ("constant-local-shadows-series-global",
      f"chosen = close > open ? {LONG} : {ALL}\n"
-     f"run() =>\n    chosen = {LONG}\n    {CALL}(chosen)\n    1\nx = run()\n",
-     None, "long"),
+     f"run() =>\n    chosen = {LONG}\n    chosen\n",
+     "run()", "long"),
 ]
 
 # The input arms: dir == 'Long' selects the first constant, anything else the
@@ -94,12 +86,6 @@ SHAPES = [
 ARMS = [
     ("long", "short"), ("short", "long"), ("long", "all"), ("all", "short"),
 ]
-
-
-def _shape_source(declarations: str, argument: str | None) -> str:
-    if argument is None:
-        return _without_call(declarations)
-    return _with_call(declarations, argument)
 
 
 def _arms_source(true_direction: str, false_direction: str, default: str) -> str:
@@ -137,7 +123,7 @@ def _assert_same(subject, subject_tag, control, label):
                          ids=[shape[0] for shape in SHAPES])
 def test_a_direction_argument_is_lowered_by_its_value_in_translation(
         name, declarations, argument, means):
-    cpp = transpile(_shape_source(declarations, argument))
+    cpp = transpile(_with_call(declarations, argument))
     # A script that restricts entries to one side must not end up with a
     # constant "all directions" for its call: that is how an argument that is
     # not the bare constant used to be lowered.
@@ -164,7 +150,7 @@ def test_every_shape_admits_the_entries_of_the_literal_it_means(tmp_path):
     feed = chart_feed_head(engine, tmp_path, 1500)
     builds = {f"control-{value}": Build(_control(value), trace=True) for value in BARE}
     for name, declarations, argument, means in SHAPES:
-        builds[f"shape-{name}"] = Build(_shape_source(declarations, argument), trace=True)
+        builds[f"shape-{name}"] = Build(_with_call(declarations, argument), trace=True)
     for true_direction, false_direction in ARMS:
         for default in ("Long", "Short"):
             other = "Short" if default == "Long" else "Long"

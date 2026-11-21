@@ -46,12 +46,12 @@ def test_top_level_series_direction_is_refused():
     _refused(HEADER + f"{CALL}({argument})\n", argument, 3)
 
 
-METHOD_ARGUMENT = f"session.ismarket[1] ? {LONG} : {ALL}"
-METHOD_SOURCE = (
+SESSION_READ = "session.ismarket[1]"
+METHOD_HISTORY_REFERENCE = (
     HEADER
     + "type Foo\n    float v = 1\n"
     + "method m(Foo self) =>\n"
-    + f"    {CALL}({METHOD_ARGUMENT})\n"
+    + f"    {CALL}({SESSION_READ} ? {LONG} : {ALL})\n"
     + "    self.v > 0\n"
     + "foo = Foo.new()\n"
     + "x = foo.m()\n"
@@ -59,18 +59,26 @@ METHOD_SOURCE = (
 )
 
 
-def test_method_session_history_reports_qualifier_before_pf_e5048():
-    # This is the old REFUSED row in test_e2e_session_history.py. It now
-    # points at session (argument start, column 34), not '[' (column 50).
-    _refused(METHOD_SOURCE, METHOD_ARGUMENT, 6)
-
-
-def test_unresolved_method_receiver_reports_qualifier_at_definition():
-    source = METHOD_SOURCE.replace(
-        "x = foo.m()\n",
-        "read(receiver) => receiver.m()\nx = read(foo)\n",
+def test_method_session_history_direction_is_refused_at_the_global_call():
+    declarations = (
+        "type Foo\n    bool enabled = true\n"
+        f"method m(Foo self) => self.enabled and {SESSION_READ}\n"
+        "foo = Foo.new()\n"
     )
-    _refused(source, METHOD_ARGUMENT, 6)
+    direction = f"foo.m() ? {LONG} : {ALL}"
+    source = HEADER + declarations + f"{CALL}({direction})\n"
+    _refused(source, direction, 3 + declarations.count("\n"))
+
+
+def test_unresolved_method_receiver_reports_scope_before_qualifier():
+    source = METHOD_HISTORY_REFERENCE.replace(
+        "x = foo.m()\n", "read(receiver) => receiver.m()\nx = read(foo)\n",
+    )
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="direction.pine")
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic.code == "PF-E2097"
+    assert (diagnostic.location.line, diagnostic.location.col) == (6, 5)
 
 
 @pytest.mark.parametrize("body,line", [
@@ -79,7 +87,7 @@ def test_unresolved_method_receiver_reports_qualifier_at_definition():
     (f"chosen = {LONG}\nchosen := close > open ? {LONG} : {ALL}\n{CALL}(chosen)\n", 5),
     (f"chosen = {LONG}\nif close > open\n    chosen := {ALL}\n{CALL}(chosen)\n", 6),
     (f"run() =>\n    chosen = close > open ? {LONG} : {ALL}\n"
-     f"    {CALL}(chosen)\n    1\nx = run()\n", 5),
+     f"    chosen\nchosen = run()\n{CALL}(chosen)\n", 7),
 ], ids=["declaration", "alias-chain", "reassignment", "controlled-write", "local"])
 def test_series_direction_through_bound_variable_is_refused(body, line):
     _refused(HEADER + body, "chosen", line)
@@ -132,33 +140,18 @@ def test_series_call_and_operator_results_are_refused(declarations, condition):
     ("relay(bool enabled)", "relay(enabled=close > open)"),
 ], ids=["function", "named-function"])
 def test_forwarded_series_parameter_reaches_builtin_contract(declaration, invocation):
-    argument = f"enabled ? {LONG} : {ALL}"
+    argument = f"{invocation} ? {LONG} : {ALL}"
+    _refused(HEADER + f"{declaration} => enabled\n{CALL}({argument})\n", argument, 4)
+
+
+def test_method_on_expression_receiver_leaves_the_direction_qualifier_unknown():
+    # The qualifier query cannot resolve the expression receiver's type, so
+    # the returned direction has no proven series qualifier.
     source = (
-        HEADER + f"{declaration} =>\n    {CALL}({argument})\n"
-        + f"    1\nx = {invocation}\n"
+        HEADER + f"method relay(bool enabled) => enabled ? {LONG} : {ALL}\n"
+        + "chosen = (close > open).relay()\n"
+        + f"{CALL}(chosen)\n"
     )
-    _refused(source, argument, 4)
-
-
-def test_method_on_expression_receiver_forwarding_series_is_accepted_by_unknown_evidence():
-    # ACCEPTED BECAUSE THE EVIDENCE IS UNKNOWN, not because TradingView accepts
-    # it: whether TradingView refuses a series receiver that a method forwards
-    # into allow_entry_in's simple parameter is an open question.
-    # This source was the "method" row of the test above.
-    # The classifier refuses only what it proves, and it has no proof
-    # here: the analyzer gives the expression receiver `close > open` no type,
-    # so the typed-parameter check never runs for the call, and the classifier's
-    # own receiver hint is unresolved for it too (its method key is not found).
-    # When a later change gives this call evidence, move the source back into
-    # the refused rows above: the last assertion then fails, which is the
-    # signal to do so.
-    argument = f"enabled ? {LONG} : {ALL}"
-    source = (
-        HEADER + f"method relay(bool enabled) =>\n    {CALL}({argument})\n"
-        + "    1\nx = (close > open).relay()\n"
-    )
-    assert transpile(source, filename="direction.pine")
-
     from pineforge_codegen.analyzer.qualifiers import ParameterQualifiers
     from pineforge_codegen.analyzer.value_bindings import ValueBindings
     from pineforge_codegen.lexer import Lexer
@@ -169,7 +162,8 @@ def test_method_on_expression_receiver_forwarding_series_is_accepted_by_unknown_
     bindings.resolve()
     qualifiers = ParameterQualifiers(ast, bindings.declaration_bindings, "direction.pine")
     assert qualifiers.active
-    assert qualifiers.infer(ast.body[-1].value, {}) is None
+    assert qualifiers.infer(ast.body[-2].value, {}) is None
+    qualifiers.check_builtin(ast.body[-1].expr)
 
 
 def test_named_series_direction_is_refused():
@@ -212,21 +206,16 @@ ACCEPTED = [
                  f"    chosen = close > open ? {LONG} : {ALL}\n    chosen\n",
                  "chosen", id="unrelated-series-local"),
     pytest.param(f"chosen = close > open ? {LONG} : {ALL}\n"
-                 f"run() =>\n    chosen = {LONG}\n    {CALL}(chosen)\n    1\nx = run()\n",
-                 LONG, id="constant-local-shadows-series-global"),
-    pytest.param("run(float close) =>\n"
-                 f"    {CALL}(close > 0 ? {LONG} : {ALL})\n    1\nx = run(1.0)\n",
-                 LONG, id="parameter-shadows-builtin"),
+                 f"run() =>\n    chosen = {LONG}\n    chosen\n",
+                 "run()", id="constant-local-shadows-series-global"),
+    pytest.param("run(float close) => close > 0\n",
+                 f"run(1.0) ? {LONG} : {ALL}", id="parameter-shadows-builtin"),
     pytest.param("isPositive(float value) => value > 0\n",
                  f"isPositive(1.0) ? {LONG} : {ALL}", id="simple-helper-return"),
-    pytest.param("relay(bool enabled) =>\n"
-                 f"    {CALL}(enabled ? {LONG} : {ALL})\n"
-                 "    1\nx = relay(input.bool(true))\n",
-                 LONG, id="forwarded-input"),
-    pytest.param("method relay(bool enabled) =>\n"
-                 f"    {CALL}(enabled ? {LONG} : {ALL})\n"
-                 "    1\ngate = input.bool(true)\nx = gate.relay()\n",
-                 LONG, id="forwarded-method-input"),
+    pytest.param("relay(bool enabled) => enabled\ngate = input.bool(true)\n",
+                 f"relay(gate) ? {LONG} : {ALL}", id="forwarded-input"),
+    pytest.param("method relay(bool enabled) => enabled\ngate = input.bool(true)\n",
+                 f"gate.relay() ? {LONG} : {ALL}", id="forwarded-method-input"),
     pytest.param("keep(simple int amount) => amount\nx = keep(input.int(7))\n",
                  LONG, id="user-contract-alongside-builtin"),
     pytest.param(f"direction() => {LONG}\n", "direction()", id="unknown-helper-return"),
@@ -272,7 +261,7 @@ def test_series_direction_was_accepted_by_reference(reference, tmp_path):
 
 def test_method_history_reference_failed_for_session_history(reference, tmp_path):
     pine = tmp_path / "strategy.pine"
-    pine.write_text(METHOD_SOURCE, encoding="utf-8")
+    pine.write_text(METHOD_HISTORY_REFERENCE, encoding="utf-8")
     before = transpile_json(pine, root=reference)
     assert not before["ok"]
     error, = (item for item in before["diagnostics"] if item["severity"] == "error")
