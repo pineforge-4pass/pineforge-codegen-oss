@@ -45,6 +45,15 @@ x = ta.sma(close, 4)
 plot(x)
 """
 
+SMA_LARGE_POWER = """//@version=6
+strategy("SMA with rounded power")
+x = ta.sma(close, math.round(math.pow(2, 60)) % 7 + 1)
+two = ta.sma(close, 2)
+// @pf-trace x=x
+// @pf-trace two=two
+plot(x)
+"""
+
 EMA_ROUNDED = """//@version=6
 strategy("round length EMA")
 x = ta.ema(close, math.round(2.5))
@@ -113,6 +122,7 @@ def runs(tmp_path_factory):
             "sma-rounded": Build(SMA_ROUNDED, trace=True),
             "sma-five": Build(SMA_FIVE, trace=True),
             "sma-four": Build(SMA_FOUR, trace=True),
+            "sma-large-power": Build(SMA_LARGE_POWER, trace=True),
             "ema-rounded": Build(EMA_ROUNDED, trace=True),
             "ema-three": Build(EMA_THREE, trace=True),
             "ema-two": Build(EMA_TWO, trace=True),
@@ -151,6 +161,13 @@ def test_sma_rounds_nine_halves_to_five(runs):
     four = _trace(ok(runs, "sma-four"), "x")
     _assert_equal_where_defined(rounded, five)
     _assert_differs(rounded, four)
+
+
+def test_sma_length_preserves_exact_rounded_power(runs):
+    outcome = ok(runs, "sma-large-power")
+    rounded = _trace(outcome, "x")
+    _assert_equal_where_defined(rounded, _trace(outcome, "two"))
+    _assert_differs(rounded, _trace(ok(runs, "sma-five"), "x"))
 
 
 def test_ema_rounds_two_point_five_to_three(runs):
