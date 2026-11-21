@@ -20,7 +20,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
-## Unreleased (next release)
+## Unreleased (1.15.0)
+
+## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked
   source adapters for fixed, input and simple lengths, including helper and
@@ -31,7 +33,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `pineforge/source/pine_ta_length.hpp`; regenerate C++ and relink.
 
 - `ta.sma` accepts supported lengths that vary by bar, including lengths from inline inputs, local variables, and loop counters. Unsupported lengths that depend on `var` or `varip` still report an error, and tuple declarations that reuse a parameter name in the same function body are rejected before C++ is generated. This also fixes Unicode handling in `str.match` and `na` separators in `str.split`.
+
 - `strategy.convert_to_account` and `strategy.convert_to_symbol` now warn in the run report and return the input unchanged, still in its original currency, when no conversion rate is available ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
+
+## 1.13.0 — 2026-11-18
+
 - Strategy sizing constants retain their string values in expressions, aliases
   and helper calls. Host order and risk settings convert these values to their
   numeric representation only at the setting boundary.
@@ -47,14 +53,17 @@ supported as exact pairs; on the 0.x line they are independent. See the
   specific diagnostic templates distinguish primitive types from qualifiers
   using their catalog argument kinds. Dotted builtin signatures retain supplied
   arguments, including escaped string literals and VWAP anchors. (#394)
+
 - Script identifiers spelled like integer-to-float conversion temporaries,
   including the underscore suffixes of nested conversions, now use the
   generator's reserved-name escaping.
+
 - Reference-typed UDT fields keep their type when initialized or reassigned
   with `na`, including array defaults. Drawing handles cross user-function
   and tuple boundaries by value, and `label(na)` produces a missing label
   handle. Polyline locals, arrays, fields and delete methods retain opaque
   handles and argument evaluation while rendering remains a visual no-op.
+
 - Generated function variants and persistent local copies avoid authored and
   generated member names, including names ending in `_cs1` and composed names
   that overlap collection-history or requested-context storage. Persistent
@@ -62,9 +71,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
   uses their generated spelling. Declarations, calls and history storage use
   the same allocated identities, including when selecting reachable variants
   for emission. Regenerate C++ and relink affected strategies.
+
 - Persistent declarations accept a type qualifier after `var` or `varip`.
   Lower-timeframe requests return independently typed arrays for inline and
   helper-returned tuple payloads.
+
 - Complete nested indentation levels can combine tabs and spaces. Requested
   `na`/`nz` helper parameters retain their bindings beside time operations;
   global tuple declarations and their member histories share one requested
@@ -87,6 +98,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `array.sort_indices` honors a supplied sort direction.
   Scalar function overloads no longer crash during type checking.
   Regenerate C++ and relink affected strategies.
+
 - A zone name the engine rejects now makes calendar-form `timestamp()` stop the
   run at its first evaluation, instead of silently calculating a UTC value.
   The paired engine reports a typed timezone error identifying the failed bar.
@@ -106,13 +118,16 @@ supported as exact pairs; on the 0.x line they are independent. See the
   returns and history clones. Untyped arguments retain collection element
   types through nested calls and tuple bindings, and reassigned matrix locals
   keep their initializer's matrix type. (#391)
+
 - Deeply nested user-function calls share type-inference work within each
   expression query, including when a return type remains unresolved.
+
 - `array.sort_indices` returns integer indices, accepts typed `array<int>`
   results and honors ascending/default or descending order in namespace and
   method calls, including named arguments. Numeric `na` values sort last in
   ascending order and first in descending order; string arrays use lexical
   ordering. The source array is unchanged. (#392)
+
 - `request.security` keeps the requested-bar history and declaration-time
   value of top-level scalar copies of persistent or reassigned globals,
   including copy chains. A declared float copy preserves an integer source's
