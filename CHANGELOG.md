@@ -35,6 +35,25 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - A script whose only `str.length`, `str.pos`, `str.match` or `str.substring` call is inside a non-constant `request.security` timeframe no longer fails to build: the helper block that those calls need is kept.
 
+- A compound argument that is passed to a function whose TA length uses the parameter keeps its grouping. With `f(simple int n) => ta.sma(close, 2 * n)`, `f(1 + 2)` builds the length 6, not `2 * 1 + 2 = 4`, and `f(2 - 2)` with `ta.ema` stops like `f(0)` instead of building a length of 2; an argument that is an identifier or a literal generates the same code as before ([#427](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/427); see also [#291](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/291)).
+
+- `math.round` in a constant TA length rounds like TradingView, half away from zero (and decimal-aware with a precision): `ta.sma(close, math.round(9 / 2))` is `ta.sma(close, 5)`, `ta.ema(close, math.round(2.5))` is `ta.ema(close, 3)`, and `ta.ema(close, 1 - math.round(0.5))` stops; the constant folder used Python's rounding (4, 2 and 1). The same rule applies to every constant the generator folds with `math.round` or `round`, including negative ties (`math.round(-2.5)` is -3) ([#428](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/428); see also [#291](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/291)).
+
+- A TA length inside a `request.security` payload that reads a timeframe built-in is sized in the requested context, like the rest of the payload, when the request's timeframe is known before the first bar (a literal, or a value chosen from a closed set of timeframes): `request.security(syminfo.tickerid, "D", ta.sma(close, timeframe.isdaily ? 5 : 3))` is `ta.sma(close, 5)` and `ta.ema(close, timeframe.isdaily ? 0 : 3)` stops; both used the chart's timeframe. A request whose timeframe is chosen at run time from an open set of values keeps the code it had, so such a length is still sized from the chart's timeframe (with a run-time-chosen `"D"` on a chart that is not daily, the same payload computes the length 3 where the requested context's is 5); sizing it in the requested context is not done here ([#429](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/429); see also [#291](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/291)).
+
+- String literals containing lone surrogate code points now produce a located compile diagnostic (`PF-E0046`) instead of escaping `transpile()` as `UnicodeEncodeError` ([#435](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/435)).
+
+- `array.new<T>(size, ...)` and its supported typed aliases create an empty
+  array when `size` is `na`, and execution continues. A non-`na` size that is
+  not finite, is negative, or exceeds the runtime container's limit stops the
+  run. See [Array constructor sizes](docs/reference/support-contracts.md#array-constructor-sizes)
+  (#436). This behavior dates to 1.11.0
+  ([#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
+
+- Stable TA length expressions preserve the required space after the Pine `not` operator when their runtime reset is reconstructed.
+
+- `strategy.risk.allow_entry_in()` now reports `PF-E2097` at the call in local scope, matching TradingView. Move the call to global scope ([#434](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/434)).
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked

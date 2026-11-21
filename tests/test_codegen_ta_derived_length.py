@@ -302,6 +302,25 @@ plot(fastMA)
     assert "std::max" in reset
 
 
+def test_stable_ternary_length_separates_not_operator():
+    src = """//@version=6
+strategy("stable-not-ternary")
+flag = input.bool(false, "Flag")
+length = not flag ? 9 : 3
+plot(ta.sma(close, length))
+"""
+    cpp = transpile(src)
+    members = re.findall(r"(_ta_sma_\d+)\(", cpp)
+    assert members, "no SMA member emitted"
+    reset = _reset_line(cpp, members[0])
+    assert reset, "no runtime reset emitted for stable-not length"
+    # Pine's word operator must remain separate from its operand when the
+    # stable-length spelling is reparsed for the runtime reset.
+    assert '!(get_input_bool("Flag", false))' in reset
+    assert "notflag" not in reset
+    assert "ta::SMA(1)" not in reset
+
+
 # ---------------------------------------------------------------------------
 # 5. Function-local math-derived length over input-derived parameters
 #    filterLen = math.max(1, int(math.round(2 / a)))   inside AIFilter(data,a,p)

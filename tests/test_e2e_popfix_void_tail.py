@@ -2,11 +2,9 @@
 
 ``goLong() => strategy.entry(...) ; strategy.exit(...)`` was emitted as a
 ``double`` method ending in ``return strategy_exit(...)``: C++ that does not
-compile ("void value not ignored"). Every builtin Pine types void -- the order
-calls, ``strategy.risk.*``, ``log.*`` and ``runtime.error`` -- is now emitted
-as a statement, also at the end of an ``if``/``switch`` arm, and the function
-returns its default. ``strategy.risk.*`` last in a function used to crash the
-transpiler with a ValueError.
+compile ("void value not ignored"). Void order calls, ``log.*`` and
+``runtime.error`` are emitted as statements, also at the end of an
+``if``/``switch`` arm, and the function returns its default.
 
 The shape is replayed end to end beside its spelled-out reference, the same
 calls inlined at the call sites: identical trades.
@@ -69,7 +67,7 @@ def test_void_tail_trades_like_the_inlined_calls(runs):
     print("void tail:", assert_same_runs(ok(runs, "shape"), ok(runs, "reference")))
 
 
-def test_every_void_builtin_ends_a_function_or_arm():
+def test_void_builtins_end_a_function_or_arm():
     cpp = transpile(HEAD + """
 logIt() =>
     log.info("x")
@@ -78,12 +76,9 @@ fail() =>
         runtime.error("negative close")
 cancelAll() =>
     strategy.cancel_all()
-risk() =>
-    strategy.risk.allow_entry_in(strategy.direction.long)
 logIt()
 fail()
 cancelAll()
-risk()
 if close > open
     strategy.entry("L", strategy.long)
 """)

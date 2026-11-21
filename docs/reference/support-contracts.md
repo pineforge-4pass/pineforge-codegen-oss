@@ -77,6 +77,10 @@ These checks change no accepted script's emission. The controls in
 `tests/test_series_to_simple_parameter_refusal.py` compare complete C++ to
 the pinned reference.
 
+`strategy.risk.allow_entry_in()` must be called at global scope. A call in a
+function, method or other local block raises PF-E2097 at the start of the
+call, matching TradingView's CE10188.
+
 In `//@version=6` scripts and libraries, user-defined type field defaults
 containing a call or an authored variable reference raise PF-E2087 at the
 default expression's first token, including within operators and ternaries.
@@ -396,3 +400,10 @@ signature in `signatures.py`, then wire the dispatch in
 namespace-specific visitor module). The cross-namespace official-surface
 test will fail at PR time if you forget any of these steps.
 
+### Array constructor sizes
+
+`array.new<T>(size, ...)` and supported typed aliases such as
+`array.new_float(size, ...)` create an empty array when `size` is `na`, and
+execution continues. With `int n = na` and `a = array.new<float>(n)`,
+`a.size()` returns 0. A size other than `na` stops the run if it is not finite,
+is negative, or exceeds the runtime container's limit.

@@ -3920,7 +3920,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             o = self._arith_operand_to_str(node.operand, _udf_stack, _depth)
             if o is None:
                 return None
-            return f"{node.op}{o}"
+            return f"{node.op} {o}" if node.op == "not" else f"{node.op}{o}"
         if isinstance(node, Ternary):
             c = self._arith_operand_to_str(node.condition, _udf_stack, _depth)
             t = self._arith_operand_to_str(node.true_val, _udf_stack, _depth)
@@ -7340,7 +7340,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                                 variant.get("binding_stack", ()),
                             )
                         if rt is not None:
-                            rendered = rt
+                            # A direct request.security payload has no helper
+                            # binding stack. Closed requests use the
+                            # requested-context lowering used by the dynamic TA
+                            # path; runtime requests keep the chart-context
+                            # reset because their evaluator owns the requested
+                            # state.
+                            rendered = (
+                                rt
+                                if info.get("runtime_context")
+                                else self._ta_payload_cpp(rt, info["sec_id"])
+                            )
                             any_runtime = True
                         else:
                             rendered = (

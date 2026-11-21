@@ -73,6 +73,10 @@ Translation also preserves these value contracts:
 - `line(na)` and `box(na)` produce the same missing handles as typed declarations initialized with `na`.
 - Literal `na` in emitted strategy string slots uses the host's empty-string sentinel, including `from_entry`, `id`, `comment` and `oca_name`.
 - Array bindings from helper tuple destructuring retain their element type for built-in method lowering.
+- `array.new<T>(size, ...)` and its supported typed aliases create an empty
+  array for an `na` size, and execution continues. Invalid sizes other than
+  `na` stop the run.
+  See [Array constructor sizes](reference/support-contracts.md#array-constructor-sizes).
 - `strategy.default_entry_qty(fill_price)` lowers to the engine strategy host's query `default_entry_qty(price)`, the order size the default quantity settings give at that price; it needs a paired engine whose strategy host provides the query. The calls TradingView refuses are refused: no price, a second price, a price given both by position and by name, an unknown argument name (`PF-E1088`), and a string, bool, color or collection price (`PF-E2083` to `PF-E2086`, only for a type the syntax proves). `PF-E5084`, which refused every call until the host had the query, is retired: the code stays in the catalog and is no longer emitted. An entry with omitted `qty` keeps engine default sizing.
 - An `if` or `switch` value reassigned to a Series updates the current slot in each selected branch.
 - Colliding direct nonpersistent scalar history declarations in ordinary functions have separate Series storage, including call-site clones, locals of different scalar families and a computed local initializer reading a same-named global with its own history. Embedded block, tuple and loop declaration collisions retain their existing storage gates.
