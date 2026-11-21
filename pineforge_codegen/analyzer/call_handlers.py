@@ -1567,6 +1567,13 @@ class CallHandlers:
         selected_ta_indices: dict[int, int] = {}
 
         param_arg_map: dict[str, str] = {}
+        compound_params: set[str] = set()
+
+        def _record_param_arg(param_name: str, actual: ASTNode) -> None:
+            param_arg_map[param_name] = self._expr_to_str(actual)
+            if isinstance(actual, (BinOp, UnaryOp, Ternary)):
+                compound_params.add(param_name)
+
         if (
             method_info is not None
             and isinstance(node.callee, MemberAccess)
@@ -1586,20 +1593,14 @@ class CallHandlers:
         )
         for p_idx, param_name in enumerate(func_def.params):
             if p_idx < len(positional_args):
-                param_arg_map[param_name] = self._expr_to_str(
-                    positional_args[p_idx]
-                )
+                _record_param_arg(param_name, positional_args[p_idx])
             elif param_name in node.kwargs:
-                param_arg_map[param_name] = self._expr_to_str(
-                    node.kwargs[param_name]
-                )
+                _record_param_arg(param_name, node.kwargs[param_name])
             elif (method_info is None
                     and p_idx < len(param_defaults)
                     and param_defaults[p_idx] is not None):
                 # An omitted parameter reads its declared default.
-                param_arg_map[param_name] = self._expr_to_str(
-                    param_defaults[p_idx]
-                )
+                _record_param_arg(param_name, param_defaults[p_idx])
 
         if func_name in self._func_ta_ranges:
             start, end = self._func_ta_ranges[func_name]
@@ -1618,12 +1619,17 @@ class CallHandlers:
             # function's parameters before substituting call-site arguments.
             local_defs = self._func_local_length_defs(func_def)
 
-            def _subst_params(arg: str, pmap: dict[str, str]) -> str:
+            def _subst_params(
+                    arg: str, pmap: dict[str, str],
+                    compound: set[str]) -> str:
                 import re
                 result = arg
                 for param, value in sorted(
                         pmap.items(), key=lambda item: len(item[0]), reverse=True):
-                    result = sub_outside_literals(rf'\b{re.escape(param)}\b', value, result)
+                    replacement = f"({value})" if param in compound else value
+                    result = sub_outside_literals(
+                        rf'\b{re.escape(param)}\b', replacement, result
+                    )
                 return result
 
             def _expand_locals(arg: str) -> str:
@@ -1668,7 +1674,7 @@ class CallHandlers:
                         )
                     ]
                     site.ctor_args = [
-                        _subst_params(arg, param_arg_map)
+                        _subst_params(arg, param_arg_map, compound_params)
                         for arg in func_ctor_templates[i]
                     ]
                     selected_ta_indices[i] = i
@@ -1699,7 +1705,8 @@ class CallHandlers:
                     ]
                     orig_args = func_ctor_templates[i]
                     resolved_ctor = [
-                        _subst_params(arg, param_arg_map) for arg in orig_args
+                        _subst_params(arg, param_arg_map, compound_params)
+                        for arg in orig_args
                     ]
                     reuse_target = (
                         reuse_existing_targets.get(i)
