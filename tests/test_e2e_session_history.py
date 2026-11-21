@@ -549,9 +549,9 @@ REFUSED = {
         "type Foo\n    bool v = f()\n"
         "x = Foo.new().v\n", (5, 14),
         "The default value cannot be a function, variable or calculation"),
-    # allow_entry_in(session.ismarket[1] ? ... : ...) is refused first for
-    # its series direction (TV CE10123), at the argument rather than the
-    # history read. test_allow_entry_in_qualifier.py retains that regression.
+    # A method cannot call allow_entry_in (TV CE10188); see
+    # test_allow_entry_in_scope.py. Passing a method's history-derived
+    # direction to a global call still raises the qualifier error.
 }
 
 
