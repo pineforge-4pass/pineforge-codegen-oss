@@ -25,6 +25,7 @@ TV_STRING_UNITS_MARKER = "/* __PINEFORGE_TV_STRING_UNITS__ */"
 
 TV_STRING_UNITS_CPP = r"""
 #include <stdexcept>
+#include <type_traits>
 
 inline int _pf_u16_length(const std::string& text) {
     std::size_t units = 0;
@@ -198,5 +199,55 @@ inline std::string _pf_u16_substr(const std::string& text, std::size_t begin,
                                 + ") > this->size() (which is " + std::to_string(units.size()) + ")");
     const std::size_t end = count > units.size() - begin ? units.size() : begin + count;
     return _pf_u16_encode(units, begin, end);
+}
+
+template <typename T>
+inline std::size_t _pf_u16_substr_position(T value, std::size_t length,
+                                           bool clamp_to_length) {
+    if constexpr (!std::is_same_v<std::decay_t<T>, bool>) {
+        if (is_na(value)) return 0;
+    }
+    if constexpr (std::is_signed_v<T> || std::is_floating_point_v<T>) {
+        if (value < 0) {
+            if constexpr (std::is_integral_v<T>) {
+                throw std::out_of_range(
+                    "basic_string::substr: __pos (which is "
+                    + std::to_string(static_cast<std::size_t>(value))
+                    + ") > this->size() (which is "
+                    + std::to_string(length) + ")");
+            }
+            throw std::out_of_range("substring position is negative");
+        }
+    }
+    if (value > length) {
+        if (clamp_to_length) return length;
+        if constexpr (std::is_integral_v<T>) {
+            throw std::out_of_range(
+                "basic_string::substr: __pos (which is "
+                + std::to_string(static_cast<std::size_t>(value))
+                + ") > this->size() (which is " + std::to_string(length) + ")");
+        }
+        throw std::out_of_range("substring position is past the source length");
+    }
+    return static_cast<std::size_t>(value);
+}
+
+template <typename BeginT>
+inline std::string _pf_u16_substr_checked(const std::string& text, BeginT begin) {
+    const std::size_t length = static_cast<std::size_t>(_pf_u16_length(text));
+    const std::size_t begin_pos = _pf_u16_substr_position(begin, length, false);
+    return _pf_u16_substr(text, begin_pos, length - begin_pos);
+}
+
+template <typename BeginT, typename EndT>
+inline std::string _pf_u16_substr_checked(const std::string& text, BeginT begin,
+                                          EndT end) {
+    const std::size_t length = static_cast<std::size_t>(_pf_u16_length(text));
+    const std::size_t begin_pos = _pf_u16_substr_position(begin, length, false);
+    const std::size_t end_pos = _pf_u16_substr_position(end, length, true);
+    if (begin_pos > end_pos) {
+        throw std::out_of_range("substring begin position is after end position");
+    }
+    return _pf_u16_substr(text, begin_pos, end_pos - begin_pos);
 }
 """
