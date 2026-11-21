@@ -330,12 +330,22 @@ existing located PF-E1006 is retained as a PineForge limitation and is listed
 as a compile gap. A located refusal of a spelling TradingView rejects follows
 its general grammar, type and qualifier rule.
 
+`strategy.convert_to_account` multiplies by the host's account-currency rate
+in effect at the bar timestamp; `strategy.convert_to_symbol` divides by it.
+Equal currency codes need no conversion. Without a usable rate the strategy
+call returns its input unchanged and the run records a warning once per call
+site. `request.currency_rate` reads the same rate for chart to account, its
+inverse for account to chart, and 1 for equal chart and account currencies.
+If that pair has no usable rate, the request stops the run, or returns `na`
+with a warning when `ignore_invalid_currency` is true. Other pairs retain
+the no-data stop. A skipped request evaluates none of its arguments.
+
 The taxonomy:
 
 
 | Bucket                           | What                                                                 |
 | -------------------------------- | -------------------------------------------------------------------- |
-| `HARD_REJECT_FUNC`               | Calls with no PineForge semantics at all (e.g. `request.seed`; `request.currency_rate` is not one: it has no feed, so it translates and stops the run where it is evaluated, its arguments first, a skipped branch evaluating nothing). |
+| `HARD_REJECT_FUNC`               | Calls with no PineForge semantics at all (e.g. `request.seed`; `request.currency_rate` is not one: it translates and checks its pair when evaluated). |
 | `HARD_REJECT_NAMESPACE`          | Whole-namespace rejects — currently EMPTY (the old `ticker.*` blanket reject became per-function `HARD_REJECT_FUNC` entries: `ticker.{renko,kagi,linebreak,pointfigure,new,modify}`; `ticker.inherit`/`ticker.standard` pass through, `ticker.heikinashi` allowed for the chart's own symbol). |
 | `DIVERGENT_VARS` (warning) / `DIVERGENT_VARS_ERROR` (reject) | Built-in variables whose value can diverge from TV. `bar_index` and `last_bar_index` warn because they depend on the fed data window; `last_bar_index` lowers to the window's true final index. The ERROR subset is reserved for silent mis-aliases and is currently empty. |
 | `BARSTATE_APPROX_VARS` (warning) | Barstate flags PineForge approximates in batch mode.                 |
