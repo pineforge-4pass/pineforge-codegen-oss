@@ -43,6 +43,13 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - String literals containing lone surrogate code points now produce a located compile diagnostic (`PF-E0046`) instead of escaping `transpile()` as `UnicodeEncodeError` ([#435](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/435)).
 
+- `array.new<T>(size, ...)` and its supported typed aliases create an empty
+  array when `size` is `na`, and execution continues. A non-`na` size that is
+  not finite, is negative, or exceeds the runtime container's limit stops the
+  run. See [Array constructor sizes](docs/reference/support-contracts.md#array-constructor-sizes)
+  (#436). This behavior dates to 1.11.0
+  ([#327](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/327)).
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked
