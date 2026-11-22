@@ -24,6 +24,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - Both strategy conversions and `request.currency_rate` use the host's rate in effect on each bar for the chart and account currencies, in either direction. Without a rate for the pair the request stops the run with the currency-conversion error, or returns `na` with a run warning when `ignore_invalid_currency` is true; other pairs still stop the run ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
 
+- The `PF-W1544` warning for recorded earnings, dividends, splits and financial
+  data now explains that the request returns `na` for a bar without a recorded
+  value.
+
 - A TA length held in a never-reassigned top-level `var int` literal is no longer refused with PF-E5092 when the script also declares a `method`; a script that declares a user function, `type` or `enum` still refuses it ([#422](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/422)).
 
 - `str.substring` now stops the run when the begin position is after the end position, and counts a `na` begin or end as 0, as TradingView does ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).

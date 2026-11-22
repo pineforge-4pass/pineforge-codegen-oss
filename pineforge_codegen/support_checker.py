@@ -2573,7 +2573,8 @@ class SupportChecker:
             f"requests manifest records under {key}; with none installed, the run stops "
             "with an error where its value is read.",
             hint=("PineForge replays the values TradingView returned on the chart's own bars "
-                  "(chart_open_ms,value): a bar the tape has no row for reads na."),
+                  "(chart_open_ms,value). If the recording has no value for a bar, "
+                  "the request returns na for that bar."),
         )
 
     def _footprint_member(self, node: FuncCall) -> str | None:
