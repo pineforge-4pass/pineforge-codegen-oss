@@ -2,7 +2,7 @@
 
 ``ast`` only parses syntax here. No expression-supplied object, attribute or
 callable is resolved: even ``math.sin`` is a fixed spelling in a local table.
-Unsupported or non-finite expressions remain on the existing runtime/error path.
+The numeric constructor folder rejects unsupported and non-finite expressions.
 """
 
 from __future__ import annotations
@@ -187,6 +187,42 @@ _COMPARISONS = {
     "==": operator.eq, "!=": operator.ne, "<": operator.lt,
     "<=": operator.le, ">": operator.gt, ">=": operator.ge,
 }
+_FLOAT_ARITHMETIC = {"+": operator.add, "-": operator.sub, "*": operator.mul}
+
+
+def _compare(op, left, right):
+    # Keep this in step with _emit_float_relational and the engine's
+    # ta_compare_band.hpp. Missing operands make even != false.
+    if left is None or right is None:
+        return False
+    if (type(left) in (int, float) and type(right) in (int, float)
+            and (type(left) is float or type(right) is float)):
+        left, right = float(left), float(right)
+        if math.isnan(left) or math.isnan(right):
+            return False
+        if left == right or (math.isfinite(left) and math.isfinite(right)
+                             and abs(left - right) <= 1e-10):
+            return op in ("==", "<=", ">=")
+    return _COMPARISONS[op](left, right)
+
+
+def _float_arithmetic(op, left, right):
+    left, right = float(left), float(right)
+    if op == "/":
+        if right != 0:
+            return left / right
+        if left == 0 or math.isnan(left):
+            return math.nan
+        sign = math.copysign(1.0, left) * math.copysign(1.0, right)
+        return math.copysign(math.inf, sign)
+    if op == "%":
+        try:
+            return math.fmod(left, right)
+        except ValueError:
+            return math.nan
+    return _FLOAT_ARITHMETIC[op](left, right)
+
+
 _DECLARATION_FUNCTIONS = {
     "int": int, "float": float, "bool": bool,
     "math.min": min, "math.max": max,
@@ -280,7 +316,46 @@ def fold_constant_expression(node, known_values: Mapping[str, object],
             raise ValueError("not a constant number")
         return _numeric(value)
 
-    def visit(expr):
+    def arithmetic_operand(value):
+        # The comparison path allows nonfinite floats but keeps the same
+        # integer size bound as other arithmetic.
+        return value if type(value) is float else numeric(value)
+
+    # Keep type inspection separate from evaluation so an unselected arm
+    # contributes its numeric type without being evaluated. Memoize by
+    # syntax identity so a chain of nested selections is still linear.
+    float_types = {}
+
+    def has_float_type(expr):
+        key = id(expr)
+        if key not in float_types:
+            float_types[key] = infer_float_type(expr)
+        return float_types[key]
+
+    def infer_float_type(expr):
+        if isinstance(expr, NumberLiteral):
+            return type(expr.value) is float
+        if isinstance(expr, (Identifier, MemberAccess)):
+            return type(primitive(visit(expr))) is float
+        if isinstance(expr, NaLiteral):
+            return True
+        if isinstance(expr, UnaryOp):
+            return expr.op in ("+", "-") and has_float_type(expr.operand)
+        if isinstance(expr, BinOp):
+            return expr.op in ("/", "%") or (expr.op in ("+", "-", "*") and (
+                has_float_type(expr.left) or has_float_type(expr.right)))
+        if isinstance(expr, Ternary):
+            return has_float_type(expr.true_val) or has_float_type(expr.false_val)
+        if isinstance(expr, FuncCall):
+            spelling = _pine_spelling(expr.callee)
+            if spelling in ("round", "math.round"):
+                return len(_constant_arguments(expr)) == 2
+            if spelling in ("abs", "math.abs"):
+                return any(has_float_type(arg) for arg in _constant_arguments(expr))
+            return spelling not in ("int", "bool", "math.ceil", "math.floor")
+        return False
+
+    def visit(expr, *, comparison_operand=False):
         if isinstance(expr, (NumberLiteral, StringLiteral, BoolLiteral)):
             return expr.value
         if isinstance(expr, NaLiteral):
@@ -293,39 +368,74 @@ def fold_constant_expression(node, known_values: Mapping[str, object],
         if isinstance(expr, UnaryOp):
             if expr.op == "not":
                 return not boolean(expr.operand)
-            operand = visit(expr.operand)
+            operand = visit(expr.operand, comparison_operand=comparison_operand)
             if operand is None:
                 return None
+            if comparison_operand and type(operand) is float:
+                return operand if expr.op == "+" else -operand
             result = fold_numeric_expression(f"{expr.op}value", {"value": numeric(operand)})
         elif isinstance(expr, Ternary):
-            return visit(expr.true_val if boolean(expr.condition) else expr.false_val)
+            arm = expr.true_val if boolean(expr.condition) else expr.false_val
+            value = visit(arm, comparison_operand=comparison_operand)
+            if comparison_operand and type(value) is int and has_float_type(expr):
+                return float(value)
+            return value
         elif isinstance(expr, BinOp):
             if expr.op == "and":
                 return boolean(expr.left) and boolean(expr.right)
             if expr.op == "or":
                 return boolean(expr.left) or boolean(expr.right)
-            left, right = primitive(visit(expr.left)), primitive(visit(expr.right))
-            if expr.op in _COMPARISONS:
-                if left is None or right is None:
-                    return False
-                return _COMPARISONS[expr.op](left, right)
+            comparing = expr.op in _COMPARISONS
+            ieee = comparing or comparison_operand
+            left = primitive(visit(expr.left, comparison_operand=ieee))
+            right = primitive(visit(expr.right, comparison_operand=ieee))
+            if comparing:
+                return _compare(expr.op, left, right)
             if left is None or right is None:
                 return None
             if expr.op == "+" and isinstance(left, str) and isinstance(right, str):
                 if len(left) + len(right) > MAX_SOURCE_CHARS:
                     raise ValueError("constant string is too long")
                 return left + right
+            if (comparison_operand
+                    and type(left) in (int, float) and type(right) in (int, float)
+                    and (expr.op in ("/", "%") or float in (type(left), type(right)))):
+                # Comparisons consume IEEE values directly; the general
+                # numeric folder still only returns finite results.
+                return _float_arithmetic(
+                    expr.op, arithmetic_operand(left), arithmetic_operand(right),
+                )
             left, right = numeric(left), numeric(right)
             result = fold_numeric_expression(f"left {expr.op} right", {"left": left, "right": right})
         elif isinstance(expr, FuncCall):
             spelling = _pine_spelling(expr.callee)
-            values = [primitive(visit(arg)) for arg in _constant_arguments(expr)]
+            values = [
+                primitive(visit(arg, comparison_operand=comparison_operand))
+                for arg in _constant_arguments(expr)
+            ]
             if spelling == "bool" and len(values) == 1:
                 if values[0] is not None and type(values[0]) not in (int, float, bool):
                     raise ValueError("not a constant numeric cast")
+                if comparison_operand and type(values[0]) is float and math.isnan(values[0]):
+                    return False
                 return bool(values[0])
             if any(value is None for value in values):
                 return None
+            if comparison_operand and len(values) == 1 and type(values[0]) is float:
+                if spelling == "float":
+                    return values[0]
+                # At the lower endpoint the cast succeeds but produces the
+                # sentinel that the relational wrapper also rejects.
+                if spelling == "int" and not -2**63 < values[0] < 2**63:
+                    return None
+            if comparison_operand and values and spelling in ("math.min", "math.max", "math.sign"):
+                args = [float(arithmetic_operand(value)) for value in values]
+                if any(math.isnan(value) for value in args):
+                    return math.nan
+                if spelling == "math.sign" and len(args) == 1:
+                    return float(_DECLARATION_FUNCTIONS[spelling](args[0]))
+                if spelling != "math.sign":
+                    return _DECLARATION_FUNCTIONS[spelling](args)
             args = [numeric(value) for value in values]
             if spelling in ("round", "math.round"):
                 if not 1 <= len(args) <= 2 or (

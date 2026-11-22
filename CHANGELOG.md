@@ -56,6 +56,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - Numeric inputs with positional options compile with their choices in the declared order, and `input()` preserves constant string defaults.
 
+- `input()` resolves immutable aliases of string defaults and applies Pine's float comparison rules when computing them.
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked

@@ -641,7 +641,10 @@ class InputHelper:
                     # bool is an int subclass — exclude it from numeric bounds
                     if isinstance(v, (int, float)) and not isinstance(v, bool):
                         entry[key] = v
-            oi = idx.get("options")
+            # Numeric options come only from the descriptor. A member can
+            # spell an enum tag here, but e.g. math.pi is not a string option.
+            numeric = namespace == "input" and func_name in ("int", "float")
+            oi = None if numeric else idx.get("options")
             if oi is not None and oi < len(merged) and merged[oi] is not None:
                 opts_node = merged[oi]
                 elems = getattr(opts_node, "elements", None)
