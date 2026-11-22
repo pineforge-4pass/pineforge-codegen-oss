@@ -1428,10 +1428,9 @@ class CollectionHistoryChecker:
         if read.in_callable:
             what = ("parameter" if read.is_parameter
                     else "script variable read in a function" if read.is_global
-                    else "function's local")
-            return (f"{label}: the history of {_a(read.kind)} {what} is not "
-                    "supported in PineForge (TradingView reads one copy per "
-                    "call: fixtures/array_history_tv ahist_fn).")
+                    else "variable declared in a function")
+            return (f"{label}: history for {_a(read.kind)} {what} is not "
+                    "supported in PineForge.")
         scope = self.declaration_scope(read.decl_node_id)
         if scope == "loop":
             return (f"{label}: the history of {_a(read.kind)} declared in a loop "

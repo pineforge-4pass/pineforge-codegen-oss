@@ -43,7 +43,7 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
+from pineforge_codegen import _generate, transpile
 from tests import _compile as compile_env
 
 
@@ -245,6 +245,17 @@ PIN_TERN_SMA_BARE = (
     "    strategy.close(\"L\")"
 )
 PIN_TERN_HIGHEST_BARE = PIN_TERN_SMA_BARE.replace("ta.sma(close, 5)", "ta.highest(high, 5)")
+
+
+def test_bare_lazy_sma_has_neutral_hoist_skip_reason():
+    generator, *_ = _generate(
+        _HEADER + PIN_LAZYAND_SMA_BARE + "\n", check_support=True, filename="<input>",
+    )
+    (_, _, reason), = generator._lazy_edge_ta_hoist_plan()["skipped"]
+    assert reason == (
+        "allow-listed family without a direct [k] history read: TradingView "
+        "keeps the reached-only clock"
+    )
 
 
 @pytest.mark.parametrize(

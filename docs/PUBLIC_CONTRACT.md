@@ -988,10 +988,16 @@ inside a `switch` arm also say that PineForge keeps the arm's lowering, and
 PF-W1067 to PF-W1072, which warn everywhere, name no arm. No warning or note
 template says that PineForge refuses or rejects something, though one may say
 what TradingView refuses or rejects. Beyond these checks a template's exact
-wording is not pinned. A text no template
-renders carries `PF-E0000` / `PF-W0000` with the text in `args.message` (and
-`args.hint`); the test suite refuses it. The `message` text itself is
-unchanged and stays the English rendering; `runtime.error` text a strategy
+wording is not pinned. A text no template renders carries `PF-E0000` /
+`PF-W0000` with the text in `args.message` (and `args.hint`); the test suite
+refuses it. The `message` field contains the English rendering. For 1.15.0,
+`PF-W1520` clarifies that the value comes from the run's symbol metadata,
+`PF-W1544`'s hint says that the request returns `na` for a bar without a
+recorded value, and the messages of `PF-E6067`, `PF-E6068`, `PF-E6069`,
+`PF-E6072`, `PF-E6073`, `PF-E6074` and `PF-W5010` no longer name a path into
+the test fixtures (the explanation of `PF-W5010` is reworded with its message);
+each keeps its code, severity and arguments.
+`runtime.error` text a strategy
 authors is not a transpile diagnostic. Since 1.5.0 an uncatalogued note uses
 the existing PF-W0000 fallback with its actual `note` level preserved;
 PF-W0000's catalog severity remains `warning`. The diagnostic level is the
@@ -1001,8 +1007,10 @@ wire authority in that fallback case. No new fallback code is allocated.
 spelled templates and preserves existing pins. Since 1.5.0 new entries require
 an authored `user_message`; the generator reports missing, malformed or
 unknown-argument presentation templates rather than copying raw diagnostics.
-The eleven reviewed severity pin changes above are explicit fixture-backed
-exceptions, not a general permission to regenerate existing pins.
+`tests/fixtures/diagnostic_notes/delta.json` and
+`tests/test_diagnostic_notes.py` record every change to an existing pin, field
+by field, and keep the historical catalog and pins intact; these listed changes
+are exceptions, not a general permission to regenerate existing pins.
 
 ## Compatibility boundary
 

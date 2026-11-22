@@ -2313,9 +2313,7 @@ class ExprVisitor:
             self._codegen_warning(
                 node,
                 f"{node.object.name}[...] reads the current {spec.kind} in "
-                "PineForge: no history of this parameter is kept, where "
-                "TradingView reads the copy the call that many calls back "
-                "left (fixtures/array_history_tv ahist_fn).",
+                "PineForge because the parameter has no stored history.",
             )
             return
         if (spec is None or spec.kind != "udt"

@@ -484,8 +484,7 @@ class TaSiteHelper:
     )
     NO_HISTORY_READ_REASON = (
         "allow-listed family without a direct [k] history read: TradingView "
-        "keeps the reached-only clock (louislapis9/oliver1002/miemomo3/"
-        "ycelestine77/quantbyboji exact on main, 2026-09-04)"
+        "keeps the reached-only clock"
     )
 
     @staticmethod

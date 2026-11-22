@@ -599,8 +599,8 @@ class SupportChecker:
         for member, emission in SYMINFO_MEMBER_MAP.items()
         if "na<" in emission or "get_syminfo_metadata" in emission
     )
-    # Silent-gap fields a run declares as a symbol fact (a lane fact through
-    # the syminfo metadata channel): na only when the run declares none.
+    # Fields that read a value from the run's symbol metadata and return na
+    # when the run does not declare that value.
     _SYMINFO_RUN_FACT_FIELDS: frozenset[str] = frozenset({"mincontract"})
 
     def __init__(self, ast: Program, filename: str = "<input>") -> None:
@@ -2298,12 +2298,10 @@ class SupportChecker:
             if node.member not in SUPPORTED_SYMINFO:
                 self._err(node, f"syminfo.{node.member} is not implemented in PineForge runtime.")
             elif node.member in self._SYMINFO_RUN_FACT_FIELDS:
-                # Read from the symbol fact the run declares; na without one.
                 self._warn(
                     node,
-                    f"syminfo.{node.member} is na unless the run declares the "
-                    f"symbol's {node.member} (syminfo metadata "
-                    f"\"{node.member}\", a lane fact).",
+                    f"syminfo.{node.member} is na unless the run declares a value for "
+                    f'"{node.member}" in its symbol metadata.',
                 )
             elif node.member in self._SYMINFO_SILENT_GAP_FIELDS:
                 # These fields silently return na in current PineForge. Warn on
@@ -2573,7 +2571,8 @@ class SupportChecker:
             f"requests manifest records under {key}; with none installed, the run stops "
             "with an error where its value is read.",
             hint=("PineForge replays the values TradingView returned on the chart's own bars "
-                  "(chart_open_ms,value): a bar the tape has no row for reads na."),
+                  "(chart_open_ms,value). If the recording has no value for a bar, "
+                  "the request returns na for that bar."),
         )
 
     def _footprint_member(self, node: FuncCall) -> str | None:

@@ -22,7 +22,8 @@ CASES = json.loads((FIXTURES / "interfaces.json").read_text())["cases"]
 MATH_CASES = json.loads((FIXTURES / "interfaces.json").read_text())["math_keyword_cases"]
 DELTA = json.loads((FIXTURES / "delta.json").read_text())
 NOTE_CODES = set(DELTA["severity_changes"])
-EMA_SEED_TEXT_DELTA = DELTA["text_changes"]["PF-W1505"]
+TEXT_DELTAS = DELTA["text_changes"]
+EMA_SEED_TEXT_DELTA = TEXT_DELTAS["PF-W1505"]
 BEFORE = json.loads((FIXTURES / "catalog.before.json").read_text())["codes"]
 PRODUCT_BEFORE = json.loads((FIXTURES / "product.before.json").read_text())
 CATALOG_ENTRY_ADDITIONS = {
@@ -157,7 +158,7 @@ CATALOG_ADDITIONS |= set(DELTA["catalog_additions"])
 # is covered by the sentence tests below without an edit here.
 TWINS = sorted("PF-W" + code[4:] for code in diagnostics_catalog()["codes"] if code.startswith("PF-E1"))
 
-# Only these two existing identities change presentation after the snapshot.
+# The lookahead migration changes presentation for two existing identities.
 # Keep both historical files intact and verify each old and new field exactly.
 LOOKAHEAD_MIGRATION = {
     "PF-E1085": {
@@ -182,6 +183,15 @@ LOOKAHEAD_MIGRATION = {
             "request.security lookahead needs an immutable simple or input-selected enum. "
             "In a switch arm PineForge only warns and keeps the arm''s lowering."),
     },
+}
+
+# Allow only the exact corrected hint when comparing with the historical catalog.
+HINT_CORRECTIONS = {
+    "PF-W1544": (
+        "PineForge replays the values TradingView returned on the chart''s own bars "
+        "(chart_open_ms,value). If the recording has no value for a bar, "
+        "the request returns na for that bar."
+    ),
 }
 
 
@@ -216,10 +226,12 @@ def _assert_catalog_delta(catalog):
                 assert old[field] == before, (code, field)
                 assert entry[field] == after, (code, field)
                 entry[field] = before
-        if code == "PF-W1505":
-            for field in ("message", "hint", "explanation"):
-                assert entry[field] == EMA_SEED_TEXT_DELTA[field], (code, field)
-                entry[field] = old[field]
+        for field, expected in TEXT_DELTAS.get(code, {}).items():
+            assert entry[field] == expected, (code, field)
+            entry[field] = old[field]
+        if code in HINT_CORRECTIONS:
+            assert entry["hint"] == HINT_CORRECTIONS[code], code
+            entry["hint"] = old["hint"]
         assert entry == old, code
     assert changed == NOTE_CODES
 
@@ -234,8 +246,19 @@ def test_exact_catalog_delta_and_legacy_pin():
     assert set(current) - set(legacy) == CATALOG_ADDITIONS
     assert current["PF-E2093"] == "b2d5cd10ea46245c7a9e31ff15db9db7d8538221d5443c9cc15ba0013a19e93f"
     assert set(LOOKAHEAD_MIGRATION) == {"PF-E1085", "PF-W1085"}
+    assert {code: set(fields) for code, fields in TEXT_DELTAS.items()} == {
+        "PF-E6067": {"message"},
+        "PF-E6068": {"message"},
+        "PF-E6069": {"message"},
+        "PF-E6072": {"message"},
+        "PF-E6073": {"message"},
+        "PF-E6074": {"message"},
+        "PF-W1505": {"message", "hint", "explanation"},
+        "PF-W1520": {"message"},
+        "PF-W5010": {"message", "explanation"},
+    }
     assert {code for code in legacy if legacy[code] != current[code]} == (
-        NOTE_CODES | set(LOOKAHEAD_MIGRATION))
+        NOTE_CODES | set(LOOKAHEAD_MIGRATION) | set(TEXT_DELTAS) | set(HINT_CORRECTIONS))
     # Historical pins describe the snapshot, including PF-W1505's old text.
     for code, entry in BEFORE.items():
         meaning = json.dumps([entry["severity"], entry["message"], entry.get("hint"),
@@ -266,12 +289,16 @@ def test_catalog_legacy_bytes_only_have_the_declared_delta():
                     new_field = json.dumps(name) + ": " + json.dumps(after, ensure_ascii=False)
                     assert line.count(new_field) == 1, (code, name)
                     line = line.replace(new_field, old_field, 1)
-            if code == "PF-W1505":
-                for name in ("message", "hint", "explanation"):
-                    field = f'"{name}": ' + json.dumps(EMA_SEED_TEXT_DELTA[name], ensure_ascii=False)
-                    old_field = f'"{name}": ' + json.dumps(BEFORE[code][name], ensure_ascii=False)
-                    assert line.count(field) == 1
-                    line = line.replace(field, old_field, 1)
+            for name, after in TEXT_DELTAS.get(code, {}).items():
+                field = f'"{name}": ' + json.dumps(after, ensure_ascii=False)
+                old_field = f'"{name}": ' + json.dumps(BEFORE[code][name], ensure_ascii=False)
+                assert line.count(field) == 1, (code, name)
+                line = line.replace(field, old_field, 1)
+            if code in HINT_CORRECTIONS:
+                field = '"hint": ' + json.dumps(HINT_CORRECTIONS[code], ensure_ascii=False)
+                old_field = '"hint": ' + json.dumps(BEFORE[code]["hint"], ensure_ascii=False)
+                assert line.count(field) == 1, code
+                line = line.replace(field, old_field, 1)
         restored.append(line)
     assert "".join(restored).encode() == (FIXTURES / "catalog.before.json").read_bytes()
 
