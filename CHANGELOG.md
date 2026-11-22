@@ -32,6 +32,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
   declares a value for `mincontract` in its symbol metadata. The warning code
   and runtime behavior stay the same.
 
+- The collection-history diagnostics `PF-E6067`, `PF-E6068`, `PF-E6069`, `PF-E6072`, `PF-E6073`, `PF-E6074` and `PF-W5010` no longer show a path into PineForge's test fixtures, their messages are reworded, and so is the explanation of `PF-W5010`. Their codes, arguments and severities stay the same.
+
 - A TA length held in a never-reassigned top-level `var int` literal is no longer refused with PF-E5092 when the script also declares a `method`; a script that declares a user function, `type` or `enum` still refuses it ([#422](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/422)).
 
 - `str.substring` now stops the run when the begin position is after the end position, and counts a `na` begin or end as 0, as TradingView does ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
