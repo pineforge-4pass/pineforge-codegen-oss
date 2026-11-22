@@ -42,6 +42,24 @@
     }
   },
   "text_changes": {
+    "PF-E6067": {
+      "message": "{label}: history for a {kind} variable declared in a function is not supported in PineForge."
+    },
+    "PF-E6068": {
+      "message": "{label}: history for a {kind} parameter is not supported in PineForge."
+    },
+    "PF-E6069": {
+      "message": "{label}: history for a {kind} script variable read in a function is not supported in PineForge."
+    },
+    "PF-E6072": {
+      "message": "{label}: history for an {kind} variable declared in a function is not supported in PineForge."
+    },
+    "PF-E6073": {
+      "message": "{label}: history for an {kind} parameter is not supported in PineForge."
+    },
+    "PF-E6074": {
+      "message": "{label}: history for an {kind} script variable read in a function is not supported in PineForge."
+    },
     "PF-W1505": {
       "message": "ta.ema seeds from the first value of the data PineForge runs, so it can differ from TradingView at the start of a run whose reference started where your range starts.",
       "hint": "The first-value seed matches TradingView when its chart had history before your range, and the difference has decayed by then. If your TradingView reference starts at your range start, declare it: set series_origin_ms to the open time of its first bar (a run option, passed through syminfo). The indicator is then na for the first length-1 bars and starts from the SMA of the first length bars, as TradingView does. The same holds for ta.macd and ta.tsi; ta.kc and ta.kcw already start that way in every run. Declaring it also starts request.security series at the first whole higher-timeframe bucket at or after that time, and a plain security expression stays na until the first higher-timeframe bar completes.",
@@ -49,6 +67,10 @@
     },
     "PF-W1520": {
       "message": "syminfo.{member} is na unless the run declares a value for \"{member}\" in its symbol metadata."
+    },
+    "PF-W5010": {
+      "message": "{object_name}[...] reads the current {kind} in PineForge because the parameter has no stored history.",
+      "explanation": "Indexing a function parameter's array or matrix with [] reads the current collection in PineForge, because PineForge stores no history for the parameter."
     }
   },
   "severity_changes": {

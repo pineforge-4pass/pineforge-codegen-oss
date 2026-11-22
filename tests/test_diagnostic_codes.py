@@ -118,6 +118,52 @@ def test_mincontract_warning_explains_symbol_metadata():
     assert (warning.level, warning.args, warning.message) == (Level.WARNING, args, message)
 
 
+COLLECTION_HISTORY_CASES = {
+    "PF-E6067": (
+        "f(float v) =>\n    m = matrix.new<float>(1, 1, v)\n    (m[1]).rows()\nr = f(close)\n",
+        {"label": "m[1]", "kind": "matrix"}),
+    "PF-E6068": (
+        "f(matrix<float> x) => (x[1]).rows()\nm = matrix.new<float>(1, 1, close)\nr = f(m)\n",
+        {"label": "x[1]", "kind": "matrix"}),
+    "PF-E6069": (
+        "m = matrix.new<float>(1, 1, close)\nf() => (m[1]).rows()\nr = f()\n",
+        {"label": "m[1]", "kind": "matrix"}),
+    "PF-E6072": (
+        "f(float v) =>\n    a = array.from(v)\n    (a[1]).size()\nr = f(close)\n",
+        {"label": "a[1]", "kind": "array"}),
+    "PF-E6073": (
+        "f(array<float> x) => (x[1]).size()\na = array.from(close)\nr = f(a)\n",
+        {"label": "x[1]", "kind": "array"}),
+    "PF-E6074": (
+        "a = array.from(close)\nf() => (a[1]).size()\nr = f()\n",
+        {"label": "a[1]", "kind": "array"}),
+    "PF-W5010": (
+        "f(array<float> x) => array.size(x[1])\na = array.from(close)\nr = f(a)\n",
+        {"object_name": "x", "kind": "array"}),
+}
+
+
+@pytest.mark.parametrize("code", COLLECTION_HISTORY_CASES)
+def test_collection_history_catalog_messages_do_not_expose_fixture_paths(code):
+    body, args = COLLECTION_HISTORY_CASES[code]
+    source = ('//@version=6\nstrategy("Collection history")\n' + body
+              + 'if r > 0\n    strategy.entry("L", strategy.long)\n')
+    if code.startswith("PF-E"):
+        with pytest.raises(CompileError) as refused:
+            transpile(source)
+        diagnostics = refused.value.diagnostics
+    else:
+        diagnostics = transpile_full(source)["diagnostics"]
+
+    matches = [d for d in diagnostics if d.code == code]
+    assert matches, [(d.code, d.message) for d in diagnostics]
+    for diagnostic in matches:
+        assert diagnostic.args == args
+        assert (diagnostic.message, diagnostic.hint) == render_diagnostic(code, args)
+        for fragment in ("fixtures/", "array_history_tv", "ahist_fn"):
+            assert fragment not in diagnostic.message
+
+
 def test_switch_arm_warnings_twin_support_checker_errors():
     """The support checker warns, inside a switch arm, what it refuses
     elsewhere: PF-W1nnn (nnn < 500) is PF-E1nnn's text as a warning."""

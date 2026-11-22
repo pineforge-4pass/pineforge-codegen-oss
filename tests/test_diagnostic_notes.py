@@ -247,8 +247,15 @@ def test_exact_catalog_delta_and_legacy_pin():
     assert current["PF-E2093"] == "b2d5cd10ea46245c7a9e31ff15db9db7d8538221d5443c9cc15ba0013a19e93f"
     assert set(LOOKAHEAD_MIGRATION) == {"PF-E1085", "PF-W1085"}
     assert {code: set(fields) for code, fields in TEXT_DELTAS.items()} == {
+        "PF-E6067": {"message"},
+        "PF-E6068": {"message"},
+        "PF-E6069": {"message"},
+        "PF-E6072": {"message"},
+        "PF-E6073": {"message"},
+        "PF-E6074": {"message"},
         "PF-W1505": {"message", "hint", "explanation"},
         "PF-W1520": {"message"},
+        "PF-W5010": {"message", "explanation"},
     }
     assert {code for code in legacy if legacy[code] != current[code]} == (
         NOTE_CODES | set(LOOKAHEAD_MIGRATION) | set(TEXT_DELTAS) | set(HINT_CORRECTIONS))
