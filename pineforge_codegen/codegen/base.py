@@ -798,6 +798,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._ta_index_by_site_id: dict[int, int] = {
             id(site): i for i, site in enumerate(ctx.ta_call_sites)
         }
+        self._ta_chart_call_windows: set[str] = set()
+        self._ta_security_call_windows: set[str] = set()
         # Context-sensitive (call-path) instance machinery for nested stateful
         # helpers. Built by ``_build_func_instances`` below. ``_current_instance_name``
         # names the function clone whose body is currently being emitted (None at
@@ -1981,12 +1983,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return
 
         func_bodies: dict[str, list] = {}
+        func_v5_bodies: set[str] = set()
         func_params: dict[str, set[str]] = {}
         for fi in ctx.func_infos:
             node = getattr(fi, "node", None)
             if node is not None and getattr(node, "body", None):
                 func_bodies.setdefault(fi.name, node.body)
                 func_params.setdefault(fi.name, set(getattr(node, "params", ()) or ()))
+                if (node.annotations or {}).get("pine_version") == 5:
+                    func_v5_bodies.add(fi.name)
 
         # Pine forbids recursive callable execution. Most scalar-only cycles
         # never enter this state-instance pass (and some legacy dead-branch
@@ -2396,6 +2401,48 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             live.add(name)
             used_ta.update(instances[name].get("ta_remap", {}).values())
             pending.extend(retained_edges.get(name, ()))
+
+        if any(site.class_name in self._TA_CALL_WINDOW_MODES for site in ctx.ta_call_sites):
+            # Reuse the actual dispatch graph: two written calls of the same
+            # helper can have different clocks and own different TA members.
+            top_calls = self._ta_conditional_chart_calls(roots)
+            pending_paths = [
+                (target, top_calls[id(call)])
+                for call in self._iter_func_calls(roots) if id(call) in top_calls
+                for target in targets(call, None)
+            ]
+            seen_paths = set()
+            body_calls = {}
+            while pending_paths:
+                name, conditional = pending_paths.pop()
+                if name not in live or (name, conditional) in seen_paths:
+                    continue
+                seen_paths.add((name, conditional))
+                if self._budget is not None:
+                    self._budget.check(phase=Phase.CODEGEN)
+                inst = instances.get(name)
+                if inst is None:
+                    continue
+                owner = inst["fname"]
+                if owner not in body_calls:
+                    body = func_bodies.get(owner, ())
+                    reaches = self._ta_conditional_chart_calls(
+                        body, eager_logical=owner in func_v5_bodies)
+                    body_calls[owner] = [
+                        (call, reaches[id(call)])
+                        for call in self._iter_func_calls(body) if id(call) in reaches
+                    ]
+                for call, local_conditional in body_calls[owner]:
+                    sparse = conditional or local_conditional
+                    if sparse:
+                        site = self._get_ta_site(call)
+                        if site is not None:
+                            member = inst["ta_remap"].get(site.member_name, site.member_name)
+                            concrete = sites_by_member.get(member)
+                            if concrete is not None:
+                                self._ta_mark_chart_call_window(concrete)
+                    pending_paths.extend((target, sparse) for target in targets(call, inst))
+
         self._live_func_instances = live
         self._dead_func_names.update(stateful - live_owners)
         self._dead_ta_indices = {
@@ -5038,6 +5085,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     self._udt_record_cpp_type(type_name), global_used
                 )
             )
+        self._ta_call_window_type = self._allocate_generated_cpp_name(
+            "_PFCallWindowExtreme", global_used
+        )
 
         member_used = set(class_used)
         self._udt_undo_coordinator_member_name = self._allocate_generated_cpp_name(
@@ -5436,6 +5486,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Context-sensitive instance pre-pass (needs the naming helpers populated
         # in __init__). Computes nested stateful-helper dispatch + fresh instances.
         self._build_func_instances()
+        if any(site.class_name in self._TA_CALL_WINDOW_MODES
+               for site in self.ctx.ta_call_sites):
+            reaches = self._ta_conditional_chart_calls([
+                *self.ctx.ast.body,
+                *(pragma.expr_node for pragma in self.ctx.pf_trace_pragmas or ()),
+            ])
+            for site in self.ctx.ta_call_sites:
+                if site.owner_func is None and reaches.get(id(site.node), False):
+                    self._ta_mark_chart_call_window(site)
         # Allocate declaration-site once flags only after every natural and
         # context-sensitive callable-state member name is known.
         self._prepare_runtime_scalar_var_initializers()
@@ -5763,6 +5822,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         _session_market_at = len(lines)
 
         # 2. Open class
+        _ta_call_window_helper_at = len(lines)
         lines.append("class GeneratedStrategy : public pineforge::source::PineStrategyHost {")
         lines.append("public:")
         _script_state_decl_start = len(lines)
@@ -5931,6 +5991,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         self._security_arg_history_sec = None
         self._security_arg_history_discovering = False
+        self._ta_prepare_security_call_windows()
+        _ta_call_window_helper: list[str] = []
+        self._emit_ta_call_window_helper(_ta_call_window_helper)
+        if _ta_call_window_helper:
+            lines[_ta_call_window_helper_at:_ta_call_window_helper_at] = _ta_call_window_helper
+            _session_market_at += len(_ta_call_window_helper)
+            _script_state_decl_start += len(_ta_call_window_helper)
         # A recorded request's missing-data flag, set where it is evaluated.
         for n in range(len(self._recorded_sites())):
             lines.append(f"    bool _pf_rec_missing_{n} = true;")
@@ -7363,7 +7430,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         runtime_args.append(rendered)
                     if any_runtime:
                         resets.append(
-                            f"{variant['member_name']} = {self._ta_fixed_cpp_type(site)}({', '.join(runtime_args)});"
+                            f"{variant['member_name']} = "
+                            f"{self._ta_security_member_cpp_type(info['sec_id'], site, variant)}"
+                            f"({', '.join(runtime_args)});"
                         )
 
         return resets

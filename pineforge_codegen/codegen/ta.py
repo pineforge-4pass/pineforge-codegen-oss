@@ -35,6 +35,7 @@ from ..ast_nodes import (
 )
 from ..analyzer.value_bindings import ValueBindings
 from ..errors import Phase
+from ..limits import syntax_children
 from ..pine_spelling import blank_string_literals
 from ..symbols import PineType
 from .helpers import pine_index_int_cast
@@ -50,6 +51,67 @@ if TYPE_CHECKING:
     from ..analyzer import TACallSite
 
 
+_TA_CALL_WINDOW_CPP = """\
+// A skipped bar contributes no sample. Re-evaluating a reached bar
+// replaces that bar's sample instead of adding another one.
+template <bool _pf_want_max, bool _pf_want_offset>
+class @TYPE@ {
+    std::vector<double> _pf_samples;
+    std::size_t _pf_length;
+    std::size_t _pf_next = 0;
+    long long _pf_last_bar = 0;
+    bool _pf_has_bar = false;
+
+    double update(double _pf_src, long long _pf_bar) {
+        const bool _pf_append = !_pf_has_bar || _pf_last_bar != _pf_bar;
+        _pf_has_bar = true;
+        _pf_last_bar = _pf_bar;
+        if (_pf_append) {
+            if (_pf_samples.size() < _pf_length) _pf_samples.push_back(_pf_src);
+            else _pf_samples[_pf_next] = _pf_src;
+            if (++_pf_next == _pf_length) _pf_next = 0;
+        } else {
+            _pf_samples[_pf_next == 0 ? _pf_length - 1 : _pf_next - 1] = _pf_src;
+        }
+        double _pf_best = pineforge::na<double>();
+        std::size_t _pf_offset = 0;
+        std::size_t _pf_slot = _pf_next == 0 ? _pf_samples.size() - 1 : _pf_next - 1;
+        for (std::size_t _pf_age = 0; _pf_age < _pf_samples.size(); ++_pf_age) {
+            const double _pf_value = _pf_samples[_pf_slot];
+            if (!pineforge::is_na(_pf_value) &&
+                (pineforge::is_na(_pf_best) ||
+                 (_pf_want_max ? _pf_value >= _pf_best : _pf_value <= _pf_best))) {
+                _pf_best = _pf_value;
+                _pf_offset = _pf_age;
+            }
+            _pf_slot = _pf_slot == 0 ? _pf_samples.size() - 1 : _pf_slot - 1;
+        }
+        if constexpr (_pf_want_offset) {
+            if (!pineforge::is_na(_pf_best)) return -static_cast<double>(_pf_offset);
+        }
+        return _pf_best;
+    }
+
+public:
+    explicit @TYPE@(int _pf_length_arg)
+        : _pf_length(_pf_length_arg > 0 ? static_cast<std::size_t>(_pf_length_arg) : 1) {}
+    double compute(double _pf_src) {
+        const auto& _pf_context = pineforge::ta::bar_context();
+        return update(_pf_src, _pf_context.installed ? _pf_context.bar_index : _pf_last_bar + 1);
+    }
+    double recompute(double _pf_src) {
+        const auto& _pf_context = pineforge::ta::bar_context();
+        return update(_pf_src, _pf_context.installed ? _pf_context.bar_index : _pf_last_bar);
+    }
+    double compute(double _pf_src, long long _pf_bar) { return update(_pf_src, _pf_bar); }
+    double recompute(double _pf_src, long long _pf_bar) { return update(_pf_src, _pf_bar); }
+    void observe_owned_storage(pineforge::OwnedStorage& _pf_storage) const noexcept {
+        pineforge::observe_owned_members(_pf_storage, _pf_samples);
+    }
+};
+"""
+
+
 class TaSiteHelper:
     """TA call-site lookups and ``.compute()`` argument construction."""
 
@@ -57,6 +119,119 @@ class TaSiteHelper:
     # bar-data default (vs. ATR / supertrend / DMI where bar OHLC must
     # always be appended). Class-level so subclasses can override.
     _TA_IMPLICIT_REPLACE = {"pivothigh", "pivotlow"}
+
+    _TA_CALL_WINDOW_MODES = {
+        "ta::Lowest": "false, false",
+        "ta::Highest": "true, false",
+        "ta::LowestBars": "false, true",
+        "ta::HighestBars": "true, true",
+    }
+
+    def _ta_conditional_chart_calls(self, roots, *, eager_logical=False) -> dict[int, bool]:
+        """Find written calls and whether their enclosing expression can skip them."""
+        pending = [(node, False) for node in roots]
+        calls = {}
+        while pending:
+            node, conditional = pending.pop()
+            if node is None:
+                continue
+            if self._budget is not None:
+                self._budget.check(node.loc, Phase.CODEGEN)
+            if isinstance(node, (FuncDef, MethodDef, TypeDecl)):
+                continue
+            if isinstance(node, FuncCall):
+                calls[id(node)] = calls.get(id(node), False) or conditional
+                name, namespace = self._resolve_callee(node.callee)
+                if namespace == "request" and name in ("security", "security_lower_tf"):
+                    pending.append((node.callee, conditional))
+                    pending.extend((arg, conditional) for i, arg in enumerate(node.args)
+                                   if i != 2)
+                    pending.extend((arg, conditional) for k, arg in (node.kwargs or {}).items()
+                                   if k != "expression")
+                    continue
+            if isinstance(node, IfStmt):
+                pending.append((node.condition, conditional))
+                if isinstance(node.condition, BoolLiteral):
+                    selected = node.body if node.condition.value else node.else_body
+                    pending.extend((stmt, conditional) for stmt in selected)
+                else:
+                    pending.extend((stmt, True) for stmt in (*node.body, *node.else_body))
+            elif isinstance(node, SwitchStmt):
+                pending.append((node.expr, conditional))
+                for index, (test, body) in enumerate(node.cases):
+                    pending.append((test, conditional or index > 0))
+                    pending.extend((stmt, True) for stmt in body)
+                pending.extend((stmt, True) for stmt in node.default_body)
+            elif isinstance(node, Ternary):
+                pending.append((node.condition, conditional))
+                if isinstance(node.condition, BoolLiteral):
+                    selected = node.true_val if node.condition.value else node.false_val
+                    pending.append((selected, conditional))
+                else:
+                    pending.extend(((node.true_val, True), (node.false_val, True)))
+            elif isinstance(node, BinOp) and node.op in ("and", "or"):
+                pending.append((node.left, conditional))
+                if eager_logical:
+                    pending.append((node.right, conditional))
+                elif isinstance(node.left, BoolLiteral):
+                    if node.left.value == (node.op == "and"):
+                        pending.append((node.right, conditional))
+                else:
+                    pending.append((node.right, True))
+            elif isinstance(node, VarDecl) and (node.is_var or node.is_varip):
+                pending.append((node.value, True))
+            else:
+                pending.extend((child, conditional) for child in syntax_children(node))
+        return calls
+
+    def _ta_mark_chart_call_window(self, site: "TACallSite") -> None:
+        if (site.class_name in self._TA_CALL_WINDOW_MODES
+                and self._ta_dynamic_plan(site) is None
+                and id(site.node) not in self._lazy_edge_hoisted_ta_call_nodes()):
+            self._ta_chart_call_windows.add(site.member_name)
+
+    def _ta_prepare_security_call_windows(self) -> None:
+        """Only use the call clock for variants the requested evaluator leaves inline."""
+        self._ta_security_call_windows = set()
+        for item, info in zip(self._security_calls, self._security_eval_info):
+            if self._budget is not None:
+                self._budget.check(phase=Phase.CODEGEN)
+            variants_by_index = info.get("ta_variants") or {}
+            if item.get("dead") or not any(
+                self.ctx.ta_call_sites[idx].class_name in self._TA_CALL_WINDOW_MODES
+                for idx in variants_by_index
+            ):
+                continue
+            sec_id = item["sec_id"]
+            # Do not let this early pass preempt the evaluator's fallback.
+            # Snapshot once for this request: its dependency walk may resolve
+            # helper bindings and cache intermediate lowering decisions.
+            snapshot = self._security_state_snapshot()
+            try:
+                keys = self._security_lazy_ta_keys(sec_id, item["expr_node"], info)
+            except Exception as error:  # same retry boundary as evaluator emission
+                if getattr(error, "limit", False):
+                    raise
+                keys = set()
+            finally:
+                self._security_state_restore(snapshot)
+            for idx, sig in keys:
+                site = self.ctx.ta_call_sites[idx]
+                if site.class_name not in self._TA_CALL_WINDOW_MODES:
+                    continue
+                for variant in variants_by_index.get(idx, ()):
+                    if (variant["signature"] == sig and self._ta_security_plan(
+                            sec_id, site, variant.get("binding_stack", ())) is None):
+                        self._ta_security_call_windows.add(variant["member_name"])
+
+    def _ta_call_window_cpp_type(self, site: "TACallSite") -> str:
+        return f"{self._ta_call_window_type}<{self._TA_CALL_WINDOW_MODES[site.class_name]}>"
+
+    def _emit_ta_call_window_helper(self, lines: list[str]) -> None:
+        if not (self._ta_chart_call_windows or self._ta_security_call_windows):
+            return
+        lines.extend(_TA_CALL_WINDOW_CPP.replace("@TYPE@", self._ta_call_window_type).splitlines())
+        lines.append("")
 
     # ------------------------------------------------------------------
     # Site / member lookup
@@ -705,7 +880,8 @@ class TaSiteHelper:
         below therefore never apply to it. A top-level lazy-edge site routed to
         the hold-last source clock (change/mom/roc) or left on its
         per-execution inline compute (cum/barssince/valuewhen/cross*/rising/...)
-        must never precalc.
+        must never precalc. Nor can an extrema window whose samples are taken
+        only when its call executes.
 
         Re-pinned: the old opt-out for a chart ``ta.sma`` under an
         ``and`` RHS (pf-probe-oliver-dual-vol-sma, "eager precalc is
@@ -721,6 +897,8 @@ class TaSiteHelper:
         ``Type.new()`` call site's and may sit in a block. Other TA families
         and request.security sites retain their existing behavior."""
         if not getattr(site, "is_static", False):
+            return False
+        if self._ta_member_name(site) in self._ta_chart_call_windows:
             return False
         if self._ta_dynamic_plan(site) is not None:
             # The length is read on the bar (its first execution, or every
@@ -2046,6 +2224,8 @@ class TaSiteHelper:
 
     def _ta_fixed_cpp_type(self, site: "TACallSite") -> str:
         """The concrete fixed object used by declarations and every factory."""
+        if site.member_name in self._ta_chart_call_windows:
+            return self._ta_call_window_cpp_type(site)
         return self._TA_CHECKED_CLASSES.get(site.class_name, site.class_name)
 
     def _ta_plan_cpp_type(self, site: "TACallSite", plan: dict | None) -> str:
@@ -2059,7 +2239,8 @@ class TaSiteHelper:
             return "_PFSeriesSma"
         if plan["kind"] == "supertrend":
             return "pineforge::source::PineSupertrend"
-        return f"pineforge::source::FirstCallBound<{self._ta_fixed_cpp_type(site)}>"
+        fixed = self._TA_CHECKED_CLASSES.get(site.class_name, site.class_name)
+        return f"pineforge::source::FirstCallBound<{fixed}>"
 
     def _ta_member_cpp_type(self, site: "TACallSite") -> str:
         """The C++ type a site's member is declared with."""
@@ -2068,8 +2249,12 @@ class TaSiteHelper:
     def _ta_security_member_cpp_type(self, sec_id: int, site: "TACallSite",
                                      variant: dict) -> str:
         """The C++ type of one request.security copy of a site."""
-        return self._ta_plan_cpp_type(
-            site, self._ta_security_plan(sec_id, site, variant.get("binding_stack", ())))
+        plan = self._ta_security_plan(sec_id, site, variant.get("binding_stack", ()))
+        if plan is None:
+            if variant["member_name"] in self._ta_security_call_windows:
+                return self._ta_call_window_cpp_type(site)
+            return self._TA_CHECKED_CLASSES.get(site.class_name, site.class_name)
+        return self._ta_plan_cpp_type(site, plan)
 
     def _ta_uses_dynamic_lengths(self) -> bool:
         """Whether any live site or request.security copy takes the lowering

@@ -54,6 +54,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - `strategy.risk.allow_entry_in()` now reports `PF-E2097` at the call in local scope, matching TradingView. Move the call to global scope ([#434](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/434)).
 
+- Conditional fixed-length calls to `ta.lowest` and `ta.highest` now compute their windows from the bars on which each call runs ([#458](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/458))
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked
