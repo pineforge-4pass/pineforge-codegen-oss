@@ -26,6 +26,7 @@ import copy
 import re
 from typing import TYPE_CHECKING
 
+from .. import signatures as sigs
 from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, EnumDecl, ExprStmt,
     FuncCall, ForInStmt, ForStmt, FuncDef, Identifier, IfStmt, MemberAccess,
@@ -34,12 +35,23 @@ from ..ast_nodes import (
     WhileStmt,
 )
 from ..analyzer.value_bindings import ValueBindings
+from ..collection_history import history_annotation
 from ..errors import Phase
+from ..limits import iter_ast_nodes
 from ..pine_spelling import blank_string_literals
+from ..session_reads import _dropped_arguments
 from ..symbols import PineType
 from .helpers import pine_index_int_cast
 from .tables import (
+    ARRAY_JOURNAL_DELTA_METHODS,
+    ARRAY_JOURNAL_FULL_METHODS,
+    ARRAY_JOURNAL_READ_METHODS,
+    ARRAY_NEW_CTORS,
     BAR_SERIES_PUSH,
+    DRAWING_NS,
+    MATH_FUNC_MAP,
+    SKIP_FUNC_NAMES,
+    STR_FUNC_MAP,
     TA_CHART_PREV_CLOSE,
     TA_CHART_PREV_CLOSE_ARG,
     TA_IMPLICIT_APPEND,
@@ -1078,31 +1090,25 @@ class TaSiteHelper:
         return []
 
     # ------------------------------------------------------------------
-    # A pure user call's history below a lazy edge
+    # A user call's history below a lazy edge
     # ------------------------------------------------------------------
     #
-    # TradingView rule, pinned 2026-09-29 on BINANCE:BTCUSDT
-    # 15 (``tests/fixtures/lazy_call_history``): ``f(...)[k]`` on a user
-    # function's call in the lazily evaluated right operand of ``and``/``or``
-    # or in a ternary's arm reads the call's value k executions of its scope
-    # ago -- k bars at the top level, k calls inside a function -- on all 95
-    # every-third-bar reads of each shape, in a function and at the top level:
-    # the call runs on every execution of its scope, and the lazy edge gates
-    # only the read. So ``isNew(s) => inS(s) and not inS(s)[1]`` is true on
-    # the first bar of every session. The call-local history the Subscript
-    # lowering keeps otherwise (pushed only where the operand runs) reads the
-    # previous time the operand ran: ``[1]`` three bars back on the tape's
-    # reads, and ``isNew`` true once in a whole run.
+    # TradingView's BINANCE:BTCUSDT 15 tape (``tests/fixtures/lazy_call_history``)
+    # pins this for pure calls: ``f(...)[k]`` in a ternary arm or on the right
+    # of ``and``/``or`` reads the value k executions of its scope ago. The
+    # producer runs before selection; only the indexed read stays lazy.
     #
-    # Only a call whose value cannot depend on when it runs is hoisted: a
-    # user function whose body is one expression of its parameters, bar
-    # fields, literals, ``timeframe.*``/``syminfo.*`` facts, operators, and
-    # ``na``/``nz``/``time``/``time_close`` or such functions (the tape's
-    # shapes), called positionally with arguments of literals, names and
-    # operators. A stateful or side-effecting callee, a read in an ``if`` or
-    # loop body, a read not below a lazy edge, one in the arguments of an
-    # every-bar ``ta.*`` hoist (already pushed on every bar) and one in a
-    # statement the lowering drops keep their lowering.
+    # In chart statements and direct function-body statements, a positional,
+    # full-arity user call with simple written arguments can also be sampled
+    # before selection when the function keeps state of its own and that
+    # state stays local to its call site. This includes the local series
+    # recurrence in the reported ternary case. Calls without a history read
+    # stay lazy, as do newly considered callees without state of their own
+    # and callees with orders, alerts, logs, ``runtime.error``, drawing,
+    # table, request, varip, external writes, a read of an object field, of
+    # strategy state or of a collection they did not create, or unresolved
+    # calls. This adds no scheduling rule for selection bodies, loops,
+    # methods or requested contexts.
 
     _LAZY_CALL_HISTORY_BUILTINS = frozenset({"na", "nz", "time", "time_close"})
     _LAZY_CALL_HISTORY_NAMESPACES = frozenset({"timeframe", "syminfo"})
@@ -1168,6 +1174,226 @@ class TaSiteHelper:
             )
         return cache[id(node)]
 
+    def _lazy_call_history_stateful_call(self, call) -> bool:
+        """Admit a full positional call only when its inputs and effects can move."""
+        if (not isinstance(call, FuncCall) or not isinstance(call.callee, Identifier)
+                or call.kwargs):
+            return False
+        node = self._lazy_call_history_user_body(call)
+        return (node is not None
+                and len(call.args) == len(node.params)
+                and all(self._lazy_call_history_pure_expr(arg, None) for arg in call.args)
+                and self._lazy_call_history_local_state(node) is True)
+
+    def _lazy_call_history_user_body(self, call) -> FuncDef | None:
+        """Resolve a bare call to a single script function, without guessing."""
+        name = call.callee.name
+        definitions = getattr(self, "_lazy_call_history_definitions", None)
+        if definitions is None:
+            definitions = self._lazy_call_history_definitions = {}
+            for info in self.ctx.func_infos:
+                definitions[info.name] = info if info.name not in definitions else None
+        if name in SKIP_FUNC_NAMES:
+            return None
+        info = definitions.get(name)
+        if info is None or info.is_udt_method or not isinstance(info.node, FuncDef):
+            return None
+        bound = self.ctx.func_call_cs_map.get(id(call))
+        inherited = self.ctx.func_inherited_call_names.get(id(call))
+        if ((bound is not None and bound[0] != name)
+                or (inherited is not None and inherited != name)):
+            return None
+        notes = info.node.annotations or {}
+        if notes.get("library") or notes.get("scalar_overload_fallback"):
+            return None
+        return info.node
+
+    _LAZY_LOCAL_BUILTINS = frozenset(
+        name for name in sigs.BUILTIN_FUNCTIONS
+        if "." not in name and name not in {"input", "max_bars_back"}
+    )
+    _LAZY_LOCAL_NAMESPACES = {
+        "ta": sigs.TA_FUNCTIONS,
+        "math": sigs.MATH_FUNCTIONS.keys() | MATH_FUNC_MAP.keys(),
+        "str": sigs.STR_FUNCTIONS.keys() | STR_FUNC_MAP.keys(),
+        "timeframe": frozenset({"change", "in_seconds"}),
+    }
+    _LAZY_LOCAL_ARRAY_CTORS = ARRAY_NEW_CTORS | {"new", "from"}
+    # concat and covariance also read a second array the body may not own.
+    _LAZY_LOCAL_ARRAY_METHODS = (
+        ARRAY_JOURNAL_DELTA_METHODS | ARRAY_JOURNAL_FULL_METHODS
+        | ARRAY_JOURNAL_READ_METHODS | {"sort_indices"}
+    ) - {"concat", "covariance"}
+
+    @staticmethod
+    def _lazy_call_history_namespace(callee) -> str | None:
+        if (isinstance(callee, MemberAccess)
+                and isinstance(callee.object, Identifier)
+                and not ValueBindings.has_value_binding(callee.object)):
+            return callee.object.name
+        return None
+
+    @staticmethod
+    def _lazy_call_history_has_stateful_read(read: Subscript, node: FuncDef) -> bool:
+        obj = read.object
+        # Existing chart fields already advance on the chart clock.
+        return (not isinstance(obj, Identifier)
+                or ValueBindings.declaration_of(obj) is not None
+                or obj.name in node.params
+                or obj.name == "bar_index")
+
+    def _lazy_call_history_series_read(self, read: Subscript, owned_arrays) -> bool:
+        """Whether a history read cannot see a collection the body did not create.
+
+        In a function the history of an array, or of a selection of arrays,
+        reads an element of the current array, which a guard earlier in the
+        statement can change. A declared name read with ``[]`` must therefore
+        be a series the analyzer keeps (a collection is never one) or an array
+        the body created, and a selection is never sampled."""
+        obj = read.object
+        if isinstance(obj, Ternary):
+            return False
+        if not isinstance(obj, Identifier):
+            return True
+        binding = ValueBindings.declaration_of(obj)
+        return (binding is None or binding in owned_arrays
+                or self._decl_binding_is_series(*binding))
+
+    def _lazy_call_history_local_state(self, root: FuncDef) -> bool | None:
+        """Summarize a body: stateful, stateless, or unsafe (including cycles)."""
+        cache = self.__dict__.setdefault("_lazy_call_history_local_cache", {})
+        stack = [(root, None, False)]
+        while stack:
+            node, dependencies, stateful = stack.pop()
+            key = id(node)
+            if dependencies is not None:
+                states = [cache[id(dep)] for dep in dependencies]
+                cache[key] = None if None in states else stateful or any(states)
+            elif key not in cache:
+                cache[key] = None
+                summary = self._lazy_call_history_local_dependencies(node)
+                if summary is not None:
+                    dependencies, stateful = summary
+                    stack.append((node, dependencies, stateful))
+                    stack.extend((dep, None, False) for dep in reversed(dependencies))
+        return cache[id(root)]
+
+    def _lazy_call_history_local_dependencies(
+        self, node: FuncDef,
+    ) -> tuple[list[FuncDef], bool] | None:
+        """Find the user calls in a body with no effects outside its own state."""
+        items = [item for stmt in node.body for item, _ in iter_ast_nodes(stmt)]
+        locals_ = {(id(item), item.name) for item in items if isinstance(item, VarDecl)}
+        locals_.update((id(item), name) for item in items
+                       if isinstance(item, TupleAssign) for name in item.names)
+        owned_arrays = {
+            (id(item), item.name) for item in items
+            if isinstance(item, VarDecl) and isinstance(item.value, FuncCall)
+            and self._lazy_call_history_namespace(item.value.callee) == "array"
+            and item.value.callee.member in self._LAZY_LOCAL_ARRAY_CTORS
+        }
+        stateful = False
+        callees = {id(item.callee) for item in items if isinstance(item, FuncCall)}
+        for item in items:
+            if isinstance(item, VarDecl):
+                if item.is_varip:
+                    return None
+                stateful |= item.is_var
+            if isinstance(item, MemberAccess) and id(item) not in callees:
+                # A field read can observe a guard's mutation of a shared
+                # object even when the sampled function itself only reads,
+                # and strategy.* state changes within the execution when a
+                # guard closes a position immediately.
+                if self._lazy_call_history_namespace(item) in (None, "strategy"):
+                    return None
+            if isinstance(item, Subscript):
+                stateful |= self._lazy_call_history_has_stateful_read(item, node)
+            if isinstance(item, Assignment):
+                if not isinstance(item.target, Identifier):
+                    return None
+                binding = ValueBindings.declaration_of(item.target)
+                if binding not in locals_:
+                    return None
+                # A rebound reference is no longer known to be fresh.
+                owned_arrays.discard(binding)
+        for item in items:
+            # Iterating a collection reads it, as a field read does: a guard
+            # earlier in the statement can change any collection the body
+            # did not create.
+            if isinstance(item, ForInStmt) and not (
+                    isinstance(item.iterable, Identifier)
+                    and ValueBindings.declaration_of(item.iterable) in owned_arrays):
+                return None
+            # So does the history of a collection.
+            if isinstance(item, Subscript) and not self._lazy_call_history_series_read(
+                    item, owned_arrays):
+                return None
+
+        dependencies = []
+        pending = [item for item in items if isinstance(item, FuncCall)]
+        seen = set()
+        seen_defaults = set()
+        while pending:
+            item = pending.pop()
+            if id(item) in seen:
+                continue
+            seen.add(id(item))
+            callee = item.callee
+            if isinstance(callee, Identifier):
+                dep = self._lazy_call_history_user_body(item)
+                if dep is not None:
+                    # Defaults run at the nested call. Inspect the omitted
+                    # ones without letting the argument binder rewrite it.
+                    if (len(item.args) > len(dep.params)
+                            or not item.kwargs.keys() <= set(dep.params[len(item.args):])):
+                        return None
+                    defaults = (dep.annotations or {}).get("param_defaults", ())
+                    for index in range(len(item.args), len(dep.params)):
+                        if dep.params[index] in item.kwargs:
+                            continue
+                        if index >= len(defaults) or defaults[index] is None:
+                            return None
+                        default = defaults[index]
+                        if id(default) in seen_defaults:
+                            continue
+                        seen_defaults.add(id(default))
+                        for child, _ in iter_ast_nodes(default):
+                            if isinstance(child, (Assignment, VarDecl)):
+                                return None
+                            if isinstance(child, MemberAccess):
+                                if self._lazy_call_history_namespace(child) in (None, "strategy"):
+                                    return None
+                            if isinstance(child, Subscript):
+                                if not self._lazy_call_history_series_read(
+                                        child, owned_arrays):
+                                    return None
+                                stateful |= self._lazy_call_history_has_stateful_read(child, dep)
+                            if isinstance(child, FuncCall):
+                                pending.append(child)
+                    dependencies.append(dep)
+                    continue
+                if (callee.name in self._LAZY_LOCAL_BUILTINS
+                        and callee.name not in self._lazy_call_history_definitions):
+                    stateful |= callee.name == "fixnan"
+                    continue
+            elif isinstance(callee, MemberAccess):
+                namespace = self._lazy_call_history_namespace(callee)
+                if callee.member in self._LAZY_LOCAL_NAMESPACES.get(namespace, ()):
+                    stateful |= (namespace == "ta" or (namespace, callee.member)
+                                 in {("math", "random"), ("math", "sum")})
+                    continue
+                if namespace == "array":
+                    if callee.member in self._LAZY_LOCAL_ARRAY_CTORS:
+                        continue
+                    receiver = item.args[0] if item.args else item.kwargs.get("id")
+                    if (callee.member in self._LAZY_LOCAL_ARRAY_METHODS
+                            and isinstance(receiver, Identifier)
+                            and ValueBindings.declaration_of(receiver) in owned_arrays):
+                        continue
+            # Unknown calls and writes through unproven references stay lazy.
+            return None
+        return dependencies, stateful
+
     def _lazy_ctor_history_call(self, call) -> bool:
         """A positional call of the one user function of its name whose body
         is a single ``T.new(...)`` of a user-defined type over
@@ -1228,7 +1454,7 @@ class TaSiteHelper:
         return self._visit_expr(obj)
 
     def _lazy_call_history_units(self, stmt) -> list:
-        """The ``pure_call(...)[k]`` reads below a lazy edge of ``stmt``'s
+        """The eligible user-call history reads below a lazy edge of ``stmt``'s
         roots (``_lazy_edge_statement_roots``), in evaluation order, whose
         arguments are ``_lazy_call_history_pure_expr``. A
         ``request.security*`` payload, which its own evaluator runs, is not
@@ -1236,16 +1462,31 @@ class TaSiteHelper:
         cache = getattr(self, "_lazy_call_history_units_cache", None)
         if cache is None:
             cache = self._lazy_call_history_units_cache = {}
-        if id(stmt) in cache:
-            return cache[id(stmt)]
+        owner_name = getattr(self, "_active_func_name", None)
+        owner = self._func_info_map.get(owner_name)
+        chart_context = (
+            not self._pine_v5_body
+            and self._security_fallback_frame is None
+            and not self._security_payload_depth
+            and (owner is None or (
+                not owner.is_udt_method
+                and isinstance(owner.node, FuncDef)
+                and not (owner.node.annotations or {}).get("library")
+            ))
+            and (owner_name, self._current_instance_name)
+            not in self._requested_context_only_inline_contexts
+        )
+        key = (id(stmt), chart_context)
+        if key in cache:
+            return cache[key]
         units: list = []
         # A statement the lowering drops (plot, bgcolor, ...) reads nothing.
         if isinstance(stmt, ExprStmt) and self._is_skip_expr(stmt.expr):
-            cache[id(stmt)] = units
+            cache[key] = units
             return units
         hoisted_ta = self._lazy_edge_hoisted_ta_call_nodes()
 
-        def scan(expr, under_lazy: bool) -> None:
+        def scan(expr, under_lazy: bool, local_calls: bool) -> None:
             if expr is None:
                 return
             if isinstance(expr, Subscript):
@@ -1259,8 +1500,15 @@ class TaSiteHelper:
                         and self._lazy_reference_history_object(call)):
                     units.append(expr)
                     return
-                scan(expr.object, under_lazy)
-                scan(expr.index, under_lazy)
+                if (under_lazy and local_calls and history_annotation(expr) is None
+                        and self._lazy_call_history_stateful_call(call)):
+                    # Retain any legacy units already found in the offset.
+                    scan(expr.index, under_lazy, False)
+                    units.append(expr)
+                    return
+                scan(expr.object, under_lazy, local_calls)
+                # The new admission never moves a producer written in the offset.
+                scan(expr.index, under_lazy, False)
             elif isinstance(expr, FuncCall):
                 # An every-bar ta.* hoist evaluates its arguments on every
                 # bar, so a read inside one already pushes on every bar.
@@ -1273,35 +1521,48 @@ class TaSiteHelper:
                     and callee.object.name == "request"
                     and callee.member in ("security", "security_lower_tf")
                 )
-                scan(callee, under_lazy)
+                if local_calls and self._is_skip_expr(expr):
+                    local_calls = False
+                dropped = (
+                    {id(arg) for arg in _dropped_arguments(expr)}
+                    if local_calls else ()
+                )
+                if local_calls and self._resolve_callee(callee)[1] in DRAWING_NS:
+                    # Some drawing operands are rendered and then discarded.
+                    local_calls = False
+                scan(callee, under_lazy, local_calls)
                 for idx, arg in enumerate(getattr(expr, "args", ()) or ()):
                     if not (is_security and idx == 2):
-                        scan(arg, under_lazy)
-                for key, value in (getattr(expr, "kwargs", None) or {}).items():
-                    if not (is_security and key == "expression"):
-                        scan(value, under_lazy)
+                        scan(arg, under_lazy, local_calls and id(arg) not in dropped)
+                for name, value in (getattr(expr, "kwargs", None) or {}).items():
+                    if not (is_security and name == "expression"):
+                        scan(value, under_lazy, local_calls and id(value) not in dropped)
             elif isinstance(expr, BinOp):
-                scan(expr.left, under_lazy)
-                scan(expr.right, under_lazy or expr.op in ("and", "or"))
+                scan(expr.left, under_lazy, local_calls)
+                scan(expr.right, under_lazy or expr.op in ("and", "or"), local_calls)
             elif isinstance(expr, Ternary):
-                scan(expr.condition, under_lazy)
-                scan(expr.true_val, True)
-                scan(expr.false_val, True)
+                scan(expr.condition, under_lazy, local_calls)
+                scan(expr.true_val, True, local_calls)
+                scan(expr.false_val, True, local_calls)
             elif isinstance(expr, UnaryOp):
-                scan(expr.operand, under_lazy)
+                scan(expr.operand, under_lazy, local_calls)
             elif isinstance(expr, MemberAccess):
-                scan(expr.object, under_lazy)
+                scan(expr.object, under_lazy, local_calls)
             elif isinstance(expr, TupleLiteral):
                 for element in expr.elements:
-                    scan(element, under_lazy)
+                    scan(element, under_lazy, local_calls)
             elif isinstance(expr, IfStmt):
-                scan(expr.condition, under_lazy)
+                scan(expr.condition, under_lazy, local_calls)
             elif isinstance(expr, SwitchStmt):
-                scan(expr.expr, under_lazy)
+                scan(expr.expr, under_lazy, local_calls)
 
+        dropped_rhs = (
+            chart_context and isinstance(stmt, (VarDecl, Assignment))
+            and isinstance(stmt.value, FuncCall) and self._is_skip_expr(stmt.value)
+        )
         for root in self._lazy_edge_statement_roots(stmt):
-            scan(root, False)
-        cache[id(stmt)] = units
+            scan(root, False, chart_context and not dropped_rhs)
+        cache[key] = units
         return units
 
     def _emit_lazy_call_history_hoists(self, stmt, lines: list[str], indent: int) -> list[int]:
