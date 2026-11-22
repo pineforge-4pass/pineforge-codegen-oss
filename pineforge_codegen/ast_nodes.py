@@ -54,6 +54,10 @@ class ArgOrder:
     def __len__(self) -> int:
         return len(self.nodes)
 
+    def __getstate__(self):
+        # Protocols 0 and 1 require explicit opt-in to pickling slots.
+        return super().__getstate__()
+
 
 # ---------------------------------------------------------------------------
 # Top-level / structural nodes

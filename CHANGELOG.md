@@ -54,6 +54,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - `strategy.risk.allow_entry_in()` now reports `PF-E2097` at the call in local scope, matching TradingView. Move the call to global scope ([#434](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/434)).
 
+- `CompileError` preserves its message and diagnostics when sent from a Python process pool, so a refused script no longer breaks unrelated tasks, and `CodegenInvariantError` keeps its message through a pickle round trip ([#457](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/457)).
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked

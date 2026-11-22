@@ -16,7 +16,9 @@ import re
 from contextlib import contextmanager
 
 from .lexer import Token, TokenType
-from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+from .errors import (
+    CompileError, Diagnostic, Level, Phase, SourceLocation, _reduce_exception,
+)
 from .limits import MAX_NESTING_DEPTH, TimeBudget, limit_error, syntax_children
 from .method_binding import method_receiver_is_used
 from .ast_nodes import (
@@ -35,6 +37,8 @@ from .ast_nodes import (
 
 
 class ParseError(Exception):
+    __reduce__ = _reduce_exception
+
     def __init__(self, message: str, token: Token) -> None:
         super().__init__(message)
         self.token = token

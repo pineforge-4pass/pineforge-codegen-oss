@@ -45,7 +45,9 @@ from .ast_nodes import (
     Ternary, TupleAssign, TupleLiteral, TypeAnnotation, TypeDecl, TypeField,
     UnaryOp, VarDecl, WhileStmt,
 )
-from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+from .errors import (
+    CompileError, Diagnostic, Level, Phase, SourceLocation, _reduce_exception,
+)
 from .cpp_names import cpp_identifier_fragment
 from .library_modules import LibraryModule, parse_library_module
 from .limits import TimeBudget
@@ -112,6 +114,8 @@ def _callee_alias(node) -> tuple[str, str] | None:
 
 
 class _LinkError(Exception):
+    __reduce__ = _reduce_exception
+
     def __init__(self, diagnostic: Diagnostic) -> None:
         super().__init__(diagnostic.message)
         self.diagnostic = diagnostic

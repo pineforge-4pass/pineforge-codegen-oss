@@ -17,6 +17,16 @@ class Phase(Enum):
     CODEGEN = "CODEGEN"
 
 
+def _rebuild_exception(cls: type[BaseException], args: tuple) -> BaseException:
+    return BaseException.__new__(cls, *args)
+
+
+def _reduce_exception(error: BaseException):
+    # These constructors need different arguments than BaseException stores.
+    # Restore the original args and apply the instance state without rerunning them.
+    return _rebuild_exception, (type(error), error.args), vars(error)
+
+
 class CodegenInvariantError(BaseException):
     """An AST value reached emission without a lowering implementation.
 
@@ -27,6 +37,8 @@ class CodegenInvariantError(BaseException):
     exposes a located CompileError, or an explicit internal error if the node
     has no source location. Direct CodeGen users must handle it themselves.
     """
+
+    __reduce__ = _reduce_exception
 
     def __init__(self, node):
         self.node = node
@@ -85,6 +97,8 @@ class Diagnostic:
 
 
 class CompileError(Exception):
+    __reduce__ = _reduce_exception
+
     def __init__(self, diagnostics: list[Diagnostic]):
         self.diagnostics = diagnostics
         # Build a plain-text summary for the base Exception message. Each
