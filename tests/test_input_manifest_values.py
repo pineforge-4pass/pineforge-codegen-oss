@@ -35,6 +35,48 @@ def _numeric_fixture() -> dict:
     return _titled((ROOT / "tests" / "fixtures" / "input_metadata_numeric.pine").read_text())
 
 
+def test_bare_string_default_uses_pine_float_equality():
+    # The operands are about 5e-11 apart, inside the absolute equality band.
+    rows = _inputs('const string seed = 1.0 == 1.00000000005 ? "A" : "B"\n'
+                   'mode = input(seed, "Mode")')
+    assert rows["Mode"]["default"] == "A"
+
+
+@pytest.mark.parametrize("op,expected", [
+    ("==", ["A", "A", "A", "B", "B"]),
+    ("!=", ["B", "B", "B", "A", "A"]),
+    ("<",  ["B", "B", "B", "A", "B"]),
+    ("<=", ["A", "A", "A", "A", "B"]),
+    (">",  ["B", "B", "B", "B", "A"]),
+    (">=", ["A", "A", "A", "B", "A"]),
+])
+def test_bare_string_default_relations_on_both_sides_of_the_band(op, expected):
+    # At -9e-11, +9e-11 and exactly +1e-10 versus zero Pine sees equality.
+    # At -1.1e-10 and +1.1e-10 it sees LT and GT respectively.
+    values = ("-0.00000000009", "0.00000000009", "0.00000000010",
+              "-0.00000000011", "0.00000000011")
+    rows = _inputs("\n".join(
+        f'const string seed{i} = {lhs} {op} 0.0 ? "A" : "B"\n'
+        f'mode{i} = input(defval=seed{i}, title="Mode {i}")'
+        for i, lhs in enumerate(values)
+    ))
+    assert [rows[f"Mode {i}"]["default"] for i in range(len(values))] == expected
+
+
+def test_bare_string_default_promotes_only_mixed_numeric_comparisons():
+    # These adjacent ints stay distinct; mixed comparison rounds the first
+    # operand to the nearest binary64 value, 9007199254740992.0.
+    rows = _inputs('const string exact = 9007199254740993 == 9007199254740992 ? "A" : "B"\n'
+                   'const string mixed = 9007199254740993 == 9007199254740992.0 ? "A" : "B"\n'
+                   'const string selected = (true ? 9007199254740993 : 0.0) == '
+                   '9007199254740992 ? "A" : "B"\n'
+                   'a = input(exact, "Integer")\nb = input(mixed, "Mixed")\n'
+                   'c = input(selected, "Selection")')
+    assert rows["Integer"]["default"] == "B"
+    assert rows["Mixed"]["default"] == "A"
+    assert rows["Selection"]["default"] == "A"
+
+
 def test_every_input_has_a_support_boolean():
     inputs = _inputs('a = input.int(1, "A")\nb = input.bool(true, "B")\n'
                      'c = input.string("x", "C")\nd = input(close, "D")\n')
@@ -146,11 +188,22 @@ def test_values_the_receipt_computes_at_run_time_keep_the_previous_manifest():
                                       "default": None, "supported": True}
     assert inputs["Expression default"]["default"] is None
     assert "options" not in inputs["Expression option"]
+    assert "options" not in _inputs('p = input.float(math.pi, "P", options=[math.pi, math.e])')["P"]
+    assert "options" not in _inputs('p = input.float(1.0, "P", options=[math.pi, 1.0])')["P"]
     assert inputs["Expression option"]["default"] == 5
     assert "min" not in inputs["Expression bound"] and "max" not in inputs["Expression bound"]
     assert inputs["Time from parts"]["default"] is None
     assert inputs["Plain constant"] == {"title": "Plain constant", "type": "string",
                                         "default": None, "supported": True}
+
+
+def test_positional_float_manifest_publishes_only_literal_lists():
+    rows = _inputs('p = input.float(1.0, "Mixed", [math.pi, 1.0])\n'
+                   'r = input.float(math.pi, "Members", [math.pi, math.e])\n'
+                   'q = input.float(1.0, "Literals", [2.0, 1.0])')
+    assert "options" not in rows["Mixed"]
+    assert "options" not in rows["Members"]
+    assert rows["Literals"]["options"] == [2.0, 1.0]
 
 
 def test_color_default_uses_the_native_setters_packed_integer():
