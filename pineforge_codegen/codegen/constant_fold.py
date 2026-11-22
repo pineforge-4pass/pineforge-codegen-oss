@@ -476,7 +476,9 @@ def fold_constant_expression(node, known_values: Mapping[str, object],
                 if len(left) + len(right) > MAX_SOURCE_CHARS:
                     raise ValueError("constant string is too long")
                 return left + right
-            if (for_input_default and not comparison_operand and expr.op == "%"):
+            if (for_input_default and not comparison_operand and expr.op in ("/", "%")):
+                # The emitted / and % convert both operands to double first,
+                # so an exactly rounded integer quotient can differ past 2**53.
                 return _numeric(_float_arithmetic(expr.op, numeric(left), numeric(right)))
             if (comparison_operand
                     and type(left) in (int, float) and type(right) in (int, float)

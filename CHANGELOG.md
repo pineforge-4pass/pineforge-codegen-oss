@@ -54,9 +54,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - `strategy.risk.allow_entry_in()` now reports `PF-E2097` at the call in local scope, matching TradingView. Move the call to global scope ([#434](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/434)).
 
-- Numeric inputs with positional options compile with their choices in the declared order, and `input()` preserves constant string defaults.
+- Numeric inputs with positional options compile with their choices in the declared order, and bare `input()` preserves string defaults it can resolve at translation time.
 
-- Bare `input()` follows immutable string aliases and treats float operands within the inclusive `1e-10` band as equal when comparing constant defaults.
+- Bare `input()` follows immutable string aliases, through a flat chain of up to 512 declarations and for a string without a NUL character. Constant comparisons that the generator evaluates, for a bare `input()` default and for the other constants it folds (such as `strategy()` parameters, history offsets and constant request timeframes), treat float operands within the inclusive `1e-10` band as equal, as the generated comparison does. A division or remainder in a bare `input()` default is computed as the generated code computes it, after both operands are converted to doubles.
 
 ## 1.14.0 — 2026-11-20
 
