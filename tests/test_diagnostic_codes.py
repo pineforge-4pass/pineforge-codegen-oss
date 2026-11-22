@@ -34,6 +34,11 @@ PIN = ROOT / "tests" / "fixtures" / "diagnostic_codes_pin.json"
 FIXTURES = ROOT / "tests" / "fixtures"
 KINDS = {"identifier", "type", "keyword", "number", "vocab", "text"}
 CATALOG = diagnostics_catalog()["codes"]
+RECORDED_REQUEST_HINT = (
+    "PineForge replays the values TradingView returned on the chart's own bars "
+    "(chart_open_ms,value). If the recording has no value for a bar, "
+    "the request returns na for that bar."
+)
 
 
 def _placeholders(template: str | None) -> set[str]:
@@ -83,6 +88,7 @@ def test_catalog_codes_are_pinned():
     assert pinned["PF-E2027"] == (
         "97d497fb95ae41955206393a4e2ef7b816710f3c10480b93180d6c312459517a"
     )
+    assert render(CATALOG["PF-W1544"]["hint"], {}) == RECORDED_REQUEST_HINT
     removed = sorted(set(pinned) - set(CATALOG))
     assert not removed, f"codes are never removed: {removed}"
     repurposed = sorted(c for c in pinned if pin_digest(CATALOG[c]) != pinned[c])
@@ -97,6 +103,65 @@ def test_catalog_api_returns_a_copy():
     first = diagnostics_catalog()
     first["codes"].clear()
     assert diagnostics_catalog()["codes"] == CATALOG
+
+
+def test_mincontract_warning_explains_symbol_metadata():
+    args = {"member": "mincontract"}
+    message = (
+        'syminfo.mincontract is na unless the run declares a value for '
+        '"mincontract" in its symbol metadata.'
+    )
+    assert render_diagnostic("PF-W1520", args) == (message, None)
+
+    source = '//@version=6\nstrategy("Minimum contract")\nplot(syminfo.mincontract)\n'
+    [warning] = [d for d in transpile_full(source)["diagnostics"] if d.code == "PF-W1520"]
+    assert (warning.level, warning.args, warning.message) == (Level.WARNING, args, message)
+
+
+COLLECTION_HISTORY_CASES = {
+    "PF-E6067": (
+        "f(float v) =>\n    m = matrix.new<float>(1, 1, v)\n    (m[1]).rows()\nr = f(close)\n",
+        {"label": "m[1]", "kind": "matrix"}),
+    "PF-E6068": (
+        "f(matrix<float> x) => (x[1]).rows()\nm = matrix.new<float>(1, 1, close)\nr = f(m)\n",
+        {"label": "x[1]", "kind": "matrix"}),
+    "PF-E6069": (
+        "m = matrix.new<float>(1, 1, close)\nf() => (m[1]).rows()\nr = f()\n",
+        {"label": "m[1]", "kind": "matrix"}),
+    "PF-E6072": (
+        "f(float v) =>\n    a = array.from(v)\n    (a[1]).size()\nr = f(close)\n",
+        {"label": "a[1]", "kind": "array"}),
+    "PF-E6073": (
+        "f(array<float> x) => (x[1]).size()\na = array.from(close)\nr = f(a)\n",
+        {"label": "x[1]", "kind": "array"}),
+    "PF-E6074": (
+        "a = array.from(close)\nf() => (a[1]).size()\nr = f()\n",
+        {"label": "a[1]", "kind": "array"}),
+    "PF-W5010": (
+        "f(array<float> x) => array.size(x[1])\na = array.from(close)\nr = f(a)\n",
+        {"object_name": "x", "kind": "array"}),
+}
+
+
+@pytest.mark.parametrize("code", COLLECTION_HISTORY_CASES)
+def test_collection_history_catalog_messages_do_not_expose_fixture_paths(code):
+    body, args = COLLECTION_HISTORY_CASES[code]
+    source = ('//@version=6\nstrategy("Collection history")\n' + body
+              + 'if r > 0\n    strategy.entry("L", strategy.long)\n')
+    if code.startswith("PF-E"):
+        with pytest.raises(CompileError) as refused:
+            transpile(source)
+        diagnostics = refused.value.diagnostics
+    else:
+        diagnostics = transpile_full(source)["diagnostics"]
+
+    matches = [d for d in diagnostics if d.code == code]
+    assert matches, [(d.code, d.message) for d in diagnostics]
+    for diagnostic in matches:
+        assert diagnostic.args == args
+        assert (diagnostic.message, diagnostic.hint) == render_diagnostic(code, args)
+        for fragment in ("fixtures/", "array_history_tv", "ahist_fn"):
+            assert fragment not in diagnostic.message
 
 
 def test_switch_arm_warnings_twin_support_checker_errors():
@@ -313,6 +378,23 @@ def test_fixed_lookahead_values_keep_timing_diagnostic(declarations, lookahead, 
             "(e.g. close[1]) to read only completed prior HTF bars.")
     for diagnostic in diagnostics:
         _assert_coded(diagnostic, "lookahead.pine")
+
+
+def test_recorded_request_hint_explains_missing_bar_values():
+    source = (
+        '//@version=6\n'
+        'strategy("Recorded earnings hint")\n'
+        'earningsValue = request.earnings(syminfo.tickerid)\n'
+        'if earningsValue > 0\n'
+        '    strategy.entry("L", strategy.long)\n'
+    )
+    out = transpile_full(source)
+    warnings = [d for d in out["diagnostics"] if d.message.startswith("request.earnings(")]
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert warning.hint == RECORDED_REQUEST_HINT
+    assert warning.code == "PF-W1544"
+    _assert_coded(warning, "recorded earnings")
 
 
 def test_number_arguments_are_numbers():

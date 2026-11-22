@@ -99,7 +99,9 @@ from .ast_nodes import (
     NaLiteral, NumberLiteral, Program, StrategyDecl, StringLiteral, Subscript,
     SwitchStmt, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, WhileStmt,
 )
-from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+from .errors import (
+    CompileError, Diagnostic, Level, Phase, SourceLocation, _reduce_exception,
+)
 from .pine_spelling import input_binding_names
 
 
@@ -160,6 +162,8 @@ class _Unresolvable(Exception):
 class _Fallback(Exception):
     """Requests whose payload parameters keep the earlier lowering."""
 
+    __reduce__ = _reduce_exception
+
     def __init__(self, requests) -> None:
         super().__init__()
         self.requests = set(requests)
@@ -167,6 +171,8 @@ class _Fallback(Exception):
 
 class _FeedFallback(Exception):
     """Requests of another symbol that read no feed: request id -> why."""
+
+    __reduce__ = _reduce_exception
 
     def __init__(self, reasons: dict[int, str]) -> None:
         super().__init__()

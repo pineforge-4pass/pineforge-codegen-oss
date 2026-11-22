@@ -26,7 +26,9 @@ from .ast_nodes import (
     MethodDef, NaLiteral, NumberLiteral, StringLiteral, Subscript, SwitchStmt,
     Ternary, TupleAssign, TupleLiteral, TypeDecl, UnaryOp, VarDecl, WhileStmt,
 )
-from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+from .errors import (
+    CompileError, Diagnostic, Level, Phase, SourceLocation, _reduce_exception,
+)
 from .library_modules import LibraryModule
 from . import signatures as sigs
 
@@ -199,6 +201,8 @@ def _kind_of_hint(hint) -> str:
 
 
 class _Refusal(Exception):
+    __reduce__ = _reduce_exception
+
     def __init__(self, node: ASTNode | None, message: str) -> None:
         super().__init__(message)
         self.node = node
