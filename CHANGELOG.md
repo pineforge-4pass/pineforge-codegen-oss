@@ -54,6 +54,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - `strategy.risk.allow_entry_in()` now reports `PF-E2097` at the call in local scope, matching TradingView. Move the call to global scope ([#434](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/434)).
 
+- A call of a user function that keeps state of its own (for example a `var`, a history read of one of its variables, or a `ta.*` call), read with `[]` in a ternary arm or on the right of `and` or `or` in a statement of the top level or of a function body, now runs before the branch is chosen, which matches the TradingView trade lists reported in #456. This applies only when the call passes every parameter positionally with names, literals and operators, and the function and the functions it calls assign only their own variables and call only `ta.*`, `math.*`, `str.*`, the time, timeframe, cast and `na`/`nz`/`fixnan` built-ins, each other, and `array.*` functions on arrays they create; quirk 15 of `docs/reference/known-codegen-quirks.md` gives the exact conditions. Calls without `[]`, reads inside `if`, `switch` or loop blocks, methods, and functions that place orders, alert, log, call `runtime.error`, draw, use tables, requests, maps, matrices or `varip`, write outside their own variables, read an object field or a `strategy.*` variable, or read or iterate a collection they did not create keep lazy evaluation ([#456](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/456)).
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked

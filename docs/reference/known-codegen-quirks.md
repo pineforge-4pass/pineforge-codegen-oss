@@ -348,17 +348,47 @@ you delete or weaken the special case, the test will tell you.
     A user function's call read at an offset below such an edge
     (`isNew(s) => inS(s) and not inS(s)[1]`) is the call's value k executions
     of its scope ago -- k bars at the top level, k calls in a function -- as
-    TradingView's BINANCE:BTCUSDT 15 tape shows
+    TradingView's BINANCE:BTCUSDT 15 tape shows for pure calls
     (`fixtures/lazy_call_history/tg-lazyhist-btc15`,
     `tests/test_e2e_lazy_call_history.py`): codegen pushes its `_hist_call_*`
     Series once per execution, before the statement, in a top-level statement
     and in a statement of a function body (`codegen/ta.py::
-    _lazy_call_history_units`, `_emit_lazy_call_history_hoists`). Only a call
-    of a pure function -- one expression of its parameters, bar fields,
+    _lazy_call_history_units`, `_emit_lazy_call_history_hoists`). A pure call
+    is a positional call, with arguments of literals, names and operators, of
+    a function whose body is one expression of its parameters, bar fields,
     literals, `timeframe.*`/`syminfo.*`, operators and `na`/`nz`/`time`/
-    `time_close` or such functions, with arguments of literals, names and
-    operators -- is hoisted; any other keeps the call-local push where the
-    operand runs, which reads the previous time it ran. An if whose head
+    `time_close` or such functions. The same push also applies to a call of
+    a function that keeps state of its own, as in the stateful ternary
+    reported in
+    [#456](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/456),
+    when all of the following hold. The call names one script function that
+    is not a method, an overload or a library function, and supplies every
+    parameter positionally with names, `timeframe.*` or `syminfo.*` members,
+    literals and operators. The function, or a function it calls, has a
+    `var`, a history read of one of its variables or parameters, of a script
+    variable, of `bar_index` or of an expression, or a `ta.*`, `fixnan`,
+    `math.sum` or `math.random` call. The function and the functions it
+    calls assign only their own variables, do not call themselves directly
+    or through each other, and call only each other (script functions as
+    above), `ta.*`, `math.*`, `str.*`, `timeframe.change`,
+    `timeframe.in_seconds`, `na`, `nz`, `fixnan`, `timestamp`, `time`,
+    `time_close`, `year`, `month`, `weekofyear`, `dayofmonth`, `dayofweek`,
+    `hour`, `minute`, `second`, the `int`, `float`, `bool` and `string`
+    casts, the `array.new*` and `array.from` constructors, and the other
+    `array.*` functions except `array.concat` and `array.covariance` on an
+    array they created and never reassigned. Only the indexed read stays in
+    the arm or the right operand of `and` or `or`. Every other call keeps
+    the evaluation it had. These stay lazy: calls without `[]`, other
+    functions without state of their own, and functions that place or
+    cancel orders, alert, log, call `runtime.error`, use drawings, tables,
+    requests, maps, matrices, a method call or `varip`, write outside their
+    own variables, read an object field, a `strategy.*` variable or constant
+    or a `dayofweek.*` constant, read or iterate (`for ... in`) a collection
+    they did not create, or take the history of such a collection or of a
+    `?:` selection. This does not add hoists in selection bodies,
+    loops, methods, library functions or requested contexts, nor for a read
+    written in an offset, in an argument of a drawing call or one the
+    lowering discards (a plot's), or in a `var` initializer. An if whose head
     reads such a history and whose block calls a `change`/`mom`/`roc`
     takes both rules: the push before the if, the held source clock in
     its block (`fixtures/cgint7_tv/cgint7_lazy`,

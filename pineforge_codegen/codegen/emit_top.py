@@ -2084,7 +2084,7 @@ class TopLevelEmitter:
 
         # d. Visit each statement. A stateful ``ta.*`` site below a lazy
         #    ``and``/``or`` RHS or ternary arm of a top-level statement is
-        #    evaluated every bar BEFORE the statement, and so is a pure user
+        #    evaluated every bar BEFORE the statement, and so is an eligible user
         #    call read at an offset there (TV rules, see ``ta.py``).
         for stmt in self.ctx.ast.body:
             self._emit_lazy_edge_ta_hoists(stmt, lines, indent=2)
@@ -2893,7 +2893,7 @@ class TopLevelEmitter:
                 self._emit_history_series_write(lines, "        ", member, value)
 
         emitted_return = False
-        # A pure call read at an offset below a lazy edge runs once per call
+        # An eligible call read at an offset below a lazy edge runs once per call
         # of this function, before its statement (``ta.py``).
         hoisted: list[int] = []
         if node.is_single_expr and node.body:
