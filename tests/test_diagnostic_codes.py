@@ -105,6 +105,19 @@ def test_catalog_api_returns_a_copy():
     assert diagnostics_catalog()["codes"] == CATALOG
 
 
+def test_mincontract_warning_explains_symbol_metadata():
+    args = {"member": "mincontract"}
+    message = (
+        'syminfo.mincontract is na unless the run declares a value for '
+        '"mincontract" in its symbol metadata.'
+    )
+    assert render_diagnostic("PF-W1520", args) == (message, None)
+
+    source = '//@version=6\nstrategy("Minimum contract")\nplot(syminfo.mincontract)\n'
+    [warning] = [d for d in transpile_full(source)["diagnostics"] if d.code == "PF-W1520"]
+    assert (warning.level, warning.args, warning.message) == (Level.WARNING, args, message)
+
+
 def test_switch_arm_warnings_twin_support_checker_errors():
     """The support checker warns, inside a switch arm, what it refuses
     elsewhere: PF-W1nnn (nnn < 500) is PF-E1nnn's text as a warning."""
