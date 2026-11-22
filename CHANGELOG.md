@@ -54,6 +54,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - `strategy.risk.allow_entry_in()` now reports `PF-E2097` at the call in local scope, matching TradingView. Move the call to global scope ([#434](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/434)).
 
+- Numeric inputs with positional options compile with their choices in the declared order, and `input()` preserves constant string defaults.
+
 ## 1.14.0 — 2026-11-20
 
 - Generated EMA, TSI, KC, KCW and MACD calls use the paired engine's checked

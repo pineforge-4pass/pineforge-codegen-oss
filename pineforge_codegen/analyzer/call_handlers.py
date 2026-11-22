@@ -70,7 +70,9 @@ from ..ast_nodes import (
     Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, NaLiteral,
 )
 from ..method_binding import bind_function_defaults
-from ..input_defaults import plain_input_default, plain_input_type
+from ..input_defaults import (
+    PLAIN_INPUT_STRING_DEFAULT, input_param_names, plain_input_default, plain_input_type,
+)
 from ..loop_types import FLOAT_REASSIGNMENT, has_fractional_int_value
 from ..pine_spelling import sub_outside_literals
 from ..external_requests import FEED_LOWERING, LOWERING_ANNOTATION
@@ -1145,6 +1147,20 @@ class CallHandlers:
             self._visit(defval)
         static_type = plain_input_type(
             defval, is_bound=self._value_bindings.has_value_binding)
+        if static_type is None and defval is not None:
+            # A const string read has the same overload as a written literal.
+            # Prove the value by lexical binding before the native input
+            # preamble, which can run before declarations in the body.
+            resolver = getattr(self, "_constant_default_resolver", None)
+            if resolver is None:
+                from ..codegen.constant_values import ConstantResolver
+                resolver = self._constant_default_resolver = ConstantResolver(
+                    self._ast, self._budget)
+            value = resolver.plain_string_default(defval)
+            if value is not None:
+                node.annotations = {**(node.annotations or {}),
+                                    PLAIN_INPUT_STRING_DEFAULT: value}
+                static_type = PineType.STRING
         if static_type is not None and static_type != PineType.COLOR:
             return static_type
         if isinstance(defval, Identifier):
@@ -1162,10 +1178,7 @@ class CallHandlers:
 
     def _merge_input_params(self, member: str | None, node: FuncCall) -> dict[str, Any]:
         """Positional + kwargs merged like codegen (for input.* validation)."""
-        if member is None:
-            param_names = sigs.get_param_names(None, "input")
-        else:
-            param_names = sigs.get_param_names("input", member)
+        param_names = input_param_names(node, member)
         if not param_names:
             return {}
         merged: list[Any] = list(node.args)
