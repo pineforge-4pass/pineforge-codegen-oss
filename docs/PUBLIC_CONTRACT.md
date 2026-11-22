@@ -988,10 +988,11 @@ inside a `switch` arm also say that PineForge keeps the arm's lowering, and
 PF-W1067 to PF-W1072, which warn everywhere, name no arm. No warning or note
 template says that PineForge refuses or rejects something, though one may say
 what TradingView refuses or rejects. Beyond these checks a template's exact
-wording is not pinned. A text no template
-renders carries `PF-E0000` / `PF-W0000` with the text in `args.message` (and
-`args.hint`); the test suite refuses it. The `message` text itself is
-unchanged and stays the English rendering; `runtime.error` text a strategy
+wording is not pinned. A text no template renders carries `PF-E0000` /
+`PF-W0000` with the text in `args.message` (and `args.hint`); the test suite
+refuses it. The `message` field contains the English rendering. For 1.15.0,
+`PF-W1520` clarifies that the value comes from the run's symbol metadata and
+keeps the same code, severity and arguments. `runtime.error` text a strategy
 authors is not a transpile diagnostic. Since 1.5.0 an uncatalogued note uses
 the existing PF-W0000 fallback with its actual `note` level preserved;
 PF-W0000's catalog severity remains `warning`. The diagnostic level is the
@@ -1001,8 +1002,8 @@ wire authority in that fallback case. No new fallback code is allocated.
 spelled templates and preserves existing pins. Since 1.5.0 new entries require
 an authored `user_message`; the generator reports missing, malformed or
 unknown-argument presentation templates rather than copying raw diagnostics.
-The eleven reviewed severity pin changes above are explicit fixture-backed
-exceptions, not a general permission to regenerate existing pins.
+The fixtures record the exact changes to existing pins, including the
+`PF-W1520` message, while preserving the historical catalog and pins.
 
 ## Compatibility boundary
 
