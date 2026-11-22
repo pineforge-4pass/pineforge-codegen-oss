@@ -68,6 +68,30 @@ def test_negative_half_uses_half_away_from_zero():
     _run_string_comparison(_compared_input("", "math.round(-1.5) == -2.0"), "A")
 
 
+@pytest.mark.parametrize("condition", [
+    "bool(9007199254740995 / 3 - 3002399751580332)",
+    "bool(9007199254740992 / 9007199254740993 - 1.0)",
+], ids=["rounded-dividend", "rounded-divisor"])
+def test_integer_division_outside_a_comparison_converts_both_operands(condition):
+    # The generated division converts each operand to a double and then
+    # divides. 9007199254740995 lies halfway between two doubles and becomes
+    # the even one, 9007199254740996, and a third of that is exactly
+    # 3002399751580332. 9007199254740993 becomes 9007199254740992, so the
+    # second quotient is exactly 1. Both differences are zero and bool() of
+    # zero is false. The exactly rounded integer quotients, 3002399751580331.5
+    # and the double just below 1, leave a nonzero difference and select A.
+    # B is derived by hand from binary64 arithmetic: TradingView's answer for
+    # integers this wide is not measured.
+    _run_string_comparison(_compared_input("", condition), "B")
+
+
+def test_integer_division_of_exact_operands_keeps_its_fraction():
+    # Control: 7 and 2 are exact doubles, so the quotient is 3.5 however it
+    # is rounded, and the difference is zero. A truncating integer division
+    # would give 3, leave -0.5 and select A.
+    _run_string_comparison(_compared_input("", "bool(7 / 2 - 3.5)"), "B")
+
+
 @pytest.mark.parametrize("declarations,condition", [
     ("", "(9007199254740992 + 1) == 9007199254740992"),
     ("", "math.toradians(1e308) < 1e308"),
@@ -75,12 +99,18 @@ def test_negative_half_uses_half_away_from_zero():
     ("", "math.avg(1e16, 1.0, -1e16) > 0.1"),
     ("", "math.round(1.005, 2) > 1.005"),
     ("float x = 9007199254740993", "x == 9007199254740992"),
+    # Outside a comparison a zero divisor leaves a non-finite quotient, which
+    # is not proved, like every other non-finite arithmetic result there.
+    ("", "bool(1 / 0)"),
 ], ids=["computed-wide-int", "radians", "degrees", "average", "round-precision",
-        "inlined-float-annotation"])
+        "inlined-float-annotation", "zero-divisor"])
 def test_unproved_string_keeps_the_historical_numeric_getter(declarations, condition):
     # Exact integer arithmetic gives B in the first row, but the native
     # float wrapper gives A. No literal is safe to substitute in that row.
     # Each unproved string uses the same numeric descriptor as older releases.
+    # Pins today's declined default: the historical numeric getter, which
+    # does not build for a string. A change that selects the string overload
+    # for this shape must update this row.
     full = _compared_input(declarations, condition)
     assert full["inputs"][0]["default"] is None
     with pytest.raises(AssertionError, match=r"error:[^\n]*number"):
@@ -105,6 +135,9 @@ plot(mode)
 
 
 def test_alias_with_embedded_nul_keeps_the_unproven_default():
+    # Pins today's declined default: the historical numeric getter, which
+    # does not build for a string. A change that selects the string overload
+    # for this shape must update this row.
     full = transpile_full(
         '//@version=6\nstrategy("String default")\n'
         'const string seed = "A\0B"\nmode = input(seed, "Mode")\n'

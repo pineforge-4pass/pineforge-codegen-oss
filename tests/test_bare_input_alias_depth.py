@@ -61,6 +61,9 @@ def test_flat_const_string_aliases_build_and_keep_the_default(length):
 
 def test_flat_alias_chain_past_the_proof_budget_keeps_the_unproven_default():
     # Control: the 513th declaration exceeds the 512-step proof budget.
+    # Pins today's declined default: the historical numeric getter, which
+    # does not build for a string. A change that selects the string overload
+    # for this shape must update this row.
     full = transpile_full(chain(513))
     assert full["inputs"][0]["default"] is None
     with pytest.raises(AssertionError, match=r"error:[^\n]*number"):
