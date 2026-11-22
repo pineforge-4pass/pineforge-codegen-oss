@@ -56,7 +56,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - Numeric inputs with positional options compile with their choices in the declared order, and `input()` preserves constant string defaults.
 
-- `input()` resolves immutable aliases of string defaults and applies Pine's float comparison rules when computing them.
+- Bare `input()` follows immutable string aliases and treats float operands within the inclusive `1e-10` band as equal when comparing constant defaults.
 
 ## 1.14.0 — 2026-11-20
 

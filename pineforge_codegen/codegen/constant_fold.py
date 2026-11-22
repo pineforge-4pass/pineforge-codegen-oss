@@ -188,12 +188,20 @@ _COMPARISONS = {
     "<=": operator.le, ">": operator.gt, ">=": operator.ge,
 }
 _FLOAT_ARITHMETIC = {"+": operator.add, "-": operator.sub, "*": operator.mul}
+PINE_FLOAT_COMPARISON_BAND = 1e-10
+# A proved missing value from the wide narrowing cast, distinct from an
+# ordinary integer with the same magnitude or an unproved expression.
+MISSING_INT64 = object()
+_INT32_MIN = -(1 << 31)
+_INT64_MIN = -(1 << 63)
+_EXACT_DOUBLE_INT = 1 << 53
 
 
 def _compare(op, left, right):
     # Keep this in step with _emit_float_relational and the engine's
     # ta_compare_band.hpp. Missing operands make even != false.
-    if left is None or right is None:
+    if (left is None or right is None
+            or left is MISSING_INT64 or right is MISSING_INT64):
         return False
     if (type(left) in (int, float) and type(right) in (int, float)
             and (type(left) is float or type(right) is float)):
@@ -201,7 +209,7 @@ def _compare(op, left, right):
         if math.isnan(left) or math.isnan(right):
             return False
         if left == right or (math.isfinite(left) and math.isfinite(right)
-                             and abs(left - right) <= 1e-10):
+                             and abs(left - right) <= PINE_FLOAT_COMPARISON_BAND):
             return op in ("==", "<=", ">=")
     return _COMPARISONS[op](left, right)
 
@@ -264,7 +272,8 @@ def _constant_arguments(call):
 
 
 def fold_constant_expression(node, known_values: Mapping[str, object],
-                             named_constants: Mapping[str, object]):
+                             named_constants: Mapping[str, object], *,
+                             for_input_default: bool = False):
     """Fold a Pine constant, returning (value, proven).
 
     All dependencies must be constant, even in an unselected arm. Evaluation
@@ -273,12 +282,56 @@ def fold_constant_expression(node, known_values: Mapping[str, object],
     declaration-only casts use their own whitelist and rounding uses the
     shared Pine rounding helper.
     NON_CONSTANT bindings shadow builtins without becoming constant values.
+
+    A bare input also needs the proof to agree with the emitted expression.
+    Keep those restrictions local: other consumers use this folder for
+    semantic constants and may not execute the expression at run time.
     """
+    def check_integer(value):
+        # A raw minimum can be a sentinel or an ordinary integer depending
+        # on its C++ width. Only the explicit float narrowing below proves
+        # which width a minimum has.
+        if (type(value) is int
+                and (value <= _INT64_MIN or value >= -_INT64_MIN
+                     or value == _INT32_MIN)):
+            raise ValueError("integer carrier is not proven")
+        return value
+
+    def signed_float_literal(expr):
+        if isinstance(expr, UnaryOp) and expr.op in ("+", "-"):
+            expr = expr.operand
+        if isinstance(expr, NumberLiteral) and type(expr.value) is float:
+            return expr.value
+        return None
+
+    def input_call_is_proven(spelling, args):
+        if spelling == "int":
+            # The emitted cast is wide for a float literal (with or
+            # without a sign). Other sources need a separate width proof.
+            return len(args) == 1 and signed_float_literal(args[0]) is not None
+        if spelling in ("math.min", "math.max"):
+            return len(args) >= 2
+        if spelling == "math.round" and len(args) == 1:
+            # A float literal reaches std::round unchanged. Restrict its
+            # result to the common exact, nonmissing range of both carriers.
+            magnitude = signed_float_literal(args[0])
+            return magnitude is not None and abs(magnitude) < -_INT32_MIN - 1
+        # The remaining math calls can use a different libm result,
+        # evaluation order, or integer result carrier in emitted C++.
+        return spelling in ("math.sign", "float", "bool") and len(args) == 1
+
     def constant(expr, depth=0):
         if depth > MAX_NESTING_DEPTH:
             return False
-        if isinstance(expr, (NumberLiteral, StringLiteral, BoolLiteral, NaLiteral)):
+        if isinstance(expr, NumberLiteral):
+            if for_input_default:
+                check_integer(expr.value)
             return True
+        if isinstance(expr, (StringLiteral, BoolLiteral)):
+            return True
+        if isinstance(expr, NaLiteral):
+            # Bare na has several destination-dependent representations.
+            return not for_input_default
         if isinstance(expr, Identifier):
             return known_values.get(expr.name, NON_CONSTANT) is not NON_CONSTANT
         if isinstance(expr, MemberAccess):
@@ -296,9 +349,12 @@ def fold_constant_expression(node, known_values: Mapping[str, object],
                     and constant(expr.false_val, depth + 1))
         if isinstance(expr, FuncCall):
             spelling = _pine_spelling(expr.callee)
-            return (spelling in _CONSTANT_CALLS
-                    and spelling.split(".", 1)[0] not in known_values
-                    and all(constant(arg, depth + 1) for arg in _constant_arguments(expr)))
+            if spelling not in _CONSTANT_CALLS or spelling.split(".", 1)[0] in known_values:
+                return False
+            args = _constant_arguments(expr)
+            return ((not for_input_default
+                     or (not expr.kwargs and input_call_is_proven(spelling, args)))
+                    and all(constant(arg, depth + 1) for arg in args))
         return False
 
     def primitive(value):
@@ -349,6 +405,8 @@ def fold_constant_expression(node, known_values: Mapping[str, object],
         if isinstance(expr, FuncCall):
             spelling = _pine_spelling(expr.callee)
             if spelling in ("round", "math.round"):
+                if for_input_default:
+                    return True  # The admitted native call returns double.
                 return len(_constant_arguments(expr)) == 2
             if spelling in ("abs", "math.abs"):
                 return any(has_float_type(arg) for arg in _constant_arguments(expr))
@@ -371,14 +429,19 @@ def fold_constant_expression(node, known_values: Mapping[str, object],
             operand = visit(expr.operand, comparison_operand=comparison_operand)
             if operand is None:
                 return None
-            if comparison_operand and type(operand) is float:
+            if (comparison_operand or for_input_default) and type(operand) is float:
                 return operand if expr.op == "+" else -operand
             result = fold_numeric_expression(f"{expr.op}value", {"value": numeric(operand)})
         elif isinstance(expr, Ternary):
             arm = expr.true_val if boolean(expr.condition) else expr.false_val
             value = visit(arm, comparison_operand=comparison_operand)
-            if comparison_operand and type(value) is int and has_float_type(expr):
-                return float(value)
+            if (comparison_operand or for_input_default) and has_float_type(expr):
+                if value is MISSING_INT64:
+                    # The selected carrier changes here. Its missingness
+                    # depends on the coercion performed at this emission site.
+                    raise ValueError("missing integer in a float selection")
+                if type(value) is int:
+                    return float(value)
             return value
         elif isinstance(expr, BinOp):
             if expr.op == "and":
@@ -390,13 +453,31 @@ def fold_constant_expression(node, known_values: Mapping[str, object],
             left = primitive(visit(expr.left, comparison_operand=ieee))
             right = primitive(visit(expr.right, comparison_operand=ieee))
             if comparing:
+                if for_input_default:
+                    lt = int if left is MISSING_INT64 else type(left)
+                    rt = int if right is MISSING_INT64 else type(right)
+                    if lt is not rt and not (lt in (int, float) and rt in (int, float)):
+                        raise ValueError("comparison operand types are not proven")
+                    if isinstance(left, str) and expr.op not in ("==", "!="):
+                        raise ValueError("string order is not proven")
+                if (for_input_default and type(left) is type(right) is int
+                        and max(abs(left), abs(right)) > _EXACT_DOUBLE_INT
+                        and not all(isinstance(operand, (NumberLiteral, Identifier))
+                                    for operand in (expr.left, expr.right))):
+                    # A computed integer operand can select the double
+                    # wrapper, which can erase the difference between ints.
+                    raise ValueError("integer comparison carrier is not proven")
                 return _compare(expr.op, left, right)
+            if for_input_default and (left is MISSING_INT64 or right is MISSING_INT64):
+                raise ValueError("arithmetic on a missing integer")
             if left is None or right is None:
                 return None
             if expr.op == "+" and isinstance(left, str) and isinstance(right, str):
                 if len(left) + len(right) > MAX_SOURCE_CHARS:
                     raise ValueError("constant string is too long")
                 return left + right
+            if (for_input_default and not comparison_operand and expr.op == "%"):
+                return _numeric(_float_arithmetic(expr.op, numeric(left), numeric(right)))
             if (comparison_operand
                     and type(left) in (int, float) and type(right) in (int, float)
                     and (expr.op in ("/", "%") or float in (type(left), type(right)))):
@@ -407,16 +488,33 @@ def fold_constant_expression(node, known_values: Mapping[str, object],
                 )
             left, right = numeric(left), numeric(right)
             result = fold_numeric_expression(f"left {expr.op} right", {"left": left, "right": right})
+            if (for_input_default and type(result) is int
+                    and max(abs(left), abs(right), abs(result)) >= -_INT32_MIN):
+                # Beyond this range the emitter may widen, insert a
+                # missingness check, or perform binary64 arithmetic.
+                raise ValueError("integer arithmetic carrier is not proven")
         elif isinstance(expr, FuncCall):
             spelling = _pine_spelling(expr.callee)
             values = [
                 primitive(visit(arg, comparison_operand=comparison_operand))
                 for arg in _constant_arguments(expr)
             ]
+            if for_input_default and spelling == "int":
+                value, = values
+                if not _INT64_MIN < value < -_INT64_MIN:
+                    return MISSING_INT64
+                return int(value)
+            if for_input_default and spelling == "math.round":
+                # Keep the existing half-away tie rule. The literal and its
+                # rounded value are both in the admitted range above. The
+                # native call itself returns a double, including signed zero.
+                rounded = _pine_round(values[0])
+                return float(rounded) if rounded else math.copysign(0.0, values[0])
             if spelling == "bool" and len(values) == 1:
                 if values[0] is not None and type(values[0]) not in (int, float, bool):
                     raise ValueError("not a constant numeric cast")
-                if comparison_operand and type(values[0]) is float and math.isnan(values[0]):
+                if ((comparison_operand or for_input_default)
+                        and type(values[0]) is float and math.isnan(values[0])):
                     return False
                 return bool(values[0])
             if any(value is None for value in values):
@@ -428,7 +526,8 @@ def fold_constant_expression(node, known_values: Mapping[str, object],
                 # sentinel that the relational wrapper also rejects.
                 if spelling == "int" and not -2**63 < values[0] < 2**63:
                     return None
-            if comparison_operand and values and spelling in ("math.min", "math.max", "math.sign"):
+            if ((comparison_operand or for_input_default)
+                    and values and spelling in ("math.min", "math.max", "math.sign")):
                 args = [float(arithmetic_operand(value)) for value in values]
                 if any(math.isnan(value) for value in args):
                     return math.nan
@@ -456,7 +555,7 @@ def fold_constant_expression(node, known_values: Mapping[str, object],
             raise ValueError("not a constant expression")
         if result is None:
             raise ValueError("not a bounded constant expression")
-        return result
+        return check_integer(result) if for_input_default else result
 
     try:
         if constant(node):
