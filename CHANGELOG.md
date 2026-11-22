@@ -26,13 +26,13 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - The `PF-W1544` warning for recorded earnings, dividends, splits and financial
   data now explains that the request returns `na` for a bar without a recorded
-  value.
+  value ([#459](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/459)).
 
 - `PF-W1520` now says that `syminfo.mincontract` is `na` unless the run
   declares a value for `mincontract` in its symbol metadata. The warning code
-  and runtime behavior stay the same.
+  and runtime behavior stay the same ([#459](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/459)).
 
-- The collection-history diagnostics `PF-E6067`, `PF-E6068`, `PF-E6069`, `PF-E6072`, `PF-E6073`, `PF-E6074` and `PF-W5010` no longer show a path into PineForge's test fixtures, their messages are reworded, and so is the explanation of `PF-W5010`. Their codes, arguments and severities stay the same.
+- The collection-history diagnostics `PF-E6067`, `PF-E6068`, `PF-E6069`, `PF-E6072`, `PF-E6073`, `PF-E6074` and `PF-W5010` no longer show a path into PineForge's test fixtures, their messages are reworded, and so is the explanation of `PF-W5010`. Their codes, arguments and severities stay the same ([#459](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/459)).
 
 - A TA length held in a never-reassigned top-level `var int` literal is no longer refused with PF-E5092 when the script also declares a `method`; a script that declares a user function, `type` or `enum` still refuses it ([#422](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/422)).
 
