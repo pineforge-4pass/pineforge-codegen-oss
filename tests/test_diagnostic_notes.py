@@ -157,7 +157,7 @@ CATALOG_ADDITIONS |= set(DELTA["catalog_additions"])
 # is covered by the sentence tests below without an edit here.
 TWINS = sorted("PF-W" + code[4:] for code in diagnostics_catalog()["codes"] if code.startswith("PF-E1"))
 
-# Only these two existing identities change presentation after the snapshot.
+# The lookahead migration changes presentation for two existing identities.
 # Keep both historical files intact and verify each old and new field exactly.
 LOOKAHEAD_MIGRATION = {
     "PF-E1085": {
@@ -182,6 +182,15 @@ LOOKAHEAD_MIGRATION = {
             "request.security lookahead needs an immutable simple or input-selected enum. "
             "In a switch arm PineForge only warns and keeps the arm''s lowering."),
     },
+}
+
+# Allow only the exact corrected hint when comparing with the historical catalog.
+HINT_CORRECTIONS = {
+    "PF-W1544": (
+        "PineForge replays the values TradingView returned on the chart''s own bars "
+        "(chart_open_ms,value). If the recording has no value for a bar, "
+        "the request returns na for that bar."
+    ),
 }
 
 
@@ -220,6 +229,9 @@ def _assert_catalog_delta(catalog):
             for field in ("message", "hint", "explanation"):
                 assert entry[field] == EMA_SEED_TEXT_DELTA[field], (code, field)
                 entry[field] = old[field]
+        if code in HINT_CORRECTIONS:
+            assert entry["hint"] == HINT_CORRECTIONS[code], code
+            entry["hint"] = old["hint"]
         assert entry == old, code
     assert changed == NOTE_CODES
 
@@ -235,7 +247,7 @@ def test_exact_catalog_delta_and_legacy_pin():
     assert current["PF-E2093"] == "b2d5cd10ea46245c7a9e31ff15db9db7d8538221d5443c9cc15ba0013a19e93f"
     assert set(LOOKAHEAD_MIGRATION) == {"PF-E1085", "PF-W1085"}
     assert {code for code in legacy if legacy[code] != current[code]} == (
-        NOTE_CODES | set(LOOKAHEAD_MIGRATION))
+        NOTE_CODES | set(LOOKAHEAD_MIGRATION) | set(HINT_CORRECTIONS))
     # Historical pins describe the snapshot, including PF-W1505's old text.
     for code, entry in BEFORE.items():
         meaning = json.dumps([entry["severity"], entry["message"], entry.get("hint"),
@@ -272,6 +284,11 @@ def test_catalog_legacy_bytes_only_have_the_declared_delta():
                     old_field = f'"{name}": ' + json.dumps(BEFORE[code][name], ensure_ascii=False)
                     assert line.count(field) == 1
                     line = line.replace(field, old_field, 1)
+            if code in HINT_CORRECTIONS:
+                field = '"hint": ' + json.dumps(HINT_CORRECTIONS[code], ensure_ascii=False)
+                old_field = '"hint": ' + json.dumps(BEFORE[code]["hint"], ensure_ascii=False)
+                assert line.count(field) == 1, code
+                line = line.replace(field, old_field, 1)
         restored.append(line)
     assert "".join(restored).encode() == (FIXTURES / "catalog.before.json").read_bytes()
 

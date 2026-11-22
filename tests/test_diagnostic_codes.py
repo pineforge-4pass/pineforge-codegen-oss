@@ -34,6 +34,11 @@ PIN = ROOT / "tests" / "fixtures" / "diagnostic_codes_pin.json"
 FIXTURES = ROOT / "tests" / "fixtures"
 KINDS = {"identifier", "type", "keyword", "number", "vocab", "text"}
 CATALOG = diagnostics_catalog()["codes"]
+RECORDED_REQUEST_HINT = (
+    "PineForge replays the values TradingView returned on the chart's own bars "
+    "(chart_open_ms,value). If the recording has no value for a bar, "
+    "the request returns na for that bar."
+)
 
 
 def _placeholders(template: str | None) -> set[str]:
@@ -83,6 +88,7 @@ def test_catalog_codes_are_pinned():
     assert pinned["PF-E2027"] == (
         "97d497fb95ae41955206393a4e2ef7b816710f3c10480b93180d6c312459517a"
     )
+    assert render(CATALOG["PF-W1544"]["hint"], {}) == RECORDED_REQUEST_HINT
     removed = sorted(set(pinned) - set(CATALOG))
     assert not removed, f"codes are never removed: {removed}"
     repurposed = sorted(c for c in pinned if pin_digest(CATALOG[c]) != pinned[c])
@@ -313,6 +319,23 @@ def test_fixed_lookahead_values_keep_timing_diagnostic(declarations, lookahead, 
             "(e.g. close[1]) to read only completed prior HTF bars.")
     for diagnostic in diagnostics:
         _assert_coded(diagnostic, "lookahead.pine")
+
+
+def test_recorded_request_hint_explains_missing_bar_values():
+    source = (
+        '//@version=6\n'
+        'strategy("Recorded earnings hint")\n'
+        'earningsValue = request.earnings(syminfo.tickerid)\n'
+        'if earningsValue > 0\n'
+        '    strategy.entry("L", strategy.long)\n'
+    )
+    out = transpile_full(source)
+    warnings = [d for d in out["diagnostics"] if d.message.startswith("request.earnings(")]
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert warning.hint == RECORDED_REQUEST_HINT
+    assert warning.code == "PF-W1544"
+    _assert_coded(warning, "recorded earnings")
 
 
 def test_number_arguments_are_numbers():
