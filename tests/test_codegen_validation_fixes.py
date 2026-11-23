@@ -897,8 +897,7 @@ def test_nested_ta_below_and_rhs_keeps_inline_sma_and_clocks_outer_change():
 
 
 def test_ta_precalc_lazy_scope_routes_recursive_ema_only():
-    """EMA follows Pine-v6 lazy edges while unrelated TA stays precalculated;
-    ``ta.roc`` takes the hold-last source clock (tests/test_lazy_source_clock*.py)."""
+    """Check the emitted window and cache declarations, not runtime sampling."""
     cpp = _cpp(
         "pred = close > open\n"
         "a = pred and ta.ema(close, 20) > close\n"
@@ -912,9 +911,9 @@ def test_ta_precalc_lazy_scope_routes_recursive_ema_only():
         "i = ta.ema(close, 23)\n"
         "plot((a or b or c or d or e or g) ? f + h + i : close)"
     )
-    for name in ("lowest", "highest"):
-        assert f"std::vector<double> _precalc__ta_{name}_" in cpp
-        assert f"_use_precalc ? _precalc__ta_{name}_" in cpp
+    for name, want_max in (("lowest", "false"), ("highest", "true")):
+        assert f"_precalc__ta_{name}_" not in cpp
+        assert re.search(rf"_PFCallWindowExtreme<{want_max}, false> _ta_{name}_[0-9]+;", cpp)
     assert "std::vector<double> _precalc__ta_roc_" not in cpp
     assert "struct _PFLazySourceClock {" in cpp
     assert (
