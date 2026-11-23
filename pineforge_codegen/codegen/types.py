@@ -2837,6 +2837,20 @@ class TypeInferer:
             specs[id(node)] = (spec, nullable)
         return specs
 
+    def _is_callable_var_string(self, binding: tuple[int, str] | None) -> bool:
+        """Recover a persistent string's type from its exact declaration.
+
+        Callable ``var`` and ``varip`` values live in strategy members, so
+        their declarations bypass the local C++ type map.
+        """
+        if binding is None:
+            return False
+        member = self.ctx.var_member_metadata_by_node.get(binding[0])
+        if member is None:
+            return False
+        _, _, pine_type, _, is_callable_scoped = member
+        return is_callable_scoped and pine_type == PineType.STRING
+
     def _type_spec_from_expr(
         self,
         node,
@@ -2890,6 +2904,8 @@ class TypeInferer:
                 shadow_ctx.identifier_decl_bindings.get(id(node))
                 if shadow_ctx is not None else None
             )
+            if self._is_callable_var_string(binding):
+                return TypeSpec.primitive("string")
             primitive_type = (
                 shadow_ctx.primitive_block_shadow_types.get(binding[0])
                 if binding is not None else None
@@ -6332,6 +6348,8 @@ class TypeInferer:
             if local is not None:
                 return self._type_for_decl(local._pf_decl_node)
             binding = self.ctx.identifier_decl_bindings.get(id(node))
+            if self._is_callable_var_string(binding):
+                return "std::string"
             if (binding is not None
                     and binding[0] in self.ctx.primitive_block_shadow_types):
                 declaration = self.ctx.identifier_binding_nodes.get(id(node))
