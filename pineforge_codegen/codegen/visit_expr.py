@@ -826,6 +826,7 @@ class ExprVisitor:
         # variable name and let get_input_*() produce the current value.
         if (name in self._known_vars
                 and name not in self._input_backed_vars
+                and id(node) not in self._persistent_init_global_reads
                 and not primitive_shadow_read
                 and not self._known_var_is_lexically_shadowed(name)):
             val = self._known_vars[name]

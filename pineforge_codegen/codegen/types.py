@@ -688,6 +688,7 @@ class TypeInferer:
         known = getattr(self, "_known_vars", {})
         if (name not in known
                 or name in getattr(self, "_input_backed_vars", ())
+                or id(node) in getattr(self, "_persistent_init_global_reads", ())
                 or self._known_var_is_lexically_shadowed(name)):
             return None
         value = known[name]
