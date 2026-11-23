@@ -177,6 +177,20 @@ float observed = take ? a : b
     _assert_equal(replay(actual, "call"), replay(reference, "array"))
 
 
+def test_conditional_calls_keep_their_own_window_lengths(replay):
+    """Unequal windows make crossed receivers observable, even without shared state."""
+    actual = """float a = take ? ta.lowest(low, 2) : na
+float b = not take ? ta.lowest(high, 5) : na
+float observed = take ? a : b
+"""
+    reference = (_array_window("low", "min", length="2")
+                 .replace("samples", "first").replace("observed", "a")
+                 + _array_window("high", "min", gate="not take", length="5")
+                 .replace("samples", "second").replace("observed", "b")
+                 + "float observed = take ? a : b\n")
+    _assert_equal(replay(actual, "call"), replay(reference, "array"))
+
+
 @pytest.mark.parametrize(("ta", "src", "reducer"), [
     pytest.param("lowest", "low", "min", id="lowest"),
     pytest.param("highest", "high", "max", id="highest"),
