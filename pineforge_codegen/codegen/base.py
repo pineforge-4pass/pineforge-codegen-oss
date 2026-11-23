@@ -3886,8 +3886,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return False
 
     # AST node kinds whose serialized form is self-delimiting (a literal, a
-    # name, a member read, or a ``name(...)`` call). Non-atomic kinds (BinOp /
-    # UnaryOp / Ternary) MUST be parenthesized when they appear as an operand,
+    # name, a member read, or a call that stays a ``name(...)`` call).
+    # Compound expressions MUST be parenthesized when they appear as an operand,
     # otherwise re-parsing the flattened infix string silently reassociates the
     # tree: Pine grouping ``(a - b) / (c - d)`` degrades to ``a - b / c - d``
     # under C++ precedence. See ``_runtime_ctor_arg_for_reset`` (the string is
@@ -3902,6 +3902,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         s = self._arith_expr_to_str(node, _udf_stack, _depth)
         if s is None:
             return None
+        if isinstance(node, FuncCall):
+            fn, ns = self._resolve_callee(node.callee)
+            if ns is None and fn is not None and self._get_udf_def(fn) is not None:
+                # Inlining can turn a self-delimiting call into an operator
+                # expression, including through another user function.
+                return f"({s})"
         if isinstance(node, self._ATOMIC_ARITH_NODES):
             return s
         return f"({s})"
