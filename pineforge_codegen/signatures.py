@@ -648,10 +648,17 @@ def _input(short_name: str, *sigs: FuncSig,
 _C = [("tooltip", S, None), ("inline", S, None), ("group", S, None),
       ("display", I, None), ("confirm", B, None)]
 
-_input("int",    _sig([("defval", I), ("title", S, ""), ("minval", I, None),
-                       ("maxval", I, None), ("step", I, 1)] + _C, ret=I))
-_input("float",  _sig([("defval", F), ("title", S, ""), ("minval", F, None),
-                       ("maxval", F, None), ("step", F, None)] + _C, ret=F))
+_DROPDOWN_INPUT_TAIL = _C[:3] + [("confirm", B, None), ("display", I, None),
+                                ("active", B, None)]
+for _name, _type, _step in (("int", I, 1), ("float", F, None)):
+    _head = [("defval", _type), ("title", S, "")]
+    _input(_name,
+           _sig(_head + [("minval", _type, None), ("maxval", _type, None),
+                         ("step", _type, _step)] + _C, ret=_type),
+           _sig(_head + [("options", _type)] + _DROPDOWN_INPUT_TAIL, ret=_type))
+    INPUT_FUNCTIONS[_name].signatures[1].params[2].type_spec = TypeSpec.array(
+        TypeSpec.primitive(_type.value)
+    )
 _input("bool",   _sig([("defval", B), ("title", S, "")] + _C, ret=B))
 _input("string", _sig([("defval", S), ("title", S, ""), ("options", S, None)] + _C, ret=S))
 INPUT_FUNCTIONS["string"].primary.params[2].type_spec = TypeSpec.array(

@@ -14,7 +14,7 @@ from ..signatures import INPUT_FUNCTIONS, MATH_CONSTANTS
 from ..symbols import PineType
 from ..builtin_constants import STRING_CONSTANT_VALUES, builtin_constant
 from .color_constants import COLOR_PARAMETERS, color_arguments, literal_color_value
-from .constant_fold import fold_constant_expression
+from .constant_fold import MISSING_INT64, fold_constant_expression
 from .strategy_declaration import _NAMED_CONSTANTS
 from .tables import (
     ALERT_FREQ_VALUES, DRAWING_STYLE_NS, NAME_ECHO_STRING_MEMBERS,
@@ -32,6 +32,12 @@ _SCALAR_CONSTANTS = {
     **{f"{namespace}.{member}": value
        for namespace, members in STRING_CONSTANT_VALUES.items()
        for member, value in members.items()},
+}
+_PLAIN_STRING_CONSTANTS = {
+    **_SCALAR_CONSTANTS,
+    **{f"{namespace}.{member}": member
+       for namespace, members in NAME_ECHO_STRING_MEMBERS.items()
+       for member in members},
 }
 
 
@@ -54,9 +60,9 @@ class ConstantResolver:
     """Resolve lexical constants and immutable global string input arguments.
 
     Binding identity, rather than a variable's spelling, owns the cache.
-    General expression proofs require explicit const declarations. String
-    input arguments also admit global literal initializers after checking
-    every write: persistence alone does not make such a binding mutable.
+    General expression proofs require explicit const declarations. Typed
+    string inputs also admit immutable global literal initializers. Bare
+    inputs can additionally follow inferred constant expression bindings.
     """
 
     def __init__(self, program, budget=None):
@@ -78,6 +84,7 @@ class ConstantResolver:
             elif isinstance(node, dict):
                 pending.extend(reversed(list(node.values())))
         self.cache = {}
+        self.plain_input_cache = {}
         self.active = set()
         self.ambiguous = {binding for binding, count in declarations.items() if count > 1}
         self.string_declarations = Counter(self.index.decl_binding.values())
@@ -131,6 +138,16 @@ class ConstantResolver:
         result = self.string_cache[binding]
         return read if isinstance(result, Identifier) else result
 
+    def plain_string_default(self, expr) -> str | None:
+        """Prove a bare input's string without using a runtime default."""
+        proof = self._scalar(expr, 0, allow_inferred=True)
+        # The ABI copies C strings, so a proved expression must survive that
+        # boundary without truncation. Authored literal defaults keep their
+        # historical handling.
+        if proof is not None and proof.pine_type == PineType.STRING and "\0" not in proof.value:
+            return proof.value
+        return None
+
     def input_default(self, call):
         contract = input_default_contract(call)
         default = call.args[0] if call.args else call.kwargs.get("defval")
@@ -146,38 +163,92 @@ class ConstantResolver:
         proof = self.expression(default)
         return proof if proof is not None and proof.pine_type == contract.pine_type else None
 
-    def _binding(self, read, depth):
+    def _binding(self, read, depth, *, allow_inferred=False):
         binding = self.index.refs.get(id(read))
         declaration = self.index.decls.get(binding)
         if (declaration is None or binding in self.index.unstable or binding in self.ambiguous
-                or (declaration.annotations or {}).get("qualifier") != "const"
-                or declaration.type_hint is None
                 or self.order[id(declaration)] >= self.order[id(read)]
                 or binding in self.active):
             return None
-        if binding not in self.cache:
+        qualifier = (declaration.annotations or {}).get("qualifier")
+        inferred = (allow_inferred and not qualifier and binding[0] == "global"
+                    and self.string_declarations[binding] == 1)
+        if not inferred and (qualifier != "const" or declaration.type_hint is None):
+            return None
+        cache = self.plain_input_cache if allow_inferred else self.cache
+        # The proof's remaining depth affects the result of a dependency
+        # walk. Include it in the bare-input key so a cache hit cannot
+        # borrow a proof made with more room or conceal a shorter proof.
+        key = (binding, depth) if allow_inferred else binding
+        if key not in cache:
             self.active.add(binding)
             try:
-                value = self.expression(declaration.value, depth + 1)
-                if (value is not None and declaration.type_hint == "float"
-                        and value.pine_type == PineType.INT):
-                    value = ConstantValue(PineType.FLOAT, float(value.value))
-                if value is not None and value.pine_type.value != declaration.type_hint:
+                value = (self._scalar(declaration.value, depth + 1, allow_inferred=True)
+                         if allow_inferred else self.expression(declaration.value, depth + 1))
+                if (allow_inferred and value is not None
+                        and value.pine_type in (PineType.INT, PineType.FLOAT)
+                        and (binding[0] != "global"
+                             or not self._input_numeric_binding(declaration, value))):
                     value = None
-                self.cache[binding] = value
+                if value is not None and declaration.type_hint is not None:
+                    if declaration.type_hint == "float" and value.pine_type == PineType.INT:
+                        value = ConstantValue(PineType.FLOAT, float(value.value))
+                    if value.pine_type.value != declaration.type_hint:
+                        value = None
+                cache[key] = value
             finally:
                 self.active.remove(binding)
-        return self.cache[binding]
+        return cache[key]
 
-    def _scalar(self, expr, depth):
+    @staticmethod
+    def _input_numeric_binding(declaration, proof):
+        # The emitter inlines literal and alias initializers as written, so
+        # an annotation alone does not prove promotion at their use sites.
+        if declaration.type_hint == "float" and proof.pine_type == PineType.INT:
+            return False
+        initializer = declaration.value
+        if isinstance(initializer, (NumberLiteral, Identifier)):
+            return True
+        if isinstance(initializer, Ternary):
+            # Some integer-valued arms (such as math.round) emit double
+            # and are narrowed only at storage. Without literal arms we
+            # cannot use the C++ conditional's carrier as the slot's type.
+            if not all(isinstance(arm, NumberLiteral)
+                       for arm in (initializer.true_val, initializer.false_val)):
+                return False
+            return (proof.pine_type == PineType.FLOAT
+                    or (proof.value is not MISSING_INT64
+                        and -(1 << 31) < proof.value < (1 << 31)))
+        # A proved float-to-int cast uses the wide storage of that cast.
+        # Numeric precomputation can otherwise replace a call or arithmetic
+        # initializer with a literal of a different precision or type.
+        return (isinstance(initializer, FuncCall)
+                and isinstance(initializer.callee, Identifier)
+                and initializer.callee.name == "int")
+
+    def _scalar(self, expr, depth, *, allow_inferred=False):
+        if expr is None or depth > MAX_NESTING_DEPTH:
+            return None
         known = {}
         for node, _ in iter_ast_nodes(expr):
+            if allow_inferred:
+                self.budget.check(node.loc)
+                if (isinstance(node, FuncCall) and isinstance(node.callee, Identifier)
+                        and node.callee.name in self.index.funcs):
+                    return None
             if isinstance(node, Identifier) and id(node) in self.index.refs:
-                value = self._binding(node, depth + 1)
+                # A flat alias is one step, just as in expression(). Only
+                # a read inside a larger expression adds an extra step.
+                binding_depth = depth if allow_inferred and node is expr else depth + 1
+                value = self._binding(node, binding_depth, allow_inferred=allow_inferred)
                 if value is None or value.pine_type == PineType.COLOR:
                     return None
                 known[node.name] = value.value
-        value, proven = fold_constant_expression(expr, known, _SCALAR_CONSTANTS)
+        constants = _PLAIN_STRING_CONSTANTS if allow_inferred else _SCALAR_CONSTANTS
+        value, proven = fold_constant_expression(
+            expr, known, constants, for_input_default=allow_inferred)
+        if allow_inferred and proven and value is MISSING_INT64:
+            return ConstantValue(PineType.INT, value)
         kind = {bool: PineType.BOOL, int: PineType.INT, float: PineType.FLOAT,
                 str: PineType.STRING}.get(type(value))
         return ConstantValue(kind, value) if proven and kind is not None else None

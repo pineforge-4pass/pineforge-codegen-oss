@@ -87,6 +87,7 @@ classes from ``..ast_nodes``.
 
 from __future__ import annotations
 
+from . import constant_fold
 from .constant_fold import NON_CONSTANT, fold_constant_expression
 from .run_stops import checked_history_offset, history_offset_guard, request_stop
 from .capacities import literal_history_offset
@@ -1581,7 +1582,7 @@ class ExprVisitor:
             "double _pfc_r = static_cast<double>(_pna_r); "
             "bool _pfc_eq = (_pfc_l == _pfc_r) || "
             "(std::isfinite(_pfc_l) && std::isfinite(_pfc_r) && "
-            "std::fabs(_pfc_l - _pfc_r) <= 1e-10); "
+            f"std::fabs(_pfc_l - _pfc_r) <= {constant_fold.PINE_FLOAT_COMPARISON_BAND!r}); "
             f"return !is_na(_pna_l) && !is_na(_pna_r) && "
             f"({compare}); }}())"
         )
