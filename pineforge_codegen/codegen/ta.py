@@ -2655,7 +2655,6 @@ class TaSiteHelper:
         cached = self.__dict__.get("_simple_ta_decls_cache")
         if cached is not None:
             return cached
-        reassigned = self._find_reassigned_vars()
         counts: dict[str, int] = {}
         decls: dict[str, VarDecl] = {}
         for stmt in self.ctx.ast.body or []:
@@ -2667,7 +2666,7 @@ class TaSiteHelper:
                     counts[name] = counts.get(name, 0) + 2
         result = {
             name: decl for name, decl in decls.items()
-            if counts.get(name) == 1 and name not in reassigned
+            if counts.get(name) == 1 and name not in self._global_write_sites
             and not decl.is_var and not decl.is_varip and decl.value is not None
             and (decl.annotations or {}).get("qualifier") != "series"
         }
