@@ -900,6 +900,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._current_input_var_name: str | None = None
         # Build known_vars for constant propagation
         self._known_vars: dict[str, int | float | bool | str] = {}
+        self._persistent_init_global_reads: set[int] = set()
         # Source-ordered lexical declarations can shadow a same-named direct
         # compile-time global.  Constant folding is raw-name keyed, so every
         # fold path must consult this COW tombstone set before substituting a
@@ -1790,6 +1791,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     )
                 )
             )
+            if (callable_decl_site and member_name != stmt.name
+                    and stmt.name in self._known_vars):
+                # Before the qualified member is activated, a same-spelled
+                # read can still denote the chart member. Keep that read in
+                # every clone without invalidating the global constant.
+                for read, _ in iter_ast_nodes(stmt.value):
+                    if isinstance(read, Identifier) and read.name == stmt.name:
+                        binding = self.ctx.identifier_decl_bindings.get(id(read))
+                        if binding and binding[0] in self._ordinary_global_var_decl_nodes:
+                            self._persistent_init_global_reads.add(id(read))
             nullable_collection_selection_decl_site = (
                 stmt_spec is not None
                 and stmt_spec.kind in {"map", "matrix"}
