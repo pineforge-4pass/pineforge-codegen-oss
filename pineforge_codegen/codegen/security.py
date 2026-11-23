@@ -1664,11 +1664,35 @@ class SecurityEmitter:
         self._security_check_block_local_history(node)
         resolving = resolving or set()
         functions: set[str] = set()
+        selector_owner = None
+        deferred_read = None
+        arm_write_sites = {}
 
         def fail(value, kind, detail):
             self._security_selection_refusal(value, kind, detail)
 
+        def refuse_read(value):
+            if value.name in BAR_BUILTINS or value.name in self.ctx.series_vars:
+                fail(value, "series", f"bar-state read {value.name}")
+            fail(value, "name", f"undefined or non-setup name {value.name}")
+
+        def written_only_in_arms(read, owner):
+            writes = self._global_write_sites.get(read.name)
+            decl = self.ctx.identifier_binding_nodes.get(id(read))
+            if (not writes or not self._security_identifier_is_global_binding(read)
+                    or not isinstance(decl, VarDecl) or decl.is_var or decl.is_varip
+                    or not self._is_stable_inline_input(decl.value)):
+                return False
+            if id(owner) not in arm_write_sites:
+                bodies = ([owner.body, owner.else_body] if isinstance(owner, IfStmt)
+                          else [body for _, body in owner.cases] + [owner.default_body])
+                arm_write_sites[id(owner)] = {
+                    id(part) for body in bodies for stmt in body
+                    for part, _ in iter_ast_nodes(stmt) if isinstance(part, Assignment)}
+            return writes <= arm_write_sites[id(owner)]
+
         def expression(value, env):
+            nonlocal deferred_read
             if isinstance(value, Identifier):
                 if value.name in env:
                     return env[value.name]
@@ -1681,9 +1705,13 @@ class SecurityEmitter:
                 if isinstance(known, (int, float, bool)):
                     literal = BoolLiteral if isinstance(known, bool) else NumberLiteral
                     return literal(value=known, loc=value.loc)
-                if value.name in BAR_BUILTINS or value.name in self.ctx.series_vars:
-                    fail(value, "series", f"bar-state read {value.name}")
-                fail(value, "name", f"undefined or non-setup name {value.name}")
+                if selector_owner is not None and written_only_in_arms(value, selector_owner):
+                    # The selector reads this input before any of its writes.
+                    # Keep the read intact; block() diagnoses the outer store.
+                    if deferred_read is None:
+                        deferred_read = value
+                    return value
+                refuse_read(value)
             if isinstance(value, (NumberLiteral, StringLiteral, BoolLiteral,
                                   ColorLiteral, NaLiteral)):
                 return value
@@ -1820,7 +1848,13 @@ class SecurityEmitter:
 
         def selection(value, env):
             def selector(expr):
-                lowered = expression(expr, env)
+                nonlocal selector_owner
+                previous = selector_owner
+                selector_owner = value if registration else None
+                try:
+                    lowered = expression(expr, env)
+                finally:
+                    selector_owner = previous
                 # With no local bindings, keep existing call identities and
                 # spelling after validating their setup dependencies.
                 return (self._substitute_tf_input_reads(expr, resolving)
@@ -1837,7 +1871,11 @@ class SecurityEmitter:
                            default_body=arm(value.default_body, env)
                            if value.default_body else [])
 
-        return selection(node, {})
+        result = selection(node, {})
+        if deferred_read is not None:
+            # Deferral changes diagnostic precedence only, never admission.
+            refuse_read(deferred_read)
+        return result
 
     def _security_check_block_local_history(self, node) -> None:
         """Refuse local history before a block's current value is substituted.
