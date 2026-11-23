@@ -4100,13 +4100,11 @@ class SecurityEmitter:
                 for child in n:
                     walk(child, bindings)
                 return
-            for value in getattr(n, "__dict__", {}).values():
-                if isinstance(value, ASTNode):
-                    walk(value, bindings)
-                elif isinstance(value, (list, tuple)):
-                    for child in value:
-                        if isinstance(child, ASTNode):
-                            walk(child, bindings)
+            if isinstance(n, ASTNode):
+                # Keyword values and switch case bodies live inside containers.
+                # Keep source order when visiting the flattened syntax children.
+                for child in reversed(list(syntax_children(n))):
+                    walk(child, bindings)
 
         walk(node, helper_binding_stack or ())
         return out
