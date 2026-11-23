@@ -8490,6 +8490,8 @@ class SecurityEmitter:
         )
         var_name = variant["result_name"]
         sec_name = variant["member_name"]
+        if sec_name in self._ta_security_call_windows:
+            compute_args += ", bar.timestamp"
         lines.append(f"        auto {var_name} = security_series_slot_is_new({sec_id}) "
                      f"? {sec_name}.compute({compute_args}) "
                      f": {sec_name}.recompute({compute_args});")
@@ -10567,6 +10569,8 @@ class SecurityEmitter:
                 helper_binding_stack,
                 emitted_lines,
             )
+            if sec_name in self._ta_security_call_windows:
+                compute_args += ", bar.timestamp"
             return f"(security_series_slot_is_new({sec_id}) ? {sec_name}.compute({compute_args}) : {sec_name}.recompute({compute_args}))"
 
         # The expression visitor renders this node on the chart's terms. Every
