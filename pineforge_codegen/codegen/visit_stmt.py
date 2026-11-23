@@ -249,6 +249,7 @@ class StmtVisitor:
                 self._visit_var_decl(node, lines, pad)
             finally:
                 self._pending_decl_outer_alias = previous_pending_alias
+            self._enter_local_array_history(node, lines, pad)
             if primitive_shadow:
                 # Inputs and expression-valued declarations can return before
                 # the general declaration path remembers their scalar type.

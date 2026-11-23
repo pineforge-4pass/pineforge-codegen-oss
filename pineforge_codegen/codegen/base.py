@@ -808,6 +808,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # ``(enclosing_instance_name, call_node_id) -> callee emit-name`` and is the
         # authority for nested stateful-helper dispatch (see visit_call).
         self._current_instance_name: str | None = None
+        self._local_array_history_decls = {
+            variable.decl_node_id: variable for variable in ctx.collection_history.values()
+            if variable.owner
+        }
         self._instance_dispatch: dict[tuple[str | None, int], str] = {}
         self._live_func_instances: set[str] | None = None
         self._fresh_instances: list[dict] = []
@@ -6435,12 +6439,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 8e. The copies an array or a matrix variable's executions left
         #     (pineforge_codegen/collection_history.py).
         self._emit_history_version_clock(lines)
-        for variable in self._collection_history_variables():
-            lines.append(
-                f"    {self._collection_history_class(variable)}<{self._collection_history_cpp_type(variable)}> "
-                f"{self._collection_history_member(variable)}"
-                f"{self._collection_history_capacity(variable)};"
-            )
+        self._emit_collection_history_members(lines)
 
         # Closed-trade prefixes belong to the declaration-derived checkpoint.
         for _node, plan in self._closed_trade_folds.values():

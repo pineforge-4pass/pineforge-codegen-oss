@@ -25,6 +25,8 @@ an array or a matrix.
 * ``SUPPORTED``: a variable of the script's top level or of one of its blocks,
   read where a built-in reads or changes it, by ``na()``, as a ``for...in``
   iterable, or bound to a variable or given to a function that only reads it.
+  A plain function-local array also supports built-in reads and ``na()``;
+  each written call owns the snapshots its declarations left.
   The analyzer annotates the read (``COLLECTION_HISTORY_ANNOTATION``).
 * ``LEGACY``: every other read that TradingView accepts and whose earlier
   lowering compiled (the element ``a[k]`` of the current array, a parameter's
@@ -507,6 +509,7 @@ class HistoryRead:
     is_var: bool
     decl_node_id: int | None
     scope_name: str = "global"     # the analyzer's scope of the variable
+    owner: str | None = None
 
 
 @dataclass
@@ -522,6 +525,7 @@ class HistoryVariable:
     # The other declarations writing the same class member (a sibling
     # block's ``x``): each closes this history before it writes.
     closed_by: set[int] = field(default_factory=set)
+    owner: str | None = None       # function whose written calls own copies
 
 
 @dataclass
@@ -1486,6 +1490,17 @@ class CollectionHistoryChecker:
         if uses.reject is not None:
             return Decision(REFUSED, node=uses.reject.node or read.node,
                             message=uses.reject.message, hint=uses.reject.hint)
+        # A nonpersistent array declared by a function lives until its
+        # lexical scope exits. Only its direct read and na consumers use
+        # that snapshot; aliasing, parameters and other contexts retain
+        # their independent decisions.
+        if (read.owner and read.kind == "array" and not read.is_var
+                and not read.is_parameter and not read.is_global
+                and use.how in ("na", "read")
+                and self.declaration_scope(read.decl_node_id) == "callable"
+                and isinstance(self._callable_of(read.node), FuncDef)
+                and not self._in_request(read.node)):
+            return Decision(SUPPORTED, use.how)
         why = self._scope_refusal(read)
         if why is None:
             decision = self._decide_supported(read, use, uses, label)
@@ -1684,7 +1699,8 @@ class CollectionHistoryChecker:
             if entry is None:
                 entry = by_declaration[key] = HistoryVariable(
                     name=read.name, kind=read.kind, spec=read.spec,
-                    is_var=read.is_var, capacity=0, decl_node_id=read.decl_node_id)
+                    is_var=read.is_var, capacity=0, decl_node_id=read.decl_node_id,
+                    owner=read.owner if read.in_callable else None)
             if entry.capacity is not None:
                 entry.capacity = (None if offset is None
                                   else max(entry.capacity, offset + 1))
@@ -1695,10 +1711,13 @@ class CollectionHistoryChecker:
         variables: dict[str, HistoryVariable] = {}
         keys: dict[tuple, str] = {}
         for name, entries in names.items():
-            entries.sort(key=lambda e: self._source_position(e.decl_node_id))
+            # Keep existing chart member names when a callable uses the
+            # same spelling. Within each group preserve declaration order.
+            entries.sort(key=lambda e: (e.owner is not None, self._source_position(e.decl_node_id)))
             for ordinal, entry in enumerate(entries):
                 entry.ordinal = ordinal
-                entry.closed_by = set(writers.get(name, set())) - {entry.decl_node_id}
+                if entry.owner is None:
+                    entry.closed_by = set(writers.get(name, set())) - {entry.decl_node_id}
                 member_key = name if ordinal == 0 else f"{name}#{ordinal}"
                 variables[member_key] = entry
                 keys[(name, entry.decl_node_id)] = member_key

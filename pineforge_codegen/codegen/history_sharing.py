@@ -67,7 +67,7 @@ class HistorySharingPlan:
         used.update(emitter._func_safe_name(fi.name) for fi in emitter.ctx.func_infos)
         used.update(emitter._session_history_member_names.values())
         used.update(emitter._collection_history_member(variable)
-                    for variable in emitter._collection_history_variables())
+                    for variable in emitter._collection_history_variables() if not variable.owner)
         for attribute in ("_array_journal_cpp_name", "_array_journal_generation_name"):
             name = getattr(emitter, attribute, None)
             if name is not None:

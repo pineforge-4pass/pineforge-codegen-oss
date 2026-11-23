@@ -32,6 +32,29 @@ from .history_sharing import (
 from .tables import ARRAY_JOURNAL_DELTA_METHODS, ARRAY_JOURNAL_FULL_METHODS
 
 
+_LOCAL_ARRAY_HISTORY_CPP = r"""
+template <typename T>
+class _PFLocalArrayHistory : public _PFCollectionHistory<T> {
+    int last_bar_ = -1;
+public:
+    using _PFCollectionHistory<T>::_PFCollectionHistory;
+    struct Slot {
+        _PFLocalArrayHistory& history;
+        const T& value;
+        // Freeze after the return expression, before its local is destroyed.
+        ~Slot() noexcept(false) {
+            if (!std::uncaught_exceptions()) history.close(value);
+        }
+    };
+    Slot enter(const T& value, int bar, bool new_bar) {
+        this->open_slot(value, new_bar && bar != last_bar_);
+        last_bar_ = bar;
+        return {*this, value};
+    }
+};
+"""
+
+
 class CollectionHistoryEmitter:
     """CodeGen mixin: the history members of array and matrix variables."""
 
@@ -52,6 +75,8 @@ class CollectionHistoryEmitter:
         return plan is not None and name == plan.clock_member
 
     def _emit_history_sharing_includes(self, lines: list[str]) -> None:
+        if self._local_array_history_decls:
+            lines.append("#include <exception>")
         if self._history_sharing_plan() is not None:
             lines.extend(("#include <limits>", "#include <utility>"))
 
@@ -264,7 +289,42 @@ class CollectionHistoryEmitter:
         which no Pine name (none starts with a digit) can spell: ``x``'s
         second declaration beside a variable ``x_1``."""
         prefix = f"{variable.ordinal}_" if variable.ordinal else ""
+        if variable.owner:
+            return self._local_array_history_member(variable, self._current_instance_name)
         return f"_pf_collection_hist_{prefix}{self._safe_name(variable.name)}"
+
+    def _local_array_history_member(self, variable, context):
+        return self._generated_helper_name(
+            ("local-array-history", variable.decl_node_id, context),
+            f"_pf_local_hist_{context or variable.owner}_{variable.ordinal}_"
+            f"{self._safe_name(variable.name)}",
+        )
+
+    def _emit_collection_history_members(self, lines):
+        for variable in self._collection_history_variables():
+            capacity = self._collection_history_capacity(variable)
+            if variable.owner:
+                # The lexical binding already includes any widened int elements.
+                spec = self._callable_collection_bindings.get(variable.decl_node_id) or variable.spec
+                cpp = self._type_spec_to_cpp(spec)
+                for context in self._inline_history_contexts_for_owner(variable.owner):
+                    member = self._local_array_history_member(variable, context)
+                    lines.append(f"    _PFLocalArrayHistory<{cpp}> {member}{capacity};")
+            else:
+                lines.append(
+                    f"    {self._collection_history_class(variable)}<{self._collection_history_cpp_type(variable)}> "
+                    f"{self._collection_history_member(variable)}{capacity};"
+                )
+
+    def _enter_local_array_history(self, node, lines, pad):
+        variable = self._local_array_history_decls.get(id(node))
+        if variable is not None:
+            member = self._collection_history_member(variable)
+            value = self._safe_name(node.name)
+            value = self._active_var_remap.get(value, value)
+            guard = self._generated_helper_name(("array-slot", member), f"{member}_slot")
+            lines.append(f"{pad}auto {guard} = this->{member}.enter("
+                         f"{value}, this->bar_index_, history_advances_new_bar());")
 
     def _collection_history_of(self, annotation):
         history = getattr(self.ctx, "collection_history", None) or {}
@@ -311,6 +371,8 @@ class CollectionHistoryEmitter:
         if any(spec.element != float_spec for spec in matrices):
             lines.append(COLLECTION_HISTORY_GENERIC_MATRIX_CPP.strip("\n"))
         lines.append(COLLECTION_HISTORY_CLASS_CPP.strip("\n"))
+        if self._local_array_history_decls:
+            lines.append(_LOCAL_ARRAY_HISTORY_CPP.strip())
         plan = self._history_sharing_plan()
         if plan is not None:
             lines.append(HISTORY_VERSION_CLOCK_CPP.replace("@CLOCK@", plan.clock_type).strip("\n"))
@@ -341,6 +403,8 @@ class CollectionHistoryEmitter:
         statements = []
         own = None
         for variable in self._collection_history_variables():
+            if variable.owner:
+                continue
             if id(node) in variable.closed_by:
                 statements.append(self._collection_history_close(variable))
             elif variable.decl_node_id == id(node):
@@ -360,7 +424,8 @@ class CollectionHistoryEmitter:
     def _emit_collection_history_closes(self, lines: list[str], pad: str) -> None:
         """The bar's end: every open slot keeps a copy of its variable."""
         for variable in self._collection_history_variables():
-            lines.append(f"{pad}{self._collection_history_close(variable)}")
+            if not variable.owner:
+                lines.append(f"{pad}{self._collection_history_close(variable)}")
 
     @staticmethod
     def _roots_at_collection_history(value) -> bool:
@@ -430,6 +495,7 @@ class CollectionHistoryEmitter:
         offset = literal_offset(node)
         if offset == 0:
             nullable_array = (isinstance(node.object, Identifier)
+                              and not self._collection_name_is_lexically_shadowed(node.object.name)
                               and node.object.name in self._array_history_value_names())
             return (f"is_na({current})" if annotation["kind"] == "matrix"
                     or nullable_array else "false")
