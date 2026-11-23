@@ -5750,11 +5750,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 # the destination as a read; ValueBindings already retains
                 # the write's authored declaration identity.
                 self._identifier_binding_scopes.setdefault(id(node.target), sym.scope)
+                # The owner key covers both functions and typed methods.
                 if (node.op in (":=", "+=", "-=", "*=", "/=", "%=")
                         and self._pine_version == 6
                         and not self._in_v5_library_definition(node)
                         and self._enclosing_func_names
-                        and self._enclosing_func_names[-1] in self._func_defs
                         and getattr(sym, "_pf_parameter_owner", None)
                         == self._enclosing_func_names[-1]):
                     self._error(
