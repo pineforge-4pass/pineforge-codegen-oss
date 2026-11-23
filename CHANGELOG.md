@@ -82,7 +82,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - Bare `input()` follows immutable string aliases, through a flat chain of up to 512 declarations and for a string without a NUL character. Constant comparisons that the generator evaluates, for a bare `input()` default and for the other constants it folds (such as `strategy()` parameters, history offsets and constant request timeframes), treat float operands within the inclusive `1e-10` band as equal, as the generated comparison does. A division or remainder in a bare `input()` default is computed as the generated code computes it, after both operands are converted to doubles.
 
-- Conditional fixed-length calls to `ta.lowest` and `ta.highest` now compute their windows from the bars on which each call runs ([#458](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/458))
+- For supported conditional `ta.lowest` and `ta.highest` calls with a constructor or input length, the generated window uses samples taken at that call site rather than chart-bar positions ([#458](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/458)).
 
 ## 1.14.0 — 2026-11-20
 
