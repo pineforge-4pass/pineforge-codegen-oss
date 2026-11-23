@@ -132,7 +132,8 @@ class ValueBindings(DiagnosticsHelper):
             _Binding(name, id(node), self.position, kind, scope.callable),
         )
 
-    def binding_of(self, node: Identifier) -> BindingInfo | None:
+    @staticmethod
+    def binding_of(node: Identifier) -> BindingInfo | None:
         """Return the kind and declaring callable recorded on this identifier."""
         use = (node.annotations or {}).get(_VALUE_USE)
         if not isinstance(use, _ValueUse) or use.binding is None:

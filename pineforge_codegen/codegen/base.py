@@ -28,6 +28,7 @@ from ..analyzer import (
     TA_LENGTH_ONLY_DEFAULT_SOURCE,
 )
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
+from ..analyzer.value_bindings import ValueBindings
 from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from ..limits import TimeBudget, iter_ast_nodes, syntax_children
@@ -386,7 +387,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     With CallVisitor extracted (step 10/N), the host class is now a thin
     coordinator that keeps state attributes, the constructor, the
     top-level ``generate()`` orchestrator, prescan helpers
-    (_collect_known_vars / _find_reassigned_vars / _collect_known_var /
+    (_collect_known_vars / _find_global_write_sites / _collect_known_var /
     _prescan_strategy_series), and the runtime-reset chain
     (_resolve_known / _is_skip_expr / _runtime_ctor_arg_for_reset /
     _collect_ta_runtime_resets / _emit_ta_runtime_reset) — kept here
@@ -949,6 +950,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 for _n, _, _ in _vlist
                 if _n not in ordinary_global_member_names
             )
+        self._global_write_sites = self._find_global_write_sites()
         self._collect_known_vars()
         # Track var names
         self._var_names = set()
@@ -3207,7 +3209,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """Collect known constant values from the AST for constant propagation."""
         # First, find all variables that are reassigned anywhere in the AST.
         # These cannot be inlined as constants since their value changes at runtime.
-        reassigned = self._find_reassigned_vars()
+        reassigned = set(self._global_write_sites)
         # Register never-reassigned ``var``/``varip`` scalars with a stable
         # init FIRST — a later derived var (or a UDF body) may reference such a
         # scalar as a stable length component, so it must be classified stable
@@ -3223,7 +3225,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # a var is a bar-invariant scalar and may feed a TA ctor length with
         # a runtime reset that reproduces the conditional logic. Series-
         # dependent reassignments are left untracked (rejected by the guard).
-        self._collect_reassigned_stable_scalars(reassigned)
+        self._collect_reassigned_stable_scalars()
 
     def _collect_stable_var_scalars(self, reassigned: set[str]) -> None:
         """Track top-level ``var``/``varip`` scalars declared exactly once (never
@@ -3371,7 +3373,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         fence the script: the scalar used as a method receiver is refused by
         ``_stable_var_literal_has_unsupported_receiver_use``, a method
         parameter or local of its name by the binding count, and a statement
-        in a method body that assigns it by ``_find_reassigned_vars``.
+        in a method body that assigns it by ``_find_global_write_sites``.
         """
 
         return any(
@@ -3478,14 +3480,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if bound_name in binding_counts:
                     binding_counts[bound_name] += 1
 
-        # ``reassigned`` comes from ``_find_reassigned_vars``, which reads
-        # statement lists only: an assignment inside an ``if`` or ``switch``
-        # block used as a value is not in it. Before methods were admitted, a
-        # method declaration kept such a script on its earlier lowering (a
-        # refusal, or a per-bar length for the functions that take a run-time
-        # length). Keep that for a name the script assigns anywhere until the
-        # reassignment set sees every assignment. A script without a method is
-        # decided as before.
+        # Method literal admission also checks authored metadata (including
+        # parameter defaults) outside the ordinary syntax walk.
         surface = list(self._walk_candidate_surface(self.ctx.ast))
         unseen_writes: set[str] = set()
         if any(isinstance(node, MethodDef) for node in surface):
@@ -3514,7 +3510,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             )
         return admitted
 
-    def _collect_reassigned_stable_scalars(self, reassigned: set[str]) -> None:
+    def _collect_reassigned_stable_scalars(self) -> None:
         """Track class-scope scalars that are reassigned but only along stable
         if/elif paths (see ``test_stable_reassigned_class_scope_length``).
 
@@ -3527,12 +3523,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         result, a bar field, a series var) leaves the var untracked, so the
         ctor guard still rejects it loudly.
         """
-        from ..ast_nodes import IfStmt, Assignment
         body = self.ctx.ast.body or []
         # Pre-resolve each reassigned var's initial VarDecl.
         inits: dict[str, object] = {}
         for stmt in body:
-            if (isinstance(stmt, VarDecl) and stmt.name in reassigned
+            if (isinstance(stmt, VarDecl) and stmt.name in self._global_write_sites
                     and id(stmt) not in self.ctx.primitive_block_shadow_types
                     and not stmt.is_var and not stmt.is_varip):
                 # Only consider vars whose initial value is itself stable;
@@ -3549,9 +3544,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if any condition / assignment is non-stable or unrenderable."""
             current = fallback
             for s in stmts or []:
-                if isinstance(s, Assignment) and isinstance(s.target, Identifier):
-                    if s.target.name != target_name:
-                        continue
+                if id(s) in remaining:
+                    remaining.remove(id(s))
                     if s.op != ":=":
                         return None  # compound assignment — not a stable fold
                     if not self._expr_is_stable(s.value):
@@ -3565,49 +3559,34 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     # an unrelated IfStmt (e.g. entry/exit logic with a series
                     # condition) must NOT abort the fold — the var simply keeps
                     # its current value through it.
-                    if not _reassigns(s, target_name):
-                        continue
-                    if not self._expr_is_stable(s.condition):
-                        return None
-                    cond = self._arith_expr_to_str(s.condition)
-                    if cond is None:
-                        return None
+                    before = len(remaining)
                     then_val = _value_after(s.body, current)
                     if then_val is None:
                         return None
                     else_val = _value_after(s.else_body, current)
                     if else_val is None:
                         return None
+                    if len(remaining) == before:
+                        continue
+                    if not self._expr_is_stable(s.condition):
+                        return None
+                    cond = self._arith_expr_to_str(s.condition)
+                    if cond is None:
+                        return None
                     current = f"({cond} ? {then_val} : {else_val})"
-                # Other statement shapes (for/while/switch/var decls of
-                # other vars) are ignored for this var's value fold; they
-                # do not reassign ``target_name`` in a way we model.
             return current
 
-        def _reassigns(node, name: str) -> bool:
-            """True if any ``:=`` assignment to ``name`` occurs within node."""
-            from ..ast_nodes import IfStmt as _If, Assignment as _Asg
-            if isinstance(node, _Asg) and isinstance(node.target, Identifier):
-                return node.target.name == name
-            if isinstance(node, _If):
-                if any(_reassigns(c, name) for c in (node.body or [])):
-                    return True
-                if any(_reassigns(c, name) for c in (node.else_body or [])):
-                    return True
-                return False
-            for attr in ("body", "else_body", "cases", "default_body"):
-                sub = getattr(node, attr, None)
-                if isinstance(sub, list):
-                    if any(_reassigns(c, name) for c in sub):
-                        return True
-            return False
-
         for target_name, init_node in inits.items():
+            if self._budget is not None:
+                self._budget.check(init_node.loc, Phase.CODEGEN)
             init_str = self._arith_expr_to_str(init_node)
             if init_str is None:
                 continue
+            # A write in a selection used as a value, for example, never
+            # reaches the statement fold. Never publish a partial fold.
+            remaining = self._global_write_sites[target_name].copy()
             final = _value_after(body, init_str)
-            if final is None:
+            if final is None or remaining:
                 continue
             # Sanity: the fold must actually differ from the bare init,
             # otherwise there were no stable reassignments and the var is
@@ -3633,30 +3612,19 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if self._refs_input(final):
                 self._input_backed_vars.add(target_name)
 
-    def _find_reassigned_vars(self) -> set[str]:
-        """Scan AST to find all variable names that are targets of := or compound assignment."""
-        reassigned: set[str] = set()
-        def walk(node):
-            if isinstance(node, Assignment):
-                if isinstance(node.target, Identifier):
-                    reassigned.add(node.target.name)
-            # Recurse into child nodes
-            if hasattr(node, 'body') and isinstance(node.body, list):
-                for child in node.body:
-                    walk(child)
-            if hasattr(node, 'else_body') and isinstance(node.else_body, list):
-                for child in node.else_body:
-                    walk(child)
-            if hasattr(node, 'cases') and isinstance(node.cases, list):
-                for expr, stmts in node.cases:
-                    for child in stmts:
-                        walk(child)
-            if hasattr(node, 'default_body') and isinstance(node.default_body, list):
-                for child in node.default_body:
-                    walk(child)
-        for stmt in self.ctx.ast.body:
-            walk(stmt)
-        return reassigned
+    def _find_global_write_sites(self) -> dict[str, set[int]]:
+        """Inventory writes through both statement and expression children."""
+        sites: dict[str, set[int]] = {}
+        for node, _ in iter_ast_nodes(self.ctx.ast):
+            if not isinstance(node, Assignment) or not isinstance(node.target, Identifier):
+                continue
+            binding = ValueBindings.binding_of(node.target)
+            # A write to a local shadow leaves the global initializer valid.
+            # For a synthetic target without an authored binding, retain the
+            # conservative name-based guard.
+            if binding is None or binding.kind == "global":
+                sites.setdefault(node.target.name, set()).add(id(node))
+        return sites
 
     # ``math.*`` members that are pure functions over their (stable) args, or
     # stable constants. Anything outside this set (e.g. ``math.random``) is
