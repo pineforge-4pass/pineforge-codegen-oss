@@ -74,6 +74,7 @@ from ..input_defaults import (
     PLAIN_INPUT_STRING_DEFAULT, input_param_names, plain_input_default, plain_input_type,
 )
 from ..loop_types import FLOAT_REASSIGNMENT, has_fractional_int_value
+from ..limits import iter_ast_nodes
 from ..pine_spelling import sub_outside_literals
 from ..external_requests import FEED_LOWERING, LOWERING_ANNOTATION
 from ..security_contexts import CONTEXT_ANNOTATION, DEAD_ANNOTATION
@@ -1462,10 +1463,8 @@ class CallHandlers:
     # User-defined function calls
     # ------------------------------------------------------------------
 
-    def _func_local_length_defs(self, func_def) -> dict[str, str]:
-        """Collect a user function's local scalar length-vars to their RHS
-        expression string, e.g. ``qqeCalc`` with ``wp = sf * 2 - 1`` returns
-        ``{"wp": "sf * 2 - 1"}``.
+    def _func_local_length_defs(self, func_def) -> dict[str, VarDecl]:
+        """Collect the declarations of a user function's stable local lengths.
 
         Only plain (non-``var``/``varip``) declarations whose RHS is a pure
         arithmetic expression over identifiers/numbers (NumberLiteral, Identifier,
@@ -1508,26 +1507,23 @@ class CallHandlers:
                     return all(_is_arith(a) for a in n.args)
             return False
 
-        reassigned: set[str] = set()
-        def _scan_reassign(stmts):
-            from ..ast_nodes import Assignment
-            for s in stmts or []:
-                if isinstance(s, Assignment) and isinstance(s.target, Identifier):
-                    reassigned.add(s.target.name)
-                for attr in ("body", "else_body"):
-                    sub = getattr(s, attr, None)
-                    if isinstance(sub, list):
-                        _scan_reassign(sub)
-        _scan_reassign(func_def.body)
+        # Include writes in declaration values and case bodies. A write
+        # invalidates only the declaration visible at its target.
+        bindings = self._value_bindings.declaration_bindings
+        reassigned = {
+            bindings.get(id(node.target))
+            for stmt in func_def.body or [] for node, _ in iter_ast_nodes(stmt)
+            if isinstance(node, Assignment) and isinstance(node.target, Identifier)
+        }
 
-        defs: dict[str, str] = {}
+        defs: dict[str, VarDecl] = {}
         for stmt in func_def.body or []:
             if (isinstance(stmt, VarDecl)
                     and not stmt.is_var and not stmt.is_varip
-                    and stmt.name not in reassigned
+                    and (id(stmt), stmt.name) not in reassigned
                     and stmt.value is not None
                     and _is_arith(stmt.value)):
-                defs[stmt.name] = self._expr_to_str(stmt.value)
+                defs[stmt.name] = stmt
         return defs
 
     def _materialize_user_func_call_site_state(
@@ -1631,35 +1627,61 @@ class CallHandlers:
             # Map local derived length variables back to expressions over the
             # function's parameters before substituting call-site arguments.
             local_defs = self._func_local_length_defs(func_def)
+            # Match value tokens, not a member, callee, keyword label or the
+            # exponent in a number. sub_outside_literals protects strings.
+            value_token = r"(?<![\w.])[A-Za-z_]\w*\b(?!\s*(?:\(|=(?!=)))"
 
             def _subst_params(
                     arg: str, pmap: dict[str, str],
                     compound: set[str]) -> str:
-                import re
-                result = arg
-                for param, value in sorted(
-                        pmap.items(), key=lambda item: len(item[0]), reverse=True):
-                    replacement = f"({value})" if param in compound else value
-                    result = sub_outside_literals(
-                        rf'\b{re.escape(param)}\b', replacement, result
-                    )
-                return result
+                # Every actual belongs to the caller. Never match a token
+                # inserted for an earlier formal against a later formal.
+                def replace(match):
+                    param = match.group()
+                    if param not in pmap:
+                        return param
+                    return f"({pmap[param]})" if param in compound else pmap[param]
 
-            def _expand_locals(arg: str) -> str:
-                import re
+                return sub_outside_literals(value_token, replace, arg)
+
+            def _expand_locals(arg: str, source=None) -> str:
                 if not local_defs:
                     return arg
-                for _ in range(32):
-                    def _rep(match: re.Match) -> str:
-                        name = match.group(0)
-                        if name in local_defs:
-                            return "(" + local_defs[name] + ")"
-                        return name
-                    expanded = sub_outside_literals(r"[A-Za-z_][A-Za-z_0-9]*", _rep, arg)
-                    if expanded == arg:
-                        break
-                    arg = expanded
-                return arg
+                # The source site (or a local initializer) still has the
+                # exact read nodes. Do not expand an outer declaration for
+                # a read of a different binding with the same spelling.
+                def bound_names(expr):
+                    return {
+                        node.name for node, _ in iter_ast_nodes(expr)
+                        if isinstance(node, Identifier) and node.name in local_defs
+                        and self._value_bindings.declaration_bindings.get(id(node))
+                        == (id(local_defs[node.name]), node.name)
+                    }
+
+                expanded_defs = {}
+
+                def expand(text, allowed, depth):
+                    def replace(match):
+                        name = match.group()
+                        if name not in allowed or depth >= 32:
+                            return name
+                        key = (name, depth)
+                        if key not in expanded_defs:
+                            value = local_defs[name].value
+                            expanded_defs[key] = "(" + expand(
+                                self._expr_to_str(value), bound_names(value), depth + 1) + ")"
+                        return expanded_defs[key]
+                    return sub_outside_literals(value_token, replace, text)
+
+                return expand(arg, bound_names(source) if source is not None else local_defs, 0)
+
+            def _site_args(site, args):
+                return [
+                    _expand_locals(arg, site.ctor_nodes[pos]
+                                   if site.owner_func == func_name and pos < len(site.ctor_nodes)
+                                   else None)
+                    for pos, arg in enumerate(args)
+                ]
 
             import re as _re
             enclosing_params: set[str] = set()
@@ -1672,20 +1694,14 @@ class CallHandlers:
                 for i in site_indices:
                     site = self._ta_call_sites[i]
                     if not hasattr(site, '_orig_ctor_args'):
-                        site._orig_ctor_args = [
-                            _expand_locals(arg) for arg in site.ctor_args
-                        ]
+                        site._orig_ctor_args = _site_args(site, site.ctor_args)
                     # Each callable owns its own view of a borrowed site's
                     # constructor expression. Expand locals in that owner view
                     # before substituting actual parameters; a template first
                     # recorded at definition time can still contain a local
                     # alias such as ``effectiveLen``.
-                    func_ctor_templates[i] = [
-                        _expand_locals(arg)
-                        for arg in func_ctor_templates.get(
-                            i, site._orig_ctor_args
-                        )
-                    ]
+                    func_ctor_templates[i] = _site_args(
+                        site, func_ctor_templates.get(i, site._orig_ctor_args))
                     site.ctor_args = [
                         _subst_params(arg, param_arg_map, compound_params)
                         for arg in func_ctor_templates[i]
@@ -1707,15 +1723,9 @@ class CallHandlers:
                 for i in site_indices:
                     orig = self._ta_call_sites[i]
                     if not hasattr(orig, '_orig_ctor_args'):
-                        orig._orig_ctor_args = [
-                            _expand_locals(arg) for arg in orig.ctor_args
-                        ]
-                    func_ctor_templates[i] = [
-                        _expand_locals(arg)
-                        for arg in func_ctor_templates.get(
-                            i, orig._orig_ctor_args
-                        )
-                    ]
+                        orig._orig_ctor_args = _site_args(orig, orig.ctor_args)
+                    func_ctor_templates[i] = _site_args(
+                        orig, func_ctor_templates.get(i, orig._orig_ctor_args))
                     orig_args = func_ctor_templates[i]
                     resolved_ctor = [
                         _subst_params(arg, param_arg_map, compound_params)

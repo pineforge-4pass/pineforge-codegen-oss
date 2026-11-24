@@ -22,6 +22,14 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (1.15.0)
 
+- A chart `ta.sma(close, p)` uses the current window when an `if` or `switch`
+  arm changes a persistent `p`. A timeframe selection whose selector starts
+  with a setup value reports an illegal outer assignment at the write.
+
+- TA length folding distinguishes a helper's local writes and a block's
+  local reads from same-named outer variables. Passing `f(b, 2)` no longer
+  substitutes `2` into a constructor argument supplied by the caller's `b`.
+
 - Both strategy conversions and `request.currency_rate` use the host's rate in effect on each bar for the chart and account currencies, in either direction. Without a rate for the pair the request stops the run with the currency-conversion error, or returns `na` with a run warning when `ignore_invalid_currency` is true; other pairs still stop the run ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
 
 - The `PF-W1544` warning for recorded earnings, dividends, splits and financial

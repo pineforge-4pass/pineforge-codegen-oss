@@ -3549,6 +3549,45 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if not inits:
             return
 
+        # The serialized constructor expression has only global names in
+        # scope. Capture immutable local reads from their exact initializers
+        # before asking the global stability classifier or spelling the RHS.
+        # A mutable local instead needs the live value at the TA call.
+        local_writes = {
+            ValueBindings.declaration_of(node.target)
+            for node, _ in iter_ast_nodes(self.ctx.ast)
+            if isinstance(node, Assignment) and isinstance(node.target, Identifier)
+        }
+
+        def bound_expr(expr, depth=0):
+            if self._budget is not None:
+                self._budget.check(expr.loc, Phase.CODEGEN)
+            substitutions = {}
+            for read, _ in iter_ast_nodes(expr):
+                if not isinstance(read, Identifier):
+                    continue
+                binding = ValueBindings.binding_of(read)
+                if binding is None or binding.kind in ("global", "builtin"):
+                    continue
+                key = ValueBindings.declaration_of(read)
+                decl = self._ta_read_declaration(read)
+                if (not isinstance(decl, VarDecl) or key in local_writes
+                        or decl.is_var or decl.is_varip or decl.value is None
+                        or depth >= self._UDF_INLINE_MAX_DEPTH):
+                    return None
+                if read.name not in substitutions:
+                    rhs = bound_expr(decl.value, depth + 1)
+                    if rhs is None:
+                        return None
+                    substitutions[read.name] = rhs
+            return self._subst_params(expr, substitutions) if substitutions else expr
+
+        def stable_spelling(expr):
+            bound = bound_expr(expr)
+            if bound is None or not self._expr_is_stable(bound):
+                return None
+            return self._arith_expr_to_str(bound)
+
         def _value_after(stmts, fallback: str | None) -> str | None:
             """Fold a statement list into the final value expression for the
             target var, given ``fallback`` as the value on entry. Returns None
@@ -3559,9 +3598,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     remaining.remove(id(s))
                     if s.op != ":=":
                         return None  # compound assignment — not a stable fold
-                    if not self._expr_is_stable(s.value):
-                        return None
-                    rhs = self._arith_expr_to_str(s.value)
+                    rhs = stable_spelling(s.value)
                     if rhs is None:
                         return None
                     current = rhs
@@ -3579,9 +3616,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         return None
                     if len(remaining) == before:
                         continue
-                    if not self._expr_is_stable(s.condition):
-                        return None
-                    cond = self._arith_expr_to_str(s.condition)
+                    cond = stable_spelling(s.condition)
                     if cond is None:
                         return None
                     current = f"({cond} ? {then_val} : {else_val})"
