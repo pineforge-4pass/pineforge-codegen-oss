@@ -516,14 +516,13 @@ class TypeInferer:
     def _is_nullable_collection_cpp_type(cpp_type: str | None) -> bool:
         """Whether ``cpp_type`` has a default-constructed Pine ``na`` ID.
 
-        Arrays still lower to ``std::vector`` and cannot distinguish a null ID
-        from a valid empty array. Keep them outside this predicate until their
-        runtime representation carries that distinction.
+        Plain array vectors lack a null ID; an array history handle has one.
         """
         return bool(
             cpp_type
             and (
                 cpp_type.startswith("PineMap<")
+                or cpp_type.startswith("_PFArrayHistoryValue<")
                 or cpp_type == "PineMatrix"
                 or cpp_type.startswith("PineGenericMatrix<")
             )
@@ -3559,7 +3558,7 @@ class TypeInferer:
         spec: TypeSpec | None = None, node: ASTNode | None = None,
     ) -> str:
         """Lower ``arr.method(...)`` to its C++ form, validating numeric requirements."""
-        if self._array_history_value_names():
+        if self._array_history_value_names() or self._nullable_local_arrays:
             array_expr = f"_pf_array_id({array_expr})"
             if method in ("covariance", "concat") and args:
                 args = [f"_pf_array_id({args[0]})", *args[1:]]
@@ -3912,6 +3911,9 @@ class TypeInferer:
 
     def _type_for_decl(self, node: VarDecl) -> str:
         """Determine the C++ type for a ``VarDecl``: explicit hint, then symbol, then RHS inference."""
+        local_type = self._nullable_local_array_type(node)
+        if local_type:
+            return local_type
         from ..drawing_all import DRAWING_ALL_SNAPSHOT, drawing_all_result_spec
         if (node.annotations or {}).get(DRAWING_ALL_SNAPSHOT):
             return self._type_spec_to_cpp(drawing_all_result_spec(node))

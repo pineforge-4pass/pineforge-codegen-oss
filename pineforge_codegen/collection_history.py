@@ -25,6 +25,8 @@ an array or a matrix.
 * ``SUPPORTED``: a variable of the script's top level or of one of its blocks,
   read where a built-in reads or changes it, by ``na()``, as a ``for...in``
   iterable, or bound to a variable or given to a function that only reads it.
+  A nonpersistent array declared in a function supports direct built-in reads
+  and ``na()`` on the history of that written call.
   The analyzer annotates the read (``COLLECTION_HISTORY_ANNOTATION``).
 * ``LEGACY``: every other read that TradingView accepts and whose earlier
   lowering compiled (the element ``a[k]`` of the current array, a parameter's
@@ -351,7 +353,7 @@ template <typename T>
 struct _PFCollectionTraits<_PFArrayHistoryValue<T>> {
     static std::shared_ptr<const _PFArrayHistoryValue<T>> freeze(const _PFArrayHistoryValue<T>& value) {
         if (value.is_na()) return nullptr;
-        return std::make_shared<const _PFArrayHistoryValue<T>>(T(value.get()));
+        return std::make_shared<const _PFArrayHistoryValue<T>>(_PFCollectionTraits<T>::copy(value.get()));
     }
     static _PFArrayHistoryValue<T> copy(const _PFArrayHistoryValue<T>& value) { return value; }
     static _PFArrayHistoryValue<T> reference(std::shared_ptr<const _PFArrayHistoryValue<T>> value) {
@@ -507,6 +509,7 @@ class HistoryRead:
     is_var: bool
     decl_node_id: int | None
     scope_name: str = "global"     # the analyzer's scope of the variable
+    owner: str | None = None       # chart function with a distinct history per call
 
 
 @dataclass
@@ -522,6 +525,7 @@ class HistoryVariable:
     # The other declarations writing the same class member (a sibling
     # block's ``x``): each closes this history before it writes.
     closed_by: set[int] = field(default_factory=set)
+    owner: str | None = None
 
 
 @dataclass
@@ -1486,6 +1490,12 @@ class CollectionHistoryChecker:
         if uses.reject is not None:
             return Decision(REFUSED, node=uses.reject.node or read.node,
                             message=uses.reject.message, hint=uses.reject.hint)
+        if (read.owner is not None and read.kind == "array" and not read.is_var
+                and use.how in ("read", "na")
+                and use.form != "history"  # an operator operand, not a built-in read
+                and self.declaration_scope(read.decl_node_id) == "callable"
+                and not self._in_request(read.node)):
+            return Decision(SUPPORTED, use.how)
         why = self._scope_refusal(read)
         if why is None:
             decision = self._decide_supported(read, use, uses, label)
@@ -1677,14 +1687,17 @@ class CollectionHistoryChecker:
             if decision is None or decision.outcome != SUPPORTED or annotation is None:
                 continue
             offset = literal_offset(read.node)
-            if decision.use == "loop" or offset == 0:
+            # A local read at zero needs no previous slot, but does need its
+            # declaration's nullable ID (na versus a valid empty array).
+            if decision.use == "loop" or (offset == 0 and read.owner is None):
                 continue
             key = (read.name, read.decl_node_id)
             entry = by_declaration.get(key)
             if entry is None:
                 entry = by_declaration[key] = HistoryVariable(
                     name=read.name, kind=read.kind, spec=read.spec,
-                    is_var=read.is_var, capacity=0, decl_node_id=read.decl_node_id)
+                    is_var=read.is_var, capacity=0, decl_node_id=read.decl_node_id,
+                    owner=read.owner)
             if entry.capacity is not None:
                 entry.capacity = (None if offset is None
                                   else max(entry.capacity, offset + 1))
@@ -1695,10 +1708,11 @@ class CollectionHistoryChecker:
         variables: dict[str, HistoryVariable] = {}
         keys: dict[tuple, str] = {}
         for name, entries in names.items():
-            entries.sort(key=lambda e: self._source_position(e.decl_node_id))
+            entries.sort(key=lambda e: (e.owner is not None, self._source_position(e.decl_node_id)))
             for ordinal, entry in enumerate(entries):
                 entry.ordinal = ordinal
-                entry.closed_by = set(writers.get(name, set())) - {entry.decl_node_id}
+                if entry.owner is None:
+                    entry.closed_by = set(writers.get(name, set())) - {entry.decl_node_id}
                 member_key = name if ordinal == 0 else f"{name}#{ordinal}"
                 variables[member_key] = entry
                 keys[(name, entry.decl_node_id)] = member_key

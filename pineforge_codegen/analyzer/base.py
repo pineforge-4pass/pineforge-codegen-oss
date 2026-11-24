@@ -42,7 +42,7 @@ from ..security_contexts import (
 from ..session_reads import emitted_session_reads
 from ..collection_history import (
     COLLECTION_HISTORY_ANNOTATION, LEGACY, REFUSED, SUPPORTED,
-    CollectionHistoryChecker, HistoryRead,
+    CollectionHistoryChecker, HistoryRead, literal_offset,
 )
 from ..method_binding import (
     BoundMethodArgs,
@@ -160,7 +160,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
     def __init__(self, ast: Program, filename: str = "<stdin>",
                  budget: TimeBudget | None = None,
-                 session_clones: frozenset[str] | None = None) -> None:
+                 session_clones: frozenset[str] | None = None,
+                 excluded_array_history_owners: frozenset[str] = frozenset()) -> None:
         self._ast = ast
         self._filename = filename
         self._budget = budget
@@ -172,6 +173,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # offset (pineforge_codegen._generate passes none first, then each
         # time adds the ones whose reads the C++ holds).
         self._session_clones = session_clones
+        self._excluded_array_history_owners = excluded_array_history_owners
         self._session_uncloned: frozenset[str] = frozenset()
         self._budget_visit_count = 0
         self._method_signatures = {}
@@ -709,6 +711,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return Analyzer(
                 self._ast, filename=self._filename, budget=self._budget,
                 session_clones=self._session_clones,
+                excluded_array_history_owners=self._excluded_array_history_owners,
             ).analyze()
         self._check_persistent_drawing_member_collisions()
 
@@ -717,6 +720,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # internally, g() also needs N call-site variants so each f_csK
         # can call g_csK with isolated state.
         self._propagate_call_site_counts()
+        # A request's evaluator (also through helpers) and a field default
+        # don't run on a written chart call's clock. Revisit just this case
+        # with those owners on their original refusal/legacy typing path.
+        excluded = self._excluded_array_history_owners.union(
+            r.owner for r in self._collection_history_reads
+            if r.owner in self._session_history_unsafe)
+        if excluded != self._excluded_array_history_owners:
+            return Analyzer(
+                self._ast, filename=self._filename, budget=self._budget,
+                session_clones=self._session_clones, excluded_array_history_owners=excluded,
+            ).analyze()
 
         # Reject (loudly) a request.security whose timeframe is a UDF parameter
         # called with multiple distinct literal timeframes — a single evaluator
@@ -3363,16 +3377,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # per call site, each typed from its own call.
         family_polymorphic = self._untyped_param_family_conflicts(
             func_defs, func_info_by_name, call_edges, _bound_user_call_args)
+        history_owners = set(self._func_global_history_reads)
+        history_owners.update(
+            r.owner for r in self._collection_history_reads
+            if r.owner is not None and r.owner not in self._session_history_unsafe
+            and literal_offset(r.node) != 0
+        )
         family_polymorphic = self._bounded_family_polymorphism(
             family_polymorphic,
-            direct_state | set(self._func_global_history_reads),
+            direct_state | history_owners,
             close_over_callers, call_edges, func_info_by_name)
         stateful = close_over_callers(
-            direct_state
-            | set(self._func_global_history_reads)
-            | family_polymorphic
+            direct_state | history_owners | family_polymorphic
         )
-        # Callables stateful only through a script variable's history, or
+        # Callables stateful only through a call site's history, or
         # their parameters' families: before those rules they shared one body,
         # so their call-site typing must not refuse a script that transpiled
         # then (``merge_profile`` below).
@@ -9322,6 +9340,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         lowering registered a series (a matrix parameter's), which the caller
         then does as it did."""
         decl_node_id = getattr(sym, "_pf_decl_node_id", None)
+        owner = self._enclosing_func_names[-1] if self._enclosing_func_names else None
         read = HistoryRead(
             node=node,
             name=name,
@@ -9333,6 +9352,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             is_var=bool(sym.is_var),
             decl_node_id=decl_node_id,
             scope_name=sym.scope or "",
+            owner=(owner if decl_node_id is not None and sym.scope != "global"
+                   and owner in self._func_defs and owner not in self._excluded_array_history_owners
+                   else None),
         )
         decision = self._history_checker().decide(read)
         if node.annotations and COLLECTION_HISTORY_ANNOTATION in node.annotations:

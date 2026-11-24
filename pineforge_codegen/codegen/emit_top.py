@@ -2934,6 +2934,7 @@ class TopLevelEmitter:
                             s.expr,
                             self._int_slot_cpp_type(None, ret_type),
                         )
+                        self._close_returned_local_array(s.expr, lines, "        ")
                         lines.append(f"        return {ret_cpp};")
                         emitted_return = True
                 elif i == len(node.body) - 1 and isinstance(s, (SwitchStmt, IfStmt)):
@@ -2994,6 +2995,8 @@ class TopLevelEmitter:
                         value,
                         self._int_slot_cpp_type(None, ret_type),
                     )
+                    self._close_returned_local_array(s if isinstance(s, VarDecl) else value,
+                                                     lines, "        ")
                     lines.append(f"        return {ret_cpp};")
                     emitted_return = True
                 elif (i == len(node.body) - 1

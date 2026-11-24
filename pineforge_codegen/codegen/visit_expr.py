@@ -739,6 +739,11 @@ class ExprVisitor:
                 target_name,
                 target_cpp_type=branch_target,
             )
+            if branch_target.startswith("_PFArrayHistoryValue<"):
+                # A vector converts to a nullable ID and the ID converts back
+                # to a vector reference. Give ?: an unambiguous result type.
+                true_value = f"{branch_target}({true_value})"
+                false_value = f"{branch_target}({false_value})"
             return (
                 f"(({condition}) ? ({true_value}) : ({false_value}))"
             )

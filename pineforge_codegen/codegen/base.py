@@ -6474,6 +6474,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 8e. The copies an array or a matrix variable's executions left
         #     (pineforge_codegen/collection_history.py).
         self._emit_history_version_clock(lines)
+        self._emit_local_array_history_members(lines)
         for variable in self._collection_history_variables():
             lines.append(
                 f"    {self._collection_history_class(variable)}<{self._collection_history_cpp_type(variable)}> "
