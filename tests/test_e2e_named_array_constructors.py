@@ -332,18 +332,24 @@ def test_reversed_keywords_run_in_formal_order_through_the_public_harness(tmp_pa
 
 def test_reported_program_runs_through_the_public_harness(tmp_path):
     engine = skip_unless_e2e_env()
-    feed = chart_feed_head(engine, tmp_path, 12)
+    bars = 12
+    feed = chart_feed_head(engine, tmp_path, bars)
     reporter = (
         "//@version=6\nstrategy('repro')\n"
         "values = array.new<float>(size = 3, initial_value = 1.0)\n"
         "n = values.size()\ntotal = values.sum()\n"
         "// @pf-trace n=n\n// @pf-trace total=total\nplot(total)\n")
-    runs = execute_all(engine, feed, tmp_path, {"reporter": Build(reporter, trace=True)})
-    result = ok(runs, "reporter")
-    for name in ("n", "total"):
-        records = [r for r in result.traces["default"] if r["name"] == name]
-        assert len(records) == 12
-        assert all(r["value"] == 3 for r in records), (name, records)
+    positional = reporter.replace("size = 3, initial_value = 1.0", "3, 1.0")
+    runs = execute_all(engine, feed, tmp_path, {
+        "reporter": Build(reporter, trace=True),
+        "positional": Build(positional, trace=True),
+    })
+    for form in ("reporter", "positional"):
+        result = ok(runs, form)
+        for name in ("n", "total"):
+            records = [r for r in result.traces["default"] if r["name"] == name]
+            assert [r["bar_index"] for r in records] == list(range(bars)), (form, name)
+            assert all(r["value"] == 3 for r in records), (form, name, records)
 
 
 @pytest.mark.parametrize("version", [5, 6])
