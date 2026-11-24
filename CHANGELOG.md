@@ -36,6 +36,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - A TA length held in a never-reassigned top-level `var int` literal is no longer refused with PF-E5092 when the script also declares a `method`; a script that declares a user function, `type` or `enum` still refuses it ([#422](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/422)).
 
+- `timeframe.in_seconds(size)` accepts a function-local `var string size`, even though `size` is also a Pine namespace ([#424](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/424)).
+
 - `str.substring` now stops the run when the begin position is after the end position, and counts a `na` begin or end as 0, as TradingView does ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
 
 - `str.trim` also removes the other white space and line terminators of the ECMAScript `trim` set, such as U+3000 and U+FEFF, which TradingView removes. It previously removed only space, tab, LF and CR ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
