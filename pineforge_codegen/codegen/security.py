@@ -8688,7 +8688,8 @@ class SecurityEmitter:
         self._security_shared_calls = {}
         self._security_shared_definitions = definitions = []
         self._security_shared_globals = {}
-        self._security_global_hist_pushes = pushes = []
+        # (series, type) -> requested value to commit if its read was skipped.
+        self._security_global_hist_pushes = pushes = {}
         self._security_array_values = {}
         # This evaluator's global history reads lowered as doubles.
         self._security_double_hist_nodes = set()
@@ -8716,14 +8717,14 @@ class SecurityEmitter:
              self._security_shared_globals, self._security_global_hist_pushes,
              self._security_double_hist_nodes, self._security_array_values) = outer
         if pushes:
-            # The history of a global the payload reads at an offset
-            # (``_security_global_history_value``): the value its reads keep,
-            # pushed once on a completed requested bar.
+            # Commit after all reads have seen the previous requested bar.
             close = max(i for i in range(start, len(lines)) if lines[i] == "    }")
             lines[close:close] = (
                 ["        if (is_complete) {"]
-                + [f"            if ({hist}_set) {hist}.push({hist}_next);"
-                   for hist, _cpp_t in pushes]
+                + [(f"            if ({hist}_set) {hist}.push({hist}_next);"
+                    if fallback is None else
+                    f"            {hist}.push({hist}_set ? {hist}_next : ({fallback}));")
+                   for (hist, _cpp_t), fallback in pushes.items()]
                 + ["        }"])
             definitions = [
                 f"        {cpp_t} {hist}_next = na<{cpp_t}>(); bool {hist}_set = false;"
@@ -8879,8 +8880,7 @@ class SecurityEmitter:
                     "[](auto _pf_v) { return is_na(_pf_v) ? na<double>() "
                     f": static_cast<double>(_pf_v); }}({value})"
                 )
-            if (hist, cpp_t) not in self._security_global_hist_pushes:
-                self._security_global_hist_pushes.append((hist, cpp_t))
+            self._security_global_hist_pushes.setdefault((hist, cpp_t), None)
             lines.append(
                 f"        if (is_complete) {{ {hist}_next = {value}; {hist}_set = true; }}"
             )
@@ -9989,7 +9989,18 @@ class SecurityEmitter:
                     # after every read has seen the history before this bar.
                     # TradingView commits one slot per requested bar.
                     if (hist, cpp_t) not in pushes:
-                        pushes.append((hist, cpp_t))
+                        fallback = None
+                        value = self._security_global_history_value(expr_node)
+                        if value is not None and self._security_pure_expr(value, set()):
+                            # The global has a value even on a skipped read.
+                            # Render only its initializer in global scope; the
+                            # index and enclosing branch must stay lazy.
+                            fallback = self._build_security_expr(
+                                sec_id, value, None, ta_results,
+                                security_mutable_names=security_mutable_names,
+                                emitted_lines=self._security_shared_definitions,
+                            )
+                        pushes[hist, cpp_t] = fallback
                     return (
                         f"([&]() -> {cpp_t} {{ "
                         f"{cpp_t} _hv = ({inner}); "
