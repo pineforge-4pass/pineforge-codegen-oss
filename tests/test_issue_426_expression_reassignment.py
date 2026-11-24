@@ -3,7 +3,6 @@
 import pytest
 
 from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
 from tests import _series_sma_oracle as bars
 from tests._compile import run_emitted_tu
 
@@ -31,14 +30,20 @@ def test_plain_read_after_write(write):
 
 
 @pytest.mark.parametrize("init", ["5", "timeframe.in_seconds()"], ids=["literal", "setup"])
-def test_persistent_length_matches_statement_diagnostic(init):
-    for prefix in ("", "x = "):
-        body = f"var int p = {init}\n" + prefix + IF_WRITE + "z = ta.sma(close, p)\n"
-        with pytest.raises(CompileError) as caught:
-            transpile(HEADER + body)
-        diagnostic, = caught.value.diagnostics
-        assert diagnostic.code == "PF-E5092"
-        assert "Unsupported TA constructor length 'p' for ta.sma" in diagnostic.message
+def test_persistent_length_statement_control(init):
+    # Both initializers start at five on this five-second chart.
+    driver = bars.per_bar_driver(("z",)).replace(
+        'count, "1", "1"', 'count, "5S", "5S"').replace("i * 60000LL", "i * 5000LL")
+    body = f"var int p = {init}\n" + IF_WRITE + "z = ta.sma(close, p)\n"
+    output = run_emitted_tu(transpile(HEADER + body), driver,
+                            opt="-O0", label="issue-426-statement")
+    length = 5
+    windows = []
+    for count, (c, o) in enumerate(zip(bars.CLOSES, bars.OPENS), 1):
+        length += int(c > o)
+        windows.append((length, sum(bars.CLOSES[count-length:count])
+                        if count >= length else None))
+    bars.assert_per_bar(bars.column(bars.per_bar_rows(output, 1)), windows, init)
 
 
 def test_mixed_writes_use_the_current_window():

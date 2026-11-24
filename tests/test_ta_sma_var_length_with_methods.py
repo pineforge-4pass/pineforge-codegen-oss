@@ -1,8 +1,8 @@
 """A method declaration must not fence a fixed top-level ``var`` TA length.
 
 The stable literal proof is intentionally narrow: a direct, never-reassigned
-``var int`` may size ``ta.sma`` once per run, while a reassigned ``var`` or a
-``varip`` remains unsupported.
+``var int`` may size ``ta.sma`` once per run. A chart selection that writes
+the period uses a live window instead.
 """
 
 from __future__ import annotations
@@ -212,9 +212,7 @@ def test_literal_sma_length_is_unchanged_by_a_method() -> None:
     )
 
 
-# A write inside an ``if`` block used as a value is not in the statement-level
-# reassignment set; with a method in the script the length keeps the lowering
-# it had before methods were admitted.
+# An unrelated method does not change a selection's write to a chart length.
 _EXPRESSION_BLOCK_WRITE = (
     "method id(int self) => self\n"
     "var int p = 5\n"
@@ -226,12 +224,18 @@ _EXPRESSION_BLOCK_WRITE = (
 )
 
 
-def test_expression_block_write_with_a_method_keeps_the_sma_refusal() -> None:
-    with pytest.raises(CompileError) as caught:
-        transpile(HEADER + _EXPRESSION_BLOCK_WRITE + "z = ta.sma(close, p)\n")
-
-    diagnostic, = caught.value.diagnostics
-    assert diagnostic.code == "PF-E5092"
+def test_expression_block_write_with_a_method_uses_current_sma_length() -> None:
+    source = HEADER + _EXPRESSION_BLOCK_WRITE + "z = ta.sma(close, p)\n"
+    driver = DRIVER.replace("open = closes[i];", "open = closes[i] + (closes[i] > 124 ? -1 : 1);")
+    output = run_emitted_tu(transpile(source), driver, opt="-O0", label="method-sma")
+    length = 5
+    for count, (line, close) in enumerate(zip(output.split(), CLOSES, strict=True), 1):
+        length += int(close > 124)
+        if count < length:
+            assert line.lstrip("-").lower() == "nan"
+        else:
+            assert float(line) == pytest.approx(sum(CLOSES[count-length:count]) / length,
+                                                rel=1e-5)
 
 
 def test_expression_block_write_with_a_method_keeps_the_per_bar_highest() -> None:

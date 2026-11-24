@@ -1904,8 +1904,8 @@ class TaSiteHelper:
     #   ``pineforge::source::SeriesPercentileNearestRank``.
     # * series, for ta.sma (outside request.security, and neither a length a
     #   callable receives from its call sites nor one that reads a
-    #   script-level ``var`` / ``varip``): each call passes its source and
-    #   the length its call site binds to ``pineforge::source::SeriesSma``
+    #   script-level persistent binding reserved for constructor sizing):
+    #   each call passes its source and live length to ``pineforge::source::SeriesSma``
     #   (through ``_PFSeriesSma``).
     # * ta.supertrend: the factor (series or simple) of the first execution is
     #   the run's -- ``pineforge::source::PineSupertrend``.
@@ -1915,7 +1915,7 @@ class TaSiteHelper:
     # so those only ever carry a simple one here. A series length for the
     # other window functions (ta.wma, ...), and for a requested-context or
     # forwarded ta.sma (``_ta_length_is_forwarded``) or one that reads a
-    # script-level ``var`` (``_ta_length_reads_script_var``), keeps the
+    # persistent length reserved for the constructor, keeps the
     # refusal.
     # Constant- and input-length sites never reach this plan: they retain
     # their constructor/reset/precalculation cadence. EMA-family objects use
@@ -2119,7 +2119,7 @@ class TaSiteHelper:
         return self._ta_plan_for(site, refused, simple,
                                  requested=self._ta_site_is_requested(site),
                                  forwarded=self._ta_length_is_forwarded(site),
-                                 persistent=self._ta_length_reads_script_var(site))
+                                 persistent=self._ta_length_needs_persistent_ctor(site))
 
     def _ta_site_is_requested(self, site: "TACallSite") -> bool:
         """Whether a request.security evaluator computes a copy of ``site``
@@ -2223,19 +2223,48 @@ class TaSiteHelper:
             self.__dict__["_ta_script_var_decls_cache"] = cached
         return cached
 
-    def _ta_length_reads_script_var(self, site: "TACallSite") -> bool:
-        """Whether an authored constructor argument reads a script-level
-        persistent declaration (``var`` / ``varip``), itself or through the
-        declaration of a name it reads. Each identifier answers from the
-        declaration the analyzer bound it to (``_ta_read_declaration``), so a
-        parameter, a loop counter, a block local or a tuple spelled like such
-        a declaration is not one, whatever the call site's spelling of the
-        argument. A read whose declaration cannot be placed answers true: it
-        is not shown to be bound where the call runs."""
+    def _chart_selection_written_vars(self) -> set[int]:
+        """Persistent declarations assigned in chart if/switch arms."""
+        cached = self.__dict__.get("_chart_selection_written_vars_cache")
+        if cached is None:
+            cached = set()
+            pending = [(stmt, False) for stmt in self.ctx.ast.body]
+            while pending:
+                node, in_arm = pending.pop()
+                if self._budget is not None:
+                    self._budget.check(node.loc, Phase.CODEGEN)
+                if isinstance(node, (FuncDef, MethodDef, TypeDecl)):
+                    continue
+                if in_arm and isinstance(node, Assignment) and isinstance(node.target, Identifier):
+                    binding = ValueBindings.declaration_of(node.target)
+                    if binding is not None and binding[0] in self._ta_script_var_decls():
+                        cached.add(binding[0])
+                if isinstance(node, (IfStmt, SwitchStmt)):
+                    arms = ([node.body, node.else_body] if isinstance(node, IfStmt)
+                            else [body for _, body in node.cases] + [node.default_body])
+                    arm_stmts = {id(stmt) for body in arms for stmt in body or []}
+                    pending.extend((child, in_arm or id(child) in arm_stmts)
+                                   for child in syntax_children(node))
+                else:
+                    pending.extend((child, in_arm) for child in syntax_children(node))
+            self.__dict__["_chart_selection_written_vars_cache"] = cached
+        return cached
+
+    def _ta_length_needs_persistent_ctor(self, site: "TACallSite") -> bool:
+        """Keep persistent lengths on the constructor path except for a
+        direct chart read of a period updated in a selection. An unplaced
+        read cannot prove that the length is available at the call site."""
         persistent = self._ta_script_var_decls()
         if not persistent:
             return False
         pending = list(getattr(site, "ctor_nodes", None) or ())
+        if site.owner_func is None and len(pending) == 1 and isinstance(pending[0], Identifier):
+            decl = self._ta_read_declaration(pending[0])
+            if (isinstance(decl, VarDecl) and decl.is_var and not decl.is_varip
+                    and id(decl) in self._chart_selection_written_vars()):
+                # This bare period has a chart write; constructor sizing
+                # would discard it. The series SMA reads it after the arm.
+                return False
         seen: set[int] = set()
         while pending:
             if self._budget is not None:
@@ -2265,7 +2294,7 @@ class TaSiteHelper:
         ``forwarded`` one (``_ta_length_is_forwarded``): the length a callable
         receives from its call sites stays with the constructor path, which
         sizes the site from the call site's argument. And so does a
-        ``persistent`` one (``_ta_length_reads_script_var``): a script-level
+        ``persistent`` one (``_ta_length_needs_persistent_ctor``): a script-level
         ``var`` / ``varip`` is the stable-var path's binding, which sizes the
         constructor from it (the literal admission, a runtime reset) or leaves
         the constructor guard's refusal. The simple spelling leaves those

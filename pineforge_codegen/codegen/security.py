@@ -1680,8 +1680,15 @@ class SecurityEmitter:
             writes = self._global_write_sites.get(read.name)
             decl = self.ctx.identifier_binding_nodes.get(id(read))
             if (not writes or not self._security_identifier_is_global_binding(read)
-                    or not isinstance(decl, VarDecl) or decl.is_var or decl.is_varip
-                    or not self._is_stable_inline_input(decl.value)):
+                    or not isinstance(decl, VarDecl) or decl.is_var or decl.is_varip):
+                return False
+            # At the selector the declaration still holds its setup value.
+            # Require the same purity and binding proof as setup replay,
+            # without depending on replay of another mutable declaration.
+            mutable_reads = set()
+            if not self._is_stable_inline_input(decl.value) and (
+                    not self._security_tf_replay_reads(decl.value, mutable_reads)
+                    or mutable_reads or self._security_tf_expr_is_per_bar(decl.value)):
                 return False
             if id(owner) not in arm_write_sites:
                 bodies = ([owner.body, owner.else_body] if isinstance(owner, IfStmt)
@@ -1706,7 +1713,7 @@ class SecurityEmitter:
                     literal = BoolLiteral if isinstance(known, bool) else NumberLiteral
                     return literal(value=known, loc=value.loc)
                 if selector_owner is not None and written_only_in_arms(value, selector_owner):
-                    # The selector reads this input before any of its writes.
+                    # The selector reads this binding before any of its writes.
                     # Keep the read intact; block() diagnoses the outer store.
                     if deferred_read is None:
                         deferred_read = value
