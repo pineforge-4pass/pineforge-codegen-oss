@@ -1998,7 +1998,14 @@ class CallHandlers:
                             continue
                         if sym is not None:
                             sym.is_series = True
-                            if sym.scope and sym.scope.startswith("func_"):
+                            parameter_owner = getattr(sym, "_pf_parameter_owner", None)
+                            if parameter_owner is not None:
+                                # Forward the history requirement to the caller's
+                                # parameter, including a method's receiver.
+                                self._func_series_vars.setdefault(
+                                    parameter_owner, set()
+                                ).add(arg.name)
+                            elif sym.scope and sym.scope.startswith("func_"):
                                 caller_name = sym.scope[5:]
                                 self._func_series_vars.setdefault(caller_name, set()).add(arg.name)
                             else:

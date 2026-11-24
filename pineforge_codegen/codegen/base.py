@@ -28,7 +28,7 @@ from ..analyzer import (
     TA_LENGTH_ONLY_DEFAULT_SOURCE,
 )
 from ..analyzer.value_bindings import ValueBindings
-from ..symbols import PineType, TypeSpec, method_receiver_type_name
+from ..symbols import PineType, TypeSpec
 from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from ..limits import MAX_SOURCE_CHARS, TimeBudget, iter_ast_nodes, syntax_children
@@ -451,6 +451,19 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 ctx, "func_nonpersistent_series_vars", {}
             ).items()
         }
+        # func_series_vars describes both Series arguments and body locals.
+        # Only the latter own storage to clone. A body declaration can have
+        # the same spelling as a parameter; its exact history still counts.
+        parameter_only_names = {
+            fi.name: set(fi.node.params).difference(
+                self._func_nonpersistent_series_vars.get(fi.name, ())
+            )
+            for fi in ctx.func_infos if fi.node is not None
+        }
+        self._func_local_series_names = {
+            owner: names.difference(parameter_only_names.get(owner, ()))
+            for owner, names in ctx.func_series_vars.items()
+        }
         # Exact declarations that are direct children of Program.body.  A
         # same-named declaration inside a top-level ``if``/loop is still a
         # lexical block local; raw membership in ``_global_member_vars`` must
@@ -538,7 +551,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         }
         self._callable_state_raw_names.update(
             name
-            for names in ctx.func_series_vars.values()
+            for names in self._func_local_series_names.values()
             for name in names
         )
 
@@ -670,12 +683,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # are themselves sets (analyzer stores ``dict[str, set]``), so we must
         # iterate each value in ``sorted`` order to be hash-seed independent.
         all_func_scoped_series: list[str] = []
-        for owner, svars in ctx.func_series_vars.items():
+        for owner, svars in self._func_local_series_names.items():
             for sv in sorted(svars):
                 exact = self._func_var_storage_name(owner, sv)
-                # ``func_series_vars`` also carries history-referenced
-                # parameters/plain locals. Translate only a real persistent
-                # member whose analyzer-exact identity is Series storage.
+                # Translate only a persistent member with exact Series storage.
                 if (self._safe_name(exact)
                         in self._series_var_member_names):
                     storage = exact
@@ -683,8 +694,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                       and sv not in self._func_nonpersistent_series_vars.get(
                           owner, set()
                       )):
-                    # A history parameter/plain local in an unrelated UDF may
-                    # reuse the Pine spelling of owner-qualified persistent
+                    # A local may reuse the name of another UDF's persistent
                     # state. It has no class-member identity to propagate into
                     # every other function's clone map; doing so remaps an
                     # initializer's earlier global read to a bogus ``x_csN``
@@ -719,8 +729,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     if exact not in orig_names:
                         orig_names.append(exact)
             # Include function's own series vars (set -> sorted for determinism)
-            if fname in ctx.func_series_vars:
-                for sv in sorted(ctx.func_series_vars[fname]):
+            if fname in self._func_local_series_names:
+                for sv in sorted(self._func_local_series_names[fname]):
                     exact = self._func_var_storage_name(fname, sv)
                     storage = (
                         exact
@@ -1996,12 +2006,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return
 
         func_bodies: dict[str, list] = {}
-        func_params: dict[str, set[str]] = {}
         for fi in ctx.func_infos:
             node = getattr(fi, "node", None)
             if node is not None and getattr(node, "body", None):
                 func_bodies.setdefault(fi.name, node.body)
-                func_params.setdefault(fi.name, set(getattr(node, "params", ()) or ()))
 
         # Pine forbids recursive callable execution. Most scalar-only cycles
         # never enter this state-instance pass (and some legacy dead-branch
@@ -2073,10 +2081,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # true-range filters into the price filter's ``_f``).
             # Same storage rule as the natural csN remap of the callee's own
             # series vars (``orig_names`` above).
-            params = func_params.get(fname, set())
-            for sv in sorted(ctx.func_series_vars.get(fname, ())):
-                if sv in params:
-                    continue  # a history-read parameter is the caller's series
+            for sv in sorted(self._func_local_series_names.get(fname, ())):
                 exact = self._func_var_storage_name(fname, sv)
                 storage = self._safe_name(
                     exact
@@ -4678,23 +4683,19 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             fi = None
             method_call = False
             if isinstance(node.callee, MemberAccess):
-                # Method syntax is type-directed. Resolve it before considering
-                # any same-named bare UDF, and use the AST owner's lexical
-                # parameter types: analyzer symbol scopes no longer exist in
-                # this source-order prepass.
-                receiver_spec = self._map_effect_type_spec(
-                    node.callee.object, owner_lexical_specs(owner)
-                )
-                receiver_name = method_receiver_type_name(receiver_spec)
-                if receiver_name is not None:
-                    method_key = f"{receiver_name}.{node.callee.member}"
-                    candidate = self._func_info_map.get(method_key)
-                    if (
-                        candidate is not None
-                        and getattr(candidate, "is_udt_method", False)
-                    ):
-                        fi = candidate
-                        method_call = True
+                # An expression receiver can bind a typed method without
+                # retaining a TypeSpec. Register its actuals (receiver first)
+                # against the method selected while its scope was live.
+                bindings = self._wide_method_call_bindings().get(id(node), ())
+                if len(bindings) == 1:
+                    fi, _ = bindings[0]
+                else:
+                    _, fi = self._map_effect_callable_info(
+                        node, owner_lexical_specs(owner)
+                    )
+                if fi is None or not fi.is_udt_method:
+                    continue
+                method_call = True
             elif isinstance(node.callee, Identifier):
                 fi = self._func_info_map.get(node.callee.name)
             if fi is None or fi.node is None:

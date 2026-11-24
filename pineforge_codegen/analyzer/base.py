@@ -2846,7 +2846,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if getattr(fi, "is_udt_method", False) and fi.node is not None:
                 func_defs.setdefault(fi.name, fi.node)
 
-        session_method_bindings: dict[int, str] = {}
+        method_bindings: dict[int, str] = {}
         # Preserve call-node identity as well as the callee name: late clone
         # materialization needs the textual call's argument mapping to resolve
         # parameterized TA constructor lengths.
@@ -2855,8 +2855,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return call.callee.name if call.callee.name in func_defs else None
             if not isinstance(call.callee, MemberAccess):
                 return None
-            if id(call) in session_method_bindings:
-                return session_method_bindings[id(call)]
+            if id(call) in method_bindings:
+                return method_bindings[id(call)]
 
             recv = call.callee.object
             method = call.callee.member
@@ -2931,9 +2931,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return calls
 
         # A lexical typed binding survives scopes that the late raw-name
-        # resolver cannot reconstruct. Prefer that exact declaration only on
-        # the new session-method path, after the C++ actually requested clones.
-        # A syntactic read in a dropped argument must keep the old graph too.
+        # resolver cannot reconstruct (e.g. an arithmetic receiver). Keep
+        # that binding on paths needing per-call session or parameter history.
         known_func_names = set(func_defs)
         requested_reads = {
             id(child)
@@ -2949,15 +2948,21 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         exact_bindings: dict[int, set[str]] = {}
         for call_id, key in self._method_call_bindings:
             exact_bindings.setdefault(call_id, set()).add(key)
-        session_method_bindings = {
+        method_bindings = {
             call_id: next(iter(keys))
             for call_id, keys in exact_bindings.items()
             if len(keys) == 1
             and call_id not in self._session_unresolved_method_calls
         }
-        if session_reach and session_method_bindings:
-            # First determine reach with exact bindings, including wrappers
-            # whose old receiver-name fallback selected the wrong overload.
+        history_reach = {
+            name for name, names in self._func_series_vars.items()
+            if name in func_defs and not names.isdisjoint(func_defs[name].params)
+        }
+        exact_reach = session_reach | history_reach
+        if exact_reach and method_bindings:
+            # A wrapper can acquire a history parameter later, when the
+            # fixed point below sees the callee it forwards its receiver to.
+            # Keep the wrapper's incoming edges as well as the reader's.
             typed_calls = {
                 name: _find_calls(definition, known_func_names, name)
                 for name, definition in func_defs.items()
@@ -2968,13 +2973,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     self._budget.check(phase=Phase.ANALYZER)
                 changed = False
                 for name, calls in typed_calls.items():
-                    if (name not in session_reach
-                            and any(sub in session_reach for sub, _ in calls)):
-                        session_reach.add(name)
+                    if (name not in exact_reach
+                            and any(sub in exact_reach for sub, _ in calls)):
+                        exact_reach.add(name)
                         changed = True
-        session_method_bindings = {
-            call_id: key for call_id, key in session_method_bindings.items()
-            if key in session_reach
+        method_bindings = {
+            call_id: key for call_id, key in method_bindings.items()
+            if key in exact_reach
         }
 
         calls_by_parent = {
@@ -2985,6 +2990,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             name: [] for name in known_func_names
         }
         call_edges: list[tuple[str | None, str, FuncCall]] = []
+        callable_declarations: dict[str, int] = {}
         # Preserve source order across definitions and top-level statements.
         # Method bodies use their ``Type.method`` owner so ``self.sibling()``
         # resolves without relying on a now-exited symbol-table scope.
@@ -2995,6 +3001,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 owner = f"{stmt.type_name}.{stmt.name}"
             else:
                 owner = None
+            if owner is not None:
+                callable_declarations[owner] = id(stmt)
             for callee, call in _find_calls(stmt, known_func_names, owner):
                 calls_by_callee.setdefault(callee, []).append(call)
                 call_edges.append((owner, callee, call))
@@ -3171,11 +3179,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         self._series_bar_fields.add(actual.name)
                     if owner is None:
                         continue
-                    owner_info = func_info_by_name.get(owner)
-                    if (
-                        owner_info is None
-                        or owner_info.node is None
-                        or actual.name not in owner_info.node.params
+                    # A same-named block local or a default from a different
+                    # scope is not a forwarded parameter. Method FuncInfos
+                    # have synthetic FuncDefs; the binding names the MethodDef.
+                    if self._value_bindings.declaration_bindings.get(id(actual)) != (
+                        callable_declarations[owner], actual.name
                     ):
                         continue
                     owner_series = self._func_series_vars.setdefault(
@@ -9184,6 +9192,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     )
                     if keeps_series and (getattr(sym, "type_spec", None) is None
                                          or sym.type_spec.kind not in ("array", "map")):
+                        sym.is_series = True
+                        parameter_owner = getattr(sym, "_pf_parameter_owner", None)
+                        if parameter_owner is not None:
+                            # The actual argument supplies this Series. Only a
+                            # read bound to a declaration can promote its storage.
+                            self._func_series_vars.setdefault(
+                                parameter_owner, set()
+                            ).add(name)
+                            self._func_series_history_nodes.setdefault(
+                                (parameter_owner, name), node
+                            )
+                            return obj_type
                         exact_member = getattr(sym, "_pf_var_member_name", None)
                         if exact_member is not None:
                             self._series_var_members.add(exact_member)
@@ -9211,12 +9231,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             and self._type_spec_contains_map(global_sym.type_spec)
                         )
                         # ``_series_vars`` is a legacy global-by-name set. Do
-                        # not let a lexical scalar series parameter poison a
+                        # not let a lexical scalar series local poison a
                         # same-named global PineMap member; the scoped series
                         # registry below is authoritative for the function.
                         if not shadows_map_state:
                             self._series_vars.add(name)
-                        sym.is_series = True
                         # Track callable-scoped series vars. Method symbol
                         # scopes use ``method_Type_name`` while every later
                         # clone/remap table is keyed by canonical
