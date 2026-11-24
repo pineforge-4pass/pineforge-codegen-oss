@@ -111,7 +111,6 @@ class InputHelper:
         if not isinstance(member, Identifier):
             return member
         declarations = {}
-        reassigned = self._find_reassigned_vars()
         for statement in self.ctx.ast.body:
             if any(candidate is node for candidate in self._walk_ast(statement)):
                 break
@@ -122,10 +121,11 @@ class InputHelper:
         while isinstance(candidate, Identifier) and candidate.name not in visited:
             visited.add(candidate.name)
             bindings = declarations.get(candidate.name, [])
-            if len(bindings) != 1 or candidate.name in reassigned:
+            if len(bindings) != 1:
                 return member
             declaration = bindings[0]
-            if declaration.is_var or declaration.is_varip:
+            if (declaration.is_var or declaration.is_varip
+                    or (id(declaration), declaration.name) in self._writes_by_decl):
                 return member
             candidate = declaration.value
         if isinstance(candidate, MemberAccess) and isinstance(candidate.object, Identifier):

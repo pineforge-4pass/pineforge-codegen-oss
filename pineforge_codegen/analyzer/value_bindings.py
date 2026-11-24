@@ -22,6 +22,8 @@ from .tables import BUILTIN_VARS
 
 
 _VALUE_USE = "pf_authored_value_use"
+_WRITE_DECL = "pf_write_declaration"
+_V5_CTOR_PARAMETER = "pf_v5_ctor_parameter"
 _GLOBAL_ONLY_CALLS = frozenset({"strategy.risk.allow_entry_in"})
 
 
@@ -112,6 +114,13 @@ class ValueBindings(DiagnosticsHelper):
         self.scopes: list[_Scope] = []
         self.uses: list[tuple[Identifier, _Scope, int, str]] = []
         self._local_global_only_calls: dict[int, str] = {}
+        self._in_v5 = False
+        self._v5_uses: list[tuple[Identifier, _Scope, int, str]] = []
+        self._v5_ctor_bindings: dict[int, tuple[int, str]] = {}
+        self.callable_declarations: dict[str, int] = {}
+        self.call_owners: dict[int, str] = {}
+        self._callable_key: str | None = None
+        self.written_declarations: set[tuple[int, str]] = set()
         # Current-tree identities for numeric source queries. Authored-use
         # annotations can retain pre-lowering identities through a copy.
         self.declaration_bindings: dict[int, tuple[int, str] | None] = {}
@@ -154,6 +163,26 @@ class ValueBindings(DiagnosticsHelper):
             return None
         return use.binding.declaration, use.binding.name
 
+    def ctor_binding(self, node: Identifier) -> tuple[int, str] | None:
+        """Current-tree binding, including imports whose v5 policy skips validation."""
+        return self.declaration_bindings.get(id(node), self._v5_ctor_bindings.get(id(node)))
+
+    @staticmethod
+    def is_ctor_parameter(node: Identifier) -> bool:
+        notes = node.annotations or {}
+        use = notes.get(_VALUE_USE)
+        return (notes.get(_V5_CTOR_PARAMETER, False)
+                or isinstance(use, _ValueUse) and use.binding is not None
+                and use.binding.kind == "parameter")
+
+    @staticmethod
+    def write_declaration(node: Identifier) -> tuple[int, str] | None:
+        return (node.annotations or {}).get(_WRITE_DECL)
+
+    def _record_write(self, node: Identifier, key: tuple[int, str]) -> None:
+        self.written_declarations.add(key)
+        node.annotations = {**(node.annotations or {}), _WRITE_DECL: key}
+
     def check_use(self, node: Identifier) -> None:
         use = (node.annotations or {}).get(_VALUE_USE)
         if (not isinstance(use, _ValueUse) or use.binding is not None
@@ -184,7 +213,7 @@ class ValueBindings(DiagnosticsHelper):
         Initializers and earlier global reads retain their exact bindings;
         parameter uses change only when their declaring callable is selected.
         """
-        for node, _scope, _position, _role in self.uses:
+        for node, _scope, _position, role in self.uses:
             key = self.declaration_bindings.get(id(node))
             if key not in names:
                 continue
@@ -192,6 +221,9 @@ class ValueBindings(DiagnosticsHelper):
                 self.budget.check(node.loc, Phase.ANALYZER)
             node.name = names[key]
             self.declaration_bindings[id(node)] = (key[0], node.name)
+            if role == "write":
+                self.written_declarations.discard(key)
+                self._record_write(node, (key[0], node.name))
             use = (node.annotations or {}).get(_VALUE_USE)
             if isinstance(use, _ValueUse) and use.binding is not None:
                 node.annotations[_VALUE_USE] = replace(
@@ -256,6 +288,17 @@ class ValueBindings(DiagnosticsHelper):
         }
         self.global_scope = self._scope(self.builtins, "global")
         self._body(self.program.body, self.global_scope)
+        for node, scope, position, role in self._v5_uses:
+            if self.budget is not None:
+                self.budget.check(node.loc, Phase.ANALYZER)
+            binding = scope.resolve(node.name, position)
+            if binding is not None and binding.kind != "builtin":
+                key = (binding.declaration, binding.name)
+                self._v5_ctor_bindings[id(node)] = key
+                if role == "write":
+                    self._record_write(node, key)
+                if binding.kind == "parameter":
+                    node.annotations = {**(node.annotations or {}), _V5_CTOR_PARAMETER: True}
         for node, scope, position, role in self.uses:
             if self.budget is not None:
                 self.budget.check(node.loc, Phase.ANALYZER)
@@ -264,6 +307,8 @@ class ValueBindings(DiagnosticsHelper):
                 (binding.declaration, binding.name)
                 if binding is not None and binding.kind != "builtin" else None
             )
+            if role == "write" and binding is not None:
+                self._record_write(node, (binding.declaration, binding.name))
             origin = (node.annotations or {}).get(_VALUE_USE)
             if not isinstance(origin, _ValueUse):
                 # Check the written scope once. Lowering can copy an authored
@@ -307,16 +352,23 @@ class ValueBindings(DiagnosticsHelper):
     def _visit(self, node: ASTNode | None, scope: _Scope) -> None:
         if node is None:
             return
+        if not self._in_v5 and (node.annotations or {}).get("pine_version") == 5:
+            # Keep v5 local scopes and reads out of every v6 admission check.
+            # A global declaration still binds in the common global scope.
+            start = len(self.uses)
+            scopes = len(self.scopes)
+            self._in_v5 = True
+            try:
+                self._visit(node, scope)
+            finally:
+                self._in_v5 = False
+            self._v5_uses.extend(self.uses[start:])
+            del self.uses[start:]
+            del self.scopes[scopes:]
+            return
         self.position += 1
         if self.budget is not None:
             self.budget.check(node.loc, Phase.ANALYZER)
-        if (node.annotations or {}).get("pine_version") == 5:
-            # Inlined v5 code keeps its policy; its exported globals still
-            # introduce bindings the v6 script can read.
-            if isinstance(node, (VarDecl, TupleAssign)):
-                for name in _declared_names(node):
-                    self._declare(scope, name, node, scope.kind)
-            return
         if isinstance(node, Identifier):
             self.uses.append((node, scope, self.position, "value"))
         elif isinstance(node, StrategyDecl):
@@ -325,6 +377,8 @@ class ValueBindings(DiagnosticsHelper):
             return
         elif isinstance(node, (FuncDef, MethodDef)):
             if scope.kind != "global":
+                if self._in_v5:
+                    return
                 # Preserve the structural definition errors ahead of value
                 # resolution in a body that cannot legally be a callable.
                 if isinstance(node, FuncDef):
@@ -341,9 +395,13 @@ class ValueBindings(DiagnosticsHelper):
             for value in (node.annotations or {}).get("param_defaults", ()):
                 self._default(value, scope)
             local = self._scope(scope, "callable", node.name)
+            key = f"{node.type_name}.{node.name}" if isinstance(node, MethodDef) else node.name
+            self.callable_declarations[key] = id(node)
             for name in node.params:
                 self._declare(local, name, node, "parameter")
+            self._callable_key = key
             self._body(node.body, local)
+            self._callable_key = None
         elif isinstance(node, TypeDecl):
             fields = self._scope(scope, "fields")
             for item in node.fields:
@@ -392,6 +450,8 @@ class ValueBindings(DiagnosticsHelper):
                 self._block(body, scope)
             self._block(node.default_body, scope)
         elif isinstance(node, FuncCall):
+            if self._callable_key is not None:
+                self.call_owners[id(node)] = self._callable_key
             # A bare callee is a callable label, not a value-variable read.
             if not isinstance(node.callee, Identifier):
                 if scope.kind != "global":
