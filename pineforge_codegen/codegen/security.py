@@ -3838,6 +3838,23 @@ class SecurityEmitter:
                     if isinstance(frame, _SecurityHelperArgumentFrame) else None)
         return None
 
+    def _security_dependency_children(self, node):
+        """Authored children in source order on this request's clock."""
+        if isinstance(node, (list, tuple)):
+            yield from node
+            return
+        if not isinstance(node, ASTNode):
+            return
+        nested_payload = None
+        if isinstance(node, FuncCall) and self._resolve_callee(node.callee) in (
+                ("security", "request"), ("security_lower_tf", "request")):
+            # The child evaluator owns its payload. The context arguments
+            # (for example a runtime timeframe) belong to the caller.
+            nested_payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
+        for child in reversed(list(syntax_children(node))):
+            if child is not nested_payload:
+                yield child
+
     def _collect_security_ohlc_hist_fields(
         self,
         node,
@@ -3916,6 +3933,7 @@ class SecurityEmitter:
                             # Lowered in this helper's scope by the emitter
                             # (``__pf_security_index_``): a dynamic read of the
                             # bound series, never resolved in the caller's.
+                            walk(n.index, bindings)
                             local_index = Identifier(name="__pf_security_index_dynamic")
                         composed = self._compose_security_helper_history_subscript(
                             bound, local_index, n, bindings)
@@ -3925,6 +3943,8 @@ class SecurityEmitter:
                             walk(bound, bound_stack)
                         else:
                             walk(composed, bound_stack)
+                    elif self._security_series_binding_target(bound) is not None:
+                        walk(n.index, bindings)
                     return
                 field = self._security_bar_history_field(n.object)
                 if field is not None:
@@ -3933,6 +3953,8 @@ class SecurityEmitter:
                     # completed-bar Series. Dynamic indices need that Series too.
                     if idx is None or idx >= 1:
                         out.add(field)
+                    if idx is None:
+                        walk(n.index, bindings)
                     return
                 global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
                 if (
@@ -4051,17 +4073,8 @@ class SecurityEmitter:
                     resolving.remove(call_key)
                     return
 
-            if isinstance(n, (list, tuple)):
-                for child in n:
-                    walk(child, bindings)
-                return
-            for value in getattr(n, "__dict__", {}).values():
-                if isinstance(value, ASTNode):
-                    walk(value, bindings)
-                elif isinstance(value, (list, tuple)):
-                    for child in value:
-                        if isinstance(child, ASTNode):
-                            walk(child, bindings)
+            for child in self._security_dependency_children(n):
+                walk(child, bindings)
 
         walk(node, helper_binding_stack or ())
         return out
@@ -4522,17 +4535,8 @@ class SecurityEmitter:
                     resolving.remove(call_key)
                     return
 
-            if isinstance(n, (list, tuple)):
-                for x in n:
-                    walk(x, bindings)
-                return
-            for _k, v in getattr(n, "__dict__", {}).items():
-                if isinstance(v, ASTNode):
-                    walk(v, bindings)
-                elif isinstance(v, (list, tuple)):
-                    for x in v:
-                        if isinstance(x, ASTNode):
-                            walk(x, bindings)
+            for child in self._security_dependency_children(n):
+                walk(child, bindings)
 
         walk(node, ())
         return out
@@ -4617,17 +4621,8 @@ class SecurityEmitter:
                 )
             ):
                 add(n)
-            if isinstance(n, (list, tuple)):
-                for x in n:
-                    walk(x)
-                return
-            for _k, v in getattr(n, "__dict__", {}).items():
-                if isinstance(v, ASTNode):
-                    walk(v)
-                elif isinstance(v, (list, tuple)):
-                    for x in v:
-                        if isinstance(x, ASTNode):
-                            walk(x)
+            for child in self._security_dependency_children(n):
+                walk(child)
 
         walk(node)
         return [
@@ -7835,11 +7830,7 @@ class SecurityEmitter:
                         (idx, current_sig if inline_helper is True else inline_helper)
                     )
 
-        # Binding/type annotations are metadata, not authored dependencies.
-        # Keep them for the consumers above without walking enum internals
-        # or annotation back edges. Reverse the stack-based syntax iterator
-        # to retain the previous field/list/dict traversal order.
-        for child in reversed(list(syntax_children(expr_node))):
+        for child in self._security_dependency_children(expr_node):
             self._collect_security_ta_binding_stacks(
                 child,
                 resolving,
@@ -8239,11 +8230,7 @@ class SecurityEmitter:
                     key = (idx, self._security_binding_stack_signature(binding_stack))
                     occurrences.setdefault(key, []).append(lazy)
 
-            # Binding/type annotations are metadata, not authored dependencies.
-            # Keep them for the consumers above without walking enum internals
-            # or annotation back edges. Reverse the stack-based syntax iterator
-            # to retain the previous field/list/dict traversal order.
-            for child in reversed(list(syntax_children(node))):
+            for child in self._security_dependency_children(node):
                 walk(child, lazy, binding_stack, resolving)
 
         walk(expr_node, False, (), set())

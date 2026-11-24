@@ -5750,21 +5750,27 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 # the destination as a read; ValueBindings already retains
                 # the write's authored declaration identity.
                 self._identifier_binding_scopes.setdefault(id(node.target), sym.scope)
+                bool_na_assignment = (
+                    node.op == ":="
+                    and sym.pine_type == PineType.BOOL
+                    and isinstance(node.value, NaLiteral)
+                    and not self._in_v5_library_definition(node)
+                )
+                # On overlap, functions diagnose the parameter write first;
+                # methods retain the bool diagnostic on the whole assignment.
                 if (node.op in (":=", "+=", "-=", "*=", "/=", "%=")
                         and self._pine_version == 6
                         and not self._in_v5_library_definition(node)
                         and self._enclosing_func_names
-                        and self._enclosing_func_names[-1] in self._func_defs
                         and getattr(sym, "_pf_parameter_owner", None)
-                        == self._enclosing_func_names[-1]):
+                        == self._enclosing_func_names[-1]
+                        and (not bool_na_assignment
+                             or self._enclosing_func_names[-1] in self._func_defs)):
                     self._error(
                         f"Function parameter '{node.target.name}' cannot be reassigned.",
                         node.target.loc,
                     )
-                if (node.op == ":="
-                        and sym.pine_type == PineType.BOOL
-                        and isinstance(node.value, NaLiteral)
-                        and not self._in_v5_library_definition(node)):
+                if bool_na_assignment:
                     location = node.loc or node.target.loc
                     if (location is not None and node.value.loc is not None
                             and location.line == node.value.loc.line):

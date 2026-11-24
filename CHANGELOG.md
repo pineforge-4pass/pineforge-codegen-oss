@@ -36,6 +36,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - A TA length held in a never-reassigned top-level `var int` literal is no longer refused with PF-E5092 when the script also declares a `method`; a script that declares a user function, `type` or `enum` still refuses it ([#422](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/422)).
 
+- `timeframe.in_seconds(size)` accepts a function-local `var string size`, even though `size` is also a Pine namespace ([#424](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/424)).
+
 - `str.substring` now stops the run when the begin position is after the end position, and counts a `na` begin or end as 0, as TradingView does ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
 
 - `str.trim` also removes the other white space and line terminators of the ECMAScript `trim` set, such as U+3000 and U+FEFF, which TradingView removes. It previously removed only space, tab, LF and CR ([#382](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/382)).
@@ -67,6 +69,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - `CompileError` preserves its message and diagnostics when sent from a Python process pool, so a refused script no longer breaks unrelated tasks, and `CodegenInvariantError` keeps its message through a pickle round trip ([#457](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/457)).
 
 - A call of a user function that keeps state of its own (for example a `var`, a history read of one of its variables, or a `ta.*` call), read with `[]` in a ternary arm or on the right of `and` or `or` in a statement of the top level or of a function body, now runs before the branch is chosen, which matches the TradingView trade counts and net profit reported in #456. This applies only when the call passes every parameter positionally with names, literals and operators, and the function and the functions it calls assign only their own variables and call only `ta.*`, `math.*`, `str.*`, the time, timeframe, cast and `na`/`nz`/`fixnan` built-ins, each other, and `array.*` functions on arrays they create; quirk 15 of `docs/reference/known-codegen-quirks.md` gives the exact conditions. Calls without `[]`, reads inside `if`, `switch` or loop blocks, methods, and functions that place orders, alert, log, call `runtime.error`, draw, use tables, requests, maps, matrices or `varip`, write outside their own variables, read an object field or a `strategy.*` variable, or read or iterate a collection they did not create keep lazy evaluation ([#456](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/456)).
+
+- Numeric inputs with positional options compile with their choices in the declared order, and bare `input()` preserves string defaults it can resolve at translation time.
+
+- Bare `input()` follows immutable string aliases, through a flat chain of up to 512 declarations and for a string without a NUL character. Constant comparisons that the generator evaluates, for a bare `input()` default and for the other constants it folds (such as `strategy()` parameters, history offsets and constant request timeframes), treat float operands within the inclusive `1e-10` band as equal, as the generated comparison does. A division or remainder in a bare `input()` default is computed as the generated code computes it, after both operands are converted to doubles.
 
 ## 1.14.0 — 2026-11-20
 

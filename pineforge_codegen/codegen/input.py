@@ -30,7 +30,7 @@ from ..ast_nodes import (
 )
 from .. import signatures as sigs
 from ..analyzer.value_bindings import ValueBindings
-from ..input_defaults import plain_input_default, plain_input_type
+from ..input_defaults import input_param_names, plain_input_type, resolved_plain_input_default
 from ..pine_spelling import expr_start, global_input_calls, input_binding_names
 from ..symbols import PineType
 from .color_constants import literal_color_value
@@ -79,7 +79,7 @@ class InputHelper:
         if namespace == "input" and func_name in sigs.INPUT_FUNCTIONS:
             param_names = sigs.get_param_names("input", func_name)
         elif func_name == "input" and namespace is None:
-            return plain_input_default(node)
+            return resolved_plain_input_default(node)
         if param_names:
             merged = list(node.args)
             for i, pname in enumerate(param_names):
@@ -552,9 +552,9 @@ class InputHelper:
         extraction reads bounds/options off the same positions codegen does.
         """
         if namespace == "input" and func_name in sigs.INPUT_FUNCTIONS:
-            names = sigs.get_param_names("input", func_name)
+            names = input_param_names(node, func_name)
         elif func_name == "input" and namespace is None:
-            names = sigs.get_param_names(None, "input")
+            names = input_param_names(node, None)
         else:
             names = None
         merged = list(node.args)
@@ -641,7 +641,10 @@ class InputHelper:
                     # bool is an int subclass — exclude it from numeric bounds
                     if isinstance(v, (int, float)) and not isinstance(v, bool):
                         entry[key] = v
-            oi = idx.get("options")
+            # Numeric options come only from the descriptor. A member can
+            # spell an enum tag here, but e.g. math.pi is not a string option.
+            numeric = namespace == "input" and func_name in ("int", "float")
+            oi = None if numeric else idx.get("options")
             if oi is not None and oi < len(merged) and merged[oi] is not None:
                 opts_node = merged[oi]
                 elems = getattr(opts_node, "elements", None)
