@@ -452,8 +452,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             ).items()
         }
         # func_series_vars describes both Series arguments and body locals.
-        # Only the latter own storage to clone. A body declaration can have
-        # the same spelling as a parameter; its exact history still counts.
+        # A fresh nested instance owns only its body locals. A declaration
+        # there can share a parameter's spelling; its exact history still counts.
         parameter_only_names = {
             fi.name: set(fi.node.params).difference(
                 self._func_nonpersistent_series_vars.get(fi.name, ())
@@ -544,6 +544,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for name in stmt.names
             if name != "_"
         )
+        # Natural csN variants include the named parameter members as well
+        # as body locals. Never remap a script or persistent member on behalf
+        # of a parameter with that spelling, even if both need history.
+        declared_members = self._direct_program_binding_names.union(
+            self._qualified_func_var_raw_names,
+            (name for name, _ in ctx.global_var_decls),
+            (name for name, _, _ in ctx.var_members),
+        )
+        func_series_members = {
+            owner: local_names | (ctx.func_series_vars[owner] - declared_members)
+            for owner, local_names in self._func_local_series_names.items()
+        }
         self._callable_state_raw_names: set[str] = {
             name
             for members in ctx.func_var_members.values()
@@ -551,7 +563,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         }
         self._callable_state_raw_names.update(
             name
-            for names in self._func_local_series_names.values()
+            for names in func_series_members.values()
             for name in names
         )
 
@@ -683,7 +695,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # are themselves sets (analyzer stores ``dict[str, set]``), so we must
         # iterate each value in ``sorted`` order to be hash-seed independent.
         all_func_scoped_series: list[str] = []
-        for owner, svars in self._func_local_series_names.items():
+        for owner, svars in func_series_members.items():
             for sv in sorted(svars):
                 exact = self._func_var_storage_name(owner, sv)
                 # Translate only a persistent member with exact Series storage.
@@ -729,8 +741,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     if exact not in orig_names:
                         orig_names.append(exact)
             # Include function's own series vars (set -> sorted for determinism)
-            if fname in self._func_local_series_names:
-                for sv in sorted(self._func_local_series_names[fname]):
+            if fname in func_series_members:
+                for sv in sorted(func_series_members[fname]):
                     exact = self._func_var_storage_name(fname, sv)
                     storage = (
                         exact

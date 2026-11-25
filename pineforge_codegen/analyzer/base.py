@@ -188,6 +188,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Final analysis consumes this inventory even when no request was seen.
         self._security_calls: list[SecurityCallInfo] = []
         self._series_vars: set[str] = set()
+        self._named_parameter_series: set[str] = set()
         self._series_var_members: set[str] = set()
         self._series_decl_nodes: set[int] = set()
         self._series_decl_bindings: set[tuple[int, str]] = set()
@@ -3186,6 +3187,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         callable_declarations[owner], actual.name
                     ):
                         continue
+                    if owner in self._method_signatures:
+                        # A method can pass its Series on by reference. Its
+                        # callee's requirement may only be known on this pass.
+                        self._named_parameter_series.add(actual.name)
                     owner_series = self._func_series_vars.setdefault(
                         owner, set()
                     )
@@ -3197,6 +3202,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     if actual.name not in owner_requirements:
                         owner_requirements.add(actual.name)
                         series_changed = True
+
+        # Requested evaluators are class methods: a parameter history left
+        # in their expression needs its named Series. Never claim the name of
+        # a script or persistent declaration on behalf of a parameter, even
+        # when the declaration occurs later or has owner-qualified storage.
+        if self._named_parameter_series:
+            self._series_vars.update(self._named_parameter_series.difference(
+                self._direct_program_binding_names,
+                (name for name, _ in self._global_var_decls),
+                (name for name, _, _ in self._var_members),
+                (raw for names in self._func_var_storage_names.values() for raw in names),
+            ))
 
         # Codegen synthesizes a Series buffer for three expression shapes that
         # do not appear in ``_func_series_vars`` themselves:
@@ -9195,8 +9212,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         sym.is_series = True
                         parameter_owner = getattr(sym, "_pf_parameter_owner", None)
                         if parameter_owner is not None:
-                            # The actual argument supplies this Series. Only a
-                            # read bound to a declaration can promote its storage.
+                            self._named_parameter_series.add(name)
                             self._func_series_vars.setdefault(
                                 parameter_owner, set()
                             ).add(name)
