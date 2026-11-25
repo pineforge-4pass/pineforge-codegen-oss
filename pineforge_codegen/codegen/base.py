@@ -31,7 +31,7 @@ from ..analyzer.value_bindings import ValueBindings
 from ..symbols import PineType, TypeSpec
 from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
-from ..limits import MAX_SOURCE_CHARS, TimeBudget, iter_ast_nodes, syntax_children
+from ..limits import TimeBudget, iter_ast_nodes, syntax_children
 from ..matrix_overloads import matrix_sum_has_rhs
 from ..reference_casts import na_reference_cast_kind
 from . import graph_journal
@@ -3530,66 +3530,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return
 
         def _fold_expr(node) -> str | None:
-            spellings: dict[tuple[int, str], str] = {}
-            expanding: set[tuple[int, str]] = set()
-            expanded_chars = 0
-
             def spell_read(read: Identifier) -> str | None:
-                nonlocal expanded_chars
                 binding = ValueBindings.declaration_of(read)
-                if binding is None:
+                if binding is None or binding[0] not in self._direct_program_var_decl_nodes:
                     return None
-                is_script = binding[0] in self._direct_program_var_decl_nodes
-                if is_script and not expanding:
-                    # Preserve the existing override-aware script binding.
-                    return read.name if self._expr_is_stable(read) else None
+                return read.name if self._expr_is_stable(read) else None
 
-                spelling = spellings.get(binding)
-                if spelling is None:
-                    declaration = self._ta_declarations().get(binding)
-                    if (not isinstance(declaration, VarDecl)
-                            or declaration.value is None
-                            or binding in self._writes_by_decl
-                            or binding in expanding or len(expanding) >= 32
-                            or (declaration.annotations or {}).get("qualifier") == "series"
-                            or self._decl_binding_is_series(*binding)):
-                        return None
-                    if not is_script and (declaration.is_var or declaration.is_varip):
-                        return None
-
-                    # Only the initializer's own lexical reads are available
-                    # here. The reset will reparse this spelling at class scope.
-                    if self._budget is not None:
-                        self._budget.check(read.loc, Phase.CODEGEN)
-                    expanding.add(binding)
-                    try:
-                        if is_script:
-                            # Check dependencies of globals read through a
-                            # local alias, but leave their spelling intact.
-                            if not (self._expr_is_stable(read)
-                                    and self._expr_is_stable(
-                                        declaration.value, _spell_read=spell_read)):
-                                return None
-                            spelling = read.name
-                        else:
-                            value = spell_stable(declaration.value)
-                            if value is None:
-                                return None
-                            spelling = f"({value})"
-                    finally:
-                        expanding.remove(binding)
-                    spellings[binding] = spelling
-
-                # A chain of aliases can repeat a previous value many times.
-                expanded_chars += len(spelling)
-                return spelling if expanded_chars <= MAX_SOURCE_CHARS else None
-
-            def spell_stable(expr) -> str | None:
-                if not self._expr_is_stable(expr, _spell_read=spell_read):
-                    return None
-                return self._arith_expr_to_str(expr, _spell_read=spell_read)
-
-            return spell_stable(node)
+            if not self._expr_is_stable(node, _spell_read=spell_read):
+                return None
+            return self._arith_expr_to_str(node, _spell_read=spell_read)
 
         def _value_after(stmts, fallback: str | None) -> str | None:
             """Fold a statement list into the final value expression for the
