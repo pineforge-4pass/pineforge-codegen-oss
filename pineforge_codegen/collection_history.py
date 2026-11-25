@@ -353,7 +353,7 @@ template <typename T>
 struct _PFCollectionTraits<_PFArrayHistoryValue<T>> {
     static std::shared_ptr<const _PFArrayHistoryValue<T>> freeze(const _PFArrayHistoryValue<T>& value) {
         if (value.is_na()) return nullptr;
-        return std::make_shared<const _PFArrayHistoryValue<T>>(_PFCollectionTraits<T>::copy(value.get()));
+        return std::make_shared<const _PFArrayHistoryValue<T>>(@FROZEN_ARRAY_CONTENTS@);
     }
     static _PFArrayHistoryValue<T> copy(const _PFArrayHistoryValue<T>& value) { return value; }
     static _PFArrayHistoryValue<T> reference(std::shared_ptr<const _PFArrayHistoryValue<T>> value) {

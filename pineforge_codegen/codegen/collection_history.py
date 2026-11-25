@@ -410,6 +410,7 @@ class CollectionHistoryEmitter:
         float_spec = TypeSpec.primitive("float")
         matrices = [v.spec for v in variables if v.kind == "matrix"]
         array_traits = COLLECTION_HISTORY_CPP
+        frozen_contents = "T(value.get())"
         if getattr(self, "_uses_array_slice_views", False):
             # History freezes contents, not live slice bindings.
             array_traits = array_traits.replace(
@@ -419,8 +420,12 @@ class CollectionHistoryEmitter:
                 "copy(const std::vector<E, A>& value) { return value; }",
                 "copy(const std::vector<E, A>& value) { return value.detached_copy(); }",
             )
+            # A nullable ID can also hold a window. Use the same detached
+            # copy as a bare array when freezing the contents of that ID.
+            frozen_contents = "_PFCollectionTraits<T>::copy(value.get())"
         lines.append(array_traits.strip("\n"))
-        lines.append(COLLECTION_HISTORY_ARRAY_VALUE_CPP.strip("\n"))
+        lines.append(COLLECTION_HISTORY_ARRAY_VALUE_CPP.replace(
+            "@FROZEN_ARRAY_CONTENTS@", frozen_contents).strip("\n"))
         if any(spec.element == float_spec for spec in matrices):
             lines.append(COLLECTION_HISTORY_MATRIX_CPP.strip("\n"))
         if any(spec.element != float_spec for spec in matrices):
