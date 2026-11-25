@@ -249,6 +249,7 @@ class StmtVisitor:
                 self._visit_var_decl(node, lines, pad)
             finally:
                 self._pending_decl_outer_alias = previous_pending_alias
+            self._enter_local_array_history(node, lines, pad)
             if primitive_shadow:
                 # Inputs and expression-valued declarations can return before
                 # the general declaration path remembers their scalar type.
@@ -890,7 +891,7 @@ class StmtVisitor:
                     self._collection_types[node.name] = spec
                 else:
                     self._collection_types.setdefault(node.name, spec)
-                cpp_type = self._type_spec_to_cpp(spec)
+                cpp_type = self._nullable_local_array_type(node) or self._type_spec_to_cpp(spec)
                 if is_global_member:
                     lines.append(f"{pad}{safe} = {init};")
                 else:
@@ -1269,6 +1270,7 @@ class StmtVisitor:
         target_name = self._get_target_name(node.target)
         self._validate_matrix_reassignment(node, target_name)
         tuple_cpp_type = self._lexical_tuple_cpp_type(node.target)
+        binding_cpp_type = tuple_cpp_type or self._nullable_local_array_type(node.target)
 
         # If/switch expression in assignment: x := if cond ...
         if isinstance(node.value, (IfStmt, SwitchStmt)) and node.op == ":=":
@@ -1282,7 +1284,7 @@ class StmtVisitor:
                 target_name is not None
                 and self._binding_is_series(target_name, safe)
             )
-            selection_cpp_type = tuple_cpp_type
+            selection_cpp_type = binding_cpp_type
             if selection_cpp_type is None:
                 selection_cpp_type = self._nullable_collection_target_cpp_type(
                     name=target_name,
@@ -1451,7 +1453,7 @@ class StmtVisitor:
             # a double NaN is stored into an int/int64_t/bool member (UB, defeats
             # is_na<T>()). Only computed for bare na — every other RHS is
             # unaffected.
-            tct = tuple_cpp_type or self._nullable_collection_target_cpp_type(
+            tct = binding_cpp_type or self._nullable_collection_target_cpp_type(
                 name=target_name,
             )
             if tct is None:
@@ -1485,7 +1487,7 @@ class StmtVisitor:
                     else:
                         lines.append(f"{pad}{safe} {node.op} {val_cpp};")
         else:
-            tct = tuple_cpp_type or self._nullable_collection_target_cpp_type(
+            tct = binding_cpp_type or self._nullable_collection_target_cpp_type(
                 name=target_name,
             )
             if tct is None:
@@ -2460,7 +2462,7 @@ class StmtVisitor:
             self._current_loop_index_vars - {node.var, *(node.vars or ())})
         iterable_spec = self._type_spec_from_expr(node.iterable)
         if (iterable_spec is not None and iterable_spec.kind == "array"
-                and self._array_history_value_names()):
+                and (self._array_history_value_names() or self._nullable_local_arrays)):
             iterable = f"_pf_array_id({iterable})"
         elem_spec = (
             iterable_spec.element

@@ -129,7 +129,7 @@ COLLECTION_HISTORY_CASES = {
         "m = matrix.new<float>(1, 1, close)\nf() => (m[1]).rows()\nr = f()\n",
         {"label": "m[1]", "kind": "matrix"}),
     "PF-E6072": (
-        "f(float v) =>\n    a = array.from(v)\n    (a[1]).size()\nr = f(close)\n",
+        "f(float v) =>\n    var a = array.from(v)\n    (a[1]).size()\nr = f(close)\n",
         {"label": "a[1]", "kind": "array"}),
     "PF-E6073": (
         "f(array<float> x) => (x[1]).size()\na = array.from(close)\nr = f(a)\n",

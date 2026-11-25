@@ -27,7 +27,8 @@ from ..analyzer import (
     TA_PERIOD_ARG,
     TA_LENGTH_ONLY_DEFAULT_SOURCE,
 )
-from ..symbols import PineType, TypeSpec, method_receiver_type_name
+from ..analyzer.value_bindings import ValueBindings
+from ..symbols import PineType, TypeSpec
 from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from ..limits import TimeBudget, iter_ast_nodes, syntax_children
@@ -386,7 +387,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     With CallVisitor extracted (step 10/N), the host class is now a thin
     coordinator that keeps state attributes, the constructor, the
     top-level ``generate()`` orchestrator, prescan helpers
-    (_collect_known_vars / _find_reassigned_vars / _collect_known_var /
+    (_collect_known_vars / _collect_known_var /
     _prescan_strategy_series), and the runtime-reset chain
     (_resolve_known / _is_skip_expr / _runtime_ctor_arg_for_reset /
     _collect_ta_runtime_resets / _emit_ta_runtime_reset) — kept here
@@ -450,6 +451,19 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 ctx, "func_nonpersistent_series_vars", {}
             ).items()
         }
+        # func_series_vars describes both Series arguments and body locals.
+        # A fresh nested instance owns only its body locals. A declaration
+        # there can share a parameter's spelling; its exact history still counts.
+        parameter_only_names = {
+            fi.name: set(fi.node.params).difference(
+                self._func_nonpersistent_series_vars.get(fi.name, ())
+            )
+            for fi in ctx.func_infos if fi.node is not None
+        }
+        self._func_local_series_names = {
+            owner: names.difference(parameter_only_names.get(owner, ()))
+            for owner, names in ctx.func_series_vars.items()
+        }
         # Exact declarations that are direct children of Program.body.  A
         # same-named declaration inside a top-level ``if``/loop is still a
         # lexical block local; raw membership in ``_global_member_vars`` must
@@ -460,6 +474,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if isinstance(stmt, VarDecl)
             and not stmt.is_var
             and not stmt.is_varip
+        }
+        # A persistent local's initializer runs before its private member
+        # becomes visible. Each clone must read the storage captured there;
+        # its global's constant value is still available for TA sizing.
+        self._outer_var_init_reads = {
+            id(read)
+            for decl, member, _, _, callable_scoped in ctx.var_member_metadata_by_node.values()
+            if callable_scoped and member != decl.name and decl.value is not None
+            for read, _ in iter_ast_nodes(decl.value)
+            if isinstance(read, Identifier) and read.name == decl.name
+            and (binding := ctx.identifier_decl_bindings.get(id(read))) is not None
+            and binding[0] in self._ordinary_global_var_decl_nodes
         }
         self._direct_program_var_decl_nodes: set[int] = {
             id(stmt)
@@ -518,6 +544,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for name in stmt.names
             if name != "_"
         )
+        # Natural csN variants include the named parameter members as well
+        # as body locals. Never remap a script or persistent member on behalf
+        # of a parameter with that spelling, even if both need history.
+        declared_members = self._direct_program_binding_names.union(
+            self._qualified_func_var_raw_names,
+            (name for name, _ in ctx.global_var_decls),
+            (name for name, _, _ in ctx.var_members),
+        )
+        func_series_members = {
+            owner: local_names | (ctx.func_series_vars[owner] - declared_members)
+            for owner, local_names in self._func_local_series_names.items()
+        }
         self._callable_state_raw_names: set[str] = {
             name
             for members in ctx.func_var_members.values()
@@ -525,7 +563,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         }
         self._callable_state_raw_names.update(
             name
-            for names in ctx.func_series_vars.values()
+            for names in func_series_members.values()
             for name in names
         )
 
@@ -657,12 +695,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # are themselves sets (analyzer stores ``dict[str, set]``), so we must
         # iterate each value in ``sorted`` order to be hash-seed independent.
         all_func_scoped_series: list[str] = []
-        for owner, svars in ctx.func_series_vars.items():
+        for owner, svars in func_series_members.items():
             for sv in sorted(svars):
                 exact = self._func_var_storage_name(owner, sv)
-                # ``func_series_vars`` also carries history-referenced
-                # parameters/plain locals. Translate only a real persistent
-                # member whose analyzer-exact identity is Series storage.
+                # Translate only a persistent member with exact Series storage.
                 if (self._safe_name(exact)
                         in self._series_var_member_names):
                     storage = exact
@@ -670,8 +706,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                       and sv not in self._func_nonpersistent_series_vars.get(
                           owner, set()
                       )):
-                    # A history parameter/plain local in an unrelated UDF may
-                    # reuse the Pine spelling of owner-qualified persistent
+                    # A local may reuse the name of another UDF's persistent
                     # state. It has no class-member identity to propagate into
                     # every other function's clone map; doing so remaps an
                     # initializer's earlier global read to a bogus ``x_csN``
@@ -706,8 +741,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     if exact not in orig_names:
                         orig_names.append(exact)
             # Include function's own series vars (set -> sorted for determinism)
-            if fname in ctx.func_series_vars:
-                for sv in sorted(ctx.func_series_vars[fname]):
+            if fname in func_series_members:
+                for sv in sorted(func_series_members[fname]):
                     exact = self._func_var_storage_name(fname, sv)
                     storage = (
                         exact
@@ -1710,6 +1745,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 for part in self._walk_ast(value):
                     if (isinstance(part, Identifier)
                             and (part.name in statement_values
+                                 or (id(part) in self._outer_var_init_reads
+                                     and part.name not in self._input_backed_vars)
                                  or first_writes.get(part.name, before) < before)
                             and (not globals_only
                                  or scopes.get(id(part)) == "global")):
@@ -1981,12 +2018,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return
 
         func_bodies: dict[str, list] = {}
-        func_params: dict[str, set[str]] = {}
         for fi in ctx.func_infos:
             node = getattr(fi, "node", None)
             if node is not None and getattr(node, "body", None):
                 func_bodies.setdefault(fi.name, node.body)
-                func_params.setdefault(fi.name, set(getattr(node, "params", ()) or ()))
 
         # Pine forbids recursive callable execution. Most scalar-only cycles
         # never enter this state-instance pass (and some legacy dead-branch
@@ -2058,10 +2093,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # true-range filters into the price filter's ``_f``).
             # Same storage rule as the natural csN remap of the callee's own
             # series vars (``orig_names`` above).
-            params = func_params.get(fname, set())
-            for sv in sorted(ctx.func_series_vars.get(fname, ())):
-                if sv in params:
-                    continue  # a history-read parameter is the caller's series
+            for sv in sorted(self._func_local_series_names.get(fname, ())):
                 exact = self._func_var_storage_name(fname, sv)
                 storage = self._safe_name(
                     exact
@@ -3160,14 +3192,22 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """Collect known constant values from the AST for constant propagation."""
         # First, find all variables that are reassigned anywhere in the AST.
         # These cannot be inlined as constants since their value changes at runtime.
-        reassigned = self._find_reassigned_vars()
+        self._writes_by_decl: dict[tuple[int, str], set[int]] = {}
+        for node, _ in iter_ast_nodes(self.ctx.ast):
+            if isinstance(node, Assignment) and isinstance(node.target, Identifier):
+                binding = ValueBindings.write_declaration(node.target)
+                if binding is not None:
+                    self._writes_by_decl.setdefault(binding, set()).add(id(node))
+        # Prior constructor route for a persistent length written in a value
+        # block: None denotes an admitted literal, otherwise its setup expression.
+        self._written_var_setups: dict[int, str | None] = {}
         # Register never-reassigned ``var``/``varip`` scalars with a stable
         # init FIRST — a later derived var (or a UDF body) may reference such a
         # scalar as a stable length component, so it must be classified stable
         # before those exprs are evaluated below.
-        self._collect_stable_var_scalars(reassigned)
+        self._collect_stable_var_scalars()
         for stmt in self.ctx.ast.body:
-            if isinstance(stmt, VarDecl) and stmt.name not in reassigned:
+            if isinstance(stmt, VarDecl) and (id(stmt), stmt.name) not in self._writes_by_decl:
                 self._collect_known_var(stmt)
         # A second pass handles the stable-reassigned-scalar pattern: a
         # class-scope scalar initialized from a stable expr and reassigned
@@ -3176,9 +3216,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # a var is a bar-invariant scalar and may feed a TA ctor length with
         # a runtime reset that reproduces the conditional logic. Series-
         # dependent reassignments are left untracked (rejected by the guard).
-        self._collect_reassigned_stable_scalars(reassigned)
+        self._collect_reassigned_stable_scalars()
 
-    def _collect_stable_var_scalars(self, reassigned: set[str]) -> None:
+    def _collect_stable_var_scalars(self) -> None:
         """Track top-level ``var``/``varip`` scalars declared exactly once (never
         reassigned) from a stable init expression.
 
@@ -3190,17 +3230,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         expand the name and lets ``_expr_is_stable`` classify it (the
         ``_stable_runtime_vars`` check precedes the ``_var_names`` rejection).
 
-        A ``var`` that is reassigned anywhere (``:=`` in ``reassigned``), is a
-        series var, or is initialized from a non-stable value stays untracked —
-        so a TA length fed by genuinely-mutable persistent state is still
-        rejected by the constructor guard. Names are NOT folded into
-        ``_known_vars`` (no use-site inlining): only the length-analysis path is
-        affected, and the ``var`` member still emits and initializes normally.
+        A written ``var`` never contributes its initializer to constant
+        propagation. If a selection value writes a previously sized length,
+        chart SMA can read its storage on each call.
 
         The exception is ``var v = input.*()`` itself, which is registered like
         the plain binding ``v = input.*()`` (``_collect_known_var``).
         """
-        literal_candidates = self._admitted_stable_var_ctor_literals(reassigned)
+        literal_candidates = self._stable_var_literal_candidates()
+        statement_writes = self._statement_writes()
 
         for stmt in (self.ctx.ast.body or []):
             if not isinstance(stmt, VarDecl):
@@ -3208,9 +3246,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if not (stmt.is_var or stmt.is_varip):
                 continue
             literal_record = literal_candidates.get(stmt.name)
-            if stmt.name in reassigned:
-                continue
             if self._decl_binding_is_series(id(stmt), stmt.name):
+                continue
+            writes = self._writes_by_decl.get((id(stmt), stmt.name))
+            if writes:
+                # Keep a previously sized chart SMA live. The literal and
+                # setup paths have different admission rules. A statement
+                # write already excluded both; a value-block write was missed.
+                if not writes.isdisjoint(statement_writes):
+                    continue
+                if literal_record is not None:
+                    self._written_var_setups[id(stmt)] = None
+                elif self._expr_is_stable(stmt.value):
+                    init = self._arith_expr_to_str(stmt.value)
+                    if init is not None:
+                        self._written_var_setups[id(stmt)] = init
                 continue
             # A never-reassigned ``var v = input.*()`` holds the input's value
             # on every bar, as ``v = input.*()`` does, so it is registered the
@@ -3324,7 +3374,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         fence the script: the scalar used as a method receiver is refused by
         ``_stable_var_literal_has_unsupported_receiver_use``, a method
         parameter or local of its name by the binding count, and a statement
-        in a method body that assigns it by ``_find_reassigned_vars``.
+        in a method body that assigns it by the declaration's write inventory.
         """
 
         return any(
@@ -3392,11 +3442,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     return True
         return False
 
-    def _admitted_stable_var_ctor_literals(
-        self,
-        reassigned: set[str],
-    ) -> dict[str, _StableVarCtorLiteral]:
-        """Return declaration-exact persistent literals safe for TA sizing."""
+    def _stable_var_literal_candidates(self) -> dict[str, _StableVarCtorLiteral]:
+        """Return persistent literal candidates. The caller checks writes."""
 
         occurrences: dict[str, list[tuple[int, VarDecl]]] = {}
         for index, stmt in enumerate(self.ctx.ast.body or []):
@@ -3431,26 +3478,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if bound_name in binding_counts:
                     binding_counts[bound_name] += 1
 
-        # ``reassigned`` comes from ``_find_reassigned_vars``, which reads
-        # statement lists only: an assignment inside an ``if`` or ``switch``
-        # block used as a value is not in it. Before methods were admitted, a
-        # method declaration kept such a script on its earlier lowering (a
-        # refusal, or a per-bar length for the functions that take a run-time
-        # length). Keep that for a name the script assigns anywhere until the
-        # reassignment set sees every assignment. A script without a method is
-        # decided as before.
-        surface = list(self._walk_candidate_surface(self.ctx.ast))
-        unseen_writes: set[str] = set()
-        if any(isinstance(node, MethodDef) for node in surface):
-            unseen_writes = {
-                node.target.name for node in surface
-                if isinstance(node, Assignment) and isinstance(node.target, Identifier)
-            }
+        # Method-bearing scripts have always required an unwritten literal,
+        # including writes in a selection value.
+        has_method = any(isinstance(s, MethodDef) for s in self.ctx.ast.body)
         admitted: dict[str, _StableVarCtorLiteral] = {}
         for name, (index, declaration) in unique.items():
             if (
-                name in reassigned
-                or name in unseen_writes
+                (has_method and (id(declaration), name) in self._writes_by_decl)
                 or binding_counts.get(name) != 1
                 or self._decl_binding_is_series(id(declaration), name)
                 or self._stable_var_literal_has_earlier_use(name, index)
@@ -3467,7 +3501,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             )
         return admitted
 
-    def _collect_reassigned_stable_scalars(self, reassigned: set[str]) -> None:
+    def _collect_reassigned_stable_scalars(self) -> None:
         """Track class-scope scalars that are reassigned but only along stable
         if/elif paths (see ``test_stable_reassigned_class_scope_length``).
 
@@ -3480,21 +3514,31 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         result, a bar field, a series var) leaves the var untracked, so the
         ctor guard still rejects it loudly.
         """
-        from ..ast_nodes import IfStmt, Assignment
         body = self.ctx.ast.body or []
         # Pre-resolve each reassigned var's initial VarDecl.
-        inits: dict[str, object] = {}
+        inits = []
         for stmt in body:
-            if (isinstance(stmt, VarDecl) and stmt.name in reassigned
+            if (isinstance(stmt, VarDecl) and (id(stmt), stmt.name) in self._writes_by_decl
                     and id(stmt) not in self.ctx.primitive_block_shadow_types
                     and not stmt.is_var and not stmt.is_varip):
                 # Only consider vars whose initial value is itself stable;
                 # an unstable init cannot become a stable scalar via later
                 # reassignment.
                 if stmt.value is not None and self._expr_is_stable(stmt.value):
-                    inits[stmt.name] = stmt.value
+                    inits.append(stmt)
         if not inits:
             return
+
+        def _fold_expr(node) -> str | None:
+            def spell_read(read: Identifier) -> str | None:
+                binding = ValueBindings.declaration_of(read)
+                if binding is None or binding[0] not in self._direct_program_var_decl_nodes:
+                    return None
+                return read.name if self._expr_is_stable(read) else None
+
+            if not self._expr_is_stable(node, _spell_read=spell_read):
+                return None
+            return self._arith_expr_to_str(node, _spell_read=spell_read)
 
         def _value_after(stmts, fallback: str | None) -> str | None:
             """Fold a statement list into the final value expression for the
@@ -3503,26 +3547,23 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             current = fallback
             for s in stmts or []:
                 if isinstance(s, Assignment) and isinstance(s.target, Identifier):
-                    if s.target.name != target_name:
+                    if id(s) not in writes:
                         continue
                     if s.op != ":=":
                         return None  # compound assignment — not a stable fold
-                    if not self._expr_is_stable(s.value):
-                        return None
-                    rhs = self._arith_expr_to_str(s.value)
+                    rhs = _fold_expr(s.value)
                     if rhs is None:
                         return None
+                    modeled.add(id(s))
                     current = rhs
                 elif isinstance(s, IfStmt):
                     # Only model IfStmts that actually reassign the target var;
                     # an unrelated IfStmt (e.g. entry/exit logic with a series
                     # condition) must NOT abort the fold — the var simply keeps
                     # its current value through it.
-                    if not _reassigns(s, target_name):
+                    if not any(id(child) in writes for child, _ in iter_ast_nodes(s)):
                         continue
-                    if not self._expr_is_stable(s.condition):
-                        return None
-                    cond = self._arith_expr_to_str(s.condition)
+                    cond = _fold_expr(s.condition)
                     if cond is None:
                         return None
                     then_val = _value_after(s.body, current)
@@ -3532,35 +3573,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     if else_val is None:
                         return None
                     current = f"({cond} ? {then_val} : {else_val})"
-                # Other statement shapes (for/while/switch/var decls of
-                # other vars) are ignored for this var's value fold; they
-                # do not reassign ``target_name`` in a way we model.
             return current
 
-        def _reassigns(node, name: str) -> bool:
-            """True if any ``:=`` assignment to ``name`` occurs within node."""
-            from ..ast_nodes import IfStmt as _If, Assignment as _Asg
-            if isinstance(node, _Asg) and isinstance(node.target, Identifier):
-                return node.target.name == name
-            if isinstance(node, _If):
-                if any(_reassigns(c, name) for c in (node.body or [])):
-                    return True
-                if any(_reassigns(c, name) for c in (node.else_body or [])):
-                    return True
-                return False
-            for attr in ("body", "else_body", "cases", "default_body"):
-                sub = getattr(node, attr, None)
-                if isinstance(sub, list):
-                    if any(_reassigns(c, name) for c in sub):
-                        return True
-            return False
-
-        for target_name, init_node in inits.items():
-            init_str = self._arith_expr_to_str(init_node)
+        for decl in inits:
+            if self._budget is not None:
+                self._budget.check(decl.loc, Phase.CODEGEN)
+            target_name = decl.name
+            writes = self._writes_by_decl[(id(decl), target_name)]
+            modeled: set[int] = set()
+            init_str = self._arith_expr_to_str(decl.value)
             if init_str is None:
                 continue
             final = _value_after(body, init_str)
-            if final is None:
+            # Never publish a partial fold: a selection in a value, loop or
+            # switch can write this declaration even if this model cannot.
+            if final is None or modeled != writes:
                 continue
             # Sanity: the fold must actually differ from the bare init,
             # otherwise there were no stable reassignments and the var is
@@ -3586,30 +3613,22 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if self._refs_input(final):
                 self._input_backed_vars.add(target_name)
 
-    def _find_reassigned_vars(self) -> set[str]:
-        """Scan AST to find all variable names that are targets of := or compound assignment."""
-        reassigned: set[str] = set()
-        def walk(node):
+    def _statement_writes(self) -> set[int]:
+        """Writes in statement position, used only for the legacy var guard."""
+        result = set()
+        pending = list(self.ctx.ast.body)
+        while pending:
+            node = pending.pop()
             if isinstance(node, Assignment):
-                if isinstance(node.target, Identifier):
-                    reassigned.add(node.target.name)
-            # Recurse into child nodes
-            if hasattr(node, 'body') and isinstance(node.body, list):
-                for child in node.body:
-                    walk(child)
-            if hasattr(node, 'else_body') and isinstance(node.else_body, list):
-                for child in node.else_body:
-                    walk(child)
-            if hasattr(node, 'cases') and isinstance(node.cases, list):
-                for expr, stmts in node.cases:
-                    for child in stmts:
-                        walk(child)
-            if hasattr(node, 'default_body') and isinstance(node.default_body, list):
-                for child in node.default_body:
-                    walk(child)
-        for stmt in self.ctx.ast.body:
-            walk(stmt)
-        return reassigned
+                result.add(id(node))
+            pending.extend(getattr(node, "body", ()))
+            if isinstance(node, IfStmt):
+                pending.extend(node.else_body)
+            elif isinstance(node, SwitchStmt):
+                for _, arm in node.cases:
+                    pending.extend(arm)
+                pending.extend(node.default_body)
+        return result
 
     # ``math.*`` members that are pure functions over their (stable) args, or
     # stable constants. Anything outside this set (e.g. ``math.random``) is
@@ -3740,7 +3759,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return None
 
     def _expr_is_stable(self, node, _udf_stack: frozenset = frozenset(),
-                        _depth: int = 0) -> bool:
+                        _depth: int = 0, *, _spell_read=None) -> bool:
         """True iff ``node``'s value is a bar-invariant scalar.
 
         A stable expression depends only on: literals, ``input.*`` values,
@@ -3754,7 +3773,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         value: bar fields (close/open/...), series vars, history subscripts,
         ``ta.*`` results, strategy.* state, or any unrecognised construct.
         The conservative False keeps the TA-ctor guard intact for genuinely
-        dynamic lengths.
+        dynamic lengths. The reassignment fold supplies ``_spell_read`` so
+        its stability check and renderer agree on each lexical read.
         """
         if node is None:
             return False
@@ -3763,6 +3783,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if isinstance(node, NaLiteral):
             return True
         if isinstance(node, Identifier):
+            if _spell_read is not None:
+                return _spell_read(node) is not None
             name = node.name
             if self._known_var_is_lexically_shadowed(name):
                 return False
@@ -3785,6 +3807,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return False
         if isinstance(node, MemberAccess):
             if isinstance(node.object, Identifier):
+                if (_spell_read is not None
+                        and ValueBindings.has_value_binding(node.object)):
+                    return False
                 ns = node.object.name
                 if ns == "timeframe":
                     return node.member in self._TF_STABLE_MEMBERS
@@ -3800,23 +3825,38 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if isinstance(node, Subscript):
             # History read (``close[1]``) or indexed access — per-bar.
             return False
+
         if isinstance(node, Ternary):
-            return (self._expr_is_stable(node.condition, _udf_stack, _depth)
-                    and self._expr_is_stable(node.true_val, _udf_stack, _depth)
-                    and self._expr_is_stable(node.false_val, _udf_stack, _depth))
+            return (
+                self._expr_is_stable(node.condition, _udf_stack, _depth, _spell_read=_spell_read)
+                and self._expr_is_stable(node.true_val, _udf_stack, _depth, _spell_read=_spell_read)
+                and self._expr_is_stable(node.false_val, _udf_stack, _depth, _spell_read=_spell_read)
+            )
         if isinstance(node, BinOp):
-            return (self._expr_is_stable(node.left, _udf_stack, _depth)
-                    and self._expr_is_stable(node.right, _udf_stack, _depth))
+            return (
+                self._expr_is_stable(node.left, _udf_stack, _depth, _spell_read=_spell_read)
+                and self._expr_is_stable(node.right, _udf_stack, _depth, _spell_read=_spell_read)
+            )
         if isinstance(node, UnaryOp):
-            return self._expr_is_stable(node.operand, _udf_stack, _depth)
+            return self._expr_is_stable(node.operand, _udf_stack, _depth, _spell_read=_spell_read)
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            if _spell_read is not None:
+                if (isinstance(node.callee, MemberAccess)
+                        and isinstance(node.callee.object, Identifier)
+                        and ValueBindings.has_value_binding(node.callee.object)):
+                    return False
+                if self._is_input_call(node):
+                    return self._is_stable_inline_input(node)
+                # Unbound keywords are not rendered; math.sum is a rolling sum.
+                if node.kwargs or (namespace == "math" and func_name == "sum"):
+                    return False
             if namespace == "ta":
                 return False
             if namespace == "math":
                 if func_name not in self._MATH_STABLE_MEMBERS:
                     return False
-                return all(self._expr_is_stable(a, _udf_stack, _depth)
+                return all(self._expr_is_stable(a, _udf_stack, _depth, _spell_read=_spell_read)
                            for a in node.args)
             if namespace == "timeframe":
                 # ``timeframe.in_seconds()`` (and any other function-form
@@ -3824,7 +3864,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 # the script's resolution, not a per-bar value.
                 if func_name not in self._TF_STABLE_MEMBERS:
                     return False
-                return all(self._expr_is_stable(a, _udf_stack, _depth)
+                return all(self._expr_is_stable(a, _udf_stack, _depth, _spell_read=_spell_read)
                            for a in node.args)
             if namespace == "input":
                 return True
@@ -3835,7 +3875,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if namespace is None and func_name == "input":
                 return self._is_stable_inline_input(node)
             if namespace is None and func_name in ("int", "float", "bool", "string"):
-                return all(self._expr_is_stable(a, _udf_stack, _depth)
+                return all(self._expr_is_stable(a, _udf_stack, _depth, _spell_read=_spell_read)
                            for a in node.args)
             # A user-defined single-expression function is stable iff every
             # argument is stable AND its body (with the params bound to those
@@ -3848,11 +3888,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if namespace is None and func_name is not None:
                 inlined = self._inline_single_expr_udf(node, _udf_stack, _depth)
                 if inlined is not None:
-                    if not all(self._expr_is_stable(a, _udf_stack, _depth)
+                    if not all(self._expr_is_stable(a, _udf_stack, _depth, _spell_read=_spell_read)
                                for a in node.args):
                         return False
                     return self._expr_is_stable(
-                        inlined, _udf_stack | {func_name}, _depth + 1)
+                        inlined, _udf_stack | {func_name}, _depth + 1,
+                        _spell_read=_spell_read,
+                    )
             # Any other call (multi-statement user functions, str.*, array.*,
             # ...) — series by default; the conservative answer keeps the guard
             # honest.
@@ -3866,14 +3908,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     # tree: Pine grouping ``(a - b) / (c - d)`` degrades to ``a - b / c - d``
     # under C++ precedence. See ``_runtime_ctor_arg_for_reset`` (the string is
     # re-parsed and lowered through the expression visitor).
-    _ATOMIC_ARITH_NODES = (NumberLiteral, StringLiteral, Identifier, MemberAccess, FuncCall)
+    _ATOMIC_ARITH_NODES = (
+        NumberLiteral, StringLiteral, BoolLiteral, Identifier, MemberAccess, FuncCall,
+    )
 
     def _arith_operand_to_str(self, node, _udf_stack: frozenset = frozenset(),
-                              _depth: int = 0) -> str | None:
+                              _depth: int = 0, *, _spell_read=None) -> str | None:
         """Serialize ``node`` for use as an operand: parenthesize it unless its
         serialized form is already self-delimiting, so grouping survives a
         round-trip through the parser."""
-        s = self._arith_expr_to_str(node, _udf_stack, _depth)
+        s = self._arith_expr_to_str(node, _udf_stack, _depth, _spell_read=_spell_read)
         if s is None:
             return None
         if isinstance(node, self._ATOMIC_ARITH_NODES):
@@ -3881,7 +3925,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return f"({s})"
 
     def _arith_expr_to_str(self, node, _udf_stack: frozenset = frozenset(),
-                           _depth: int = 0) -> str | None:
+                           _depth: int = 0, *, _spell_read=None) -> str | None:
         """Render a numeric arithmetic-over-identifiers expression to a string
         that re-parses to the SAME tree (grouping preserved via
         ``_arith_operand_to_str``). Returns None for any node shape we don't
@@ -3894,7 +3938,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if getattr(self, "_arith_udf_memo", None) is None:
             self._arith_udf_memo = {}
             try:
-                return self._arith_expr_to_str(node, _udf_stack, _depth)
+                return self._arith_expr_to_str(
+                    node, _udf_stack, _depth, _spell_read=_spell_read)
             finally:
                 self._arith_udf_memo = None
         if isinstance(node, NumberLiteral):
@@ -3906,25 +3951,27 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # ``len = mode == "Fast" ? 8 : 21``: a length chosen by comparing
             # an input.string with its options.
             return pine_string_literal(node.value)
+        if _spell_read is not None and isinstance(node, BoolLiteral):
+            return "true" if node.value else "false"
         if isinstance(node, Identifier):
-            return node.name
+            return node.name if _spell_read is None else _spell_read(node)
         if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
             return f"{node.object.name}.{node.member}"
         if isinstance(node, BinOp):
-            l = self._arith_operand_to_str(node.left, _udf_stack, _depth)
-            r = self._arith_operand_to_str(node.right, _udf_stack, _depth)
+            l = self._arith_operand_to_str(node.left, _udf_stack, _depth, _spell_read=_spell_read)
+            r = self._arith_operand_to_str(node.right, _udf_stack, _depth, _spell_read=_spell_read)
             if l is None or r is None:
                 return None
             return f"{l} {node.op} {r}"
         if isinstance(node, UnaryOp):
-            o = self._arith_operand_to_str(node.operand, _udf_stack, _depth)
+            o = self._arith_operand_to_str(node.operand, _udf_stack, _depth, _spell_read=_spell_read)
             if o is None:
                 return None
             return f"{node.op} {o}" if node.op == "not" else f"{node.op}{o}"
         if isinstance(node, Ternary):
-            c = self._arith_operand_to_str(node.condition, _udf_stack, _depth)
-            t = self._arith_operand_to_str(node.true_val, _udf_stack, _depth)
-            f = self._arith_operand_to_str(node.false_val, _udf_stack, _depth)
+            c = self._arith_operand_to_str(node.condition, _udf_stack, _depth, _spell_read=_spell_read)
+            t = self._arith_operand_to_str(node.true_val, _udf_stack, _depth, _spell_read=_spell_read)
+            f = self._arith_operand_to_str(node.false_val, _udf_stack, _depth, _spell_read=_spell_read)
             if c is None or t is None or f is None:
                 return None
             return f"{c} ? {t} : {f}"
@@ -3954,16 +4001,20 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     inlined = self._inline_single_expr_udf(node, _udf_stack, _depth)
                     memo[key] = (
                         None if inlined is None
-                        else self._arith_expr_to_str(inlined, _udf_stack | {fn}, _depth + 1),
+                        else self._arith_operand_to_str(
+                            inlined, _udf_stack | {fn}, _depth + 1,
+                            _spell_read=_spell_read,
+                        ),
                         node.args,
                     )
                 return memo[key][0]
+            # A callable label is not a variable read.
             callee = self._arith_expr_to_str(node.callee, _udf_stack, _depth)
             if callee is None:
                 return None
             parts = []
             for a in node.args:
-                s = self._arith_expr_to_str(a, _udf_stack, _depth)
+                s = self._arith_expr_to_str(a, _udf_stack, _depth, _spell_read=_spell_read)
                 if s is None:
                     return None
                 parts.append(s)
@@ -4593,23 +4644,19 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             fi = None
             method_call = False
             if isinstance(node.callee, MemberAccess):
-                # Method syntax is type-directed. Resolve it before considering
-                # any same-named bare UDF, and use the AST owner's lexical
-                # parameter types: analyzer symbol scopes no longer exist in
-                # this source-order prepass.
-                receiver_spec = self._map_effect_type_spec(
-                    node.callee.object, owner_lexical_specs(owner)
-                )
-                receiver_name = method_receiver_type_name(receiver_spec)
-                if receiver_name is not None:
-                    method_key = f"{receiver_name}.{node.callee.member}"
-                    candidate = self._func_info_map.get(method_key)
-                    if (
-                        candidate is not None
-                        and getattr(candidate, "is_udt_method", False)
-                    ):
-                        fi = candidate
-                        method_call = True
+                # An expression receiver can bind a typed method without
+                # retaining a TypeSpec. Register its actuals (receiver first)
+                # against the method selected while its scope was live.
+                bindings = self._wide_method_call_bindings().get(id(node), ())
+                if len(bindings) == 1:
+                    fi, _ = bindings[0]
+                else:
+                    _, fi = self._map_effect_callable_info(
+                        node, owner_lexical_specs(owner)
+                    )
+                if fi is None or not fi.is_udt_method:
+                    continue
+                method_call = True
             elif isinstance(node.callee, Identifier):
                 fi = self._func_info_map.get(node.callee.name)
             if fi is None or fi.node is None:
@@ -6389,6 +6436,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 8e. The copies an array or a matrix variable's executions left
         #     (pineforge_codegen/collection_history.py).
         self._emit_history_version_clock(lines)
+        self._emit_local_array_history_members(lines)
         for variable in self._collection_history_variables():
             lines.append(
                 f"    {self._collection_history_class(variable)}<{self._collection_history_cpp_type(variable)}> "

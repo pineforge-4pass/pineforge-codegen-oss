@@ -62,6 +62,7 @@ back through ``base.py``.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from ..ast_nodes import (
@@ -74,7 +75,8 @@ from ..input_defaults import (
     PLAIN_INPUT_STRING_DEFAULT, input_param_names, plain_input_default, plain_input_type,
 )
 from ..loop_types import FLOAT_REASSIGNMENT, has_fractional_int_value
-from ..pine_spelling import sub_outside_literals
+from ..errors import Phase
+from ..limits import MAX_NESTING_DEPTH, limit_error
 from ..external_requests import FEED_LOWERING, LOWERING_ANNOTATION
 from ..security_contexts import CONTEXT_ANNOTATION, DEAD_ANNOTATION
 from ..symbols import PineType, unify_pine_types
@@ -699,6 +701,7 @@ class CallHandlers:
                 is_static=is_static,
                 owner_func=(self._enclosing_func_names[-1] if self._enclosing_func_names else None),
             )
+            site._bound_ctor_nodes = all_args[2:3] if ctor_args else []
             self._ta_call_sites.append(site)
             self._ta_member_names.add(site.member_name)
             return PineType.FLOAT
@@ -1462,18 +1465,12 @@ class CallHandlers:
     # User-defined function calls
     # ------------------------------------------------------------------
 
-    def _func_local_length_defs(self, func_def) -> dict[str, str]:
-        """Collect a user function's local scalar length-vars to their RHS
-        expression string, e.g. ``qqeCalc`` with ``wp = sf * 2 - 1`` returns
-        ``{"wp": "sf * 2 - 1"}``.
+    def _func_local_length_defs(self, func_def) -> dict[tuple[int, str], ASTNode]:
+        """Arithmetic initializers eligible for specialization, by declaration.
 
-        Only plain (non-``var``/``varip``) declarations whose RHS is a pure
-        arithmetic expression over identifiers/numbers (NumberLiteral, Identifier,
-        BinOp, UnaryOp, or a math.* FuncCall) qualify — these are the shapes that
-        can legitimately feed a TA constructor length. Series-valued locals (whose
-        RHS is a ta.* call, a subscript, a ternary, etc.) are skipped so we never
-        inline a price series into a ctor-length slot. Names reassigned with ``:=``
-        are also skipped (their value is not a stable compile-time length).
+        An immutable local can name another arithmetic initializer or a
+        parameter. A write anywhere in its body disqualifies the declaration.
+        The constructor planner decides whether the expanded leaves are stable.
         """
         def _is_arith(n) -> bool:
             if isinstance(n, (NumberLiteral, Identifier)):
@@ -1508,27 +1505,71 @@ class CallHandlers:
                     return all(_is_arith(a) for a in n.args)
             return False
 
-        reassigned: set[str] = set()
-        def _scan_reassign(stmts):
-            from ..ast_nodes import Assignment
-            for s in stmts or []:
-                if isinstance(s, Assignment) and isinstance(s.target, Identifier):
-                    reassigned.add(s.target.name)
-                for attr in ("body", "else_body"):
-                    sub = getattr(s, attr, None)
-                    if isinstance(sub, list):
-                        _scan_reassign(sub)
-        _scan_reassign(func_def.body)
+        cache = self.__dict__.setdefault("_ta_local_length_defs", {})
+        if id(func_def) not in cache:
+            defs = {}
+            for stmt in func_def.body:
+                if (isinstance(stmt, VarDecl) and not stmt.is_var and not stmt.is_varip
+                        and (id(stmt), stmt.name) not in self._value_bindings.written_declarations
+                        and _is_arith(stmt.value)):
+                    defs[id(stmt), stmt.name] = stmt.value
+            cache[id(func_def)] = defs
+        return cache[id(func_def)]
 
-        defs: dict[str, str] = {}
-        for stmt in func_def.body or []:
-            if (isinstance(stmt, VarDecl)
-                    and not stmt.is_var and not stmt.is_varip
-                    and stmt.name not in reassigned
-                    and stmt.value is not None
-                    and _is_arith(stmt.value)):
-                defs[stmt.name] = self._expr_to_str(stmt.value)
-        return defs
+    def _bind_ctor_expr(self, expr, bindings, *, expand=False, depth=0):
+        """Substitute bound leaves simultaneously. An actual stays in its
+        caller's scope until the next call edge is processed. Retain untouched
+        nodes (including input calls with declaration-derived titles)."""
+        if not bindings:
+            return expr
+        if depth > MAX_NESTING_DEPTH:
+            raise limit_error(f"AST nesting depth exceeds {MAX_NESTING_DEPTH} nodes.",
+                              expr.loc, Phase.ANALYZER)
+        if self._budget is not None:
+            self._budget.check(expr.loc, Phase.ANALYZER)
+
+        def bind(node):
+            return self._bind_ctor_expr(node, bindings, expand=expand, depth=depth + 1)
+
+        if isinstance(expr, Identifier):
+            actual = bindings.get(self._value_bindings.ctor_binding(expr))
+            if actual is None:
+                return expr
+            # Only chase declarations when expanding local initializers.
+            # Actual parameters have already crossed into the caller's scope.
+            return bind(actual) if expand else actual
+
+        if isinstance(expr, BinOp):
+            parts = dict(left=bind(expr.left), right=bind(expr.right))
+        elif isinstance(expr, UnaryOp):
+            parts = dict(operand=bind(expr.operand))
+        elif isinstance(expr, Ternary):
+            parts = {k: bind(getattr(expr, k)) for k in ("condition", "true_val", "false_val")}
+        elif isinstance(expr, MemberAccess):
+            parts = dict(object=bind(expr.object))
+        elif isinstance(expr, Subscript):
+            parts = dict(object=bind(expr.object), index=bind(expr.index))
+        elif isinstance(expr, TupleLiteral):
+            items = [bind(item) for item in expr.elements]
+            return (expr if all(a is b for a, b in zip(items, expr.elements))
+                    else replace(expr, elements=items))
+        elif isinstance(expr, FuncCall):
+            args = [bind(a) for a in expr.args]
+            kwargs = {k: bind(v) for k, v in expr.kwargs.items()}
+            callee = bind(expr.callee) if isinstance(expr.callee, MemberAccess) else expr.callee
+            if (callee is expr.callee and all(a is b for a, b in zip(args, expr.args))
+                    and all(v is expr.kwargs[k] for k, v in kwargs.items())):
+                return expr
+            # The private expression is rendered, never visited as the authored
+            # call. Its old argument-order metadata points to pre-substitution
+            # nodes and must not be traversed as another copy of its arguments.
+            notes = {k: v for k, v in (expr.annotations or {}).items() if k != "call_arg_order"}
+            return replace(expr, callee=callee, args=args, kwargs=kwargs, annotations=notes)
+        else:
+            return expr
+        if all(part is getattr(expr, key) for key, part in parts.items()):
+            return expr
+        return replace(expr, **parts)
 
     def _materialize_user_func_call_site_state(
             self, func_name: str, cs_idx: int, node: FuncCall,
@@ -1579,13 +1620,8 @@ class CallHandlers:
 
         selected_ta_indices: dict[int, int] = {}
 
-        param_arg_map: dict[str, str] = {}
-        compound_params: set[str] = set()
-
-        def _record_param_arg(param_name: str, actual: ASTNode) -> None:
-            param_arg_map[param_name] = self._expr_to_str(actual)
-            if isinstance(actual, (BinOp, UnaryOp, Ternary)):
-                compound_params.add(param_name)
+        param_args = {}
+        owner_id = self._value_bindings.callable_declarations.get(func_name)
 
         if (
             method_info is not None
@@ -1606,14 +1642,14 @@ class CallHandlers:
         )
         for p_idx, param_name in enumerate(func_def.params):
             if p_idx < len(positional_args):
-                _record_param_arg(param_name, positional_args[p_idx])
+                param_args[(owner_id, param_name)] = positional_args[p_idx]
             elif param_name in node.kwargs:
-                _record_param_arg(param_name, node.kwargs[param_name])
+                param_args[(owner_id, param_name)] = node.kwargs[param_name]
             elif (method_info is None
                     and p_idx < len(param_defaults)
                     and param_defaults[p_idx] is not None):
                 # An omitted parameter reads its declared default.
-                _record_param_arg(param_name, param_defaults[p_idx])
+                param_args[(owner_id, param_name)] = param_defaults[p_idx]
 
         if func_name in self._func_ta_ranges:
             start, end = self._func_ta_ranges[func_name]
@@ -1628,99 +1664,40 @@ class CallHandlers:
                 func_name, {}
             )
 
-            # Map local derived length variables back to expressions over the
-            # function's parameters before substituting call-site arguments.
+            # A template is the tree in this owner's scope, including the
+            # actuals of an inner call when this owner borrows its TA site.
+            # Keep the string view for the existing ownership fixed point.
+            templates = self.__dict__.setdefault("_ta_ctor_templates", {})
             local_defs = self._func_local_length_defs(func_def)
 
-            def _subst_params(
-                    arg: str, pmap: dict[str, str],
-                    compound: set[str]) -> str:
-                import re
-                result = arg
-                for param, value in sorted(
-                        pmap.items(), key=lambda item: len(item[0]), reverse=True):
-                    replacement = f"({value})" if param in compound else value
-                    result = sub_outside_literals(
-                        rf'\b{re.escape(param)}\b', replacement, result
-                    )
-                return result
+            def bind_site(i, site):
+                template = templates.get((func_name, i))
+                if template is None:
+                    template = getattr(site, "_bound_ctor_nodes", site.ctor_nodes)
+                template = [self._bind_ctor_expr(arg, local_defs, expand=True) for arg in template]
+                templates[func_name, i] = template
+                func_ctor_templates[i] = [self._expr_to_str(arg) for arg in template]
+                return [self._bind_ctor_expr(arg, param_args) for arg in template]
 
-            def _expand_locals(arg: str) -> str:
-                import re
-                if not local_defs:
-                    return arg
-                for _ in range(32):
-                    def _rep(match: re.Match) -> str:
-                        name = match.group(0)
-                        if name in local_defs:
-                            return "(" + local_defs[name] + ")"
-                        return name
-                    expanded = sub_outside_literals(r"[A-Za-z_][A-Za-z_0-9]*", _rep, arg)
-                    if expanded == arg:
-                        break
-                    arg = expanded
-                return arg
-
-            import re as _re
-            enclosing_params: set[str] = set()
-            for names in self._enclosing_func_params:
-                enclosing_params |= names
+            def register_bound(target, args):
+                site = self._ta_call_sites[target]
+                site._bound_ctor_nodes = args
+                site.ctor_args = [self._expr_to_str(arg) for arg in args]
+                caller = self._value_bindings.call_owners.get(id(node))
+                if caller is not None:
+                    templates[caller, target] = args
+                    self._func_ta_ctor_args.setdefault(caller, {})[target] = list(site.ctor_args)
 
             if cs_idx == 0:
-                # cs0 owns the source-level sites. Preserve their parameterized
-                # ctor args for every later direct or inherited clone.
                 for i in site_indices:
                     site = self._ta_call_sites[i]
-                    if not hasattr(site, '_orig_ctor_args'):
-                        site._orig_ctor_args = [
-                            _expand_locals(arg) for arg in site.ctor_args
-                        ]
-                    # Each callable owns its own view of a borrowed site's
-                    # constructor expression. Expand locals in that owner view
-                    # before substituting actual parameters; a template first
-                    # recorded at definition time can still contain a local
-                    # alias such as ``effectiveLen``.
-                    func_ctor_templates[i] = [
-                        _expand_locals(arg)
-                        for arg in func_ctor_templates.get(
-                            i, site._orig_ctor_args
-                        )
-                    ]
-                    site.ctor_args = [
-                        _subst_params(arg, param_arg_map, compound_params)
-                        for arg in func_ctor_templates[i]
-                    ]
+                    register_bound(i, bind_site(i, site))
                     selected_ta_indices[i] = i
-                    if enclosing_params and self._nested_ta_touched is not None:
-                        for arg in site.ctor_args:
-                            tokens = set(_re.findall(
-                                r"[A-Za-z_][A-Za-z_0-9]*", arg))
-                            if tokens & enclosing_params:
-                                if self._enclosing_func_names:
-                                    caller = self._enclosing_func_names[-1]
-                                    self._func_ta_ctor_args.setdefault(
-                                        caller, {}
-                                    )[i] = list(site.ctor_args)
-                                break
             else:
                 clone_name_map: dict[str, str] = {}
                 for i in site_indices:
                     orig = self._ta_call_sites[i]
-                    if not hasattr(orig, '_orig_ctor_args'):
-                        orig._orig_ctor_args = [
-                            _expand_locals(arg) for arg in orig.ctor_args
-                        ]
-                    func_ctor_templates[i] = [
-                        _expand_locals(arg)
-                        for arg in func_ctor_templates.get(
-                            i, orig._orig_ctor_args
-                        )
-                    ]
-                    orig_args = func_ctor_templates[i]
-                    resolved_ctor = [
-                        _subst_params(arg, param_arg_map, compound_params)
-                        for arg in orig_args
-                    ]
+                    args = bind_site(i, orig)
                     reuse_target = (
                         reuse_existing_targets.get(i)
                         if reuse_existing_targets is not None
@@ -1744,7 +1721,7 @@ class CallHandlers:
                         (id(node), cs_idx), {}
                     ).get(i)
                     if existing_target is not None:
-                        self._ta_call_sites[existing_target].ctor_args = resolved_ctor
+                        register_bound(existing_target, args)
                         selected_ta_indices[i] = existing_target
                         continue
                     clone_name = f"{orig.member_name}_cs{cs_idx}"
@@ -1780,7 +1757,7 @@ class CallHandlers:
                     cloned = TACallSite(
                         member_name=clone_name,
                         class_name=orig.class_name,
-                        ctor_args=resolved_ctor,
+                        ctor_args=[],
                         compute_args=orig.compute_args[:],
                         returns_tuple=orig.returns_tuple,
                         node=orig.node,
@@ -1790,17 +1767,12 @@ class CallHandlers:
                     )
                     selected_ta_indices[i] = len(self._ta_call_sites)
                     self._ta_call_sites.append(cloned)
+                    register_bound(len(self._ta_call_sites) - 1, args)
                     self._ta_member_names.add(clone_name)
                 if clone_name_map:
                     self._func_cs_ta_clone_names[(func_name, cs_idx)] = clone_name_map
 
-            # A nested stateful helper belongs to the enclosing callable's
-            # call path even when its constructor has no forwarded parameters
-            # (``ta.change`` is the canonical example). Constructor-template
-            # forwarding above is intentionally narrower: it only rewrites
-            # expressions that reference enclosing parameters. Keep state
-            # ownership independent from that substitution test so every
-            # written parent call site receives its exact borrowed TA targets.
+            # Keep state ownership even when the constructor has no arguments.
             if self._nested_ta_touched is not None:
                 self._nested_ta_touched.update(selected_ta_indices.values())
 
@@ -2026,7 +1998,14 @@ class CallHandlers:
                             continue
                         if sym is not None:
                             sym.is_series = True
-                            if sym.scope and sym.scope.startswith("func_"):
+                            parameter_owner = getattr(sym, "_pf_parameter_owner", None)
+                            if parameter_owner is not None:
+                                # Forward the history requirement to the caller's
+                                # parameter, including a method's receiver.
+                                self._func_series_vars.setdefault(
+                                    parameter_owner, set()
+                                ).add(arg.name)
+                            elif sym.scope and sym.scope.startswith("func_"):
                                 caller_name = sym.scope[5:]
                                 self._func_series_vars.setdefault(caller_name, set()).add(arg.name)
                             else:

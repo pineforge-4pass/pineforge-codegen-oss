@@ -473,7 +473,7 @@ CPP_EMITTER_NAMES = frozenset("""
     _pf_script_state_checkpoint_ _PFScriptState _PFForeignEmaSeeding
     _PFALMA _PFKC _PFKCW _PFAnchoredVWAP _PFAnchoredVWAPBands _PFSeriesSma
     _PFPivotPointLevels _PFArrayField _PFTvFormatValue
-    _PFCollectionTraits _PFArrayHistoryValue _PFCollectionHistory
+    _PFCollectionTraits _PFArrayHistoryValue _PFCollectionHistory _PFLocalArrayHistory
     _pf_collection_history_changed kLoopTimeLimitMs kTvFloatStepEnd
     checked_settings trace is_na na nz fixnan
 """.split())

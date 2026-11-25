@@ -42,7 +42,7 @@ from ..security_contexts import (
 from ..session_reads import emitted_session_reads
 from ..collection_history import (
     COLLECTION_HISTORY_ANNOTATION, LEGACY, REFUSED, SUPPORTED,
-    CollectionHistoryChecker, HistoryRead,
+    CollectionHistoryChecker, HistoryRead, literal_offset,
 )
 from ..method_binding import (
     BoundMethodArgs,
@@ -160,7 +160,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
     def __init__(self, ast: Program, filename: str = "<stdin>",
                  budget: TimeBudget | None = None,
-                 session_clones: frozenset[str] | None = None) -> None:
+                 session_clones: frozenset[str] | None = None,
+                 excluded_array_history_owners: frozenset[str] = frozenset()) -> None:
         self._ast = ast
         self._filename = filename
         self._budget = budget
@@ -172,6 +173,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # offset (pineforge_codegen._generate passes none first, then each
         # time adds the ones whose reads the C++ holds).
         self._session_clones = session_clones
+        self._excluded_array_history_owners = excluded_array_history_owners
         self._session_uncloned: frozenset[str] = frozenset()
         self._budget_visit_count = 0
         self._method_signatures = {}
@@ -186,6 +188,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Final analysis consumes this inventory even when no request was seen.
         self._security_calls: list[SecurityCallInfo] = []
         self._series_vars: set[str] = set()
+        self._named_parameter_series: set[str] = set()
         self._series_var_members: set[str] = set()
         self._series_decl_nodes: set[int] = set()
         self._series_decl_bindings: set[tuple[int, str]] = set()
@@ -709,6 +712,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return Analyzer(
                 self._ast, filename=self._filename, budget=self._budget,
                 session_clones=self._session_clones,
+                excluded_array_history_owners=self._excluded_array_history_owners,
             ).analyze()
         self._check_persistent_drawing_member_collisions()
 
@@ -717,6 +721,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # internally, g() also needs N call-site variants so each f_csK
         # can call g_csK with isolated state.
         self._propagate_call_site_counts()
+        # A request's evaluator (also through helpers) and a field default
+        # don't run on a written chart call's clock. Revisit just this case
+        # with those owners on their original refusal/legacy typing path.
+        excluded = self._excluded_array_history_owners.union(
+            r.owner for r in self._collection_history_reads
+            if r.owner in self._session_history_unsafe)
+        if excluded != self._excluded_array_history_owners:
+            return Analyzer(
+                self._ast, filename=self._filename, budget=self._budget,
+                session_clones=self._session_clones, excluded_array_history_owners=excluded,
+            ).analyze()
 
         # Reject (loudly) a request.security whose timeframe is a UDF parameter
         # called with multiple distinct literal timeframes — a single evaluator
@@ -2832,7 +2847,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if getattr(fi, "is_udt_method", False) and fi.node is not None:
                 func_defs.setdefault(fi.name, fi.node)
 
-        session_method_bindings: dict[int, str] = {}
+        method_bindings: dict[int, str] = {}
         # Preserve call-node identity as well as the callee name: late clone
         # materialization needs the textual call's argument mapping to resolve
         # parameterized TA constructor lengths.
@@ -2841,8 +2856,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return call.callee.name if call.callee.name in func_defs else None
             if not isinstance(call.callee, MemberAccess):
                 return None
-            if id(call) in session_method_bindings:
-                return session_method_bindings[id(call)]
+            if id(call) in method_bindings:
+                return method_bindings[id(call)]
 
             recv = call.callee.object
             method = call.callee.member
@@ -2917,9 +2932,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return calls
 
         # A lexical typed binding survives scopes that the late raw-name
-        # resolver cannot reconstruct. Prefer that exact declaration only on
-        # the new session-method path, after the C++ actually requested clones.
-        # A syntactic read in a dropped argument must keep the old graph too.
+        # resolver cannot reconstruct (e.g. an arithmetic receiver). Keep
+        # that binding on paths needing per-call session or parameter history.
         known_func_names = set(func_defs)
         requested_reads = {
             id(child)
@@ -2935,15 +2949,21 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         exact_bindings: dict[int, set[str]] = {}
         for call_id, key in self._method_call_bindings:
             exact_bindings.setdefault(call_id, set()).add(key)
-        session_method_bindings = {
+        method_bindings = {
             call_id: next(iter(keys))
             for call_id, keys in exact_bindings.items()
             if len(keys) == 1
             and call_id not in self._session_unresolved_method_calls
         }
-        if session_reach and session_method_bindings:
-            # First determine reach with exact bindings, including wrappers
-            # whose old receiver-name fallback selected the wrong overload.
+        history_reach = {
+            name for name, names in self._func_series_vars.items()
+            if name in func_defs and not names.isdisjoint(func_defs[name].params)
+        }
+        exact_reach = session_reach | history_reach
+        if exact_reach and method_bindings:
+            # A wrapper can acquire a history parameter later, when the
+            # fixed point below sees the callee it forwards its receiver to.
+            # Keep the wrapper's incoming edges as well as the reader's.
             typed_calls = {
                 name: _find_calls(definition, known_func_names, name)
                 for name, definition in func_defs.items()
@@ -2954,13 +2974,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     self._budget.check(phase=Phase.ANALYZER)
                 changed = False
                 for name, calls in typed_calls.items():
-                    if (name not in session_reach
-                            and any(sub in session_reach for sub, _ in calls)):
-                        session_reach.add(name)
+                    if (name not in exact_reach
+                            and any(sub in exact_reach for sub, _ in calls)):
+                        exact_reach.add(name)
                         changed = True
-        session_method_bindings = {
-            call_id: key for call_id, key in session_method_bindings.items()
-            if key in session_reach
+        method_bindings = {
+            call_id: key for call_id, key in method_bindings.items()
+            if key in exact_reach
         }
 
         calls_by_parent = {
@@ -2971,6 +2991,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             name: [] for name in known_func_names
         }
         call_edges: list[tuple[str | None, str, FuncCall]] = []
+        callable_declarations: dict[str, int] = {}
         # Preserve source order across definitions and top-level statements.
         # Method bodies use their ``Type.method`` owner so ``self.sibling()``
         # resolves without relying on a now-exited symbol-table scope.
@@ -2981,6 +3002,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 owner = f"{stmt.type_name}.{stmt.name}"
             else:
                 owner = None
+            if owner is not None:
+                callable_declarations[owner] = id(stmt)
             for callee, call in _find_calls(stmt, known_func_names, owner):
                 calls_by_callee.setdefault(callee, []).append(call)
                 call_edges.append((owner, callee, call))
@@ -3157,13 +3180,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         self._series_bar_fields.add(actual.name)
                     if owner is None:
                         continue
-                    owner_info = func_info_by_name.get(owner)
-                    if (
-                        owner_info is None
-                        or owner_info.node is None
-                        or actual.name not in owner_info.node.params
+                    # A same-named block local or a default from a different
+                    # scope is not a forwarded parameter. Method FuncInfos
+                    # have synthetic FuncDefs; the binding names the MethodDef.
+                    if self._value_bindings.declaration_bindings.get(id(actual)) != (
+                        callable_declarations[owner], actual.name
                     ):
                         continue
+                    if owner in self._method_signatures:
+                        # A method can pass its Series on by reference. Its
+                        # callee's requirement may only be known on this pass.
+                        self._named_parameter_series.add(actual.name)
                     owner_series = self._func_series_vars.setdefault(
                         owner, set()
                     )
@@ -3175,6 +3202,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     if actual.name not in owner_requirements:
                         owner_requirements.add(actual.name)
                         series_changed = True
+
+        # Requested evaluators are class methods: a parameter history left
+        # in their expression needs its named Series. Never claim the name of
+        # a script or persistent declaration on behalf of a parameter, even
+        # when the declaration occurs later or has owner-qualified storage.
+        if self._named_parameter_series:
+            self._series_vars.update(self._named_parameter_series.difference(
+                self._direct_program_binding_names,
+                (name for name, _ in self._global_var_decls),
+                (name for name, _, _ in self._var_members),
+                (raw for names in self._func_var_storage_names.values() for raw in names),
+            ))
 
         # Codegen synthesizes a Series buffer for three expression shapes that
         # do not appear in ``_func_series_vars`` themselves:
@@ -3363,16 +3402,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # per call site, each typed from its own call.
         family_polymorphic = self._untyped_param_family_conflicts(
             func_defs, func_info_by_name, call_edges, _bound_user_call_args)
+        history_owners = set(self._func_global_history_reads)
+        history_owners.update(
+            r.owner for r in self._collection_history_reads
+            if r.owner is not None and r.owner not in self._session_history_unsafe
+            and literal_offset(r.node) != 0
+        )
         family_polymorphic = self._bounded_family_polymorphism(
             family_polymorphic,
-            direct_state | set(self._func_global_history_reads),
+            direct_state | history_owners,
             close_over_callers, call_edges, func_info_by_name)
         stateful = close_over_callers(
-            direct_state
-            | set(self._func_global_history_reads)
-            | family_polymorphic
+            direct_state | history_owners | family_polymorphic
         )
-        # Callables stateful only through a script variable's history, or
+        # Callables stateful only through a call site's history, or
         # their parameters' families: before those rules they shared one body,
         # so their call-site typing must not refuse a script that transpiled
         # then (``merge_profile`` below).
@@ -9166,6 +9209,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     )
                     if keeps_series and (getattr(sym, "type_spec", None) is None
                                          or sym.type_spec.kind not in ("array", "map")):
+                        sym.is_series = True
+                        parameter_owner = getattr(sym, "_pf_parameter_owner", None)
+                        if parameter_owner is not None:
+                            self._named_parameter_series.add(name)
+                            self._func_series_vars.setdefault(
+                                parameter_owner, set()
+                            ).add(name)
+                            self._func_series_history_nodes.setdefault(
+                                (parameter_owner, name), node
+                            )
+                            return obj_type
                         exact_member = getattr(sym, "_pf_var_member_name", None)
                         if exact_member is not None:
                             self._series_var_members.add(exact_member)
@@ -9193,12 +9247,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             and self._type_spec_contains_map(global_sym.type_spec)
                         )
                         # ``_series_vars`` is a legacy global-by-name set. Do
-                        # not let a lexical scalar series parameter poison a
+                        # not let a lexical scalar series local poison a
                         # same-named global PineMap member; the scoped series
                         # registry below is authoritative for the function.
                         if not shadows_map_state:
                             self._series_vars.add(name)
-                        sym.is_series = True
                         # Track callable-scoped series vars. Method symbol
                         # scopes use ``method_Type_name`` while every later
                         # clone/remap table is keyed by canonical
@@ -9322,6 +9375,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         lowering registered a series (a matrix parameter's), which the caller
         then does as it did."""
         decl_node_id = getattr(sym, "_pf_decl_node_id", None)
+        owner = self._enclosing_func_names[-1] if self._enclosing_func_names else None
         read = HistoryRead(
             node=node,
             name=name,
@@ -9333,6 +9387,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             is_var=bool(sym.is_var),
             decl_node_id=decl_node_id,
             scope_name=sym.scope or "",
+            owner=(owner if decl_node_id is not None and sym.scope != "global"
+                   and owner in self._func_defs and owner not in self._excluded_array_history_owners
+                   else None),
         )
         decision = self._history_checker().decide(read)
         if node.annotations and COLLECTION_HISTORY_ANNOTATION in node.annotations:

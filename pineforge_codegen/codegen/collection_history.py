@@ -13,6 +13,9 @@ TradingView's read-only history (fixtures/array_history_tv).
 
 from __future__ import annotations
 
+from functools import cached_property
+
+from ..analyzer.value_bindings import ValueBindings
 from ..collection_history import (
     COLLECTION_HISTORY_ARRAY_VALUE_CPP,
     COLLECTION_HISTORY_CLASS_CPP,
@@ -30,6 +33,29 @@ from .history_sharing import (
     CACHED_COLLECTION_HISTORY_CPP, HISTORY_VERSION_CLOCK_CPP, HistorySharingPlan,
 )
 from .tables import ARRAY_JOURNAL_DELTA_METHODS, ARRAY_JOURNAL_FULL_METHODS
+
+
+_LOCAL_ARRAY_HISTORY_CPP = r"""
+template <typename T>
+class _PFLocalArrayHistory : public _PFCollectionHistory<T> {
+    int last_bar_ = -1;
+public:
+    using _PFCollectionHistory<T>::_PFCollectionHistory;
+    struct Slot {
+        _PFLocalArrayHistory& history;
+        const T& value;
+        ~Slot() noexcept(false) {
+            if (std::uncaught_exceptions() == 0) history.close(value);
+        }
+    };
+    Slot enter(const T& value, int bar) {
+        // First reach on THIS bar, even if the chart already committed its close.
+        this->open_slot(value, bar != last_bar_);
+        last_bar_ = bar;
+        return {*this, value};
+    }
+};
+"""
 
 
 class CollectionHistoryEmitter:
@@ -52,6 +78,8 @@ class CollectionHistoryEmitter:
         return plan is not None and name == plan.clock_member
 
     def _emit_history_sharing_includes(self, lines: list[str]) -> None:
+        if self._local_array_histories:
+            lines.append("#include <exception>")
         if self._history_sharing_plan() is not None:
             lines.extend(("#include <limits>", "#include <utility>"))
 
@@ -207,6 +235,9 @@ class CollectionHistoryEmitter:
         while values:
             source = values.pop()
             if isinstance(source, Identifier):
+                local_type = self._nullable_local_array_type(source)
+                if local_type:
+                    return local_type
                 if (self._collection_name_is_lexically_shadowed(source.name)
                         or source.name in self._current_func_param_types):
                     continue
@@ -227,7 +258,7 @@ class CollectionHistoryEmitter:
                        "_pf_history_array, (size_t)_pf_history_offset); ")
         elif mutable and (writer := self._history_sharing_writer(receiver)) is not None:
             capture = f"{writer}.save_set(_pf_history_array, (size_t)_pf_history_offset); "
-        if self._array_history_value_names():
+        if self._array_history_value_names() or self._nullable_local_arrays:
             receiver = f"_pf_array_id({receiver})"
         if mutable:
             return (
@@ -254,15 +285,99 @@ class CollectionHistoryEmitter:
         )
 
     def _collection_history_variables(self) -> list:
-        """The declarations whose history the script reads, in key order."""
+        """Chart declarations; the caller owns a function local's history."""
         history = getattr(self.ctx, "collection_history", None) or {}
-        return [history[key] for key in sorted(history)]
+        return [history[key] for key in sorted(history) if history[key].owner is None]
+
+    @cached_property
+    def _local_array_histories(self):
+        history = getattr(self.ctx, "collection_history", None) or {}
+        return {v.decl_node_id: v for v in history.values()
+                if v.owner is not None}
+
+    def _local_array_history_for(self, node):
+        if not self._local_array_histories:
+            return None
+        if isinstance(node, VarDecl):
+            return self._local_array_histories.get(id(node))
+        if isinstance(node, Identifier):
+            binding = (self.ctx.identifier_decl_bindings.get(id(node))
+                       or ValueBindings.declaration_of(node))
+            if binding:
+                return self._local_array_histories.get(binding[0])
+        return None
+
+    @cached_property
+    def _nullable_local_arrays(self):
+        nullable = set()
+        if self._local_array_histories:
+            for node, _ in iter_ast_nodes(self.ctx.ast):
+                if isinstance(node, (VarDecl, Assignment)):
+                    target = node if isinstance(node, VarDecl) else node.target
+                    variable = self._local_array_history_for(target)
+                    if variable and self._selection_contains_na(node.value):
+                        nullable.add(variable.decl_node_id)
+        return nullable
+
+    def _local_array_history_type(self, variable):
+        key = variable.decl_node_id
+        # The array width pass already specializes the declaration binding.
+        spec = self._callable_collection_bindings.get(key) or variable.spec
+        cpp = self._type_spec_to_cpp(spec)
+        return f"_PFArrayHistoryValue<{cpp}>" if key in self._nullable_local_arrays else cpp
+
+    def _nullable_local_array_type(self, node):
+        variable = self._local_array_history_for(node)
+        if variable and variable.decl_node_id in self._nullable_local_arrays:
+            return self._local_array_history_type(variable)
+        return None
+
+    def _local_array_member(self, variable, context):
+        return self._generated_helper_name(
+            ("local-array-history", variable.decl_node_id, context),
+            f"_pf_local_hist_{context or variable.owner}_{variable.ordinal}_{self._safe_name(variable.name)}",
+        )
+
+    def _emit_local_array_history_members(self, lines):
+        for variable in self._local_array_histories.values():
+            if variable.capacity == 1:  # only [0]: the live binding suffices
+                continue
+            cpp = self._local_array_history_type(variable)
+            capacity = self._collection_history_capacity(variable)
+            for context in self._inline_history_contexts_for_owner(variable.owner):
+                member = self._local_array_member(variable, context)
+                lines.append(f"    _PFLocalArrayHistory<{cpp}> {member}{capacity};")
+
+    def _local_array_slot(self, node):
+        variable = self._local_array_history_for(node)
+        if variable is None or variable.capacity == 1:
+            return None
+        name = self._safe_name(variable.name)
+        value = self._active_var_remap.get(name, name)
+        return self._collection_history_member(variable), value
+
+    def _enter_local_array_history(self, node, lines, pad):
+        slot = self._local_array_slot(node)
+        if slot:
+            member, value = slot
+            guard = self._generated_helper_name(("array-slot", member), f"{member}_slot")
+            lines.append(f"{pad}auto {guard} = this->{member}.enter({value}, this->bar_index_);")
+
+    def _close_returned_local_array(self, node, lines, pad):
+        # A named return may move the vector before its Slot destructor.
+        # All other return expressions finish before scope exit freezes it.
+        slot = self._local_array_slot(node)
+        if slot:
+            member, value = slot
+            lines.append(f"{pad}this->{member}.close({value});")
 
     def _collection_history_member(self, variable) -> str:
         """``_pf_collection_hist_<name>``; a later declaration of the same
         name (a sibling block's) gets ``_pf_collection_hist_<ordinal>_<name>``,
         which no Pine name (none starts with a digit) can spell: ``x``'s
         second declaration beside a variable ``x_1``."""
+        if variable.owner is not None:
+            return self._local_array_member(variable, self._current_instance_name)
         prefix = f"{variable.ordinal}_" if variable.ordinal else ""
         return f"_pf_collection_hist_{prefix}{self._safe_name(variable.name)}"
 
@@ -290,11 +405,12 @@ class CollectionHistoryEmitter:
 
     def _emit_collection_history_helper(self, lines: list[str]) -> None:
         variables = self._collection_history_variables()
-        if not variables and not self._array_history_value_names():
+        if not (variables or self._local_array_histories or self._array_history_value_names()):
             return
         float_spec = TypeSpec.primitive("float")
         matrices = [v.spec for v in variables if v.kind == "matrix"]
         array_traits = COLLECTION_HISTORY_CPP
+        frozen_contents = "T(value.get())"
         if getattr(self, "_uses_array_slice_views", False):
             # History freezes contents, not live slice bindings.
             array_traits = array_traits.replace(
@@ -304,13 +420,19 @@ class CollectionHistoryEmitter:
                 "copy(const std::vector<E, A>& value) { return value; }",
                 "copy(const std::vector<E, A>& value) { return value.detached_copy(); }",
             )
+            # A nullable ID can also hold a window. Use the same detached
+            # copy as a bare array when freezing the contents of that ID.
+            frozen_contents = "_PFCollectionTraits<T>::copy(value.get())"
         lines.append(array_traits.strip("\n"))
-        lines.append(COLLECTION_HISTORY_ARRAY_VALUE_CPP.strip("\n"))
+        lines.append(COLLECTION_HISTORY_ARRAY_VALUE_CPP.replace(
+            "@FROZEN_ARRAY_CONTENTS@", frozen_contents).strip("\n"))
         if any(spec.element == float_spec for spec in matrices):
             lines.append(COLLECTION_HISTORY_MATRIX_CPP.strip("\n"))
         if any(spec.element != float_spec for spec in matrices):
             lines.append(COLLECTION_HISTORY_GENERIC_MATRIX_CPP.strip("\n"))
         lines.append(COLLECTION_HISTORY_CLASS_CPP.strip("\n"))
+        if self._local_array_histories:
+            lines.append(_LOCAL_ARRAY_HISTORY_CPP.strip("\n"))
         plan = self._history_sharing_plan()
         if plan is not None:
             lines.append(HISTORY_VERSION_CLOCK_CPP.replace("@CLOCK@", plan.clock_type).strip("\n"))
@@ -421,14 +543,17 @@ class CollectionHistoryEmitter:
                 else f"{member}.at({index})")
 
     def _collection_history_na(self, node) -> str | None:
-        """``na(a[k])``: whether the history holds no copy there (an array
-        variable itself is never na in PineForge; a matrix may be)."""
+        """Whether the indexed snapshot, or the live ID at offset zero, is missing."""
         annotation = history_annotation(node)
         if annotation is None or annotation["use"] != "na":
             return None
         current = self._visit_expr(node.object)
         offset = literal_offset(node)
         if offset == 0:
+            variable = self._collection_history_of(annotation)
+            if variable is not None and variable.owner is not None:
+                return (f"is_na({current})" if variable.decl_node_id in self._nullable_local_arrays
+                        else "false")
             nullable_array = (isinstance(node.object, Identifier)
                               and node.object.name in self._array_history_value_names())
             return (f"is_na({current})" if annotation["kind"] == "matrix"

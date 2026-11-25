@@ -409,9 +409,6 @@ NOT_SUPPORTED = {
     "function_parameter": (
         "f(array<float> x) =>\n    na(x[1]) ? -1 : (x[1]).size()\n"
         "a = array.from(close)\nr = f(a)\n", "parameter"),
-    "function_local": (
-        "f(float y) =>\n    la = array.from(y)\n    na(la[1]) ? -1.0 : (la[1]).get(0)\n"
-        "r = f(close)\n", "function"),
     "method_receiver": (
         "method prevSize(array<float> this) =>\n"
         "    na(this[1]) ? -1 : (this[1]).size()\n"
