@@ -37,7 +37,7 @@ from ..ast_nodes import (
 from ..analyzer.value_bindings import ValueBindings
 from ..collection_history import history_annotation
 from ..errors import Phase
-from ..limits import iter_ast_nodes
+from ..limits import iter_ast_nodes, syntax_children
 from ..pine_spelling import blank_string_literals
 from ..security_contexts import GLOBAL_ANNOTATION
 from ..session_reads import _dropped_arguments
@@ -1811,21 +1811,24 @@ class TaSiteHelper:
         """The lowering of a site with a constructor argument the constructor
         cannot take, or None (the ordinary constructor / runtime-reset path).
         ``kind`` is ``first_call`` / ``series_extreme`` /
-        ``series_percentile`` / ``supertrend``, or ``refused`` (the
-        constructor guard reports it)."""
-        cache = self.__dict__.setdefault("_ta_dynamic_plan_cache", {})
-        key = id(site)
-        if key not in cache:
-            cache[key] = self._build_ta_dynamic_plan(site)
-        plan = cache[key]
-        if plan is None or plan["kind"] == "refused":
+        ``series_percentile`` / ``supertrend``. A series Supertrend period
+        is reported here so the constructor guard cannot blame its factor."""
+        plan = self._ta_cached_plan(site)
+        if plan is not None and plan["kind"] == "refused":
+            if "series_period" in plan:
+                self._refuse_ta_period(site, plan["series_period"])
             return None
         return plan
 
+    def _ta_cached_plan(self, site: "TACallSite") -> dict | None:
+        cache = self.__dict__.setdefault("_ta_dynamic_plan_cache", {})
+        if id(site) not in cache:
+            cache[id(site)] = self._build_ta_dynamic_plan(site)
+        return cache[id(site)]
+
     def _ta_dynamic_refusal(self, site: "TACallSite") -> dict | None:
-        """The refused plan of a site, when it has one."""
-        self._ta_dynamic_plan(site)
-        plan = self.__dict__.get("_ta_dynamic_plan_cache", {}).get(id(site))
+        """Inspect a refusal without raising: unused callable variants can be pruned."""
+        plan = self._ta_cached_plan(site)
         if plan is not None and plan["kind"] == "refused":
             return plan
         return None
@@ -1926,15 +1929,17 @@ class TaSiteHelper:
                 and (self._runtime_ctor_arg_for_reset(arg) is None
                      or self._ta_arg_takes_plan(site, pos, arg)))
         ]
-        if not refused:
+        if not refused and site.class_name != "ta::Supertrend":
             return None
         if len(nodes) != len(site.ctor_args):
-            return {"kind": "refused", "refused": refused}
+            return {"kind": "refused", "refused": refused} if refused else None
         simple = {
             pos: self._simple_ta_arg_cpp_node(bound[pos])
             for pos in refused
         }
-        return self._ta_plan_for(site, refused, simple,
+        if site.class_name == "ta::Supertrend":
+            return self._ta_plan_for(site, refused, simple, bound)
+        return self._ta_plan_for(site, refused, simple, bound,
                                  requested=self._ta_site_is_requested(site),
                                  forwarded=self._ta_length_is_forwarded(site),
                                  persistent=self._ta_length_needs_stable_var(site))
@@ -2089,9 +2094,144 @@ class TaSiteHelper:
                     pending.append(declaration.value)
         return False
 
-    def _ta_plan_for(self, site: "TACallSite", refused: list, simple: dict,
+    def _ta_write_sources(self) -> dict:
+        """The RHS and controlling expressions of each bound scalar write."""
+        cached = self.__dict__.get("_ta_write_sources_cache")
+        if cached is not None:
+            return cached
+        sources = {}
+        # A linked chain shares the guards of earlier switch cases without
+        # copying their entire prefix into every arm.
+        pending = [(self.ctx.ast, None)]
+        while pending:
+            node, controls = pending.pop()
+            if self._budget is not None:
+                self._budget.check(node.loc, Phase.CODEGEN)
+            if (isinstance(node, Assignment) and isinstance(node.target, Identifier)
+                    and ValueBindings.write_declaration(node.target) is not None):
+                sources[id(node)] = (node, controls)
+            if isinstance(node, SwitchStmt):
+                if node.expr is not None:
+                    pending.append((node.expr, controls))
+                    controls = (node.expr, controls)
+                for case, body in node.cases:
+                    pending.append((case, controls))
+                    controls = (case, controls)
+                    pending.extend((stmt, controls) for stmt in body)
+                pending.extend((stmt, controls) for stmt in node.default_body)
+            elif isinstance(node, (IfStmt, WhileStmt, ForStmt, ForInStmt)):
+                if isinstance(node, ForStmt):
+                    guards = (node.start, node.end, node.step)
+                elif isinstance(node, ForInStmt):
+                    guards = (node.iterable,)
+                else:
+                    guards = (node.condition,)
+                for guard in guards:
+                    if guard is not None:
+                        pending.append((guard, controls))
+                        controls = (guard, controls)
+                body = node.body + node.else_body if isinstance(node, IfStmt) else node.body
+                pending.extend((stmt, controls) for stmt in body)
+            else:
+                # Includes selections used as the value of a declaration or store.
+                pending.extend((child, controls) for child in syntax_children(node))
+        self.__dict__["_ta_write_sources_cache"] = sources
+        return sources
+
+    def _ta_period_is_series(self, period) -> bool:
+        """Positive evidence about the bound value; an unrenderable simple
+        expression or a binding merely having storage is not such evidence."""
+        pending = [period]
+        declarations = self.ctx.identifier_decl_bindings
+        seen = set()
+        bindings = set()
+        seen_controls = set()
+        while pending:
+            node = pending.pop()
+            if node is None or id(node) in seen:
+                continue
+            seen.add(id(node))
+            if self._budget is not None:
+                self._budget.check(node.loc, Phase.CODEGEN)
+            if isinstance(node, Identifier):
+                decl = self._ta_read_declaration(node)
+                if isinstance(decl, (VarDecl, TupleAssign)):
+                    binding = (id(decl), node.name)
+                    if binding in bindings:
+                        continue
+                    bindings.add(binding)
+                    if (decl.annotations or {}).get("qualifier") == "series":
+                        return True
+                    pending.append(decl.value)
+                    for write_id in self._writes_by_decl.get(binding, ()):
+                        write, controls = self._ta_write_sources()[write_id]
+                        if isinstance(decl, VarDecl) and (decl.is_var or decl.is_varip):
+                            if write.op != ":=" or any(
+                                isinstance(read, Identifier)
+                                and self._ta_read_declaration(read) is decl
+                                for read, _ in iter_ast_nodes(write.value)
+                            ):
+                                return True
+                        pending.append(write.value)
+                        while controls is not None and id(controls) not in seen_controls:
+                            seen_controls.add(id(controls))
+                            guard, controls = controls
+                            pending.append(guard)
+                elif (decl is None and declarations.get(id(node)) is None
+                      and node.name != "na" and node.name in sigs.BUILTIN_VARIABLES
+                      and not ValueBindings.is_ctor_parameter(node)):
+                    return True
+            elif isinstance(node, Subscript):
+                return True
+            elif isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
+                ns = node.object.name
+                if not ValueBindings.has_value_binding(node.object) and (
+                    ns == "barstate" or ns == "ta"
+                    or ns == "session" and node.member in sigs.SESSION_FLAG_MEMBERS
+                ):
+                    return True
+            elif isinstance(node, FuncCall):
+                name, ns = self._resolve_callee(node.callee)
+                if (isinstance(node.callee, MemberAccess)
+                        and isinstance(node.callee.object, Identifier)
+                        and ValueBindings.has_value_binding(node.callee.object)):
+                    continue
+                if (self._is_source_input(node) or ns == "ta"
+                        or (ns == "math" and name in ("sum", "random"))
+                        or (ns == "timeframe" and name == "change")):
+                    return True
+                if (ns in ("str", "math", "timeframe")
+                        or ns is None and name in ("int", "float", "bool", "string", "na", "nz")):
+                    pending.extend(node.args)
+                    pending.extend(node.kwargs.values())
+            elif isinstance(node, IfStmt):
+                pending.append(node.condition)
+                pending.extend(arm[-1] for arm in (node.body, node.else_body) if arm)
+            elif isinstance(node, SwitchStmt):
+                pending.append(node.expr)
+                for case, arm in node.cases:
+                    pending.append(case)
+                    if arm:
+                        pending.append(arm[-1])
+                if node.default_body:
+                    pending.append(node.default_body[-1])
+            elif isinstance(node, (VarDecl, Assignment, TupleAssign)):
+                pending.append(node.value)
+            elif isinstance(node, (ExprStmt, BinOp, UnaryOp, Ternary, TupleLiteral)):
+                pending.extend(syntax_children(node))
+        return False
+
+    def _refuse_ta_period(self, site: "TACallSite", shown: str) -> None:
+        from ..diagnostic_codes import render_diagnostic
+
+        message, hint = render_diagnostic(
+            "PF-E5009", {"a": shown, "class_name": site.class_name},
+        )
+        self._codegen_error(site.node, message, hint=hint)
+
+    def _ta_plan_for(self, site: "TACallSite", refused: list, simple: dict, bound: list,
                      requested: bool = False, forwarded: bool = False,
-                     persistent: bool = False) -> dict:
+                     persistent: bool = False) -> dict | None:
         """The plan of a site whose ``refused`` constructor arguments have the
         context-free C++ ``simple`` (None: series). A ``requested`` copy (a
         request.security evaluator's) keeps the refusal of a series ta.sma
@@ -2111,6 +2251,13 @@ class TaSiteHelper:
         elif family in self._TA_SERIES_EXTREME_CLASSES:
             kind = "first_call" if simple[refused[0]] is not None else "series_extreme"
         elif family == "supertrend":
+            # Both callers supply constructor nodes in signature order, with
+            # helper actuals substituted. Only atrPeriod requires a simple int.
+            if len(bound) > 1 and self._ta_period_is_series(bound[1]):
+                shown = self._arith_expr_to_str(bound[1]) or site.ctor_args[1]
+                return {"kind": "refused", "refused": [1], "series_period": shown}
+            if not refused:
+                return None
             kind = "supertrend"
         elif all(simple[pos] is not None for pos in refused):
             kind = "first_call"
@@ -2191,16 +2338,20 @@ class TaSiteHelper:
             and ((self._runtime_ctor_arg_for_reset(arg) is None and not stability[pos])
                  or self._ta_bound_arg_takes_plan(site, pos, bound[pos]))
         ]
-        if not refused:
+        if not refused and site.class_name != "ta::Supertrend":
             return None
         bound_simple = {
             pos: self._simple_ta_arg_cpp_node(node)
-            for pos, node in enumerate(bound) if node is not None
+            for pos, node in enumerate(bound) if refused and node is not None
         }
         plan = self._ta_plan_for(
-            site, refused, {pos: bound_simple.get(pos) for pos in refused},
+            site, refused, {pos: bound_simple.get(pos) for pos in refused}, bound,
             requested=True)
+        if plan is None:
+            return None
         if plan["kind"] == "refused":
+            if "series_period" in plan:
+                self._refuse_ta_period(site, plan["series_period"])
             forced = [pos for pos in plan["refused"]
                       if stability[pos] or self._runtime_ctor_arg_for_reset(ctor_args[pos]) is not None]
             if forced:
