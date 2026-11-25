@@ -39,6 +39,7 @@ from ..collection_history import history_annotation
 from ..errors import Phase
 from ..limits import iter_ast_nodes
 from ..pine_spelling import blank_string_literals
+from ..security_contexts import GLOBAL_ANNOTATION
 from ..session_reads import _dropped_arguments
 from ..symbols import PineType
 from .helpers import pine_index_int_cast
@@ -2002,8 +2003,10 @@ class TaSiteHelper:
         counter, a namespace prefix).
 
         The analyzer's record of the read's first visit
-        (``identifier_binding_nodes``) is authoritative, None included. Its
-        type visit records nothing for a read it leaves to a namespace
+        (``identifier_binding_nodes``) is authoritative, None included, for
+        reads written in that scope. A global copied into a request payload
+        retains its caller's declaration even if the helper precedes it.
+        The type visit records nothing for a read it leaves to a namespace
         handler (a variable spelled like a built-in namespace:
         ``Analyzer._visit_Identifier``) or does not reach (a keyword value a
         dispatcher does not visit). Such a read answers from the lexical
@@ -2015,6 +2018,17 @@ class TaSiteHelper:
         ``_TA_UNPLACED_DECLARATION``, which a caller must not take for an
         absent binding."""
         declarations = getattr(self.ctx, "identifier_binding_nodes", {}) or {}
+        if (read.annotations or {}).get(GLOBAL_ANNOTATION):
+            bound = ValueBindings.declaration_of(read)
+            if bound is not None:
+                return self._ta_declarations().get(bound, self._TA_UNPLACED_DECLARATION)
+            # A tree without authored-use metadata still has a binding if
+            # the type visit actually saw the program declaration.
+            decl = declarations.get(id(read))
+            if (id(decl) in self._direct_program_var_decl_nodes
+                    or id(decl) in self._direct_program_tuple_decl_nodes):
+                return decl
+            return self._TA_UNPLACED_DECLARATION
         if id(read) in declarations:
             return declarations[id(read)]
         bound = ValueBindings.declaration_of(read)

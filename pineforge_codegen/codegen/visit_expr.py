@@ -823,11 +823,13 @@ class ExprVisitor:
         )
         # Inline known constants (literals). Input-backed names are NOT inlined
         # because strategy_set_input() can override them at runtime; emit the
-        # variable name and let get_input_*() produce the current value.
+        # variable name and let get_input_*() produce the current value. Each
+        # callable clone also initializes from the outer storage it captures.
         if (name in self._known_vars
                 and name not in self._input_backed_vars
                 and not primitive_shadow_read
-                and not self._known_var_is_lexically_shadowed(name)):
+                and not self._known_var_is_lexically_shadowed(name)
+                and id(node) not in self._outer_var_init_reads):
             val = self._known_vars[name]
             if isinstance(val, bool):
                 return "true" if val else "false"

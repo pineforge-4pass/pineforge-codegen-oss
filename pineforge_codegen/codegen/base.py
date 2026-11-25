@@ -462,6 +462,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             and not stmt.is_var
             and not stmt.is_varip
         }
+        # A persistent local's initializer runs before its private member
+        # becomes visible. Each clone must read the storage captured there;
+        # its global's constant value is still available for TA sizing.
+        self._outer_var_init_reads = {
+            id(read)
+            for decl, member, _, _, callable_scoped in ctx.var_member_metadata_by_node.values()
+            if callable_scoped and member != decl.name and decl.value is not None
+            for read, _ in iter_ast_nodes(decl.value)
+            if isinstance(read, Identifier) and read.name == decl.name
+            and (binding := ctx.identifier_decl_bindings.get(id(read))) is not None
+            and binding[0] in self._ordinary_global_var_decl_nodes
+        }
         self._direct_program_var_decl_nodes: set[int] = {
             id(stmt)
             for stmt in ctx.ast.body
@@ -1711,6 +1723,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 for part in self._walk_ast(value):
                     if (isinstance(part, Identifier)
                             and (part.name in statement_values
+                                 or (id(part) in self._outer_var_init_reads
+                                     and part.name not in self._input_backed_vars)
                                  or first_writes.get(part.name, before) < before)
                             and (not globals_only
                                  or scopes.get(id(part)) == "global")):

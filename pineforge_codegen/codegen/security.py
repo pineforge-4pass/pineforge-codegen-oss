@@ -1693,6 +1693,15 @@ class SecurityEmitter:
                 if isinstance(known, (int, float, bool)):
                     literal = BoolLiteral if isinstance(known, bool) else NumberLiteral
                     return literal(value=known, loc=value.loc)
+                # A write in an arm can itself be why the incoming global is
+                # no longer a setup constant. Report that side effect at its
+                # statement, without substituting the declaration's initializer.
+                binding = self.ctx.identifier_decl_bindings.get(id(value))
+                writes = self._writes_by_decl.get(binding)
+                if writes and self._security_identifier_is_global_binding(value):
+                    for stmt, _ in iter_ast_nodes(node):
+                        if id(stmt) in writes:
+                            fail(stmt, "statement", "outer assignment")
                 if value.name in BAR_BUILTINS or value.name in self.ctx.series_vars:
                     fail(value, "series", f"bar-state read {value.name}")
                 fail(value, "name", f"undefined or non-setup name {value.name}")

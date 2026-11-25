@@ -17,6 +17,7 @@ from ..ast_nodes import (
 )
 from ..errors import Phase
 from ..limits import TimeBudget, iter_ast_nodes, syntax_children
+from ..security_contexts import GLOBAL_ANNOTATION
 from .diagnostics import DiagnosticsHelper
 from .tables import BUILTIN_VARS
 
@@ -165,6 +166,10 @@ class ValueBindings(DiagnosticsHelper):
 
     def ctor_binding(self, node: Identifier) -> tuple[int, str] | None:
         """Current-tree binding, including imports whose v5 policy skips validation."""
+        if (node.annotations or {}).get(GLOBAL_ANNOTATION):
+            # A payload actual was copied into the helper. Its caller bound
+            # it already; a formal or local here cannot substitute for it.
+            return self.declaration_of(node)
         return self.declaration_bindings.get(id(node), self._v5_ctor_bindings.get(id(node)))
 
     @staticmethod
