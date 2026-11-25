@@ -848,8 +848,7 @@ class SecurityEmitter:
                 item, f"std::declval<_RuntimeSec{sec_id}&>().") + ")"
             + f" _runtime_request_{sec_id}(const std::string& authored_tf, bool lookahead, bool gaps) {{",
         ))
-        self._emit_ta_runtime_reset(lines, indent=2)
-        info = self._security_eval_info[sec_id]
+        instance_resets = self._emit_ta_runtime_reset(lines, indent=2).get(sec_id, ())
         lower = "true" if item.get("is_lower_tf_array") else "false"
         ha = "true" if item.get("heikinashi") else "false"
         lines.extend((
@@ -859,7 +858,20 @@ class SecurityEmitter:
             "            + (lookahead ? \":1\" : \":0\") + (gaps ? \":1\" : \":0\");",
             f"        const pineforge::RuntimeContextKey key{{{sec_id}, arguments, service.active_context()}};",
             "        const auto handle = service.get_or_create(key, [&]() {",
-            f"            return std::make_unique<_RuntimeSec{sec_id}>(this, tf, lookahead, gaps, {lower}, {ha});",
+        ))
+        factory = f"std::make_unique<_RuntimeSec{sec_id}>(this, tf, lookahead, gaps, {lower}, {ha})"
+        if instance_resets:
+            # The new cursor exists here, before any events are replayed.
+            # Input getters still resolve on the strategy that owns the factory.
+            lines.append(f"            auto _pf_out = {factory};")
+            bindings = {name: f"_pf_out->{name}" for name in names}
+            bindings["_pf_state"] = "(*_pf_out)"
+            for reset in instance_resets:
+                lines.append("            " + self._runtime_security_cpp(reset, bindings))
+            lines.append("            return _pf_out;")
+        else:
+            lines.append(f"            return {factory};")
+        lines.extend((
             "        });",
             "        service.advance(handle, runtime_security_frontier());",
             f"        auto& state = dynamic_cast<_RuntimeSec{sec_id}&>(service.published(handle));",

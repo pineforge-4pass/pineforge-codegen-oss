@@ -7240,15 +7240,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self,
         *,
         security_source_node: ASTNode | None = None,
-    ) -> list[str]:
-        """Collect reassignment statements for every TA object whose ctor args
-        depend on an input-backed variable. Returned strings are raw C++
-        assignment statements (no enclosing block/indent). Empty list when no
-        site depends on an input, in which case no reset code is needed.
-        """
-        if not self.ctx.ta_call_sites:
-            return []
+    ) -> tuple[list[str], dict[int, list[str]]]:
+        """Collect per-run resets and the resets that need an open request's cursor."""
         resets: list[str] = []
+        instance_resets: dict[int, list[str]] = {}
+        if not self.ctx.ta_call_sites:
+            return resets, instance_resets
 
         # Main-context TA objects
         for _ta_idx, site in enumerate(self.ctx.ta_call_sites):
@@ -7340,17 +7337,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                                 variant.get("binding_stack", ()),
                             )
                         if rt is not None:
-                            # A direct request.security payload has no helper
-                            # binding stack. Closed requests use the
-                            # requested-context lowering used by the dynamic TA
-                            # path; runtime requests keep the chart-context
-                            # reset because their evaluator owns the requested
-                            # state.
-                            rendered = (
-                                rt
-                                if info.get("runtime_context")
-                                else self._ta_payload_cpp(rt, info["sec_id"])
-                            )
+                            rendered = self._ta_payload_cpp(rt, info["sec_id"])
                             any_runtime = True
                         else:
                             rendered = (
@@ -7362,20 +7349,24 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                             rendered = self._ta_ctor_bool_cpp(rendered)
                         runtime_args.append(rendered)
                     if any_runtime:
-                        resets.append(
-                            f"{variant['member_name']} = {self._ta_fixed_cpp_type(site)}({', '.join(runtime_args)});"
+                        args = ", ".join(runtime_args)
+                        target = resets
+                        # A direct or helper-bound cursor read needs the new
+                        # instance. Input-only lengths still seed its prototype.
+                        if (info.get("runtime_context")
+                                and info["tf_expr"] in cpp_code_only(args)):
+                            target = instance_resets.setdefault(info["sec_id"], [])
+                        target.append(
+                            f"{variant['member_name']} = {self._ta_fixed_cpp_type(site)}({args});"
                         )
 
-        return resets
+        return resets, instance_resets
 
-    def _emit_ta_runtime_reset(self, lines: list[str], indent: int = 2) -> None:
-        """Emit an inline TA reset block gated by ``_ta_initialized_``. Used
-        from both ``on_bar`` and ``evaluate_security`` so whichever runs first
-        on a run actually re-sizes TA buffers from current input values before
-        any compute happens."""
-        resets = self._collect_ta_runtime_resets()
+    def _emit_ta_runtime_reset(self, lines: list[str], indent: int = 2) -> dict[int, list[str]]:
+        """Emit the first-use strategy reset and return the resets owned by each factory."""
+        resets, instance_resets = self._collect_ta_runtime_resets()
         if not resets:
-            return
+            return instance_resets
 
         pad = "    " * indent
         lines.append(f"{pad}if (!_ta_initialized_) {{")
@@ -7383,3 +7374,4 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.append(f"{pad}    {r}")
         lines.append(f"{pad}    _ta_initialized_ = true;")
         lines.append(f"{pad}}}")
+        return instance_resets

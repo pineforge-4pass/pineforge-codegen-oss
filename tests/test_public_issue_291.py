@@ -343,6 +343,37 @@ control = readCopy()
     _assert_values(_values(out, "control"), expected, "MACD plain-copy control")
     _assert_values(_values(out, "v"), expected, "MACD tuple reader")
 
+    reported = """//@version=6
+strategy('repro')
+[macdLine, signalLine, hist] = ta.macd(close, 12, 26, 9)
+float histCopy = hist
+readHist() => hist
+v = readHist()
+diff = v - hist
+// @pf-trace v=v
+// @pf-trace diff=diff
+plot(v)
+"""
+    out = native("tuple_macd_reported", _traced(reported, "hist"))
+    expected = _values(out, "hist")
+    # The issue records the first TradingView histogram value at bar 33
+    # for these lengths. The synthetic feed is only for the native witness.
+    first = next((bar for bar, value in enumerate(expected) if not math.isnan(value)), None)
+    if first != 33:
+        raise SemanticMismatch(f"MACD histogram first defined at bar {first}; expected 33")
+    tail = expected[33:]
+    if not all(math.isfinite(value) for value in tail):
+        raise SemanticMismatch("MACD histogram has non-finite values after warm-up")
+    _require(len({value for value in tail if value != 0}) > 8,
+             "Reported MACD histogram never supplied varying nonzero values after warm-up")
+    _assert_values(_values(out, "v"), expected, "Reported MACD tuple reader")
+    _assert_values(_values(out, "diff"), [math.nan] * 33 + [0.0] * len(tail),
+                   "MACD reader minus histogram")
+
+    control = reported.replace("readHist() => hist\n", "readHist() => histCopy\n")
+    copied = native("tuple_macd_copy", control)
+    _assert_values(_values(copied, "v"), expected, "Reported MACD plain-copy control")
+
 
 @pytest.mark.parametrize("scope", ("global", "block", "callable"))
 @pytest.mark.parametrize("initializer", ("na", "string(na)"))
@@ -540,6 +571,29 @@ before = mult
         _assert_values(_values(out, "before", tag), [value] * BARS, f"{tag}/input at declaration")
         _assert_values(_values(out, "after", tag), expected, f"{tag}/input after assignment")
     _require(_values(out, "before") != _values(out, "before", "override"), "Ignored input override")
+
+    if (spelling, mutation) == ("float", "double"):
+        # Run the reported declaration and its separate-input workaround
+        # independently so neither input binding can affect the other.
+        reported = """//@version=6
+strategy('repro')
+mult = input.float(2.0, 'Mult')
+mult := mult * 2
+// @pf-trace mult=mult
+plot(mult)
+"""
+        control = reported.replace(
+            "mult = input.float(2.0, 'Mult')",
+            "multInput = input.float(2.0, 'Mult')\nmult = multInput",
+        )
+        overrides = {"Mult": -3.5}
+        direct = native("input_float_double_reported", reported, overrides)
+        separate = native("input_float_double_separate", control, overrides)
+        for tag, doubled in (("default", 4.0), ("override", -7.0)):
+            _assert_values(_values(separate, "mult", tag), [doubled] * BARS,
+                           f"{tag}/separate input control")
+            _assert_values(_values(direct, "mult", tag), [doubled] * BARS,
+                           f"{tag}/reassigned input")
 
 
 @pytest.mark.parametrize("family", ("bool", "string", "color"))
