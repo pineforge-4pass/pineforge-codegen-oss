@@ -4578,13 +4578,14 @@ class SecurityEmitter:
 
     def _collect_security_expr_hist_subscripts(
         self, node, resolving: set[str] | None = None
-    ) -> list[Subscript]:
+    ) -> list[tuple[Subscript, bool]]:
         """Subscripted helper-call results needing security-context history:
         in the payload, the globals it reads, and the bodies of the user
         functions it calls (``h() => nz(g()[1])``). One inside a helper body
         is kept only where the payload reaches it once: two inlines of it
         (``h() + h()``) would each need their own history, and are refused
-        where lowered, as every earlier build refused them."""
+        where lowered, as every earlier build refused them. The flag says
+        whether the read may be skipped on a completed requested bar."""
         if node is None:
             return []
         if resolving is None:
@@ -4595,6 +4596,7 @@ class SecurityEmitter:
         in_helper: set[int] = set()
         reached: dict[int, int] = {}
         helpers: list[str] = []
+        may_skip: set[int] = set()
 
         def add(n: Subscript) -> None:
             if (n is node
@@ -4613,14 +4615,16 @@ class SecurityEmitter:
                 seen.add(key)
                 out.append(n)
 
-        def walk(n) -> None:
+        def walk(n, eager: bool) -> None:
             if n is None:
                 return
             if isinstance(n, Identifier):
                 global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
                 if n.name in global_expr_map and n.name not in resolving:
                     resolving.add(n.name)
-                    walk(global_expr_map[n.name])
+                    walk(global_expr_map[n.name],
+                         eager and self._security_identifier_is_global_binding(n)
+                         and n.name not in self._global_mutable_infos)
                     resolving.remove(n.name)
                 return
             if (isinstance(n, FuncCall) and isinstance(n.callee, Identifier)
@@ -4630,7 +4634,7 @@ class SecurityEmitter:
                 if (info is not None and getattr(info, "node", None) is not None
                         and not self._security_pure_body(info.node)):
                     helpers.append(n.callee.name)
-                    walk(info.node.body)
+                    walk(info.node.body, eager)
                     helpers.pop()
             if (
                 isinstance(n, Subscript)
@@ -4642,12 +4646,25 @@ class SecurityEmitter:
                 )
             ):
                 add(n)
+                if not eager:
+                    may_skip.add(id(n))
             for child in self._security_dependency_children(n):
-                walk(child)
+                # Follow only edges that must evaluate the child. In
+                # particular, helper arguments can be substituted into lazy
+                # uses in their callee; their mere presence is not a read.
+                strict = (
+                    isinstance(n, (list, tuple, ExprStmt, TupleLiteral, UnaryOp))
+                    or (isinstance(n, BinOp) and
+                        (n.op not in ("and", "or") or child is n.left))
+                    or (isinstance(n, (Ternary, IfStmt)) and child is n.condition)
+                    or (isinstance(n, VarDecl) and not (n.is_var or n.is_varip))
+                    or (isinstance(n, Assignment) and child is n.value)
+                )
+                walk(child, eager and strict)
 
-        walk(node)
+        walk(node, True)
         return [
-            n for n in out
+            (n, id(n) in may_skip) for n in out
             if id(n) not in in_helper or reached[id(n)] == 1
             or self._security_global_history_value(n) is n.object
         ]
@@ -4852,7 +4869,8 @@ class SecurityEmitter:
             # advanced where the evaluator opens its slot.
             self._security_bar_index_secs.add(sec_id)
             lines.append(f"    int {self._security_bar_index_member(sec_id)} = -1;")
-        for idx, node in enumerate(self._collect_security_expr_hist_subscripts(expr_node)):
+        reads = self._collect_security_expr_hist_subscripts(expr_node)
+        for idx, (node, may_skip) in enumerate(reads):
             # A session.* flag is a bool: its history reads false, not na,
             # before the first requested bar.
             value = self._security_global_history_value(node)
@@ -4877,6 +4895,7 @@ class SecurityEmitter:
                 "type": cpp_t,
                 "object": node.object,
                 "tuple_global": value is node.object,
+                "may_skip": may_skip,
             }
             lines.append(f"    Series<{cpp_t}> {name}{mbb_suffix};")
 
@@ -9991,7 +10010,8 @@ class SecurityEmitter:
                     if (hist, cpp_t) not in pushes:
                         fallback = None
                         value = self._security_global_history_value(expr_node)
-                        if value is not None and self._security_pure_expr(value, set()):
+                        if (meta["may_skip"] and value is not None
+                                and self._security_pure_expr(value, set())):
                             # The global has a value even on a skipped read.
                             # Render only its initializer in global scope; the
                             # index and enclosing branch must stay lazy.
