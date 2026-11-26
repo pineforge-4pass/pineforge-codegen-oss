@@ -334,9 +334,9 @@ class TaSiteHelper:
         top level, control-flow bodies, user-function bodies and UDT field
         defaults. Entering a statement resets both flags, expression nodes
         propagate them, and a ``request.security*`` payload is skipped because
-        its own evaluator lowers it. Consumed only by the block-scope opt-outs
-        in ``_ta_site_uses_precalc``; top-level statement operands are governed
-        by ``_lazy_edge_ta_hoist_plan`` instead.
+        its own evaluator lowers it. Consumed by the precalc gate in
+        ``_ta_site_uses_precalc``: a site below a lazy edge that
+        ``_lazy_edge_ta_hoist_plan`` does not hoist never precalcs.
         """
         cached = getattr(self, "_lazy_scope_ta_call_nodes", None)
         if cached is not None:
@@ -483,7 +483,8 @@ class TaSiteHelper:
     # 39/39 per-execution, na until three executed samples -- plus the exact
     # mirrors ``crossunder``/``falling``) keeps the inline compute and never
     # precalcs. Every other family keeps its existing lowering unchanged
-    # (inline compute when reached; precalc when static) until a tape pins
+    # (inline compute when reached, in batch and inline runs alike: a site
+    # below a lazy edge precalcs only when it is hoisted) until a tape pins
     # it -- ``_lazy_edge_hoist_plan()["skipped"]`` lists them per script.
     LAZY_EVERY_BAR_TA = frozenset({"highest", "lowest", "sma", "ema"})
     LAZY_SOURCE_CLOCK_TA = frozenset({"change", "mom", "roc"})
@@ -719,19 +720,19 @@ class TaSiteHelper:
         per-execution inline compute (cum/barssince/valuewhen/cross*/rising/...)
         must never precalc.
 
-        Re-pinned: the old opt-out for a chart ``ta.sma`` under an
-        ``and`` RHS (pf-probe-oliver-dual-vol-sma, "eager precalc is
-        TV-incorrect") and the matching recursive ``ta.ema`` rule encoded a
-        per-call clock that TradingView refuted for top-level shapes (a daily
-        US-stock probe, ``... and close > ta.sma(close,5)[1]``: the every-bar
-        clock matched every trade and the per-call clock did not; ``ta.ema``
-        likewise). The analyzer never marks a site inside an
-        ``if``/loop/function scope static, so after hoisting the opt-outs
-        only reach a static lazy-edge ``ta.sma``/``ta.ema`` that is not a
-        top-level statement operand -- in practice a UDT field default
-        (``test_ta_precalc_walks_type_field_defaults``), whose clock is the
-        ``Type.new()`` call site's and may sit in a block. Other TA families
-        and request.security sites retain their existing behavior."""
+        Every other site below a lazy edge (``_ta_call_nodes_under_lazy_rhs``:
+        an ``and``/``or`` right operand or a ``?:`` arm, in any statement) is
+        stepped only on the bars that reach it on the inline path, so it never
+        precalcs, whatever its family: precalculate() would step it on every
+        chart bar, and a batch run would read values that the inline run of
+        the same script never computes. The bare twins of the every-bar tapes
+        (``? ta.sma(close, 5) : na``, ``? ta.highest(high, 5) : na``) are
+        per-execution on TradingView
+        (``tests/test_lazy_edge_ta_every_bar.py``); the old opt-outs covered
+        only ``ta.sma`` under an ``and`` RHS and ``ta.ema``. The analyzer
+        never marks a site inside an ``if``/loop/function scope static, and a
+        ``request.security*`` payload is not classified: its own evaluator
+        lowers it."""
         if not getattr(site, "is_static", False):
             return False
         if self._ta_dynamic_plan(site) is not None:
@@ -748,18 +749,13 @@ class TaSiteHelper:
             return False
         if node is not None and id(node) in plan["call_nodes"]:
             return all(self._expr_safe_for_ta_precalc(arg) for arg in site.compute_args)
-        ta_name = self._ta_name_from_site(site)
-        if (
-            ta_name == "sma"
-            and node is not None
-            and id(node) in self._ta_call_nodes_under_and_rhs()
-        ):
-            return False
-        if (
-            ta_name == "ema"
-            and node is not None
-            and id(node) in self._ta_call_nodes_under_lazy_rhs()
-        ):
+        if node is not None and id(node) in self._ta_call_nodes_under_lazy_rhs():
+            # Reached-only on the inline path: an ``and``/``or`` right operand
+            # or a ``?:`` arm the hoist left alone steps the indicator only on
+            # the bars that reach it. precalculate() steps it on every chart
+            # bar, so a batch run read values the inline run never computes
+            # (``take ? ta.sma(close, 3) : na``: the closes of the unselected
+            # bars entered the window). Every family, not only sma/ema.
             return False
         return all(self._expr_safe_for_ta_precalc(arg) for arg in site.compute_args)
 
