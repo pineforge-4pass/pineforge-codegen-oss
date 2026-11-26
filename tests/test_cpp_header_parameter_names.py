@@ -45,6 +45,11 @@ def test_header_and_parameter_names_escape_without_changing_input_titles(name, v
     # ta.mfi, ta.rci and ta.cci.
     "PINEFORGE_HAS_PINE_SAR", "PINEFORGE_HAS_PINE_DMI_REFERENCE",
     "PINEFORGE_HAS_PINE_MFI", "PINEFORGE_HAS_PINE_RCI", "PINEFORGE_HAS_PINE_CCI",
+    # One feature macro of each series-length header, and one of the three
+    # the engine also defines with a word break; the whole list is held to
+    # the reserved names in tests/test_pine_source_ta_types.py.
+    "PINEFORGE_HAS_PINE_SERIES_WMA", "PINEFORGE_HAS_PINE_SERIES_MATHSUM",
+    "PINEFORGE_HAS_PINE_SERIES_MATH_SUM", "PINEFORGE_HAS_PINE_SERIES_FALLING",
 ])
 def test_audited_header_macros_escape_and_keep_public_input_keys(name):
     result = transpile_full(

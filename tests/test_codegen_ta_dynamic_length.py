@@ -19,8 +19,12 @@ rules and their tapes are in the engine header
 * simple length (fixed for the run) of any family:
   ``pineforge::source::FirstCallBound<class>``, the constant-length class built
   on the call's first execution, the length checked by ``simple_ta_length``;
+* series length of ta.sma and of the other window functions TradingView
+  compiles that way (ta.wma, ta.stdev, ta.cci, ...): the function's
+  ``pineforge::source::Series*`` class, the length passed last on every call
+  (``tests/test_ta_series_length_classes.py``);
 * series length of another family: still refused (TradingView refuses it for
-  the recursive ones; the other window functions are not lowered yet).
+  the recursive ones).
 
 Constant- and input-length calls keep their constructor cadence; EMA-family
 objects use the paired checked source adapters for every qualifier.
@@ -662,7 +666,8 @@ plot(a + b)
 
 
 @pytest.mark.parametrize("call", [
-    "ta.wma(close, n)", "ta.stdev(close, n)",
+    # ta.wma and ta.stdev left this list: TradingView compiles their series
+    # length, and tests/test_ta_series_length_classes.py pins their lowering.
     "ta.rsi(close, n)", "ta.ema(close, n)", "ta.atr(n)",
 ])
 def test_other_series_lengths_stay_refused(call: str) -> None:

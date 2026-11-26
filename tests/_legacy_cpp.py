@@ -10,7 +10,8 @@ from tests._cpp_tokens import code_only, regions
 # Exact source-bearing spellings emitted by base.py (host base),
 # emit_top.py (its includes, host/config/override uses), checked_settings.py
 # (config), security.py (host time_close), and ta.py (length adapters and
-# every Pine-layer type of ``_TA_PINE_LAYER_CLASSES``).
+# every Pine-layer type of ``_TA_PINE_LAYER_CLASSES`` and
+# ``_TA_SERIES_LENGTH_CLASSES``).
 # Do not allow arbitrary namespaces, paths, or source-qualified members:
 # they could hide an unrenamed script identifier.
 _EMITTER_SOURCE_SPELLINGS = (
@@ -18,6 +19,9 @@ _EMITTER_SOURCE_SPELLINGS = (
     "#include <pineforge/source/pine_ta_length.hpp>",
     "#include <pineforge/source/pine_ta_flat_range.hpp>",
     "#include <pineforge/source/pine_ta_cci.hpp>",
+    "#include <pineforge/source/pine_ta_series_ma.hpp>",
+    "#include <pineforge/source/pine_ta_series_stats.hpp>",
+    "#include <pineforge/source/pine_ta_series_osc.hpp>",
     "pineforge::source::PineStrategyHost",
     "pineforge::source::PineStrategyConfig",
     "pineforge::source::StrategyOverrides",
@@ -42,6 +46,33 @@ _EMITTER_SOURCE_SPELLINGS = (
     "pineforge::source::PineMfi",
     "pineforge::source::PineRci",
     "pineforge::source::PineCci",
+    "pineforge::source::SeriesWma",
+    "pineforge::source::SeriesVwma",
+    "pineforge::source::SeriesAlma",
+    "pineforge::source::SeriesLinreg",
+    "pineforge::source::SeriesBb",
+    "pineforge::source::SeriesBbw",
+    "pineforge::source::SeriesVwapBands",
+    "pineforge::source::SeriesStdev",
+    "pineforge::source::SeriesVariance",
+    "pineforge::source::SeriesDev",
+    "pineforge::source::SeriesRange",
+    "pineforge::source::SeriesMedian",
+    "pineforge::source::SeriesMode",
+    "pineforge::source::SeriesPercentrank",
+    "pineforge::source::SeriesPercentileLinear",
+    "pineforge::source::SeriesCorrelation",
+    "pineforge::source::SeriesMathSum",
+    "pineforge::source::SeriesStoch",
+    "pineforge::source::SeriesCci",
+    "pineforge::source::SeriesMfi",
+    "pineforge::source::SeriesMom",
+    "pineforge::source::SeriesRoc",
+    "pineforge::source::SeriesCmo",
+    "pineforge::source::SeriesWpr",
+    "pineforge::source::SeriesCog",
+    "pineforge::source::SeriesRising",
+    "pineforge::source::SeriesFalling",
     "pineforge::source::FirstCallBound",
     "pineforge::source::ta_number",
     "pineforge::source::simple_ta_length",

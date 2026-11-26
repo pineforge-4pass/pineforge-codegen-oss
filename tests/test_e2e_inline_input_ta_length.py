@@ -428,17 +428,19 @@ def test_inline_input_matches_bound_spelling(case_name: str, case_runs) -> None:
 # when an inline input is one of its leaves: the input is a stable leaf, the
 # rest of the expression is not.
 #
-# TradingView refuses a series length for ta.ema and ta.rsi, and there is no
-# recorded result for ta.wma, so these refusals keep the plain wording (the
-# second element of a row is the name the refusal gives the call). The ta.sma
-# row that stood here is lowered on the chart: its test follows this one.
+# TradingView refuses a series length for ta.ema, ta.rsi and ta.rma, so these
+# refusals keep the plain wording (the second element of a row is the name
+# the refusal gives the call). The ta.sma row that stood here is lowered on
+# the chart: its test follows this one. The last row was a ta.wma call until
+# a series ta.wma length was lowered to its engine series class as well
+# (tests/test_ta_series_length_classes.py).
 SERIES_LENGTHS = (
     ('ta.ema(close, close > open ? input.int(2, "A") : input.int(4, "B"))',
      "ta::EMA", '(close > open) ? input.int(2, "A") : input.int(4, "B")', ""),
     ('ta.rsi(close, math.max(input.int(14, "Len"), int(volume)))',
      "ta::RSI", 'math.max(input.int(14, "Len"), int(volume))', ""),
-    ('ta.wma(close, input.source(close, "Src"))',
-     "ta::WMA", 'input.source(close, "Src")', ""),
+    ('ta.rma(close, input.source(close, "Src"))',
+     "ta::RMA", 'input.source(close, "Src")', ""),
 )
 
 

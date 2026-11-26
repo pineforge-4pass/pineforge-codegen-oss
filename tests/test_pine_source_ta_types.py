@@ -6,9 +6,11 @@ source-layer types ``PineSar``, ``PineDmiReference``, ``PineMfi``, ``PineRci``
 and ``PineCci`` (``codegen/ta.py::_TA_PINE_LAYER_CLASSES``).
 
 The routing test is the emitter's shape: every declaration, reset and factory
-of a site spells the selected type. The table test holds the class table, the
-include and guard texts, the reserved macro names and the test helpers'
-spelling list to one another. The hosted tests run the emitted translation
+of a site spells the selected type. The table test holds the two class tables
+(the fixed types and the types of a per-bar length,
+``_TA_SERIES_LENGTH_CLASSES``), the include and guard texts, the reserved
+macro names and the test helpers' spelling list to one another. The hosted
+tests run the emitted translation
 unit on invented bars, on the precalculated route and on the live one, and
 read the script's own values. Each expected row is worked by hand in its
 test's comment; none is a value recorded on TradingView or copied from a run.
@@ -127,6 +129,33 @@ def test_the_class_table_its_headers_guards_and_reserved_names_agree():
         # A historical comparison must know the spelling as the emitter's.
         if cpp_type.startswith("pineforge::source::"):
             assert cpp_type in _EMITTER_SOURCE_SPELLINGS, class_name
+    # The second table, the type of a site with a per-bar length, has the
+    # same header and feature-macro columns.
+    for class_name, row in CodeGen._TA_SERIES_LENGTH_CLASSES.items():
+        cpp_type, header, feature, required, optional = row
+        assert header in includes, class_name
+        assert required >= 0 and optional >= 0, class_name
+        if feature is None:
+            # Only the class written into the translation unit around the
+            # engine's SeriesSma, which is older than the feature macros.
+            assert cpp_type == "_PFSeriesSma", class_name
+            continue
+        features.add(feature)
+        assert cpp_type.startswith("pineforge::source::Series"), class_name
+        assert cpp_type in _EMITTER_SOURCE_SPELLINGS, class_name
+        # The engine names the macro after the class, and every engine series
+        # class is required by that name.
+        assert feature == (
+            "PINEFORGE_HAS_PINE_SERIES_" + cpp_type.rsplit("Series", 1)[1].upper()
+        ), class_name
+        assert feature in guards, class_name
+    # The engine also defines the three macros of more than one word with a
+    # word break; both spellings are macros of its headers.
+    assert {
+        "PINEFORGE_HAS_PINE_SERIES_VWAP_BANDS",
+        "PINEFORGE_HAS_PINE_SERIES_PERCENTILE_LINEAR",
+        "PINEFORGE_HAS_PINE_SERIES_MATH_SUM",
+    } <= CPP_STANDARD_MACROS
     for header, line in includes.items():
         path = f"pineforge/source/{header}.hpp"
         assert line == f"#include <{path}>"
