@@ -76,6 +76,28 @@ supported as exact pairs; on the 0.x line they are independent. See the
   names `PINEFORGE_HAS_PINE_SAR`, `PINEFORGE_HAS_PINE_DMI_REFERENCE`,
   `PINEFORGE_HAS_PINE_MFI`, `PINEFORGE_HAS_PINE_RCI` and
   `PINEFORGE_HAS_PINE_CCI`; regenerate C++ and relink.
+- A chart call whose length the script computes on each bar is no longer
+  refused with `PF-E5009` for `ta.wma`, `ta.vwma`, `ta.alma`, `ta.linreg`,
+  `ta.bb`, `ta.bbw`, `ta.stdev`, `ta.variance`, `ta.dev`, `ta.range`,
+  `ta.median`, `ta.mode`, `ta.percentrank`,
+  `ta.percentile_linear_interpolation`, `ta.correlation`, `math.sum`,
+  `ta.stoch`, `ta.cci`, `ta.mfi`, `ta.mom`, `ta.roc`, `ta.cmo`, `ta.wpr`,
+  `ta.cog`, `ta.rising` and `ta.falling`, nor is a per-bar stdev multiplier of
+  `ta.vwap`'s bands. TradingView compiles these calls. Each is lowered to the
+  function's `pineforge::source::Series*` class of the paired engine, which
+  takes the length (for `ta.vwap`, the multiplier) on every call; a length
+  that never changes gives the fixed-length call's values. Generated code
+  includes `pineforge/source/pine_ta_series_ma.hpp`,
+  `pine_ta_series_stats.hpp` or `pine_ta_series_osc.hpp` for the classes it
+  uses and requires each class's `PINEFORGE_HAS_PINE_SERIES_*` macro; those
+  names are now reserved. A constant or input length keeps its fixed-length
+  class. Still refused: such a length inside `request.security`, one a
+  function receives from its caller, one that reads a script-level `var` not
+  shown to change, and any other argument of these calls that varies by bar
+  (the `mult` of `ta.bb`, for example, which TradingView refuses too).
+- A `ta.linreg` `offset` that varies by bar, which TradingView refuses, is now
+  refused with `PF-E5009`; it used to be read on every bar. A constant or
+  input offset is unchanged.
 - A `ta.*` call in a `?:` arm or on the right of `and` or `or`, with no `[]` read on the call, now computes the same values in a run that may precalculate (no bar magnifier, empty timeframes) as in every other run: it is evaluated only on the bars that reach it. Such a run used to fill the call on every chart bar, so with `y = bar_index % 2 == 0 ? ta.sma(close, 3) : na` the closes of the odd bars entered the average. This applies to every `ta.*` function; `ta.ema`, and `ta.sma` on the right of `and`, already behaved this way. Unconditional calls and calls read with `[]` are unchanged.
 
 - Both strategy conversions and `request.currency_rate` use the host's rate in effect on each bar for the chart and account currencies, in either direction. Without a rate for the pair the request stops the run with the currency-conversion error, or returns `na` with a run warning when `ignore_invalid_currency` is true; other pairs still stop the run ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).

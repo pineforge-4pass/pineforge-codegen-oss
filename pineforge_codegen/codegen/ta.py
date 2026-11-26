@@ -1722,11 +1722,18 @@ class TaSiteHelper:
     # * series, for ta.percentile_nearest_rank: each call appends to its own
     #   buffer and passes source, length and percentage to
     #   ``pineforge::source::SeriesPercentileNearestRank``.
-    # * series, for ta.sma (outside request.security, and neither a length a
-    #   callable receives from its call sites nor an unadmitted persistent
-    #   length): each call passes its source and
-    #   the length its call site binds to ``pineforge::source::SeriesSma``
-    #   (through ``_PFSeriesSma``). A length that reads a script-level
+    # * series, for the window functions TradingView compiles with a per-bar
+    #   length (``_TA_SERIES_LENGTH_CLASSES``: ta.sma, ta.wma, ta.vwma,
+    #   ta.alma, ta.linreg, ta.bb, ta.bbw, ta.stdev, ta.variance, ta.dev,
+    #   ta.range, ta.median, ta.mode, ta.percentrank,
+    #   ta.percentile_linear_interpolation, ta.correlation, math.sum,
+    #   ta.stoch, ta.cci, ta.mfi, ta.mom, ta.roc, ta.cmo, ta.wpr, ta.cog,
+    #   ta.rising, ta.falling, and the stdev multiplier of ta.vwap's bands),
+    #   outside request.security, and neither a length a callable receives
+    #   from its call sites nor an unadmitted persistent length: each call
+    #   passes its inputs and the length its call site binds to the
+    #   function's ``pineforge::source::Series*`` class (ta.sma through
+    #   ``_PFSeriesSma``). A length that reads a script-level
     #   ``var`` / ``varip`` is admitted when the script shows that it varies
     #   by bar (``_ta_period_is_series``): the call reads that declaration's
     #   storage, as it reads any other name of a series length.
@@ -1743,12 +1750,13 @@ class TaSiteHelper:
     #   a strength that changes between bars are not recorded here.
     #
     # TradingView refuses a series length for ta.rma / ema / rsi / atr / dmi /
-    # macd / kc / hma / tsi / rci and supertrend's atrPeriod at compile time,
-    # so those only ever carry a simple one here. A series length for the
-    # other window functions (ta.wma, ...), and for a requested-context or
-    # forwarded ta.sma (``_ta_length_is_forwarded``) or one with a
+    # macd / kc / kcw / hma / tsi / rci and supertrend's atrPeriod at compile
+    # time, so those only ever carry a simple one here; it refuses a series
+    # ``mult`` of ta.bb and a series ``offset`` of ta.linreg too
+    # (``_ta_linreg_series_offset``). A series length of a requested-context
+    # or forwarded site (``_ta_length_is_forwarded``), or one with a
     # script-level ``var`` length that is not shown to vary by bar, keeps the
-    # refusal.
+    # refusal, as does any other constructor argument that varies by bar.
     # Constant- and input-length sites never reach this plan: they retain
     # their constructor/reset/precalculation cadence. EMA-family objects use
     # the checked source adapters for every qualifier. An input.string choice
@@ -1825,9 +1833,10 @@ class TaSiteHelper:
         """The lowering of a site with a constructor argument the constructor
         cannot take, or None (the ordinary constructor / runtime-reset path).
         ``kind`` is ``first_call`` / ``series_extreme`` /
-        ``series_percentile`` / ``series_sma`` / ``series_pivot`` /
+        ``series_percentile`` / ``series_length`` / ``series_pivot`` /
         ``supertrend``. A series Supertrend period
-        is reported here so the constructor guard cannot blame its factor."""
+        is reported here so the constructor guard cannot blame its factor;
+        so is a series ta.linreg offset, which no constructor takes."""
         plan = self._ta_cached_plan(site)
         if plan is not None and plan["kind"] == "refused":
             if "series_period" in plan:
@@ -1923,9 +1932,28 @@ class TaSiteHelper:
         spelled = self._arith_expr_to_str(node) if node is not None else None
         return spelled is not None and self._ta_arg_takes_plan(site, position, spelled, inline=False)
 
+    def _ta_linreg_series_offset(self, site: "TACallSite") -> str | None:
+        """The Pine spelling of a ta.linreg ``offset`` shown to vary by bar,
+        or None. TradingView declares ``offset`` simple and refuses a series
+        one at compile time; here it is a compute() argument, which every
+        call renders, so nothing else refuses it. Only positive evidence
+        counts (``_ta_period_is_series``): an offset that is not shown to
+        vary keeps compiling."""
+        if site.class_name != "ta::Linreg" or len(site.compute_args) < 2:
+            return None
+        offset = site.compute_args[1]
+        if not self._ta_period_is_series(offset):
+            return None
+        return self._arith_expr_to_str(offset) or "offset"
+
     def _build_ta_dynamic_plan(self, site: "TACallSite") -> dict | None:
         if not site.ctor_args:
             return None
+        series_offset = self._ta_linreg_series_offset(site)
+        if series_offset is not None:
+            # Reported by ``_ta_dynamic_plan``, as a series Supertrend period
+            # is: the refusal names the offset, whatever the length is.
+            return {"kind": "refused", "refused": [], "series_period": series_offset}
         nodes = list(getattr(site, "ctor_nodes", None) or [])
         bound = getattr(site, "_bound_ctor_nodes", nodes)
         # Resolve constructor leaves where they were written. For a borrowed
@@ -1946,12 +1974,24 @@ class TaSiteHelper:
         ]
         if not refused and site.class_name != "ta::Supertrend":
             return None
-        if len(nodes) != len(site.ctor_args):
+        # ta.vwap's omitted-anchor bands carry their multiplier as a bound
+        # node only (the analyzer's vwap_bands dispatch): a top-level call
+        # whose multiplier varies by bar is planned from it, and every other
+        # one keeps the refusal, as before.
+        bands_only = (
+            len(nodes) != len(site.ctor_args)
+            and site.class_name == "ta::VWAPBands"
+            and getattr(site, "owner_func", None) is None
+            and len(bound) == len(site.ctor_args)
+        )
+        if len(nodes) != len(site.ctor_args) and not bands_only:
             return {"kind": "refused", "refused": refused} if refused else None
         simple = {
             pos: self._simple_ta_arg_cpp_node(bound[pos])
             for pos in refused
         }
+        if bands_only and all(simple[pos] is not None for pos in refused):
+            return {"kind": "refused", "refused": refused}
         if site.class_name == "ta::Supertrend":
             return self._ta_plan_for(site, refused, simple, bound)
         return self._ta_plan_for(site, refused, simple, bound,
@@ -2264,8 +2304,9 @@ class TaSiteHelper:
                      persistent: bool = False) -> dict | None:
         """The plan of a site whose ``refused`` constructor arguments have the
         context-free C++ ``simple`` (None: series). A ``requested`` copy (a
-        request.security evaluator's) keeps the refusal of a series ta.sma
-        length: the chart-context lowering is not qualified there. So does a
+        request.security evaluator's) keeps the refusal of a series length of
+        a ``_TA_SERIES_LENGTH_CLASSES`` function (ta.sma, ta.wma, ...): the
+        chart-context lowering is not qualified there. So does a
         ``forwarded`` one (``_ta_length_is_forwarded``): the length a callable
         receives from its call sites stays with the constructor path, which
         sizes the site from the call site's argument. And so does a
@@ -2301,13 +2342,57 @@ class TaSiteHelper:
             # bound (a block, a loop, a callable, a script-level ``var``, a
             # request.security payload).
             kind = "series_pivot"
-        elif (family == "sma" and not requested and not forwarded
-                and not persistent
-                and refused == [0] and len(site.ctor_args) == 1):
-            kind = "series_sma"
+        elif (not requested and not forwarded and not persistent
+                and self._ta_series_length_admits(site, refused, simple)):
+            kind = "series_length"
         else:
             return {"kind": "refused", "refused": refused}
-        return {"kind": kind, "refused": refused, "simple": simple, "family": family}
+        # ``nodes``: the bound constructor nodes, which the series-length
+        # call of a site without ``ctor_nodes`` (ta.vwap's omitted-anchor
+        # bands) renders its per-call value from.
+        return {"kind": kind, "refused": refused, "simple": simple, "family": family,
+                "nodes": bound}
+
+    def _ta_series_length_admits(self, site: "TACallSite", refused: list,
+                                 simple: dict) -> bool:
+        """Whether the series class of ``site``'s function
+        (``_TA_SERIES_LENGTH_CLASSES``) takes its constructor arguments: the
+        per-call one (the first: the length, or the multiplier of ta.vwap's
+        bands) is the argument that varies by bar, every other unsized one
+        has a simple spelling (TradingView refuses a series ``mult`` of
+        ta.bb), and the call spells as many of the others as the class has
+        an overload for."""
+        row = self._TA_SERIES_LENGTH_CLASSES.get(site.class_name)
+        if row is None:
+            return False
+        required, optional = row[3], row[4]
+        given = len(site.ctor_args) - 1
+        if not required <= given <= required + optional:
+            return False
+        if 0 not in refused or simple[0] is not None:
+            return False
+        return all(simple[pos] is not None for pos in refused if pos != 0)
+
+    def _ta_series_length_rows(self) -> list[tuple]:
+        """The rows of ``_TA_SERIES_LENGTH_CLASSES`` a live chart site is
+        lowered to, in the table's order: their headers are included and
+        their feature macros required (``_ta_pine_layer_include_lines``,
+        codegen/emit_top.py). A request.security copy never takes this
+        lowering (``_ta_plan_for``). The plans are read without reporting a
+        refusal, which stays with the first caller that needs the site's
+        plan (``_ta_dynamic_plan``)."""
+        dead = getattr(self, "_dead_ta_indices", set())
+        lowered = set()
+        for index, site in enumerate(self.ctx.ta_call_sites):
+            if index in dead:
+                continue
+            plan = self._ta_cached_plan(site)
+            if plan is not None and plan["kind"] == "series_length":
+                lowered.add(site.class_name)
+        return [
+            row for class_name, row in self._TA_SERIES_LENGTH_CLASSES.items()
+            if class_name in lowered
+        ]
 
     def _ta_security_plan(self, sec_id: int, site: "TACallSite",
                           helper_binding_stack=None) -> dict | None:
@@ -2496,9 +2581,11 @@ class TaSiteHelper:
 
     # Analyzer class identities also select signature/result/implicit-OHLC
     # rules. Keep those identities and map the concrete execution type only
-    # at emission. This is the one table that does it: a row for every class
-    # identity whose fixed object is built from the engine's Pine source
-    # layer. Every other family keeps the kernel class its identity names.
+    # at emission. Two tables do it, with the same header and feature-macro
+    # columns: this one, a row for every class identity whose fixed object is
+    # built from the engine's Pine source layer (every other family keeps the
+    # kernel class its identity names), and ``_TA_SERIES_LENGTH_CLASSES``
+    # below it, the type of a site whose length the script computes per bar.
     #
     #     class identity: (emitted type, header, feature macro, checked)
     #
@@ -2607,6 +2694,160 @@ class TaSiteHelper:
         ),
     }
 
+    # The window functions TradingView compiles with a per-bar length, by the
+    # analyzer's class identity of the site.
+    #
+    #     class identity: (series type, header, feature macro, required,
+    #                      optional)
+    #
+    # * series type: what the member of a site with a per-bar length is
+    #   declared with (``_ta_plan_cpp_type``, plan kind ``series_length``).
+    #   Every engine class has the shape of ``pineforge::source::SeriesSma``:
+    #   it is default-constructed, and ``compute`` / ``recompute`` take the
+    #   arguments the fixed class's ``compute`` takes, then the fixed class's
+    #   other constructor arguments in constructor (Pine) order, then the
+    #   per-call value LAST -- the length, or the stdev multiplier of
+    #   ta.vwap's bands, the one constructor argument those have.
+    # * header, feature macro: as in the table above. Every engine class of
+    #   this table has a guard in ``_TA_PINE_LAYER_GUARDS``; ``SeriesSma``
+    #   (the ``_PFSeriesSma`` member type) is older than these macros and
+    #   has none.
+    # * required, optional: how many of the fixed class's other constructor
+    #   arguments a call must spell and may spell. The engine class has an
+    #   overload without each optional one (the ``floor`` of ta.alma, the
+    #   ``biased`` of ta.stdev and ta.variance) and applies its default.
+    #
+    # Where the fixed object of a function is a Pine-layer type of the table
+    # above, its series class answers by the same Pine rule (the engine
+    # headers state each): SeriesVwma is PineVwma's two separate averages,
+    # SeriesMom and SeriesRoc count ``source[length]`` by position as PineMom
+    # and PineRoc do, SeriesMfi has PineMfi's first value and SeriesCci is 0
+    # on a flat window as PineCci is.
+    _TA_SERIES_MA_HEADER = "pine_ta_series_ma"
+    _TA_SERIES_STATS_HEADER = "pine_ta_series_stats"
+    _TA_SERIES_OSC_HEADER = "pine_ta_series_osc"
+    _TA_SERIES_LENGTH_CLASSES = {
+        "ta::SMA": ("_PFSeriesSma", _TA_LENGTH_HEADER, None, 0, 0),
+        "ta::WMA": (
+            "pineforge::source::SeriesWma", _TA_SERIES_MA_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_WMA", 0, 0,
+        ),
+        "ta::VWMA": (
+            "pineforge::source::SeriesVwma", _TA_SERIES_MA_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_VWMA", 0, 0,
+        ),
+        # offset and sigma, then floor.
+        "_PFALMA": (
+            "pineforge::source::SeriesAlma", _TA_SERIES_MA_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_ALMA", 2, 1,
+        ),
+        "ta::Linreg": (
+            "pineforge::source::SeriesLinreg", _TA_SERIES_MA_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_LINREG", 0, 0,
+        ),
+        # mult.
+        "ta::BB": (
+            "pineforge::source::SeriesBb", _TA_SERIES_MA_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_BB", 1, 0,
+        ),
+        "ta::BBW": (
+            "pineforge::source::SeriesBbw", _TA_SERIES_MA_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_BBW", 1, 0,
+        ),
+        # The per-call value is the stdev multiplier: the omitted-anchor
+        # form, then the form with an anchor argument. One engine class takes
+        # both, the multiplier last after either form's compute() arguments.
+        "ta::VWAPBands": (
+            "pineforge::source::SeriesVwapBands", _TA_SERIES_MA_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_VWAPBANDS", 0, 0,
+        ),
+        "_PFAnchoredVWAPBands": (
+            "pineforge::source::SeriesVwapBands", _TA_SERIES_MA_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_VWAPBANDS", 0, 0,
+        ),
+        # biased.
+        "ta::StdDev": (
+            "pineforge::source::SeriesStdev", _TA_SERIES_STATS_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_STDEV", 0, 1,
+        ),
+        "ta::Variance": (
+            "pineforge::source::SeriesVariance", _TA_SERIES_STATS_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_VARIANCE", 0, 1,
+        ),
+        "ta::Dev": (
+            "pineforge::source::SeriesDev", _TA_SERIES_STATS_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_DEV", 0, 0,
+        ),
+        "ta::Range": (
+            "pineforge::source::SeriesRange", _TA_SERIES_STATS_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_RANGE", 0, 0,
+        ),
+        "ta::Median": (
+            "pineforge::source::SeriesMedian", _TA_SERIES_STATS_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_MEDIAN", 0, 0,
+        ),
+        "ta::Mode": (
+            "pineforge::source::SeriesMode", _TA_SERIES_STATS_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_MODE", 0, 0,
+        ),
+        "ta::PercentRank": (
+            "pineforge::source::SeriesPercentrank", _TA_SERIES_STATS_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_PERCENTRANK", 0, 0,
+        ),
+        "ta::PercentileLinearInterpolation": (
+            "pineforge::source::SeriesPercentileLinear", _TA_SERIES_STATS_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_PERCENTILELINEAR", 0, 0,
+        ),
+        "ta::Correlation": (
+            "pineforge::source::SeriesCorrelation", _TA_SERIES_STATS_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_CORRELATION", 0, 0,
+        ),
+        "math::Sum": (
+            "pineforge::source::SeriesMathSum", _TA_SERIES_STATS_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_MATHSUM", 0, 0,
+        ),
+        "ta::Stoch": (
+            "pineforge::source::SeriesStoch", _TA_SERIES_OSC_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_STOCH", 0, 0,
+        ),
+        "ta::CCI": (
+            "pineforge::source::SeriesCci", _TA_SERIES_OSC_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_CCI", 0, 0,
+        ),
+        "ta::MFI": (
+            "pineforge::source::SeriesMfi", _TA_SERIES_OSC_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_MFI", 0, 0,
+        ),
+        "ta::Mom": (
+            "pineforge::source::SeriesMom", _TA_SERIES_OSC_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_MOM", 0, 0,
+        ),
+        "ta::ROC": (
+            "pineforge::source::SeriesRoc", _TA_SERIES_OSC_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_ROC", 0, 0,
+        ),
+        "ta::CMO": (
+            "pineforge::source::SeriesCmo", _TA_SERIES_OSC_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_CMO", 0, 0,
+        ),
+        "ta::WPR": (
+            "pineforge::source::SeriesWpr", _TA_SERIES_OSC_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_WPR", 0, 0,
+        ),
+        "ta::COG": (
+            "pineforge::source::SeriesCog", _TA_SERIES_OSC_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_COG", 0, 0,
+        ),
+        "ta::Rising": (
+            "pineforge::source::SeriesRising", _TA_SERIES_OSC_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_RISING", 0, 0,
+        ),
+        "ta::Falling": (
+            "pineforge::source::SeriesFalling", _TA_SERIES_OSC_HEADER,
+            "PINEFORGE_HAS_PINE_SERIES_FALLING", 0, 0,
+        ),
+    }
+
     def _ta_fixed_cpp_type(self, site: "TACallSite") -> str:
         """The concrete fixed object used by declarations and every factory."""
         row = self._TA_PINE_LAYER_CLASSES.get(site.class_name)
@@ -2626,8 +2867,8 @@ class TaSiteHelper:
             return self._TA_SERIES_EXTREME_CLASSES[plan["family"]]
         if plan["kind"] == "series_percentile":
             return self._TA_SERIES_PERCENTILE_CLASS
-        if plan["kind"] == "series_sma":
-            return "_PFSeriesSma"
+        if plan["kind"] == "series_length":
+            return self._TA_SERIES_LENGTH_CLASSES[plan.get("site", site).class_name][0]
         if plan["kind"] == "series_pivot":
             # ``_settle_ta_series_pivot`` writes the classes once a member is
             # declared with one of them.
@@ -2737,14 +2978,25 @@ class TaSiteHelper:
         if kind == "series_extreme":
             length = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
             return f"{base_args}, pineforge::source::ta_number({length})"
-        if kind == "series_sma":
-            # The source is the call's own (``base_args``); the length is the
-            # call site's binding, read on every call
-            # (pineforge::source::SeriesSma).
-            if len(site.compute_args) != 1 or not base_args:
-                raise AssertionError("series ta.sma site must have one source")
-            length = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
-            return f"{base_args}, pineforge::source::ta_number({length})"
+        if kind == "series_length":
+            # The inputs are the call's own (``base_args``: what the fixed
+            # class's compute() takes); then the fixed class's other
+            # constructor arguments the call spells; then the per-call value,
+            # the call site's binding read on every call
+            # (``_TA_SERIES_LENGTH_CLASSES``).
+            if not base_args:
+                raise AssertionError("series-length TA site must have compute arguments")
+            values = [base_args]
+            for position in range(1, len(site.ctor_args)):
+                values.append(self._ta_dynamic_ctor_arg(site, plan, position, render_node))
+            if site.ctor_nodes:
+                per_call = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
+            else:
+                # ta.vwap's omitted-anchor bands: the multiplier is a bound
+                # node only (``_build_ta_dynamic_plan``).
+                per_call = render_node(plan["nodes"][0])
+            values.append(f"pineforge::source::ta_number({per_call})")
+            return ", ".join(values)
         if kind == "series_pivot":
             # The source is the call's own (``base_args``: the explicit
             # source, else the bar's high / low); leftbars and rightbars are
