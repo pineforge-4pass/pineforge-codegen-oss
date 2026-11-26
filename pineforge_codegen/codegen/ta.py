@@ -1736,6 +1736,15 @@ class TaSiteHelper:
     #   storage, as it reads any other name of a series length.
     # * ta.supertrend: the factor (series or simple) of the first execution is
     #   the run's -- ``pineforge::source::PineSupertrend``.
+    # * series leftbars or rightbars, for ta.pivothigh / ta.pivotlow (both
+    #   overloads): each call passes its source and both strengths to
+    #   ``_PFSeriesPivotHigh`` / ``_PFSeriesPivotLow``, classes written into
+    #   the translation unit (``emit_top._TA_SERIES_PIVOT_CPP``). The call
+    #   keeps its own source history and tests ``source[rightbars]`` against
+    #   the ``leftbars`` values before it and the ``rightbars`` values after
+    #   it, with ta::PivotHigh / ta::PivotLow's comparisons and the strengths
+    #   of the current call. TradingView compiles these calls; its values for
+    #   a strength that changes between bars are not recorded here.
     #
     # TradingView refuses a series length for ta.rma / ema / rsi / atr / dmi /
     # macd / kc / hma / tsi / rci and supertrend's atrPeriod at compile time,
@@ -1794,6 +1803,12 @@ class TaSiteHelper:
     _TA_SERIES_PERCENTILE_CLASS = (
         "pineforge::source::SeriesPercentileNearestRank"
     )
+    # ta.pivothigh / ta.pivotlow with a series leftbars or rightbars: the
+    # classes ``_settle_ta_series_pivot`` writes into the translation unit.
+    _TA_SERIES_PIVOT_CLASSES = {
+        "pivothigh": "_PFSeriesPivotHigh",
+        "pivotlow": "_PFSeriesPivotLow",
+    }
     # Pure str.* functions of simple arguments (a simple result).
     _SIMPLE_STR_FUNCS = frozenset({
         "upper", "lower", "contains", "startswith", "endswith", "length",
@@ -1814,7 +1829,8 @@ class TaSiteHelper:
         """The lowering of a site with a constructor argument the constructor
         cannot take, or None (the ordinary constructor / runtime-reset path).
         ``kind`` is ``first_call`` / ``series_extreme`` /
-        ``series_percentile`` / ``supertrend``. A series Supertrend period
+        ``series_percentile`` / ``series_sma`` / ``series_pivot`` /
+        ``supertrend``. A series Supertrend period
         is reported here so the constructor guard cannot blame its factor."""
         plan = self._ta_cached_plan(site)
         if plan is not None and plan["kind"] == "refused":
@@ -2282,6 +2298,13 @@ class TaSiteHelper:
             kind = "supertrend"
         elif all(simple[pos] is not None for pos in refused):
             kind = "first_call"
+        elif family in self._TA_SERIES_PIVOT_CLASSES:
+            # A strength that is a value of each bar: TradingView declares
+            # leftbars and rightbars series for both overloads. The call
+            # passes both strengths every time, wherever the series value is
+            # bound (a block, a loop, a callable, a script-level ``var``, a
+            # request.security payload).
+            kind = "series_pivot"
         elif (family == "sma" and not requested and not forwarded
                 and not persistent
                 and refused == [0] and len(site.ctor_args) == 1):
@@ -2500,6 +2523,11 @@ class TaSiteHelper:
             return self._TA_SERIES_PERCENTILE_CLASS
         if plan["kind"] == "series_sma":
             return "_PFSeriesSma"
+        if plan["kind"] == "series_pivot":
+            # ``_settle_ta_series_pivot`` writes the classes once a member is
+            # declared with one of them.
+            self._uses_ta_series_pivot = True
+            return self._TA_SERIES_PIVOT_CLASSES[plan["family"]]
         if plan["kind"] == "supertrend":
             return "pineforge::source::PineSupertrend"
         return f"pineforge::source::FirstCallBound<{self._ta_fixed_cpp_type(site)}>"
@@ -2612,6 +2640,16 @@ class TaSiteHelper:
                 raise AssertionError("series ta.sma site must have one source")
             length = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
             return f"{base_args}, pineforge::source::ta_number({length})"
+        if kind == "series_pivot":
+            # The source is the call's own (``base_args``: the explicit
+            # source, else the bar's high / low); leftbars and rightbars are
+            # the call site's bindings, read on every call.
+            if len(site.ctor_args) != 2 or not base_args:
+                raise AssertionError("series pivot site must have one source")
+            left = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
+            right = self._ta_dynamic_ctor_arg(site, plan, 1, render_node)
+            return (f"{base_args}, pineforge::source::ta_number({left}), "
+                    f"pineforge::source::ta_number({right})")
         if kind == "series_percentile":
             if len(site.compute_args) != 2:
                 raise AssertionError(
