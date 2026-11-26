@@ -7,7 +7,8 @@ ta.percentile_nearest_rank lowers to its engine series class, and so does a
 chart ta.sma whose length the chart computes per bar: the first test below
 runs it and reads each bar's mean. Where a ta.sma series length is still
 refused (a request.security copy, a length a callable receives, one that reads
-a script-level var; tests/test_ta_series_sma_binding.py and
+a script-level var and is not shown to vary by bar;
+tests/test_ta_series_sma_binding.py and
 tests/test_codegen_ta_stable_var_literal.py), the refusal names the Pine
 function and says that TradingView accepts the call: ta.sma has a RECORDED
 TradingView result that a series length compiles (the engine's note on its
