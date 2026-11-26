@@ -10,6 +10,8 @@ import re
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.analyzer import TA_CLASS_MAP
+from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
 from tests.test_runtime_var_initialization import _compile_and_run
@@ -25,10 +27,25 @@ def _ctor_periods(cpp: str, ta_name: str = "sma") -> list[str]:
     return periods
 
 
+def _fixed_factory(ta_name: str) -> str:
+    """How the reset of a fixed ``ta.<ta_name>`` object begins: the C++ type
+    the generator's type table selects for the call
+    (``codegen/ta.py::_TA_PINE_LAYER_CLASSES``), or the engine class the call
+    names where the table has no row for it."""
+    identity = TA_CLASS_MAP[ta_name]
+    row = CodeGen._TA_PINE_LAYER_CLASSES.get(identity)
+    return (identity if row is None else row[0]) + "("
+
+
 def _reset_lines(cpp: str, ta_name: str = "sma", *, factory: str | None = None) -> list[str]:
+    """The lines that rebuild a ``ta.<ta_name>`` member, in source order.
+
+    ``factory`` is how the right-hand side begins. Left out, it is the type a
+    fixed call of that function is built from today, whichever function it
+    is: a caller that wants another spelling (the engine class of a call the
+    table selects a type for, say) passes it."""
     if factory is None:
-        # ta.sma is built from its checked fixed-length type.
-        factory = "pineforge::source::PineFixedSma(" if ta_name == "sma" else "ta::"
+        factory = _fixed_factory(ta_name)
     return [
         line.strip()
         for line in cpp.splitlines()
@@ -186,7 +203,8 @@ plot(out + unrelatedOut)
     assert _ctor_periods(cpp, "sma") == ["2"]
     assert _ctor_periods(cpp, "rma") == ["2"]
     assert _ctor_periods(cpp, "ema") == ["20"]
-    resets = _reset_lines(cpp, "ema") + _reset_lines(
+    # No reset in either spelling, the engine class's or the checked type's.
+    resets = _reset_lines(cpp, "ema", factory="ta::") + _reset_lines(
         cpp, "ema", factory="pineforge::source::PineEma("
     )
     assert resets == []

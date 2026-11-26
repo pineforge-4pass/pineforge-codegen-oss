@@ -544,11 +544,18 @@ plot(sig)
     # This catches the exact regression: ``_ta_change_<n>_cs1`` /
     # ``_ta_rma_<n>_cs1`` referenced by the cloned ``dirmov_cs1`` body but
     # dropped from the member list by the dead-code pass.
-    declared = set(re.findall(r"(?:ta::|pineforge::source::)\w+\s+(\w+)\s*;", cpp))
+    #
+    # The scan reads the code, not the preprocessor lines: a script with
+    # ta.rma includes <pineforge/source/pine_ta_length.hpp>, and that file
+    # name spells ``_ta_length.`` without naming a member.
+    code = "\n".join(
+        line for line in cpp.splitlines() if not line.lstrip().startswith("#")
+    )
+    declared = set(re.findall(r"(?:ta::|pineforge::source::)\w+\s+(\w+)\s*;", code))
     referenced = set()
-    for m in re.finditer(r"(_ta_\w+)\s*(?:\.|=)", cpp):
+    for m in re.finditer(r"(_ta_\w+)\s*(?:\.|=)", code):
         referenced.add(m.group(1))
-    referenced |= set(re.findall(r"(_ta_\w+)\s*\.", cpp))
+    referenced |= set(re.findall(r"(_ta_\w+)\s*\.", code))
     # Exclude internal bookkeeping flags (``_ta_initialized_``) -- those are
     # declared as ``bool _ta_initialized_ = false;`` separately, not as TA
     # members; they are not part of this regression.
