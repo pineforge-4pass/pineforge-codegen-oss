@@ -2505,6 +2505,7 @@ class TaSiteHelper:
     _TA_CHECKED_CLASSES = {
         "ta::EMA": "pineforge::source::PineEma",
         "ta::TSI": "pineforge::source::PineTsi",
+        "ta::Supertrend": "pineforge::source::PineFixedSupertrend",
         "ta::MACD": "pineforge::source::PineMacd",
         "_PFKC": "_PFKC",
         "_PFKCW": "_PFKCW",

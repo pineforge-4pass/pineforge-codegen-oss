@@ -36,6 +36,16 @@ supported as exact pairs; on the 0.x line they are independent. See the
   own held source (below `and`, `or` or `?:`, or in a top-level `if` block) is
   unchanged. Requires the `PineMom` and `PineRoc` APIs in
   `pineforge/source/pine_ta_length.hpp`; regenerate C++ and relink.
+- A `ta.supertrend` call whose factor and ATR period are constants or inputs
+  now stops the run on its first execution when the factor is zero or less or
+  the ATR period is zero or less, with the error a factor that is not a
+  constant already raised ("Invalid value of the 'factor' argument (0) in the
+  'supertrend' function. It must be > 0."). Such a call used to compute.
+  Valid arguments compute what they computed before. Generated code uses the
+  paired engine's `PineFixedSupertrend` for these calls, including helper and
+  requested-context copies and precalculation, and requires
+  `PINEFORGE_HAS_PINE_FIXED_SUPERTREND` from
+  `pineforge/source/pine_ta_length.hpp`; regenerate C++ and relink.
 
 - Both strategy conversions and `request.currency_rate` use the host's rate in effect on each bar for the chart and account currencies, in either direction. Without a rate for the pair the request stops the run with the currency-conversion error, or returns `na` with a run warning when `ignore_invalid_currency` is true; other pairs still stop the run ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
 

@@ -222,6 +222,40 @@ class TopLevelEmitter:
 
     Mixed into ``CodeGen``; not intended to be instantiated standalone."""
 
+    # The feature macro the paired engine header defines beside a checked
+    # fixed type of ``_TA_CHECKED_CLASSES`` (codegen/ta.py), as the guard a
+    # translation unit with a call of that class identity carries after the
+    # header's include: an engine header older than the type is then reported
+    # by the macro's name.
+    # ta.supertrend with a constant or input factor and ATR period keeps its
+    # constructor, reset and precalculation cadence on PineFixedSupertrend,
+    # which makes on the call's first execution the argument check
+    # PineSupertrend makes for a factor that is not a constant (a factor of
+    # zero or less, or an ATR period of zero or less or na, stops the run
+    # there) and otherwise delegates to ta::Supertrend.
+    # Each line is one whole literal of this module: the generated-C++
+    # allowlist reads its fixed ``#error`` texts from this file
+    # (cpp_allowlist.py), and a message is C++ text only inside its quotes
+    # (scripts/gen_host_members.py).
+    _TA_CHECKED_CLASS_FEATURES = {
+        "ta::Supertrend": (
+            "#ifndef PINEFORGE_HAS_PINE_FIXED_SUPERTREND",
+            '#error "ta.supertrend requires the paired pineforge-engine fixed-argument adapter (PINEFORGE_HAS_PINE_FIXED_SUPERTREND)"',
+            "#endif",
+        ),
+    }
+
+    def _ta_checked_feature_guards(self) -> list[str]:
+        """The guards of ``_TA_CHECKED_CLASS_FEATURES`` for the class
+        identities this script's ``ta.*`` calls have, in the table's order."""
+        used = {site.class_name for site in self.ctx.ta_call_sites}
+        return [
+            line
+            for class_name, guard in self._TA_CHECKED_CLASS_FEATURES.items()
+            if class_name in used
+            for line in guard
+        ]
+
     def _emit_includes(self, lines: list[str]) -> None:
         roots = [self.ctx.ast] + [
             pragma.expr_node for pragma in (self.ctx.pf_trace_pragmas or [])
@@ -264,6 +298,7 @@ class TopLevelEmitter:
             for site in self.ctx.ta_call_sites
         ):
             lines.append('#include <pineforge/source/pine_ta_length.hpp>')
+            lines.extend(self._ta_checked_feature_guards())
         if self._has_checked_precalculated_ta():
             lines.extend(('#include <pineforge/run_failure.hpp>', '#include <exception>'))
         lines.append('#include <pineforge/math.hpp>')
