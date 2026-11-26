@@ -99,7 +99,7 @@ TA_SMOKE_CASES = {
     "valuewhen": ("x = ta.valuewhen(close > open, close, 0)", "ta::ValueWhen"),
     "variance": ("x = ta.variance(close, 5)", "ta::Variance"),
     "vwap": ("x = ta.vwap(close)", "ta::VWAP"),
-    "vwma": ("x = ta.vwma(close, 5)", "ta::VWMA"),
+    "vwma": ("x = ta.vwma(close, 5)", "pineforge::source::PineVwma"),
     "wma": ("x = ta.wma(close, 5)", "ta::WMA"),
     "wpr": ("x = ta.wpr(14)", "ta::WPR"),
 }
@@ -130,10 +130,20 @@ def test_every_official_ta_function_has_codegen_smoke(name):
     assert expected in cpp
 
 
+# The C++ type a property variable's object is declared with: the engine
+# class, or for ta.iii and ta.wvad the engine's Pine-layer type, which is na
+# on a bar whose high equals its low (tests/test_ta_iii_wvad_flat_bar.py).
+TA_VARIABLE_TYPES = {
+    "obv": "ta::OBV", "accdist": "ta::AccDist", "nvi": "ta::NVI",
+    "pvi": "ta::PVI", "pvt": "ta::PVT", "wad": "ta::WAD",
+    "wvad": "pineforge::source::PineWvad", "iii": "pineforge::source::PineIii",
+}
+
+
 @pytest.mark.parametrize("name", sorted(OFFICIAL_TA_VARIABLES))
 def test_official_ta_property_variables_compile_without_parentheses(name):
     cpp = transpile(_pine(f"x = ta.{name}"))
-    assert f"ta::{ {'obv': 'OBV', 'accdist': 'AccDist', 'nvi': 'NVI', 'pvi': 'PVI', 'pvt': 'PVT', 'wad': 'WAD', 'wvad': 'WVAD', 'iii': 'III'}[name] }" in cpp
+    assert TA_VARIABLE_TYPES[name] in cpp
 
 
 @pytest.mark.parametrize("name", sorted(OFFICIAL_TA_VARIABLES))

@@ -556,7 +556,7 @@ class TestTAKwargs:
 
     def test_ta_vwma_kwargs(self):
         cpp = _generate(_pine('x = ta.vwma(source=close, length=20)'))
-        assert "ta::VWMA" in cpp
+        assert "pineforge::source::PineVwma" in cpp
 
     def test_ta_mom_kwargs(self):
         cpp = _generate(_pine('x = ta.mom(source=close, length=10)'))

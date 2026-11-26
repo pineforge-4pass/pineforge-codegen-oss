@@ -86,6 +86,7 @@ def test_without_source_rename_leaves_unrenamed_text_unchanged(cpp: str) -> None
     (
         "#include <pineforge/source/pine_strategy_host.hpp>",
         "#include <pineforge/source/pine_ta_length.hpp>",
+        "#include <pineforge/source/pine_ta_flat_range.hpp>",
         "pineforge::source::PineStrategyHost",
         "pineforge::source::PineStrategyConfig",
         "pineforge::source::StrategyOverrides",
@@ -100,6 +101,9 @@ def test_without_source_rename_leaves_unrenamed_text_unchanged(cpp: str) -> None
         "pineforge::source::PineKc",
         "pineforge::source::PineKcw",
         "pineforge::source::PineMacd",
+        "pineforge::source::PineVwma",
+        "pineforge::source::PineIii",
+        "pineforge::source::PineWvad",
         "pineforge::source::FirstCallBound",
         "pineforge::source::ta_number",
         "pineforge::source::simple_ta_length",

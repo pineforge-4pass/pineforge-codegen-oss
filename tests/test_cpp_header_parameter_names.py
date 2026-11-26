@@ -40,6 +40,7 @@ def test_header_and_parameter_names_escape_without_changing_input_titles(name, v
     "PINEFORGE_HAS_TA_SERIES_LENGTH", "PINEFORGE_HAS_PINE_POSITIONAL_LAG",
     "PF_NATIVE_OK",
     "PINEFORGE_HAS_PINE_FIXED_SUPERTREND",
+    "PINEFORGE_HAS_PINE_FLAT_RANGE",
 ])
 def test_audited_header_macros_escape_and_keep_public_input_keys(name):
     result = transpile_full(
