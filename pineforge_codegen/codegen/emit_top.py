@@ -222,51 +222,69 @@ class TopLevelEmitter:
 
     Mixed into ``CodeGen``; not intended to be instantiated standalone."""
 
-    # The feature macro the paired engine header defines beside a checked
-    # fixed type of ``_TA_CHECKED_CLASSES`` (codegen/ta.py), as the guard a
-    # translation unit with a call of that class identity carries after the
-    # header's include: an engine header older than the type is then reported
-    # by the macro's name.
-    # ta.supertrend with a constant or input factor and ATR period keeps its
-    # constructor, reset and precalculation cadence on PineFixedSupertrend,
-    # which makes on the call's first execution the argument check
-    # PineSupertrend makes for a factor that is not a constant (a factor of
-    # zero or less, or an ATR period of zero or less or na, stops the run
-    # there) and otherwise delegates to ta::Supertrend.
-    # Each line is one whole literal of this module: the generated-C++
-    # allowlist reads its fixed ``#error`` texts from this file
+    # The text behind the header and feature-macro columns of
+    # ``_TA_PINE_LAYER_CLASSES`` (codegen/ta.py). Each line is one whole
+    # literal of this module: the generated-C++ allowlist reads its allowed
+    # ``#include`` set and its fixed ``#error`` texts from this file
     # (cpp_allowlist.py), and a message is C++ text only inside its quotes
     # (scripts/gen_host_members.py).
-    _TA_CHECKED_CLASS_FEATURES = {
-        "ta::Supertrend": (
+    #
+    # The include line of every engine header a Pine-layer type is declared
+    # in, by the key the class table names it with, in the order the lines
+    # are written. The first is also the header of the dynamic-length
+    # lowering (``_ta_uses_dynamic_lengths``).
+    _TA_PINE_LAYER_INCLUDES = {
+        "pine_ta_length": "#include <pineforge/source/pine_ta_length.hpp>",
+        "pine_ta_flat_range": "#include <pineforge/source/pine_ta_flat_range.hpp>",
+        "pine_ta_cci": "#include <pineforge/source/pine_ta_cci.hpp>",
+    }
+
+    # The guard a translation unit with a call of a class identity carries
+    # after its header's include, by the feature macro the class table names:
+    # an engine header older than the type is then reported by the macro's
+    # name. A feature macro without an entry here is reserved only, and an
+    # engine header without its type fails at the type's name.
+    _TA_PINE_LAYER_GUARDS = {
+        "PINEFORGE_HAS_PINE_FIXED_SUPERTREND": (
             "#ifndef PINEFORGE_HAS_PINE_FIXED_SUPERTREND",
             '#error "ta.supertrend requires the paired pineforge-engine fixed-argument adapter (PINEFORGE_HAS_PINE_FIXED_SUPERTREND)"',
             "#endif",
         ),
+        "PINEFORGE_HAS_PINE_FLAT_RANGE": (
+            "#ifndef PINEFORGE_HAS_PINE_FLAT_RANGE",
+            '#error "ta.iii and ta.wvad require the paired pineforge-engine flat-range adapters (PINEFORGE_HAS_PINE_FLAT_RANGE)"',
+            "#endif",
+        ),
     }
 
-    def _ta_checked_feature_guards(self) -> list[str]:
-        """The guards of ``_TA_CHECKED_CLASS_FEATURES`` for the class
-        identities this script's ``ta.*`` calls have, in the table's order."""
-        used = {site.class_name for site in self.ctx.ta_call_sites}
-        return [
-            line
-            for class_name, guard in self._TA_CHECKED_CLASS_FEATURES.items()
-            if class_name in used
-            for line in guard
-        ]
+    def _ta_pine_layer_include_lines(self) -> list[str]:
+        """The include line of every engine header this script's ``ta.*``
+        objects are declared in, each followed by the guards of the class
+        identities the script has in that header, in the tables' order.
 
-    # ta.iii and ta.wvad are built from the paired engine's flat-range objects
-    # (``_TA_FLAT_RANGE_CLASSES``, codegen/ta.py), which are na on a bar whose
-    # high equals its low. Their header's include, then the guard for the
-    # feature macro that header defines beside them. Each line is one whole
-    # literal of this module, for the reasons given above.
-    _TA_FLAT_RANGE_INCLUDE = (
-        "#include <pineforge/source/pine_ta_flat_range.hpp>",
-        "#ifndef PINEFORGE_HAS_PINE_FLAT_RANGE",
-        '#error "ta.iii and ta.wvad require the paired pineforge-engine flat-range adapters (PINEFORGE_HAS_PINE_FLAT_RANGE)"',
-        "#endif",
-    )
+        Every call site counts, a dead chart member included: its
+        request.security copies are still declared. The length header is
+        also written for a site or request.security copy that takes the
+        dynamic-length lowering, whatever its class."""
+        used = {site.class_name for site in self.ctx.ta_call_sites}
+        dynamic = self._ta_uses_dynamic_lengths()
+        lines: list[str] = []
+        for header, include in self._TA_PINE_LAYER_INCLUDES.items():
+            needed = dynamic and header == self._TA_LENGTH_HEADER
+            features: list[str] = []
+            for class_name, row in self._TA_PINE_LAYER_CLASSES.items():
+                if class_name not in used or row[1] != header:
+                    continue
+                needed = True
+                feature = row[2]
+                if feature in self._TA_PINE_LAYER_GUARDS and feature not in features:
+                    features.append(feature)
+            if not needed:
+                continue
+            lines.append(include)
+            for feature in features:
+                lines.extend(self._TA_PINE_LAYER_GUARDS[feature])
+        return lines
 
     def _emit_includes(self, lines: list[str]) -> None:
         roots = [self.ctx.ast] + [
@@ -304,19 +322,7 @@ class TopLevelEmitter:
         lines.append('#include <pineforge/ta.hpp>')
         lines.extend(['#if __has_include(<pineforge/checked_settings.hpp>)',
                       '#include <pineforge/checked_settings.hpp>', '#endif'])
-        if self._ta_uses_dynamic_lengths() or any(
-            site.class_name in self._TA_CHECKED_CLASSES
-            or site.class_name in self._TA_POSITIONAL_LAG_CLASSES
-            or site.class_name in self._TA_VOLUME_WEIGHTED_CLASSES
-            for site in self.ctx.ta_call_sites
-        ):
-            lines.append('#include <pineforge/source/pine_ta_length.hpp>')
-            lines.extend(self._ta_checked_feature_guards())
-        if any(
-            site.class_name in self._TA_FLAT_RANGE_CLASSES
-            for site in self.ctx.ta_call_sites
-        ):
-            lines.extend(self._TA_FLAT_RANGE_INCLUDE)
+        lines.extend(self._ta_pine_layer_include_lines())
         if self._has_checked_precalculated_ta():
             lines.extend(('#include <pineforge/run_failure.hpp>', '#include <exception>'))
         lines.append('#include <pineforge/math.hpp>')
@@ -3278,9 +3284,11 @@ class TopLevelEmitter:
         )
 
     def _has_checked_precalculated_ta(self) -> bool:
-        """Whether replay can reach an execution-checked EMA-family length."""
+        """Whether replay can reach a fixed object that checks an argument on
+        its first execution (the EMA family's lengths, a fixed
+        ta.supertrend's factor and ATR period)."""
         return any(
-            site.class_name in self._TA_CHECKED_CLASSES
+            self._ta_fixed_type_is_checked(site)
             and self._ta_site_uses_precalc(site)
             for _ti, site in enumerate(self.ctx.ta_call_sites)
             if _ti not in self._dead_ta_indices

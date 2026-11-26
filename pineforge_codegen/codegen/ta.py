@@ -2496,63 +2496,128 @@ class TaSiteHelper:
 
     # Analyzer class identities also select signature/result/implicit-OHLC
     # rules. Keep those identities and map the concrete execution type only
-    # at emission. The Keltner shims retain their existing seeding scope and
-    # wrap PineKc/PineKcw; all other families keep their current types.
-    _TA_CHECKED_CLASSES = {
-        "ta::EMA": "pineforge::source::PineEma",
-        "ta::TSI": "pineforge::source::PineTsi",
-        "ta::Supertrend": "pineforge::source::PineFixedSupertrend",
-        "ta::MACD": "pineforge::source::PineMacd",
-        "_PFKC": "_PFKC",
-        "_PFKCW": "_PFKCW",
-    }
-
-    # TradingView's ta.mom and ta.roc read ``source[length]`` by bar position:
-    # a bar whose source is na keeps its place, and the call is na when either
-    # end is na. ta::Mom and ta::ROC count present samples instead, so the
-    # Pine call is built from the engine's Pine-layer objects, which keep one
-    # slot per call. They take the same constructor argument and never stop a
-    # run, so they are not checked classes: precalculation needs no handler.
-    _TA_POSITIONAL_LAG_CLASSES = {
-        "ta::Mom": "pineforge::source::PineMom",
-        "ta::ROC": "pineforge::source::PineRoc",
-    }
-
-    # TradingView's ta.vwma is ``ta.sma(source * volume, length) /
-    # ta.sma(volume, length)``, and each of the two averages skips an na input
-    # on its own: a bar whose source is na still enters the volume average,
-    # and the call answers the held product average over it. ta::VWMA keeps
-    # complete (source, volume) pairs instead and answers na on such a bar,
-    # so the Pine call is built from the engine's Pine-layer object, declared
-    # in the header of the classes above. It takes the same constructor
-    # argument and never stops a run: not a checked class either.
-    _TA_VOLUME_WEIGHTED_CLASSES = {
-        "ta::VWMA": "pineforge::source::PineVwma",
-    }
-
-    # TradingView's ta.iii and ta.wvad divide by the bar's range and are na on
-    # a bar whose high equals its low, where ta::III and ta::WVAD answer 0.
-    # The Pine variables are built from the engine's flat-range objects, which
-    # have a header of their own (``_TA_FLAT_RANGE_INCLUDE``,
-    # codegen/emit_top.py). They take no constructor argument and never stop
-    # a run either.
-    _TA_FLAT_RANGE_CLASSES = {
-        "ta::III": "pineforge::source::PineIii",
-        "ta::WVAD": "pineforge::source::PineWvad",
+    # at emission. This is the one table that does it: a row for every class
+    # identity whose fixed object is built from the engine's Pine source
+    # layer. Every other family keeps the kernel class its identity names.
+    #
+    #     class identity: (emitted type, header, feature macro, checked)
+    #
+    # * emitted type: what every declaration, reset and factory of a site
+    #   spells (``_ta_fixed_cpp_type``). It takes the constructor arguments
+    #   and has the ``compute``, ``recompute`` and ``observe_owned_storage``
+    #   of the kernel class, so a site changes its type and nothing else.
+    # * header: the engine header that declares the type, named by its key in
+    #   ``_TA_PINE_LAYER_INCLUDES`` (codegen/emit_top.py, which owns the
+    #   include lines: the generated-C++ allowlist reads them from there).
+    # * feature macro: the macro that header defines beside the type, or
+    #   None. Every one is reserved in ``CPP_STANDARD_MACROS``
+    #   (codegen/helpers.py): a script name with that spelling would be
+    #   expanded. One with an entry in ``_TA_PINE_LAYER_GUARDS``
+    #   (codegen/emit_top.py) is also required by name after the include.
+    # * checked: the type checks an argument on the call's first execution
+    #   and can stop the run there, so a replay that reaches it keeps the
+    #   invalid-argument handler (``_ta_fixed_type_is_checked``).
+    _TA_LENGTH_HEADER = "pine_ta_length"
+    _TA_FLAT_RANGE_HEADER = "pine_ta_flat_range"
+    _TA_CCI_HEADER = "pine_ta_cci"
+    _TA_PINE_LAYER_CLASSES = {
+        # The EMA family checks its lengths. The Keltner shims retain their
+        # existing seeding scope and wrap PineKc/PineKcw.
+        "ta::EMA": ("pineforge::source::PineEma", _TA_LENGTH_HEADER, None, True),
+        "ta::TSI": ("pineforge::source::PineTsi", _TA_LENGTH_HEADER, None, True),
+        # ta.supertrend with a constant or input factor and ATR period keeps
+        # its constructor, reset and precalculation cadence on
+        # PineFixedSupertrend, which makes on the call's first execution the
+        # argument check PineSupertrend makes for a factor that is not a
+        # constant (a factor of zero or less, or an ATR period of zero or
+        # less or na, stops the run there) and otherwise delegates to
+        # ta::Supertrend.
+        "ta::Supertrend": (
+            "pineforge::source::PineFixedSupertrend", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_FIXED_SUPERTREND", True,
+        ),
+        "ta::MACD": ("pineforge::source::PineMacd", _TA_LENGTH_HEADER, None, True),
+        "_PFKC": ("_PFKC", _TA_LENGTH_HEADER, None, True),
+        "_PFKCW": ("_PFKCW", _TA_LENGTH_HEADER, None, True),
+        # TradingView's ta.mom and ta.roc read ``source[length]`` by bar
+        # position: a bar whose source is na keeps its place, and the call is
+        # na when either end is na. ta::Mom and ta::ROC count present samples
+        # instead, so the Pine call is built from the engine's Pine-layer
+        # objects, which keep one slot per call. They take the same
+        # constructor argument and never stop a run, so they are not checked:
+        # precalculation needs no handler.
+        "ta::Mom": (
+            "pineforge::source::PineMom", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_POSITIONAL_LAG", False,
+        ),
+        "ta::ROC": (
+            "pineforge::source::PineRoc", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_POSITIONAL_LAG", False,
+        ),
+        # TradingView's ta.vwma is ``ta.sma(source * volume, length) /
+        # ta.sma(volume, length)``, and each of the two averages skips an na
+        # input on its own: a bar whose source is na still enters the volume
+        # average, and the call answers the held product average over it.
+        # ta::VWMA keeps complete (source, volume) pairs instead and answers
+        # na on such a bar, so the Pine call is built from the engine's
+        # Pine-layer object. It takes the same constructor argument and never
+        # stops a run: not checked either.
+        "ta::VWMA": ("pineforge::source::PineVwma", _TA_LENGTH_HEADER, None, False),
+        # TradingView's ta.iii and ta.wvad divide by the bar's range and are
+        # na on a bar whose high equals its low, where ta::III and ta::WVAD
+        # answer 0. The Pine variables are built from the engine's flat-range
+        # objects, which have a header of their own. They take no constructor
+        # argument and never stop a run either.
+        "ta::III": (
+            "pineforge::source::PineIii", _TA_FLAT_RANGE_HEADER,
+            "PINEFORGE_HAS_PINE_FLAT_RANGE", False,
+        ),
+        "ta::WVAD": (
+            "pineforge::source::PineWvad", _TA_FLAT_RANGE_HEADER,
+            "PINEFORGE_HAS_PINE_FLAT_RANGE", False,
+        ),
+        # Built-ins whose Pine rule differs from the kernel class's own on a
+        # few bars. Each Pine-layer type wraps its kernel class: ta.sar
+        # compares prices as a Pine relational does, so two values within
+        # 1e-10 read as equal; ta.dmi keeps both directional indices on a bar
+        # whose averaged true range is zero, and ADX takes its step there;
+        # ta.mfi has its first value on bar ``length - 1``; ta.rci is na
+        # through bar ``length - 1``; ta.cci answers 0 on a window whose mean
+        # deviation is zero within 1e-10 (PineCci has a header of its own).
+        # None of them checks an argument or stops a run.
+        "ta::SAR": (
+            "pineforge::source::PineSar", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_SAR", False,
+        ),
+        "ta::DMI": (
+            "pineforge::source::PineDmiReference", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_DMI_REFERENCE", False,
+        ),
+        "ta::MFI": (
+            "pineforge::source::PineMfi", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_MFI", False,
+        ),
+        "ta::RCI": (
+            "pineforge::source::PineRci", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_RCI", False,
+        ),
+        "ta::CCI": (
+            "pineforge::source::PineCci", _TA_CCI_HEADER,
+            "PINEFORGE_HAS_PINE_CCI", False,
+        ),
     }
 
     def _ta_fixed_cpp_type(self, site: "TACallSite") -> str:
         """The concrete fixed object used by declarations and every factory."""
-        name = site.class_name
-        for classes in (
-            self._TA_CHECKED_CLASSES,
-            self._TA_POSITIONAL_LAG_CLASSES,
-            self._TA_VOLUME_WEIGHTED_CLASSES,
-            self._TA_FLAT_RANGE_CLASSES,
-        ):
-            if name in classes:
-                return classes[name]
-        return name
+        row = self._TA_PINE_LAYER_CLASSES.get(site.class_name)
+        return site.class_name if row is None else row[0]
+
+    def _ta_fixed_type_is_checked(self, site: "TACallSite") -> bool:
+        """Whether the site's fixed object checks an argument on its first
+        execution and can stop the run there (the ``checked`` column of
+        ``_TA_PINE_LAYER_CLASSES``)."""
+        row = self._TA_PINE_LAYER_CLASSES.get(site.class_name)
+        return row is not None and row[3]
 
     def _ta_plan_cpp_type(self, site: "TACallSite", plan: dict | None) -> str:
         if plan is None:

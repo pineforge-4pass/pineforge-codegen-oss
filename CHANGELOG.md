@@ -60,6 +60,22 @@ supported as exact pairs; on the 0.x line they are independent. See the
   a genuine 0 included. Generated code uses the paired engine's `PineIii` and
   `PineWvad` and requires `PINEFORGE_HAS_PINE_FLAT_RANGE` from
   `pineforge/source/pine_ta_flat_range.hpp`; regenerate C++ and relink.
+- `ta.sar`, `ta.dmi`, `ta.mfi`, `ta.rci` and `ta.cci` are built from the paired
+  engine's Pine-layer types `PineSar`, `PineDmiReference`, `PineMfi`, `PineRci`
+  and `PineCci`, which apply the Pine rule where the engine's own class
+  differs. Results change only on these bars, and in what follows from them:
+  `ta.sar` compares prices as a Pine relational operator does, so two values
+  within 1e-10 of each other read as equal; `ta.dmi` keeps both directional
+  indices on a bar whose averaged true range is zero, where all three results
+  used to be `na`, and ADX takes its step on that bar; `ta.mfi` has its first
+  value on bar `length - 1`, one bar earlier; `ta.rci` is `na` through bar
+  `length - 1`, one bar longer; `ta.cci` is 0 on a window whose mean deviation
+  is zero within 1e-10, where it used to divide by a rounding residue.
+  Generated code includes `pineforge/source/pine_ta_length.hpp` for the first
+  four and `pineforge/source/pine_ta_cci.hpp` for `ta.cci`, and reserves the
+  names `PINEFORGE_HAS_PINE_SAR`, `PINEFORGE_HAS_PINE_DMI_REFERENCE`,
+  `PINEFORGE_HAS_PINE_MFI`, `PINEFORGE_HAS_PINE_RCI` and
+  `PINEFORGE_HAS_PINE_CCI`; regenerate C++ and relink.
 - A `ta.*` call in a `?:` arm or on the right of `and` or `or`, with no `[]` read on the call, now computes the same values in a run that may precalculate (no bar magnifier, empty timeframes) as in every other run: it is evaluated only on the bars that reach it. Such a run used to fill the call on every chart bar, so with `y = bar_index % 2 == 0 ? ta.sma(close, 3) : na` the closes of the odd bars entered the average. This applies to every `ta.*` function; `ta.ema`, and `ta.sma` on the right of `and`, already behaved this way. Unconditional calls and calls read with `[]` are unchanged.
 
 - Both strategy conversions and `request.currency_rate` use the host's rate in effect on each bar for the chart and account currencies, in either direction. Without a rate for the pair the request stops the run with the currency-conversion error, or returns `na` with a run warning when `ignore_invalid_currency` is true; other pairs still stop the run ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
