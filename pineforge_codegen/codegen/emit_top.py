@@ -256,6 +256,18 @@ class TopLevelEmitter:
             for line in guard
         ]
 
+    # ta.iii and ta.wvad are built from the paired engine's flat-range objects
+    # (``_TA_FLAT_RANGE_CLASSES``, codegen/ta.py), which are na on a bar whose
+    # high equals its low. Their header's include, then the guard for the
+    # feature macro that header defines beside them. Each line is one whole
+    # literal of this module, for the reasons given above.
+    _TA_FLAT_RANGE_INCLUDE = (
+        "#include <pineforge/source/pine_ta_flat_range.hpp>",
+        "#ifndef PINEFORGE_HAS_PINE_FLAT_RANGE",
+        '#error "ta.iii and ta.wvad require the paired pineforge-engine flat-range adapters (PINEFORGE_HAS_PINE_FLAT_RANGE)"',
+        "#endif",
+    )
+
     def _emit_includes(self, lines: list[str]) -> None:
         roots = [self.ctx.ast] + [
             pragma.expr_node for pragma in (self.ctx.pf_trace_pragmas or [])
@@ -295,10 +307,16 @@ class TopLevelEmitter:
         if self._ta_uses_dynamic_lengths() or any(
             site.class_name in self._TA_CHECKED_CLASSES
             or site.class_name in self._TA_POSITIONAL_LAG_CLASSES
+            or site.class_name in self._TA_VOLUME_WEIGHTED_CLASSES
             for site in self.ctx.ta_call_sites
         ):
             lines.append('#include <pineforge/source/pine_ta_length.hpp>')
             lines.extend(self._ta_checked_feature_guards())
+        if any(
+            site.class_name in self._TA_FLAT_RANGE_CLASSES
+            for site in self.ctx.ta_call_sites
+        ):
+            lines.extend(self._TA_FLAT_RANGE_INCLUDE)
         if self._has_checked_precalculated_ta():
             lines.extend(('#include <pineforge/run_failure.hpp>', '#include <exception>'))
         lines.append('#include <pineforge/math.hpp>')

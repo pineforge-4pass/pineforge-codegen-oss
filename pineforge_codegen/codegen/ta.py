@@ -2518,11 +2518,41 @@ class TaSiteHelper:
         "ta::ROC": "pineforge::source::PineRoc",
     }
 
+    # TradingView's ta.vwma is ``ta.sma(source * volume, length) /
+    # ta.sma(volume, length)``, and each of the two averages skips an na input
+    # on its own: a bar whose source is na still enters the volume average,
+    # and the call answers the held product average over it. ta::VWMA keeps
+    # complete (source, volume) pairs instead and answers na on such a bar,
+    # so the Pine call is built from the engine's Pine-layer object, declared
+    # in the header of the classes above. It takes the same constructor
+    # argument and never stops a run: not a checked class either.
+    _TA_VOLUME_WEIGHTED_CLASSES = {
+        "ta::VWMA": "pineforge::source::PineVwma",
+    }
+
+    # TradingView's ta.iii and ta.wvad divide by the bar's range and are na on
+    # a bar whose high equals its low, where ta::III and ta::WVAD answer 0.
+    # The Pine variables are built from the engine's flat-range objects, which
+    # have a header of their own (``_TA_FLAT_RANGE_INCLUDE``,
+    # codegen/emit_top.py). They take no constructor argument and never stop
+    # a run either.
+    _TA_FLAT_RANGE_CLASSES = {
+        "ta::III": "pineforge::source::PineIii",
+        "ta::WVAD": "pineforge::source::PineWvad",
+    }
+
     def _ta_fixed_cpp_type(self, site: "TACallSite") -> str:
         """The concrete fixed object used by declarations and every factory."""
         name = site.class_name
-        return self._TA_CHECKED_CLASSES.get(
-            name, self._TA_POSITIONAL_LAG_CLASSES.get(name, name))
+        for classes in (
+            self._TA_CHECKED_CLASSES,
+            self._TA_POSITIONAL_LAG_CLASSES,
+            self._TA_VOLUME_WEIGHTED_CLASSES,
+            self._TA_FLAT_RANGE_CLASSES,
+        ):
+            if name in classes:
+                return classes[name]
+        return name
 
     def _ta_plan_cpp_type(self, site: "TACallSite", plan: dict | None) -> str:
         if plan is None:

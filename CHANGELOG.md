@@ -46,6 +46,20 @@ supported as exact pairs; on the 0.x line they are independent. See the
   requested-context copies and precalculation, and requires
   `PINEFORGE_HAS_PINE_FIXED_SUPERTREND` from
   `pineforge/source/pine_ta_length.hpp`; regenerate C++ and relink.
+- `ta.vwma` follows TradingView's definition, `ta.sma(source * volume, length)
+  / ta.sma(volume, length)`, with each of the two averages skipping an `na`
+  value on its own. On a bar whose source is `na` the call used to return
+  `na`; it now returns the held average of `source * volume` over the new
+  average of `volume`, and the two averages cover different bars until
+  `length` further bars with a source have arrived. On a feed with no `na`
+  source the results can differ from the earlier ones only in the last digit
+  of a double. Generated code uses the paired engine's `PineVwma` from
+  `pineforge/source/pine_ta_length.hpp`; regenerate C++ and relink.
+- `ta.iii` and `ta.wvad` are `na` on a bar whose high equals its low, as on
+  TradingView; they used to be 0 there. A bar with a range keeps its value,
+  a genuine 0 included. Generated code uses the paired engine's `PineIii` and
+  `PineWvad` and requires `PINEFORGE_HAS_PINE_FLAT_RANGE` from
+  `pineforge/source/pine_ta_flat_range.hpp`; regenerate C++ and relink.
 - A `ta.*` call in a `?:` arm or on the right of `and` or `or`, with no `[]` read on the call, now computes the same values in a run that may precalculate (no bar magnifier, empty timeframes) as in every other run: it is evaluated only on the bars that reach it. Such a run used to fill the call on every chart bar, so with `y = bar_index % 2 == 0 ? ta.sma(close, 3) : na` the closes of the odd bars entered the average. This applies to every `ta.*` function; `ta.ema`, and `ta.sma` on the right of `and`, already behaved this way. Unconditional calls and calls read with `[]` are unchanged.
 
 - Both strategy conversions and `request.currency_rate` use the host's rate in effect on each bar for the chart and account currencies, in either direction. Without a rate for the pair the request stops the run with the currency-conversion error, or returns `na` with a run warning when `ignore_invalid_currency` is true; other pairs still stop the run ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
