@@ -150,3 +150,51 @@ def with_checked_ta(cpp: str, *, precalc: bool, kc: bool = False,
         cpp, changed = _EMA_TYPE.subn("pineforge::source::PineEma", cpp)
         assert changed
     return _with_checked_precalc(cpp) if precalc else cpp
+
+
+_FLAT_RANGE_HEADER = "#include <pineforge/source/pine_ta_flat_range.hpp>\n"
+_CCI_HEADER = "#include <pineforge/source/pine_ta_cci.hpp>\n"
+# Kernel class: the Pine source-layer type ta.sar, ta.dmi, ta.mfi, ta.rci or
+# ta.cci is built from, and the header that declares it.
+_PINE_SOURCE_TYPES = {
+    "ta::SAR": ("pineforge::source::PineSar", _CHECKED_HEADER),
+    "ta::DMI": ("pineforge::source::PineDmiReference", _CHECKED_HEADER),
+    "ta::MFI": ("pineforge::source::PineMfi", _CHECKED_HEADER),
+    "ta::RCI": ("pineforge::source::PineRci", _CHECKED_HEADER),
+    "ta::CCI": ("pineforge::source::PineCci", _CCI_HEADER),
+}
+
+
+def _before_first(cpp: str, text: str, anchors: tuple[str, ...]) -> str:
+    """``text`` written before the first of ``anchors`` the C++ has."""
+    for anchor in anchors:
+        if anchor in cpp:
+            assert cpp.count(anchor) == 1
+            return cpp.replace(anchor, text + anchor, 1)
+    raise AssertionError("the reference C++ has no include to write a header before")
+
+
+def with_pine_source_ta(cpp: str) -> str:
+    """Expect the Pine source-layer type where the reference spells a kernel
+    class that ta.sar, ta.dmi, ta.mfi, ta.rci or ta.cci is now built from,
+    and that type's header where the emitter writes it.
+
+    A result type (``ta::DMIResult``) keeps its spelling. Every other byte is
+    the reference's, and a script with none of the five is returned unchanged.
+    Apply it after ``with_checked_ta``, which may already have written the
+    length header.
+    """
+    needed = set()
+    for kernel, (selected, header) in _PINE_SOURCE_TYPES.items():
+        cpp, changed = re.subn(rf"\b{re.escape(kernel)}\b", selected, cpp)
+        if changed:
+            needed.add(header)
+    # The emitted order: the length header and its guards, the flat-range
+    # header and its guard, the cci header, the failure headers of a checked
+    # replay, the math header.
+    tail = (_FAILURE_HEADERS + _MATH_HEADER, _MATH_HEADER)
+    if _CHECKED_HEADER in needed and _CHECKED_HEADER not in cpp:
+        cpp = _before_first(cpp, _CHECKED_HEADER, (_FLAT_RANGE_HEADER,) + tail)
+    if _CCI_HEADER in needed and _CCI_HEADER not in cpp:
+        cpp = _before_first(cpp, _CCI_HEADER, tail)
+    return cpp

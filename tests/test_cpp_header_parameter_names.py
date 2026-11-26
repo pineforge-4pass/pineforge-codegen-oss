@@ -41,6 +41,10 @@ def test_header_and_parameter_names_escape_without_changing_input_titles(name, v
     "PF_NATIVE_OK",
     "PINEFORGE_HAS_PINE_FIXED_SUPERTREND",
     "PINEFORGE_HAS_PINE_FLAT_RANGE",
+    # The feature macros beside the Pine source-layer types of ta.sar, ta.dmi,
+    # ta.mfi, ta.rci and ta.cci.
+    "PINEFORGE_HAS_PINE_SAR", "PINEFORGE_HAS_PINE_DMI_REFERENCE",
+    "PINEFORGE_HAS_PINE_MFI", "PINEFORGE_HAS_PINE_RCI", "PINEFORGE_HAS_PINE_CCI",
 ])
 def test_audited_header_macros_escape_and_keep_public_input_keys(name):
     result = transpile_full(

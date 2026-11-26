@@ -8,14 +8,16 @@ from tests._cpp_tokens import code_only, regions
 
 
 # Exact source-bearing spellings emitted by base.py (host base),
-# emit_top.py (two includes, host/config/override uses), checked_settings.py
-# (config), security.py (host time_close), and ta.py (length adapters).
+# emit_top.py (its includes, host/config/override uses), checked_settings.py
+# (config), security.py (host time_close), and ta.py (length adapters and
+# every Pine-layer type of ``_TA_PINE_LAYER_CLASSES``).
 # Do not allow arbitrary namespaces, paths, or source-qualified members:
 # they could hide an unrenamed script identifier.
 _EMITTER_SOURCE_SPELLINGS = (
     "#include <pineforge/source/pine_strategy_host.hpp>",
     "#include <pineforge/source/pine_ta_length.hpp>",
     "#include <pineforge/source/pine_ta_flat_range.hpp>",
+    "#include <pineforge/source/pine_ta_cci.hpp>",
     "pineforge::source::PineStrategyHost",
     "pineforge::source::PineStrategyConfig",
     "pineforge::source::StrategyOverrides",
@@ -30,9 +32,16 @@ _EMITTER_SOURCE_SPELLINGS = (
     "pineforge::source::PineKc",
     "pineforge::source::PineKcw",
     "pineforge::source::PineMacd",
+    "pineforge::source::PineMom",
+    "pineforge::source::PineRoc",
     "pineforge::source::PineVwma",
     "pineforge::source::PineIii",
     "pineforge::source::PineWvad",
+    "pineforge::source::PineSar",
+    "pineforge::source::PineDmiReference",
+    "pineforge::source::PineMfi",
+    "pineforge::source::PineRci",
+    "pineforge::source::PineCci",
     "pineforge::source::FirstCallBound",
     "pineforge::source::ta_number",
     "pineforge::source::simple_ta_length",

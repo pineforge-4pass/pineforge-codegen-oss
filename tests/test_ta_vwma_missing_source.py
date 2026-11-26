@@ -8,7 +8,7 @@ bars until ``n`` further bars with a source have arrived. The engine's
 ``ta::VWMA`` keeps complete (source, volume) pairs instead: it answers na on
 such a bar and weighs the following bars by the pairs' volumes. The Pine call
 is built from the engine's Pine-layer object ``PineVwma``
-(``codegen/ta.py::_TA_VOLUME_WEIGHTED_CLASSES``).
+(``codegen/ta.py::_TA_PINE_LAYER_CLASSES``).
 
 Invented bars, length 2, the source hidden on bar 2:
 

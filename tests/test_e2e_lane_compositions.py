@@ -240,7 +240,8 @@ def test_a_float_choice_keeps_its_value(runs):
     # values bar for bar (the reset path would pass (int)0.02 and 2).
     outcomes, _ = runs
     sar, bb = ok(outcomes, "float_sar"), ok(outcomes, "float_bb")
-    assert "pineforge::source::FirstCallBound<ta::SAR>" in sar.transpiled["cpp"]
+    assert ("pineforge::source::FirstCallBound<pineforge::source::PineSar>"
+            in sar.transpiled["cpp"])
     factories = [line for line in bb.transpiled["cpp"].splitlines()
                  if "return ta::BB(" in line]
     assert len(factories) == 2 and all("(2.5)" in line and "(int)" not in line

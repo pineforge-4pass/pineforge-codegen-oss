@@ -5,7 +5,7 @@ with ``100 * (x - x[n]) / x[n]``. The subscript counts bars, so a bar whose
 source is na keeps its place and the call is na when either end is na. The
 engine's ``ta::Mom`` / ``ta::ROC`` count present samples instead, so the Pine
 call is built from the engine's Pine-layer objects ``PineMom`` / ``PineRoc``
-(``codegen/ta.py::_TA_POSITIONAL_LAG_CLASSES``).
+(``codegen/ta.py::_TA_PINE_LAYER_CLASSES``).
 
 Invented closes, length 2, the source hidden on bar 2:
 

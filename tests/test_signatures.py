@@ -470,7 +470,7 @@ class TestTAKwargs:
 
     def test_ta_rci_kwargs(self):
         cpp = _generate(_pine('x = ta.rci(source=close, length=14)'))
-        assert "ta::RCI" in cpp
+        assert "pineforge::source::PineRci" in cpp
 
     def test_ta_change_kwargs(self):
         cpp = _generate(_pine('x = ta.change(source=close, length=1)'))
@@ -539,11 +539,11 @@ class TestTAKwargs:
 
     def test_ta_dmi_kwargs(self):
         cpp = _generate(_pine('[dp, dm, adx] = ta.dmi(diLength=14, adxSmoothing=14)'))
-        assert "ta::DMI" in cpp
+        assert "pineforge::source::PineDmiReference" in cpp
 
     def test_ta_sar_kwargs(self):
         cpp = _generate(_pine('x = ta.sar(start=0.02, inc=0.02, max=0.2)'))
-        assert "ta::SAR" in cpp
+        assert "pineforge::source::PineSar" in cpp
         assert "current_bar_.high, current_bar_.low, current_bar_.close" in cpp
 
     def test_ta_linreg_kwargs(self):
@@ -576,7 +576,7 @@ class TestTAKwargs:
 
     def test_ta_cci_kwargs(self):
         cpp = _generate(_pine('x = ta.cci(source=close, length=20)'))
-        assert "ta::CCI" in cpp
+        assert "pineforge::source::PineCci" in cpp
 
     def test_ta_cum_kwargs(self):
         cpp = _generate(_pine('x = ta.cum(source=volume)'))

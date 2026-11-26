@@ -409,7 +409,8 @@ lo = ta.lowest(low, len)
 plot(r + e + m + a + adx + mc + w + s + lo)
 """
     cpp = transpile(src)
-    for cls in ("ta::RSI", "ta::RMA", "ta::ATR", "ta::DMI", "pineforge::source::PineMacd",
+    for cls in ("ta::RSI", "ta::RMA", "ta::ATR", "pineforge::source::PineDmiReference",
+                "pineforge::source::PineMacd",
                 "ta::WMA", "ta::SMA", "ta::Lowest"):
         assert _members(cpp, f"pineforge::source::FirstCallBound<{cls}>"), cls
     # ``lenP`` alone is an input.string choice: input-derived, so its EMA keeps
