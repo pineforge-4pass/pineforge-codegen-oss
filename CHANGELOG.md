@@ -86,6 +86,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - `ta.sma` accepts supported lengths that vary by bar, including lengths from inline inputs, local variables, and loop counters. Unsupported lengths that depend on `var` or `varip` still report an error, and tuple declarations that reuse a parameter name in the same function body are rejected before C++ is generated. This also fixes Unicode handling in `str.match` and `na` separators in `str.split`.
 
+- A chart `ta.sma` length that varies by bar is no longer refused with `PF-E5092` because one of the names it reads is a script-level `var` or `varip`: with `var int base = 2` and `n = base + bar_index % 2`, `ta.sma(close, n)` averages each bar's own window, and so does a `var` length that the script reassigns from its own value (`p := p + 1`). A `var` or `varip` length that is not shown to vary by bar keeps its previous handling (the constructor for an admitted literal or an input, the refusal otherwise), as do a `request.security` copy and a length that a function receives from its callers.
+
 - `strategy.convert_to_account` and `strategy.convert_to_symbol` now warn in the run report and return the input unchanged, still in its original currency, when no conversion rate is available ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
 
 ## 1.13.0 — 2026-11-18

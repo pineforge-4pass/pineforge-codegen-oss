@@ -1730,7 +1730,10 @@ class TaSiteHelper:
     #   callable receives from its call sites nor an unadmitted persistent
     #   length): each call passes its source and
     #   the length its call site binds to ``pineforge::source::SeriesSma``
-    #   (through ``_PFSeriesSma``).
+    #   (through ``_PFSeriesSma``). A length that reads a script-level
+    #   ``var`` / ``varip`` is admitted when the script shows that it varies
+    #   by bar (``_ta_period_is_series``): the call reads that declaration's
+    #   storage, as it reads any other name of a series length.
     # * ta.supertrend: the factor (series or simple) of the first execution is
     #   the run's -- ``pineforge::source::PineSupertrend``.
     #
@@ -1738,8 +1741,8 @@ class TaSiteHelper:
     # macd / kc / hma / tsi / rci and supertrend's atrPeriod at compile time,
     # so those only ever carry a simple one here. A series length for the
     # other window functions (ta.wma, ...), and for a requested-context or
-    # forwarded ta.sma (``_ta_length_is_forwarded``) or one with an
-    # unsupported script-level ``var`` length, keeps the
+    # forwarded ta.sma (``_ta_length_is_forwarded``) or one with a
+    # script-level ``var`` length that is not shown to vary by bar, keeps the
     # refusal.
     # Constant- and input-length sites never reach this plan: they retain
     # their constructor/reset/precalculation cadence. EMA-family objects use
@@ -2058,9 +2061,14 @@ class TaSiteHelper:
     def _ta_length_needs_stable_var(self, site: "TACallSite") -> bool:
         """Whether an authored constructor argument needs the stable-var
         path. Except for previously sized lengths written in a value block,
-        this includes any read of a script-level
+        and for a length the script shows to vary by bar
+        (``_ta_period_is_series``), this includes any read of a script-level
         persistent declaration (``var`` / ``varip``), itself or through the
-        declaration of a name it reads. Each identifier answers from the
+        declaration of a name it reads. TradingView qualifies a length with
+        that evidence series whatever declaration holds a part of it, so the
+        call reads it on every call; a persistent length without it may be
+        fixed for the run, which the series lowering does not claim to
+        answer. Each identifier answers from the
         declaration the analyzer bound it to (``_ta_read_declaration``), so a
         parameter, a loop counter, a block local or a tuple spelled like such
         a declaration is not one, whatever the call site's spelling of the
@@ -2069,7 +2077,10 @@ class TaSiteHelper:
         persistent = self._ta_script_var_decls()
         if not persistent:
             return False
-        pending = list(getattr(site, "ctor_nodes", None) or ())
+        nodes = list(getattr(site, "ctor_nodes", None) or ())
+        # Asked once, and only of a length that reads such a declaration.
+        varies_by_bar: bool | None = None
+        pending = list(nodes)
         seen: set[int] = set()
         while pending:
             if self._budget is not None:
@@ -2088,7 +2099,14 @@ class TaSiteHelper:
                     if init is None or self._runtime_ctor_arg_for_reset(init) is not None:
                         continue
                 if key in persistent:
-                    return True
+                    if varies_by_bar is None:
+                        varies_by_bar = any(
+                            self._ta_period_is_series(node) for node in nodes)
+                    if not varies_by_bar:
+                        return True
+                    # Read from its storage at the call: its initializer
+                    # runs once and is not part of the length.
+                    continue
                 if id(declaration) not in seen:
                     seen.add(id(declaration))
                     pending.append(declaration.value)
@@ -2244,7 +2262,10 @@ class TaSiteHelper:
         constructor from it (the literal admission, a runtime reset) or leaves
         the constructor guard's refusal. The simple spelling leaves those
         declarations out (``_simple_ta_top_level_decls``), so ``simple`` being
-        None does not say that such a length varies by bar."""
+        None does not say that such a length varies by bar. One the script
+        shows to vary by bar (``_ta_period_is_series``) is not ``persistent``
+        here: it takes the series lowering, which reads the declaration's
+        storage at the call."""
         family = self._ta_site_function(site)
         if family == "percentile_nearest_rank":
             kind = "series_percentile" if simple[refused[0]] is None else "first_call"
