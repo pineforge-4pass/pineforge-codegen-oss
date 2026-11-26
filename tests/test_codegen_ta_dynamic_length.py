@@ -13,6 +13,9 @@ rules and their tapes are in the engine header
   ``pineforge::source::SeriesPercentileNearestRank`` appends on every call;
 * ta.supertrend: ``pineforge::source::PineSupertrend``, factor and atrPeriod
   passed on the call and read on its first execution;
+* series leftbars or rightbars, ta.pivothigh / ta.pivotlow:
+  ``_PFSeriesPivotHigh`` / ``_PFSeriesPivotLow``, classes written into the
+  translation unit, both strengths passed on every call;
 * simple length (fixed for the run) of any family:
   ``pineforge::source::FirstCallBound<class>``, the constant-length class built
   on the call's first execution, the length checked by ``simple_ta_length``;
@@ -168,6 +171,222 @@ plot(lo + hi + lob + hib)
     assert not re.search(r"_ta_(lowest|highest)\w*_\d+\(", cpp.split("GeneratedStrategy()")[1].split("{")[0])
     assert "_precalc__ta_lowest" not in cpp
     compile_cpp(cpp, label="series_extremes")
+
+
+# ta.pivothigh / ta.pivotlow with a leftbars or rightbars that is a value of
+# each bar. TradingView declares both strengths series for both overloads; the
+# call used to be refused ("Unsupported TA constructor length"), because the
+# constructor of ta::PivotHigh / ta::PivotLow fixes both strengths for the run.
+_SERIES_PIVOT_CLASSES = {
+    "pivothigh": "_PFSeriesPivotHigh",
+    "pivotlow": "_PFSeriesPivotLow",
+}
+_PIVOT_DEFAULT_SOURCE = {"pivothigh": "high", "pivotlow": "low"}
+
+
+@pytest.mark.parametrize("function", ["pivothigh", "pivotlow"])
+def test_series_pivot_strengths_take_the_per_bar_class(function: str) -> None:
+    field = _PIVOT_DEFAULT_SOURCE[function]
+    src = f"""//@version=6
+strategy("series pivot strengths")
+n = 1 + bar_index % 2
+p = ta.{function}(1, n)
+q = ta.{function}(close, n, 2)
+plot(p + q)
+"""
+    cpp = transpile(src)
+    first, second = _members(cpp, _SERIES_PIVOT_CLASSES[function])
+    # The two-argument form keeps its default source; both strengths are
+    # passed on every call, compute and recompute alike.
+    implicit = _compute_line(cpp, first)
+    assert f"{first}.compute(current_bar_.{field}, pineforge::source::ta_number(" in implicit
+    assert f"{first}.recompute(current_bar_.{field}, pineforge::source::ta_number(" in implicit
+    assert implicit.count("pineforge::source::ta_number(n)") == 2
+    assert implicit.count("pineforge::source::ta_number(") == 4
+    explicit = _compute_line(cpp, second)
+    assert f"{second}.compute(current_bar_.close, pineforge::source::ta_number(n), " in explicit
+    assert explicit.count("pineforge::source::ta_number(") == 4
+    # No constructor argument, no fixed-strength class and no precalculated
+    # series for these sites; the per-bar classes are written once.
+    assert not re.search(
+        rf"_ta_{function}_\d+\(", cpp.split("GeneratedStrategy()")[1].split("{")[0])
+    assert not re.search(r"ta::Pivot(?:High|Low)\s+_ta_", cpp)
+    assert f"_precalc__ta_{function}" not in cpp
+    assert cpp.count("class _PFSeriesPivot {") == 1
+    assert cpp.count(f"class {_SERIES_PIVOT_CLASSES[function]} {{") == 1
+    assert "__PINEFORGE_TA_SERIES_PIVOT__" not in cpp
+    assert "#include <pineforge/source/pine_ta_length.hpp>" in cpp
+
+
+def test_a_var_pivot_strength_is_read_on_every_call() -> None:
+    # A script-level ``var`` written on the bar is a series strength too: the
+    # call reads it each time instead of sizing a constructor from it.
+    src = """//@version=6
+strategy("var pivot strength")
+var int pivotStrength = 2
+pivotStrength := close > open ? 1 : 2
+x = ta.pivothigh(high, pivotStrength, pivotStrength)
+plot(x)
+"""
+    cpp = transpile(src)
+    [member] = _members(cpp, "_PFSeriesPivotHigh")
+    line = _compute_line(cpp, member)
+    assert f"{member}.compute(current_bar_.high, pineforge::source::ta_number(" in line
+    assert len(re.findall(
+        r"pineforge::source::ta_number\([^,]*\bpivotStrength\b[^,]*\)", line)) == 4
+    assert not re.search(r"ta::PivotHigh\s+_ta_", cpp)
+
+
+def test_constant_pivot_strengths_keep_the_constructor_class() -> None:
+    # The per-bar classes and their place marker stay out of every other
+    # script: a constant or input strength keeps ta::PivotHigh / ta::PivotLow.
+    src = """//@version=6
+strategy("constant pivot strengths")
+len = input.int(3, "Strength")
+p = ta.pivothigh(2, 2)
+q = ta.pivotlow(low, len, len)
+plot(p + q)
+"""
+    cpp = transpile(src)
+    assert re.search(r"ta::PivotHigh\s+_ta_pivothigh_\d+;", cpp)
+    assert re.search(r"ta::PivotLow\s+_ta_pivotlow_\d+;", cpp)
+    assert "_PFSeriesPivot" not in cpp
+    assert "__PINEFORGE_TA_SERIES_PIVOT__" not in cpp
+
+
+def test_a_request_security_copy_takes_the_per_bar_pivot_class() -> None:
+    # The requested copy reads its strengths on every requested bar, with the
+    # requested bar's high / low as the source of both overloads.
+    src = """//@version=6
+strategy("security pivot strengths")
+n = math.max(1, ta.barssince(close > open) + 1)
+ph = request.security(syminfo.tickerid, "60", ta.pivothigh(high, 1, n))
+pl = request.security(syminfo.tickerid, "60", ta.pivotlow(n, 1))
+plot(ph + pl)
+"""
+    cpp = transpile(src)
+    high = re.search(r"_PFSeriesPivotHigh\s+(_sec\d+__ta_pivothigh_\d+);", cpp)
+    low = re.search(r"_PFSeriesPivotLow\s+(_sec\d+__ta_pivotlow_\d+);", cpp)
+    assert high and low
+    assert re.search(
+        rf"{high.group(1)}\.compute\(bar\.high, pineforge::source::ta_number\(", cpp)
+    assert re.search(
+        rf"{low.group(1)}\.compute\(bar\.low, pineforge::source::ta_number\(", cpp)
+    assert cpp.count("class _PFSeriesPivot {") == 1
+    compile_cpp(cpp, label="security_pivot_strengths")
+
+
+def test_a_callable_clone_takes_the_per_bar_pivot_class_per_call_site() -> None:
+    src = """//@version=6
+strategy("pivot clones")
+pivotOf(n) => ta.pivothigh(high, n, n)
+fixed = pivotOf(5)
+dynamic = pivotOf(math.max(1, ta.barssince(close > open) + 1))
+plot(fixed + dynamic)
+"""
+    cpp = transpile(src)
+    # The constant clone keeps its constructor; the series one reads its
+    # argument on every call.
+    assert re.search(r"ta::PivotHigh\s+_ta_pivothigh_\w+;", cpp)
+    assert _members(cpp, "_PFSeriesPivotHigh")
+    compile_cpp(cpp, label="pivot_clones")
+
+
+_SERIES_PIVOT_VALUE_DRIVER = r"""
+#include <iostream>
+
+int main() {
+    const double prices[] = {@PRICES@};
+    const std::size_t total = sizeof(prices) / sizeof(prices[0]);
+    std::vector<pineforge::Bar> bars(total);
+    for (std::size_t i = 0; i < total; ++i) {
+        bars[i].open = bars[i].high = bars[i].low = bars[i].close = prices[i];
+        bars[i].volume = 1.0;
+        bars[i].timestamp = 1704067200000LL + static_cast<long long>(i) * 60000LL;
+    }
+    GeneratedStrategy strategy;
+    strategy.run(bars.data(), bars.size(), "1", "1");
+    if (!strategy.last_error().empty()) {
+        std::cerr << strategy.last_error() << "\n";
+        return 14;
+    }
+    std::cout << strategy.implicit_trace << "\n" << strategy.explicit_trace << "\n"
+              << strategy.fixed_trace << "\n";
+    return 0;
+}
+"""
+
+# Invented bars with open = high = low = close. ``n = 1 + bar_index % 2`` is
+# 1, 2, 1, 2, ... A bar answers the price ``right`` bars back when it is not
+# below (pivothigh; not above for pivotlow) the ``left`` prices before it and
+# is strictly above (below) the ``right`` prices after it, left and right
+# being the bar's own; it answers na while fewer than left + right + 1 bars
+# exist. str.tostring prints na as NaN. The last column is a constant
+# (1, 1) call on the same bars: where it differs from the first two, a
+# lowering that froze the strength at 1 fails.
+#
+# right = n, left = 1, prices 2 6 3 5 2 7 4 (pivothigh):
+#   bar 2 (right 1): 6 of bar 1; before it 2, after it 3            -> 6
+#   bar 3 (right 2): 6 of bar 1; before it 2, after it 3 and 5      -> 6
+#   bar 4 (right 1): 5 of bar 3; before it 3, after it 2            -> 5
+#   bar 5 (right 2): 5 of bar 3; after it 2 and 7, and 7 > 5        -> na
+#   bar 6 (right 1): 7 of bar 5; before it 2, after it 4            -> 7
+#   constant (1, 1): bar 3 tests 3 of bar 2 (6 before it) -> na; bar 5
+#   tests 2 of bar 4 (5 before it) -> na.
+# left = n, right = 1, prices 3 8 5 2 4 1 7 2 6 (pivothigh):
+#   bar 2 (left 1): 8 of bar 1; before it 3, after it 5             -> 8
+#   bar 3 (left 2): 5 of bar 2; before it 8 > 5                     -> na
+#   bar 4 (left 1): 2 of bar 3; before it 5 > 2                     -> na
+#   bar 5 (left 2): 4 of bar 4; before it 2 and 5, and 5 > 4        -> na
+#   bar 6 (left 1): 1 of bar 5; before it 4 > 1                     -> na
+#   bar 7 (left 2): 7 of bar 6; before it 1 and 4, after it 2       -> 7
+#   bar 8 (left 1): 2 of bar 7; before it 7 > 2                     -> na
+#   constant (1, 1): bar 5 tests 4 of bar 4 with 2 before and 1 after -> 4.
+# The pivotlow rows are the same bars mirrored (price -> 10 - price), every
+# comparison reversed.
+_SERIES_PIVOT_VALUE_CASES = {
+    "pivothigh-right": (
+        "pivothigh", "1, n", (2, 6, 3, 5, 2, 7, 4),
+        "NaN,NaN,6,6,5,NaN,7,", "NaN,NaN,6,NaN,5,NaN,7,"),
+    "pivotlow-right": (
+        "pivotlow", "1, n", (8, 4, 7, 5, 8, 3, 6),
+        "NaN,NaN,4,4,5,NaN,3,", "NaN,NaN,4,NaN,5,NaN,3,"),
+    "pivothigh-left": (
+        "pivothigh", "n, 1", (3, 8, 5, 2, 4, 1, 7, 2, 6),
+        "NaN,NaN,8,NaN,NaN,NaN,NaN,7,NaN,", "NaN,NaN,8,NaN,NaN,4,NaN,7,NaN,"),
+    "pivotlow-left": (
+        "pivotlow", "n, 1", (7, 2, 5, 8, 6, 9, 3, 8, 4),
+        "NaN,NaN,2,NaN,NaN,NaN,NaN,3,NaN,", "NaN,NaN,2,NaN,NaN,6,NaN,3,NaN,"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SERIES_PIVOT_VALUE_CASES))
+def test_series_pivot_values_follow_each_bars_strengths(case: str) -> None:
+    function, strengths, prices, expected, constant = _SERIES_PIVOT_VALUE_CASES[case]
+    field = _PIVOT_DEFAULT_SOURCE[function]
+    src = (
+        '//@version=6\nstrategy("series pivot values")\n'
+        "n = 1 + bar_index % 2\n"
+        f"p = ta.{function}({strengths})\n"
+        f"q = ta.{function}({field}, {strengths})\n"
+        f"steady = ta.{function}(1, 1)\n"
+        'var string implicit_trace = ""\n'
+        'var string explicit_trace = ""\n'
+        'var string fixed_trace = ""\n'
+        'implicit_trace := implicit_trace + str.tostring(p, "#.##") + ","\n'
+        'explicit_trace := explicit_trace + str.tostring(q, "#.##") + ","\n'
+        'fixed_trace := fixed_trace + str.tostring(steady, "#.##") + ","\n'
+        "plot(p + q + steady)\n"
+    )
+    cpp = transpile(src)
+    assert len(_members(cpp, _SERIES_PIVOT_CLASSES[function])) == 2
+    output = run_emitted_tu(
+        cpp,
+        _SERIES_PIVOT_VALUE_DRIVER.replace(
+            "@PRICES@", ", ".join(str(price) for price in prices)),
+        opt="-O0", label=f"series_pivot_values_{case}",
+    )
+    assert output == f"{expected}\n{expected}\n{constant}\n"
 
 
 def test_simple_lengths_build_the_constant_class_on_first_call() -> None:

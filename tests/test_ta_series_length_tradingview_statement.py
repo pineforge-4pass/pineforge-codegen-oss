@@ -16,8 +16,10 @@ TradingView compile probes).
 Every other function keeps the plain wording, with the C++ class name, which
 makes no claim about TradingView: the functions where TradingView refuses a
 series length too (ta.ema, ta.rsi, ...), and the ones with no recorded result
-(ta.wma, ta.percentile_linear_interpolation, ta.pivothigh, ...). A function
-joins the first group only with its own recorded result.
+(ta.wma, ta.percentile_linear_interpolation, ...). A function
+joins the first group only with its own recorded result. ta.pivothigh and
+ta.pivotlow no longer reach a refusal: a series leftbars or rightbars is read
+on every call (tests/test_codegen_ta_dynamic_length.py).
 """
 
 import pytest
