@@ -98,6 +98,27 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - A `ta.linreg` `offset` that varies by bar, which TradingView refuses, is now
   refused with `PF-E5009`; it used to be read on every bar. A constant or
   input offset is unchanged.
+- `ta.rma`, `ta.sma`, `ta.rsi`, `ta.atr`, `ta.hma`, `ta.vwma`, `ta.mfi`,
+  `ta.highest`, `ta.lowest`, `ta.highestbars`, `ta.lowestbars` and `ta.dmi`
+  with a constant or input length of zero or less now stop the run on the
+  call's first execution, as on TradingView, with its text for the call
+  ("Invalid value of the 'length' argument (0) in the 'sma' function. It must
+  be > 0."; `ta.rsi` names the argument `y`, `ta.atr` the function
+  `'atr'->'rma'`, `ta.vwma` `'vwma'->'sma'`, and `ta.dmi` its two lengths
+  `DI Length` and `ADX Smoothing`). Such a call used to compute: `na` on every
+  bar for most of them, 100 for `ta.mfi`, and no defined value for `ta.sma`
+  and `ta.vwma`. A valid length computes what it computed before. Generated
+  code declares these calls with the paired engine's `PineFixedRma`,
+  `PineFixedSma`, `PineFixedRsi`, `PineFixedAtr`, `PineFixedHma`,
+  `PineFixedVwma`, `PineFixedMfi`, `PineFixedHighest`, `PineFixedLowest`,
+  `PineFixedHighestBars`, `PineFixedLowestBars` and `PineFixedDmi` (those of
+  `ta.vwma`, `ta.mfi` and `ta.dmi` wrap `PineVwma`, `PineMfi` and
+  `PineDmiReference`), including helper and requested-context copies, a
+  simple length and precalculation, and requires
+  `PINEFORGE_HAS_PINE_FIXED_LENGTH` from
+  `pineforge/source/pine_ta_length.hpp`; that name is now reserved. A length
+  the script computes on each bar keeps its series class. Regenerate C++ and
+  relink.
 - A `ta.*` call in a `?:` arm or on the right of `and` or `or`, with no `[]` read on the call, now computes the same values in a run that may precalculate (no bar magnifier, empty timeframes) as in every other run: it is evaluated only on the bars that reach it. Such a run used to fill the call on every chart bar, so with `y = bar_index % 2 == 0 ? ta.sma(close, 3) : na` the closes of the odd bars entered the average. This applies to every `ta.*` function; `ta.ema`, and `ta.sma` on the right of `and`, already behaved this way. Unconditional calls and calls read with `[]` are unchanged.
 
 - Both strategy conversions and `request.currency_rate` use the host's rate in effect on each bar for the chart and account currencies, in either direction. Without a rate for the pair the request stops the run with the currency-conversion error, or returns `na` with a run warning when `ignore_invalid_currency` is true; other pairs still stop the run ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).

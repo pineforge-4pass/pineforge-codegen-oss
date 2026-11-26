@@ -2647,9 +2647,12 @@ class TaSiteHelper:
         # average, and the call answers the held product average over it.
         # ta::VWMA keeps complete (source, volume) pairs instead and answers
         # na on such a bar, so the Pine call is built from the engine's
-        # Pine-layer object. It takes the same constructor argument and never
-        # stops a run: not checked either.
-        "ta::VWMA": ("pineforge::source::PineVwma", _TA_LENGTH_HEADER, None, False),
+        # Pine-layer object PineVwma, through its checked fixed-length form
+        # (the fixed-length rows at the end of this table).
+        "ta::VWMA": (
+            "pineforge::source::PineFixedVwma", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_FIXED_LENGTH", True,
+        ),
         # TradingView's ta.iii and ta.wvad divide by the bar's range and are
         # na on a bar whose high equals its low, where ta::III and ta::WVAD
         # answer 0. The Pine variables are built from the engine's flat-range
@@ -2671,18 +2674,21 @@ class TaSiteHelper:
         # ta.mfi has its first value on bar ``length - 1``; ta.rci is na
         # through bar ``length - 1``; ta.cci answers 0 on a window whose mean
         # deviation is zero within 1e-10 (PineCci has a header of its own).
-        # None of them checks an argument or stops a run.
+        # PineSar, PineRci and PineCci check no argument and never stop a
+        # run. ta.dmi and ta.mfi are built from PineDmiReference and PineMfi
+        # through their checked fixed-length forms (the rows at the end of
+        # this table).
         "ta::SAR": (
             "pineforge::source::PineSar", _TA_LENGTH_HEADER,
             "PINEFORGE_HAS_PINE_SAR", False,
         ),
         "ta::DMI": (
-            "pineforge::source::PineDmiReference", _TA_LENGTH_HEADER,
-            "PINEFORGE_HAS_PINE_DMI_REFERENCE", False,
+            "pineforge::source::PineFixedDmi", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_FIXED_LENGTH", True,
         ),
         "ta::MFI": (
-            "pineforge::source::PineMfi", _TA_LENGTH_HEADER,
-            "PINEFORGE_HAS_PINE_MFI", False,
+            "pineforge::source::PineFixedMfi", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_FIXED_LENGTH", True,
         ),
         "ta::RCI": (
             "pineforge::source::PineRci", _TA_LENGTH_HEADER,
@@ -2691,6 +2697,60 @@ class TaSiteHelper:
         "ta::CCI": (
             "pineforge::source::PineCci", _TA_CCI_HEADER,
             "PINEFORGE_HAS_PINE_CCI", False,
+        ),
+        # Checked fixed-length types. TradingView compiles each of these
+        # calls with a constant or an input length of zero or less and stops
+        # the run on the bar where the call first executes ("Invalid value of
+        # the 'length' argument (0) in the 'sma' function. It must be > 0.").
+        # The classes a fixed call was built with hold no such rule: for a
+        # length of zero most answer na on every bar, PineMfi answers 100,
+        # and ta::SMA and the two windows of PineVwma read a window they do
+        # not have. Each type below stores the length (its constructor never
+        # stops a run, so a call the script never reaches stops nothing),
+        # makes on the call's first execution the check a simple length gets
+        # (``simple_ta_length``, which words the text as TradingView does for
+        # the call), and then builds the type it wraps, whose values a valid
+        # length keeps: the kernel class of the identity for the nine rows
+        # here, and the Pine-layer type of the call for ta.vwma (PineVwma),
+        # ta.dmi (PineDmiReference, both lengths, diLength first) and ta.mfi
+        # (PineMfi) in the rows above. A site whose length is simple, read on
+        # its first execution, is a FirstCallBound of the same type. One
+        # feature macro stands for all twelve.
+        "ta::RMA": (
+            "pineforge::source::PineFixedRma", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_FIXED_LENGTH", True,
+        ),
+        "ta::SMA": (
+            "pineforge::source::PineFixedSma", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_FIXED_LENGTH", True,
+        ),
+        "ta::RSI": (
+            "pineforge::source::PineFixedRsi", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_FIXED_LENGTH", True,
+        ),
+        "ta::ATR": (
+            "pineforge::source::PineFixedAtr", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_FIXED_LENGTH", True,
+        ),
+        "ta::HMA": (
+            "pineforge::source::PineFixedHma", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_FIXED_LENGTH", True,
+        ),
+        "ta::Highest": (
+            "pineforge::source::PineFixedHighest", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_FIXED_LENGTH", True,
+        ),
+        "ta::Lowest": (
+            "pineforge::source::PineFixedLowest", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_FIXED_LENGTH", True,
+        ),
+        "ta::HighestBars": (
+            "pineforge::source::PineFixedHighestBars", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_FIXED_LENGTH", True,
+        ),
+        "ta::LowestBars": (
+            "pineforge::source::PineFixedLowestBars", _TA_LENGTH_HEADER,
+            "PINEFORGE_HAS_PINE_FIXED_LENGTH", True,
         ),
     }
 

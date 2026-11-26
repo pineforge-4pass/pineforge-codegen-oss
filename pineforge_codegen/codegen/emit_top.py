@@ -255,6 +255,14 @@ class TopLevelEmitter:
             '#error "ta.supertrend requires the paired pineforge-engine fixed-argument adapter (PINEFORGE_HAS_PINE_FIXED_SUPERTREND)"',
             "#endif",
         ),
+        # One macro for the twelve checked fixed-length types (ta.rma,
+        # ta.sma, ta.rsi, ta.atr, ta.hma, ta.vwma, ta.mfi, ta.highest,
+        # ta.lowest, ta.highestbars, ta.lowestbars and ta.dmi).
+        "PINEFORGE_HAS_PINE_FIXED_LENGTH": (
+            "#ifndef PINEFORGE_HAS_PINE_FIXED_LENGTH",
+            '#error "generated code requires the paired pineforge-engine fixed-length adapters (PINEFORGE_HAS_PINE_FIXED_LENGTH)"',
+            "#endif",
+        ),
         "PINEFORGE_HAS_PINE_FLAT_RANGE": (
             "#ifndef PINEFORGE_HAS_PINE_FLAT_RANGE",
             '#error "ta.iii and ta.wvad require the paired pineforge-engine flat-range adapters (PINEFORGE_HAS_PINE_FLAT_RANGE)"',
@@ -3437,7 +3445,8 @@ class TopLevelEmitter:
     def _has_checked_precalculated_ta(self) -> bool:
         """Whether replay can reach a fixed object that checks an argument on
         its first execution (the EMA family's lengths, a fixed
-        ta.supertrend's factor and ATR period)."""
+        ta.supertrend's factor and ATR period, the length of the twelve
+        checked fixed-length types)."""
         return any(
             self._ta_fixed_type_is_checked(site)
             and self._ta_site_uses_precalc(site)
