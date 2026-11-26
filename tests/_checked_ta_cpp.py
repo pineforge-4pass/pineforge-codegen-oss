@@ -9,6 +9,14 @@ _CHECKED_HEADER = "#include <pineforge/source/pine_ta_length.hpp>\n"
 _FAILURE_HEADERS = "#include <pineforge/run_failure.hpp>\n#include <exception>\n"
 _MATH_HEADER = "#include <pineforge/math.hpp>\n"
 _EMA_TYPE = re.compile(r"\bta::EMA\b")
+# The class alone: ``ta::SupertrendResult`` keeps its name.
+_SUPERTREND_TYPE = re.compile(r"\bta::Supertrend\b")
+_SUPERTREND_GUARD = (
+    "#ifndef PINEFORGE_HAS_PINE_FIXED_SUPERTREND\n"
+    '#error "ta.supertrend requires the paired pineforge-engine fixed-argument'
+    ' adapter (PINEFORGE_HAS_PINE_FIXED_SUPERTREND)"\n'
+    "#endif\n"
+)
 
 _OLD_KC_FORWARD = (
     " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true;"
@@ -107,20 +115,38 @@ def _with_checked_precalc(cpp: str) -> str:
     )
 
 
-def with_checked_ta(cpp: str, *, precalc: bool, kc: bool = False) -> str:
+def with_checked_ta(cpp: str, *, precalc: bool, kc: bool = False,
+                    supertrend: bool = False, ema: bool | None = None) -> str:
     """Expect the checked EMA type, or the checked KC shim when kc is set.
+
+    With ``supertrend``, the fixed-argument Supertrend adapter and the guard
+    for its feature macro are expected as well. ``ema`` says whether the
+    script also has an EMA object; left out, it is expected exactly when
+    neither ``kc`` nor ``supertrend`` is set, as before ``supertrend``
+    existed.
 
     Every other byte comes from the pinned reference, including initializer
     arguments, reset getters, replay computations and requested state.
     """
+    if ema is None:
+        ema = not kc and not supertrend
     assert cpp.count(_MATH_HEADER) == 1
     assert _CHECKED_HEADER not in cpp
-    headers = _CHECKED_HEADER + (_FAILURE_HEADERS if precalc else "")
+    headers = (
+        _CHECKED_HEADER
+        + (_SUPERTREND_GUARD if supertrend else "")
+        + (_FAILURE_HEADERS if precalc else "")
+    )
     cpp = cpp.replace(_MATH_HEADER, headers + _MATH_HEADER, 1)
     if kc:
         assert cpp.count(_OLD_KC) == 1
         cpp = cpp.replace(_OLD_KC, _CHECKED_KC, 1)
-    else:
+    if supertrend:
+        cpp, changed = _SUPERTREND_TYPE.subn(
+            "pineforge::source::PineFixedSupertrend", cpp
+        )
+        assert changed
+    if ema:
         cpp, changed = _EMA_TYPE.subn("pineforge::source::PineEma", cpp)
         assert changed
     return _with_checked_precalc(cpp) if precalc else cpp

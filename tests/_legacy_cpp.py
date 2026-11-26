@@ -23,6 +23,7 @@ _EMITTER_SOURCE_SPELLINGS = (
     "pineforge::source::SeriesHighestBars",
     "pineforge::source::SeriesLowestBars",
     "pineforge::source::PineSupertrend",
+    "pineforge::source::PineFixedSupertrend",
     "pineforge::source::PineEma",
     "pineforge::source::PineTsi",
     "pineforge::source::PineKc",

@@ -89,7 +89,10 @@ TA_SMOKE_CASES = {
     "sma": ("x = ta.sma(close, 5)", "ta::SMA"),
     "stdev": ("x = ta.stdev(close, 5)", "ta::StdDev"),
     "stoch": ("x = ta.stoch(close, high, low, 14)", "ta::Stoch"),
-    "supertrend": ("[s, d] = ta.supertrend(3.0, 10)", "ta::Supertrend"),
+    "supertrend": (
+        "[s, d] = ta.supertrend(3.0, 10)",
+        "pineforge::source::PineFixedSupertrend",
+    ),
     "swma": ("x = ta.swma(close)", "ta::SWMA"),
     "tr": ("x = ta.tr(true)", "ta::TR"),
     "tsi": ("x = ta.tsi(close, 13, 25)", "pineforge::source::PineTsi"),

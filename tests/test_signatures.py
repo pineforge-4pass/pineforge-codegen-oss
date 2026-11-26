@@ -535,7 +535,7 @@ class TestTAKwargs:
 
     def test_ta_supertrend_kwargs(self):
         cpp = _generate(_pine('[st, dir] = ta.supertrend(factor=3.0, atrPeriod=10)'))
-        assert "ta::Supertrend" in cpp
+        assert "pineforge::source::PineFixedSupertrend" in cpp
 
     def test_ta_dmi_kwargs(self):
         cpp = _generate(_pine('[dp, dm, adx] = ta.dmi(diLength=14, adxSmoothing=14)'))

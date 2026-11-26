@@ -94,6 +94,7 @@ def test_without_source_rename_leaves_unrenamed_text_unchanged(cpp: str) -> None
         "pineforge::source::SeriesHighestBars",
         "pineforge::source::SeriesLowestBars",
         "pineforge::source::PineSupertrend",
+        "pineforge::source::PineFixedSupertrend",
         "pineforge::source::PineEma",
         "pineforge::source::PineTsi",
         "pineforge::source::PineKc",

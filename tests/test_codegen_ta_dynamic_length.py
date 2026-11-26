@@ -783,8 +783,9 @@ def test_constant_and_input_lengths_keep_their_cpp(tmp_path: Path) -> None:
         expected = expected.replace(previous, assignment, 1)
     # The checked replay is the documented emission: its source adapter,
     # failure headers, guarded replay, typed invalid-argument catch and cache
-    # clearing are all part of the expected C++.
-    expected = with_checked_ta(expected, precalc=True)
+    # clearing are all part of the expected C++. The constant-factor
+    # Supertrend is the fixed-argument adapter, with its feature guard.
+    expected = with_checked_ta(expected, precalc=True, supertrend=True, ema=True)
     # The rollback hook leaves requested-evaluation state alone since the
     # fill-restore fix; everything else must stay identical.
     assert without_restore_script_state(
