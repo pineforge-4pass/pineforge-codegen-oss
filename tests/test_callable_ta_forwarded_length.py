@@ -25,7 +25,10 @@ def _ctor_periods(cpp: str, ta_name: str = "sma") -> list[str]:
     return periods
 
 
-def _reset_lines(cpp: str, ta_name: str = "sma", *, factory: str = "ta::") -> list[str]:
+def _reset_lines(cpp: str, ta_name: str = "sma", *, factory: str | None = None) -> list[str]:
+    if factory is None:
+        # ta.sma is built from its checked fixed-length type.
+        factory = "pineforge::source::PineFixedSma(" if ta_name == "sma" else "ta::"
     return [
         line.strip()
         for line in cpp.splitlines()

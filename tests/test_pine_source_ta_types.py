@@ -3,7 +3,11 @@ source-layer types.
 
 The kernel classes keep their own rules; the Pine built-ins follow the
 source-layer types ``PineSar``, ``PineDmiReference``, ``PineMfi``, ``PineRci``
-and ``PineCci`` (``codegen/ta.py::_TA_PINE_LAYER_CLASSES``).
+and ``PineCci`` (``codegen/ta.py::_TA_PINE_LAYER_CLASSES``). ta.dmi and ta.mfi
+are declared with ``PineFixedDmi`` and ``PineFixedMfi``, which check the
+lengths on the call's first execution and then are ``PineDmiReference`` and
+``PineMfi`` (tests/test_ta_fixed_length_checks.py has the check); their rows
+below are values on which those two differ from the kernel classes.
 
 The routing test is the emitter's shape: every declaration, reset and factory
 of a site spells the selected type. The table test holds the two class tables
@@ -35,10 +39,10 @@ _FAMILIES = {
     "sar": ("pineforge::source::PineSar", "ta::SAR", _LENGTH_HEADER,
             "ta.sar(0.02, 0.02, 0.2)", "ta.sar(settingInput, 0.02, 0.2)",
             'settingInput = input.float(0.02, "Setting")'),
-    "dmi": ("pineforge::source::PineDmiReference", "ta::DMI", _LENGTH_HEADER,
+    "dmi": ("pineforge::source::PineFixedDmi", "ta::DMI", _LENGTH_HEADER,
             "ta.dmi(5, 5)", "ta.dmi(settingInput, 5)",
             'settingInput = input.int(5, "Setting")'),
-    "mfi": ("pineforge::source::PineMfi", "ta::MFI", _LENGTH_HEADER,
+    "mfi": ("pineforge::source::PineFixedMfi", "ta::MFI", _LENGTH_HEADER,
             "ta.mfi(close, 5)", "ta.mfi(close, settingInput)",
             'settingInput = input.int(5, "Setting")'),
     "rci": ("pineforge::source::PineRci", "ta::RCI", _LENGTH_HEADER,
@@ -48,6 +52,8 @@ _FAMILIES = {
             "ta.cci(close, 5)", "ta.cci(close, settingInput)",
             'settingInput = input.int(5, "Setting")'),
 }
+# The two whose selected type also checks its lengths on the first execution.
+_CHECKED_FAMILIES = frozenset({"dmi", "mfi"})
 
 
 def _members(cpp, family):
@@ -103,8 +109,12 @@ def test_every_site_is_built_from_the_source_layer_type(family):
     include = f"#include <{header}>\n"
     assert cpp.count(include) == 1
     assert cpp.index(include) < cpp.index("#include <pineforge/math.hpp>\n")
-    # These types check no argument: the replay keeps no invalid-length handler.
-    assert "_pf_precalc_error" not in cpp
+    # A type that checks no argument adds no invalid-length handler to the
+    # replay; one that checks its lengths keeps it where the replay steps it.
+    replayed = any(f"_precalc_{name}[i] =" in cpp for _kind, name in members)
+    assert ("_pf_precalc_error" in cpp) == (
+        family in _CHECKED_FAMILIES and replayed
+    )
 
 
 @pytest.mark.parametrize("family", _FAMILIES)
@@ -174,11 +184,12 @@ def test_the_class_table_its_headers_guards_and_reserved_names_agree():
         assert lines[1].startswith('#error "') and lines[1].endswith(f'({feature})"')
         assert lines[2:] == ("#endif",)
     # The five built-ins this module is about.
-    for selected, kernel, header, *_ in _FAMILIES.values():
+    for family, (selected, kernel, header, *_calls) in _FAMILIES.items():
         cpp_type, key, feature, checked = table[kernel]
         assert cpp_type == selected
         assert includes[key] == f"#include <{header}>"
-        assert feature is not None and not checked
+        assert feature is not None
+        assert checked == (family in _CHECKED_FAMILIES)
 
 
 # One hosted run per route on a handle of its own: the bare overload offers

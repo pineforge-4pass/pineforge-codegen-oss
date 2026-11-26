@@ -622,7 +622,7 @@ def test_requested_context_admits_only_proven_stable_var_literal_ctor(
     initializers = _constructor_initializers(cpp)
     assert re.search(r"_ta_sma_\d+\(5\)", initializers)
     assert re.search(r"_sec\d+__ta_sma_\d+\(5\)", initializers)
-    assert "ta::SMA(1)" not in cpp
+    assert "PineFixedSma(1)" not in cpp
     assert not re.search(r"_ta_sma_\d+\(1\)", cpp)
     assert not re.search(r"_sec\d+__ta_sma_\d+\(1\)", cpp)
     compile_cpp(

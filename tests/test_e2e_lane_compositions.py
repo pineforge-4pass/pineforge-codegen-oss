@@ -226,7 +226,10 @@ def test_a_payload_timeframe_length_reads_the_requested_timeframe(runs):
     subject = ok(outcomes, "tf_length")
     twin9, twin14 = ok(outcomes, "tf_length_9"), ok(outcomes, "tf_length_14")
     # The constructor reset would compare the chart's "15" (length 14).
-    assert "pineforge::source::FirstCallBound<ta::RSI> _sec0__ta_rsi_" in subject.transpiled["cpp"]
+    assert (
+        "pineforge::source::FirstCallBound<pineforge::source::PineFixedRsi> _sec0__ta_rsi_"
+        in subject.transpiled["cpp"]
+    )
     summary = assert_same_runs(subject, twin9)
     values9 = _values(twin9.traces["default"], "r")
     values14 = _values(twin14.traces["default"], "r")
@@ -273,7 +276,9 @@ def test_each_lanes_members_in_one_tu(runs):
     cpp = subject.transpiled["cpp"]
     assert re.search(r"^\s*int64_t alias = ", cpp, re.M)
     assert re.search(r"^\s*std::string hs = ", cpp, re.M)
-    assert "pineforge::source::FirstCallBound<ta::RSI> _ta_rsi_" in cpp
+    assert (
+        "pineforge::source::FirstCallBound<pineforge::source::PineFixedRsi> _ta_rsi_" in cpp
+    )
     assert "Series<bool> _pf_session_hist_ismarket" in cpp
     records = subject.traces["default"]
     alias = _values(records, "alias")
@@ -415,13 +420,15 @@ def test_each_ta_length_takes_its_lanes_lowering() -> None:
     # from the input, on the chart and in the payload.
     assert _member_type(cpp, "_ta_ema_2") == "pineforge::source::PineEma"
     assert choice in _line(cpp, r"^\s*_ta_ema_2 = pineforge::source::PineEma\(")
-    assert _member_type(cpp, "_sec0__ta_sma_1") == "ta::SMA"
-    assert choice in _line(cpp, r"^\s*_sec0__ta_sma_1 = ta::SMA\(")
+    assert _member_type(cpp, "_sec0__ta_sma_1") == "pineforge::source::PineFixedSma"
+    assert choice in _line(cpp, r"^\s*_sec0__ta_sma_1 = pineforge::source::PineFixedSma\(")
     # K-TA-DYNLEN: the syminfo comparison is built on the call's first
     # execution, the timeframe one in the requested timeframe.
-    assert _member_type(cpp, "_sec1__ta_sma_1") == "pineforge::source::FirstCallBound<ta::SMA>"
+    assert _member_type(cpp, "_sec1__ta_sma_1") == (
+        "pineforge::source::FirstCallBound<pineforge::source::PineFixedSma>")
     assert 'syminfo_.type == std::string("crypto")' in _line(cpp, r"_sec1__ta_sma_1\.compute\(")
-    assert _member_type(cpp, "_sec2__ta_rsi_3") == "pineforge::source::FirstCallBound<ta::RSI>"
+    assert _member_type(cpp, "_sec2__ta_rsi_3") == (
+        "pineforge::source::FirstCallBound<pineforge::source::PineFixedRsi>")
     rsi = _line(cpp, r"_sec2__ta_rsi_3\.compute\(")
     assert '"D" == std::string("D")' in rsi and "script_tf_" not in rsi
     compile_cpp(cpp, label="lane composition lengths")
@@ -467,7 +474,7 @@ if r > 50
     strategy.entry("L", strategy.long)
 '''
     cpp = transpile(src)
-    assert _member_type(cpp, "_sec0__ta_rsi_1") == "ta::RSI"
+    assert _member_type(cpp, "_sec0__ta_rsi_1") == "pineforge::source::PineFixedRsi"
 
 
 def test_a_derived_name_is_spelled_from_its_declarations() -> None:

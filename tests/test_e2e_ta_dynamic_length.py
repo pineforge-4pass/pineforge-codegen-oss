@@ -118,7 +118,8 @@ def test_supertrend_reads_its_first_factor(runs):
 
 def test_simple_length_is_the_constant(runs):
     cpp, compared = replay(runs, "simple_length")
-    for cls in ("ta::RSI", "ta::RMA", "ta::ATR"):
+    for cls in ("pineforge::source::PineFixedRsi", "pineforge::source::PineFixedRma",
+                "pineforge::source::PineFixedAtr"):
         assert f"pineforge::source::FirstCallBound<{cls}> " in cpp, cls
     # ``lenP`` is an input.string choice: input-derived, its EMA keeps the
     # constructor and is reset from the input (the request.security helpers
@@ -134,8 +135,12 @@ def test_simple_length_is_the_constant(runs):
 
 def test_simple_window_length_reads_the_constant_ring(runs):
     cpp, compared = replay(runs, "simple_window")
-    assert "pineforge::source::FirstCallBound<ta::Lowest> " in cpp
-    assert "pineforge::source::FirstCallBound<ta::HighestBars> " in cpp
+    assert (
+        "pineforge::source::FirstCallBound<pineforge::source::PineFixedLowest> " in cpp
+    )
+    assert (
+        "pineforge::source::FirstCallBound<pineforge::source::PineFixedHighestBars> " in cpp
+    )
     assert "pineforge::source::SeriesLowest " in cpp
     assert "pineforge::source::SeriesHighestBars " in cpp
     print(f"simple vs series window: {compared}/{compared} bars equal TradingView")

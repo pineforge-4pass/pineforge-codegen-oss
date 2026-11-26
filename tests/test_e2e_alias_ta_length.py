@@ -46,7 +46,8 @@ def _resets(cpp: str) -> list[str]:
 def test_the_reset_reads_the_alias_through_the_inputs():
     cpp = transpile(source(NAME, FIXTURES))
     resets = "\n".join(_resets(cpp))
-    for cls in ("pineforge::source::PineEma", "ta::SMA", "ta::RSI", "ta::Highest"):
+    for cls in ("pineforge::source::PineEma", "pineforge::source::PineFixedSma",
+                "pineforge::source::PineFixedRsi", "pineforge::source::PineFixedHighest"):
         line = next(ln for ln in resets.splitlines() if f"= {cls}(" in ln)
         # The alias's own member is never the length: it is 0 until the body
         # assigns it, after the reset has run.

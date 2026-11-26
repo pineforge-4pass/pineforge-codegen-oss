@@ -40,7 +40,7 @@ import pytest
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp, run_emitted_tu
-from tests._checked_ta_cpp import with_checked_ta
+from tests._checked_ta_cpp import with_checked_ta, with_pine_source_ta
 from tests._e2e import reference_codegen, transpile_json
 from tests._legacy_cpp import without_restore_script_state, without_trade_history_policy
 
@@ -413,9 +413,11 @@ lo = ta.lowest(low, len)
 plot(r + e + m + a + adx + mc + w + s + lo)
 """
     cpp = transpile(src)
-    for cls in ("ta::RSI", "ta::RMA", "ta::ATR", "pineforge::source::PineDmiReference",
+    for cls in ("pineforge::source::PineFixedRsi", "pineforge::source::PineFixedRma",
+                "pineforge::source::PineFixedAtr", "pineforge::source::PineFixedDmi",
                 "pineforge::source::PineMacd",
-                "ta::WMA", "ta::SMA", "ta::Lowest"):
+                "ta::WMA", "pineforge::source::PineFixedSma",
+                "pineforge::source::PineFixedLowest"):
         assert _members(cpp, f"pineforge::source::FirstCallBound<{cls}>"), cls
     # ``lenP`` alone is an input.string choice: input-derived, so its EMA keeps
     # the constructor and the runtime reset re-reads the input (the
@@ -469,7 +471,7 @@ plot(fixed + dynamic)
 """
     cpp = transpile(src)
     # The constant clone keeps its constructor; the series one is re-windowed.
-    assert re.search(r"ta::Lowest\s+_ta_lowest_\w+;", cpp)
+    assert re.search(r"pineforge::source::PineFixedLowest\s+_ta_lowest_\w+;", cpp)
     assert _members(cpp, "pineforge::source::SeriesLowest")
     compile_cpp(cpp, label="clones")
 
@@ -485,10 +487,14 @@ lo = request.security(syminfo.tickerid, "60", ta.lowest(low, n))
 plot(r + lo)
 """
     cpp = transpile(src)
-    rsi = re.search(r"pineforge::source::FirstCallBound<ta::RSI>\s+(_sec\d+__ta_rsi_\d+);", cpp)
+    rsi = re.search(
+        r"pineforge::source::FirstCallBound<pineforge::source::PineFixedRsi>"
+        r"\s+(_sec\d+__ta_rsi_\d+);", cpp)
     lowest = re.search(r"pineforge::source::SeriesLowest\s+(_sec\d+__ta_lowest_\d+);", cpp)
     assert rsi and lowest
-    assert re.search(rf"{rsi.group(1)}\.compute\(\[&\]\(\) \{{ return ta::RSI\(", cpp)
+    assert re.search(
+        rf"{rsi.group(1)}\.compute\(\[&\]\(\) \{{ return pineforge::source::PineFixedRsi\(",
+        cpp)
     assert re.search(rf"{lowest.group(1)}\.compute\(bar\.low, pineforge::source::ta_number\(", cpp)
     compile_cpp(cpp, label="security_payload")
 
@@ -545,7 +551,8 @@ if out + acc > top
     cpp = transpile(src)
     [local] = _members(cpp, "pineforge::source::SeriesHighest")
     [loop] = _members(cpp, "pineforge::source::SeriesLowest")
-    [top] = _members(cpp, "pineforge::source::FirstCallBound<ta::Highest>")
+    [top] = _members(
+        cpp, "pineforge::source::FirstCallBound<pineforge::source::PineFixedHighest>")
     body = cpp.split("int n = ", 1)[1]
     assert f"{local}.compute(current_bar_.high, pineforge::source::ta_number(n))" in body
     assert re.search(r"for \(int n = [^\n]*\n[^\n]*" + re.escape(
@@ -589,7 +596,8 @@ plot(a + c)
 """
     cpp = transpile(src)
     [series] = _members(cpp, "pineforge::source::SeriesLowest")
-    [simple] = _members(cpp, "pineforge::source::FirstCallBound<ta::Lowest>")
+    [simple] = _members(
+        cpp, "pineforge::source::FirstCallBound<pineforge::source::PineFixedLowest>")
     assert "ta_number(m)" in _compute_line(cpp, series)
     assert '"crypto"' in _compute_line(cpp, simple)
     compile_cpp(cpp, label="declared_qualifiers")
@@ -608,7 +616,7 @@ def test_helper_bound_security_copies_are_planned_per_call(series_first: bool) -
     cpp = transpile(src)
     simple_sec, series_sec = (1, 0) if series_first else (0, 1)
     assert _member_type(cpp, f"_sec{simple_sec}__ta_highest_1") == \
-        "pineforge::source::FirstCallBound<ta::Highest>"
+        "pineforge::source::FirstCallBound<pineforge::source::PineFixedHighest>"
     assert _member_type(cpp, f"_sec{series_sec}__ta_highest_1") == \
         "pineforge::source::SeriesHighest"
     # A payload's bar_index is the requested bar's count (CG-OPEN-ITEMS
@@ -647,7 +655,7 @@ plot(a + b + c)
     lines = {sec: _compute_line(cpp, f"_sec{sec}__ta_highest_1") for sec in range(3)}
     assert "(9) : (14)" in lines[0]
     assert "(21) : (30)" in lines[1]
-    assert "ta::Highest(7)" in lines[2]
+    assert "pineforge::source::PineFixedHighest(7)" in lines[2]
     compile_cpp(cpp, label="callable_copies")
 
 
@@ -792,6 +800,9 @@ def test_constant_and_input_lengths_keep_their_cpp(tmp_path: Path) -> None:
     # clearing are all part of the expected C++. The constant-factor
     # Supertrend is the fixed-argument adapter, with its feature guard.
     expected = with_checked_ta(expected, precalc=True, supertrend=True, ema=True)
+    # ta.sma, ta.lowest, ta.highest and ta.rsi are built from the checked
+    # fixed-length types, whose feature guard follows the Supertrend one.
+    expected = with_pine_source_ta(expected)
     # The rollback hook leaves requested-evaluation state alone since the
     # fill-restore fix; everything else must stay identical.
     assert without_restore_script_state(

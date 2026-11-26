@@ -23,6 +23,7 @@ same C++ on both builds.
 
 from __future__ import annotations
 
+from tests._checked_ta_cpp import with_pine_source_ta
 from tests._legacy_cpp import legacy_cpp
 import concurrent.futures
 import csv
@@ -203,7 +204,9 @@ def test_the_pre_lane_build_missed_every_omitted_default(outcomes, case):
 def test_a_script_that_declares_every_default_is_unchanged(outcomes, case):
     lane = _outcome(outcomes, case.tape, "lane")
     legacy = _outcome(outcomes, case.tape, "legacy")
-    assert legacy_cpp(lane.cpp) == legacy_cpp(legacy.cpp)
+    # The probes' two ta.sma calls are built from the checked fixed-length
+    # type today; every other byte is the legacy build's.
+    assert legacy_cpp(lane.cpp) == legacy_cpp(with_pine_source_ta(legacy.cpp))
     assert lane.engine == legacy.engine == _tape(case)
 
 

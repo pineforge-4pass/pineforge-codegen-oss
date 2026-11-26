@@ -40,6 +40,8 @@ def test_header_and_parameter_names_escape_without_changing_input_titles(name, v
     "PINEFORGE_HAS_TA_SERIES_LENGTH", "PINEFORGE_HAS_PINE_POSITIONAL_LAG",
     "PF_NATIVE_OK",
     "PINEFORGE_HAS_PINE_FIXED_SUPERTREND",
+    # The feature macro beside the checked fixed-length types.
+    "PINEFORGE_HAS_PINE_FIXED_LENGTH",
     "PINEFORGE_HAS_PINE_FLAT_RANGE",
     # The feature macros beside the Pine source-layer types of ta.sar, ta.dmi,
     # ta.mfi, ta.rci and ta.cci.

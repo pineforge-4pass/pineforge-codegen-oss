@@ -82,7 +82,9 @@ def test_the_requested_copies_read_the_helper_state():
     assert re.search(r"pineforge::source::SeriesLowest _sec3__ta_lowest_\w+;", cpp)
     # ``q`` rebound in an if arm: the local the evaluator assigns.
     assert "pineforge::source::ta_number(_sec4_tq_5_q)" in cpp
-    assert not re.search(r"ta::(Highest|Lowest)\(", cpp.split("void _eval_security_0")[1])
+    assert not re.search(
+        r"(?:ta::|PineFixed)(Highest|Lowest)\(", cpp.split("void _eval_security_0")[1]
+    )
     compile_cpp(cpp)
 
 
@@ -138,7 +140,7 @@ def test_an_indirect_self_reading_update_plans_without_recursing():
 @pytest.mark.parametrize("call, member", [
     # (The requested EMA's seeding wrapper is not this rule's.)
     ("ta.ema(close, q)", r"pineforge::source::PineEma _sec0__ta_ema_1;"),
-    ("ta.highest(high, q)", r"ta::Highest _sec0__ta_highest_1;"),
+    ("ta.highest(high, q)", r"pineforge::source::PineFixedHighest _sec0__ta_highest_1;"),
 ])
 def test_a_local_an_arm_only_declares_keeps_its_value(call, member):
     # ``q = 6`` in the arm declares a local of its own; only ``z`` is
@@ -176,5 +178,5 @@ def test_an_arm_reassigning_its_own_shadow_keeps_the_enclosing_value():
         'x = request.security(syminfo.tickerid, "60", f())\n'
         "plot(x)\n"
     )
-    assert "ta::Highest _sec0__ta_highest_1;" in cpp
+    assert "pineforge::source::PineFixedHighest _sec0__ta_highest_1;" in cpp
     compile_cpp(cpp)
