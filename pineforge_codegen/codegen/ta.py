@@ -2510,9 +2510,22 @@ class TaSiteHelper:
         "_PFKCW": "_PFKCW",
     }
 
+    # TradingView's ta.mom and ta.roc read ``source[length]`` by bar position:
+    # a bar whose source is na keeps its place, and the call is na when either
+    # end is na. ta::Mom and ta::ROC count present samples instead, so the
+    # Pine call is built from the engine's Pine-layer objects, which keep one
+    # slot per call. They take the same constructor argument and never stop a
+    # run, so they are not checked classes: precalculation needs no handler.
+    _TA_POSITIONAL_LAG_CLASSES = {
+        "ta::Mom": "pineforge::source::PineMom",
+        "ta::ROC": "pineforge::source::PineRoc",
+    }
+
     def _ta_fixed_cpp_type(self, site: "TACallSite") -> str:
         """The concrete fixed object used by declarations and every factory."""
-        return self._TA_CHECKED_CLASSES.get(site.class_name, site.class_name)
+        name = site.class_name
+        return self._TA_CHECKED_CLASSES.get(
+            name, self._TA_POSITIONAL_LAG_CLASSES.get(name, name))
 
     def _ta_plan_cpp_type(self, site: "TACallSite", plan: dict | None) -> str:
         if plan is None:

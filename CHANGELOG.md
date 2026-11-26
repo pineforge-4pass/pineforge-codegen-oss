@@ -27,6 +27,15 @@ supported as exact pairs; on the 0.x line they are independent. See the
   with `PF-E5009` ("Unsupported TA constructor length"); it now reads its
   source and both strengths on every call. Calls with constant or input
   strengths emit the same C++ as before.
+- `ta.mom` and `ta.roc` read `source[length]` by bar position, as TradingView
+  does: a bar whose source is `na` keeps its place, and the call returns `na`
+  when the current value or the value `length` bars back is `na`. They used to
+  count back over present values, which read an older value for the `length`
+  bars after an `na` bar. Results change only for a source that has an `na`
+  bar after its first value. A call that runs only on some bars and reads its
+  own held source (below `and`, `or` or `?:`, or in a top-level `if` block) is
+  unchanged. Requires the `PineMom` and `PineRoc` APIs in
+  `pineforge/source/pine_ta_length.hpp`; regenerate C++ and relink.
 
 - Both strategy conversions and `request.currency_rate` use the host's rate in effect on each bar for the chart and account currencies, in either direction. Without a rate for the pair the request stops the run with the currency-conversion error, or returns `na` with a run warning when `ignore_invalid_currency` is true; other pairs still stop the run ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
 

@@ -260,6 +260,7 @@ class TopLevelEmitter:
                       '#include <pineforge/checked_settings.hpp>', '#endif'])
         if self._ta_uses_dynamic_lengths() or any(
             site.class_name in self._TA_CHECKED_CLASSES
+            or site.class_name in self._TA_POSITIONAL_LAG_CLASSES
             for site in self.ctx.ta_call_sites
         ):
             lines.append('#include <pineforge/source/pine_ta_length.hpp>')
