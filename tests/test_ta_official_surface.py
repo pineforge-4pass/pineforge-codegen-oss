@@ -63,7 +63,7 @@ TA_SMOKE_CASES = {
     "mfi": ("x = ta.mfi(close, 5)", "ta::MFI"),
     "min": ("x = ta.min(close)", "ta::AllTimeMin"),
     "mode": ("x = ta.mode(close, 5)", "ta::Mode"),
-    "mom": ("x = ta.mom(close, 1)", "ta::Mom"),
+    "mom": ("x = ta.mom(close, 1)", "pineforge::source::PineMom"),
     "percentile_linear_interpolation": (
         "x = ta.percentile_linear_interpolation(close, 5, 50)",
         "ta::PercentileLinearInterpolation",
@@ -83,7 +83,7 @@ TA_SMOKE_CASES = {
     "rci": ("x = ta.rci(close, 5)", "ta::RCI"),
     "rising": ("x = ta.rising(close, 3)", "ta::Rising"),
     "rma": ("x = ta.rma(close, 5)", "ta::RMA"),
-    "roc": ("x = ta.roc(close, 1)", "ta::ROC"),
+    "roc": ("x = ta.roc(close, 1)", "pineforge::source::PineRoc"),
     "rsi": ("x = ta.rsi(close, 14)", "ta::RSI"),
     "sar": ("x = ta.sar(0.02, 0.02, 0.2)", "ta::SAR"),
     "sma": ("x = ta.sma(close, 5)", "ta::SMA"),

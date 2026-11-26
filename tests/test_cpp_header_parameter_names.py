@@ -37,7 +37,8 @@ def test_header_and_parameter_names_escape_without_changing_input_titles(name, v
 @pytest.mark.parametrize("name", [
     "MB_LEN_MAX", "INT_WIDTH", "BOOL_MAX", "SNAN", "HUGE_VAL_F128",
     "FP_ILOGB0", "M_PIf64x", "math_errhandling", "_GLIBCXX_CMATH",
-    "PINEFORGE_HAS_TA_SERIES_LENGTH", "PF_NATIVE_OK",
+    "PINEFORGE_HAS_TA_SERIES_LENGTH", "PINEFORGE_HAS_PINE_POSITIONAL_LAG",
+    "PF_NATIVE_OK",
 ])
 def test_audited_header_macros_escape_and_keep_public_input_keys(name):
     result = transpile_full(

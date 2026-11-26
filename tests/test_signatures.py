@@ -560,11 +560,11 @@ class TestTAKwargs:
 
     def test_ta_mom_kwargs(self):
         cpp = _generate(_pine('x = ta.mom(source=close, length=10)'))
-        assert "ta::Mom" in cpp
+        assert "pineforge::source::PineMom" in cpp
 
     def test_ta_roc_kwargs(self):
         cpp = _generate(_pine('x = ta.roc(source=close, length=10)'))
-        assert "ta::ROC" in cpp
+        assert "pineforge::source::PineRoc" in cpp
 
     def test_ta_rising_kwargs(self):
         cpp = _generate(_pine('x = ta.rising(source=close, length=3)'))
