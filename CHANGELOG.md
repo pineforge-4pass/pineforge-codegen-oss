@@ -22,6 +22,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (1.15.0)
 
+- `timeframe.from_seconds(seconds)` now returns Pine timeframe strings for
+  integer seconds, including series values ([#431](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/431)).
+
 - `// @pf-trace` now reads prior values of `time`, `time_close`, `bar_index` and other built-in series even when only the pragma indexes them. An indexed built-in without traceable history reports an error at the pragma ([#486](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/486)).
 
 - `// @pf-trace` can now read bar history such as `close[1]` even when the strategy body never reads that history ([#482](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/482)).

@@ -139,7 +139,7 @@ def test_emitter_checks_type_before_implicit_string_conversion(
 ):
     # An internal caller can reach emission after bypassing an analyzer guard.
     # The emitter must still refuse the semantic type before bool text lowering.
-    monkeypatch.setattr(Analyzer, "_check_timeframe_string_arguments",
+    monkeypatch.setattr(Analyzer, "_check_timeframe_arguments",
                         lambda *args, **kwargs: None, raising=False)
     supplied = f"timeframe = {argument}" if named else argument
     source = (

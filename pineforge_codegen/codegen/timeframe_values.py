@@ -24,6 +24,7 @@ from ..limits import (
 from ..security_contexts import ScriptIndex, TIMEFRAME_SOURCES_ANNOTATION
 from ..symbols import PineType, TypeSpec
 from .constant_fold import _constant_arguments, fold_constant_expression
+from .timeframe_from_seconds import timeframe_from_seconds
 
 
 class OpenTimeframeSet(Exception):
@@ -435,6 +436,9 @@ class TimeframeValues:
 
     def _builtin(self, namespace, name, args):
         self._tick()
+        if (namespace == "timeframe" and name == "from_seconds"
+                and len(args) == 1 and type(args[0]) is int):
+            return timeframe_from_seconds(args[0])
         if namespace == "str" and name == "tostring" and len(args) == 1:
             return self._text(args[0])
         if namespace == "str" and name == "format" and args and type(args[0]) is str:
