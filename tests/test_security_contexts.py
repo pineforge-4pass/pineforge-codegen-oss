@@ -23,6 +23,7 @@ import re
 import pytest
 
 from pineforge_codegen import transpile, transpile_full
+from pineforge_codegen.codegen.security import SecurityEmitter
 from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
 
@@ -73,6 +74,58 @@ def test_nested_helper_inputs_register_their_getters():
         '1, get_input_string("B", std::string("240")), input_tf_, true, false',
     ]
     compile_cpp(cpp, label="nested-inputs")
+
+
+def test_issue_694_case_5_reads_the_engine_chart_publication():
+    # Pinned C++ fixtures for lookahead_on requests are stale if they expect
+    # every chart read to use the live requested cell.
+    cpp = transpile(
+        '//@version=6\nstrategy("issue 694 case 5")\n'
+        'daily = request.security(syminfo.tickerid, "D", close, '
+        'lookahead = barmerge.lookahead_on)\n'
+        'plot(daily)\n'
+    )
+    assert (
+        'class GeneratedStrategy : public pineforge::source::PineStrategyHost,\n'
+        '                          public pineforge::source::PineSecurityChartPublisher {'
+    ) in cpp
+    assert (
+        'register_security_chart_eval(0, "D", input_tf_, true, false, false);'
+    ) in cpp
+    assert "PINEFORGE_HAS_SECURITY_CHART_PUBLICATION_V1" in cpp
+    assert "double _chart_sec_0 = na<double>();" in cpp
+    assert "_req_sec_0 = bar.close;" in cpp
+    assert "_chart_sec_0 = _req_sec_0;" in cpp
+    assert (
+        "void publish_security_chart(int sec_id, const Bar& projected) override {"
+    ) in cpp
+    assert "case 0: _chart_sec_0 = projected.close; break;" in cpp
+    assert "daily = _chart_sec_0;" in cpp
+    compile_cpp(cpp, label="issue-694-case-5-chart-publication")
+
+
+def test_issue_694_offset_control_keeps_legacy_cpp_byte_identical(monkeypatch):
+    # Complements
+    # test_security_series_timeframe.py::test_setup_timeframes_are_byte_identical_without_expansion:
+    # this is the exact old emitter path with the new admission door disabled.
+    source = (
+        '//@version=6\nstrategy("issue 694 case 5 control")\n'
+        'daily = request.security(syminfo.tickerid, "D", close[1], '
+        'lookahead = barmerge.lookahead_on)\n'
+        'plot(daily)\n'
+    )
+    actual = transpile(source)
+    monkeypatch.setattr(
+        SecurityEmitter,
+        "_security_chart_publication_eligible",
+        lambda self, item, resolved_tf: False,
+        raising=False,
+    )
+    expected = transpile(source)
+    assert actual == expected
+    assert "register_security_eval(0, \"D\", input_tf_, true, false);" in actual
+    assert "register_security_chart_eval" not in actual
+    assert "PineSecurityChartPublisher" not in actual
 
 
 def test_paths_of_different_depths_share_a_context():
