@@ -225,7 +225,10 @@ def test_non_top_level_and_eager_shapes_keep_the_existing_route():
         assert "_PFLazySourceClock" not in cpp, label
         assert "_pf_lazy_src_hist_" not in cpp, label
         assert "_pf_every_bar_ta_" not in cpp, label
-        assert "ta::ROC _ta_roc" in cpp or "ta::Change _ta_change" in cpp, label
+        assert (
+            "pineforge::source::PineRoc _ta_roc" in cpp
+            or "ta::Change _ta_change" in cpp
+        ), label
 
 
 def test_boolean_change_cannot_be_compared_with_zero():

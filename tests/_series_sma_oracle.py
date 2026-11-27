@@ -108,10 +108,12 @@ int main() {
 """
 
 
-def per_bar_driver(members, inputs=()) -> str:
+def per_bar_driver(members, inputs=(), closes=CLOSES) -> str:
     """A ``main`` that prints one line per bar: the value each of ``members``
     (top-level variables of the script) holds on that bar, na as ``na``.
-    ``inputs`` are ``(title, value)`` overrides set before every run."""
+    ``inputs`` are ``(title, value)`` overrides set before every run.
+    ``closes`` replaces the bars above with a test's own: each opens at the
+    close before it, the first one below its close, as those do."""
     sets = "".join(
         f'        strategy_set_input(&strategy, "{title}", "{value}");\n'
         for title, value in inputs
@@ -120,23 +122,25 @@ def per_bar_driver(members, inputs=()) -> str:
         f"        pf_test_print(pf_test_value(strategy.{member}));\n"
         for member in members
     )
+    opens = (closes[0] - 1,) + tuple(closes[:-1])
     return (
         _DRIVER
-        .replace("@OPENS@", ", ".join(str(value) for value in OPENS))
-        .replace("@CLOSES@", ", ".join(str(value) for value in CLOSES))
-        .replace("@BARS@", str(BARS))
+        .replace("@OPENS@", ", ".join(str(value) for value in opens))
+        .replace("@CLOSES@", ", ".join(str(value) for value in closes))
+        .replace("@BARS@", str(len(closes)))
         .replace("@INPUTS@", sets)
         .replace("@PRINTS@", prints)
     )
 
 
-def per_bar_rows(output: str, width: int) -> list[tuple[float, ...]]:
-    """The driver's output: for each bar, the ``width`` values it printed."""
+def per_bar_rows(output: str, width: int, bars: int = BARS) -> list[tuple[float, ...]]:
+    """The driver's output: for each of the ``bars`` bars, the ``width``
+    values it printed."""
     rows = [
         tuple(math.nan if cell == "na" else float(cell) for cell in line.split())
         for line in output.splitlines()
     ]
-    assert len(rows) == BARS and all(len(row) == width for row in rows), output
+    assert len(rows) == bars and all(len(row) == width for row in rows), output
     return rows
 
 

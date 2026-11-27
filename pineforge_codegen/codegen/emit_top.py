@@ -120,6 +120,100 @@ from .unicode_case import CASE_MAPPING_CPP, CASE_MAPPING_MARKER
 ENUM_STRING_INCLUDE = '#include <pineforge/source/pine_policy_support.hpp>'
 _TRADE_HISTORY_POLICY_MARKER = "        /* __PINEFORGE_TRADE_HISTORY_POLICY__ */"
 
+# ta.pivothigh / ta.pivotlow with a series leftbars or rightbars
+# (``TaSiteHelper._ta_plan_for``, kind ``series_pivot``). The classes take the
+# marker's place only when a member is declared with one of them
+# (``_settle_ta_series_pivot``): a request.security copy may be the only user,
+# and its lowering is decided after the include block is written.
+#
+# Every compute() keeps the call's source; recompute() replaces the last one.
+# The candidate is the source ``rightbars`` calls back. It is the pivot when
+# the ``leftbars`` sources before it and the ``rightbars`` sources after it
+# pass ta::PivotHigh / ta::PivotLow's own comparisons: an equal value on the
+# left is allowed, an equal value on the right is not, and an na value on
+# either side or at the candidate answers na. Both strengths are those of the
+# current call, truncated toward zero. A call whose strengths are na or
+# negative, or reach past the sources kept so far, answers na. With strengths
+# that never change the answers are ta::PivotHigh / ta::PivotLow's.
+#
+# The sources are kept for the whole run in the engine's
+# ``pineforge::source::HeldHistory`` (copy-on-write, so a rollback checkpoint
+# copies no values), numbered from 0 in call order.
+#
+# The C++ below carries no comment and names every local ``_pf_*``:
+# ``scripts/gen_host_members.py`` reads each word a string constant of this
+# package spells, and a new bare word that is also a host member would change
+# the derived ``HOST_MEMBER_NAMES``.
+_TA_SERIES_PIVOT_MARKER = "/* __PINEFORGE_TA_SERIES_PIVOT__ */"
+_TA_SERIES_PIVOT_CPP = r"""class _PFSeriesPivot {
+    pineforge::source::HeldHistory _pf_history_;
+
+public:
+    double _pf_step(double _pf_src, double _pf_left, double _pf_right, bool _pf_advance,
+                    bool _pf_high) {
+        const long long _pf_last = _pf_history_.empty()
+            ? 0 : _pf_history_.last_bar() + (_pf_advance ? 1 : 0);
+        _pf_history_.write(_pf_last, _pf_src, 0);
+        const long long _pf_count = _pf_last + 1;
+        _pf_left = std::trunc(_pf_left);
+        _pf_right = std::trunc(_pf_right);
+        if (!(_pf_left >= 0.0) || !(_pf_right >= 0.0)) return pineforge::na<double>();
+        if (_pf_left >= static_cast<double>(_pf_count)
+                || _pf_right >= static_cast<double>(_pf_count))
+            return pineforge::na<double>();
+        const long long _pf_before = static_cast<long long>(_pf_left);
+        const long long _pf_after = static_cast<long long>(_pf_right);
+        if (_pf_before + _pf_after + 1 > _pf_count) return pineforge::na<double>();
+        const long long _pf_at = _pf_last - _pf_after;
+        const double _pf_pivot = _pf_history_.at(_pf_at);
+        if (pineforge::is_na(_pf_pivot)) return pineforge::na<double>();
+        for (long long _pf_i = _pf_at - _pf_before; _pf_i < _pf_at; ++_pf_i) {
+            const double _pf_value = _pf_history_.at(_pf_i);
+            if (pineforge::is_na(_pf_value)
+                    || (_pf_high ? _pf_value > _pf_pivot : _pf_value < _pf_pivot))
+                return pineforge::na<double>();
+        }
+        for (long long _pf_i = _pf_at + 1; _pf_i <= _pf_last; ++_pf_i) {
+            const double _pf_value = _pf_history_.at(_pf_i);
+            if (pineforge::is_na(_pf_value)
+                    || (_pf_high ? _pf_value >= _pf_pivot : _pf_value <= _pf_pivot))
+                return pineforge::na<double>();
+        }
+        return _pf_pivot;
+    }
+    void observe_owned_storage(pineforge::OwnedStorage& _pf_out) const noexcept {
+        _pf_history_.observe_owned_storage(_pf_out);
+    }
+};
+class _PFSeriesPivotHigh {
+    _PFSeriesPivot _pf_impl_;
+
+public:
+    double compute(double _pf_src, double _pf_left, double _pf_right) {
+        return _pf_impl_._pf_step(_pf_src, _pf_left, _pf_right, true, true);
+    }
+    double recompute(double _pf_src, double _pf_left, double _pf_right) {
+        return _pf_impl_._pf_step(_pf_src, _pf_left, _pf_right, false, true);
+    }
+    void observe_owned_storage(pineforge::OwnedStorage& _pf_out) const noexcept {
+        _pf_impl_.observe_owned_storage(_pf_out);
+    }
+};
+class _PFSeriesPivotLow {
+    _PFSeriesPivot _pf_impl_;
+
+public:
+    double compute(double _pf_src, double _pf_left, double _pf_right) {
+        return _pf_impl_._pf_step(_pf_src, _pf_left, _pf_right, true, false);
+    }
+    double recompute(double _pf_src, double _pf_left, double _pf_right) {
+        return _pf_impl_._pf_step(_pf_src, _pf_left, _pf_right, false, false);
+    }
+    void observe_owned_storage(pineforge::OwnedStorage& _pf_out) const noexcept {
+        _pf_impl_.observe_owned_storage(_pf_out);
+    }
+};"""
+
 
 class TopLevelEmitter:
     """Mixin owning the top-level C++ section emitters and the
@@ -127,6 +221,52 @@ class TopLevelEmitter:
     instance methods.
 
     Mixed into ``CodeGen``; not intended to be instantiated standalone."""
+
+    # The feature macro the paired engine header defines beside a checked
+    # fixed type of ``_TA_CHECKED_CLASSES`` (codegen/ta.py), as the guard a
+    # translation unit with a call of that class identity carries after the
+    # header's include: an engine header older than the type is then reported
+    # by the macro's name.
+    # ta.supertrend with a constant or input factor and ATR period keeps its
+    # constructor, reset and precalculation cadence on PineFixedSupertrend,
+    # which makes on the call's first execution the argument check
+    # PineSupertrend makes for a factor that is not a constant (a factor of
+    # zero or less, or an ATR period of zero or less or na, stops the run
+    # there) and otherwise delegates to ta::Supertrend.
+    # Each line is one whole literal of this module: the generated-C++
+    # allowlist reads its fixed ``#error`` texts from this file
+    # (cpp_allowlist.py), and a message is C++ text only inside its quotes
+    # (scripts/gen_host_members.py).
+    _TA_CHECKED_CLASS_FEATURES = {
+        "ta::Supertrend": (
+            "#ifndef PINEFORGE_HAS_PINE_FIXED_SUPERTREND",
+            '#error "ta.supertrend requires the paired pineforge-engine fixed-argument adapter (PINEFORGE_HAS_PINE_FIXED_SUPERTREND)"',
+            "#endif",
+        ),
+    }
+
+    def _ta_checked_feature_guards(self) -> list[str]:
+        """The guards of ``_TA_CHECKED_CLASS_FEATURES`` for the class
+        identities this script's ``ta.*`` calls have, in the table's order."""
+        used = {site.class_name for site in self.ctx.ta_call_sites}
+        return [
+            line
+            for class_name, guard in self._TA_CHECKED_CLASS_FEATURES.items()
+            if class_name in used
+            for line in guard
+        ]
+
+    # ta.iii and ta.wvad are built from the paired engine's flat-range objects
+    # (``_TA_FLAT_RANGE_CLASSES``, codegen/ta.py), which are na on a bar whose
+    # high equals its low. Their header's include, then the guard for the
+    # feature macro that header defines beside them. Each line is one whole
+    # literal of this module, for the reasons given above.
+    _TA_FLAT_RANGE_INCLUDE = (
+        "#include <pineforge/source/pine_ta_flat_range.hpp>",
+        "#ifndef PINEFORGE_HAS_PINE_FLAT_RANGE",
+        '#error "ta.iii and ta.wvad require the paired pineforge-engine flat-range adapters (PINEFORGE_HAS_PINE_FLAT_RANGE)"',
+        "#endif",
+    )
 
     def _emit_includes(self, lines: list[str]) -> None:
         roots = [self.ctx.ast] + [
@@ -166,9 +306,17 @@ class TopLevelEmitter:
                       '#include <pineforge/checked_settings.hpp>', '#endif'])
         if self._ta_uses_dynamic_lengths() or any(
             site.class_name in self._TA_CHECKED_CLASSES
+            or site.class_name in self._TA_POSITIONAL_LAG_CLASSES
+            or site.class_name in self._TA_VOLUME_WEIGHTED_CLASSES
             for site in self.ctx.ta_call_sites
         ):
             lines.append('#include <pineforge/source/pine_ta_length.hpp>')
+            lines.extend(self._ta_checked_feature_guards())
+        if any(
+            site.class_name in self._TA_FLAT_RANGE_CLASSES
+            for site in self.ctx.ta_call_sites
+        ):
+            lines.extend(self._TA_FLAT_RANGE_INCLUDE)
         if self._has_checked_precalculated_ta():
             lines.extend(('#include <pineforge/run_failure.hpp>', '#include <exception>'))
         lines.append('#include <pineforge/math.hpp>')
@@ -272,6 +420,11 @@ class TopLevelEmitter:
         if self._uses_timestamp_calendar:
             lines.append(TIMEZONE_STOP_SHIM_CPP)
         self._emit_ta_compat_shims(lines)
+        # The per-bar pivot classes of a series leftbars / rightbars. Which
+        # members are declared with them (a request.security copy among them)
+        # is known only after the body is generated, so this place holds a
+        # marker that ``_settle_ta_series_pivot`` resolves.
+        lines.extend((_TA_SERIES_PIVOT_MARKER, ""))
         if getattr(self, "_uses_drawing", False):
             lines.append(DRAWING_LIFETIME_CPP)
         if self._uses_polyline:
@@ -2176,6 +2329,32 @@ class TopLevelEmitter:
             "        this->set_trade_history_streamable(true);",
             "#endif",
         ]
+
+    def _settle_ta_series_pivot(self, lines: list[str]) -> None:
+        """Resolve the marker that holds the place of the per-bar pivot classes.
+
+        The classes take the marker's place when a chart site or a
+        request.security copy is declared with one of them. Otherwise the
+        marker and the blank line after it go, so a script without a series
+        pivot strength has the text it had before."""
+        try:
+            marker = lines.index(_TA_SERIES_PIVOT_MARKER)
+        except ValueError as exc:  # pragma: no cover - generation invariant
+            raise AssertionError(
+                "generated file lost the place of its series pivot helpers"
+            ) from exc
+        # A plan may be built for a site whose member is never declared.
+        declared = False
+        if getattr(self, "_uses_ta_series_pivot", False):
+            code = cpp_code_only("\n".join(lines))
+            declared = any(
+                re.search(rf"\b{re.escape(name)}\b", code)
+                for name in self._TA_SERIES_PIVOT_CLASSES.values()
+            )
+        if declared:
+            lines[marker] = _TA_SERIES_PIVOT_CPP
+        else:
+            del lines[marker:marker + 2]
 
     def _settle_tv_string_units(self, lines: list[str]) -> None:
         """Resolve the marker that holds the place of the UTF-16 unit helpers.

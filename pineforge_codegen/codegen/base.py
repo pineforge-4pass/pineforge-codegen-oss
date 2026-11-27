@@ -6652,6 +6652,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.insert(0, ENUM_STRING_INCLUDE)
         # The same for the UTF-16 unit helpers of str.length, str.pos and
         # str.substring: any body or evaluator may emit one of those calls.
+        # The per-bar pivot classes: a request.security copy may be the only
+        # member declared with one of them.
+        self._settle_ta_series_pivot(lines)
         self._settle_tv_string_units(lines)
         self._settle_tv_string_trim(lines)
         self._settle_case_mapping(lines)

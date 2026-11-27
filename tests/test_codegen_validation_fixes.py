@@ -897,7 +897,9 @@ def test_nested_ta_below_and_rhs_keeps_inline_sma_and_clocks_outer_change():
 
 
 def test_ta_precalc_lazy_scope_routes_recursive_ema_only():
-    """EMA follows Pine-v6 lazy edges while unrelated TA stays precalculated;
+    """Every family follows Pine-v6 lazy edges: a site reached only when its
+    operand is selected never precalcs (the name dates from the rule that
+    covered ``ta.ema`` alone), so only the unconditional EMA keeps a vector;
     ``ta.roc`` takes the hold-last source clock (tests/test_lazy_source_clock*.py)."""
     cpp = _cpp(
         "pred = close > open\n"
@@ -912,9 +914,9 @@ def test_ta_precalc_lazy_scope_routes_recursive_ema_only():
         "i = ta.ema(close, 23)\n"
         "plot((a or b or c or d or e or g) ? f + h + i : close)"
     )
-    for name in ("lowest", "highest"):
-        assert f"std::vector<double> _precalc__ta_{name}_" in cpp
-        assert f"_use_precalc ? _precalc__ta_{name}_" in cpp
+    for name in ("lowest", "highest", "sma"):
+        assert f"std::vector<double> _precalc__ta_{name}_" not in cpp
+        assert f"_use_precalc ? _precalc__ta_{name}_" not in cpp
     assert "std::vector<double> _precalc__ta_roc_" not in cpp
     assert "struct _PFLazySourceClock {" in cpp
     assert (
@@ -924,8 +926,6 @@ def test_ta_precalc_lazy_scope_routes_recursive_ema_only():
     # No site reads its own history, so nothing is hoisted.
     assert "_pf_every_bar_ta_" not in cpp
     assert len(re.findall(r"std::vector<double> _precalc__ta_ema_", cpp)) == 1
-    assert len(re.findall(r"std::vector<double> _precalc__ta_sma_", cpp)) == 2
-    assert len(re.findall(r"_use_precalc \? _precalc__ta_sma_", cpp)) >= 2
 
 
 def test_precalculated_extrema_direct_history_uses_chart_bar_clock():
