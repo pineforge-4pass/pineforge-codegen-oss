@@ -764,6 +764,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if info.is_var or name in self._global_reassigned_names
         }
         self._retain_security_value_copies(mutable_global_infos)
+        self._mark_execution_window_sites()
 
         pure_global_expr_map = {
             k: v for k, v in self._global_expr_map.items() if k not in mutable_global_infos

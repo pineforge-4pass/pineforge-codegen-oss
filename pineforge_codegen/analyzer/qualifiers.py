@@ -51,11 +51,11 @@ def _declared_qualifiers(definition):
 class ParameterQualifiers(DiagnosticsHelper):
     """Read-only qualifier queries shared by user and builtin contracts."""
 
-    def __init__(self, program, bindings, filename, budget=None):
+    def __init__(self, program, bindings, filename, budget=None, *, infer_only=False):
         self._filename = filename
         self.budget = budget
         self.bindings = bindings
-        self.active = any(
+        self.active = not infer_only and (any(
             qualifier in {"simple", "const"}
             for node in program.body if isinstance(node, (FuncDef, MethodDef))
             for qualifier in _declared_qualifiers(node)
@@ -63,8 +63,8 @@ class ParameterQualifiers(DiagnosticsHelper):
             isinstance(node, FuncCall)
             and self._builtin_name(node) in _BUILTIN_PARAMETERS
             for node, _ in iter_ast_nodes(program)
-        )
-        if not self.active:
+        ))
+        if not self.active and not infer_only:
             return
         self.nodes = {id(node): node for node, _ in iter_ast_nodes(program)}
         self.functions = {}
@@ -175,10 +175,11 @@ class ParameterQualifiers(DiagnosticsHelper):
         ranks = [self.infer(value, environment) for value in values]
         qualifiers = list(_declared_qualifiers(definition))
         qualifiers += [None] * (len(definition.params) - len(qualifiers))
-        for name, qualifier, value, rank in zip(
-            definition.params, qualifiers, values, ranks,
-        ):
-            self._check_argument(function_name, name, qualifier, value, rank)
+        if self.active:
+            for name, qualifier, value, rank in zip(
+                definition.params, qualifiers, values, ranks,
+            ):
+                self._check_argument(function_name, name, qualifier, value, rank)
         effective = tuple(
             _RANKS.get(qualifier, rank)
             for qualifier, rank in zip(qualifiers, ranks)
@@ -213,6 +214,10 @@ class ParameterQualifiers(DiagnosticsHelper):
                 self.budget.check(node.loc, Phase.ANALYZER)
             self.expressions[key] = self._infer(node, environment)
         return self.expressions[key]
+
+    def is_simple_or_series(self, expression):
+        """Positive qualifier evidence at a chart site, excluding const and input."""
+        return self.infer(expression, {}) in (_SIMPLE, _SERIES)
 
     def _is_chart_member(self, node, namespace, member):
         """``namespace.member`` with the namespace no script binding shadows."""

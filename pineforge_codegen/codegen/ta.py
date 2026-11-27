@@ -152,9 +152,13 @@ class TaSiteHelper:
         # that call site's clone: its own constructor arguments decide.
         site = self._ta_active_site(site)
         plan = self._ta_dynamic_plan(site)
-        if plan is None:
-            return args
-        return self._ta_dynamic_compute_args(site, plan, args, self._visit_expr)
+        if self._is_block_extreme(site):
+            # FirstCallBound consumes the factory, then forwards bar and
+            # source to the same window that the series-length form uses.
+            args = f"bar_index_, {args}"
+        if plan is not None:
+            args = self._ta_dynamic_compute_args(site, plan, args, self._visit_expr)
+        return args
 
     def _ta_active_site(self, site: "TACallSite") -> "TACallSite":
         """The site whose member ``_ta_member_name`` resolves ``site`` to."""
@@ -732,8 +736,10 @@ class TaSiteHelper:
         only ``ta.sma`` under an ``and`` RHS and ``ta.ema``. The analyzer
         never marks a site inside an ``if``/loop/function scope static, and a
         ``request.security*`` payload is not classified: its own evaluator
-        lowers it."""
-        if not getattr(site, "is_static", False):
+        lowers it. A conditional extreme in a top-level ``if`` body
+        (``_is_block_extreme``) keeps its execution window and never precalcs
+        either."""
+        if not getattr(site, "is_static", False) or self._is_block_extreme(site):
             return False
         if self._ta_dynamic_plan(site) is not None:
             # The length is read on the bar (its first execution, or every
@@ -821,7 +827,8 @@ class TaSiteHelper:
 
         Returns ``{"by_stmt": {id(stmt): [unit, ...]}, "call_nodes": set,
         "source_clock": {id(node): {"node", "site", "length_literal"}},
-        "per_execution_nodes": set, "skipped": [(node, site, reason), ...]}``.
+        "per_execution_nodes": set,
+        "skipped": [(node, site, reason), ...]}``.
         Only ``LAZY_EVERY_BAR_TA`` families whose call carries a direct
         ``[k]`` history read (``Subscript`` on the call) become hoist units.
         ``source_clock`` sites (change/mom/roc) lower through
@@ -1031,6 +1038,16 @@ class TaSiteHelper:
         }
         self._lazy_edge_hoist_plan_cache = plan
         return plan
+
+    # Only the chart sites marked by the analyzer use these kernels.
+    _BLOCK_EXTREME_TYPES = {
+        "ta::Highest": "_PFExecutedExtreme<true>",
+        "ta::Lowest": "_PFExecutedExtreme<false>",
+        "ta::HighestBars": "_PFExecutedExtreme<true, true>",
+    }
+
+    def _is_block_extreme(self, site: "TACallSite") -> bool:
+        return site.uses_execution_window
 
     def _lazy_edge_hoisted_ta_call_nodes(self) -> set[int]:
         return self._lazy_edge_ta_hoist_plan()["call_nodes"]
@@ -1712,13 +1729,13 @@ class TaSiteHelper:
     #
     # * simple (fixed for the run -- a syminfo preset, str.* over one):
     #   TradingView answers exactly the constant-length call
-    #   (the ring of a sparse ta.lowest included). Lowered onto
-    #   ``pineforge::source::FirstCallBound<class>``, built from the call's
+    #   (including the execution window of a conditional ta.lowest). Lowered
+    #   onto ``pineforge::source::FirstCallBound<class>``, built from the call's
     #   first execution; a length goes through ``simple_ta_length`` (0, a
     #   negative length or na stops the run, as TradingView does).
     # * series, for ta.highest / ta.lowest / ta.highestbars / ta.lowestbars:
-    #   re-windowed on every call -- ``pineforge::source::Series*``, the length
-    #   passed per call.
+    #   re-windowed on every call. The #458 probe sites use `_PFExecutedExtreme`;
+    #   other sites use ``pineforge::source::Series*``.
     # * series, for ta.percentile_nearest_rank: each call appends to its own
     #   buffer and passes source, length and percentage to
     #   ``pineforge::source::SeriesPercentileNearestRank``.
@@ -2843,7 +2860,11 @@ class TaSiteHelper:
         # ta.dmi (PineDmiReference, both lengths, diLength first) and ta.mfi
         # (PineMfi) in the rows above. A site whose length is simple, read on
         # its first execution, is a FirstCallBound of the same type. One
-        # feature macro stands for all twelve.
+        # feature macro stands for all twelve. A chart site that keeps an
+        # execution window (``_is_block_extreme``) is not declared with its
+        # row's type: ``_ta_kernel_type`` gives it ``_PFExecutedExtreme``,
+        # which answers na for a constructor length of zero or less and
+        # stops no run. Its request.security copies are the row's type.
         "ta::RMA": (
             "pineforge::source::PineFixedRma", _TA_LENGTH_HEADER,
             "PINEFORGE_HAS_PINE_FIXED_LENGTH", True,
@@ -3048,10 +3069,17 @@ class TaSiteHelper:
         row = self._TA_PINE_LAYER_CLASSES.get(site.class_name)
         return row is not None and row[3]
 
-    def _ta_plan_cpp_type(self, site: "TACallSite", plan: dict | None) -> str:
+    def _ta_kernel_type(self, site: "TACallSite", *, chart: bool) -> str:
+        if chart and self._is_block_extreme(site):
+            return self._BLOCK_EXTREME_TYPES[site.class_name]
+        return self._ta_fixed_cpp_type(site)
+
+    def _ta_plan_cpp_type(self, site: "TACallSite", plan: dict | None, *, chart: bool) -> str:
         if plan is None:
-            return self._ta_fixed_cpp_type(site)
+            return self._ta_kernel_type(site, chart=chart)
         if plan["kind"] == "series_extreme":
+            if chart and self._is_block_extreme(site):
+                return self._BLOCK_EXTREME_TYPES[site.class_name]
             return self._TA_SERIES_EXTREME_CLASSES[plan["family"]]
         if plan["kind"] == "series_percentile":
             return self._TA_SERIES_PERCENTILE_CLASS
@@ -3064,17 +3092,18 @@ class TaSiteHelper:
             return self._TA_SERIES_PIVOT_CLASSES[plan["family"]]
         if plan["kind"] == "supertrend":
             return "pineforge::source::PineSupertrend"
-        return f"pineforge::source::FirstCallBound<{self._ta_fixed_cpp_type(site)}>"
+        return f"pineforge::source::FirstCallBound<{self._ta_kernel_type(site, chart=chart)}>"
 
     def _ta_member_cpp_type(self, site: "TACallSite") -> str:
         """The C++ type a site's member is declared with."""
-        return self._ta_plan_cpp_type(site, self._ta_dynamic_plan(site))
+        return self._ta_plan_cpp_type(site, self._ta_dynamic_plan(site), chart=True)
 
     def _ta_security_member_cpp_type(self, sec_id: int, site: "TACallSite",
                                      variant: dict) -> str:
         """The C++ type of one request.security copy of a site."""
         return self._ta_plan_cpp_type(
-            site, self._ta_security_plan(sec_id, site, variant.get("binding_stack", ())))
+            site, self._ta_security_plan(sec_id, site, variant.get("binding_stack", ())),
+            chart=False)
 
     def _ta_uses_dynamic_lengths(self) -> bool:
         """Whether any live site or request.security copy takes the lowering
@@ -3228,7 +3257,8 @@ class TaSiteHelper:
                 value = (f'pineforge::source::simple_ta_length({value}, '
                          f'"{family}", "{param.name}")')
             ctor.append(value)
-        make = f"[&]() {{ return {self._ta_fixed_cpp_type(site)}({', '.join(ctor)}); }}"
+        kernel = self._ta_kernel_type(site, chart="sec_id" not in plan)
+        make = f"[&]() {{ return {kernel}({', '.join(ctor)}); }}"
         return f"{make}, {base_args}" if base_args else make
 
     def _simple_ta_top_level_decls(self) -> dict:

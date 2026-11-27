@@ -22,6 +22,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (1.15.0)
 
+- In the then body of a top-level chart `if`, a direct reassignment such as
+  `x := ta.lowest(src, length)` uses the last `length` executions. This covers
+  `ta.lowest` and `ta.highest` with literal, input, simple or series lengths,
+  and `ta.highestbars` with simple or series lengths. Its offset counts chart
+  bars back to the winning execution, including skipped bars
+  ([#458](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/458)).
 - `// @pf-trace` now reads prior values of `time`, `time_close`, `bar_index` and other built-in series even when only the pragma indexes them. An indexed built-in without traceable history reports an error at the pragma ([#486](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/486)).
 
 - `// @pf-trace` can now read bar history such as `close[1]` even when the strategy body never reads that history ([#482](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/482)).
@@ -133,8 +139,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
   simple length and precalculation, and requires
   `PINEFORGE_HAS_PINE_FIXED_LENGTH` from
   `pineforge/source/pine_ta_length.hpp`; that name is now reserved. A length
-  the script computes on each bar keeps its series class. Regenerate C++ and
-  relink.
+  the script computes on each bar keeps its series class. A `ta.lowest` or
+  `ta.highest` call that uses the last `length` executions of a top-level
+  `if` body (#458, above) is not declared with these types on the chart: with
+  a constant or input length of zero or less it still returns `na`.
+  Regenerate C++ and relink.
 - A `ta.*` call in a `?:` arm or on the right of `and` or `or`, with no `[]` read on the call, now computes the same values in a run that may precalculate (no bar magnifier, empty timeframes) as in every other run: it is evaluated only on the bars that reach it. Such a run used to fill the call on every chart bar, so with `y = bar_index % 2 == 0 ? ta.sma(close, 3) : na` the closes of the odd bars entered the average. This applies to every `ta.*` function; `ta.ema`, and `ta.sma` on the right of `and`, already behaved this way. Unconditional calls and calls read with `[]` are unchanged.
 - An untyped user function now receives the fractional result of an array
   calculation even when another call passes an integer. Previously, a median

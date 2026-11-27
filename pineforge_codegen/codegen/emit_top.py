@@ -435,9 +435,13 @@ class TopLevelEmitter:
         declared. A series type counts where a live chart site is lowered to
         it (``_ta_series_length_rows``). The length header is also written
         for a site or request.security copy that takes the dynamic-length
-        lowering, whatever its class."""
+        lowering, whatever its class, and for a chart site that keeps an
+        execution window (``_is_block_extreme``): ``_PFExecutedExtreme``
+        checks a per-call length with that header's ``simple_ta_length``."""
         used = {site.class_name for site in self.ctx.ta_call_sites}
-        dynamic = self._ta_uses_dynamic_lengths()
+        dynamic = self._ta_uses_dynamic_lengths() or any(
+            self._is_block_extreme(site) for site in self.ctx.ta_call_sites
+        )
         # (header, feature macro) of every type the script has.
         declared = [
             (row[1], row[2])
@@ -498,6 +502,10 @@ class TopLevelEmitter:
         lines.append('#include <pineforge/ta.hpp>')
         lines.extend(['#if __has_include(<pineforge/checked_settings.hpp>)',
                       '#include <pineforge/checked_settings.hpp>', '#endif'])
+        if any(self._is_block_extreme(site) for site in self.ctx.ta_call_sites):
+            # _PFExecutedExtreme keeps a conditional extreme's executions in
+            # a std::deque (``_emit_ta_compat_shims``).
+            lines.append("#include <deque>")
         lines.extend(self._ta_pine_layer_include_lines())
         if self._has_checked_precalculated_ta():
             lines.extend(('#include <pineforge/run_failure.hpp>', '#include <exception>'))
@@ -637,6 +645,49 @@ class TopLevelEmitter:
             site.class_name for site in getattr(self.ctx, "ta_call_sites", ())
         }
 
+        if any(self._is_block_extreme(site) for site in self.ctx.ta_call_sites):
+            lines.append("""template<bool High, bool Bars = false>
+class _PFExecutedExtreme {
+    struct Sample { int bar; double value; };
+    std::deque<Sample> samples_;
+    int length_ = 0;
+public:
+    _PFExecutedExtreme() = default;
+    explicit _PFExecutedExtreme(int length) : length_(length) {}
+    double compute(int bar, double src) {
+        return update(bar, src, length_);
+    }
+    double compute(int bar, double src, double length) {
+        const char* name = High ? (Bars ? "highestbars" : "highest")
+                                : (Bars ? "lowestbars" : "lowest");
+        return update(bar, src, pineforge::source::simple_ta_length(length, name, "length"));
+    }
+    template<class... Args> double recompute(Args... args) {
+        return compute(args...);
+    }
+private:
+    double update(int bar, double src, int n) {
+        if (n <= 0) return na<double>();
+        if (!samples_.empty() && samples_.back().bar == bar)
+            samples_.back().value = src;
+        else
+            samples_.push_back({bar, src});
+        // A series length (no constructor length) may grow past all previous lengths.
+        if (length_ > 0 && samples_.size() > static_cast<std::size_t>(n)) samples_.pop_front();
+        if (bar < n - 1) return na<double>();
+
+        const auto count = std::min(samples_.size(), static_cast<std::size_t>(n));
+        const Sample* best = nullptr;
+        for (auto it = samples_.end() - count; it != samples_.end(); ++it) {
+            if (!is_na(it->value) && (!best || (High ? it->value > best->value
+                                                      : it->value < best->value)))
+                best = &*it;
+        }
+        if (!best) return na<double>();
+        return Bars ? static_cast<double>(best->bar - bar) : best->value;
+    }
+};
+""")
         if any(
             self._ta_member_cpp_type(site) == "_PFSeriesSma"
             for index, site in enumerate(getattr(self.ctx, "ta_call_sites", ()))
