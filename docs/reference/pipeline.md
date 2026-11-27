@@ -61,9 +61,9 @@ existing parser grammar.
   made included).
 6. `CodeGen(ctx).generate()` → C++ source string.
 
-Pragmas are reattached to `ctx.pf_trace_pragmas` between (5) and (6)
-because the analyzer never inspects them; codegen emits the trace tail
-in `on_bar`.
+After visiting the body, the analyzer registers indexed built-in variables in
+trace pragmas with the same history buffers as body reads. Codegen reads
+`ctx.pf_trace_pragmas` to emit the trace calls at the end of `on_bar`.
 
 `_generate` runs (2)-(6) first without the per-call clones of functions that
 read a `session.<flag>[k]` (the calls they had before such reads were
