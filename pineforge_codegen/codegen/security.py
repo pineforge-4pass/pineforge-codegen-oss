@@ -4021,9 +4021,10 @@ class SecurityEmitter:
         completed bar skips the call, and overwrite the previous call's slot
         when the call first runs on a later evaluation. Such state opens a
         slot when the call's last run was committed, and otherwise recomputes
-        the one still open (``_emit_security_evaluator`` commits it). A
-        second run of the call in one evaluation (a parameter read twice
-        inlines its argument twice) recomputes the slot the first one opened.
+        the one still open (``_emit_security_evaluator`` commits it). When
+        the call's text is reached at more than one place (a parameter read
+        twice inlines its argument twice), a second run of it in one
+        evaluation recomputes the slot the first one opened.
         """
         clock = getattr(self, "_security_call_clock", None)
         if clock is None:
@@ -4077,9 +4078,10 @@ class SecurityEmitter:
 
         The C++ names: its ``open`` member
         (``_security_sparse_clock_members``), the evaluator's ``new`` and
-        ``ran`` locals (``_emit_security_evaluator``) and the ``slot`` local
-        of one run of the call: whether that run opens a slot
-        (``_security_slot_is_new_cpp``). ``lines`` and ``scope`` say where
+        ``ran`` locals (``_emit_security_evaluator``) and two locals of one
+        run of the call: ``first``, whether it is the first run of this
+        evaluation after a committed one, and ``slot``, whether it opens a
+        slot (``_security_slot_is_new_cpp``). ``lines`` and ``scope`` say where
         the outermost sparse call sits: a global its body reads is lowered
         there (``_build_security_expr``). A call inside a sparse call
         inherits them. Every key is set here, for every call.
@@ -4093,6 +4095,7 @@ class SecurityEmitter:
             if outer is None else (outer["lines"], outer["scope"]))
         return {"open": f"{stem}_open_{ordinal}", "new": f"{stem}_new_{ordinal}",
                 "ran": f"{stem}_ran_{ordinal}", "slot": f"{stem}_slot_{ordinal}",
+                "first": f"{stem}_first_{ordinal}",
                 "used": False, "lines": lines, "scope": scope}
 
     def _security_call_owns_ta(self, sec_id, idx, variant) -> bool:
@@ -4116,13 +4119,15 @@ class SecurityEmitter:
         that call itself. The variants ``_emit_security_evaluator_body`` left
         to it are computed here, before the body reads them: with the call's
         own frames, so ``x[1]`` in their arguments reads the call's ring, and
-        on the call's clock. Returns the result keys, which the caller drops
-        from ``ta_results`` once the body is lowered: the values are locals
-        of this run of the call.
+        on the call's clock: the first run of an evaluation after a committed
+        one advances the series, and every other run recomputes it, as the
+        evaluator's opening block does once per requested bar. Returns the
+        result keys, which the caller drops from ``ta_results`` once the body
+        is lowered: the values are locals of this run of the call.
         """
         pending = getattr(self, "_security_call_ta", None)
-        if (not pending or ta_results is None or lines is None
-                or getattr(self, "_security_call_clock", None) is None):
+        clock = getattr(self, "_security_call_clock", None)
+        if not pending or ta_results is None or lines is None or clock is None:
             return ()
         signature = self._security_binding_stack_signature(stack)
         opened = []
@@ -4133,10 +4138,10 @@ class SecurityEmitter:
                 sec_id, self.ctx.ta_call_sites[idx], ta_results,
                 security_mutable_names, stack, emitted_lines=lines)
             name = self._security_next_inline_name(sec_id, "call", f"ta{idx}")
-            is_new = self._security_slot_is_new_cpp(sec_id)
+            clock["used"] = True
             member = variant["member_name"]
             lines.append(
-                f"        const auto {name} = {is_new} ? {member}.compute({compute_args}) "
+                f"        const auto {name} = {clock['first']} ? {member}.compute({compute_args}) "
                 f": {member}.recompute({compute_args});")
             ta_results[idx, variant_signature] = name
             opened.append((idx, variant_signature))
@@ -4170,6 +4175,9 @@ class SecurityEmitter:
         if scope[:len(entry["scope"])] != entry["scope"]:
             # The text reads locals of the block it was lowered in.
             return None
+        # Two reaches can run in one evaluation: the second recomputes the
+        # slot the first opened (``_emit_security_evaluator``).
+        entry["reused"] = True
         return entry["text"]
 
     def _security_var_reseed_lines(self, ref, seed_ref, expr_cpp, pad) -> list[str]:
@@ -9082,7 +9090,7 @@ class SecurityEmitter:
         # (``_security_open_call_ta``) and the text of each sparse call it
         # has lowered (``_security_sparse_call_lowered``).
         self._security_call_ta = {}
-        self._security_call_lowerings = {}
+        self._security_call_lowerings = lowerings = {}
         outer_arg_sec = self._security_arg_history_sec
         outer_arg_values = self._security_arg_call_values
         outer_arg_globals = self._security_arg_globals
@@ -9116,9 +9124,14 @@ class SecurityEmitter:
             lines[close:close] = [
                 f"        if ({ran}) {open_} = !is_complete;"
                 for open_, (_new, *rans) in clocks.items() for ran in rans]
+            # A text reached at more than one place can run twice in one
+            # evaluation (``_security_sparse_call_lowered``).
+            reused = {entry["ran"] for entry in lowerings.values() if entry["reused"]}
             definitions = [
                 f"        const bool {new} = !{open_}; "
-                + " ".join(f"bool {ran} = false;" for ran in rans)
+                + " ".join(
+                    f"bool {ran} = false; const bool {ran.replace('_ran_', '_dup_', 1)} = "
+                    f"{'true' if ran in reused else 'false'};" for ran in rans)
                 for open_, (new, *rans) in clocks.items()] + definitions
         if pushes:
             # Commit after all reads have seen the previous requested bar.
@@ -10925,19 +10938,26 @@ class SecurityEmitter:
                         sec_id, resolved
                     )
                 if sparse_body is not None:
+                    ran = None
                     if call_clock["used"]:
                         # The evaluator opens and commits this call's slots
                         # only when a run reached the call. Each lowering of
-                        # the call has its own ``ran`` flag: its state is its
-                        # own, so only its own earlier run of this evaluation
-                        # has opened the slot it would open.
+                        # the call has its own ``ran`` and ``dup`` flags: its
+                        # state is its own. ``dup`` says this text is reached
+                        # at more than one place; a later run of it in one
+                        # evaluation is then the same call again, and
+                        # recomputes the slot the first run opened.
                         runs = self._security_call_clocks.setdefault(
                             call_clock["open"], [call_clock["new"]])
                         ran = call_clock["ran"] + (f"_{len(runs) - 1}" if len(runs) > 1 else "")
                         runs.append(ran)
+                        dup = ran.replace("_ran_", "_dup_", 1)
+                        first, slot, new = (
+                            call_clock["first"], call_clock["slot"], call_clock["new"])
                         sparse_body.insert(
-                            0, f"        const bool {call_clock['slot']} = {call_clock['new']} "
-                               f"&& !{ran}; {ran} = true;")
+                            0, f"        const bool {first} = {new} && !{ran}; "
+                               f"const bool {slot} = {new} && !({ran} && {dup}); "
+                               f"(void){first}; (void){slot}; {ran} = true;")
                     # The argument and the entire body execute inside the
                     # caller's ?:, &&, ||, branch or loop, even for a body
                     # that emits local declarations before its result.
@@ -10953,7 +10973,8 @@ class SecurityEmitter:
                         lowerings[id(expr_node), tuple(
                             id(caller) for caller in helper_binding_stack or ())] = {
                                 "text": resolved, "stack": helper_binding_stack,
-                                "scope": getattr(self, "_security_scope_path", ())}
+                                "scope": getattr(self, "_security_scope_path", ()),
+                                "ran": ran, "reused": False}
                 return resolved
 
         if (
