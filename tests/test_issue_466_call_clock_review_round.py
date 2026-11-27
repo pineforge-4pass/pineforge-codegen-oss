@@ -107,6 +107,36 @@ plot(out)
         )
 
 
+def test_repeated_argument_reads_of_multistatement_helper_sma_history():
+    source = """//@version=6
+strategy("History of an SMA read twice")
+twice(float v) => v + v
+f(src) =>
+    x = src + 0.0
+    twice(nz(ta.sma(x, 2)[1], -1))
+out = request.security(syminfo.tickerid, "15", close > open ? f(high) : -2, lookahead=barmerge.lookahead_on)
+plot(out)
+"""
+    rows = _increasing_rows(source, "SMA history read twice in a multi-statement helper")
+    # With one sample per completed call, [1] reads the SMA from the
+    # previous completed call. Twice that mean is the sum of the last two
+    # committed highs. Taken arms return -2 at bars 0–2 (twice the nz fallback),
+    # 20 + 22 = 42 at bars 3–7, 22 + 27 = 49 at bar 8, 27 + 28 = 55 at
+    # bars 9–12, and 28 + 32 = 60 at bars 13–15. Untaken arms return -2.
+    bar_8 = next(value for i, complete, _, _, value in rows if i == 8 and complete)
+    assert bar_8 == 49, f"bar 8 complete=True: value {bar_8}, expected 49"
+
+    for i, complete, close, _, value in rows:
+        if i == 8 and complete:
+            continue  # Already compared above.
+        prior = [20 + j for j in _TAKEN if j < i]
+        expected = sum(prior[-2:]) if close > 10 and len(prior) >= 2 else -2
+        assert value == expected, (
+            f"bar {i} complete={complete} close={close}: {value=}, {expected=}, "
+            f"previous completed call highs {prior}"
+        )
+
+
 def _increasing_rows(source, label):
     rows = _rows(source, lambda i: (20 + i,) * 3, label)
     for i, complete, _, high, _ in rows:
