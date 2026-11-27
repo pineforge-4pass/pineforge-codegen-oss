@@ -38,7 +38,10 @@ def _declined_by_finite_route(source: str, *, check_support: bool = True) -> str
 
 
 def _member_periods(cpp: str, family: str) -> list[int]:
-    names = re.findall(rf"ta::{family}\s+(_ta_\w+_\d+)\s*;", cpp)
+    # Each expanded length is a fixed call: its checked fixed-length type.
+    names = re.findall(
+        rf"pineforge::source::PineFixed{family}\s+(_ta_\w+_\d+)\s*;", cpp
+    )
     periods: list[int] = []
     for name in names:
         match = re.search(rf"\b{re.escape(name)}\((\d+)\)", cpp)

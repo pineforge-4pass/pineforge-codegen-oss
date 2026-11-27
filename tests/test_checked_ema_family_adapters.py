@@ -542,11 +542,13 @@ int main() {
     ("body", "guarded"),
     (
         ("value = ta.ema(close, 3)\n", True),
-        ("value = ta.sma(close, 3)\n", False),
-        ("unused(float sample) => ta.ema(sample, 3)\nvalue = ta.sma(close, 3)\n", False),
+        # ta.wma stands for a precalculated call whose type checks nothing
+        # (ta.sma's does: tests/test_ta_fixed_length_checks.py).
+        ("value = ta.wma(close, 3)\n", False),
+        ("unused(float sample) => ta.ema(sample, 3)\nvalue = ta.wma(close, 3)\n", False),
         (
             'simple int span = syminfo.type == "crypto" ? 3 : 5\n'
-            "value = ta.ema(close, span) + ta.sma(close, 3)\n",
+            "value = ta.ema(close, span) + ta.wma(close, 3)\n",
             False,
         ),
     ),

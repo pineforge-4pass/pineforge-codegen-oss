@@ -148,7 +148,7 @@ def test_an_alias_equal_to_a_builtin_namespace_reads_its_builtins():
             '    strategy.entry("L", strategy.long)\n')
     cpp = _cpp(body)
     assert "Signals_v1__pin" in cpp
-    assert "ta::SMA" in cpp and "ta::RSI" in cpp
+    assert "PineFixedSma" in cpp and "PineFixedRsi" in cpp
     cpp = _cpp('import pftest/Base/1 as math\nx = math.max(math.twice(close), 1)\n'
                'plot(x)\nif x > 0\n    strategy.entry("L", strategy.long)\n')
     assert "Base_v1__twice" in cpp and "std::max" in cpp
@@ -208,7 +208,7 @@ def test_each_call_site_keeps_its_own_state():
                    '[n1, s1] = counter(5)\n[n2, s2] = counter(9)\n'
                    'if n1 == n2 and s1 > s2\n    strategy.entry("L", strategy.long)\n')
     plain = transpile(twin)
-    assert cpp.count("ta::SMA") == plain.count("ta::SMA") >= 2
+    assert cpp.count("PineFixedSma") == plain.count("PineFixedSma") >= 2
     assert cpp.count("Signals_v1__counter_cs") == plain.count("counter_cs")
 
 

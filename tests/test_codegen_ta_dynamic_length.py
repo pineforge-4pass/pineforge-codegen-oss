@@ -8,7 +8,8 @@ rules and their tapes are in the engine header
 ``tests/test_e2e_ta_dynamic_length.py``):
 
 * series length, ta.highest / ta.lowest / ta.highestbars / ta.lowestbars:
-  ``pineforge::source::Series*``, the length passed on every call;
+  the length passed on every call, to the reached-sample window in a chart
+  if body and ``pineforge::source::Series*`` otherwise;
 * series length, ta.percentile_nearest_rank:
   ``pineforge::source::SeriesPercentileNearestRank`` appends on every call;
 * ta.supertrend: ``pineforge::source::PineSupertrend``, factor and atrPeriod
@@ -19,8 +20,12 @@ rules and their tapes are in the engine header
 * simple length (fixed for the run) of any family:
   ``pineforge::source::FirstCallBound<class>``, the constant-length class built
   on the call's first execution, the length checked by ``simple_ta_length``;
+* series length of ta.sma and of the other window functions TradingView
+  compiles that way (ta.wma, ta.stdev, ta.cci, ...): the function's
+  ``pineforge::source::Series*`` class, the length passed last on every call
+  (``tests/test_ta_series_length_classes.py``);
 * series length of another family: still refused (TradingView refuses it for
-  the recursive ones; the other window functions are not lowered yet).
+  the recursive ones).
 
 Constant- and input-length calls keep their constructor cadence; EMA-family
 objects use the paired checked source adapters for every qualifier.
@@ -36,7 +41,7 @@ import pytest
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp, run_emitted_tu
-from tests._checked_ta_cpp import with_checked_ta
+from tests._checked_ta_cpp import with_checked_ta, with_pine_source_ta
 from tests._e2e import reference_codegen, transpile_json
 from tests._legacy_cpp import (
     without_loop_watchdog, without_restore_script_state, without_trade_history_policy,
@@ -411,8 +416,11 @@ lo = ta.lowest(low, len)
 plot(r + e + m + a + adx + mc + w + s + lo)
 """
     cpp = transpile(src)
-    for cls in ("ta::RSI", "ta::RMA", "ta::ATR", "ta::DMI", "pineforge::source::PineMacd",
-                "ta::WMA", "ta::SMA", "ta::Lowest"):
+    for cls in ("pineforge::source::PineFixedRsi", "pineforge::source::PineFixedRma",
+                "pineforge::source::PineFixedAtr", "pineforge::source::PineFixedDmi",
+                "pineforge::source::PineMacd",
+                "ta::WMA", "pineforge::source::PineFixedSma",
+                "pineforge::source::PineFixedLowest"):
         assert _members(cpp, f"pineforge::source::FirstCallBound<{cls}>"), cls
     # ``lenP`` alone is an input.string choice: input-derived, so its EMA keeps
     # the constructor and the runtime reset re-reads the input (the
@@ -466,7 +474,7 @@ plot(fixed + dynamic)
 """
     cpp = transpile(src)
     # The constant clone keeps its constructor; the series one is re-windowed.
-    assert re.search(r"ta::Lowest\s+_ta_lowest_\w+;", cpp)
+    assert re.search(r"pineforge::source::PineFixedLowest\s+_ta_lowest_\w+;", cpp)
     assert _members(cpp, "pineforge::source::SeriesLowest")
     compile_cpp(cpp, label="clones")
 
@@ -482,10 +490,14 @@ lo = request.security(syminfo.tickerid, "60", ta.lowest(low, n))
 plot(r + lo)
 """
     cpp = transpile(src)
-    rsi = re.search(r"pineforge::source::FirstCallBound<ta::RSI>\s+(_sec\d+__ta_rsi_\d+);", cpp)
+    rsi = re.search(
+        r"pineforge::source::FirstCallBound<pineforge::source::PineFixedRsi>"
+        r"\s+(_sec\d+__ta_rsi_\d+);", cpp)
     lowest = re.search(r"pineforge::source::SeriesLowest\s+(_sec\d+__ta_lowest_\d+);", cpp)
     assert rsi and lowest
-    assert re.search(rf"{rsi.group(1)}\.compute\(\[&\]\(\) \{{ return ta::RSI\(", cpp)
+    assert re.search(
+        rf"{rsi.group(1)}\.compute\(\[&\]\(\) \{{ return pineforge::source::PineFixedRsi\(",
+        cpp)
     assert re.search(rf"{lowest.group(1)}\.compute\(bar\.low, pineforge::source::ta_number\(", cpp)
     compile_cpp(cpp, label="security_payload")
 
@@ -540,11 +552,12 @@ if out + acc > top
     strategy.entry("L", strategy.long)
 """
     cpp = transpile(src)
-    [local] = _members(cpp, "pineforge::source::SeriesHighest")
+    [local] = _members(cpp, "_PFExecutedExtreme<true>")
     [loop] = _members(cpp, "pineforge::source::SeriesLowest")
-    [top] = _members(cpp, "pineforge::source::FirstCallBound<ta::Highest>")
+    [top] = _members(
+        cpp, "pineforge::source::FirstCallBound<pineforge::source::PineFixedHighest>")
     body = cpp.split("int n = ", 1)[1]
-    assert f"{local}.compute(current_bar_.high, pineforge::source::ta_number(n))" in body
+    assert f"{local}.compute(bar_index_, current_bar_.high, pineforge::source::ta_number(n))" in body
     assert re.search(
         r"for \(int n = [^\n]*\n[^\n]*"
         + re.escape(f"{loop}.compute(current_bar_.low, pineforge::source::ta_number(n))"),
@@ -574,8 +587,8 @@ plot(out)
 
 
 def test_an_explicit_series_declaration_is_rewindowed() -> None:
-    # ``series int m`` of a simple value is series to TradingView: a sparse
-    # call re-windows, while ``simple int k`` reads the constant ring.
+    # Both window the reached bars. The series declaration reads m, while
+    # the simple declaration binds its syminfo expression on first use.
     src = """//@version=6
 strategy("declared qualifiers")
 series int m = syminfo.type == "crypto" ? 4 : 8
@@ -588,8 +601,8 @@ if bar_index % 9 < 2
 plot(a + c)
 """
     cpp = transpile(src)
-    [series] = _members(cpp, "pineforge::source::SeriesLowest")
-    [simple] = _members(cpp, "pineforge::source::FirstCallBound<ta::Lowest>")
+    [series] = _members(cpp, "_PFExecutedExtreme<false>")
+    [simple] = _members(cpp, "pineforge::source::FirstCallBound<_PFExecutedExtreme<false>>")
     assert "ta_number(m)" in _compute_line(cpp, series)
     assert '"crypto"' in _compute_line(cpp, simple)
     compile_cpp(cpp, label="declared_qualifiers")
@@ -608,7 +621,7 @@ def test_helper_bound_security_copies_are_planned_per_call(series_first: bool) -
     cpp = transpile(src)
     simple_sec, series_sec = (1, 0) if series_first else (0, 1)
     assert _member_type(cpp, f"_sec{simple_sec}__ta_highest_1") == \
-        "pineforge::source::FirstCallBound<ta::Highest>"
+        "pineforge::source::FirstCallBound<pineforge::source::PineFixedHighest>"
     assert _member_type(cpp, f"_sec{series_sec}__ta_highest_1") == \
         "pineforge::source::SeriesHighest"
     # A payload's bar_index is the requested bar's count (CG-OPEN-ITEMS
@@ -647,7 +660,7 @@ plot(a + b + c)
     lines = {sec: _compute_line(cpp, f"_sec{sec}__ta_highest_1") for sec in range(3)}
     assert "(9) : (14)" in lines[0]
     assert "(21) : (30)" in lines[1]
-    assert "ta::Highest(7)" in lines[2]
+    assert "pineforge::source::PineFixedHighest(7)" in lines[2]
     compile_cpp(cpp, label="callable_copies")
 
 
@@ -666,7 +679,8 @@ plot(a + b)
 
 
 @pytest.mark.parametrize("call", [
-    "ta.wma(close, n)", "ta.stdev(close, n)",
+    # ta.wma and ta.stdev left this list: TradingView compiles their series
+    # length, and tests/test_ta_series_length_classes.py pins their lowering.
     "ta.rsi(close, n)", "ta.ema(close, n)", "ta.atr(n)",
 ])
 def test_other_series_lengths_stay_refused(call: str) -> None:
@@ -791,6 +805,9 @@ def test_constant_and_input_lengths_keep_their_cpp(tmp_path: Path) -> None:
     # clearing are all part of the expected C++. The constant-factor
     # Supertrend is the fixed-argument adapter, with its feature guard.
     expected = with_checked_ta(expected, precalc=True, supertrend=True, ema=True)
+    # ta.sma, ta.lowest, ta.highest and ta.rsi are built from the checked
+    # fixed-length types, whose feature guard follows the Supertrend one.
+    expected = with_pine_source_ta(expected)
     # The rollback hook leaves requested-evaluation state alone since the
     # fill-restore fix; everything else must stay identical.
     assert without_restore_script_state(

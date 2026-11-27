@@ -24,6 +24,6 @@ def test_constant_input_expression_sizes_and_resets_ta(default, value, named):
     periods = lambda text: re.findall(r"_ta_sma_\d+\((\d+)\)", text)
     assert periods(cpp) == periods(control) == [str(value)]
     reset = next(line.strip() for line in cpp.splitlines()
-                 if re.search(r"_ta_sma_\d+ = ta::SMA\(", line))
+                 if re.search(r"_ta_sma_\d+ = pineforge::source::PineFixedSma\(", line))
     assert 'get_input_int("Window", ' in reset
-    assert "ta::SMA(1)" not in reset
+    assert "PineFixedSma(1)" not in reset

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from pineforge_codegen import transpile
+from tests._checked_ta_cpp import with_pine_source_ta
 from tests._e2e import reference_codegen, transpile_json
 from tests._legacy_cpp import without_loop_watchdog
 from tests._numeric_expected import (
@@ -28,7 +29,8 @@ def test_proven_non_na_emission_unchanged(tmp_path):
     current = transpile_json(fixture)
     assert old.get("ok"), old
     assert current.get("ok"), current
-    assert current["cpp"] == old["cpp"]
+    # The fixture's ta.sma is built from the checked fixed-length type today.
+    assert current["cpp"] == with_pine_source_ta(old["cpp"])
     pine = tmp_path / "finite.pine"
     pine.write_text(
         '//@version=6\nstrategy("Finite numeric writes")\n'

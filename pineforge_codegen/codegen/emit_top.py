@@ -257,51 +257,249 @@ class TopLevelEmitter:
 
     Mixed into ``CodeGen``; not intended to be instantiated standalone."""
 
-    # The feature macro the paired engine header defines beside a checked
-    # fixed type of ``_TA_CHECKED_CLASSES`` (codegen/ta.py), as the guard a
-    # translation unit with a call of that class identity carries after the
-    # header's include: an engine header older than the type is then reported
-    # by the macro's name.
-    # ta.supertrend with a constant or input factor and ATR period keeps its
-    # constructor, reset and precalculation cadence on PineFixedSupertrend,
-    # which makes on the call's first execution the argument check
-    # PineSupertrend makes for a factor that is not a constant (a factor of
-    # zero or less, or an ATR period of zero or less or na, stops the run
-    # there) and otherwise delegates to ta::Supertrend.
-    # Each line is one whole literal of this module: the generated-C++
-    # allowlist reads its fixed ``#error`` texts from this file
-    # (cpp_allowlist.py), and a message is C++ text only inside its quotes
-    # (scripts/gen_host_members.py).
-    _TA_CHECKED_CLASS_FEATURES = {
-        "ta::Supertrend": (
+    # The text behind the header and feature-macro columns of
+    # ``_TA_PINE_LAYER_CLASSES`` and ``_TA_SERIES_LENGTH_CLASSES``
+    # (codegen/ta.py). Each line is one whole literal of this module: the
+    # generated-C++ allowlist reads its allowed ``#include`` set and its fixed
+    # ``#error`` texts from this file (cpp_allowlist.py), and a message is C++
+    # text only inside its quotes (scripts/gen_host_members.py).
+    #
+    # The include line of every engine header a Pine-layer type is declared
+    # in, by the key the class tables name it with, in the order the lines
+    # are written. The first is also the header of the dynamic-length
+    # lowering (``_ta_uses_dynamic_lengths``); each of the three series
+    # headers includes it.
+    _TA_PINE_LAYER_INCLUDES = {
+        "pine_ta_length": "#include <pineforge/source/pine_ta_length.hpp>",
+        "pine_ta_flat_range": "#include <pineforge/source/pine_ta_flat_range.hpp>",
+        "pine_ta_cci": "#include <pineforge/source/pine_ta_cci.hpp>",
+        "pine_ta_series_ma": "#include <pineforge/source/pine_ta_series_ma.hpp>",
+        "pine_ta_series_stats": "#include <pineforge/source/pine_ta_series_stats.hpp>",
+        "pine_ta_series_osc": "#include <pineforge/source/pine_ta_series_osc.hpp>",
+    }
+
+    # The guard a translation unit carries after a header's include, by the
+    # feature macro a class table names: for a fixed type, when the script
+    # has a call of the class identity; for a series type, when a call is
+    # lowered to it. An engine header older than the type is then reported by
+    # the macro's name. A feature macro without an entry here is reserved
+    # only, and an engine header without its type fails at the type's name.
+    _TA_PINE_LAYER_GUARDS = {
+        "PINEFORGE_HAS_PINE_FIXED_SUPERTREND": (
             "#ifndef PINEFORGE_HAS_PINE_FIXED_SUPERTREND",
             '#error "ta.supertrend requires the paired pineforge-engine fixed-argument adapter (PINEFORGE_HAS_PINE_FIXED_SUPERTREND)"',
             "#endif",
         ),
+        # One macro for the twelve checked fixed-length types (ta.rma,
+        # ta.sma, ta.rsi, ta.atr, ta.hma, ta.vwma, ta.mfi, ta.highest,
+        # ta.lowest, ta.highestbars, ta.lowestbars and ta.dmi).
+        "PINEFORGE_HAS_PINE_FIXED_LENGTH": (
+            "#ifndef PINEFORGE_HAS_PINE_FIXED_LENGTH",
+            '#error "generated code requires the paired pineforge-engine fixed-length adapters (PINEFORGE_HAS_PINE_FIXED_LENGTH)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_FLAT_RANGE": (
+            "#ifndef PINEFORGE_HAS_PINE_FLAT_RANGE",
+            '#error "ta.iii and ta.wvad require the paired pineforge-engine flat-range adapters (PINEFORGE_HAS_PINE_FLAT_RANGE)"',
+            "#endif",
+        ),
+        # The Pine-layer types of ta.sar and ta.rci (the length header) and
+        # of ta.cci (its own header): PineSar, PineRci and PineCci.
+        "PINEFORGE_HAS_PINE_SAR": (
+            "#ifndef PINEFORGE_HAS_PINE_SAR",
+            '#error "ta.sar requires the paired pineforge-engine Pine-layer adapter (PINEFORGE_HAS_PINE_SAR)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_RCI": (
+            "#ifndef PINEFORGE_HAS_PINE_RCI",
+            '#error "ta.rci requires the paired pineforge-engine Pine-layer adapter (PINEFORGE_HAS_PINE_RCI)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_CCI": (
+            "#ifndef PINEFORGE_HAS_PINE_CCI",
+            '#error "ta.cci requires the paired pineforge-engine Pine-layer adapter (PINEFORGE_HAS_PINE_CCI)"',
+            "#endif",
+        ),
+        # The series classes of pine_ta_series_ma.hpp.
+        "PINEFORGE_HAS_PINE_SERIES_WMA": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_WMA",
+            '#error "ta.wma requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_WMA)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_VWMA": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_VWMA",
+            '#error "ta.vwma requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_VWMA)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_ALMA": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_ALMA",
+            '#error "ta.alma requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_ALMA)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_LINREG": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_LINREG",
+            '#error "ta.linreg requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_LINREG)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_BB": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_BB",
+            '#error "ta.bb requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_BB)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_BBW": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_BBW",
+            '#error "ta.bbw requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_BBW)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_VWAPBANDS": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_VWAPBANDS",
+            '#error "ta.vwap requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_VWAPBANDS)"',
+            "#endif",
+        ),
+        # The series classes of pine_ta_series_stats.hpp.
+        "PINEFORGE_HAS_PINE_SERIES_STDEV": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_STDEV",
+            '#error "ta.stdev requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_STDEV)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_VARIANCE": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_VARIANCE",
+            '#error "ta.variance requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_VARIANCE)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_DEV": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_DEV",
+            '#error "ta.dev requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_DEV)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_RANGE": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_RANGE",
+            '#error "ta.range requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_RANGE)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_MEDIAN": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_MEDIAN",
+            '#error "ta.median requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_MEDIAN)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_MODE": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_MODE",
+            '#error "ta.mode requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_MODE)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_PERCENTRANK": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_PERCENTRANK",
+            '#error "ta.percentrank requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_PERCENTRANK)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_PERCENTILELINEAR": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_PERCENTILELINEAR",
+            '#error "ta.percentile_linear_interpolation requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_PERCENTILELINEAR)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_CORRELATION": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_CORRELATION",
+            '#error "ta.correlation requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_CORRELATION)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_MATHSUM": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_MATHSUM",
+            '#error "math.sum requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_MATHSUM)"',
+            "#endif",
+        ),
+        # The series classes of pine_ta_series_osc.hpp.
+        "PINEFORGE_HAS_PINE_SERIES_STOCH": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_STOCH",
+            '#error "ta.stoch requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_STOCH)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_CCI": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_CCI",
+            '#error "ta.cci requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_CCI)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_MFI": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_MFI",
+            '#error "ta.mfi requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_MFI)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_MOM": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_MOM",
+            '#error "ta.mom requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_MOM)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_ROC": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_ROC",
+            '#error "ta.roc requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_ROC)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_CMO": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_CMO",
+            '#error "ta.cmo requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_CMO)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_WPR": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_WPR",
+            '#error "ta.wpr requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_WPR)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_COG": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_COG",
+            '#error "ta.cog requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_COG)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_RISING": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_RISING",
+            '#error "ta.rising requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_RISING)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_SERIES_FALLING": (
+            "#ifndef PINEFORGE_HAS_PINE_SERIES_FALLING",
+            '#error "ta.falling requires the paired pineforge-engine series adapter (PINEFORGE_HAS_PINE_SERIES_FALLING)"',
+            "#endif",
+        ),
     }
 
-    def _ta_checked_feature_guards(self) -> list[str]:
-        """The guards of ``_TA_CHECKED_CLASS_FEATURES`` for the class
-        identities this script's ``ta.*`` calls have, in the table's order."""
-        used = {site.class_name for site in self.ctx.ta_call_sites}
-        return [
-            line
-            for class_name, guard in self._TA_CHECKED_CLASS_FEATURES.items()
-            if class_name in used
-            for line in guard
-        ]
+    def _ta_pine_layer_include_lines(self) -> list[str]:
+        """The include line of every engine header this script's ``ta.*``
+        objects are declared in, each followed by the guards of the types
+        the script has in that header, in the tables' order.
 
-    # ta.iii and ta.wvad are built from the paired engine's flat-range objects
-    # (``_TA_FLAT_RANGE_CLASSES``, codegen/ta.py), which are na on a bar whose
-    # high equals its low. Their header's include, then the guard for the
-    # feature macro that header defines beside them. Each line is one whole
-    # literal of this module, for the reasons given above.
-    _TA_FLAT_RANGE_INCLUDE = (
-        "#include <pineforge/source/pine_ta_flat_range.hpp>",
-        "#ifndef PINEFORGE_HAS_PINE_FLAT_RANGE",
-        '#error "ta.iii and ta.wvad require the paired pineforge-engine flat-range adapters (PINEFORGE_HAS_PINE_FLAT_RANGE)"',
-        "#endif",
-    )
+        For a fixed type every call site of its class identity counts, a dead
+        chart member included: its request.security copies are still
+        declared. A series type counts where a live chart site is lowered to
+        it (``_ta_series_length_rows``). The length header is also written
+        for a site or request.security copy that takes the dynamic-length
+        lowering, whatever its class, and for a chart site that keeps an
+        execution window (``_is_block_extreme``): ``_PFExecutedExtreme``
+        checks a per-call length with that header's ``simple_ta_length``."""
+        used = {site.class_name for site in self.ctx.ta_call_sites}
+        dynamic = self._ta_uses_dynamic_lengths() or any(
+            self._is_block_extreme(site) for site in self.ctx.ta_call_sites
+        )
+        # (header, feature macro) of every type the script has.
+        declared = [
+            (row[1], row[2])
+            for class_name, row in self._TA_PINE_LAYER_CLASSES.items()
+            if class_name in used
+        ]
+        declared.extend((row[1], row[2]) for row in self._ta_series_length_rows())
+        lines: list[str] = []
+        for header, include in self._TA_PINE_LAYER_INCLUDES.items():
+            needed = dynamic and header == self._TA_LENGTH_HEADER
+            features: list[str] = []
+            for declared_header, feature in declared:
+                if declared_header != header:
+                    continue
+                needed = True
+                if feature in self._TA_PINE_LAYER_GUARDS and feature not in features:
+                    features.append(feature)
+            if not needed:
+                continue
+            lines.append(include)
+            for feature in features:
+                lines.extend(self._TA_PINE_LAYER_GUARDS[feature])
+        return lines
 
     def _emit_includes(self, lines: list[str]) -> None:
         roots = [self.ctx.ast] + [
@@ -339,19 +537,11 @@ class TopLevelEmitter:
         lines.append('#include <pineforge/ta.hpp>')
         lines.extend(['#if __has_include(<pineforge/checked_settings.hpp>)',
                       '#include <pineforge/checked_settings.hpp>', '#endif'])
-        if self._ta_uses_dynamic_lengths() or any(
-            site.class_name in self._TA_CHECKED_CLASSES
-            or site.class_name in self._TA_POSITIONAL_LAG_CLASSES
-            or site.class_name in self._TA_VOLUME_WEIGHTED_CLASSES
-            for site in self.ctx.ta_call_sites
-        ):
-            lines.append('#include <pineforge/source/pine_ta_length.hpp>')
-            lines.extend(self._ta_checked_feature_guards())
-        if any(
-            site.class_name in self._TA_FLAT_RANGE_CLASSES
-            for site in self.ctx.ta_call_sites
-        ):
-            lines.extend(self._TA_FLAT_RANGE_INCLUDE)
+        if any(self._is_block_extreme(site) for site in self.ctx.ta_call_sites):
+            # _PFExecutedExtreme keeps a conditional extreme's executions in
+            # a std::deque (``_emit_ta_compat_shims``).
+            lines.append("#include <deque>")
+        lines.extend(self._ta_pine_layer_include_lines())
         if self._has_checked_precalculated_ta():
             lines.extend(('#include <pineforge/run_failure.hpp>', '#include <exception>'))
         lines.append('#include <pineforge/math.hpp>')
@@ -492,6 +682,49 @@ class TopLevelEmitter:
             site.class_name for site in getattr(self.ctx, "ta_call_sites", ())
         }
 
+        if any(self._is_block_extreme(site) for site in self.ctx.ta_call_sites):
+            lines.append("""template<bool High, bool Bars = false>
+class _PFExecutedExtreme {
+    struct Sample { int bar; double value; };
+    std::deque<Sample> samples_;
+    int length_ = 0;
+public:
+    _PFExecutedExtreme() = default;
+    explicit _PFExecutedExtreme(int length) : length_(length) {}
+    double compute(int bar, double src) {
+        return update(bar, src, length_);
+    }
+    double compute(int bar, double src, double length) {
+        const char* name = High ? (Bars ? "highestbars" : "highest")
+                                : (Bars ? "lowestbars" : "lowest");
+        return update(bar, src, pineforge::source::simple_ta_length(length, name, "length"));
+    }
+    template<class... Args> double recompute(Args... args) {
+        return compute(args...);
+    }
+private:
+    double update(int bar, double src, int n) {
+        if (n <= 0) return na<double>();
+        if (!samples_.empty() && samples_.back().bar == bar)
+            samples_.back().value = src;
+        else
+            samples_.push_back({bar, src});
+        // A series length (no constructor length) may grow past all previous lengths.
+        if (length_ > 0 && samples_.size() > static_cast<std::size_t>(n)) samples_.pop_front();
+        if (bar < n - 1) return na<double>();
+
+        const auto count = std::min(samples_.size(), static_cast<std::size_t>(n));
+        const Sample* best = nullptr;
+        for (auto it = samples_.end() - count; it != samples_.end(); ++it) {
+            if (!is_na(it->value) && (!best || (High ? it->value > best->value
+                                                      : it->value < best->value)))
+                best = &*it;
+        }
+        if (!best) return na<double>();
+        return Bars ? static_cast<double>(best->bar - bar) : best->value;
+    }
+};
+""")
         if any(
             self._ta_member_cpp_type(site) == "_PFSeriesSma"
             for index, site in enumerate(getattr(self.ctx, "ta_call_sites", ()))
@@ -3317,9 +3550,12 @@ class TopLevelEmitter:
         )
 
     def _has_checked_precalculated_ta(self) -> bool:
-        """Whether replay can reach an execution-checked EMA-family length."""
+        """Whether replay can reach a fixed object that checks an argument on
+        its first execution (the EMA family's lengths, a fixed
+        ta.supertrend's factor and ATR period, the length of the twelve
+        checked fixed-length types)."""
         return any(
-            site.class_name in self._TA_CHECKED_CLASSES
+            self._ta_fixed_type_is_checked(site)
             and self._ta_site_uses_precalc(site)
             for _ti, site in enumerate(self.ctx.ta_call_sites)
             if _ti not in self._dead_ta_indices

@@ -1123,7 +1123,7 @@ def test_ta_precalc_skips_and_rhs_sma_in_tuple_assignment():
     )
     assert "std::vector<double> _precalc__ta_sma" not in cpp
     assert "_use_precalc ? _precalc__ta_sma" not in cpp
-    assert "ta::SMA _ta_sma_1;" in cpp
+    assert "pineforge::source::PineFixedSma _ta_sma_1;" in cpp
 
 
 def test_ta_precalc_skips_and_rhs_sma_in_assignment_subscript_target():
@@ -1149,7 +1149,7 @@ def test_ta_precalc_walks_nested_func_call_keyword_values_under_and_rhs():
     )
     assert "std::vector<double> _precalc__ta_sma" not in cpp
     assert "_use_precalc ? _precalc__ta_sma" not in cpp
-    assert "ta::SMA _ta_sma_1;" in cpp
+    assert "pineforge::source::PineFixedSma _ta_sma_1;" in cpp
 
 
 def test_ta_precalc_walks_chained_call_receiver_under_and_rhs():
@@ -1210,7 +1210,7 @@ def test_ta_precalc_walks_type_field_defaults():
     )
     assert "std::vector<double> _precalc__ta_sma" not in cpp
     assert "_use_precalc ? _precalc__ta_sma" not in cpp
-    assert "ta::SMA _ta_sma_1;" in cpp
+    assert "pineforge::source::PineFixedSma _ta_sma_1;" in cpp
 
 
 def test_ta_call_as_type_field_default_is_refused():
