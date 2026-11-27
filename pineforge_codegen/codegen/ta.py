@@ -1731,8 +1731,8 @@ class TaSiteHelper:
     #   ta.rising, ta.falling, and the stdev multiplier of ta.vwap's bands),
     #   outside request.security, and neither a length a callable receives
     #   from its call sites nor an unadmitted persistent length, nor (ta.sma
-    #   excepted) a call written inside a loop
-    #   (``_ta_series_length_call_is_in_loop``): each call
+    #   excepted) a call written inside a loop or in a function or method
+    #   reached from one (``_ta_series_length_call_is_in_loop``): each call
     #   passes its inputs and the length its call site binds to the
     #   function's ``pineforge::source::Series*`` class (ta.sma through
     #   ``_PFSeriesSma``). A length that reads a script-level
@@ -1758,8 +1758,8 @@ class TaSiteHelper:
     # (``_ta_linreg_series_offset``). A series length of a requested-context
     # or forwarded site (``_ta_length_is_forwarded``), or one with a
     # script-level ``var`` length that is not shown to vary by bar, or of a
-    # call written inside a loop (``_TA_SERIES_LENGTH_LOOP_CLASSES`` names the
-    # exception), keeps the
+    # call written inside a loop or in a function or method reached from one
+    # (``_TA_SERIES_LENGTH_LOOP_CLASSES`` names the exception), keeps the
     # refusal, as does any other constructor argument that varies by bar.
     # Constant- and input-length sites never reach this plan: they retain
     # their constructor/reset/precalculation cadence. EMA-family objects use
@@ -2322,9 +2322,9 @@ class TaSiteHelper:
         None does not say that such a length varies by bar. One the script
         shows to vary by bar (``_ta_period_is_series``) is not ``persistent``
         here: it takes the series lowering, which reads the declaration's
-        storage at the call. A call written inside a loop keeps the refusal
-        as well, ta.sma's excepted
-        (``_ta_series_length_call_is_in_loop``)."""
+        storage at the call. A call written inside a loop, or in a function
+        or method reached from one, keeps the refusal as well, ta.sma's
+        excepted (``_ta_series_length_call_is_in_loop``)."""
         family = self._ta_site_function(site)
         if family == "percentile_nearest_rank":
             kind = "series_percentile" if simple[refused[0]] is None else "first_call"
@@ -2381,46 +2381,121 @@ class TaSiteHelper:
         return all(simple[pos] is not None for pos in refused if pos != 0)
 
     # The functions of ``_TA_SERIES_LENGTH_CLASSES`` whose per-bar length is
-    # lowered for a call written inside a loop as well. Such a call runs once
-    # on every pass, so one object is called several times on a bar, each
-    # time with that pass's length (a loop counter: ``for i = 2 to 4`` with
-    # ``ta.wma(close, i)``). An engine series class records one sample on
-    # every compute(), so its window then counts calls, not bars: the bar's
-    # source is in it once for every pass. No value of TradingView is
-    # recorded for such a call of any of these functions. The one recorded
-    # for a window function called from a loop, ta.percentile_nearest_rank
-    # (the engine's pine_ta_length.hpp), is not the sum of the same calls
-    # made outside the loop, so neither rule is claimed here: the call keeps
-    # its refusal, as before these classes were lowered. ta.sma is the one
-    # row lowered before them; its loop call already compiles, and stays so.
-    # A function joins this set only with its own recorded result.
+    # lowered for a call a loop runs as well: one written inside a loop, or
+    # in a function or method reached from one (``_ta_loop_call_nodes``).
+    # Such a call runs once on every pass, so one object is called several
+    # times on a bar, each time with that pass's length (a loop counter:
+    # ``for i = 2 to 4`` with ``ta.wma(close, i)``; or ``f() => ta.wma(close,
+    # n)`` with ``f()`` called in the loop). An engine series class records
+    # one sample on every compute(), so its window then counts calls, not
+    # bars: the bar's source is in it once for every pass. No value of
+    # TradingView is recorded for such a call of any of these functions. The
+    # one recorded for a window function called from a loop,
+    # ta.percentile_nearest_rank (the engine's pine_ta_length.hpp), is not
+    # the sum of the same calls made outside the loop, so neither rule is
+    # claimed here: the call keeps its refusal, as before these classes were
+    # lowered. ta.sma is the one row lowered before them; its loop call
+    # already compiles, and stays so. A function joins this set only with
+    # its own recorded result.
     _TA_SERIES_LENGTH_LOOP_CLASSES = frozenset({"ta::SMA"})
 
     def _ta_loop_call_nodes(self) -> frozenset:
-        """``id`` of every call written inside a loop: anywhere under a
-        ``for``, ``for ... in`` or ``while`` statement, its header included,
-        in the script body or in a callable's."""
+        """``id`` of every call a loop can run more than once on a bar.
+
+        A call written anywhere under a ``for``, ``for ... in`` or ``while``
+        statement, its header included, runs on every pass. So does a call
+        written in a body that such a call enters: the body of a function or
+        method that the loop calls, and the body of every function or method
+        called from a body entered this way, to a fixed point over the
+        script's calls. The answer is reachability from a loop statement and
+        nothing else.
+
+        A call enters every definition of the name it spells (``f(...)``,
+        ``x.f(...)``): overloads, and the methods of several receiver types,
+        are not told apart, so a body counts as entered when any call that
+        could be its own runs in a loop. Two more places are part of a body:
+        a parameter's default value, which runs at a call that omits the
+        argument, and the field defaults of a type, which run where an
+        object of the type is built (``T.new(...)``). A body is entered
+        once, whatever the number of call paths that lead to it."""
         cached = self.__dict__.get("_ta_loop_call_nodes_cache")
-        if cached is None:
-            found: set[int] = set()
-            pending = [(self.ctx.ast, False)]
-            while pending:
-                node, in_loop = pending.pop()
-                if self._budget is not None:
-                    self._budget.check(node.loc, Phase.CODEGEN)
-                if in_loop and isinstance(node, FuncCall):
-                    found.add(id(node))
-                in_loop = in_loop or isinstance(node, (ForStmt, ForInStmt, WhileStmt))
-                pending.extend((child, in_loop) for child in syntax_children(node))
-            cached = frozenset(found)
-            self.__dict__["_ta_loop_call_nodes_cache"] = cached
+        if cached is not None:
+            return cached
+        # The calls a loop statement encloses, and the calls written in each
+        # body, by the ``id`` of the definition that holds the body.
+        in_loops: list[FuncCall] = []
+        written: dict[int, list[FuncCall]] = {}
+        # The bodies a call can enter, by the name the call spells.
+        callables: dict[str, list[ASTNode]] = {}
+        types: dict[str, list[ASTNode]] = {}
+        pending: list = [(self.ctx.ast, None, False)]
+        while pending:
+            node, body, in_loop = pending.pop()
+            if self._budget is not None:
+                self._budget.check(node.loc, Phase.CODEGEN)
+            if isinstance(node, (FuncDef, MethodDef)):
+                body = node
+                callables.setdefault(node.name, []).append(node)
+                # Default values are kept outside the syntax children.
+                pending.extend(
+                    (value, body, in_loop)
+                    for value in (node.annotations or {}).get("param_defaults", ())
+                    if isinstance(value, ASTNode)
+                )
+            elif isinstance(node, TypeDecl):
+                body = node
+                types.setdefault(node.name, []).append(node)
+            elif isinstance(node, FuncCall):
+                if in_loop:
+                    in_loops.append(node)
+                if body is not None:
+                    written.setdefault(id(body), []).append(node)
+            in_loop = in_loop or isinstance(node, (ForStmt, ForInStmt, WhileStmt))
+            pending.extend((child, body, in_loop) for child in syntax_children(node))
+
+        def entered(call: FuncCall) -> list:
+            callee = call.callee
+            if isinstance(callee, Identifier):
+                return callables.get(callee.name, [])
+            if not isinstance(callee, MemberAccess):
+                return []
+            found = list(callables.get(callee.member, ()))
+            if callee.member == "new":
+                # ``T.new(...)`` builds an object of ``T``; a qualified
+                # type is spelled ``alias.T``.
+                built = callee.object
+                if isinstance(built, Identifier):
+                    found.extend(types.get(built.name, ()))
+                elif isinstance(built, MemberAccess):
+                    found.extend(types.get(built.member, ()))
+            return found
+
+        reached: set[int] = set()
+        frontier = list(in_loops)
+        while frontier:
+            call = frontier.pop()
+            if self._budget is not None:
+                self._budget.check(call.loc, Phase.CODEGEN)
+            for definition in entered(call):
+                if id(definition) not in reached:
+                    reached.add(id(definition))
+                    frontier.extend(written.get(id(definition), ()))
+        nodes = {id(call) for call in in_loops}
+        nodes.update(
+            id(call) for body_id in reached for call in written.get(body_id, ())
+        )
+        cached = frozenset(nodes)
+        self.__dict__["_ta_loop_call_nodes_cache"] = cached
         return cached
 
     def _ta_series_length_call_is_in_loop(self, site: "TACallSite") -> bool:
-        """Whether ``site`` is a call written inside a loop of a function
-        whose series class is not lowered there
-        (``_TA_SERIES_LENGTH_LOOP_CLASSES``). A clone answers for the call
-        it was cloned from: it keeps that call's node."""
+        """Whether a loop can run ``site``'s call more than once on a bar
+        (``_ta_loop_call_nodes``: the call is written inside a loop, or in a
+        body reached from one), for a function whose series class is not
+        lowered there (``_TA_SERIES_LENGTH_LOOP_CLASSES``). A clone answers
+        for the call it was cloned from: it keeps that call's node, so every
+        call site's copy of a call in a body reached from a loop answers
+        alike."""
         if site.class_name in self._TA_SERIES_LENGTH_LOOP_CLASSES:
             return False
         node = getattr(site, "node", None)

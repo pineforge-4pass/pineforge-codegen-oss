@@ -97,10 +97,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
   names are now reserved. A constant or input length keeps its fixed-length
   class. Still refused: such a length inside `request.security`, one a
   function receives from its caller, one that reads a script-level `var` not
-  shown to change, a call written inside a loop (a loop-counter length, for
-  example: the call runs once on every pass, and no TradingView value of such
-  a call is recorded), and any other argument of these calls that varies by
-  bar (the `mult` of `ta.bb`, for example, which TradingView refuses too).
+  shown to change, a call a loop runs (one written inside a loop, with a
+  loop-counter length for example, or in a function or method that a loop
+  calls, itself or through other functions: the call runs once on every pass,
+  and no TradingView value of such a call is recorded), and any other
+  argument of these calls that varies by bar (the `mult` of `ta.bb`, for
+  example, which TradingView refuses too).
 - A `ta.linreg` `offset` that varies by bar, which TradingView refuses, is now
   refused with `PF-E5009`; it used to be read on every bar. A constant or
   input offset is unchanged.
