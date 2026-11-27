@@ -121,14 +121,14 @@ def test_runtime_requested_timeframe_length_compiles():
 
     cpp = transpile(SMA_RUNTIME_CONTEXT)
     assert cpp and "_runtime_request_0(chosen_tf" in cpp
-    assert "ta::SMA" in cpp
+    assert "PineFixedSma" in cpp
     compile_cpp(cpp, label="runtime-requested-timeframe-length")
 
 
 def test_runtime_requested_timeframe_length_reset_does_not_read_the_evaluator_state():
     cpp = transpile(SMA_RUNTIME_CONTEXT)
     needle = "_pf_state.cursor.timeframe"
-    assert cpp and "ta::SMA" in cpp
+    assert cpp and "PineFixedSma" in cpp
     assert "_runtime_request_0(chosen_tf" in cpp
 
     runtime_struct = _cpp_block(
@@ -148,10 +148,10 @@ def test_runtime_requested_timeframe_length_reset_does_not_read_the_evaluator_st
 
 def test_closed_requested_timeframe_length_keeps_requested_context_path():
     cpp = transpile(SMA_CLOSED_CONTEXT)
-    assert cpp and "ta::SMA" in cpp
+    assert cpp and "PineFixedSma" in cpp
     reset_lines = [
         line for line in cpp.splitlines()
-        if " = ta::SMA(" in line and "_sec" in line
+        if " = pineforge::source::PineFixedSma(" in line and "_sec" in line
     ]
     assert reset_lines
     assert any('tf_is_daily("D")' in line for line in reset_lines)

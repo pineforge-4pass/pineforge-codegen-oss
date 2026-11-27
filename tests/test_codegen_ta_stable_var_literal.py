@@ -29,13 +29,16 @@ def _constructor_initializers(cpp: str) -> str:
     return match.group(1)
 
 
-# The call the fences below are read through: ``ta.wma`` sizes its buffer in
-# the constructor and has no series-length lowering, so a length the literal
-# admission does not take is refused there. ``ta.pivothigh`` was this call
-# until a series leftbars / rightbars was lowered per bar
-# (tests/test_codegen_ta_dynamic_length.py): an unadmitted ``var`` strength is
-# now read on every call instead of being refused.
-_FENCED_CALL = "x = ta.wma(close, p)"
+# The call the fences below are read through: ``ta.rma`` sizes its buffer in
+# the constructor and has no series-length lowering (TradingView refuses a
+# series length for it), so a length the literal admission does not take is
+# refused there. ``ta.pivothigh`` was this call until a series leftbars /
+# rightbars was lowered per bar (tests/test_codegen_ta_dynamic_length.py),
+# and ``ta.wma`` until a series length of it was lowered to its engine series
+# class (tests/test_ta_series_length_classes.py): an unadmitted ``var``
+# strength, or a ``ta.wma`` length shown to vary by bar, is now read on every
+# call instead of being refused.
+_FENCED_CALL = "x = ta.rma(close, p)"
 
 
 def _assert_exact_ctor_rejection(
@@ -51,7 +54,7 @@ def _assert_exact_ctor_rejection(
     diagnostic = caught.value.diagnostics[0]
     assert diagnostic.level is Level.ERROR
     assert diagnostic.phase is Phase.CODEGEN
-    # The call's opening parenthesis: column 11 of ``x = ta.wma(close, p)``.
+    # The call's opening parenthesis: column 11 of ``x = ta.rma(close, p)``.
     assert (
         diagnostic.location.file,
         diagnostic.location.line,
@@ -59,7 +62,7 @@ def _assert_exact_ctor_rejection(
         diagnostic.location.end_col,
     ) == (filename, expected_line, 11, 12)
     assert diagnostic.message == (
-        "Unsupported TA constructor length 'p' for ta::WMA: it is "
+        "Unsupported TA constructor length 'p' for ta::RMA: it is "
         "neither a compile-time constant nor derived from an input, so "
         "PineForge cannot size the indicator buffer."
     )
@@ -547,12 +550,12 @@ def test_callable_parameter_rebinding_fences_literal_specialization(
     ],
 )
 def test_nonimmutable_persistent_lengths_remain_rejected(binding: str) -> None:
-    # ``ta.wma``: a constructor-sized call with no series-length lowering
+    # ``ta.rma``: a constructor-sized call with no series-length lowering
     # (``_FENCED_CALL``). The binding keeps its spelling.
     source = f"""//@version=6
 strategy("persistent length guard")
 {binding}
-average = ta.wma(close, pivotLength)
+average = ta.rma(close, pivotLength)
 """
 
     with pytest.raises(CompileError, match="Unsupported TA constructor length"):
@@ -565,7 +568,7 @@ strategy("persistent length shadow guard")
 var int pivotLength = 5
 readAverage() =>
     var int pivotLength = 7
-    ta.wma(close, pivotLength)
+    ta.rma(close, pivotLength)
 average = readAverage()
 """
 
@@ -579,7 +582,7 @@ strategy("persistent block length shadow guard")
 var int pivotLength = 5
 if close > open
     int pivotLength = int(close)
-    average = ta.wma(close, pivotLength)
+    average = ta.rma(close, pivotLength)
 """
 
     with pytest.raises(CompileError, match="Unsupported TA constructor length"):
@@ -591,7 +594,7 @@ def test_same_spelled_loop_binder_does_not_capture_global_literal() -> None:
 strategy("persistent loop length shadow guard")
 var int pivotLength = 5
 for pivotLength = 1 to int(close)
-    average = ta.wma(close, pivotLength)
+    average = ta.rma(close, pivotLength)
 """
 
     with pytest.raises(CompileError, match="Unsupported TA constructor length"):
@@ -619,7 +622,7 @@ def test_requested_context_admits_only_proven_stable_var_literal_ctor(
     initializers = _constructor_initializers(cpp)
     assert re.search(r"_ta_sma_\d+\(5\)", initializers)
     assert re.search(r"_sec\d+__ta_sma_\d+\(5\)", initializers)
-    assert "ta::SMA(1)" not in cpp
+    assert "PineFixedSma(1)" not in cpp
     assert not re.search(r"_ta_sma_\d+\(1\)", cpp)
     assert not re.search(r"_sec\d+__ta_sma_\d+\(1\)", cpp)
     compile_cpp(

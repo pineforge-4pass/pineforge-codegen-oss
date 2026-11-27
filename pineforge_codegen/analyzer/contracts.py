@@ -57,6 +57,8 @@ class TACallSite:
     # simple-length lowering renders a length the constructor cannot take
     # from these at the call site.
     ctor_nodes: list = field(default_factory=list)
+    # Chart clock of the written site. Requested-context copies keep their own clock.
+    uses_execution_window: bool = False
 
 
 @dataclass

@@ -189,8 +189,8 @@ second = holder.sample(open)
 """
     cpp = transpile(source)
 
-    assert "ta::SMA _ta_sma_1;" in cpp
-    assert "ta::SMA _ta_sma_1_cs1;" in cpp
+    assert "pineforge::source::PineFixedSma _ta_sma_1;" in cpp
+    assert "pineforge::source::PineFixedSma _ta_sma_1_cs1;" in cpp
     assert "double _prev_fixnan_1 = na<double>();" in cpp
     assert "double _prev_fixnan_1_cs1 = na<double>();" in cpp
     assert (
