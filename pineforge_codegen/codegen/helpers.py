@@ -288,6 +288,7 @@ CPP_STANDARD_MACROS = frozenset("""
     PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1
     PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1
     PINEFORGE_HAS_RUNTIME_CONTEXT_SERVICE_V1
+    PINEFORGE_HAS_SECURITY_CHART_PUBLICATION_V1
     _PF_NO_DATA_STOP _PF_OTHER_SYMBOL_STOP _PF_ARRAY_STOP _PF_COLLECTION_STOP
     _PF_NA_STOP _PF_LIMIT_STOP _PF_UNSUPPORTED_STOP _PF_STRING_STOP _PF_TIMEZONE_STOP
     _PF_ENGINE_INVARIANT _PF_INVARIANT_AT _PF_SETTING_FAILURE
@@ -409,7 +410,7 @@ CPP_STANDARD_MACROS |= frozenset(
 # pineforge``; an authored UDT can make its unqualified type reads ambiguous.
 CPP_EMITTER_NAMES = frozenset("""
     GeneratedStrategy BacktestEngine Bar Series PineArray PineMap PineMatrix
-    PineGenericMatrix PineStrategyConfig PineStrategyHost StrategyOverrides
+    PineGenericMatrix PineStrategyConfig PineStrategyHost PineSecurityChartPublisher StrategyOverrides
     SymInfo ReportC MagnifierDistribution ChartPoint Line Box Label Linefill
     std pineforge ta math report report_sink report_sequence
     source native_calendar RunFailureCode
@@ -418,6 +419,7 @@ CPP_EMITTER_NAMES = frozenset("""
     on_bar on_source_bar prepare_script_run configure_pine_strategy
     configure_security_evaluators snapshot_script_state restore_script_state
     commit_script_state set_strategy_override set_input
+    publish_security_chart register_security_chart_eval
     set_magnifier_volume_weighted strategy_declares_bar_magnifier fill_report run
     strategy_capabilities_api_version strategy_capabilities_receipt
     strategy_confirmed_bar_api_version strategy_confirmed_bar_receipt
@@ -595,7 +597,7 @@ _CPP_TEMPORARY_PATTERN = re.compile(
     r"|_pf_substring_arg\d+|_pf_case_arg\d+"
     r"|_pf_w_+"
     r"|_req_sec_(?:lower_tf_)?\d+(?:_\d+)?|_precalc_\w+|_sec\d+_\w+"
-    r"|_pf_(?:sec|rec)_missing_\d+|_eval_security_\d+"
+    r"|_pf_(?:sec|rec)_missing_\d+|_eval_security_\d+|_chart_sec_\d+"
     r"|_RuntimeSec\d+|_runtime_(?:feed|request)_\d+"
     r"|_ta_\w+_\d+(?:(?:_cs|__ni|_u)\d+)*"
     r"|_prev_fixnan_\d+(?:(?:_cs|__ni|_u)\d+)*|_result__ta_\w+"
