@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 
 from tests._e2e import (
-    REPO_ROOT, build_strategy_library, derive_chart_feed, reference_codegen,
+    REPO_ROOT, build_strategy_library, derive_chart_feed, reference_codegen, reference_engine,
     skip_unless_e2e_env, transpile_json,
 )
 
@@ -99,7 +99,8 @@ def _host(engine_root: Path, feeds: dict[str, Path], workdir: Path, tape: str,
         if not transpiled.get("ok"):
             raise RuntimeError(json.dumps(transpiled.get("diagnostics"), indent=1))
         outcome.cpp = transpiled["cpp"]
-        build_strategy_library(outcome.cpp, workdir)
+        reference_host = reference_engine() if codegen != REPO_ROOT else None
+        build_strategy_library(outcome.cpp, workdir, reference_host=reference_host)
         library = ctypes.CDLL(str(workdir / "strategy.so"))
         export = getattr(library, "strategy_declares_bar_magnifier", None)
         if export is not None:
@@ -114,7 +115,8 @@ def _host(engine_root: Path, feeds: dict[str, Path], workdir: Path, tape: str,
             feed = feeds["15"]
         (workdir / "inputs.json").write_text(json.dumps(inputs))
         out = workdir / "engine_trades.csv"
-        cmd = [sys.executable, str(engine_root / "scripts" / "run_strategy.py"), str(workdir),
+        runner = (reference_host or engine_root) / "scripts" / "run_strategy.py"
+        cmd = [sys.executable, str(runner), str(workdir),
                "--ohlcv", str(feed), "--no-trim-output", "-o", str(out)]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
@@ -145,7 +147,7 @@ def outcomes(tmp_path_factory) -> dict[tuple[str, str], Outcome]:
 
 def _outcome(outcomes: dict, tape: str, build: str) -> Outcome:
     if (tape, build) not in outcomes:
-        pytest.skip(f"codegen {BASE} is not in this checkout's history")
+        pytest.fail(f"NEEDS historical codegen {BASE}")
     outcome = outcomes[(tape, build)]
     if outcome.error is not None:
         pytest.fail(f"[{build} {tape}] {outcome.error}", pytrace=False)
@@ -173,6 +175,7 @@ def test_the_pre_lane_build_ran_the_declaring_script_unmagnified(outcomes):
     outcome = _outcome(outcomes, "mi-fx-eth-15", "base")
     assert outcome.declares is False
     tape = _tape("mi-fx-eth-15")
+    assert outcome.engine == _tape("w9mag-fx-eth-15-off")
     exits = [(e, t) for e, t in zip(outcome.engine, tape) if e != t]
     assert len(outcome.engine) == len(tape) and len(exits) == 7
 

@@ -40,7 +40,7 @@ from pathlib import Path
 import pytest
 
 from tests._e2e import (
-    REPO_ROOT, build_strategy_library, derive_chart_feed, reference_codegen,
+    REPO_ROOT, build_strategy_library, derive_chart_feed, reference_codegen, reference_engine,
     skip_unless_e2e_env, transpile_json,
 )
 
@@ -121,8 +121,9 @@ def _replay(engine_root: Path, feed: Path, workdir: Path, tape: str,
         if not transpiled.get("ok"):
             raise RuntimeError(json.dumps(transpiled.get("diagnostics"), indent=1))
         outcome.cpp = transpiled["cpp"]
-        build_strategy_library(outcome.cpp, workdir)
-        outcome.engine = trades(run_on_tape(engine_root, workdir, feed), 0)
+        reference_host = reference_engine() if codegen != REPO_ROOT else None
+        build_strategy_library(outcome.cpp, workdir, reference_host=reference_host)
+        outcome.engine = trades(run_on_tape(reference_host or engine_root, workdir, feed), 0)
     except Exception as exc:  # recorded and asserted by the case's own test
         outcome.error = str(exc)
     return outcome
@@ -130,8 +131,7 @@ def _replay(engine_root: Path, feed: Path, workdir: Path, tape: str,
 
 @pytest.fixture(scope="module")
 def outcomes(tmp_path_factory) -> dict[tuple[str, str], Outcome]:
-    """Every tape under this checkout's codegen, and under ``LEGACY`` when that
-    commit is in the checkout's history (its rows skip otherwise)."""
+    """Replay each tape with the current pair and with the frozen generator and host."""
     engine_root = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("function_global_history")
     feed = derive_chart_feed(engine_root, base / "ohlcv_ETH-USDT-USDT_15m.csv")
@@ -145,7 +145,7 @@ def outcomes(tmp_path_factory) -> dict[tuple[str, str], Outcome]:
 
 def _outcome(outcomes: dict, tape: str, build: str) -> Outcome:
     if (tape, build) not in outcomes:
-        pytest.skip(f"codegen {LEGACY} is not in this checkout's history")
+        pytest.fail(f"NEEDS historical codegen {LEGACY}")
     outcome = outcomes[(tape, build)]
     if outcome.error is not None:
         pytest.fail(f"[{build} {tape}] {outcome.error}", pytrace=False)
@@ -171,7 +171,14 @@ def test_every_trade_is_tradingviews(outcomes, tape):
 
 @pytest.mark.parametrize("tape", PER_CALL_SITE)
 def test_the_pre_lane_build_read_the_charts_history(outcomes, tape):
-    assert _outcome(outcomes, tape, "legacy").engine != _tape(tape)
+    engine = _outcome(outcomes, tape, "legacy").engine
+    tv = _tape(tape)
+    # The history read changes the encoded quantity, not when the probe trades.
+    # Each first entry encodes abs(delta) + 1: the chart's [1] reads -1
+    # (r4 and conditional), and the model's [2] reads -2. See the fixture README.
+    assert [(e[0], e[4]) for e in engine] == [(t[0], t[4]) for t in tv]
+    expected_qty = 3 if tape == "w9-fn-history-model" else 2
+    assert engine[0][3] == expected_qty != tv[0][3], tape
 
 
 def test_chart_builtins_keep_the_pre_lane_lowering(outcomes):
