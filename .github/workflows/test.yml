@@ -318,6 +318,159 @@ jobs:
           path: pytest-results.xml
           if-no-files-found: error
 
+  reference-engine:
+    name: reference-engine
+    # The end-to-end modules that compare today's generator with pinned
+    # historical generators. Today's leg runs against engine main, built the
+    # way the native job builds it; every historical leg runs against the
+    # reference engine, the exact release commit below, which the tests read
+    # from PINEFORGE_REFERENCE_ENGINE.
+    # The reference engine is built on every run: the admission rules refuse
+    # an Actions cache in every workflow, so a cache needs a base rule change
+    # first (docs/ci.md). No timeout-minutes, like every other job here.
+    needs: [authz, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      PYTHONHASHSEED: "0"
+      CXX: /usr/bin/g++
+      REFERENCE_ENGINE_SHA: "5718c5dc05086fc5b66b4cb565617efe837131e3"
+    steps:
+      - name: "Check out the exact head with full history"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: "${{ github.event.pull_request.head.sha || github.sha }}"
+          fetch-depth: 0
+          path: candidate
+          persist-credentials: false
+      - name: "Resolve public engine MAIN at job runtime"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pineforge-4pass/pineforge-engine
+          ref: main
+          path: engine
+          persist-credentials: false
+      - name: "Check out the reference engine at its exact release commit"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pineforge-4pass/pineforge-engine
+          ref: "5718c5dc05086fc5b66b4cb565617efe837131e3"
+          path: reference-engine
+          persist-credentials: false
+      - name: "Require the reference engine to be exactly that commit"
+        shell: "bash"
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/reference-engine"
+          mkdir -p "$out"
+          head=$(git -C reference-engine rev-parse --verify 'HEAD^{commit}')
+          if [[ "$head" != "$REFERENCE_ENGINE_SHA" ]]; then
+            echo "::error::reference engine HEAD is $head, not $REFERENCE_ENGINE_SHA"
+            exit 1
+          fi
+          {
+            echo "reference engine: $head tree $(git -C reference-engine rev-parse --verify 'HEAD^{tree}')"
+            echo "engine main: $(git -C engine rev-parse --verify 'HEAD^{commit}') tree $(git -C engine rev-parse --verify 'HEAD^{tree}')"
+            echo "codegen: $(git -C candidate rev-parse --verify 'HEAD^{commit}')"
+          } | tee "$out/identity.txt" >> "$GITHUB_STEP_SUMMARY"
+      - name: "Set up Python"
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: "Install with dev extras"
+        shell: "bash"
+        run: |
+          set -euo pipefail
+          cd candidate
+          python -m pip install -e ".[dev]"
+      - name: "Build engine main and fetch its public corpus feed"
+        shell: "bash"
+        run: |
+          set -euo pipefail
+          cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Release \
+            -DPINEFORGE_BUILD_TESTS=OFF -DPINEFORGE_BUILD_SOURCE_LAYER=ON \
+            "-DCMAKE_CXX_COMPILER=$CXX"
+          cmake --build engine/build --parallel "$(nproc)"
+          git -C engine submodule update --init corpus
+          git -C engine/corpus lfs pull
+      - name: "Build the reference engine once"
+        shell: "bash"
+        run: |
+          set -euo pipefail
+          cmake -S reference-engine -B reference-engine/build -DCMAKE_BUILD_TYPE=Release \
+            -DPINEFORGE_BUILD_TESTS=OFF -DPINEFORGE_BUILD_SOURCE_LAYER=ON \
+            "-DCMAKE_CXX_COMPILER=$CXX"
+          cmake --build reference-engine/build --parallel "$(nproc)"
+      - name: "Run the historical generator comparisons"
+        shell: "bash"
+        run: |
+          set -euo pipefail
+          work="$GITHUB_WORKSPACE"
+          out="$RUNNER_TEMP/reference-engine"
+          eigen=""
+          for dir in "$work/engine/build/_deps/eigen-src" /usr/include/eigen3; do
+            if [[ -f "$dir/Eigen/Dense" ]]; then
+              eigen=$dir
+              break
+            fi
+          done
+          if [[ -z "$eigen" ]]; then
+            echo "::error::real Eigen headers missing"
+            exit 1
+          fi
+          feed="$work/engine/corpus/data/ohlcv_ETH-USDT-USDT_1m.csv"
+          for path in "$work/engine/include/pineforge/engine.hpp" \
+                      "$work/engine/build/include/pineforge/version.h" \
+                      "$work/engine/build/lib/libpineforge.a" \
+                      "$work/engine/scripts/run_strategy.py" \
+                      "$work/reference-engine/build/lib/libpineforge.a" \
+                      "$work/reference-engine/scripts/run_strategy.py" \
+                      "$feed"; do
+            if [[ ! -s "$path" ]]; then
+              echo "::error::required native input missing or empty: $path"
+              exit 1
+            fi
+          done
+          if [[ "$(stat -c %s "$feed")" -lt 1000000 ]]; then
+            echo "::error::corpus 1m feed is an unsmudged LFS pointer: $feed"
+            exit 1
+          fi
+          export PINEFORGE_ENGINE_INCLUDE="$work/engine/include"
+          export PINEFORGE_GENERATED_INCLUDE="$work/engine/build/include"
+          export PINEFORGE_ENGINE_LIB="$work/engine/build/lib/libpineforge.a"
+          export PINEFORGE_EIGEN_INCLUDE="$eigen"
+          export PINEFORGE_ENGINE_CORPUS="$work/engine/corpus"
+          export PINEFORGE_REFERENCE_ENGINE="$work/reference-engine"
+          export PINEFORGE_REQUIRE_NATIVE=1
+          cd "$work/candidate"
+          python -m pytest -q -n auto -ra --junitxml="$out/junit.xml" \
+            tests/test_e2e_session_ismarket.py \
+            tests/test_e2e_bar_magnifier_flag.py \
+            tests/test_e2e_function_global_history.py \
+            tests/test_e2e_strategy_defaults.py 2>&1 | tee "$out/pytest.log"
+          python3 -I -c '
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+          totals = {key: sum(int(suite.get(key, "0")) for suite in suites)
+                    for key in ("tests", "errors", "failures", "skipped")}
+          print("JUnit totals:", totals)
+          if not totals["tests"] or totals["errors"] or totals["failures"] or totals["skipped"]:
+              print("::error::every selected test must run and pass; a skip is not a pass")
+              sys.exit(1)
+          ' "$out/junit.xml"
+      - name: "Retain identities, the pytest log and JUnit"
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reference-engine-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/reference-engine
+          if-no-files-found: error
+
   test-check:
     needs: [authz, changes, workflow-lint, package-files, pytest]
     if: ${{ always() }}

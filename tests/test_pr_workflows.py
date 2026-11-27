@@ -132,6 +132,7 @@ def assert_test_workflow_runner_routing(workflow):
         "workflow-lint": ["    runs-on: ubuntu-24.04"],
         "package-files": ["    runs-on: ubuntu-24.04"],
         "pytest": ["    runs-on: ubuntu-24.04"],
+        "reference-engine": ["    runs-on: ubuntu-24.04"],
         "test-check": ["    runs-on: ubuntu-24.04"],
     }, "test.yml runner routing differs"
 
