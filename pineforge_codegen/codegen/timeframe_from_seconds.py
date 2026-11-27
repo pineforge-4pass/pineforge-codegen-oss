@@ -3,6 +3,9 @@
 # Seconds have discrete multipliers. For the remaining units, the multiplier
 # is a positive integer in the documented range. Order matters on ties:
 # prefer 1D over 1440, and 1W over 7D.
+# OPEN TVF-431-TIE: TradingView confirmation is pending for a rounded-up
+# candidate that ties a larger unit; this implementation currently prefers
+# that larger unit (for example, 604799 -> 1W rather than 7D).
 _SECOND_MULTIPLIERS = (1, 5, 10, 15, 30, 45)
 _UNITS = (
     (60, 1440, ""),
@@ -22,6 +25,7 @@ def timeframe_from_seconds(seconds: int) -> str:
     result = f"{_MAX_MONTHS}{_MONTH_SUFFIX}"
     for unit, limit, suffix in _UNITS:
         multiplier = 1 + (seconds - 1) // unit
+        # OPEN TVF-431-TIE: the <= keeps the current larger-unit tie rule.
         if multiplier <= limit and multiplier * unit <= duration:
             duration = multiplier * unit
             result = f"{multiplier}{suffix}"
@@ -59,6 +63,7 @@ def timeframe_from_seconds_cpp(name: str) -> str:
         const int64_t _pf_multiple = 1 + (_pf_seconds - 1) / _pf_unit._pf_step;
         if (_pf_multiple > _pf_unit._pf_limit) continue;
         const int64_t _pf_candidate = _pf_multiple * _pf_unit._pf_step;
+        // OPEN TVF-431-TIE: the <= keeps the current larger-unit tie rule.
         if (_pf_candidate <= _pf_out) {{
             _pf_out = _pf_candidate;
             _pf_v = _pf_multiple;
