@@ -244,11 +244,14 @@ class TopLevelEmitter:
     }
 
     # The guard a translation unit carries after a header's include, by the
-    # feature macro a class table names: for a fixed type, when the script
-    # has a call of the class identity; for a series type, when a call is
-    # lowered to it. An engine header older than the type is then reported by
-    # the macro's name. A feature macro without an entry here is reserved
-    # only, and an engine header without its type fails at the type's name.
+    # feature macro a class table names, when the unit declares a member of
+    # the type: for a fixed type, a member of the type or a FirstCallBound of
+    # it (``_ta_fixed_type_classes``, codegen/ta.py); for a series type, a
+    # call lowered to it. An engine header older than the type is then
+    # reported by the macro's name, and a unit that declares no such member
+    # requires nothing of that header. A feature macro without an entry here
+    # is reserved only, and an engine header without its type fails at the
+    # type's name.
     _TA_PINE_LAYER_GUARDS = {
         "PINEFORGE_HAS_PINE_FIXED_SUPERTREND": (
             "#ifndef PINEFORGE_HAS_PINE_FIXED_SUPERTREND",
@@ -428,11 +431,15 @@ class TopLevelEmitter:
     def _ta_pine_layer_include_lines(self) -> list[str]:
         """The include line of every engine header this script's ``ta.*``
         objects are declared in, each followed by the guards of the types
-        the script has in that header, in the tables' order.
+        the translation unit declares from that header, in the tables' order.
 
-        For a fixed type every call site of its class identity counts, a dead
-        chart member included: its request.security copies are still
-        declared. A series type counts where a live chart site is lowered to
+        A fixed type's header is written for every call site of its class
+        identity, a dead chart member included. Its feature macro is
+        required only when a member is declared with the type
+        (``_ta_fixed_type_classes``): a site with a per-bar length, one that
+        keeps an execution window and a dead one declare another type or
+        none, and their header is then written without that guard. A series
+        type counts, header and guard, where a live chart site is lowered to
         it (``_ta_series_length_rows``). The length header is also written
         for a site or request.security copy that takes the dynamic-length
         lowering, whatever its class, and for a chart site that keeps an
@@ -442,9 +449,11 @@ class TopLevelEmitter:
         dynamic = self._ta_uses_dynamic_lengths() or any(
             self._is_block_extreme(site) for site in self.ctx.ta_call_sites
         )
-        # (header, feature macro) of every type the script has.
+        named = self._ta_fixed_type_classes()
+        # (header, feature macro) of every type the script has: the macro of
+        # a fixed type only where a member names the type.
         declared = [
-            (row[1], row[2])
+            (row[1], row[2] if class_name in named else None)
             for class_name, row in self._TA_PINE_LAYER_CLASSES.items()
             if class_name in used
         ]
