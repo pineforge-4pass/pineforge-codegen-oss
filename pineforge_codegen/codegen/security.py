@@ -4072,18 +4072,28 @@ class SecurityEmitter:
                 frame.samples[param] = sample
         return lines
 
-    def _security_sparse_call_clock(self, sec_id, stack) -> dict:
-        """The C++ names of the clock of the sparse call ``stack`` ends at:
-        its ``open`` member (``_security_sparse_clock_members``), the
-        evaluator's ``new`` and ``ran`` locals (``_emit_security_evaluator``)
-        and the ``slot`` local of one run of the call: whether that run opens
-        a slot (``_security_slot_is_new_cpp``)."""
+    def _security_sparse_call_clock(self, sec_id, stack, enclosing_lines) -> dict:
+        """The whole clock record of the sparse call ``stack`` ends at.
+
+        The C++ names: its ``open`` member
+        (``_security_sparse_clock_members``), the evaluator's ``new`` and
+        ``ran`` locals (``_emit_security_evaluator``) and the ``slot`` local
+        of one run of the call: whether that run opens a slot
+        (``_security_slot_is_new_cpp``). ``lines`` and ``scope`` say where
+        the outermost sparse call sits: a global its body reads is lowered
+        there (``_build_security_expr``). A call inside a sparse call
+        inherits them. Every key is set here, for every call.
+        """
         ordinal = self._security_sparse_call_paths[sec_id][
             self._security_argument_call_path(stack)]
         stem = f"_sec{sec_id}_call"
+        outer = getattr(self, "_security_call_clock", None)
+        lines, scope = (
+            (enclosing_lines, getattr(self, "_security_scope_path", ()))
+            if outer is None else (outer["lines"], outer["scope"]))
         return {"open": f"{stem}_open_{ordinal}", "new": f"{stem}_new_{ordinal}",
                 "ran": f"{stem}_ran_{ordinal}", "slot": f"{stem}_slot_{ordinal}",
-                "used": False}
+                "used": False, "lines": lines, "scope": scope}
 
     def _security_call_owns_ta(self, sec_id, idx, variant) -> bool:
         """Whether a hoisted ``ta.*`` variant is computed by a sparse call.
@@ -10858,13 +10868,7 @@ class SecurityEmitter:
                 call_clock = None
                 if sparse_body is not None:
                     call_clock = self._security_sparse_call_clock(
-                        sec_id, plan["binding_stack"])
-                    # Where the outermost sparse call sits: a global its body
-                    # reads is lowered there (``_build_security_expr``).
-                    call_clock["lines"], call_clock["scope"] = (
-                        (enclosing_lines, getattr(self, "_security_scope_path", ()))
-                        if outer_clock is None else
-                        (outer_clock["lines"], outer_clock["scope"]))
+                        sec_id, plan["binding_stack"], enclosing_lines)
                     self._security_call_clock = call_clock
                     outside_before = len(call_clock["lines"] or ())
                 opened_ta = ()
