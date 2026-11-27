@@ -48,22 +48,22 @@ def timeframe_from_seconds_cpp(name: str) -> str:
     constexpr struct {{
         int64_t _pf_step;
         int _pf_limit;
-        const char* _pf_suffix;
+        const char* _pf_symbol;
     }} _pf_units[] = {{
 {units}
     }};
-    int64_t _pf_duration = {_MONTH * _MAX_MONTHS};
-    int64_t _pf_count = {_MAX_MONTHS};
-    const char* _pf_suffix = "{_MONTH_SUFFIX}";
+    int64_t _pf_out = {_MONTH * _MAX_MONTHS};
+    int64_t _pf_v = {_MAX_MONTHS};
+    const char* _pf_symbol = "{_MONTH_SUFFIX}";
     for (const auto& _pf_unit : _pf_units) {{
         const int64_t _pf_multiple = 1 + (_pf_seconds - 1) / _pf_unit._pf_step;
         if (_pf_multiple > _pf_unit._pf_limit) continue;
         const int64_t _pf_candidate = _pf_multiple * _pf_unit._pf_step;
-        if (_pf_candidate <= _pf_duration) {{
-            _pf_duration = _pf_candidate;
-            _pf_count = _pf_multiple;
-            _pf_suffix = _pf_unit._pf_suffix;
+        if (_pf_candidate <= _pf_out) {{
+            _pf_out = _pf_candidate;
+            _pf_v = _pf_multiple;
+            _pf_symbol = _pf_unit._pf_symbol;
         }}
     }}
-    return std::to_string(_pf_count) + _pf_suffix;
+    return std::to_string(_pf_v) + _pf_symbol;
 }}"""
