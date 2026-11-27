@@ -829,7 +829,7 @@ class TaSiteHelper:
 
         Returns ``{"by_stmt": {id(stmt): [unit, ...]}, "call_nodes": set,
         "source_clock": {id(node): {"node", "site", "length_literal"}},
-        "per_execution_nodes": set, "block_extrema": set,
+        "per_execution_nodes": set,
         "skipped": [(node, site, reason), ...]}``.
         Only ``LAZY_EVERY_BAR_TA`` families whose call carries a direct
         ``[k]`` history read (``Subscript`` on the call) become hoist units.
@@ -862,7 +862,6 @@ class TaSiteHelper:
         call_nodes: set[int] = set()
         source_clock: dict[int, dict] = {}
         per_execution_nodes: set[int] = set()
-        block_extrema: set[int] = set()
         skipped: list[tuple] = []
         counter = [0]
 
@@ -1002,10 +1001,6 @@ class TaSiteHelper:
                     and callee.member in ("security", "security_lower_tf")
                 )
                 site = None if history_read else self._get_ta_site(node)
-                # The #458 fixture reads a direct value from an if body. The top-level
-                # head and a call's own [k] have separate clock rules.
-                if site is not None and site.class_name in self._BLOCK_EXTREME_TYPES:
-                    block_extrema.add(id(node))
                 if (site is not None
                         and self._ta_name_from_site(site) in self.LAZY_SOURCE_CLOCK_TA
                         and self._lazy_source_clock_eligible(site)):
@@ -1041,24 +1036,20 @@ class TaSiteHelper:
             "call_nodes": call_nodes,
             "source_clock": source_clock,
             "per_execution_nodes": per_execution_nodes,
-            "block_extrema": block_extrema,
             "skipped": skipped,
         }
         self._lazy_edge_hoist_plan_cache = plan
         return plan
 
-    # Direction and result (value or bar offset) are independent of the
-    # qualifier of the window length.
+    # Only the chart sites marked by the analyzer use these kernels.
     _BLOCK_EXTREME_TYPES = {
         "ta::Highest": "_PFExecutedExtreme<true>",
         "ta::Lowest": "_PFExecutedExtreme<false>",
         "ta::HighestBars": "_PFExecutedExtreme<true, true>",
-        "ta::LowestBars": "_PFExecutedExtreme<false, true>",
     }
 
     def _is_block_extreme(self, site: "TACallSite") -> bool:
-        return (site.class_name in self._BLOCK_EXTREME_TYPES
-                and id(site.node) in self._lazy_edge_ta_hoist_plan()["block_extrema"])
+        return site.uses_execution_window
 
     def _lazy_edge_hoisted_ta_call_nodes(self) -> set[int]:
         return self._lazy_edge_ta_hoist_plan()["call_nodes"]
@@ -1745,7 +1736,7 @@ class TaSiteHelper:
     #   first execution; a length goes through ``simple_ta_length`` (0, a
     #   negative length or na stops the run, as TradingView does).
     # * series, for ta.highest / ta.lowest / ta.highestbars / ta.lowestbars:
-    #   re-windowed on every call. Chart if bodies use `_PFExecutedExtreme`;
+    #   re-windowed on every call. The #458 probe sites use `_PFExecutedExtreme`;
     #   other sites use ``pineforge::source::Series*``.
     # * series, for ta.percentile_nearest_rank: each call appends to its own
     #   buffer and passes source, length and percentage to

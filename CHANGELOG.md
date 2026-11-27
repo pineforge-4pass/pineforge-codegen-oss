@@ -22,10 +22,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (1.15.0)
 
-- Inside a chart `if` block, `ta.lowest`, `ta.highest`, `ta.lowestbars` and
-  `ta.highestbars` take their window from the call's last `length` executions.
-  Offsets count chart bars back to the extreme, including skipped bars.
-  Literal, input, simple and series lengths follow the same rule
+- In the then body of a top-level chart `if`, a direct reassignment such as
+  `x := ta.lowest(src, length)` uses the last `length` executions. This covers
+  `ta.lowest` and `ta.highest` with literal, input, simple or series lengths,
+  and `ta.highestbars` with simple or series lengths. Its offset counts chart
+  bars back to the winning execution, including skipped bars
   ([#458](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/458)).
 
 - Both strategy conversions and `request.currency_rate` use the host's rate in effect on each bar for the chart and account currencies, in either direction. Without a rate for the pair the request stops the run with the currency-conversion error, or returns `na` with a run warning when `ignore_invalid_currency` is true; other pairs still stop the run ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
