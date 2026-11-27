@@ -325,6 +325,13 @@ jobs:
     # way the native job builds it; every historical leg runs against the
     # reference engine, the exact release commit below, which the tests read
     # from PINEFORGE_REFERENCE_ENGINE.
+    # The four modules have two halves. The public cases run here:
+    # scripts/check_reference_engine_junit.py requires exactly the ids of
+    # tests/reference_engine/public_ids.txt to run and pass, and allows a skip
+    # only for "private fixtures not present". The private-fixture cases run
+    # where those fixtures exist: a private runner, with the same reference
+    # engine and the same no-skip rule (with the fixtures present, nothing may
+    # skip).
     # The reference engine is built on every run: the admission rules refuse
     # an Actions cache in every workflow, so a cache needs a base rule change
     # first (docs/ci.md). No timeout-minutes, like every other job here.
@@ -450,19 +457,10 @@ jobs:
             tests/test_e2e_bar_magnifier_flag.py \
             tests/test_e2e_function_global_history.py \
             tests/test_e2e_strategy_defaults.py 2>&1 | tee "$out/pytest.log"
-          python3 -I -c '
-          import sys
-          import xml.etree.ElementTree as ET
-
-          root = ET.parse(sys.argv[1]).getroot()
-          suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
-          totals = {key: sum(int(suite.get(key, "0")) for suite in suites)
-                    for key in ("tests", "errors", "failures", "skipped")}
-          print("JUnit totals:", totals)
-          if not totals["tests"] or totals["errors"] or totals["failures"] or totals["skipped"]:
-              print("::error::every selected test must run and pass; a skip is not a pass")
-              sys.exit(1)
-          ' "$out/junit.xml"
+          python3 -I scripts/check_reference_engine_junit.py \
+            --junit "$out/junit.xml" \
+            --public tests/reference_engine/public_ids.txt \
+            --reference tests/reference_engine/needs_reference_ids.txt
       - name: "Retain identities, the pytest log and JUnit"
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
