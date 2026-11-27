@@ -38,7 +38,9 @@ from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp, run_emitted_tu
 from tests._checked_ta_cpp import with_checked_ta
 from tests._e2e import reference_codegen, transpile_json
-from tests._legacy_cpp import without_restore_script_state, without_trade_history_policy
+from tests._legacy_cpp import (
+    without_loop_watchdog, without_restore_script_state, without_trade_history_policy,
+)
 
 
 # Accepted scaffold for whole-C++ noninterference only; historical semantic
@@ -543,8 +545,11 @@ if out + acc > top
     [top] = _members(cpp, "pineforge::source::FirstCallBound<ta::Highest>")
     body = cpp.split("int n = ", 1)[1]
     assert f"{local}.compute(current_bar_.high, pineforge::source::ta_number(n))" in body
-    assert re.search(r"for \(int n = [^\n]*\n[^\n]*" + re.escape(
-        f"{loop}.compute(current_bar_.low, pineforge::source::ta_number(n))"), cpp)
+    assert re.search(
+        r"for \(int n = [^\n]*\n[^\n]*"
+        + re.escape(f"{loop}.compute(current_bar_.low, pineforge::source::ta_number(n))"),
+        without_loop_watchdog(cpp),
+    )
     assert '"crypto"' in _compute_line(cpp, top)
     compile_cpp(cpp, label="shadowed_lengths")
 

@@ -12,7 +12,9 @@ from hashlib import sha256
 import pytest
 
 from tests._e2e import Build, chart_feed_head, execute_all, ok, skip_unless_e2e_env
-from tests._legacy_cpp import legacy_cpp, without_restore_script_state, without_source_rename
+from tests._legacy_cpp import (
+    legacy_cpp, without_loop_watchdog, without_restore_script_state, without_source_rename,
+)
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError, Level, Phase
 from tests.test_map_param_methods import _compile_and_run
@@ -387,7 +389,7 @@ def test_map_namespace_resolution_respects_source_order_and_lexical_roots(
     hunks: tuple,
 ):
     cpp = transpile(source)
-    pinned = cpp
+    pinned = without_loop_watchdog(cpp) if source == _FOR_BLOCK_LOCAL_MAP_SOURCE else cpp
     for previous, expected in hunks:
         pinned = require_numeric_hunk(pinned, previous, expected)
     assert sha256(legacy_cpp(pinned).encode()).hexdigest() == expected_hash

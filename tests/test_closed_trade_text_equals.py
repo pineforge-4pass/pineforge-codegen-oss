@@ -7,6 +7,7 @@ import re
 import pytest
 
 from pineforge_codegen import transpile
+from tests._legacy_cpp import without_loop_watchdog
 from tests.test_runtime_var_initialization import _compile_and_run
 
 
@@ -141,16 +142,20 @@ _LOOP_CPP = (
 )
 
 
+def _assert_loop_comparison(cpp: str, expected_cpp: str) -> None:
+    assert _LOOP_CPP + f"            if ({expected_cpp}) {{\n" in without_loop_watchdog(cpp)
+    assert cpp.count(expected_cpp) == 1
+    assert cpp.count("_equals(") == 1
+    assert "closed_trade_entry_id(" not in cpp
+    _assert_retains_rows(cpp)
+
+
 @pytest.mark.parametrize(
     "expression, expected_cpp", [row[:2] for row in _LOOP_COMPARISONS],
 )
 def test_loop_variable_comparison_emission(expression, expected_cpp):
     cpp = transpile(_HEADER + _LOOP_SOURCE.format(expression=expression))
-    assert _LOOP_CPP + f"            if ({expected_cpp}) {{\n" in cpp
-    assert cpp.count(expected_cpp) == 1
-    assert cpp.count("_equals(") == 1
-    assert "closed_trade_entry_id(" not in cpp
-    _assert_retains_rows(cpp)
+    _assert_loop_comparison(cpp, expected_cpp)
 
 
 @pytest.mark.parametrize("source, expected_cpp", [
@@ -381,10 +386,7 @@ def test_loop_variable_comparisons_execute_in_source_host(
     expression, expected_cpp, expected_stdout,
 ):
     cpp = transpile(_HEADER + _LOOP_SOURCE.format(expression=expression))
-    assert _LOOP_CPP + f"            if ({expected_cpp}) {{\n" in cpp
-    assert cpp.count("_equals(") == 1
-    assert "closed_trade_entry_id(" not in cpp
-    _assert_retains_rows(cpp)
+    _assert_loop_comparison(cpp, expected_cpp)
     driver = (
         '#include <iostream>\n#include <utility>\n' + _SEEDED_HOST
         + r'''

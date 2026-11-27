@@ -6,6 +6,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from tests._e2e import reference_codegen, transpile_json
+from tests._legacy_cpp import without_loop_watchdog
 from tests._numeric_expected import (
     integer_arithmetic, integer_store, integer_to_double, require_numeric_hunk,
 )
@@ -57,7 +58,7 @@ def test_proven_non_na_emission_unchanged(tmp_path):
     "float observed = choose()\n",
 ])
 def test_integer_source_controls_keep_their_existing_emission(tmp_path, body):
-    """Compare these controls byte for byte.
+    """Compare these controls byte for byte outside the loop watchdog.
 
     The input proof covers input.int and generic integer input; input.time
     retains conservative guards. A declared float initialized by an integer
@@ -82,6 +83,8 @@ def test_integer_source_controls_keep_their_existing_emission(tmp_path, body):
             '"cannot create std::vector larger than max_size()");',
             "if(is_na(_pf_array_new_size)) return std::vector<int>();",
         )
+    elif "for step = 0 to 1" in body:
+        cpp = without_loop_watchdog(cpp)
     assert cpp == previous["cpp"]
 
 
