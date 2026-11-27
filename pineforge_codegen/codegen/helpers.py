@@ -34,6 +34,14 @@ _INT_LITERAL_TEXT = re.compile(
 )
 
 
+def requested_string_global(ctx, node) -> bool:
+    """Does this identifier read the script declaration whose history is requested?"""
+    if not isinstance(node, Identifier):
+        return False
+    decl = getattr(ctx, "requested_string_history_globals", {}).get(node.name)
+    return decl is not None and ctx.identifier_binding_nodes.get(id(node)) is decl
+
+
 def na_preserving_int_cast(value_cpp: str, int_cpp_type: str = "int") -> str:
     """Narrow a numeric expression to an integer type without losing ``na``.
 

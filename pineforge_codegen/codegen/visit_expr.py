@@ -123,7 +123,9 @@ from ..ast_nodes import (
 )
 from .strategy_declaration import DECLARATION_CONSTANTS, NamedConstant
 from .color_constants import color_literal_to_int64 as _color_literal_to_int64
-from .helpers import na_preserving_int_cast, pine_index_int_cast, unary_sign_cpp
+from .helpers import (
+    na_preserving_int_cast, pine_index_int_cast, requested_string_global, unary_sign_cpp,
+)
 from .types import COLLECTION_MUTATING_METHODS
 from .tables import (
     ADJUSTMENT_MAP,
@@ -781,6 +783,8 @@ class ExprVisitor:
         name = node.name
         if name in self._current_func_series_params:
             return True
+        if requested_string_global(self.ctx, node):
+            return True
         if (name in self._current_func_param_types
                 or (name in BAR_FIELDS and self._builtin_local_symbol(node) is None)
                 or self._reads_builtin_variable(node)):
@@ -807,6 +811,8 @@ class ExprVisitor:
         pending_outer = getattr(self, "_pending_decl_outer_alias", {})
         if name in pending_outer:
             return pending_outer[name]
+        if requested_string_global(self.ctx, node):
+            return f"{self._safe_name(name)}[0]"
         # Function parameters that are series — read current value
         if name in self._current_func_series_params:
             return f"{self._safe_name(name)}[0]"
@@ -2430,6 +2436,8 @@ class ExprVisitor:
         )
         if isinstance(node.object, Identifier):
             name = node.object.name
+            if requested_string_global(self.ctx, node.object):
+                return f"{self._safe_name(name)}[{series_idx}]"
             # A script variable read through history in a plain UDF body: the
             # call site's own history of it.
             if id(node) in self.ctx.func_global_history_nodes:

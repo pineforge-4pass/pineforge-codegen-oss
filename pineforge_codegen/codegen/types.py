@@ -66,6 +66,7 @@ from .helpers import (
     evaluate_args_once,
     na_preserving_int_cast,
     pine_truth_cast,
+    requested_string_global,
 )
 from .. import signatures as sigs
 from .tables import (
@@ -4018,6 +4019,8 @@ class TypeInferer:
     def _series_type_for(self, name: str) -> str:
         """C++ element type for a series variable's history buffer."""
         from .tables import INT64_BUILTINS
+        if name in getattr(self.ctx, "requested_string_history_globals", {}):
+            return "std::string"
         # A bare int64 bar builtin used as a history series (``time[1]``) needs an
         # int64_t buffer: epoch-ms overflow int32 and the na sentinel would be
         # misdetected. ``_is_int64_builtin_init`` only matches user vars whose
@@ -5153,6 +5156,11 @@ class TypeInferer:
         if isinstance(node, Subscript) and isinstance(node.object, Identifier):
             # A history read keeps the series' element type.
             base = node.object.name
+            if base in getattr(self.ctx, "requested_string_history_globals", {}):
+                if requested_string_global(self.ctx, node.object):
+                    return False
+                if base in self.ctx.series_bar_fields:
+                    return True
             parameters = getattr(self, "_current_func_series_param_types", {})
             if base in parameters:
                 return parameters[base] == "double"
@@ -6321,6 +6329,13 @@ class TypeInferer:
                 return self._type_spec_to_cpp(spec)
         if isinstance(node, Subscript) and isinstance(node.object, Identifier):
             name = node.object.name
+            if name in getattr(self.ctx, "requested_string_history_globals", {}):
+                if requested_string_global(self.ctx, node.object):
+                    return "std::string"
+                if name in self.ctx.series_bar_fields:
+                    # The price and the script series can both have [] reads
+                    # when the script uses the price before its declaration.
+                    return "double"
             local = self._builtin_local_symbol(node.object)
             if local is not None:
                 return self._type_for_decl(local._pf_decl_node)
@@ -6353,6 +6368,8 @@ class TypeInferer:
             lexical_tuple_type = self._lexical_tuple_cpp_type(node)
             if lexical_tuple_type is not None:
                 return lexical_tuple_type
+            if requested_string_global(self.ctx, node):
+                return "std::string"
             local = self._builtin_local_symbol(node)
             if local is not None:
                 return self._type_for_decl(local._pf_decl_node)

@@ -89,7 +89,7 @@ from ..external_requests import _nodes as walk_request_nodes
 from ..limits import iter_ast_nodes, syntax_children
 from .helpers import (
     _CPP_COMMENT_OR_LITERAL as _SECURITY_CPP_LITERALS,
-    na_preserving_int_cast, unary_sign_cpp,
+    na_preserving_int_cast, pine_index_int_cast, requested_string_global, unary_sign_cpp,
 )
 from ..security_contexts import (
     GLOBAL_ANNOTATION, TIMEFRAME_SOURCES_ANNOTATION, UNREACHED_ANNOTATION,
@@ -2625,7 +2625,13 @@ class SecurityEmitter:
             # not reinterpret as Pine value reads.
             protect_references()
 
+        string_globals = getattr(getattr(self, "ctx", None), "requested_string_history_globals", {})
         for name in sorted(security_mutable_names, key=len, reverse=True):
+            if name in string_globals:
+                # Already bound by AST identity, including inside builtins.
+                # A text substitution here would also rename ``bar.close``
+                # in the initializer of a script variable named ``close``.
+                continue
             info = self._global_mutable_infos.get(name)
             if info is None:
                 continue
@@ -4196,6 +4202,7 @@ class SecurityEmitter:
                         Subscript(
                             object=global_expr_map[n.object.name],
                             index=n.index,
+                            loc=n.loc,
                         ),
                         bindings,
                     )
@@ -4518,6 +4525,8 @@ class SecurityEmitter:
         """The requested-bar series a payload's ``node[k]`` reads the history
         of: a bar field, or a source input's selected series (its own
         ``_sec<N>_hist_`` member, one per input); else None."""
+        if requested_string_global(self.ctx, node):
+            return None
         if node.name in SECURITY_BAR_FIELDS:
             return node.name
         call = self._security_source_input_call(node)
@@ -8148,6 +8157,8 @@ class SecurityEmitter:
             ta_results,
             security_mutable_names=relevant_names,
             emitted_lines=emitted_lines,
+            expected_type=("std::string" if node.name in self.ctx.requested_string_history_globals
+                           else None),
         )
         expr_cpp = self._security_copy_store_cpp(node.name, info, node.value, expr_cpp)
         cpp_type = self._security_cpp_type_for_mutable(node.name, info)
@@ -8206,6 +8217,8 @@ class SecurityEmitter:
             ta_results,
             security_mutable_names=relevant_names,
             emitted_lines=emitted_lines,
+            expected_type=("std::string" if target_name in self.ctx.requested_string_history_globals
+                           else None),
         )
 
         def store(cpp: str) -> str:
@@ -9743,8 +9756,12 @@ class SecurityEmitter:
         security_mutable_names: set[str] | None = None,
         helper_binding_stack: tuple[dict[str, ASTNode], ...] | None = None,
         emitted_lines: list[str] | None = None,
+        *,
+        expected_type: str | None = None,
     ) -> str:
         """Build C++ expression for a security evaluator."""
+        if expected_type == "std::string" and self._selection_node_is_na(expr_node):
+            return "na<std::string>()"
         if expr_node is None:
             return "na<double>()"
         checked_offset = getattr(self, "_security_history_offset_overrides", {}).get(id(expr_node))
@@ -9774,6 +9791,9 @@ class SecurityEmitter:
                 expr_node, security_mutable_names, helper_binding_stack)
 
         if isinstance(expr_node, Identifier):
+            string_global = requested_string_global(self.ctx, expr_node)
+            if string_global and expr_node.name in security_mutable_names:
+                return f"{self._security_state_name(sec_id, expr_node.name)}[0]"
             sample = self._security_sampled_argument(expr_node.name, helper_binding_stack)
             if sample is not None:
                 return sample.current
@@ -9811,9 +9831,9 @@ class SecurityEmitter:
                 "hlc3": "((bar.high + bar.low + bar.close) / 3.0)",
                 "ohlc4": "((bar.open + bar.high + bar.low + bar.close) / 4.0)",
             }
-            if expr_node.name in bar_fields:
+            if expr_node.name in bar_fields and not string_global:
                 return bar_fields[expr_node.name]
-            if expr_node.name == "time_close":
+            if expr_node.name == "time_close" and not string_global:
                 return self._security_bar_field_expr("time_close", sec_id)
 
             if expr_node.name in security_mutable_names:
@@ -9982,6 +10002,21 @@ class SecurityEmitter:
                     return self._build_security_expr(
                         sec_id, expr_node.index, ta_range, ta_results, resolving,
                         security_mutable_names, helper_binding_stack, emitted_lines)
+
+                if (expr_node.object.name in security_mutable_names
+                        and requested_string_global(self.ctx, expr_node.object)):
+                    # The declaration owns the current slot. Every helper
+                    # reads this same requested Series, including [0] and
+                    # the string na returned for a missing slot.
+                    offset = self._resolve_security_index_literal(
+                        expr_node.index, helper_binding_stack)
+                    state = self._security_state_name(sec_id, expr_node.object.name)
+                    if offset is not None and offset >= 0:
+                        return f"{state}[{offset}]"
+                    idx = self._checked_history_offset_cpp(
+                        build_index(), expr_node.index, constant=False)
+                    return (f"([&]() -> std::string {{ int _pf_offset = {pine_index_int_cast(idx)}; "
+                            f"return is_na(_pf_offset) ? na<std::string>() : {state}[_pf_offset]; }}())")
 
                 sample = self._security_sampled_argument(
                     expr_node.object.name, helper_binding_stack)
@@ -10161,7 +10196,8 @@ class SecurityEmitter:
                     resolving.add(expr_node.object.name)
                     resolved = self._build_security_expr(
                         sec_id,
-                        Subscript(object=global_expr_map[expr_node.object.name], index=expr_node.index),
+                        Subscript(object=global_expr_map[expr_node.object.name],
+                                  index=expr_node.index, loc=expr_node.loc),
                         ta_range,
                         ta_results,
                         resolving,
@@ -10520,11 +10556,16 @@ class SecurityEmitter:
                 sec_id, expr_node.condition, ta_range, ta_results, resolving, security_mutable_names, helper_binding_stack, emitted_lines
             )
             tv = self._build_security_expr(
-                sec_id, expr_node.true_val, ta_range, ta_results, resolving, security_mutable_names, helper_binding_stack, emitted_lines
+                sec_id, expr_node.true_val, ta_range, ta_results, resolving, security_mutable_names,
+                helper_binding_stack, emitted_lines, expected_type=expected_type,
             )
             fv = self._build_security_expr(
-                sec_id, expr_node.false_val, ta_range, ta_results, resolving, security_mutable_names, helper_binding_stack, emitted_lines
+                sec_id, expr_node.false_val, ta_range, ta_results, resolving, security_mutable_names,
+                helper_binding_stack, emitted_lines, expected_type=expected_type,
             )
+            if expected_type == "std::string":
+                cond = self._coerce_bool_expr(cond, expr_node.condition)
+                return f"(({cond}) ? ({tv}) : ({fv}))"
             if (self._security_emits_double(expr_node.true_val, helper_binding_stack)
                     or self._security_emits_double(expr_node.false_val, helper_binding_stack)):
                 tv = self._security_float_cpp(tv, expr_node.true_val, helper_binding_stack)
@@ -11765,6 +11806,12 @@ class SecurityEmitter:
         history (re-evaluating ``g`` on the requested bar would pair it with
         the chart's ``g[1]``), and ``timeframe.*`` (beside the chart's
         ``timeframe.in_seconds()``)."""
+        receiver = node.object if isinstance(node, Subscript) else node
+        if requested_string_global(self.ctx, receiver):
+            if receiver.name in (self._security_calls[sec_id].get("mutable_globals") or ()):
+                return True
+            if isinstance(node, Identifier) and node.name in self.ctx.global_expr_map:
+                return True
         # A helper's parameter is bound in both evaluator modes. The legacy
         # fallback may keep a surrounding builtin's rendering, but it cannot
         # resolve that parameter in the chart function's lexical scope.

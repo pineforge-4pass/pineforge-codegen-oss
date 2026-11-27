@@ -224,11 +224,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             for name in stmt.names
             if name != "_"
         )
-        self._direct_program_binding_names: set[str] = {
-            stmt.name
-            for stmt in ast.body
-            if isinstance(stmt, VarDecl)
+        self._direct_program_vars = {
+            stmt.name: stmt for stmt in ast.body if isinstance(stmt, VarDecl)
         }
+        self._direct_program_binding_names: set[str] = set(self._direct_program_vars)
         self._direct_program_binding_names.update(
             name
             for stmt in ast.body
@@ -493,6 +492,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._enum_member_strings: dict[str, list[str]] = {}
         # request.security rebinding helpers for mutable globals
         self._global_binding_infos: dict[str, MutableGlobalInfo] = {}
+        self._requested_string_history_globals: dict[str, VarDecl] = {}
+        self._price_string_history_reads: list[tuple[Subscript, TypeSpec | None, Symbol]] = []
         self._global_reassigned_names: set[str] = set()
         self._current_top_level_stmt: ASTNode | None = None
         self._global_scope = True
@@ -701,6 +702,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     self._register_history_receiver(
                         node, self._history_receiver_type_spec(node.object),
                     )
+        # A requested string global needs a string Series in the ordinary
+        # emitted helper too. Keep the old chart-only price binding when no
+        # request reads the declaration's history.
+        for read, spec, symbol in self._price_string_history_reads:
+            if self._requested_string_history_globals.get(symbol.name) is symbol._pf_decl_node:
+                self._register_history_receiver(read, spec, script_symbol=symbol)
+            else:
+                self._series_bar_fields.add(symbol.name)
         if self._operator_condition_errors:
             condition_type, location = self._operator_condition_errors[0]
             self._error(
@@ -768,6 +777,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         pure_global_expr_map = {
             k: v for k, v in self._global_expr_map.items() if k not in mutable_global_infos
         }
+        # Keep immutable initializers available to requests which only need
+        # their current value. Requests which index one recorded it in their
+        # replay inventory at the read, just like a reassigned series.
+        for name, decl in self._requested_string_history_globals.items():
+            if name not in mutable_global_infos:
+                mutable_global_infos[name] = replace(
+                    self._global_binding_infos[name], is_series=True, source_stmts=[decl]
+                )
 
         return AnalyzerContext(
             ast=self._ast,
@@ -789,6 +806,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             filename=self._filename,
             global_var_decls=self._global_var_decls,
             global_expr_map=pure_global_expr_map,
+            requested_string_history_globals=self._requested_string_history_globals,
             identifier_binding_scopes=dict(self._identifier_binding_scopes),
             identifier_decl_bindings=dict(self._identifier_decl_bindings),
             primitive_block_shadow_types=dict(self._primitive_block_shadow_types),
@@ -2499,6 +2517,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             resolving = set()
 
         out: set[str] = set()
+
+        if isinstance(node, Subscript) and isinstance(node.object, Identifier):
+            receiver = node.object
+            info = self._global_binding_infos.get(receiver.name)
+            if (info is not None and info.pine_type == PineType.STRING
+                    and isinstance(info.decl_node, VarDecl)
+                    and info.decl_node is self._direct_program_vars.get(receiver.name)
+                    and self._identifier_binding_nodes.get(id(receiver)) is info.decl_node):
+                self._requested_string_history_globals[receiver.name] = info.decl_node
+                out.add(receiver.name)
 
         if isinstance(node, Identifier):
             scope = self._identifier_binding_scopes.get(id(node))
@@ -9195,18 +9223,24 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._register_history_receiver(node, object_spec)
         return obj_type
 
-    def _register_history_receiver(self, node: Subscript, object_spec: TypeSpec | None) -> None:
+    def _register_history_receiver(
+        self, node: Subscript, object_spec: TypeSpec | None, *, script_symbol: Symbol | None = None,
+    ) -> None:
         """Record the bar field or exact variable binding whose history is read."""
         if isinstance(node.object, Identifier):
             name = node.object.name
-            sym = self._symbols.resolve(name)
+            sym = script_symbol or self._symbols.resolve(name)
             local_declaration = (
                 sym is not None and sym.scope != "global"
                 and bool(self._collection_scope_stack)
                 and getattr(sym, "_pf_decl_node_id", None) is not None
             )
-            if name in BAR_FIELDS and not local_declaration:
-                self._series_bar_fields.add(name)
+            if name in BAR_FIELDS and not local_declaration and script_symbol is None:
+                if (sym is not None and sym.scope == "global" and sym.pine_type == PineType.STRING
+                        and isinstance(getattr(sym, "_pf_decl_node", None), VarDecl)):
+                    self._price_string_history_reads.append((node, object_spec, sym))
+                else:
+                    self._series_bar_fields.add(name)
             else:
                 if sym is not None:
                     if getattr(sym, "_pf_shadows_map_state", False):
