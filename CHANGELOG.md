@@ -32,6 +32,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
   symbol, of Heikin-Ashi bars or with a run-time timeframe are unchanged
   ([#466](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/466)).
 
+- In the then body of a top-level chart `if`, a direct reassignment such as
+  `x := ta.lowest(src, length)` uses the last `length` executions. This covers
+  `ta.lowest` and `ta.highest` with literal, input, simple or series lengths,
+  and `ta.highestbars` with simple or series lengths. Its offset counts chart
+  bars back to the winning execution, including skipped bars
+  ([#458](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/458)).
 - `// @pf-trace` now reads prior values of `time`, `time_close`, `bar_index` and other built-in series even when only the pragma indexes them. An indexed built-in without traceable history reports an error at the pragma ([#486](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/486)).
 
 - `// @pf-trace` can now read bar history such as `close[1]` even when the strategy body never reads that history ([#482](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/482)).
@@ -78,6 +84,76 @@ supported as exact pairs; on the 0.x line they are independent. See the
   a genuine 0 included. Generated code uses the paired engine's `PineIii` and
   `PineWvad` and requires `PINEFORGE_HAS_PINE_FLAT_RANGE` from
   `pineforge/source/pine_ta_flat_range.hpp`; regenerate C++ and relink.
+- `ta.sar`, `ta.dmi`, `ta.mfi`, `ta.rci` and `ta.cci` are built from the paired
+  engine's Pine-layer types `PineSar`, `PineDmiReference`, `PineMfi`, `PineRci`
+  and `PineCci`, which apply the Pine rule where the engine's own class
+  differs. Results change only on these bars, and in what follows from them:
+  `ta.sar` compares prices as a Pine relational operator does, so two values
+  within 1e-10 of each other read as equal; `ta.dmi` keeps both directional
+  indices on a bar whose averaged true range is zero, where all three results
+  used to be `na`, and ADX takes its step on that bar; `ta.mfi` has its first
+  value on bar `length - 1`, one bar earlier; `ta.rci` is `na` through bar
+  `length - 1`, one bar longer; `ta.cci` is 0 on a window whose mean deviation
+  is zero within 1e-10, where it used to divide by a rounding residue.
+  Generated code includes `pineforge/source/pine_ta_length.hpp` for the first
+  four and `pineforge/source/pine_ta_cci.hpp` for `ta.cci`, and reserves the
+  names `PINEFORGE_HAS_PINE_SAR`, `PINEFORGE_HAS_PINE_DMI_REFERENCE`,
+  `PINEFORGE_HAS_PINE_MFI`, `PINEFORGE_HAS_PINE_RCI` and
+  `PINEFORGE_HAS_PINE_CCI`. A script with `ta.sar`, `ta.rci` or `ta.cci`
+  requires `PINEFORGE_HAS_PINE_SAR`, `PINEFORGE_HAS_PINE_RCI` or
+  `PINEFORGE_HAS_PINE_CCI` after the include, so an engine header without the
+  type stops the build at an `#error` that names the macro. Regenerate C++
+  and relink.
+- A chart call whose length the script computes on each bar is no longer
+  refused with `PF-E5009` for `ta.wma`, `ta.vwma`, `ta.alma`, `ta.linreg`,
+  `ta.bb`, `ta.bbw`, `ta.stdev`, `ta.variance`, `ta.dev`, `ta.range`,
+  `ta.median`, `ta.mode`, `ta.percentrank`,
+  `ta.percentile_linear_interpolation`, `ta.correlation`, `math.sum`,
+  `ta.stoch`, `ta.cci`, `ta.mfi`, `ta.mom`, `ta.roc`, `ta.cmo`, `ta.wpr`,
+  `ta.cog`, `ta.rising` and `ta.falling`, nor is a per-bar stdev multiplier of
+  `ta.vwap`'s bands. TradingView compiles these calls. Each is lowered to the
+  function's `pineforge::source::Series*` class of the paired engine, which
+  takes the length (for `ta.vwap`, the multiplier) on every call; a length
+  that never changes gives the fixed-length call's values. Generated code
+  includes `pineforge/source/pine_ta_series_ma.hpp`,
+  `pine_ta_series_stats.hpp` or `pine_ta_series_osc.hpp` for the classes it
+  uses and requires each class's `PINEFORGE_HAS_PINE_SERIES_*` macro; those
+  names are now reserved. A constant or input length keeps its fixed-length
+  class. Still refused: such a length inside `request.security`, one a
+  function receives from its caller, one that reads a script-level `var` not
+  shown to change, a call a loop runs (one written inside a loop, with a
+  loop-counter length for example, or in a function or method that a loop
+  calls, itself or through other functions: the call runs once on every pass,
+  and no TradingView value of such a call is recorded), and any other
+  argument of these calls that varies by bar (the `mult` of `ta.bb`, for
+  example, which TradingView refuses too).
+- A `ta.linreg` `offset` that varies by bar, which TradingView refuses, is now
+  refused with `PF-E5009`; it used to be read on every bar. A constant or
+  input offset is unchanged.
+- `ta.rma`, `ta.sma`, `ta.rsi`, `ta.atr`, `ta.hma`, `ta.vwma`, `ta.mfi`,
+  `ta.highest`, `ta.lowest`, `ta.highestbars`, `ta.lowestbars` and `ta.dmi`
+  with a constant or input length of zero or less now stop the run on the
+  call's first execution, as on TradingView, with its text for the call
+  ("Invalid value of the 'length' argument (0) in the 'sma' function. It must
+  be > 0."; `ta.rsi` names the argument `y`, `ta.atr` the function
+  `'atr'->'rma'`, `ta.vwma` `'vwma'->'sma'`, and `ta.dmi` its two lengths
+  `DI Length` and `ADX Smoothing`). Such a call used to compute: `na` on every
+  bar for most of them, 100 for `ta.mfi`, and no defined value for `ta.sma`
+  and `ta.vwma`. A valid length computes what it computed before. Generated
+  code declares these calls with the paired engine's `PineFixedRma`,
+  `PineFixedSma`, `PineFixedRsi`, `PineFixedAtr`, `PineFixedHma`,
+  `PineFixedVwma`, `PineFixedMfi`, `PineFixedHighest`, `PineFixedLowest`,
+  `PineFixedHighestBars`, `PineFixedLowestBars` and `PineFixedDmi` (those of
+  `ta.vwma`, `ta.mfi` and `ta.dmi` wrap `PineVwma`, `PineMfi` and
+  `PineDmiReference`), including helper and requested-context copies, a
+  simple length and precalculation, and requires
+  `PINEFORGE_HAS_PINE_FIXED_LENGTH` from
+  `pineforge/source/pine_ta_length.hpp`; that name is now reserved. A length
+  the script computes on each bar keeps its series class. A `ta.lowest` or
+  `ta.highest` call that uses the last `length` executions of a top-level
+  `if` body (#458, above) is not declared with these types on the chart: with
+  a constant or input length of zero or less it still returns `na`.
+  Regenerate C++ and relink.
 - A `ta.*` call in a `?:` arm or on the right of `and` or `or`, with no `[]` read on the call, now computes the same values in a run that may precalculate (no bar magnifier, empty timeframes) as in every other run: it is evaluated only on the bars that reach it. Such a run used to fill the call on every chart bar, so with `y = bar_index % 2 == 0 ? ta.sma(close, 3) : na` the closes of the odd bars entered the average. This applies to every `ta.*` function; `ta.ema`, and `ta.sma` on the right of `and`, already behaved this way. Unconditional calls and calls read with `[]` are unchanged.
 - An untyped user function now receives the fractional result of an array
   calculation even when another call passes an integer. Previously, a median

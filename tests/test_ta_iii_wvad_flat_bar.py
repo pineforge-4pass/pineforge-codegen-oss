@@ -10,7 +10,7 @@ whose numerator is zero (the close in the middle of the range, the close at
 the open) is a genuine 0. The engine's ``ta::III`` and ``ta::WVAD`` answer 0
 on a bar with no range, so the Pine variables are built from the engine's
 Pine-layer objects ``PineIii`` and ``PineWvad``
-(``codegen/ta.py::_TA_FLAT_RANGE_CLASSES``), which have a header of their own.
+(``codegen/ta.py::_TA_PINE_LAYER_CLASSES``), which have a header of their own.
 
 Invented bars; bars 1 and 4 are flat, bar 2 has a range and both numerators
 zero:

@@ -104,7 +104,7 @@ def test_global_declared_after_the_helper_is_put_in():
                      r"_req_sec_0 = _sec0__ta_sma_\1_hist\[0\];", evaluators[0])
     # h(body, len): the requested SMA of the candle body, the input's length.
     assert "_sec1__ta_sma_1.compute((bar.close - bar.open))" in evaluators[1]
-    assert re.search(r'_sec1__ta_sma_\w+ = ta::SMA\(get_input_int\("Len", 4\)\)', after["cpp"])
+    assert re.search(r'_sec1__ta_sma_\w+ = pineforge::source::PineFixedSma\(get_input_int\("Len", 4\)\)', after["cpp"])
     # The evaluators of the globals declared first, up to the TA sites'
     # numbering (declaration order).
     before = transpile(PRELUDE + GLOBALS + LATER + CALLS + TRADE)
@@ -124,7 +124,7 @@ def test_globals_declared_before_request_helpers_are_put_in():
     # h(body, len): the requested SMA of the candle body, the input's length.
     # ma owns SMA site 1, so h's SMA is site 2 and takes the input's default of 4.
     assert "_sec1__ta_sma_2.compute((bar.close - bar.open))" in evaluators[1]
-    assert re.search(r'_sec1__ta_sma_\w+ = ta::SMA\(get_input_int\("Len", 4\)\)', result["cpp"])
+    assert re.search(r'_sec1__ta_sma_\w+ = pineforge::source::PineFixedSma\(get_input_int\("Len", 4\)\)', result["cpp"])
     # Each global can sit immediately above its reader: g reads only ma, h reads body/len.
     interleaved = transpile(PRELUDE + (
         'ma = ta.sma(close, 20)\n'

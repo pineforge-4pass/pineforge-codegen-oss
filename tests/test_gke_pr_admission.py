@@ -1902,6 +1902,7 @@ def test_test_workflow_hosted_runner_admission_and_mutations():
         "workflow-lint": "ubuntu-24.04",
         "package-files": "ubuntu-24.04",
         "pytest": "ubuntu-24.04",
+        "reference-engine": "ubuntu-24.04",
         "test-check": "ubuntu-24.04",
     }
     check_workflows({**sources, path: candidate})

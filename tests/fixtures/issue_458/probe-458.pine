@@ -1,0 +1,64 @@
+//@version=6
+strategy("probe 458 conditional extrema", overlay = false, pyramiding = 7, use_bar_magnifier = false,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     initial_capital = 1000000, margin_long = 100, margin_short = 100,
+     process_orders_on_close = false, calc_on_order_fills = false, commission_value = 0, slippage = 0)
+// Issue #458. ONE block, gated by the bar's time only, runs on ten bars of 2026-11-16 UTC. In it
+// ta.lowest and ta.highest are called with the SAME length, 5, written four ways. Each way has its own
+// call sites and its own entry id, and every id spells: tag | bar offset j | lowest | highest.
+// The two sources are functions of the bar's time only: no price is read and none is spelled.
+f(x) => na(x) ? "na" : str.tostring(x, "#.########")
+q = 900000
+t0 = timestamp("UTC", 2026, 11, 16, 0, 0)
+int j = int((time - t0) / q)
+bool inRun = j >= 9 and j <= 48
+// The block runs on j = 9, 11, 18, 20, 27, 29, 36, 38, 45, 47; the book is closed one bar after each.
+bool gate = inRun and (j % 9 == 0 or j % 9 == 2)
+bool shut = inRun and (j % 9 == 1 or j % 9 == 3)
+// On a bar where the block runs: 100 + j and 300 - j. On every other bar from t0 on: 20 + r and 400 + r,
+// with r = (5 * j) % 13. Before t0: constants.
+float srcL = gate ? 100.0 + j : (j >= 0 ? 20.0 + (j * 5) % 13 : 50.0)
+float srcH = gate ? 300.0 - j : (j >= 0 ? 400.0 + (j * 5) % 13 : 350.0)
+// The length, 5, from an input, as a series value and as a simple value; the literal is written in place.
+int lenIn = input.int(5, "Length")
+lenSer = time > 0 ? 5 : 6
+lenSim = syminfo.mintick > 0 ? 5 : 6
+// The every-bar control: the same two calls, made on every bar.
+float everyL = ta.lowest(srcL, 5)
+float everyH = ta.highest(srcH, 5)
+// The reference of "the last five executions": the sources of the last five runs of the block.
+var array<float> seenL = array.new_float(0)
+var array<float> seenH = array.new_float(0)
+float litL = na
+float litH = na
+float inpL = na
+float inpH = na
+float serL = na
+float serH = na
+float simL = na
+float simH = na
+if gate
+    litL := ta.lowest(srcL, 5)
+    litH := ta.highest(srcH, 5)
+    inpL := ta.lowest(srcL, lenIn)
+    inpH := ta.highest(srcH, lenIn)
+    serL := ta.lowest(srcL, lenSer)
+    serH := ta.highest(srcH, lenSer)
+    simL := ta.lowest(srcL, lenSim)
+    simH := ta.highest(srcH, lenSim)
+    array.push(seenL, srcL)
+    if array.size(seenL) > 5
+        array.shift(seenL)
+    array.push(seenH, srcH)
+    if array.size(seenH) > 5
+        array.shift(seenH)
+    string jj = str.tostring(j)
+    strategy.entry("src|" + jj + "|" + f(srcL) + "|" + f(srcH), strategy.long)
+    strategy.entry("bar|" + jj + "|" + f(everyL) + "|" + f(everyH), strategy.long)
+    strategy.entry("exe|" + jj + "|" + f(array.min(seenL)) + "|" + f(array.max(seenH)), strategy.long)
+    strategy.entry("lit|" + jj + "|" + f(litL) + "|" + f(litH), strategy.long)
+    strategy.entry("inp|" + jj + "|" + f(inpL) + "|" + f(inpH), strategy.long)
+    strategy.entry("ser|" + jj + "|" + f(serL) + "|" + f(serH), strategy.long)
+    strategy.entry("sim|" + jj + "|" + f(simL) + "|" + f(simH), strategy.long)
+if shut
+    strategy.close_all(comment = "x")

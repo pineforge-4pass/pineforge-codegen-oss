@@ -162,7 +162,7 @@ def test_string_as_std_string():
 def test_ta_sma():
     src = '//@version=6\nstrategy("T")\nx = ta.sma(close, 14)\n'
     cpp = _generate(src)
-    assert "ta::SMA" in cpp
+    assert "pineforge::source::PineFixedSma" in cpp
     assert ".compute(" in cpp
 
 
@@ -200,7 +200,7 @@ def test_ta_call_site_member():
     src = '//@version=6\nstrategy("T")\nx = ta.rsi(close, 14)\n'
     cpp = _generate(src)
     assert "_ta_rsi_" in cpp
-    assert "ta::RSI" in cpp
+    assert "pineforge::source::PineFixedRsi" in cpp
 
 
 def test_time_with_session_uses_pine_time():
@@ -1717,7 +1717,11 @@ if is_last
 # that gives each path its own member. (Was: all clones shared one member.)
 
 def _ta_decls_and_computed(cpp: str):
-    decls = _re.findall(r'ta::(?:Highest|Lowest|Change|Sma|Ema) (_ta_\w+);', cpp)
+    # ta.highest and ta.lowest are declared with their checked fixed-length
+    # types.
+    decls = _re.findall(
+        r'(?:ta::(?:Change|Sma|Ema)|pineforge::source::PineFixed(?:Highest|Lowest))'
+        r' (_ta_\w+);', cpp)
     computed = set(_re.findall(r'(_ta_\w+)\.(?:compute|recompute)\(', cpp))
     return decls, computed
 
