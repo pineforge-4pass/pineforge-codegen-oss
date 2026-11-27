@@ -199,14 +199,19 @@ and has no input limits). It does not return nonfatal diagnostics (warnings and,
 since 1.5.0, notes); use `transpile_full()` to inspect them.
 
 Each generated `for`, `for … in` and `while` has a wall-time limit of
-**2000 ms per entry**. To change it, pass e.g.
+**2000 ms per entry**. This default is four times TradingView's 500 ms loop
+limit. To change it, pass e.g.
 `transpile(pine, loop_timeout_ms=100)`, then rebuild the strategy. The
 timer restarts each time the loop is reached, even on the same bar. The
 iteration count carries forward on that bar: after each 256 iterations the
 watchdog checks the current entry's deadline. Exits with a partial count add
 no clock read. An overrun detected at a sample stops the run with the chart
 bar index and the loop's Pine line.
-See the [public contract](docs/PUBLIC_CONTRACT.md#python-functions) for bounds.
+
+An inner loop can use a full budget each time it runs, so the total time
+of nested loops can exceed a single limit. Lower `loop_timeout_ms` to
+shorten each entry's budget, or enter the inner loop fewer times.
+See the [public contract](docs/PUBLIC_CONTRACT.md#python-functions) for sampling details.
 
 `libraries` is new in 1.0.0. It maps an import path to the library's
 source (`{"user/name/version": source_text}`), and each import the script uses

@@ -179,6 +179,25 @@ total += b
     assert output == "|1200|8", output
 
 
+def test_later_helper_loop_entry_times_out_on_the_same_bar():
+    source = HEADER + """f(int n) =>
+    int result = 0
+    for i = 1 to n
+        result += 1
+    result
+a = f(300)
+float total = a
+b = f(300)
+total += b
+c = f(600)
+total += c
+"""
+    output = _run_with_counting_clock(source, label="later same-bar helper timeout")
+    # Each short entry samples at 1 ms. The third entry samples at 1 and 2 ms
+    # and stops before its result can be added to total.
+    assert output == "Error on bar 0: Pine line 5: loop time limit exceeded (2 ms)|600|7", output
+
+
 def test_short_inner_entries_leave_the_outer_deadline_running():
     source = HEADER + """float total = 0.0
 for outer = 1 to 256

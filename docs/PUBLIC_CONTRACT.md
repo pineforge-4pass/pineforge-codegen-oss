@@ -512,8 +512,15 @@ it is not a Pine `input`. Invalid types and nonpositive values raise
 
 Each entry starts a fresh `std::chrono::steady_clock` timer, including loops
 in called functions and requested evaluators. If a helper runs the same loop
-twice on one bar, the second entry gets the full budget. In a nest, the outer
-timer keeps running while the inner loop executes. TradingView sets a
+twice on one bar, the second entry gets the full budget.
+
+In a nest, the outer timer keeps running while the inner loop executes, but
+the watchdog checks it only at the outer loop's own samples. Each inner
+entry can use a full budget, so the total time of nested loops can exceed a
+single limit. Lower `loop_timeout_ms` to shorten each entry's budget, or
+enter the inner loop fewer times.
+
+TradingView sets a
 [500 ms loop limit and times out the outer loop first](https://www.tradingview.com/pine-script-docs/writing/limitations/#loop-execution).
 PineForge reports the loop whose sample detects an expired deadline. A long
 inner loop can therefore report its own line before the outer loop samples.
@@ -532,6 +539,9 @@ The bar is the zero-based chart bar being processed; the line is the
 one-based Pine loop header. Proven-endless counted loops that already stop
 immediately retain their TradingView stop and report the configured limit.
 Scripts with no generated Pine loops need no clock.
+
+The worst case for the added clock overhead is a short inner loop inside a
+tight outer loop: every inner entry costs one clock read.
 
 History retention depends on the source and these parameters, never the
 number of bars or trades. With `history_capacity=None`, existing Pine

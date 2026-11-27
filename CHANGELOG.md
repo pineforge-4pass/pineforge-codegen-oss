@@ -25,6 +25,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - Generated Pine loops now report the chart bar index and Pine source
   line when a clock sample reaches `loop_timeout_ms` (default 2000 ms per
   loop entry). A loop samples every 256 iterations across entries on a bar.
+  The worst case for the added clock overhead is a short inner loop inside
+  a tight outer loop: every inner entry costs one clock read.
   Regenerate C++ and relink to apply the watchdog
   ([#440](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/440)).
 
