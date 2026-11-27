@@ -319,11 +319,11 @@ if out + acc > top
     strategy.entry("L", strategy.long)
 """
     cpp = transpile(src)
-    [local] = _members(cpp, "pineforge::source::SeriesHighest")
+    [local] = _members(cpp, "_PFExecutedSeriesExtreme<true>")
     [loop] = _members(cpp, "pineforge::source::SeriesLowest")
     [top] = _members(cpp, "pineforge::source::FirstCallBound<ta::Highest>")
     body = cpp.split("int n = ", 1)[1]
-    assert f"{local}.compute(current_bar_.high, pineforge::source::ta_number(n))" in body
+    assert f"{local}.compute(bar_index_, current_bar_.high, pineforge::source::ta_number(n))" in body
     assert re.search(r"for \(int n = [^\n]*\n[^\n]*" + re.escape(
         f"{loop}.compute(current_bar_.low, pineforge::source::ta_number(n))"), cpp)
     assert '"crypto"' in _compute_line(cpp, top)
@@ -350,8 +350,8 @@ plot(out)
 
 
 def test_an_explicit_series_declaration_is_rewindowed() -> None:
-    # ``series int m`` of a simple value is series to TradingView: a sparse
-    # call re-windows, while ``simple int k`` reads the constant ring.
+    # Both window the reached bars. The series declaration still reads its
+    # length each time, while the simple declaration binds it on first use.
     src = """//@version=6
 strategy("declared qualifiers")
 series int m = syminfo.type == "crypto" ? 4 : 8
@@ -364,8 +364,8 @@ if bar_index % 9 < 2
 plot(a + c)
 """
     cpp = transpile(src)
-    [series] = _members(cpp, "pineforge::source::SeriesLowest")
-    [simple] = _members(cpp, "pineforge::source::FirstCallBound<ta::Lowest>")
+    [series] = _members(cpp, "_PFExecutedSeriesExtreme<false>")
+    [simple] = _members(cpp, "_PFExecutedExtreme<pineforge::source::FirstCallBound<ta::Lowest>>")
     assert "ta_number(m)" in _compute_line(cpp, series)
     assert '"crypto"' in _compute_line(cpp, simple)
     compile_cpp(cpp, label="declared_qualifiers")

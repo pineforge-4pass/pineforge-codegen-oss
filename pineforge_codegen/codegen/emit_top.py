@@ -302,6 +302,60 @@ class TopLevelEmitter:
             site.class_name for site in getattr(self.ctx, "ta_call_sites", ())
         }
 
+        block_lengths = {
+            (self._ta_dynamic_plan(site) or {}).get("kind")
+            for site in self.ctx.ta_call_sites if self._is_block_extreme(site)
+        }
+        if block_lengths - {"series_extreme"}:
+            # The kernel sees adjacent ring slots but the real chart age for
+            # warm-up. Arguments (including nested TA) evaluate on the chart
+            # before entering this scope. The clock is checkpointed with its TA.
+            lines.append("""template<class Kernel>
+class _PFExecutedExtreme {
+    Kernel kernel_;
+    int last_bar_ = -1;
+    int slot_ = -1;
+public:
+    _PFExecutedExtreme() = default;
+    explicit _PFExecutedExtreme(int length) : kernel_(length) {}
+    template<class... Args> double compute(int bar, Args&&... args) {
+        const bool append = bar != last_bar_;
+        if (append) { last_bar_ = bar; ++slot_; }
+        ta::BarContextScope context(slot_, static_cast<long long>(slot_) - bar);
+        return append ? kernel_.compute(args...) : kernel_.recompute(args...);
+    }
+    template<class... Args> double recompute(int bar, Args&&... args) {
+        return compute(bar, args...);
+    }
+};
+""")
+        if "series_extreme" in block_lengths:
+            # A later length may grow past every previous length. Keep all
+            # reached sources; skipped chart bars occupy no slots.
+            lines.append("""template<bool High>
+class _PFExecutedSeriesExtreme {
+    std::vector<double> samples_;
+    int last_bar_ = -1;
+public:
+    double compute(int bar, double src, double length) {
+        const int n = pineforge::source::simple_ta_length(
+            length, High ? "highest" : "lowest", "length");
+        if (last_bar_ == bar) samples_.back() = src;
+        else { samples_.push_back(src); last_bar_ = bar; }
+        if (bar < n - 1) return na<double>();
+        const auto count = std::min(samples_.size(), static_cast<std::size_t>(n));
+        double best = na<double>();
+        for (auto it = samples_.end() - count; it != samples_.end(); ++it) {
+            if (!is_na(*it) && (is_na(best) || (High ? *it > best : *it < best)))
+                best = *it;
+        }
+        return best;
+    }
+    double recompute(int bar, double src, double length) {
+        return compute(bar, src, length);
+    }
+};
+""")
         if any(
             self._ta_member_cpp_type(site) == "_PFSeriesSma"
             for index, site in enumerate(getattr(self.ctx, "ta_call_sites", ()))

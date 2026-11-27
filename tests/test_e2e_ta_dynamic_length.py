@@ -1,27 +1,26 @@
 """ta.* calls whose length (or supertrend factor) is neither a constant nor an
-input: each lowering replays a TradingView tape through transpile, compile and
+input: each lowering replays a TradingView fixture through transpile, compile and
 run.
 
 TradingView accepts a length the constructor cannot take. Its Pine qualifier
-decides the answer (evidence dated 2026-09-26; the engine header
-``pineforge/source/pine_ta_length.hpp`` states each rule with its tapes):
+decides when the call reads it:
 
 * a series length for ta.highest / ta.lowest / ta.highestbars /
-  ta.lowestbars re-windows every call (``pineforge::source::Series*``);
+  ta.lowestbars re-windows every call; in a chart if body highest and
+  lowest window the sources on the last ``length`` executions (#458);
 * a series length for ta.percentile_nearest_rank appends every call to its
   call site's ``pineforge::source::SeriesPercentileNearestRank`` buffer;
 * ta.supertrend reads its factor once, on its first execution
   (``pineforge::source::PineSupertrend``);
 * a simple length -- a syminfo preset -- answers exactly as the constant
-  (``pineforge::source::FirstCallBound``), a sparse window through the
-  constant-length ring; an input-string ternary is input-derived and keeps
+  (``pineforge::source::FirstCallBound``); an input-string ternary is input-derived and keeps
   its constructor (the request.security helpers row), with the same answer;
 * a name a block shadows, or a value declared ``series``, is series; each
   request.security copy is lowered from the length its own call passes, and
   its ``timeframe.*`` reads the requested timeframe.
 
 Each fixture under ``fixtures/ta_dynamic_length/<probe>/`` pairs the
-synthetic ``strategy.pine`` beside it with its recorded tape on
+synthetic ``strategy.pine`` beside it with its September fixture on
 BINANCE:ETHUSDT.P 15 from 2025-04-01 (``metrics.json`` is its provenance). The
 probe enters on every bar with an id that spells the bar's values, so a trade
 is equal only when every recorded value is. The run starts the corpus 15m feed
@@ -32,6 +31,7 @@ from __future__ import annotations
 
 import csv
 import math
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -76,14 +76,41 @@ def runs(tmp_path_factory):
     return engine, feed, base, outcomes
 
 
-def replay(runs, probe: str) -> tuple[str, int]:
-    """The probe's C++ and the number of recorded bars whose engine entry id
-    equals TradingView's Signal; fails on the first difference."""
+def _apply_execution_windows(expected, feed, windows):
+    # PROBE-458 (2026-11-16 TradingView reading): a sparse lowest/highest
+    # windows the reached sources, for every length qualifier. Update only
+    # those fields; keep the September CSV and its provenance intact.
+    with feed.open() as stream:
+        bars = list(csv.DictReader(stream))
+    stamps = [int(row["timestamp"]) for row in bars]
+    wanted = [FIRST_BAR_MS + b * 900_000 for b in range(BARS)]
+    assert stamps == wanted, f"NOT COMPARED: chart grid; expected={wanted}, native={stamps}"
+    for columns, source, length_at in windows:
+        seen = []
+        extreme = min if source == "low" else max
+        for b, row in enumerate(bars):
+            length = length_at(b)  # zero denotes an unreached site
+            if not length:
+                continue
+            seen.append(Decimal(row[source]))
+            if b in expected:
+                value = ("na" if b + 1 < length else
+                         format(extreme(seen[-length:]).normalize(), "f"))
+                fields = expected[b].split("|")
+                for column in columns:
+                    fields[column] = value
+                expected[b] = "|".join(fields)
+
+
+def replay(runs, probe: str, windows=()) -> tuple[str, int]:
+    """The fixture's C++ and number of engine entry IDs compared, bar by bar."""
     engine, feed, base, outcomes = runs
     outcome = ok(outcomes, probe)
     trades = closed_trades(engine, base / probe, feed)
     engine_ids = {int(t["entry_id"].split("|")[0]): t["entry_id"] for t in trades}
     expected = tv_signals(probe)
+    if windows:
+        _apply_execution_windows(expected, feed, windows)
     compared = 0
     for bar in sorted(expected):
         if bar not in engine_ids:
@@ -92,19 +119,22 @@ def replay(runs, probe: str) -> tuple[str, int]:
             continue
         assert engine_ids[bar] == expected[bar], (
             f"{probe} bar {bar}:\n  engine      {engine_ids[bar]}\n"
-            f"  TradingView {expected[bar]}")
+            f"  expected    {expected[bar]}")
         compared += 1
     assert compared >= len(expected) - 1
     return outcome.transpiled["cpp"], compared
 
 
 def test_series_length_extremes_rewindow_every_call(runs):
-    cpp, compared = replay(runs, "series_extremes")
+    # Only g is the sparse highest; gb is highestbars and keeps its fixture.
+    cpp, compared = replay(runs, "series_extremes", (
+        ((7,), "high", lambda b: (b - 30) % 12 + 1 if b >= 30 and (b - 30) % 12 < 8 else 0),
+    ))
     assert "#include <pineforge/source/pine_ta_length.hpp>" in cpp
     for cls in ("SeriesLowest", "SeriesHighest", "SeriesLowestBars", "SeriesHighestBars"):
         assert f"pineforge::source::{cls} " in cpp, cls
     assert "pineforge::source::ta_number(" in cpp
-    print(f"series extremes: {compared}/{compared} bars equal TradingView")
+    print(f"series extremes: compared {compared} entry IDs")
 
 
 def test_supertrend_reads_its_first_factor(runs):
@@ -132,26 +162,34 @@ def test_simple_length_is_the_constant(runs):
     print(f"simple lengths: {compared}/{compared} bars equal TradingView")
 
 
-def test_simple_window_length_reads_the_constant_ring(runs):
-    cpp, compared = replay(runs, "simple_window")
-    assert "pineforge::source::FirstCallBound<ta::Lowest> " in cpp
+def test_simple_window_length_reads_the_execution_window(runs):
+    # PROBE-458 (2026-11-16 TradingView reading) supersedes the two
+    # September lowest columns: ls and lr both use the last five executions.
+    cpp, compared = replay(runs, "simple_window", (
+        ((2, 3), "low", lambda b: 5 if b % 9 < 2 else 0),
+    ))
+    assert "_PFExecutedExtreme<pineforge::source::FirstCallBound<ta::Lowest>> " in cpp
     assert "pineforge::source::FirstCallBound<ta::HighestBars> " in cpp
-    assert "pineforge::source::SeriesLowest " in cpp
+    assert "_PFExecutedSeriesExtreme<false> " in cpp
     assert "pineforge::source::SeriesHighestBars " in cpp
-    print(f"simple vs series window: {compared}/{compared} bars equal TradingView")
+    print(f"simple vs series window: compared {compared} entry IDs")
 
 
 def test_scopes_and_request_security_copies(runs):
     # A length shadowed in a block, a simple value declared ``series``, one
     # helper reached from two payloads (simple and series lengths),
     # ``timeframe.*`` in a payload's length (the requested timeframe) and a
-    # callable's request.security cloned per call site: every column of every
-    # bar equals TradingView's.
-    cpp, compared = replay(runs, "scoping_copies")
+    # callable's request.security cloned per call site. sh and sq are chart
+    # extrema inside if bodies; the five requested-context columns are not.
+    cpp, compared = replay(runs, "scoping_copies", (
+        ((1,), "high", lambda b: b % 7 + 1 if b % 3 else 0),
+        ((2,), "low", lambda b: 4 if b % 9 < 2 else 0),
+    ))
     assert "pineforge::source::SeriesHighest " in cpp
-    assert "pineforge::source::SeriesLowest " in cpp
+    assert "_PFExecutedSeriesExtreme<true> " in cpp
+    assert "_PFExecutedSeriesExtreme<false> " in cpp
     assert 'tf_multiplier("60")' in cpp
-    print(f"scopes and request.security copies: {compared}/{compared} bars equal TradingView")
+    print(f"scopes and request.security copies: compared {compared} entry IDs")
 
 
 SYNTHETIC_BARS = 240

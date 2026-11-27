@@ -333,11 +333,14 @@ you delete or weaken the special case, the test will tell you.
     `cum`/`barssince`/`valuewhen`/`cross*`/`rising`/`falling`/`math.sum`
     (`LAZY_PER_EXECUTION_TA`) keep the reached-only inline compute, which is
     TradingView's per-execution clock, and never precalc.
-    Sites inside `if`/loop/function bodies, `else if` conditions, `var`
-    initializers, `request.security` payloads and tuple-returning sites keep
-    their existing lowering, but for a `change`/`mom`/`roc` in a top-level
+    A direct `ta.highest` or `ta.lowest` value in a top-level `if` body takes
+    its window from the last `length` reached sources, including the current
+    one, for literal, input, simple and series lengths (#458). This window
+    does not apply to `ta.highestbars`, `ta.lowestbars` or a history read on
+    the call (`tests/test_issue_458_last_five_executions.py`).
+    A `change`/`mom`/`roc` in a top-level
     if block -- an else-if's or a nested if's condition and statements, and
-    a value-form if's -- which runs only on the bars its block runs and reads
+    a value-form if's -- runs only on the bars its block runs and reads
     the same held source history (`_lazy_edge_ta_hoist_plan`: TradingView's
     `te_lazy_if_source` tape reads `ta.roc(close, 3)` in a nested if from
     the close its third bar held, where the executions' own ring read na;

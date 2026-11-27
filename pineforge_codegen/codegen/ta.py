@@ -152,9 +152,11 @@ class TaSiteHelper:
         # that call site's clone: its own constructor arguments decide.
         site = self._ta_active_site(site)
         plan = self._ta_dynamic_plan(site)
-        if plan is None:
-            return args
-        return self._ta_dynamic_compute_args(site, plan, args, self._visit_expr)
+        if plan is not None:
+            args = self._ta_dynamic_compute_args(site, plan, args, self._visit_expr)
+        if self._is_block_extreme(site):
+            return f"bar_index_, {args}"
+        return args
 
     def _ta_active_site(self, site: "TACallSite") -> "TACallSite":
         """The site whose member ``_ta_member_name`` resolves ``site`` to."""
@@ -732,7 +734,7 @@ class TaSiteHelper:
         (``test_ta_precalc_walks_type_field_defaults``), whose clock is the
         ``Type.new()`` call site's and may sit in a block. Other TA families
         and request.security sites retain their existing behavior."""
-        if not getattr(site, "is_static", False):
+        if not getattr(site, "is_static", False) or self._is_block_extreme(site):
             return False
         if self._ta_dynamic_plan(site) is not None:
             # The length is read on the bar (its first execution, or every
@@ -825,7 +827,8 @@ class TaSiteHelper:
 
         Returns ``{"by_stmt": {id(stmt): [unit, ...]}, "call_nodes": set,
         "source_clock": {id(node): {"node", "site", "length_literal"}},
-        "per_execution_nodes": set, "skipped": [(node, site, reason), ...]}``.
+        "per_execution_nodes": set, "block_extrema": set,
+        "skipped": [(node, site, reason), ...]}``.
         Only ``LAZY_EVERY_BAR_TA`` families whose call carries a direct
         ``[k]`` history read (``Subscript`` on the call) become hoist units.
         ``source_clock`` sites (change/mom/roc) lower through
@@ -857,6 +860,7 @@ class TaSiteHelper:
         call_nodes: set[int] = set()
         source_clock: dict[int, dict] = {}
         per_execution_nodes: set[int] = set()
+        block_extrema: set[int] = set()
         skipped: list[tuple] = []
         counter = [0]
 
@@ -996,6 +1000,10 @@ class TaSiteHelper:
                     and callee.member in ("security", "security_lower_tf")
                 )
                 site = None if history_read else self._get_ta_site(node)
+                # The #458 fixture reads a direct value from an if body. The top-level
+                # head and a call's own [k] have separate clock rules.
+                if site is not None and site.class_name in ("ta::Lowest", "ta::Highest"):
+                    block_extrema.add(id(node))
                 if (site is not None
                         and self._ta_name_from_site(site) in self.LAZY_SOURCE_CLOCK_TA
                         and self._lazy_source_clock_eligible(site)):
@@ -1031,10 +1039,15 @@ class TaSiteHelper:
             "call_nodes": call_nodes,
             "source_clock": source_clock,
             "per_execution_nodes": per_execution_nodes,
+            "block_extrema": block_extrema,
             "skipped": skipped,
         }
         self._lazy_edge_hoist_plan_cache = plan
         return plan
+
+    def _is_block_extreme(self, site: "TACallSite") -> bool:
+        return (site.class_name in ("ta::Lowest", "ta::Highest")
+                and id(site.node) in self._lazy_edge_ta_hoist_plan()["block_extrema"])
 
     def _lazy_edge_hoisted_ta_call_nodes(self) -> set[int]:
         return self._lazy_edge_ta_hoist_plan()["call_nodes"]
@@ -1716,8 +1729,8 @@ class TaSiteHelper:
     #
     # * simple (fixed for the run -- a syminfo preset, str.* over one):
     #   TradingView answers exactly the constant-length call
-    #   (the ring of a sparse ta.lowest included). Lowered onto
-    #   ``pineforge::source::FirstCallBound<class>``, built from the call's
+    #   (including the execution window of a conditional ta.lowest). Lowered
+    #   onto ``pineforge::source::FirstCallBound<class>``, built from the call's
     #   first execution; a length goes through ``simple_ta_length`` (0, a
     #   negative length or na stops the run, as TradingView does).
     # * series, for ta.highest / ta.lowest / ta.highestbars / ta.lowestbars:
@@ -2485,7 +2498,13 @@ class TaSiteHelper:
 
     def _ta_member_cpp_type(self, site: "TACallSite") -> str:
         """The C++ type a site's member is declared with."""
-        return self._ta_plan_cpp_type(site, self._ta_dynamic_plan(site))
+        plan = self._ta_dynamic_plan(site)
+        if self._is_block_extreme(site):
+            if plan is not None and plan["kind"] == "series_extreme":
+                high = "true" if plan["family"] == "highest" else "false"
+                return f"_PFExecutedSeriesExtreme<{high}>"
+            return f"_PFExecutedExtreme<{self._ta_plan_cpp_type(site, plan)}>"
+        return self._ta_plan_cpp_type(site, plan)
 
     def _ta_security_member_cpp_type(self, sec_id: int, site: "TACallSite",
                                      variant: dict) -> str:
