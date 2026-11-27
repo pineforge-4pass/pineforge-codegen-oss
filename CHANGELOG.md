@@ -69,6 +69,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `PineWvad` and requires `PINEFORGE_HAS_PINE_FLAT_RANGE` from
   `pineforge/source/pine_ta_flat_range.hpp`; regenerate C++ and relink.
 - A `ta.*` call in a `?:` arm or on the right of `and` or `or`, with no `[]` read on the call, now computes the same values in a run that may precalculate (no bar magnifier, empty timeframes) as in every other run: it is evaluated only on the bars that reach it. Such a run used to fill the call on every chart bar, so with `y = bar_index % 2 == 0 ? ta.sma(close, 3) : na` the closes of the odd bars entered the average. This applies to every `ta.*` function; `ta.ema`, and `ta.sma` on the right of `and`, already behaved this way. Unconditional calls and calls read with `[]` are unchanged.
+- An untyped user function now receives the fractional result of an array
+  calculation even when another call passes an integer. Previously, a median
+  of `2.5` could arrive as `2`, changing formatted comments and order quantities
+  calculated inside the function ([#476](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/476)).
 
 - Both strategy conversions and `request.currency_rate` use the host's rate in effect on each bar for the chart and account currencies, in either direction. Without a rate for the pair the request stops the run with the currency-conversion error, or returns `na` with a run warning when `ignore_invalid_currency` is true; other pairs still stop the run ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
 
