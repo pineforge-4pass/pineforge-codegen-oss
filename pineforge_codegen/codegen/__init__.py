@@ -23,6 +23,7 @@ from .tables import (
     SECURITY_OHLC_BAR_FIELDS,
     # Runtime function-name constants emitted as C++ string literals.
     RUNTIME_REGISTER_SECURITY_EVAL_FN,
+    RUNTIME_REGISTER_SECURITY_CHART_EVAL_FN,
     RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN,
     # TA dispatch / arg tables.
     TA_RETURNS_BOOL,
@@ -57,6 +58,7 @@ __all__ = [
     "BAR_BUILTINS",
     "BAR_SERIES_PUSH",
     "SECURITY_OHLC_BAR_FIELDS",
+    "RUNTIME_REGISTER_SECURITY_CHART_EVAL_FN",
     "TA_RETURNS_BOOL",
     "TA_IMPLICIT_COMPUTE",
     "TA_COMPUTE_ARGS",

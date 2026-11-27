@@ -2673,6 +2673,11 @@ class CallVisitor:
                 expr_node = chosen["expr_node"] if chosen else None
 
                 if sec_id is not None and expr_node is not None:
+                    if (
+                        chosen.get("chart_publication")
+                        and getattr(self, "_security_payload_depth", 0) == 0
+                    ):
+                        return f"_chart_sec_{sec_id}"
                     if chosen.get("series_tf_sites"):
                         return self._security_series_tf_value(chosen, all_args[1])
                     if isinstance(expr_node, TupleLiteral):
