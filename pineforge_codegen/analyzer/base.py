@@ -38,6 +38,7 @@ from ..input_keys import assign_input_keys
 from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
 from ..security_contexts import (
     GLOBAL_ANNOTATION, PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series,
+    _request_name, _request_payload,
 )
 from ..session_reads import emitted_session_reads
 from ..collection_history import (
@@ -702,6 +703,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     self._register_history_receiver(
                         node, self._history_receiver_type_spec(node.object),
                     )
+        self._complete_replayed_string_histories()
         # A requested string global needs a string Series in the ordinary
         # emitted helper too. Keep the old chart-only price binding when no
         # request reads the declaration's history.
@@ -2519,15 +2521,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         out: set[str] = set()
 
-        if isinstance(node, Subscript) and isinstance(node.object, Identifier):
-            receiver = node.object
-            info = self._global_binding_infos.get(receiver.name)
-            if (info is not None and info.pine_type == PineType.STRING
-                    and isinstance(info.decl_node, VarDecl)
-                    and info.decl_node is self._direct_program_vars.get(receiver.name)
-                    and self._identifier_binding_nodes.get(id(receiver)) is info.decl_node):
-                self._requested_string_history_globals[receiver.name] = info.decl_node
-                out.add(receiver.name)
+        string_decl = self._string_history_declaration(node)
+        if string_decl is not None:
+            self._requested_string_history_globals[string_decl.name] = string_decl
+            out.add(string_decl.name)
 
         if isinstance(node, Identifier):
             scope = self._identifier_binding_scopes.get(id(node))
@@ -2538,16 +2535,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return out
             name = node.name
             info = self._global_binding_infos.get(name)
-            if info is not None:
-                if info.is_var or name in self._global_reassigned_names:
-                    out.add(name)
-                    if name in resolving:
-                        return out
-                    resolving.add(name)
-                    for stmt in info.source_stmts:
-                        out |= self._collect_security_mutable_globals(stmt, resolving)
-                    resolving.remove(name)
+            if info is not None and (info.is_var or name in self._global_reassigned_names):
+                out.add(name)
+                if name in resolving:
                     return out
+                resolving.add(name)
+                for stmt in info.source_stmts:
+                    out |= self._collect_security_mutable_globals(stmt, resolving)
+                resolving.remove(name)
+                return out
             value = self._global_expr_map.get(name)
             if value is None and info is not None and isinstance(info.decl_node, VarDecl):
                 # The legacy series-name set can omit this global from the
@@ -2604,6 +2600,122 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             out |= self._collect_security_mutable_globals(child, resolving)
 
         return out
+
+    def _string_history_declaration(self, node: ASTNode) -> VarDecl | None:
+        if isinstance(node, Subscript) and isinstance(node.object, Identifier):
+            obj = node.object
+            info = self._global_binding_infos.get(obj.name)
+            if (info is not None and info.pine_type == PineType.STRING
+                    and isinstance(info.decl_node, VarDecl)
+                    and info.decl_node is self._direct_program_vars.get(obj.name)
+                    and self._identifier_binding_nodes.get(id(obj)) is info.decl_node):
+                return info.decl_node
+        return None
+
+    def _complete_replayed_string_histories(self) -> None:
+        """Include string histories used to compute a request's replayed stores.
+
+        A request registers the state it reads at its source position. The
+        evaluator also replays subsequent stores to that state; their RHSs
+        and guards are known only after the script has been visited.
+        """
+        calls = [call for call in self._security_calls if call.mutable_globals and not call.dead]
+        if not calls or not self._global_reassigned_names:
+            return
+        if not any(info.pine_type == PineType.STRING
+                   and (name in self._series_vars or name in BAR_FIELDS)
+                   for name, info in self._global_binding_infos.items()):
+            return
+
+        # Match _emit_security_rebind_stmt: a replay runs the RHS of a
+        # selected store and its enclosing conditions, not its siblings.
+        inputs: dict[str, list[ASTNode]] = {}
+
+        def index_stores(statements, guards=()):
+            for stmt in statements:
+                if self._budget is not None:
+                    self._budget.check(stmt.loc, Phase.ANALYZER)
+                if isinstance(stmt, IfStmt):
+                    inner = (*guards, stmt.condition)
+                    index_stores(stmt.body, inner)
+                    index_stores(stmt.else_body or (), inner)
+                elif isinstance(stmt, VarDecl) and self._direct_program_vars.get(stmt.name) is stmt:
+                    inputs.setdefault(stmt.name, []).append(stmt.value)
+                elif isinstance(stmt, Assignment) and isinstance(stmt.target, Identifier):
+                    name = stmt.target.name
+                    info = self._global_binding_infos.get(name)
+                    binding = self._value_bindings.write_declaration(stmt.target)
+                    if info is not None and binding == (id(info.decl_node), name):
+                        inputs.setdefault(name, []).extend((*guards, stmt.value))
+
+        index_stores(self._ast.body)
+
+        for call in calls:
+            replay = set(call.mutable_globals)
+            sampled_inputs: set[str] = set()
+            histories: dict[str, VarDecl] = {}
+            # Find history reads in stores, without reclassifying every
+            # ordinary read in a later store as a new mutable dependency.
+            pending = [(expr, False) for name in call.mutable_globals
+                       for expr in inputs.get(name, ())]
+            seen = set()
+            while pending:
+                node, sampling = pending.pop()
+                key = (id(node), sampling)
+                if node is None or key in seen:
+                    continue
+                seen.add(key)
+                if self._budget is not None:
+                    self._budget.check(node.loc, Phase.ANALYZER)
+                decl = self._string_history_declaration(node)
+                if decl is not None:
+                    histories[decl.name] = decl
+                    # The index is a value on this clock too. Follow the
+                    # declaration's stores below, not its name as another read.
+                    pending.append((node.index, True))
+                elif isinstance(node, Identifier):
+                    decl = self._identifier_binding_nodes.get(id(node))
+                    if decl is None or decl is not self._direct_program_vars.get(node.name):
+                        continue
+                    if not (decl.is_var or decl.is_varip
+                            or decl.name in self._global_reassigned_names):
+                        pending.append((decl.value, sampling))
+                        continue
+                    if not sampling:
+                        continue
+                if decl is not None:
+                    # Already replaying a current value is not proof that
+                    # its later writes' inputs were inventoried for sampling.
+                    if decl.name not in sampled_inputs:
+                        sampled_inputs.add(decl.name)
+                        replay.add(decl.name)
+                        pending.extend((expr, True) for expr in inputs.get(decl.name, ()))
+                    continue
+                if isinstance(node, FuncCall):
+                    if self._is_input_func_call(node):
+                        value = node.args[0] if node.args else node.kwargs.get("defval")
+                        pending.append((value, sampling))
+                        continue
+                    if isinstance(node.callee, Identifier):
+                        function = self._func_defs.get(node.callee.name)
+                        if function is not None:
+                            pending.extend((stmt, sampling) for stmt in function.body)
+                # The nested request owns its expression, not this replay.
+                payload = _request_payload(node) if _request_name(node) else None
+                pending.extend((child, sampling) for child in syntax_children(node)
+                               if child is not payload)
+            if not histories:
+                continue
+            # Add the string and its producers together. A loop or switch
+            # writer cannot be replayed by _emit_security_rebind_stmt. Keep
+            # this request's existing lowering if the new plan would send
+            # such a writer to that refusal (e.g. str.length(txt[2])).
+            additions = replay.difference(call.mutable_globals)
+            if any(isinstance(stmt, (ForStmt, ForInStmt, WhileStmt, SwitchStmt))
+                   for name in additions for stmt in self._global_binding_infos[name].source_stmts):
+                continue
+            self._requested_string_history_globals.update(histories)
+            call.mutable_globals = tuple(sorted(replay))
 
     def _retain_security_value_copies(
         self, mutable_infos: dict[str, MutableGlobalInfo],

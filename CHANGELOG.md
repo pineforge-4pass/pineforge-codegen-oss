@@ -24,7 +24,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - A `request.security` helper can read a string global's history. For example,
   `str.length(txt[1])` uses the string `txt` held on the previous requested
-  bar, including when the script names the variable `open`
+  bar, including when the script names the variable `open`. A later
+  assignment that the request replays also reads that history on the
+  request's timeframe, including reassignments of the string itself
   ([#495](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/495)).
 
 - Inside `request.security`, a conditionally called helper that indexes a bar
