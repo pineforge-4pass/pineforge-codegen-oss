@@ -22,6 +22,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (1.15.0)
 
+- An untyped user function now receives the fractional result of an array
+  calculation even when another call passes an integer. Previously, a median
+  of `2.5` could arrive as `2`, changing formatted comments and order quantities
+  calculated inside the function ([#476](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/476)).
+
 - Both strategy conversions and `request.currency_rate` use the host's rate in effect on each bar for the chart and account currencies, in either direction. Without a rate for the pair the request stops the run with the currency-conversion error, or returns `na` with a run warning when `ignore_invalid_currency` is true; other pairs still stop the run ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
 
 - The `PF-W1544` warning for recorded earnings, dividends, splits and financial
