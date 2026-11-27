@@ -3,10 +3,19 @@
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.diagnostic_codes import render_diagnostic
 from pineforge_codegen.errors import CompileError
+from pineforge_codegen.support_checker import NOT_YET_FUNC
 
 
 _HEADER = '//@version=6\nstrategy("Unsupported calls")\n'
+
+
+@pytest.fixture(autouse=True)
+def unimplemented_builtin(monkeypatch):
+    # Exercise this refusal independently of when a real builtin is added.
+    _, hint = render_diagnostic("PF-E1035", {"full": "timeframe.missing_call"})
+    monkeypatch.setitem(NOT_YET_FUNC, "timeframe.missing_call", hint)
 
 
 @pytest.mark.parametrize(
@@ -14,7 +23,7 @@ _HEADER = '//@version=6\nstrategy("Unsupported calls")\n'
     [
         pytest.param(
             'selected = switch 0\n'
-            '    0 => timeframe.from_seconds(60)\n'
+            '    0 => timeframe.missing_call(60)\n'
             '    => "15"\n',
             "ANALYZER", "PF-E1035", 4, 32,
             # Nine characters precede the 22-character callee on line 4.
@@ -24,7 +33,7 @@ _HEADER = '//@version=6\nstrategy("Unsupported calls")\n'
             'selected = switch 0\n'
             '    0 =>\n'
             '        text = if close > open\n'
-            '            timeframe.from_seconds(60)\n'
+            '            timeframe.missing_call(60)\n'
             '        else\n'
             '            "15"\n'
             '        text\n'
@@ -39,7 +48,7 @@ _HEADER = '//@version=6\nstrategy("Unsupported calls")\n'
             '        text = if close > open\n'
             '            "15"\n'
             '        else\n'
-            '            timeframe.from_seconds(60)\n'
+            '            timeframe.missing_call(60)\n'
             '        text\n'
             '    => "15"\n',
             "ANALYZER", "PF-E1035", 8, 35,
@@ -50,7 +59,7 @@ _HEADER = '//@version=6\nstrategy("Unsupported calls")\n'
             'selected = switch 0\n'
             '    0 =>\n'
             '        text = switch 1\n'
-            '            1 => timeframe.from_seconds(60)\n'
+            '            1 => timeframe.missing_call(60)\n'
             '            => "15"\n'
             '        text\n'
             '    => "15"\n',
@@ -61,7 +70,7 @@ _HEADER = '//@version=6\nstrategy("Unsupported calls")\n'
         pytest.param(
             'for index = 0 to 1\n'
             '    selected = switch index\n'
-            '        0 => timeframe.from_seconds(60)\n'
+            '        0 => timeframe.missing_call(60)\n'
             '        => "15"\n',
             "ANALYZER", "PF-E1035", 5, 36,
             # Eight spaces, '0 => ' and the callee place '(' at column 36.
@@ -69,7 +78,7 @@ _HEADER = '//@version=6\nstrategy("Unsupported calls")\n'
         ),
         pytest.param(
             'selected = switch 0\n'
-            '    0 => str.length(timeframe.from_seconds(60))\n'
+            '    0 => str.length(timeframe.missing_call(60))\n'
             '    => 0\n',
             "ANALYZER", "PF-E1035", 4, 43,
             # Nine prefix characters plus 'str.length(' add 20 before the callee.
@@ -87,21 +96,21 @@ def test_unimplemented_call_in_value_arm_is_an_error(body, phase, code, line, co
     assert (diagnostic.phase.value, diagnostic.code) == (phase, code)
     assert (diagnostic.location.line, diagnostic.location.col) == (line, col)
     assert diagnostic.location.file == "unsupported_calls.pine"
-    assert diagnostic.message == "timeframe.from_seconds(...) is not implemented yet."
+    assert diagnostic.message == "timeframe.missing_call(...) is not implemented yet."
 
 
 @pytest.mark.parametrize(
     "body, phase, code, line, col",
     [
         pytest.param(
-            "tf = timeframe.from_seconds(900)\n",
+            "tf = timeframe.missing_call(900)\n",
             "ANALYZER", "PF-E1035", 3, 28,
             # 'tf = ' has five characters; '(' follows the 22-character callee.
             id="plain-declaration",
         ),
         pytest.param(
             'selected = if close > open\n'
-            '    timeframe.from_seconds(60)\n'
+            '    timeframe.missing_call(60)\n'
             'else\n'
             '    "15"\n',
             "ANALYZER", "PF-E1035", 4, 27,
@@ -112,20 +121,20 @@ def test_unimplemented_call_in_value_arm_is_an_error(body, phase, code, line, co
             'selected = if close > open\n'
             '    "15"\n'
             'else\n'
-            '    timeframe.from_seconds(60)\n',
+            '    timeframe.missing_call(60)\n',
             "ANALYZER", "PF-E1035", 6, 27,
             # Four spaces and the callee place '(' at column 27 on line 6.
             id="plain-else-value",
         ),
         pytest.param(
             "for index = 0 to 1\n"
-            "    selected = timeframe.from_seconds(60)\n",
+            "    selected = timeframe.missing_call(60)\n",
             "ANALYZER", "PF-E1035", 4, 38,
             # Four spaces plus 'selected = ' add 15 characters before the callee.
             id="plain-loop-body",
         ),
         pytest.param(
-            "selected = str.length(timeframe.from_seconds(60))\n",
+            "selected = str.length(timeframe.missing_call(60))\n",
             "ANALYZER", "PF-E1035", 3, 45,
             # 'selected = str.length(' has 22 characters before the callee.
             id="plain-call-argument",
@@ -150,7 +159,7 @@ strategy("Unsupported calls", overlay = true, initial_capital = 1000000, pyramid
 cycleIndex = int(math.floor(bar_index / 20))
 flip = cycleIndex % 2 == 0
 selected = switch cycleIndex % 2
-    0 => timeframe.from_seconds(60)
+    0 => timeframe.missing_call(60)
     => "15"
 signalValue = str.length(selected)
 tradeQty = na(signalValue) ? 0.75 : (signalValue > 0 ? 1.25 : signalValue < 0 ? 2.5 : 3.75) + math.abs(signalValue) / (1.0 + math.abs(signalValue))
