@@ -23,6 +23,7 @@ same C++ on both builds.
 
 from __future__ import annotations
 
+from tests._checked_ta_cpp import with_pine_source_ta
 from tests._legacy_cpp import legacy_cpp
 import concurrent.futures
 import csv
@@ -38,7 +39,7 @@ from pathlib import Path
 import pytest
 
 from tests._e2e import (
-    REPO_ROOT, build_strategy_library, derive_chart_feed, reference_codegen,
+    REPO_ROOT, build_strategy_library, derive_chart_feed, reference_codegen, reference_engine,
     skip_unless_e2e_env, transpile_json,
 )
 
@@ -55,15 +56,16 @@ TAPE_UTC_OFFSET_HOURS = 8
 class Case:
     tape: str
     omits: tuple[str, ...]  # which of the three parameters the probe leaves out
+    legacy_first_qty: float | None = None  # omitted-default controls only
 
 
 CASES = (
     Case("tvd-all-omit-v6-eth15",
-         ("initial_capital", "default_qty_type", "default_qty_value")),
-    Case("tvd-cap-omit-v6-eth15", ("initial_capital",)),
-    Case("tvd-qty-value1-v6-eth15", ("default_qty_type",)),
-    Case("tvd-qty-typefixed-v6-eth15", ("default_qty_value",)),
-    Case("tvd-qty-typecash-v6-eth15", ("default_qty_value",)),
+         ("initial_capital", "default_qty_type", "default_qty_value"), 1.0),
+    Case("tvd-cap-omit-v6-eth15", ("initial_capital",), 523.5602),
+    Case("tvd-qty-value1-v6-eth15", ("default_qty_type",), 1.0),
+    Case("tvd-qty-typefixed-v6-eth15", ("default_qty_value",), 1.0),
+    Case("tvd-qty-typecash-v6-eth15", ("default_qty_value",), 0.0005),
     Case("tvd-qty-fixed1-v6-eth15", ()),
     Case("tvd-cap-x1m-v6-eth15", ()),
 )
@@ -134,8 +136,9 @@ def _replay(engine_root: Path, feed: Path, workdir: Path, case: Case,
         if not transpiled.get("ok"):
             raise RuntimeError(json.dumps(transpiled.get("diagnostics"), indent=1))
         outcome.cpp = transpiled["cpp"]
-        build_strategy_library(outcome.cpp, workdir)
-        outcome.engine = trades(run_on_tape(engine_root, workdir, feed), 0)
+        reference_host = reference_engine() if codegen != REPO_ROOT else None
+        build_strategy_library(outcome.cpp, workdir, reference_host=reference_host)
+        outcome.engine = trades(run_on_tape(reference_host or engine_root, workdir, feed), 0)
     except Exception as exc:  # recorded and asserted by the case's own test
         outcome.error = str(exc)
     return outcome
@@ -143,8 +146,7 @@ def _replay(engine_root: Path, feed: Path, workdir: Path, case: Case,
 
 @pytest.fixture(scope="module")
 def outcomes(tmp_path_factory) -> dict[tuple[str, str], Outcome]:
-    """Every case under this checkout's codegen, and under ``LEGACY`` when that
-    commit is in the checkout's history (its rows skip otherwise)."""
+    """Replay each tape with the current pair and with the frozen generator and host."""
     engine_root = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("strategy_defaults")
     feed = derive_chart_feed(engine_root, base / "ohlcv_ETH-USDT-USDT_15m.csv")
@@ -158,7 +160,7 @@ def outcomes(tmp_path_factory) -> dict[tuple[str, str], Outcome]:
 
 def _outcome(outcomes: dict, tape: str, build: str) -> Outcome:
     if (tape, build) not in outcomes:
-        pytest.skip(f"codegen {LEGACY} is not in this checkout's history")
+        pytest.fail(f"NEEDS historical codegen {LEGACY}")
     outcome = outcomes[(tape, build)]
     if outcome.error is not None:
         pytest.fail(f"[{build} {tape}] {outcome.error}", pytrace=False)
@@ -185,7 +187,14 @@ def test_every_trade_is_tradingviews(outcomes, case):
 @pytest.mark.parametrize("case", [c for c in CASES if c.omits], ids=[c.tape for c in CASES if c.omits])
 def test_the_pre_lane_build_missed_every_omitted_default(outcomes, case):
     engine = _outcome(outcomes, case.tape, "legacy").engine
-    assert engine != _tape(case)
+    tape = _tape(case)
+    assert engine, f"{case.tape}: no historical trades to compare"
+    # Every probe first buys at 1910. The legacy host used 1M capital,
+    # fixed sizing and value 1 wherever the script omitted those settings.
+    # At lot step 0.0001 that gives 523.5602 ETH for 100% of 1M, 0.0005
+    # for 1 cash unit and exactly 1 ETH for each fixed-size control.
+    assert engine[0][:3] == tape[0][:3], case.tape  # time, side and price
+    assert engine[0][3] == case.legacy_first_qty != tape[0][3], case.tape
     # The legacy build left the omitted parameters to the host's own defaults.
     cpp = _outcome(outcomes, case.tape, "legacy").cpp
     lane = _outcome(outcomes, case.tape, "lane").cpp
@@ -203,8 +212,28 @@ def test_the_pre_lane_build_missed_every_omitted_default(outcomes, case):
 def test_a_script_that_declares_every_default_is_unchanged(outcomes, case):
     lane = _outcome(outcomes, case.tape, "lane")
     legacy = _outcome(outcomes, case.tape, "legacy")
-    assert legacy_cpp(lane.cpp) == legacy_cpp(legacy.cpp)
+    # The probes' two ta.sma calls are built from the checked fixed-length
+    # type today; every other byte is the legacy build's.
+    assert legacy_cpp(lane.cpp) == legacy_cpp(with_pine_source_ta(legacy.cpp))
     assert lane.engine == legacy.engine == _tape(case)
+
+
+@pytest.mark.parametrize("case", [c for c in CASES if not c.omits], ids=[c.tape for c in CASES if not c.omits])
+def test_a_script_that_declares_every_default_transpiles_to_the_legacy_cpp(case):
+    # The C++ comparison of the test above on its own: ``transpile_json`` of
+    # the probe on this checkout and on ``LEGACY``, with no build and no
+    # replay, so it runs where either build's replay does not.
+    legacy_tree = reference_codegen(LEGACY)
+    if legacy_tree is None:
+        pytest.skip(f"codegen {LEGACY} is not in this checkout's history")
+    pine = FIXTURES / case.tape / "strategy.pine"
+    lane = transpile_json(pine)
+    legacy = transpile_json(pine, legacy_tree)
+    assert lane.get("ok"), json.dumps(lane.get("diagnostics"), indent=1)
+    assert legacy.get("ok"), json.dumps(legacy.get("diagnostics"), indent=1)
+    # The probes' two ta.sma calls are built from the checked fixed-length
+    # type today; every other byte is the legacy build's.
+    assert legacy_cpp(lane["cpp"]) == legacy_cpp(with_pine_source_ta(legacy["cpp"]))
 
 
 def test_the_tapes_are_the_recorded_exports():

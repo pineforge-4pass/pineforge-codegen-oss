@@ -77,5 +77,6 @@ def test_a_chain_of_helper_locals_is_walked_once():
         "if r > close\n"
         '    strategy.entry("L", strategy.long)\n')
     assert time.monotonic() - start < 30
-    assert cpp.count("ta::SMA _sec0__ta_sma_1_v") <= n + 1
+    copies = cpp.count("pineforge::source::PineFixedSma _sec0__ta_sma_1_v")
+    assert 0 < copies <= n + 1
     compile_cpp(cpp)

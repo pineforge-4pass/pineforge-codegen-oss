@@ -51,7 +51,7 @@ def test_input_chosen_length_matches_the_tape_and_its_override(tmp_path_factory)
 def test_both_indicators_are_reset_from_the_input_comparison():
     cpp = transpile(source("sec2_ta_len_choice"))
     choice = ('get_input_string("Mode", std::string("B")) == std::string("A")')
-    resets = [line for line in cpp.splitlines() if "ta::SMA(" in line and choice in line]
+    resets = [line for line in cpp.splitlines() if "PineFixedSma(" in line and choice in line]
     # The chart helper's site and the requested one, each reset from the input.
     assert any(line.strip().startswith("_ta_sma_") for line in resets), resets
     assert any(line.strip().startswith("_sec0_") for line in resets), resets

@@ -160,8 +160,8 @@ def test_untitled_inputs_keep_their_declarations_keys():
     cpp = transpile(PRELUDE + (
         'f(len) => request.security(syminfo.tickerid, "60", ta.sma(close, len))\n'
         'lenA = f(input.int(3))\nlenB = f(input.int(6))\nx = lenA - lenB\n') + TRADE)
-    assert re.search(r'_sec0__ta_sma_\w+ = ta::SMA\(get_input_int\("lenA", 3\)\)', cpp)
-    assert re.search(r'_sec1__ta_sma_\w+ = ta::SMA\(get_input_int\("lenB", 6\)\)', cpp)
+    assert re.search(r'_sec0__ta_sma_\w+ = pineforge::source::PineFixedSma\(get_input_int\("lenA", 3\)\)', cpp)
+    assert re.search(r'_sec1__ta_sma_\w+ = pineforge::source::PineFixedSma\(get_input_int\("lenB", 6\)\)', cpp)
 
 
 @pytest.mark.parametrize("body", [

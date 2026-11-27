@@ -13,7 +13,7 @@ from pineforge_codegen import transpile
 from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.errors import CompileError
 from pineforge_codegen.symbols import PineType
-from tests._checked_ta_cpp import with_checked_ta
+from tests._checked_ta_cpp import with_checked_ta, with_pine_source_ta
 from tests._e2e import reference_codegen, transpile_json
 from tests.test_runtime_var_initialization import _compile_and_run
 
@@ -1021,6 +1021,10 @@ def _assert_reference_cpp(source, reference, tmp_path, *, checked=None):
     expected = before["cpp"]
     if checked is not None:
         expected = with_checked_ta(expected, **checked)
+    # ta.sar is built from the engine's Pine source-layer type, which the
+    # reference predates (the sar-plain-inputs and literal-float-settings
+    # cases). Every other byte stays the reference's.
+    expected = with_pine_source_ta(expected)
     assert after["cpp"] == expected
 
 
