@@ -170,3 +170,26 @@ int main() {
     # The second full batch must trip at exit, before the 129th outer entry.
     assert int(completed) == 128 * 1000 + 512, output
     assert int(reads) == 4, output  # Two starts on this bar and two inner samples.
+
+
+@pytest.mark.parametrize("pine_header,cpp_header", [
+    ("for i = 1 to 4", "for (int i = "),
+    ("while total < 4.0", "while ("),
+])
+def test_watchdog_common_path_only_decrements_a_local(pine_header, cpp_header):
+    cpp = transpile(HEADER + f"float total = 0.0\n{pine_header}\n    total += 1.0\n")
+    on_bar = cpp.split("void on_source_bar(", 1)[1].split("\n    }", 1)[0]
+    before, loop = on_bar.split(cpp_header, 1)
+    local = re.search(r"^ +unsigned (\w+) = (\w+)\.begin\([^\n]+\);$", before, re.M)
+    assert local, "the countdown must be an automatic unsigned, copied at loop entry"
+    count, timer = local.groups()
+    body, after = loop.split("\n", 1)[1].split("\n        }", 1)
+    # Inspect the GNU/Clang spelling; the portable arm need not hint the branch.
+    gnu = re.sub(r"^#if[^\n]*\n(.*?)^#else\n.*?^#endif\n", r"\1", body, flags=re.M | re.S)
+    guard, write = gnu.rsplit("\n", 1)
+    assert write.strip().startswith("total ")
+    assert re.fullmatch(
+        rf"\s*if \((?:::)?__builtin_expect\(--{count} == 0, 0\)\)\s+"
+        rf"{count} = {timer}\.poll\(\);", guard)
+    assert f"{timer}.finish({count});" in after
+    assert re.search(r"\[\[gnu::noinline, gnu::cold\]\]\s+unsigned poll\(\) const", cpp)
