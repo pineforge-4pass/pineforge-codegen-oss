@@ -337,11 +337,22 @@ you delete or weaken the special case, the test will tell you.
     `cum`/`barssince`/`valuewhen`/`cross*`/`rising`/`falling`/`math.sum`
     (`LAZY_PER_EXECUTION_TA`) keep the reached-only inline compute, which is
     TradingView's per-execution clock, and never precalc.
-    Sites inside `if`/loop/function bodies, `else if` conditions, `var`
-    initializers, `request.security` payloads and tuple-returning sites keep
-    their existing lowering, but for a `change`/`mom`/`roc` in a top-level
+    For #458 the chart site must be `x := ta.func(src, length)` directly in
+    the then body of a top-level `if` statement. `lowest` and `highest` take
+    their window from the last `length` executions (literal, input, simple and
+    series lengths). `highestbars` uses that window only with a simple or
+    series length; its result is the winning sample's chart bar index minus
+    the current bar index, including gaps. Both November probes held the
+    length at five (`tests/test_issue_458_last_five_executions.py`,
+    `tests/test_issue_458_bar_distance_offsets.py`).
+    The implicit-source overloads, `lowestbars`, and literal or input
+    `highestbars` keep their previous lowering. So do declarations (including
+    `var`, `varip` and tuple bindings), compound stores, conditions, `else`
+    and `else if`, nested or value-form `if`, operands, arguments, history
+    reads, loops, switches, functions, methods and `request.security` copies.
+    A `change`/`mom`/`roc` in a top-level
     if block -- an else-if's or a nested if's condition and statements, and
-    a value-form if's -- which runs only on the bars its block runs and reads
+    a value-form if's -- runs only on the bars its block runs and reads
     the same held source history (`_lazy_edge_ta_hoist_plan`: TradingView's
     `te_lazy_if_source` tape reads `ta.roc(close, 3)` in a nested if from
     the close its third bar held, where the executions' own ring read na;

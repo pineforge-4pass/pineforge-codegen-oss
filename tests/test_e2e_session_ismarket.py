@@ -60,12 +60,10 @@ security bar's time, so its values are the pre-lane build's.
 
 from __future__ import annotations
 
-import concurrent.futures
 import csv
 import datetime as dt
 import hashlib
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from functools import cache
@@ -76,7 +74,7 @@ import pytest
 
 from tests._compile import compile_cpp
 from tests._e2e import (
-    REPO_ROOT, build_strategy_library, reference_codegen, run_strategy,
+    REPO_ROOT, build_strategy_library, reference_codegen, reference_engine, run_strategy,
     skip_unless_e2e_env, transpile_json,
 )
 from tests._private_fixtures import private_fixture
@@ -296,8 +294,18 @@ class Replay:
     traces: dict[str, list[dict]]
 
 
+def _session_build(build: str) -> tuple[Path, Path | None]:
+    if build == "current":
+        return REPO_ROOT, None
+    assert build == "legacy"
+    codegen = reference_codegen(LEGACY)
+    if codegen is None:
+        pytest.fail(f"NEEDS historical codegen {LEGACY}")
+    return codegen, reference_engine()
+
+
 def _replay(engine: Path, work: Path, source: str, codegen: Path,
-            cases: list[Case]) -> Replay:
+            cases: list[Case], reference_host: Path | None = None) -> Replay:
     work.mkdir(parents=True, exist_ok=True)
     feed = _write_feed(_replay_stamps(cases[0].slug), work / "chart.csv")
     pine = work / "strategy.pine"
@@ -306,42 +314,33 @@ def _replay(engine: Path, work: Path, source: str, codegen: Path,
     if not transpiled.get("ok"):
         raise RuntimeError("transpile_json refused it:\n"
                            + json.dumps(transpiled.get("diagnostics"), indent=1))
-    build_strategy_library(transpiled["cpp"], work)
+    build_strategy_library(transpiled["cpp"], work, reference_host=reference_host)
     replay = Replay(cpp=transpiled["cpp"], diagnostics=transpiled.get("diagnostics", []),
                     trades={}, traces={})
     for i, case in enumerate(cases):
-        trades, records, _ = run_strategy(engine, work, feed, _overrides(case),
+        trades, records, _ = run_strategy(reference_host or engine, work, feed, _overrides(case),
                                           f"case{i}", trace=True)
         replay.trades[case.key] = trades
-        replay.traces[case.key] = records or []
+        assert records, f"[{case.key}] missing session trace"
+        replay.traces[case.key] = records
     return replay
 
 
 @pytest.fixture(scope="session")
 def replays(tmp_path_factory):
-    """Load and cache one tape's ``(build, slug)`` replays under every session
-    spelling of its chart; build is ``current``, ``legacy`` (when LEGACY is in
-    this checkout's history), or ``security-current`` / ``security-legacy``."""
+    """Cache one build at a time. A current-only assertion never starts a legacy run."""
     base = tmp_path_factory.mktemp("session_ismarket")
 
     @cache
-    def load(slug: str, security: bool = False) -> dict[tuple[str, str], Replay]:
-        # Resolve only this tape, on the test's thread, before starting builds.
+    def load(slug: str, build: str, security: bool = False) -> Replay:
         probe = tape_file(slug, "strategy.pine").read_text(encoding="utf-8")
-        _replay_stamps(slug)
         engine = skip_unless_e2e_env()
-        legacy = reference_codegen(LEGACY)
-        builds = {"current": REPO_ROOT} | ({"legacy": legacy} if legacy is not None else {})
+        codegen, reference_host = _session_build(build)
         cases = [SECURITY_CASE] if security else [case for case in CASES if case.slug == slug]
         probe += SECURITY_TRACE + TRACE if security else TRACE
         prefix = "security-" if security else ""
-        jobs = {(f"{prefix}{label}", slug): (probe, codegen, cases)
-                for label, codegen in builds.items()}
-        workers = max(2, min(8, (os.cpu_count() or 4) // 2))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {key: pool.submit(_replay, engine, base / key[0] / key[1], *job)
-                       for key, job in jobs.items()}
-            return {key: future.result() for key, future in futures.items()}
+        return _replay(engine, base / f"{prefix}{build}" / slug, probe, codegen, cases,
+                       reference_host)
 
     return load
 
@@ -434,8 +433,7 @@ def test_private_tapes_are_the_recorded_exports() -> None:
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.key)
 def test_session_flags_are_tradingviews(case: Case, replays) -> None:
-    replays = replays(case.slug)
-    replay = replays[("current", case.slug)]
+    replay = replays(case.slug, "current")
     misses = _misses(case, replay)
     wrong = {FLAGS[letter]: len(bars) for letter, bars in misses.items()
              if len(bars) != case.pinned.get(letter, 0)}
@@ -458,10 +456,7 @@ def test_legacy_predicates_missed_the_pinned_bars(case: Case, replays) -> None:
     payload still reads, and misses exactly the pinned bars: on these tapes
     only the extended-hours chart's _regular pair, which it read from the
     chart's day (see EXTENDED)."""
-    replays = replays(case.slug)
-    if ("legacy", case.slug) not in replays:
-        pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
-    replay = replays[("legacy", case.slug)]
+    replay = replays(case.slug, "legacy")
     assert "_pf_session_market_(" not in replay.cpp
     misses = _misses(case, replay)
     assert {letter: len(bars) for letter, bars in misses.items() if bars} == case.legacy, case.key
@@ -475,8 +470,7 @@ def test_security_payload_keeps_its_own_bars_predicates(replays) -> None:
     exactly as the pre-lane build did, and each read warns that it can differ
     from TradingView; the chart reads beside it are TradingView's flags."""
     case = SECURITY_CASE
-    replays = replays(case.slug, security=True)
-    current = replays[("security-current", case.slug)]
+    current = replays(case.slug, "current", security=True)
     for name in ("ismarket", "ispremarket", "ispostmarket"):
         assert (f"pine_session_{name}(syminfo_.session, syminfo_.timezone, bar.timestamp)"
                 in current.cpp), name
@@ -484,9 +478,7 @@ def test_security_payload_keeps_its_own_bars_predicates(replays) -> None:
                     if d["severity"] == "warning" and "inside request.security" in d["message"])
     assert warned == ["session.ismarket", "session.ispostmarket", "session.ispremarket"]
     assert not any(_misses(case, current).values())
-    if ("security-legacy", case.slug) not in replays:
-        pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
-    legacy = replays[("security-legacy", case.slug)]
+    legacy = replays(case.slug, "legacy", security=True)
     for name in ("ismarket", "ispremarket", "ispostmarket"):
         payload = traced(current.traces[case.key], f"security_{name}")
         assert payload and payload == traced(legacy.traces[case.key], f"security_{name}"), name
@@ -501,31 +493,31 @@ SUNDAY_OPEN = 1740956400000  # 2025-03-02 17:00 America/Chicago: Monday's sessio
 
 
 @pytest.fixture(scope="session")
-def one_bar(tmp_path_factory) -> dict[str, tuple[bytes, list[dict], str]]:
+def one_bar(tmp_path_factory):
     """The probe on a single bar given no timeframe, per build: the engine
     detects none and presents no session-day facts for such a run."""
     tape_file("hm-g236-es1-60-dst-mar", "tv_trades.csv")
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("session_ismarket_one_bar")
-    builds = {"current": REPO_ROOT}
-    legacy = reference_codegen(LEGACY)
-    if legacy is not None:
-        builds["legacy"] = legacy
-    runs = {}
-    for label, codegen in builds.items():
-        work = base / label
+
+    def load(build: str) -> tuple[bytes, list[dict], str]:
+        codegen, reference_host = _session_build(build)
+        work = base / build
         work.mkdir()
         feed = _write_feed([SUNDAY_OPEN], work / "chart.csv")
         pine = work / "strategy.pine"
         pine.write_text(ONE_BAR_PROBE, encoding="utf-8")
         transpiled = transpile_json(pine, codegen)
         assert transpiled.get("ok"), transpiled.get("diagnostics")
-        build_strategy_library(transpiled["cpp"], work)
+        build_strategy_library(transpiled["cpp"], work, reference_host=reference_host)
         overrides = {"runtime_overrides": {"session": "1700-1600:23456",
                                            "timezone": "America/Chicago"}}
-        trades, records, _ = run_strategy(engine, work, feed, overrides, "one", trace=True)
-        runs[label] = (trades, records or [], transpiled["cpp"])
-    return runs
+        trades, records, _ = run_strategy(reference_host or engine, work, feed, overrides,
+                                          "one", trace=True)
+        assert records, f"[{build}] missing one-bar session trace"
+        return trades, records, transpiled["cpp"]
+
+    return load
 
 
 def test_one_bar_without_timeframe_reads_the_calendar(one_bar) -> None:
@@ -538,14 +530,12 @@ def test_one_bar_without_timeframe_reads_the_calendar(one_bar) -> None:
     it tested the Sunday instant's own weekday against the mask, and read it
     out of market, until the time/color handling."""
     assert read_tape("hm-g236-es1-60-dst-mar")[0] == (SUNDAY_OPEN, {"M": True})
-    trades, records, cpp = one_bar["current"]
+    trades, records, cpp = one_bar("current")
     assert "_pf_session_market_(" in cpp
     assert traced(records, "ismarket") == [(SUNDAY_OPEN, True)]
     assert traced(records, "isfirstbar") == [(SUNDAY_OPEN, False)]
     assert engine_entry_times(trades) == [SUNDAY_OPEN]
-    if "legacy" not in one_bar:
-        pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
-    legacy_trades, legacy_records, legacy_cpp = one_bar["legacy"]
+    legacy_trades, legacy_records, legacy_cpp = one_bar("legacy")
     assert "_pf_session_market_(" not in legacy_cpp
     assert traced(legacy_records, "ismarket") == [(SUNDAY_OPEN, True)]
     assert engine_entry_times(legacy_trades) == [SUNDAY_OPEN]

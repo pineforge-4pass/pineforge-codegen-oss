@@ -15,11 +15,13 @@ TradingView result that a series length compiles (the engine's note on its
 TradingView compile probes).
 Every other function keeps the plain wording, with the C++ class name, which
 makes no claim about TradingView: the functions where TradingView refuses a
-series length too (ta.ema, ta.rsi, ...), and the ones with no recorded result
-(ta.wma, ta.percentile_linear_interpolation, ...). A function
-joins the first group only with its own recorded result. ta.pivothigh and
-ta.pivotlow no longer reach a refusal: a series leftbars or rightbars is read
-on every call (tests/test_codegen_ta_dynamic_length.py).
+series length too (ta.ema, ta.rsi, ...), and the ones with no recorded result.
+A function joins the first group only with its own recorded result.
+ta.pivothigh and ta.pivotlow no longer reach a refusal: a series leftbars or
+rightbars is read on every call (tests/test_codegen_ta_dynamic_length.py).
+Nor do the window functions TradingView compiles with a per-bar length
+(ta.wma, ta.stdev, ta.cci, ...) on the chart: each is lowered to its engine
+series class (tests/test_ta_series_length_classes.py).
 """
 
 import pytest
@@ -35,16 +37,6 @@ REASON = (
     "it is neither a compile-time constant nor derived from an input, so "
     "PineForge cannot size the indicator buffer."
 )
-
-
-def _loop_source(call: str) -> str:
-    return (
-        '//@version=6\nstrategy("Series length")\n'
-        'float total = 0.0\n'
-        'for i = 2 to 4\n'
-        f'    total += {call}\n'
-        'plot(total)\n'
-    )
 
 
 def _bar_source(call: str) -> str:
@@ -98,17 +90,13 @@ def test_a_chart_series_sma_length_averages_each_bars_own_window():
 
 
 @pytest.mark.parametrize("source, argument, class_name", [
-    # TradingView refuses a series length for these too.
+    # TradingView refuses a series length for these too. ta.wma, ta.vwma,
+    # ta.stdev, ta.cci and ta.percentile_linear_interpolation left this list:
+    # TradingView compiles their series length, and
+    # tests/test_ta_series_length_classes.py pins their lowering.
     (_bar_source("ta.ema(close, n)"), "n", "ta::EMA"),
     (_bar_source("ta.rsi(close, n)"), "n", "ta::RSI"),
-    # No recorded TradingView result either way: no claim.
-    (_bar_source("ta.wma(close, n)"), "n", "ta::WMA"),
-    (_bar_source("ta.vwma(close, n)"), "n", "ta::VWMA"),
-    (_bar_source("ta.stdev(close, n)"), "n", "ta::StdDev"),
-    (_bar_source("ta.cci(close, n)"), "n", "ta::CCI"),
-    (_loop_source("ta.percentile_linear_interpolation(close, i, 50)"), "i",
-     "ta::PercentileLinearInterpolation"),
-], ids=["ema", "rsi", "wma", "vwma", "stdev", "cci", "percentile_linear_interpolation"])
+], ids=["ema", "rsi"])
 def test_a_function_without_a_recorded_result_keeps_the_plain_wording(
         source, argument, class_name):
     diagnostic = _refusal(source)

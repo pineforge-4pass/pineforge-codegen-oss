@@ -115,8 +115,8 @@ strategy("keep existing math domain")
 value = ta.sma(close, math.round(math.sqrt(6.25)))
 '''
     cpp = transpile(source)
-    assert "ta::SMA(2)" not in cpp
-    assert "pineforge::source::FirstCallBound<ta::SMA>" in cpp
+    assert "PineFixedSma(2)" not in cpp
+    assert "pineforge::source::FirstCallBound<pineforge::source::PineFixedSma>" in cpp
     assert "std::round(std::sqrt(6.25))" in cpp
 
 
@@ -217,7 +217,10 @@ fifth = ta.sma(close, math.pow(2, 3))
 ''')
     constructor = next(line for line in cpp.splitlines() if "explicit GeneratedStrategy()" in line)
     assert re.findall(r"_ta_sma_\d+\((\d+)\)", constructor) == ["5", "6", "5", "4", "8"]
-    reset = next(line for line in cpp.splitlines() if "_ta_sma_1 = ta::SMA" in line)
+    reset = next(
+        line for line in cpp.splitlines()
+        if "_ta_sma_1 = pineforge::source::PineFixedSma" in line
+    )
     assert 'get_input_int("Length", 16)' in reset
     assert "std::round" in reset
     compile_cpp(cpp, label="safe-numeric-constructors")
@@ -234,7 +237,10 @@ third = ta.sma(close, math.floor(length / 3))
 ''')
     constructor = next(line for line in cpp.splitlines() if "explicit GeneratedStrategy()" in line)
     assert re.findall(r"_ta_sma_\d+\((\d+)\)", constructor) == ["1", "1", "1"]
-    resets = [line for line in cpp.splitlines() if "= ta::SMA" in line]
+    resets = [
+        line for line in cpp.splitlines()
+        if "= pineforge::source::PineFixedSma" in line
+    ]
     assert any('get_input_int("Length", 16)' in line and "std::sqrt" in line for line in resets)
     assert any('get_input_int("Length", 16)' in line and "std::ceil" in line for line in resets)
     assert any('get_input_int("Length", 16)' in line and "std::floor" in line for line in resets)

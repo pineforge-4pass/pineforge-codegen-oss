@@ -99,7 +99,9 @@ def test_callable_length_substitution_keeps_string_literals(body, expected):
     resets = [
         line.strip()
         for line in cpp.splitlines()
-        if re.match(r"_ta_sma_\d+\s*=\s*ta::SMA\(", line.strip())
+        if re.match(
+            r"_ta_sma_\d+\s*=\s*pineforge::source::PineFixedSma\(", line.strip()
+        )
     ]
     assert resets, "no SMA constructor reset emitted"
     for reset in resets:

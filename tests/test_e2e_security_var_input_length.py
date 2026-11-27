@@ -47,5 +47,5 @@ def test_an_override_resizes_the_requested_indicator(tmp_path):
 
 def test_the_requested_constructor_reads_the_getter():
     cpp = transpile((FIXTURES / f"{NAME}.pine").read_text())
-    ctors = [l for l in cpp.splitlines() if "_sec0__ta_sma" in l and "ta::SMA(" in l]
+    ctors = [l for l in cpp.splitlines() if "_sec0__ta_sma" in l and "PineFixedSma(" in l]
     assert ctors and all('get_input_double("VF", 6.0)' in l for l in ctors), ctors

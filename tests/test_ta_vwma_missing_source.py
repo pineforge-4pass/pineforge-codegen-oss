@@ -7,8 +7,11 @@ the product average holds its last mean, and the two windows cover different
 bars until ``n`` further bars with a source have arrived. The engine's
 ``ta::VWMA`` keeps complete (source, volume) pairs instead: it answers na on
 such a bar and weighs the following bars by the pairs' volumes. The Pine call
-is built from the engine's Pine-layer object ``PineVwma``
-(``codegen/ta.py::_TA_VOLUME_WEIGHTED_CLASSES``).
+is built from the engine's Pine-layer object ``PineVwma``, through its checked
+fixed-length form ``PineFixedVwma`` (``codegen/ta.py::_TA_PINE_LAYER_CLASSES``):
+that type checks the length on the call's first execution
+(tests/test_ta_fixed_length_checks.py) and then is ``PineVwma``, whose values
+the rows below are.
 
 Invented bars, length 2, the source hidden on bar 2:
 
@@ -36,7 +39,7 @@ from tests._compile import compile_cpp, run_emitted_tu
 
 
 _HEADER = "#include <pineforge/source/pine_ta_length.hpp>"
-_TYPE = "pineforge::source::PineVwma"
+_TYPE = "pineforge::source::PineFixedVwma"
 _KERNEL = "ta::VWMA"
 _PRECALCULATE = "void precalculate(const Bar* bars, int n)"
 
@@ -191,7 +194,7 @@ def test_consumers_compile_against_the_paired_engine():
     compile_cpp(transpile(_CONSUMERS), label="volume_weighted_consumers")
 
 
-def test_precalculation_builds_the_pine_layer_type_without_a_length_handler():
+def test_precalculation_builds_the_checked_type_and_keeps_the_length_handler():
     cpp = transpile(
         '//@version=6\nstrategy("precalculated volume-weighted average")\n'
         "value = ta.vwma(close, 3)\nplot(value)\n"
@@ -199,7 +202,9 @@ def test_precalculation_builds_the_pine_layer_type_without_a_length_handler():
     precalc = cpp.split(_PRECALCULATE, 1)[1].split("\n    }", 1)[0]
     # Built for the replay and rebuilt for the run.
     assert precalc.count(f"= {_TYPE}(") == 2
-    # The object accepts every length, so the replay keeps no length-stop
-    # handler: that belongs to the checked adapters.
-    assert "try {" not in precalc
-    assert "_pf_precalc_error" not in precalc
+    # The type checks its length on the first call, so the replay that fills
+    # the call's cache leaves an invalid length to the bar on which the call
+    # executes: it is built before the handler's block and rebuilt after it.
+    assert "catch (const std::exception& _pf_precalc_error)" in precalc
+    assert precalc.index(f"= {_TYPE}(") < precalc.index("try {")
+    assert precalc.rindex(f"= {_TYPE}(") > precalc.index("catch (")

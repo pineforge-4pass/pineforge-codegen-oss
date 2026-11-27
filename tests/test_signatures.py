@@ -424,7 +424,7 @@ class TestTAKwargs:
 
     def test_ta_sma_kwargs(self):
         cpp = _generate(_pine('x = ta.sma(source=close, length=14)'))
-        assert "ta::SMA" in cpp
+        assert "pineforge::source::PineFixedSma" in cpp
         assert ".compute(" in cpp
 
     def test_ta_ema_kwargs(self):
@@ -433,7 +433,7 @@ class TestTAKwargs:
 
     def test_ta_rma_kwargs(self):
         cpp = _generate(_pine('x = ta.rma(source=close, length=14)'))
-        assert "ta::RMA" in cpp
+        assert "pineforge::source::PineFixedRma" in cpp
 
     def test_ta_wma_kwargs(self):
         cpp = _generate(_pine('x = ta.wma(source=close, length=14)'))
@@ -441,15 +441,15 @@ class TestTAKwargs:
 
     def test_ta_hma_kwargs(self):
         cpp = _generate(_pine('x = ta.hma(source=close, length=14)'))
-        assert "ta::HMA" in cpp
+        assert "pineforge::source::PineFixedHma" in cpp
 
     def test_ta_rsi_kwargs(self):
         cpp = _generate(_pine('x = ta.rsi(source=close, length=14)'))
-        assert "ta::RSI" in cpp
+        assert "pineforge::source::PineFixedRsi" in cpp
 
     def test_ta_atr_kwargs(self):
         cpp = _generate(_pine('x = ta.atr(length=14)'))
-        assert "ta::ATR" in cpp
+        assert "pineforge::source::PineFixedAtr" in cpp
 
     def test_ta_stdev_kwargs(self):
         cpp = _generate(_pine('x = ta.stdev(source=close, length=20)'))
@@ -457,11 +457,11 @@ class TestTAKwargs:
 
     def test_ta_highest_kwargs(self):
         cpp = _generate(_pine('x = ta.highest(source=high, length=14)'))
-        assert "ta::Highest" in cpp
+        assert "pineforge::source::PineFixedHighest " in cpp
 
     def test_ta_lowest_kwargs(self):
         cpp = _generate(_pine('x = ta.lowest(source=low, length=14)'))
-        assert "ta::Lowest" in cpp
+        assert "pineforge::source::PineFixedLowest " in cpp
 
     def test_ta_max_min_chart_kwargs(self):
         cpp = _generate(_pine('x = ta.max(source=high)\ny = ta.min(source=low)'))
@@ -470,7 +470,7 @@ class TestTAKwargs:
 
     def test_ta_rci_kwargs(self):
         cpp = _generate(_pine('x = ta.rci(source=close, length=14)'))
-        assert "ta::RCI" in cpp
+        assert "pineforge::source::PineRci" in cpp
 
     def test_ta_change_kwargs(self):
         cpp = _generate(_pine('x = ta.change(source=close, length=1)'))
@@ -539,11 +539,11 @@ class TestTAKwargs:
 
     def test_ta_dmi_kwargs(self):
         cpp = _generate(_pine('[dp, dm, adx] = ta.dmi(diLength=14, adxSmoothing=14)'))
-        assert "ta::DMI" in cpp
+        assert "pineforge::source::PineFixedDmi" in cpp
 
     def test_ta_sar_kwargs(self):
         cpp = _generate(_pine('x = ta.sar(start=0.02, inc=0.02, max=0.2)'))
-        assert "ta::SAR" in cpp
+        assert "pineforge::source::PineSar" in cpp
         assert "current_bar_.high, current_bar_.low, current_bar_.close" in cpp
 
     def test_ta_linreg_kwargs(self):
@@ -556,7 +556,7 @@ class TestTAKwargs:
 
     def test_ta_vwma_kwargs(self):
         cpp = _generate(_pine('x = ta.vwma(source=close, length=20)'))
-        assert "pineforge::source::PineVwma" in cpp
+        assert "pineforge::source::PineFixedVwma" in cpp
 
     def test_ta_mom_kwargs(self):
         cpp = _generate(_pine('x = ta.mom(source=close, length=10)'))
@@ -576,7 +576,7 @@ class TestTAKwargs:
 
     def test_ta_cci_kwargs(self):
         cpp = _generate(_pine('x = ta.cci(source=close, length=20)'))
-        assert "ta::CCI" in cpp
+        assert "pineforge::source::PineCci" in cpp
 
     def test_ta_cum_kwargs(self):
         cpp = _generate(_pine('x = ta.cum(source=volume)'))
@@ -596,16 +596,16 @@ class TestTAKwargs:
 
     def test_ta_highestbars_kwargs(self):
         cpp = _generate(_pine('x = ta.highestbars(source=high, length=14)'))
-        assert "ta::HighestBars" in cpp
+        assert "pineforge::source::PineFixedHighestBars" in cpp
 
     def test_ta_lowestbars_kwargs(self):
         cpp = _generate(_pine('x = ta.lowestbars(source=low, length=14)'))
-        assert "ta::LowestBars" in cpp
+        assert "pineforge::source::PineFixedLowestBars" in cpp
 
     def test_ta_mixed_positional_and_kwargs(self):
         """First arg positional, second as kwarg."""
         cpp = _generate(_pine('x = ta.sma(close, length=14)'))
-        assert "ta::SMA" in cpp
+        assert "pineforge::source::PineFixedSma" in cpp
         assert ".compute(" in cpp
 
     def test_ta_stoch_kwargs(self):
