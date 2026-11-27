@@ -129,10 +129,12 @@ def replay(runs, probe: str, windows=()) -> tuple[str, int]:
 
 
 def test_series_length_extremes_rewindow_every_call(runs):
-    # g takes the sparse high. Every reached streak starts at length one
-    # and grows by one per adjacent bar, so gb can use its original TV ID.
+    # g and gb both take the sparse high. The November TradingView reading
+    # (values over the last N executions; offsets as the bar distance to the
+    # execution holding the extreme, pinned by test_bar_distance_offsets)
+    # supersedes the September columns 7 and 8; the CSV stays as dated history.
     cpp, compared = replay(runs, "series_extremes", (
-        ((7,), (), "high", lambda b: (b - 30) % 12 + 1 if b >= 30 and (b - 30) % 12 < 8 else 0),
+        ((7,), (8,), "high", lambda b: (b - 30) % 12 + 1 if b >= 30 and (b - 30) % 12 < 8 else 0),
     ))
     assert "#include <pineforge/source/pine_ta_length.hpp>" in cpp
     for cls in ("SeriesLowest", "SeriesHighest", "SeriesLowestBars", "SeriesHighestBars"):
