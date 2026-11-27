@@ -188,6 +188,7 @@ transpile(
     check_support: bool = True,   # run the support checker before codegen
     filename: str = "<input>",    # name used in error locations
     libraries: Mapping[str, str] | None = None,   # imported Pine libraries (new in 1.0.0)
+    loop_timeout_ms: int | None = None,   # 2000 ms per execution of a Pine loop
 ) -> str
 ```
 
@@ -196,6 +197,13 @@ Returns the generated C++ source as a string. Raises
 on a syntax error or an input limit (0.10.4 recovers from some syntax errors
 and has no input limits). It does not return nonfatal diagnostics (warnings and,
 since 1.5.0, notes); use `transpile_full()` to inspect them.
+
+Each generated `for`, `for … in` and `while` has a wall-time limit of
+**2000 ms per loop invocation on a bar**. To change it, pass e.g.
+`transpile(pine, loop_timeout_ms=100)`, then rebuild the strategy. The
+monotonic clock is sampled every 256 iterations and at loop exit. An
+overrun stops the run with the chart bar index and the loop's Pine line.
+See the [public contract](docs/PUBLIC_CONTRACT.md#python-functions) for bounds.
 
 `libraries` is new in 1.0.0. It maps an import path to the library's
 source (`{"user/name/version": source_text}`), and each import the script uses
@@ -215,6 +223,7 @@ transpile_full(
     check_support: bool = True,
     filename: str = "<input>",
     libraries: Mapping[str, str] | None = None,   # new in 1.0.0
+    loop_timeout_ms: int | None = None,
 ) -> dict
 ```
 

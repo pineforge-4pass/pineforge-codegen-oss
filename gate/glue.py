@@ -38,10 +38,11 @@ def _diagnostic_entries(diagnostics) -> list:
 
 
 def transpile_json(source: str, *, history_capacity: int | None = None,
-                   drawing_capacity: int | None = None) -> str:
+                   drawing_capacity: int | None = None,
+                   loop_timeout_ms: int | None = None) -> str:
     try:
         full = transpile_full(source, history_capacity=history_capacity,
-                              drawing_capacity=drawing_capacity)
+                              drawing_capacity=drawing_capacity, loop_timeout_ms=loop_timeout_ms)
     except CompileError as e:
         return json.dumps({"ok": False, "error": str(e),
                            "diagnostics": _diagnostic_entries(e.diagnostics)})

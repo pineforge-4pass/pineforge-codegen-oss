@@ -5900,6 +5900,7 @@ class SecurityEmitter:
                     self._security_scope_path = saved_scope
                     loop_depth[0] -= 1
 
+            timer = self._start_loop_watchdog(stmt, lines, indent)
             if isinstance(stmt, ForStmt):
                 counter_cpp_type = self._security_for_counter_cpp_type(
                     stmt.start, runtime_stack_local, step=stmt.step, pine_v5=pine_v5,
@@ -5942,7 +5943,7 @@ class SecurityEmitter:
                             start_cpp=initial_start,
                             names=names, render=render_bound, emit_body=emit_body,
                             counter_cpp_type=counter_cpp_type,
-                            guard_na=True, pine_v5=pine_v5,
+                            guard_na=True, pine_v5=pine_v5, timer=timer,
                         )
                     return
                 end_cpp, end_inline = build(stmt.end)
@@ -5992,8 +5993,10 @@ class SecurityEmitter:
                 lines.append(
                     f"{pad}while ({self._coerce_bool_expr(cond_cpp, stmt.condition)}) {{"
                 )
+            lines.append(f"{pad}    {timer}.poll();")
             emit_body(indent + 1)
             lines.append(f"{pad}}}")
+            lines.append(f"{pad}{timer}.check();")
 
         for stmt in plan["body"]:
             emit_stmt(stmt, local_cpp_bindings, indent=2)

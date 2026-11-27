@@ -7,6 +7,36 @@ from pineforge_codegen.codegen.run_stops import (
 from tests._cpp_tokens import code_only, regions
 
 
+def without_loop_watchdog(cpp: str) -> str:
+    """Project a guarded TU onto the bytes used by pre-#440 lowering oracles."""
+    from pineforge_codegen.codegen.emit_top import LOOP_CLOCK_INCLUDE, LOOP_WATCHDOG_CPP
+
+    if LOOP_CLOCK_INCLUDE + "\n" not in cpp:
+        return cpp
+    declaration = re.compile(
+        r"^ *::(?P<type>_pf_LoopWatchdog(?:__pf\d+)?) "
+        r"(?P<timer>_pf_loop_watchdog_\d+(?:__pf\d+)?)\{bar_index_, \d+\};\n", re.M)
+    instances = declaration.findall(cpp)
+    assert instances, "watchdog support without a loop"
+    support = LOOP_WATCHDOG_CPP.replace("@TYPE@", instances[0][0]) + "\n\n"
+    assert cpp.count(support) == 1
+    cpp = cpp.replace(LOOP_CLOCK_INCLUDE + "\n", "", 1).replace(support, "", 1)
+    cpp = declaration.sub("", cpp)
+    for _, timer in set(instances):
+        cpp, polls = re.subn(rf"(?m)^ *{timer}\.poll\(\);\n", "", cpp)
+        cpp, checks = re.subn(rf"(?m)^ *{timer}\.check\(\);\n", "", cpp)
+        assert polls and checks, f"incomplete watchdog {timer}: {polls} polls, {checks} exits"
+    if "::kLoopTimeLimitMs" not in cpp:  # An immediate stop still needs the limit.
+        cpp = cpp.replace("inline constexpr int kLoopTimeLimitMs = 2000;\n\n", "", 1)
+    # The receipt lists actual host reads. A script that already read bar_index_
+    # keeps its entry; only the read contributed by the timer disappears.
+    if not re.search(r"\bbar_index_\b", code_only(cpp)):
+        cpp = re.sub(r'(\\"host_reads\\":\[)(.*?)\]', lambda m: (
+            m[1] + ",".join(k for k in m[2].split(",") if k != r'\"bar_index_\"') + "]"
+        ), cpp)
+    return cpp
+
+
 # Exact source-bearing spellings emitted by base.py (host base),
 # emit_top.py (two includes, host/config/override uses), checked_settings.py
 # (config), security.py (host time_close), and ta.py (length adapters).

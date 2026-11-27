@@ -6,6 +6,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from tests._e2e import reference_codegen, transpile_json
+from tests._legacy_cpp import without_loop_watchdog
 from tests._numeric_expected import (
     int64_store, integer_arithmetic, integer_store, require_numeric_hunk,
 )
@@ -158,6 +159,7 @@ def test_integer_callable_controls_keep_complete_reference_cpp(tmp_path, body):
         cpp = require_numeric_hunk(
             cpp, "int observed = 0;", "int64_t observed = 0;")
     elif "for counter =" in body:
+        cpp = without_loop_watchdog(cpp)
         argument = f"measure({integer_store('counter')})"
         cpp = require_numeric_hunk(
             cpp, "observed += measure(counter);",

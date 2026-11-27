@@ -484,23 +484,42 @@ transpile(pine_source: str, *, check_support: bool = True,
           filename: str = "<input>",
           libraries: Mapping[str, str] | None = None,
           history_capacity: int | None = None,
-          drawing_capacity: int | None = None) -> str
+          drawing_capacity: int | None = None,
+          loop_timeout_ms: int | None = None) -> str
 
 transpile_full(pine_source: str, *, check_support: bool = True,
                filename: str = "<input>",
                libraries: Mapping[str, str] | None = None,
                history_capacity: int | None = None,
-               drawing_capacity: int | None = None) -> dict
+               drawing_capacity: int | None = None,
+               loop_timeout_ms: int | None = None) -> dict
 ```
 
-The same keyword-only capacity options are accepted by
+The same keyword-only capacity and loop timeout options are accepted by
 `transpile_with_request_inventory()` and root `gate/glue.py`.
 The JavaScript worker template in `scripts/worker-template.mjs` passes only
-the source and does not forward either option.
+the source and uses the defaults.
 `history_capacity` is an exact integer of at least 2 or `None`;
 `drawing_capacity` is an exact integer of at least 1 or `None`.
 Booleans, floating values, strings and smaller integers raise `PF-E5094`
 with `option` and `minimum` arguments.
+
+`loop_timeout_ms` is the wall time available to each execution of a Pine
+`for`, `for … in` or `while`. `None` selects **2000 ms**; an override is an
+exact integer from 1 through 2147483647. It is compiled into the strategy;
+it is not a Pine `input`. Invalid types and nonpositive values raise
+`PF-E5094`; integers above the native range raise `PF-E0036`.
+
+Each loop starts its own `std::chrono::steady_clock` timer when reached,
+including nested loops and loops in called functions and requested
+evaluators. It polls every **256 iterations** and checks on exit, including
+`break`. A slow iteration can run past the deadline before control returns
+to a check. An expired timer stops the run through `runtime.error`'s path:
+for example, `Error on bar 17: Pine line 6: loop time limit exceeded (2000 ms)`.
+The bar is the zero-based chart bar being processed; the line is the
+one-based Pine loop header. Proven-endless counted loops that already stop
+immediately retain their TradingView stop and report the configured limit.
+Scripts with no generated Pine loops need no clock.
 
 History retention depends on the source and these parameters, never the
 number of bars or trades. With `history_capacity=None`, existing Pine
@@ -758,7 +777,7 @@ An explicit title that is not a compile-time string constant raises
 ## Pyodide and gate/glue JSON
 
 `gate/glue.py` defines
-`transpile_json(source: str, *, history_capacity: int | None = None, drawing_capacity: int | None = None) -> str`.
+`transpile_json(source: str, *, history_capacity: int | None = None, drawing_capacity: int | None = None, loop_timeout_ms: int | None = None) -> str`.
 It returns a
 serialized JSON **string**. The shipped Pyodide worker runs that glue. Its
 success and compile-error envelopes are:

@@ -22,6 +22,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (1.15.0)
 
+- Generated Pine loops now stop with the chart bar index and Pine source
+  line when they exceed `loop_timeout_ms` (default 2000 ms per invocation).
+  Regenerate C++ and relink to apply the watchdog
+  ([#440](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/440)).
+
 - `// @pf-trace` now reads prior values of `time`, `time_close`, `bar_index` and other built-in series even when only the pragma indexes them. An indexed built-in without traceable history reports an error at the pragma ([#486](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/486)).
 
 - `// @pf-trace` can now read bar history such as `close[1]` even when the strategy body never reads that history ([#482](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/482)).

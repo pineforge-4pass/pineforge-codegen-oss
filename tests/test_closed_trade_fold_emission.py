@@ -142,6 +142,7 @@ def test_fold_reuses_one_body_and_excludes_the_newest_final_run():
     )
     assert dedent("""\
         auto _pf_ctf0_step = [&](int i, auto& _pf_ctf0_a0, auto& _pf_ctf0_a1) {
+            _pf_loop_watchdog_0.poll();
             std::string entryId = closed_trade_entry_id(i);
             double profit = closed_trade_profit(i);
             if ((entryId == std::string("Long"))) {
@@ -157,8 +158,10 @@ def test_fold_reuses_one_body_and_excludes_the_newest_final_run():
         if (_pf_ctf0_final > 0) {
             const int64_t _pf_ctf0_run = closed_trade_exit_time(_pf_ctf0_final - 1);
             _pf_ctf0_limit = _pf_ctf0_final - 1;
-            while (_pf_ctf0_limit > 0 && closed_trade_exit_time(_pf_ctf0_limit - 1) == _pf_ctf0_run)
+            while (_pf_ctf0_limit > 0 && closed_trade_exit_time(_pf_ctf0_limit - 1) == _pf_ctf0_run) {
+                _pf_loop_watchdog_0.poll();
                 --_pf_ctf0_limit;
+            }
         }
         if (_pf_ctf0_n < _pf_ctf0_seen || _pf_ctf0_limit < _pf_ctf0_settled || _pf_ctf0_settled == 0) {
             _pf_ctf0_settled = 0;
@@ -254,6 +257,7 @@ def test_fold_preserves_bound_visits_counter_names_and_later_plain_loop(monkeypa
     emitter._visit_for(following, lines, 0)
     # The fold consumes loop number zero; the following unplanned loop keeps number one.
     assert "\n".join(lines) == dedent("""\
+        ::_pf_LoopWatchdog _pf_loop_watchdog_1{bar_index_, 13};
         int _for_start_1 = (2);
         int _for_end_1 = (4);
         int _for_step_1 = (1);
@@ -261,8 +265,10 @@ def test_fold_preserves_bound_visits_counter_names_and_later_plain_loop(monkeypa
         if (_for_step_1 == 0) _for_step_1 = 1;
         const bool _for_down_1 = (_for_start_1 > _for_end_1);
         for (int j = _for_start_1; (_for_down_1 ? (j >= _for_end_1) : (j <= _for_end_1)); j += (_for_down_1 ? -_for_step_1 : _for_step_1), _for_end_1 = (4)) {
+            _pf_loop_watchdog_1.poll();
             other += 1;
         }
+        _pf_loop_watchdog_1.check();
     """).rstrip().replace(
         "other += 1;",
         f"other = {integer_store(integer_arithmetic('other', '+', '1'))};",

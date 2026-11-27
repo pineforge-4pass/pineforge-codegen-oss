@@ -118,6 +118,23 @@ from .unicode_case import CASE_MAPPING_CPP, CASE_MAPPING_MARKER
 
 # Keep the late-selected include beside the headers the C++ allowlist reads.
 ENUM_STRING_INCLUDE = '#include <pineforge/source/pine_policy_support.hpp>'
+LOOP_CLOCK_INCLUDE = '#include <chrono>'
+LOOP_WATCHDOG_CPP = """struct @TYPE@ {
+    std::int64_t bar;
+    int line;
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    unsigned iterations = 0;
+
+    void poll() {
+        if ((++iterations & 255u) == 0) check();
+    }
+    void check() const {
+        if (std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(::kLoopTimeLimitMs))
+            pine_runtime_error(std::string("Error on bar ") + std::to_string(bar)
+                + ": Pine line " + std::to_string(line) + ": loop time limit exceeded ("
+                + std::to_string(::kLoopTimeLimitMs) + " ms)");
+    }
+};"""
 _TRADE_HISTORY_POLICY_MARKER = "        /* __PINEFORGE_TRADE_HISTORY_POLICY__ */"
 
 # ta.pivothigh / ta.pivotlow with a series leftbars or rightbars
@@ -414,8 +431,7 @@ class TopLevelEmitter:
         from .endless_for import plan_endless_for_loops
         self._endless_for_actions = plan_endless_for_loops(self.ctx.ast)
         if "stop" in self._endless_for_actions.values():
-            lines.append("inline constexpr int kLoopTimeLimitMs = 2000;")
-            lines.append("")
+            lines.extend((self._loop_timeout_constant(), ""))
         lines.append(RUN_STOP_SHIMS_CPP)
         if self._uses_timestamp_calendar:
             lines.append(TIMEZONE_STOP_SHIM_CPP)
@@ -444,6 +460,9 @@ class TopLevelEmitter:
         # Syminfo derivation helpers (_pf_derive_main_tickerid, _pf_derive_country)
         from .helpers_syminfo import emit_syminfo_helpers
         lines.extend(emit_syminfo_helpers())
+
+    def _loop_timeout_constant(self) -> str:
+        return f"inline constexpr int kLoopTimeLimitMs = {self._loop_timeout_ms};"
 
     def _emit_ta_compat_shims(self, lines: list[str]) -> None:
         """Emit source-level adapters for TA1 arguments and anchored forms.
