@@ -67,7 +67,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
   average of `volume`, and the two averages cover different bars until
   `length` further bars with a source have arrived. On a feed with no `na`
   source the results can differ from the earlier ones only in the last digit
-  of a double. Generated code uses the paired engine's `PineVwma` from
+  of a double. Generated code uses the paired engine's `PineFixedVwma`, which
+  wraps `PineVwma` (see the fixed-length entry below), from
   `pineforge/source/pine_ta_length.hpp`; regenerate C++ and relink.
 - `ta.iii` and `ta.wvad` are `na` on a bar whose high equals its low, as on
   TradingView; they used to be 0 there. A bar with a range keeps its value,
