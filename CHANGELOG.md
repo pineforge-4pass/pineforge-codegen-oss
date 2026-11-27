@@ -160,6 +160,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
   declares a value for `mincontract` in its symbol metadata. The warning code
   and runtime behavior stay the same ([#459](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/459)).
 
+- `PF-W1520` also covers other symbol fields that the run can supply, such as
+  `syminfo.employees`. `PF-W1521` and `PF-W1522` say which field PineForge
+  returns `na` for. A condition such as `na(syminfo.pricescale)` can still
+  be true.
+
 - The collection-history diagnostics `PF-E6067`, `PF-E6068`, `PF-E6069`, `PF-E6072`, `PF-E6073`, `PF-E6074` and `PF-W5010` no longer show a path into PineForge's test fixtures, their messages are reworded, and so is the explanation of `PF-W5010`. Their codes, arguments and severities stay the same ([#459](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/459)).
 
 - A TA length held in a never-reassigned top-level `var int` literal is no longer refused with PF-E5092 when the script also declares a `method`; a script that declares a user function, `type` or `enum` still refuses it ([#422](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/422)).
