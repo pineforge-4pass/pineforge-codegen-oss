@@ -602,6 +602,12 @@ def test_cut_check_holds_for_the_four_part_texts_and_refuses_a_change_to_one_of_
 
     texts = real_workflows_in_shape(four_part_workflow)
     assert_pytest_jobs_are_cut_the_same_way(*texts)
+    pr_workflow, push_workflow = texts
+    reference_job = job_blocks(push_workflow)["reference-engine"]
+    changed_reference = replace_once(reference_job, "pytest -q -n auto -ra", "pytest -q -n 2 -ra")
+    assert_pytest_jobs_are_cut_the_same_way(
+        pr_workflow, replace_once(push_workflow, reference_job, changed_reference)
+    )
     for label, before, after, reason in [
         (f"the list 1 to {PYTEST_SHARDS - 1}", shard_axis_line(PYTEST_SHARDS),
          shard_axis_line(PYTEST_SHARDS - 1), "matrix"),
@@ -611,7 +617,7 @@ def test_cut_check_holds_for_the_four_part_texts_and_refuses_a_change_to_one_of_
          shard_variable_line(PYTEST_SHARDS + 1), "env"),
         ("the PF_TEST_SHARD line removed", shard_variable_line(PYTEST_SHARDS), "", "env"),
         ("the shard line removed", shard_axis_line(PYTEST_SHARDS), "", "matrix"),
-        ("-n auto changed to -n 2", "-n auto", "-n 2", "runs"),
+        ("pytest workers changed to 2", "pytest -q -n auto -rs", "pytest -q -n 2 -rs", "runs"),
         ("one Python version removed", '["3.11", "3.12", "3.13", "3.14"]',
          '["3.11", "3.12", "3.13"]', "matrix"),
         ("one more env entry", shard_variable_line(PYTEST_SHARDS),
@@ -643,7 +649,7 @@ def test_cut_check_refuses_two_equal_texts_that_are_not_cut_as_expected():
         (f"the divisor {PYTEST_SHARDS + 1}", shard_variable_line(PYTEST_SHARDS),
          shard_variable_line(PYTEST_SHARDS + 1), "variable"),
         ("the PF_TEST_SHARD line removed", shard_variable_line(PYTEST_SHARDS), "", "variable"),
-        ("-n auto changed to -n 2", "-n auto", "-n 2", "commands"),
+        ("pytest workers changed to 2", "pytest -q -n auto -rs", "pytest -q -n 2 -rs", "commands"),
     ]:
         changed = [replace_once(text, before, after) for text in four_part]
         assert_cut_refused(*changed, reason, f"{label} in both workflows")
