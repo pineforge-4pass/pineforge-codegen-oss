@@ -191,7 +191,9 @@ class Replay:
 
 
 def _replay(engine: Path, work: Path, source: str, stamps: list[int],
-            codegen: Path = REPO_ROOT) -> Replay:
+            codegen: Path = REPO_ROOT, reference_host: Path | None = None) -> Replay:
+    """Build and run ``source`` on ``engine``; a caller replaying a historical
+    generator names the ``reference_host`` that builds and runs its C++ instead."""
     work.mkdir(parents=True, exist_ok=True)
     feed = _write_feed(stamps, work / "chart.csv")
     pine = work / "strategy.pine"
@@ -200,8 +202,9 @@ def _replay(engine: Path, work: Path, source: str, stamps: list[int],
     if not transpiled.get("ok"):
         raise RuntimeError("transpile_json refused it:\n"
                            + json.dumps(transpiled.get("diagnostics"), indent=1))
-    build_strategy_library(transpiled["cpp"], work)
-    trades, records, _ = run_strategy(engine, work, feed, OVERRIDES, "replay", trace=True)
+    build_strategy_library(transpiled["cpp"], work, reference_host=reference_host)
+    trades, records, _ = run_strategy(reference_host or engine, work, feed, OVERRIDES,
+                                      "replay", trace=True)
     return Replay(transpiled["cpp"], transpiled.get("diagnostics", []), records or [], trades)
 
 

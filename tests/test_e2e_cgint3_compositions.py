@@ -51,7 +51,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from tests._e2e import (
-    Build, chart_feed_head, execute_all, ok, reference_codegen, same,
+    Build, chart_feed_head, execute_all, ok, reference_codegen, reference_engine, same,
     skip_unless_e2e_env, transpile_json,
 )
 from tests.test_e2e_session_history import EXTENDED, _replay, _replay_stamps
@@ -292,7 +292,10 @@ def tail_runs(tmp_path_factory):
     out = {"tail": _replay(engine, base / "tail", TAIL, stamps)}
     main = reference_codegen(MAIN)
     if main is not None:
-        out["tail_main"] = _replay(engine, base / "tail_main", TAIL, stamps, main)
+        # MAIN's C++ predates today's host: its leg builds against and runs on the
+        # reference engine (a missing one raises NEEDS); today's leg keeps the host.
+        out["tail_main"] = _replay(engine, base / "tail_main", TAIL, stamps, main,
+                                   reference_host=reference_engine())
     return out
 
 
