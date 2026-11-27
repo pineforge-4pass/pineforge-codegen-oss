@@ -28,6 +28,7 @@ from pineforge_codegen import transpile
 from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.codegen.helpers import CPP_STANDARD_MACROS
 from pineforge_codegen.cpp_allowlist import ALLOWED_INCLUDES
+from tests._checked_ta_cpp import _PINE_SOURCE_GUARDS
 from tests._compile import compile_cpp, run_emitted_tu
 from tests._legacy_cpp import _EMITTER_SOURCE_SPELLINGS
 
@@ -123,6 +124,41 @@ def test_every_site_compiles_against_the_paired_engine(family):
     # constructor and methods: an engine without it fails here, at the
     # include or at the member declarations.
     compile_cpp(transpile(_routing_source(family)), label=f"source_type_{family}")
+
+
+# The three whose selected type has a feature macro of its own. ta.dmi and
+# ta.mfi are required through the fixed-length macro
+# (tests/test_ta_fixed_length_checks.py).
+_OWN_FEATURE_FAMILIES = ("sar", "rci", "cci")
+
+
+@pytest.mark.parametrize("family", _OWN_FEATURE_FAMILIES)
+def test_the_types_header_is_followed_by_the_guard_of_its_feature_macro(family):
+    # An engine header older than the type must stop the build at an #error
+    # that names the macro, not at the type's name in a member declaration.
+    _selected, kernel, header, constant, _from_input, _declaration = _FAMILIES[family]
+    macro = CodeGen._TA_PINE_LAYER_CLASSES[kernel][2]
+    assert macro == "PINEFORGE_HAS_PINE_" + family.upper()
+    cpp = transpile(
+        '//@version=6\nstrategy("source type guard")\n'
+        f"value = {constant}\n"
+        "plot(value)\n"
+    )
+    include = f"#include <{header}>\n"
+    assert cpp.count(include) == 1
+    # Between the type's header and the next include.
+    after = cpp[cpp.index(include) + len(include):].split("#include", 1)[0]
+    guard = (
+        f"#ifndef {macro}\n"
+        f'#error "ta.{family} requires the paired pineforge-engine Pine-layer'
+        f' adapter ({macro})"\n'
+        "#endif\n"
+    )
+    assert guard in after, after
+    assert cpp.count(f"#ifndef {macro}\n") == 1
+    # The helper that rewrites an earlier build's C++ spells the same lines.
+    assert _PINE_SOURCE_GUARDS[kernel] == guard
+    assert "\n".join(CodeGen._TA_PINE_LAYER_GUARDS[macro]) + "\n" == guard
 
 
 def test_the_class_table_its_headers_guards_and_reserved_names_agree():

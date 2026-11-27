@@ -210,6 +210,24 @@ def test_a_script_that_declares_every_default_is_unchanged(outcomes, case):
     assert lane.engine == legacy.engine == _tape(case)
 
 
+@pytest.mark.parametrize("case", [c for c in CASES if not c.omits], ids=[c.tape for c in CASES if not c.omits])
+def test_a_script_that_declares_every_default_transpiles_to_the_legacy_cpp(case):
+    # The C++ comparison of the test above on its own: ``transpile_json`` of
+    # the probe on this checkout and on ``LEGACY``, with no build and no
+    # replay, so it runs where either build's replay does not.
+    legacy_tree = reference_codegen(LEGACY)
+    if legacy_tree is None:
+        pytest.skip(f"codegen {LEGACY} is not in this checkout's history")
+    pine = FIXTURES / case.tape / "strategy.pine"
+    lane = transpile_json(pine)
+    legacy = transpile_json(pine, legacy_tree)
+    assert lane.get("ok"), json.dumps(lane.get("diagnostics"), indent=1)
+    assert legacy.get("ok"), json.dumps(legacy.get("diagnostics"), indent=1)
+    # The probes' two ta.sma calls are built from the checked fixed-length
+    # type today; every other byte is the legacy build's.
+    assert legacy_cpp(lane["cpp"]) == legacy_cpp(with_pine_source_ta(legacy["cpp"]))
+
+
 def test_the_tapes_are_the_recorded_exports():
     for case in CASES:
         metrics = json.loads((FIXTURES / case.tape / "metrics.json").read_text())

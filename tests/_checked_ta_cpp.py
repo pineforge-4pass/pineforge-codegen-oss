@@ -161,6 +161,24 @@ _PINE_SOURCE_TYPES = {
     "ta::RCI": ("pineforge::source::PineRci", _CHECKED_HEADER),
     "ta::CCI": ("pineforge::source::PineCci", _CCI_HEADER),
 }
+
+
+def _pine_layer_guard(function: str, macro: str) -> str:
+    return (
+        f"#ifndef {macro}\n"
+        f'#error "ta.{function} requires the paired pineforge-engine Pine-layer'
+        f' adapter ({macro})"\n'
+        "#endif\n"
+    )
+
+
+# Kernel class: the guard written behind the header of its Pine source-layer
+# type, for the type's feature macro.
+_PINE_SOURCE_GUARDS = {
+    "ta::SAR": _pine_layer_guard("sar", "PINEFORGE_HAS_PINE_SAR"),
+    "ta::RCI": _pine_layer_guard("rci", "PINEFORGE_HAS_PINE_RCI"),
+    "ta::CCI": _pine_layer_guard("cci", "PINEFORGE_HAS_PINE_CCI"),
+}
 # Kernel class: the checked fixed-length type a call with a constant, input
 # or simple length is built from. The length header declares all twelve and
 # defines one feature macro beside them.
@@ -190,6 +208,12 @@ _FIXED_LENGTH_FUNCTIONS = (
 # A member of one of the twelve calls, whatever its type: the guard is written
 # for a script that has such a call, a call with a per-bar length included.
 _FIXED_LENGTH_MEMBER = re.compile(rf"_ta_(?:{_FIXED_LENGTH_FUNCTIONS})_\d")
+# The members of the twelve whose row stands before ta.sar's in the emitter's
+# class table (``_TA_PINE_LAYER_CLASSES``), and before ta.rci's: the
+# fixed-length guard is written where the first row of a call the script has
+# stands.
+_FIXED_LENGTH_BEFORE_SAR = re.compile(r"_ta_vwma_\d")
+_FIXED_LENGTH_BEFORE_RCI = re.compile(r"_ta_(?:vwma|dmi|mfi)_\d")
 # The cache of a precalculated call of the twelve: its replay is checked.
 _FIXED_LENGTH_CACHE = re.compile(
     rf"^    std::vector<[^;\n]*> _precalc__ta_(?:{_FIXED_LENGTH_FUNCTIONS})_\w+;$",
@@ -212,8 +236,9 @@ def with_pine_source_ta(cpp: str) -> str:
     ta.cci, and the checked fixed-length type of ta.rma, ta.sma, ta.rsi,
     ta.atr, ta.hma, ta.vwma, ta.mfi, ta.highest, ta.lowest, ta.highestbars,
     ta.lowestbars and ta.dmi. With it, where the emitter writes them: the
-    type's header, the guard for the fixed-length feature macro, and, when a
-    call of the twelve is precalculated, the failure headers and the
+    type's header, the guard for the feature macro of ta.sar, ta.rci and
+    ta.cci and the one for the fixed-length feature macro, and, when a call
+    of the twelve is precalculated, the failure headers and the
     invalid-length handler of the replay.
 
     A result type (``ta::DMIResult``) keeps its spelling. Every other byte is
@@ -223,10 +248,12 @@ def with_pine_source_ta(cpp: str) -> str:
     the twelve is one the emitter declares no member for is not recognised.
     """
     needed = set()
+    layered = set()
     for kernel, (selected, header) in _PINE_SOURCE_TYPES.items():
         cpp, changed = re.subn(rf"\b{re.escape(kernel)}\b", selected, cpp)
         if changed:
             needed.add(header)
+            layered.add(kernel)
     fixed_length = False
     for kernel, selected in _FIXED_LENGTH_TYPES.items():
         cpp, changed = re.subn(rf"\b{re.escape(kernel)}\b", selected, cpp)
@@ -234,21 +261,43 @@ def with_pine_source_ta(cpp: str) -> str:
     fixed_length = fixed_length or bool(_FIXED_LENGTH_MEMBER.search(cpp))
     if fixed_length:
         needed.add(_CHECKED_HEADER)
-    # The emitted order: the length header and its guards (the fixed
-    # ta.supertrend adapter's, then the fixed-length one), the flat-range
-    # header and its guard, the cci header, the failure headers of a checked
-    # replay, the math header.
+    # The emitted order: the length header and its guards, the flat-range
+    # header and its guard, the cci header and its guard, the failure headers
+    # of a checked replay, the math header.
     tail = (_FAILURE_HEADERS + _MATH_HEADER, _MATH_HEADER)
     if _CHECKED_HEADER in needed and _CHECKED_HEADER not in cpp:
         cpp = _before_first(cpp, _CHECKED_HEADER, (_FLAT_RANGE_HEADER,) + tail)
-    if fixed_length and _FIXED_LENGTH_GUARD not in cpp:
+    # The guards behind the length header stand in the order of the emitter's
+    # class table, each once: the fixed ta.supertrend adapter's, then the
+    # fixed-length one where the first of its twelve calls stands in that
+    # table (ta.vwma before ta.sar, ta.dmi and ta.mfi between ta.sar and
+    # ta.rci, the other nine after ta.rci), with ta.sar's and ta.rci's own.
+    guards: list[str] = []
+    if fixed_length and _FIXED_LENGTH_BEFORE_SAR.search(cpp):
+        guards.append(_FIXED_LENGTH_GUARD)
+    if "ta::SAR" in layered:
+        guards.append(_PINE_SOURCE_GUARDS["ta::SAR"])
+    if (fixed_length and _FIXED_LENGTH_GUARD not in guards
+            and _FIXED_LENGTH_BEFORE_RCI.search(cpp)):
+        guards.append(_FIXED_LENGTH_GUARD)
+    if "ta::RCI" in layered:
+        guards.append(_PINE_SOURCE_GUARDS["ta::RCI"])
+    if fixed_length and _FIXED_LENGTH_GUARD not in guards:
+        guards.append(_FIXED_LENGTH_GUARD)
+    guards = [guard for guard in guards if guard not in cpp]
+    if guards:
         written = _CHECKED_HEADER + _SUPERTREND_GUARD
         if written not in cpp:
             written = _CHECKED_HEADER
         assert cpp.count(written) == 1
-        cpp = cpp.replace(written, written + _FIXED_LENGTH_GUARD, 1)
-    if _CCI_HEADER in needed and _CCI_HEADER not in cpp:
-        cpp = _before_first(cpp, _CCI_HEADER, tail)
+        cpp = cpp.replace(written, written + "".join(guards), 1)
+    if _CCI_HEADER in needed:
+        if _CCI_HEADER not in cpp:
+            cpp = _before_first(cpp, _CCI_HEADER, tail)
+        cci_guard = _PINE_SOURCE_GUARDS["ta::CCI"]
+        if cci_guard not in cpp:
+            assert cpp.count(_CCI_HEADER) == 1
+            cpp = cpp.replace(_CCI_HEADER, _CCI_HEADER + cci_guard, 1)
     if _FIXED_LENGTH_CACHE.search(cpp) and "_pf_precalc_error" not in cpp:
         if _FAILURE_HEADERS + _MATH_HEADER not in cpp:
             assert cpp.count(_MATH_HEADER) == 1

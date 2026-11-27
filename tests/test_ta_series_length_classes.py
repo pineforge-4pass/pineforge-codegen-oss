@@ -9,7 +9,9 @@ class's ``compute`` takes, then the fixed class's other constructor arguments
 the script spells, then the per-call value last. The classes are declared in
 three engine headers, each included only by a script that uses one of its
 classes and followed by the guard of that class's feature macro. A constant
-or input length keeps its fixed-length class and constructor.
+or input length keeps its fixed-length class and constructor. A call written
+inside a loop keeps its refusal: it would call one object once on every pass
+of every bar (``LOOP_REFUSED``).
 
 TradingView refuses a per-bar value for the length of ta.ema, ta.rma, ta.rsi,
 ta.atr, ta.hma, ta.tsi, ta.macd, ta.dmi, ta.kc, ta.kcw and ta.rci, for
@@ -469,6 +471,69 @@ def test_a_per_bar_length_outside_the_lowering_stays_refused(case: str) -> None:
         assert ENGINE not in diagnostic.message
 
 
+# A call written inside a loop runs once on every pass, so the three passes
+# of ``for i = 2 to 4`` call one object three times on a bar, with the lengths
+# 2, 3 and 4. An engine series class records one sample on every call: its
+# window then counts calls, not bars, and holds the bar's close once for each
+# pass. With the closes 10, 12, 11, 15 of tests/_series_sma_oracle.py, the
+# loop over ta.wma would total 34.8 on bar 1 and 42.6 on bar 3, where
+# ta.wma(close, 2) + ta.wma(close, 3) + ta.wma(close, 4) is na on bar 1 (the
+# length 3 has two bars) and 41/3 + 79/6 + 12.7 on bar 3. No value of
+# TradingView is recorded for such a call of these functions, so it keeps the
+# refusal it had before the series classes were lowered. One function of each
+# engine header first, with the whole diagnostic; then every row of ``CASES``.
+LOOP = "for i = 2 to 4\n"
+LOOP_REFUSED = {
+    "wma": ("ta.wma(close, i)", "ta::WMA"),
+    "stdev": ("ta.stdev(close, i)", "ta::StdDev"),
+    "cci": ("ta.cci(close, i)", "ta::CCI"),
+}
+
+
+@pytest.mark.parametrize("case", list(LOOP_REFUSED))
+def test_a_loop_counter_length_keeps_its_refusal(case: str) -> None:
+    call, class_name = LOOP_REFUSED[case]
+    source = (
+        HEADER
+        + "float total = 0.0\n"
+        + LOOP
+        + f"    total += {call}\n"
+        + "plot(total)\n"
+    )
+    # On a generator that lowers the call this transpile succeeds.
+    diagnostic = _refusal(source)
+    assert diagnostic.code == PLAIN_CODE
+    assert diagnostic.message.startswith(
+        f"Unsupported TA constructor length 'i' for {class_name}: ")
+    assert ENGINE not in diagnostic.message
+    # The header takes two lines, ``total`` and the loop one each.
+    assert diagnostic.location.line == 5
+
+
+@pytest.mark.parametrize("case", list(CASES))
+def test_a_call_inside_a_loop_is_not_lowered_to_a_series_class(case: str) -> None:
+    # The statements of the case in the loop body, their per-call argument
+    # the loop counter, and the value each pass leaves added up.
+    body = "".join(
+        "    " + line + "\n"
+        for line in _statements(case, "out", "i").splitlines()
+    )
+    source = (
+        HEADER
+        + "float total = 0.0\n"
+        + LOOP
+        + body
+        + "    total += out\n"
+        + "plot(total)\n"
+    )
+    # On a generator that lowers the call this transpile succeeds.
+    with pytest.raises(CompileError) as caught:
+        transpile(source)
+    assert caught.value.diagnostics
+    for diagnostic in caught.value.diagnostics:
+        assert ENGINE not in diagnostic.message
+
+
 def test_a_per_bar_linreg_offset_is_refused() -> None:
     # TradingView declares ``offset`` simple. The call compiled here, with the
     # offset read on every bar, before this refusal.
@@ -499,6 +564,24 @@ def test_a_per_bar_linreg_offset_is_refused_beside_a_per_bar_length() -> None:
     assert diagnostic.message.startswith(
         "Unsupported TA constructor length 'k' for ta::Linreg: ")
     assert diagnostic.location.line == 5
+
+
+def test_a_per_bar_linreg_offset_is_refused_in_a_request_security_expression() -> None:
+    # The call written as the request's own expression: its copy is planned
+    # from the call, and the plan asks the offset before anything else. A
+    # call reached through a helper that only the request evaluates is not
+    # covered by this row.
+    source = (
+        HEADER
+        + 'float out = request.security(syminfo.tickerid, "60", '
+        + "ta.linreg(close, 5, bar_index % 3))\n"
+        + "plot(out)\n"
+    )
+    diagnostic = _refusal(source)
+    assert diagnostic.code == PLAIN_CODE
+    assert diagnostic.message.startswith("Unsupported TA constructor length '")
+    assert " for ta::Linreg: " in diagnostic.message
+    assert diagnostic.location.line == 3
 
 
 @pytest.mark.parametrize("offset", ["0", "2", 'input.int(1, "Offset")'])
