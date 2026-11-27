@@ -22,6 +22,58 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (1.15.0)
 
+- `// @pf-trace` now reads prior values of `time`, `time_close`, `bar_index` and other built-in series even when only the pragma indexes them. An indexed built-in without traceable history reports an error at the pragma ([#486](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/486)).
+
+- `// @pf-trace` can now read bar history such as `close[1]` even when the strategy body never reads that history ([#482](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/482)).
+
+- A `// @pf-trace` expression that reads the history of a scalar built-in, such as `time[1]`, `bar_index[1]` or `strategy.position_size[1]`, now reads the same history buffer as the strategy body. An indexed built-in that has no history is reported as `PF-E5099` instead of tracing its current value ([#486](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/486)).
+
+- String variables named after calendar built-ins, such as `second` or `minute`,
+  now compile when concatenated with another string.
+- `ta.pivothigh` and `ta.pivotlow` accept a `leftbars` or `rightbars` that
+  changes from bar to bar, in both overloads. Such a call used to be refused
+  with `PF-E5009` ("Unsupported TA constructor length"); it now reads its
+  source and both strengths on every call. Calls with constant or input
+  strengths emit the same C++ as before.
+- `ta.mom` and `ta.roc` read `source[length]` by bar position, as TradingView
+  does: a bar whose source is `na` keeps its place, and the call returns `na`
+  when the current value or the value `length` bars back is `na`. They used to
+  count back over present values, which read an older value for the `length`
+  bars after an `na` bar. Results change only for a source that has an `na`
+  bar after its first value. A call that runs only on some bars and reads its
+  own held source (below `and`, `or` or `?:`, or in a top-level `if` block) is
+  unchanged. Requires the `PineMom` and `PineRoc` APIs in
+  `pineforge/source/pine_ta_length.hpp`; regenerate C++ and relink.
+- A `ta.supertrend` call whose factor and ATR period are constants or inputs
+  now stops the run on its first execution when the factor is zero or less or
+  the ATR period is zero or less, with the error a factor that is not a
+  constant already raised ("Invalid value of the 'factor' argument (0) in the
+  'supertrend' function. It must be > 0."). Such a call used to compute.
+  Valid arguments compute what they computed before. Generated code uses the
+  paired engine's `PineFixedSupertrend` for these calls, including helper and
+  requested-context copies and precalculation, and requires
+  `PINEFORGE_HAS_PINE_FIXED_SUPERTREND` from
+  `pineforge/source/pine_ta_length.hpp`; regenerate C++ and relink.
+- `ta.vwma` follows TradingView's definition, `ta.sma(source * volume, length)
+  / ta.sma(volume, length)`, with each of the two averages skipping an `na`
+  value on its own. On a bar whose source is `na` the call used to return
+  `na`; it now returns the held average of `source * volume` over the new
+  average of `volume`, and the two averages cover different bars until
+  `length` further bars with a source have arrived. On a feed with no `na`
+  source the results can differ from the earlier ones only in the last digit
+  of a double. Generated code uses the paired engine's `PineVwma` from
+  `pineforge/source/pine_ta_length.hpp`; regenerate C++ and relink.
+- `ta.iii` and `ta.wvad` are `na` on a bar whose high equals its low, as on
+  TradingView; they used to be 0 there. A bar with a range keeps its value,
+  a genuine 0 included. Generated code uses the paired engine's `PineIii` and
+  `PineWvad` and requires `PINEFORGE_HAS_PINE_FLAT_RANGE` from
+  `pineforge/source/pine_ta_flat_range.hpp`; regenerate C++ and relink.
+- A `ta.*` call in a `?:` arm or on the right of `and` or `or`, with no `[]` read on the call, now computes the same values in a run that may precalculate (no bar magnifier, empty timeframes) as in every other run: it is evaluated only on the bars that reach it. Such a run used to fill the call on every chart bar, so with `y = bar_index % 2 == 0 ? ta.sma(close, 3) : na` the closes of the odd bars entered the average. This applies to every `ta.*` function; `ta.ema`, and `ta.sma` on the right of `and`, already behaved this way. Unconditional calls and calls read with `[]` are unchanged.
+- An untyped user function now receives the fractional result of an array
+  calculation even when another call passes an integer. Previously, a median
+  of `2.5` could arrive as `2`, changing formatted comments and order quantities
+  calculated inside the function ([#476](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/476)).
+
 - Both strategy conversions and `request.currency_rate` use the host's rate in effect on each bar for the chart and account currencies, in either direction. Without a rate for the pair the request stops the run with the currency-conversion error, or returns `na` with a run warning when `ignore_invalid_currency` is true; other pairs still stop the run ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
 
 - The `PF-W1544` warning for recorded earnings, dividends, splits and financial
@@ -85,6 +137,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `pineforge/source/pine_ta_length.hpp`; regenerate C++ and relink.
 
 - `ta.sma` accepts supported lengths that vary by bar, including lengths from inline inputs, local variables, and loop counters. Unsupported lengths that depend on `var` or `varip` still report an error, and tuple declarations that reuse a parameter name in the same function body are rejected before C++ is generated. This also fixes Unicode handling in `str.match` and `na` separators in `str.split`.
+
+- A chart `ta.sma` length that varies by bar is no longer refused with `PF-E5092` because one of the names it reads is a script-level `var` or `varip`: with `var int base = 2` and `n = base + bar_index % 2`, `ta.sma(close, n)` averages each bar's own window, and so does a `var` length that the script reassigns from its own value (`p := p + 1`). A `var` or `varip` length that is not shown to vary by bar keeps its previous handling (the constructor for an admitted literal or an input, the refusal otherwise), as do a `request.security` copy and a length that a function receives from its callers.
 
 - `strategy.convert_to_account` and `strategy.convert_to_symbol` now warn in the run report and return the input unchanged, still in its original currency, when no conversion rate is available ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
 

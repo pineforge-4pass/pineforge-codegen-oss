@@ -45,7 +45,7 @@ from typing import Any
 
 from .errors import CompileError, SourceLocation
 from .lexer import Lexer
-from .limits import TimeBudget, check_ast_depth
+from .limits import TimeBudget, check_ast_depth, iter_ast_nodes
 from .parser import ParseError, Parser
 
 
@@ -140,6 +140,7 @@ def extract_pf_trace_pragmas(source: str, *, filename: str = "<input>",
             continue
         name = m.group(1)
         expr_source = m.group(2)
+        column_offset = m.start(2)
         # Reuse the full Pine-source -> AST pipeline by lexing + parsing
         # the expression body in isolation. ``Parser._parse_expression``
         # is the same entry the statement parser uses for RHS values,
@@ -158,9 +159,16 @@ def extract_pf_trace_pragmas(source: str, *, filename: str = "<input>",
             for diagnostic in exc.diagnostics:
                 loc = diagnostic.location
                 diagnostic.location = SourceLocation(
-                    filename, loc.line + lineno - 1, loc.col, loc.end_col,
+                    filename, loc.line + lineno - 1,
+                    loc.col + column_offset, loc.end_col + column_offset,
                 )
             raise CompileError(exc.diagnostics) from exc
+        # The expression was parsed in isolation, but later diagnostics
+        # (including history refusals) point into the original comment.
+        for node, _ in iter_ast_nodes(expr_node):
+            if (loc := node.loc) is not None:
+                node.loc = SourceLocation(filename, lineno, loc.col + column_offset,
+                                          loc.end_col + column_offset)
         pragmas.append(
             PfTracePragma(
                 name=name,

@@ -391,6 +391,25 @@ UNCHANGED = (
 )
 
 
+# The reference predates the Pine-layer ta.roc object
+# (tests/test_ta_mom_roc_missing_bar.py). The lazily executed call of the
+# UNCHANGED row still reads the generator's held source history; the site's
+# member, which that lowering does not use, is declared with the new type, and
+# its header is included.
+_MATH_HEADER = "#include <pineforge/math.hpp>\n"
+_PINE_TA_HEADER = "#include <pineforge/source/pine_ta_length.hpp>\n"
+_KERNEL_ROC_MEMBER = "    ta::ROC _ta_roc_1;\n"
+_PINE_ROC_MEMBER = "    pineforge::source::PineRoc _ta_roc_1;\n"
+
+
+def _with_pine_roc_member(cpp: str) -> str:
+    assert cpp.count(_MATH_HEADER) == 1
+    assert cpp.count(_KERNEL_ROC_MEMBER) == 1
+    assert _PINE_TA_HEADER not in cpp
+    return cpp.replace(_MATH_HEADER, _PINE_TA_HEADER + _MATH_HEADER).replace(
+        _KERNEL_ROC_MEMBER, _PINE_ROC_MEMBER)
+
+
 @pytest.mark.parametrize("body", UNCHANGED)
 @pytest.mark.parametrize("header", [HEADER, HEADER.replace('")', '", max_labels_count=10)')])
 def test_under_capacity_scripts_keep_the_entire_reference_cpp(tmp_path, body, header):
@@ -402,5 +421,8 @@ def test_under_capacity_scripts_keep_the_entire_reference_cpp(tmp_path, body, he
     before = transpile_json(pine, root=reference)
     assert before["ok"], before.get("diagnostics")
     cpp = transpile(source)
-    assert cpp == before["cpp"]
+    expected = before["cpp"]
+    if "ta.roc(" in body:
+        expected = _with_pine_roc_member(expected)
+    assert cpp == expected
     assert transpile(source, history_capacity=None, drawing_capacity=None) == cpp

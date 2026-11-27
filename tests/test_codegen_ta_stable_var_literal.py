@@ -29,7 +29,16 @@ def _constructor_initializers(cpp: str) -> str:
     return match.group(1)
 
 
-def _assert_exact_pivot_ctor_rejection(
+# The call the fences below are read through: ``ta.wma`` sizes its buffer in
+# the constructor and has no series-length lowering, so a length the literal
+# admission does not take is refused there. ``ta.pivothigh`` was this call
+# until a series leftbars / rightbars was lowered per bar
+# (tests/test_codegen_ta_dynamic_length.py): an unadmitted ``var`` strength is
+# now read on every call instead of being refused.
+_FENCED_CALL = "x = ta.wma(close, p)"
+
+
+def _assert_exact_ctor_rejection(
     source: str,
     *,
     filename: str,
@@ -42,14 +51,15 @@ def _assert_exact_pivot_ctor_rejection(
     diagnostic = caught.value.diagnostics[0]
     assert diagnostic.level is Level.ERROR
     assert diagnostic.phase is Phase.CODEGEN
+    # The call's opening parenthesis: column 11 of ``x = ta.wma(close, p)``.
     assert (
         diagnostic.location.file,
         diagnostic.location.line,
         diagnostic.location.col,
         diagnostic.location.end_col,
-    ) == (filename, expected_line, 17, 18)
+    ) == (filename, expected_line, 11, 12)
     assert diagnostic.message == (
-        "Unsupported TA constructor length 'p' for ta::PivotHigh: it is "
+        "Unsupported TA constructor length 'p' for ta::WMA: it is "
         "neither a compile-time constant nor derived from an input, so "
         "PineForge cannot size the indicator buffer."
     )
@@ -219,13 +229,11 @@ def test_any_hidden_history_use_fences_stable_literal_admission(
     source = (
         '//@version=6\nstrategy("hidden history")\nvar int p = 5\n'
         + hidden_history
-        + "\nx = ta.pivothigh(high, p, p)\n"
+        + f"\n{_FENCED_CALL}\n"
     )
-    expected_line = source.splitlines().index(
-        "x = ta.pivothigh(high, p, p)"
-    ) + 1
+    expected_line = source.splitlines().index(_FENCED_CALL) + 1
 
-    _assert_exact_pivot_ctor_rejection(
+    _assert_exact_ctor_rejection(
         source,
         filename="stable-var-hidden-history.pine",
         expected_line=expected_line,
@@ -247,13 +255,11 @@ def test_any_user_declaration_fences_narrow_literal_admission(
     source = (
         '//@version=6\nstrategy("declaration fence")\nvar int p = 5\n'
         + declaration
-        + "\nx = ta.pivothigh(high, p, p)\n"
+        + f"\n{_FENCED_CALL}\n"
     )
-    expected_line = source.splitlines().index(
-        "x = ta.pivothigh(high, p, p)"
-    ) + 1
+    expected_line = source.splitlines().index(_FENCED_CALL) + 1
 
-    _assert_exact_pivot_ctor_rejection(
+    _assert_exact_ctor_rejection(
         source,
         filename="stable-var-declaration-fence.pine",
         expected_line=expected_line,
@@ -541,10 +547,12 @@ def test_callable_parameter_rebinding_fences_literal_specialization(
     ],
 )
 def test_nonimmutable_persistent_lengths_remain_rejected(binding: str) -> None:
+    # ``ta.wma``: a constructor-sized call with no series-length lowering
+    # (``_FENCED_CALL``). The binding keeps its spelling.
     source = f"""//@version=6
 strategy("persistent length guard")
 {binding}
-highPivot = ta.pivothigh(high, pivotLength, pivotLength)
+average = ta.wma(close, pivotLength)
 """
 
     with pytest.raises(CompileError, match="Unsupported TA constructor length"):
@@ -555,10 +563,10 @@ def test_same_spelled_callable_var_does_not_capture_global_literal() -> None:
     source = """//@version=6
 strategy("persistent length shadow guard")
 var int pivotLength = 5
-readPivot() =>
+readAverage() =>
     var int pivotLength = 7
-    ta.pivothigh(high, pivotLength, pivotLength)
-highPivot = readPivot()
+    ta.wma(close, pivotLength)
+average = readAverage()
 """
 
     with pytest.raises(CompileError, match="Unsupported TA constructor length"):
@@ -571,7 +579,7 @@ strategy("persistent block length shadow guard")
 var int pivotLength = 5
 if close > open
     int pivotLength = int(close)
-    highPivot = ta.pivothigh(high, pivotLength, pivotLength)
+    average = ta.wma(close, pivotLength)
 """
 
     with pytest.raises(CompileError, match="Unsupported TA constructor length"):
@@ -583,7 +591,7 @@ def test_same_spelled_loop_binder_does_not_capture_global_literal() -> None:
 strategy("persistent loop length shadow guard")
 var int pivotLength = 5
 for pivotLength = 1 to int(close)
-    highPivot = ta.pivothigh(high, pivotLength, pivotLength)
+    average = ta.wma(close, pivotLength)
 """
 
     with pytest.raises(CompileError, match="Unsupported TA constructor length"):

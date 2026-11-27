@@ -1030,8 +1030,9 @@ def test_other_ta_and_input_scripts_keep_complete_cpp(source, reference, tmp_pat
         "function-derived-integer": {"precalc": False},
         "integer-arithmetic": {"precalc": True},
         "kc-plain-multiplier-input": {"precalc": True, "kc": True},
-        "literal-float-settings": {"precalc": True, "kc": True},
+        "literal-float-settings": {"precalc": True, "kc": True, "supertrend": True},
         "requested-integer-history": {"precalc": True},
+        "supertrend-plain-factor-input": {"precalc": True, "supertrend": True},
     }
     _assert_reference_cpp(
         source, reference, tmp_path, checked=checked.get(request.node.callspec.id),
