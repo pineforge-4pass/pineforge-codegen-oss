@@ -78,7 +78,7 @@ def runs(tmp_path_factory):
 
 def _apply_execution_windows(expected, feed, windows):
     # The November #458 probes supersede the sparse extrema columns in the
-    # September tapes. Derive those columns from the April OHLC; all other
+    # September fixtures. Derive those columns from the April OHLC; all other
     # fields still come directly from the archived CSV.
     with feed.open() as stream:
         bars = list(csv.DictReader(stream))

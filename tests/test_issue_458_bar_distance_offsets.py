@@ -33,8 +33,8 @@ def test_bar_distance_offsets(tmp_path):
                 out.write(line)
     assert stamps == grid, f"NOT COMPARED: 15m chart grid; expected={grid}, native={stamps}"
 
-    tape = (FIXTURE / "tv-458sw3-ids.txt").read_text(encoding="ascii")
-    expected = [line for line in tape.splitlines() if not line.startswith("#")]
+    pinned = (FIXTURE / "tv-458sw3-ids.txt").read_text(encoding="ascii")
+    expected = [line for line in pinned.splitlines() if not line.startswith("#")]
     deciding = [str(b) for b in range(9, 300) if b % 9 in (0, 1)]
     fixture_bars = [entry.partition("|")[0] for entry in expected]
     assert fixture_bars == deciding, (
