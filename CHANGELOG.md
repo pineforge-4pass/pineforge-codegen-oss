@@ -77,7 +77,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
   average of `volume`, and the two averages cover different bars until
   `length` further bars with a source have arrived. On a feed with no `na`
   source the results can differ from the earlier ones only in the last digit
-  of a double. Generated code uses the paired engine's `PineVwma` from
+  of a double. Generated code uses the paired engine's `PineFixedVwma`, which
+  wraps `PineVwma` (see the fixed-length entry below), from
   `pineforge/source/pine_ta_length.hpp`; regenerate C++ and relink.
 - `ta.iii` and `ta.wvad` are `na` on a bar whose high equals its low, as on
   TradingView; they used to be 0 there. A bar with a range keeps its value,
@@ -85,9 +86,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `PineWvad` and requires `PINEFORGE_HAS_PINE_FLAT_RANGE` from
   `pineforge/source/pine_ta_flat_range.hpp`; regenerate C++ and relink.
 - `ta.sar`, `ta.dmi`, `ta.mfi`, `ta.rci` and `ta.cci` are built from the paired
-  engine's Pine-layer types `PineSar`, `PineDmiReference`, `PineMfi`, `PineRci`
-  and `PineCci`, which apply the Pine rule where the engine's own class
-  differs. Results change only on these bars, and in what follows from them:
+  engine's Pine-layer types `PineSar`, `PineFixedDmi`, `PineFixedMfi`,
+  `PineRci` and `PineCci`, which apply the Pine rule where the engine's own
+  class differs (`PineFixedDmi` and `PineFixedMfi` wrap `PineDmiReference` and
+  `PineMfi`, which hold the rule; see the fixed-length entry below). Results
+  change only on these bars, and in what follows from them:
   `ta.sar` compares prices as a Pine relational operator does, so two values
   within 1e-10 of each other read as equal; `ta.dmi` keeps both directional
   indices on a bar whose averaged true range is zero, where all three results
@@ -99,11 +102,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
   four and `pineforge/source/pine_ta_cci.hpp` for `ta.cci`, and reserves the
   names `PINEFORGE_HAS_PINE_SAR`, `PINEFORGE_HAS_PINE_DMI_REFERENCE`,
   `PINEFORGE_HAS_PINE_MFI`, `PINEFORGE_HAS_PINE_RCI` and
-  `PINEFORGE_HAS_PINE_CCI`. A script with `ta.sar`, `ta.rci` or `ta.cci`
-  requires `PINEFORGE_HAS_PINE_SAR`, `PINEFORGE_HAS_PINE_RCI` or
-  `PINEFORGE_HAS_PINE_CCI` after the include, so an engine header without the
-  type stops the build at an `#error` that names the macro. Regenerate C++
-  and relink.
+  `PINEFORGE_HAS_PINE_CCI`. Generated code that declares `PineSar`, `PineRci`
+  or `PineCci` requires `PINEFORGE_HAS_PINE_SAR`, `PINEFORGE_HAS_PINE_RCI` or
+  `PINEFORGE_HAS_PINE_CCI` after the include: an engine whose header lacks
+  the type stops the build at an `#error` that names the macro. An engine
+  without the header file itself (`pineforge/source/pine_ta_cci.hpp` for
+  `ta.cci`) stops earlier, at the `#include`. Regenerate C++ and relink.
 - A chart call whose length the script computes on each bar is no longer
   refused with `PF-E5009` for `ta.wma`, `ta.vwma`, `ta.alma`, `ta.linreg`,
   `ta.bb`, `ta.bbw`, `ta.stdev`, `ta.variance`, `ta.dev`, `ta.range`,
@@ -154,6 +158,21 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `if` body (#458, above) is not declared with these types on the chart: with
   a constant or input length of zero or less it still returns `na`.
   Regenerate C++ and relink.
+- Generated code requires a `PINEFORGE_HAS_PINE_*` feature macro after an
+  engine header's include only when it declares an object of the type the
+  macro stands for (the type itself, or the object a simple length builds on
+  the call's first execution). A script whose only call of such a function
+  declares another type or none used to carry the `#ifndef` / `#error` guard
+  as well: a call with a per-bar length (it declares the function's
+  `Series*` class, which keeps its own macro), a `ta.lowest` or `ta.highest`
+  call that uses the executions of a top-level `if` body, a `ta.supertrend`
+  whose factor is not a constant or an input, and a call in a function the
+  script never calls. This covers `PINEFORGE_HAS_PINE_SAR`,
+  `PINEFORGE_HAS_PINE_RCI`, `PINEFORGE_HAS_PINE_CCI`,
+  `PINEFORGE_HAS_PINE_FIXED_LENGTH`, `PINEFORGE_HAS_PINE_FIXED_SUPERTREND` and
+  `PINEFORGE_HAS_PINE_FLAT_RANGE`. The include lines are unchanged. A script
+  that declares the type keeps its guard; the fixed-length guard, one macro
+  for twelve types, now stands with the first of them the script declares.
 - A `ta.*` call in a `?:` arm or on the right of `and` or `or`, with no `[]` read on the call, now computes the same values in a run that may precalculate (no bar magnifier, empty timeframes) as in every other run: it is evaluated only on the bars that reach it. Such a run used to fill the call on every chart bar, so with `y = bar_index % 2 == 0 ? ta.sma(close, 3) : na` the closes of the odd bars entered the average. This applies to every `ta.*` function; `ta.ema`, and `ta.sma` on the right of `and`, already behaved this way. Unconditional calls and calls read with `[]` are unchanged.
 - An untyped user function now receives the fractional result of an array
   calculation even when another call passes an integer. Previously, a median

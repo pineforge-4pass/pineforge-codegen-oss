@@ -205,15 +205,17 @@ _FIXED_LENGTH_GUARD = (
 _FIXED_LENGTH_FUNCTIONS = (
     "rma|sma|rsi|atr|hma|vwma|mfi|highest|lowest|highestbars|lowestbars|dmi"
 )
-# A member of one of the twelve calls, whatever its type: the guard is written
-# for a script that has such a call, a call with a per-bar length included.
+# A member of one of the twelve calls, whatever its type: the length header is
+# written for a script that has such a call, a call with a per-bar length
+# included. The guard is not: it is written for a script that declares one of
+# the twelve types, which is where the reference spells the kernel class.
 _FIXED_LENGTH_MEMBER = re.compile(rf"_ta_(?:{_FIXED_LENGTH_FUNCTIONS})_\d")
-# The members of the twelve whose row stands before ta.sar's in the emitter's
-# class table (``_TA_PINE_LAYER_CLASSES``), and before ta.rci's: the
-# fixed-length guard is written where the first row of a call the script has
-# stands.
-_FIXED_LENGTH_BEFORE_SAR = re.compile(r"_ta_vwma_\d")
-_FIXED_LENGTH_BEFORE_RCI = re.compile(r"_ta_(?:vwma|dmi|mfi)_\d")
+# The kernel classes of the twelve whose row stands before ta.sar's in the
+# emitter's class table (``_TA_PINE_LAYER_CLASSES``), and before ta.rci's: the
+# fixed-length guard is written where the first row of a type the script
+# declares stands.
+_FIXED_LENGTH_BEFORE_SAR = frozenset({"ta::VWMA"})
+_FIXED_LENGTH_BEFORE_RCI = frozenset({"ta::VWMA", "ta::DMI", "ta::MFI"})
 # The cache of a precalculated call of the twelve: its replay is checked.
 _FIXED_LENGTH_CACHE = re.compile(
     rf"^    std::vector<[^;\n]*> _precalc__ta_(?:{_FIXED_LENGTH_FUNCTIONS})_\w+;$",
@@ -254,12 +256,15 @@ def with_pine_source_ta(cpp: str) -> str:
         if changed:
             needed.add(header)
             layered.add(kernel)
-    fixed_length = False
+    # The kernel classes of the twelve the reference spells: a member, a reset
+    # or a factory of that class is one of the checked type today, and a
+    # script that declares the type carries the guard of its feature macro.
+    fixed_length = set()
     for kernel, selected in _FIXED_LENGTH_TYPES.items():
         cpp, changed = re.subn(rf"\b{re.escape(kernel)}\b", selected, cpp)
-        fixed_length = fixed_length or bool(changed)
-    fixed_length = fixed_length or bool(_FIXED_LENGTH_MEMBER.search(cpp))
-    if fixed_length:
+        if changed:
+            fixed_length.add(kernel)
+    if fixed_length or _FIXED_LENGTH_MEMBER.search(cpp):
         needed.add(_CHECKED_HEADER)
     # The emitted order: the length header and its guards, the flat-range
     # header and its guard, the cci header and its guard, the failure headers
@@ -269,16 +274,17 @@ def with_pine_source_ta(cpp: str) -> str:
         cpp = _before_first(cpp, _CHECKED_HEADER, (_FLAT_RANGE_HEADER,) + tail)
     # The guards behind the length header stand in the order of the emitter's
     # class table, each once: the fixed ta.supertrend adapter's, then the
-    # fixed-length one where the first of its twelve calls stands in that
-    # table (ta.vwma before ta.sar, ta.dmi and ta.mfi between ta.sar and
-    # ta.rci, the other nine after ta.rci), with ta.sar's and ta.rci's own.
+    # fixed-length one where the first of its twelve types the script
+    # declares stands in that table (ta.vwma before ta.sar, ta.dmi and ta.mfi
+    # between ta.sar and ta.rci, the other nine after ta.rci), with ta.sar's
+    # and ta.rci's own.
     guards: list[str] = []
-    if fixed_length and _FIXED_LENGTH_BEFORE_SAR.search(cpp):
+    if fixed_length & _FIXED_LENGTH_BEFORE_SAR:
         guards.append(_FIXED_LENGTH_GUARD)
     if "ta::SAR" in layered:
         guards.append(_PINE_SOURCE_GUARDS["ta::SAR"])
-    if (fixed_length and _FIXED_LENGTH_GUARD not in guards
-            and _FIXED_LENGTH_BEFORE_RCI.search(cpp)):
+    if (_FIXED_LENGTH_GUARD not in guards
+            and fixed_length & _FIXED_LENGTH_BEFORE_RCI):
         guards.append(_FIXED_LENGTH_GUARD)
     if "ta::RCI" in layered:
         guards.append(_PINE_SOURCE_GUARDS["ta::RCI"])
