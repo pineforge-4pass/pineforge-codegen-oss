@@ -3850,18 +3850,40 @@ class SecurityEmitter:
 
         return walk(body, sampled)
 
-    @staticmethod
-    def _security_sampled_argument(name, bindings):
-        """A runtime value/history pair, separate from lexical AST lookup."""
+    def _security_sampled_argument(self, name, bindings, *, type_query=False):
+        """Look up an emitted sample, or its declaration when querying types."""
         for frame in reversed(bindings or ()):
             if name not in frame:
                 continue
             bound = frame[name]
             if isinstance(bound, Identifier) and bound.name == name:
                 continue
-            return (frame.samples.get(name)
-                    if isinstance(frame, _SecurityHelperArgumentFrame) else None)
+            if not isinstance(frame, _SecurityHelperArgumentFrame):
+                return None
+            sample = frame.samples.get(name)
+            if sample is None and type_query and frame.call is not None:
+                # Type queries rebuild the callee's frame without emitting
+                # its prelude. The field type belongs to the same written
+                # call path; the prelude's C++ local is not in scope here.
+                cells = self._security_sparse_cells(getattr(self, "_security_arg_history_sec", None))
+                if cells:
+                    path = self._security_argument_call_path((*frame.caller_stack, frame))
+                    sample = cells.get((path, name))
+            return sample
         return None
+
+    def _security_sparse_history_type(self, node, bindings):
+        if (bindings and isinstance(node, Subscript) and isinstance(node.object, Identifier)
+                and not self._security_identifier_is_global_binding(node.object)):
+            sample = self._security_sampled_argument(
+                node.object.name, bindings, type_query=True)
+            if sample is not None:
+                return sample.completed_type
+        return None
+
+    def _security_sparse_cells(self, sec_id):
+        # A standalone emitter enumerating expression history has no call plan.
+        return getattr(self, "_security_sparse_arg_histories", {}).get(sec_id, {})
 
     def _security_dependency_children(self, node):
         """Authored children in source order on this request's clock."""
@@ -4998,8 +5020,7 @@ class SecurityEmitter:
         for (sid, _node_id), meta in self._security_expr_hist_by_node.items():
             if sid == sec_id:
                 names.append(meta["name"])
-        names.extend(cell.member for cell in self._security_sparse_arg_histories.get(
-            sec_id, {}).values())
+        names.extend(cell.member for cell in self._security_sparse_cells(sec_id).values())
         return names
 
     def _emit_security_expr_hist_members(
@@ -5040,7 +5061,7 @@ class SecurityEmitter:
                 "may_skip": may_skip,
             }
             lines.append(f"    Series<{cpp_t}> {name}{mbb_suffix};")
-        for cell in self._security_sparse_arg_histories.get(sec_id, {}).values():
+        for cell in self._security_sparse_cells(sec_id).values():
             lines.append(f"    Series<{cell.completed_type}> {cell.member}{mbb_suffix};")
 
     def _build_security_math_call(
@@ -5192,6 +5213,11 @@ class SecurityEmitter:
             return node is not None
         if self._text_type(node) == "bool":
             return False
+        history_type = self._security_sparse_history_type(node, bindings)
+        if history_type is not None:
+            # Even a never-missing argument has missing samples before the
+            # requested call site has accumulated enough history.
+            return history_type in ("int", "int64_t")
         if self._security_emits_double(node, bindings):
             return False
         if isinstance(node, Subscript) and isinstance(node.object, Identifier):
@@ -11504,9 +11530,13 @@ class SecurityEmitter:
         if node is None or depth > 64:
             return False
         if isinstance(node, Identifier):
-            sample = self._security_sampled_argument(node.name, helper_binding_stack)
+            sample = self._security_sampled_argument(
+                node.name, helper_binding_stack, type_query=True)
             if sample is not None:
                 return sample.completed_type in (None, "double")
+        history_type = self._security_sparse_history_type(node, helper_binding_stack)
+        if history_type is not None:
+            return history_type == "double"
         if (isinstance(node, Subscript)
                 and id(node) in getattr(self, "_security_double_hist_nodes", ())):
             # A global's history read on the requested clock is a double
