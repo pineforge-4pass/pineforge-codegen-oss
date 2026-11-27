@@ -991,12 +991,14 @@ what TradingView refuses or rejects. Beyond these checks a template's exact
 wording is not pinned. A text no template renders carries `PF-E0000` /
 `PF-W0000` with the text in `args.message` (and `args.hint`); the test suite
 refuses it. The `message` field contains the English rendering. For 1.15.0,
-`PF-W1520` clarifies that the value comes from the run's symbol metadata,
-`PF-W1544`'s hint says that the request returns `na` for a bar without a
-recorded value, and the messages of `PF-E6067`, `PF-E6068`, `PF-E6069`,
+`PF-W1520` says that the field is `na` if the run supplies no value in its
+symbol metadata. `PF-W1521` and `PF-W1522` describe fields PineForge always
+returns `na` for. `PF-W1522` is used for a read inside a condition; it describes
+only the field's value. `PF-W1544`'s hint says that the request returns `na`
+for a bar without a recorded value, and `PF-E6067`, `PF-E6068`, `PF-E6069`,
 `PF-E6072`, `PF-E6073`, `PF-E6074` and `PF-W5010` no longer name a path into
 the test fixtures (the explanation of `PF-W5010` is reworded with its message);
-each keeps its code, severity and arguments.
+each catalog entry keeps its code, severity and arguments.
 `runtime.error` text a strategy
 authors is not a transpile diagnostic. Since 1.5.0 an uncatalogued note uses
 the existing PF-W0000 fallback with its actual `note` level preserved;
