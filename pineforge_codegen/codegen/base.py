@@ -885,6 +885,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # the evaluator being emitted has read.
         self._security_call_clock: dict | None = None
         self._security_call_clocks: dict | None = None
+        # The ta.* variants the evaluator being emitted leaves to its sparse
+        # calls, and the text of each sparse call it has lowered.
+        self._security_call_ta: dict | None = None
+        self._security_call_lowerings: dict | None = None
         self._security_arg_history_sec: int | None = None
         self._security_arg_history_discovering = False
         self._security_arg_call_values: dict[tuple, str] = {}
