@@ -88,6 +88,19 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 - `strategy.convert_to_account` and `strategy.convert_to_symbol` now warn in the run report and return the input unchanged, still in its original currency, when no conversion rate is available ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
 
+### Known issues
+
+- Fractional arguments to user functions can be truncated. When an untyped
+  function parameter receives a fractional value at one call site and an
+  integer at another, the fraction can be lost before the function runs. This
+  can change an order quantity: for example, doubling 2.5 can place an order
+  for 4 units instead of 5. The first affected release is 1.13.0. There is no
+  verified workaround. Fixed in the next release for the reported forms. The
+  same truncation remains when the argument's array type cannot be proven from
+  syntax (for example values read through `array.get`, `map.get`, UDT fields
+  or `for … in` elements); that case is tracked in [#490](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/490)
+  ([#476](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/476)).
+
 ## 1.13.0 — 2026-11-18
 
 - Strategy sizing constants retain their string values in expressions, aliases
@@ -187,6 +200,19 @@ supported as exact pairs; on the 0.x line they are independent. See the
   Compound assignments in requested selections retain the lexical binding
   of their target and its request-owned `var` or `varip` storage.
   See [#393](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/393).
+
+### Known issues
+
+- Fractional arguments to user functions can be truncated. When an untyped
+  function parameter receives a fractional value at one call site and an
+  integer at another, the fraction can be lost before the function runs. This
+  can change an order quantity: for example, doubling 2.5 can place an order
+  for 4 units instead of 5. The first affected release is 1.13.0. There is no
+  verified workaround. Fixed in the next release for the reported forms. The
+  same truncation remains when the argument's array type cannot be proven from
+  syntax (for example values read through `array.get`, `map.get`, UDT fields
+  or `for … in` elements); that case is tracked in [#490](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/490)
+  ([#476](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/476)).
 
 ## 1.12.0 — 2026-11-12
 
