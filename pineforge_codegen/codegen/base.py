@@ -877,6 +877,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # frozen records, so speculative evaluator restore is two levels deep.
         self._security_arg_inventory: dict[int, dict] = {}
         self._security_arg_histories: dict[int, dict] = {}
+        self._security_sparse_arg_histories: dict[int, dict] = {}
+        # Written call path -> ordinal of that call's own clock members.
+        self._security_sparse_call_paths: dict[int, dict] = {}
+        self._security_lazy_call_ids: set[int] = set()
+        # The sparse call whose body is being lowered, and the call clocks
+        # the evaluator being emitted has read.
+        self._security_call_clock: dict | None = None
+        self._security_call_clocks: dict | None = None
         self._security_arg_history_sec: int | None = None
         self._security_arg_history_discovering = False
         self._security_arg_call_values: dict[tuple, str] = {}
@@ -5886,6 +5894,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             )
         
         # request.security state
+        if self._security_calls and self.ctx.func_series_vars:
+            self._security_lazy_call_ids = self._security_conditional_calls()
         for item in self._security_calls:
             sec_id = item["sec_id"]
             expr_node = item["expr_node"]

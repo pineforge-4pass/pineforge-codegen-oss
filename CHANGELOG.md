@@ -22,6 +22,16 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (1.15.0)
 
+- Inside `request.security`, a conditionally called helper that indexes a bar
+  field argument now counts completed calls at that site. For `f(x) => x[3]`,
+  `f(time)` returns the time from three calls ago, even when the calls skip
+  requested bars. A separate call that runs on every bar keeps its own clock.
+  A value the helper keeps between such calls, such as a local it reads with
+  history, advances with the same completed calls. This applies to
+  `request.security`; `request.security_lower_tf` and requests of another
+  symbol, of Heikin-Ashi bars or with a run-time timeframe are unchanged
+  ([#466](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/466)).
+
 - In the then body of a top-level chart `if`, a direct reassignment such as
   `x := ta.lowest(src, length)` uses the last `length` executions. This covers
   `ta.lowest` and `ta.highest` with literal, input, simple or series lengths,
