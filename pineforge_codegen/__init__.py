@@ -4,8 +4,9 @@ from collections.abc import Mapping
 
 from .lexer import Lexer
 from .parser import Parser
-from .analyzer import Analyzer
+from .analyzer import BAR_FIELDS, Analyzer
 from .analyzer.value_bindings import ValueBindings
+from .ast_nodes import Identifier, Subscript
 from .codegen import CodeGen
 from .codegen.capacities import validate_capacity_options as _validate_capacity_options
 from .cpp_allowlist import REASONS, check_generated_cpp
@@ -19,7 +20,10 @@ from .finite_ta_length import expand_finite_choice_extrema_lengths
 from .function_overloads import bind_scalar_overloads
 from .input_keys import assign_input_keys
 from .library_inline import inline_libraries
-from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
+from .limits import (
+    TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom,
+    iter_ast_nodes,
+)
 from .method_binding import validate_call_argument_order
 from .pragmas import extract_pf_trace_pragmas
 from .request_discovery import discover_requests, request_sites
@@ -112,11 +116,16 @@ def _generate(pine_source: str, check_support: bool, filename: str,
             ctx = Analyzer(ast, filename=filename, budget=budget,
                            session_clones=clones).analyze()
         budget.check(phase=Phase.ANALYZER)
-        # Attach after analysis: pragma expressions are not part of the
-        # program body, so the analyzer never inspects them; the codegen
-        # consumes them directly from the context to emit the on_bar tail
-        # ``if (trace_enabled_) { trace(...); ... }`` block.
+        # Trace expressions run at script scope, outside the AST the analyzer
+        # visits. Register their indexed bar fields before codegen declares
+        # and advances the history buffers shared by body and trace reads.
         ctx.pf_trace_pragmas = pragmas
+        for pragma in pragmas:
+            ctx.series_bar_fields.update(
+                node.object.name for node, _ in iter_ast_nodes(pragma.expr_node)
+                if isinstance(node, Subscript) and isinstance(node.object, Identifier)
+                and node.object.name in BAR_FIELDS
+            )
         try:
             capacity_options = {}
             if history_capacity is not None:
