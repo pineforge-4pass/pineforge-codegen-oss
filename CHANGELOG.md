@@ -28,11 +28,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the calls skip requested bars. A separate call that runs on every bar keeps
   its own clock. What the helper keeps between such calls advances with the
   same completed calls: a local it reads with history, a `var`, and a `ta.*`
-  call in its body, which no longer advances on requested bars that skip the
-  helper. A `ta.*` result read with history, such as `ta.sma(x[1], 5)[1]`,
-  still advances on every requested bar. A `var` takes its first value from
-  the first completed call, and a call that a helper reads in more than one
-  place keeps one state. This applies to
+  call in its body. `ta.sma(x, 5)[1]` reads the average from the previous
+  completed call, even when requested bars were skipped. Two reads of one
+  written call share its state, including reads in different blocks.
+  A helper's `var` takes its seed from the confirmed evaluation of its first
+  call, including when the helper runs on every requested bar. The
+  completed-call history applies to
   `request.security`; `request.security_lower_tf` and requests of another
   symbol, of Heikin-Ashi bars or with a run-time timeframe are unchanged
   ([#466](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/466)).
