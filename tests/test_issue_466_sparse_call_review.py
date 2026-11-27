@@ -336,10 +336,8 @@ plot(request.security(syminfo.tickerid, "15", sample()))
 # --- Byte control -----------------------------------------------------------
 
 def test_dense_helper_state_keeps_base_cpp(tmp_path):
-    # No conditional call: a helper's ta.* sites, locals read with history,
-    # ``var`` and parameter history all keep the requested-bar clock, and the
-    # C++ the base emitted (the shape of
-    # tests/test_security_helper_local_var.py's concordance probe).
+    # ``dir`` has a literal seed, even though its later stores read the bar.
+    # Keep the entire base result for this concordance shape.
     before = _same_outcome_as_base("""//@version=6
 strategy("Dense helper state")
 int almaLen = 9
