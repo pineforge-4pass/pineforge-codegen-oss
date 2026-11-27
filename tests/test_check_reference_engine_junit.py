@@ -18,6 +18,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "check_reference_engine_junit.py"
 PUBLIC = ROOT / "tests" / "reference_engine" / "public_ids.txt"
 REFERENCE = ROOT / "tests" / "reference_engine" / "needs_reference_ids.txt"
+# The private-fixture cases that need the reference engine. They skip on a
+# public runner, so they are never public ids; a runner that has the fixtures
+# gives the check this list as both of its lists.
+PRIVATE_REFERENCE = ROOT / "tests" / "reference_engine" / "private_needs_reference_ids.txt"
 # Two cases that need private fixtures, skipped with the helper's own text.
 PRIVATE_SKIPS = (
     ("tests/test_e2e_session_ismarket.py::test_private_tapes_are_the_recorded_exports",
@@ -79,13 +83,21 @@ def id_list(tmp_path, ids):
     return path
 
 
-def check(tmp_path, junit, *, public=PUBLIC):
-    """Run the check on this JUnit text with the committed reference list."""
+def private_ids():
+    """The committed private-fixture ids that need the reference engine."""
+    assert PRIVATE_REFERENCE.is_file(), f"missing: {PRIVATE_REFERENCE.relative_to(ROOT)}"
+    private = PRIVATE_REFERENCE.read_text(encoding="utf-8").splitlines()
+    assert private, f"empty: {PRIVATE_REFERENCE.relative_to(ROOT)}"
+    return private
+
+
+def check(tmp_path, junit, *, public=PUBLIC, reference=REFERENCE):
+    """Run the check on this JUnit text, with the committed lists unless named."""
     junit_path = tmp_path / "junit.xml"
     junit_path.write_text(junit, encoding="utf-8")
     return subprocess.run(
         [sys.executable, "-I", str(SCRIPT), "--junit", str(junit_path),
-         "--public", str(public), "--reference", str(REFERENCE)],
+         "--public", str(public), "--reference", str(reference)],
         capture_output=True, text=True, check=False,
     )
 
@@ -140,4 +152,24 @@ def test_a_failure_fails(tmp_path):
     assert fail_lines(result) == [
         "FAIL: (a) the report counts failures=1 errors=0",
         f"FAIL: (a) failure: {failed}: {message}",
+    ]
+
+
+def test_no_private_reference_case_is_a_public_id():
+    assert not set(private_ids()) & set(public_ids())
+
+
+def test_a_private_reference_case_that_skips_fails(tmp_path):
+    """With the private fixtures present the private list is both lists of the
+    check: every case of it runs and passes, and a skip is not coverage."""
+    private = private_ids()
+    lists = {"public": PRIVATE_REFERENCE, "reference": PRIVATE_REFERENCE}
+    clean = check(tmp_path, report(private), **lists)
+    assert clean.returncode == 0, clean.stdout + clean.stderr
+    skipped = (private[-1], "private fixtures not present: session_ismarket/example/tape.csv")
+    result = check(tmp_path, report(private[:-1], skips=[skipped]), **lists)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert fail_lines(result) == [
+        f"FAIL: (c) in the public list but skipped: {skipped[0]}",
+        f"FAIL: (d) in the reference list but did not pass: {skipped[0]}",
     ]
