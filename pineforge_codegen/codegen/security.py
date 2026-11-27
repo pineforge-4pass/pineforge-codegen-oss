@@ -244,6 +244,9 @@ class _SecurityArgumentSample:
     # None marks an eager current-value argument sampled in caller scope,
     # without a backing history member; it must never supply a subscript read.
     member: str | None
+    # A sparse call commits at evaluator exit. Its ring still ends at the
+    # previous call while the body runs; its current argument is separate.
+    completed_type: str | None = None
 
 
 class SecurityEmitter:
@@ -3633,7 +3636,8 @@ class SecurityEmitter:
         inventory = getattr(self, "_security_arg_inventory", {}).get(sec_id, {})
         owner = next((frame for frame in reversed(bindings or ())
                       if read.object.name in frame), None)
-        if not isinstance(owner, _SecurityHelperArgumentFrame) or owner.call is None:
+        if (not isinstance(owner, _SecurityHelperArgumentFrame)
+                or owner.call is None or owner.method):
             return None
         info = self._func_info_map[owner.call.callee.name]
         # A string parameter authored as a price field keeps the composer's
@@ -3876,6 +3880,115 @@ class SecurityEmitter:
             if child is not nested_payload:
                 yield child
 
+    @staticmethod
+    def _security_argument_call_path(bindings) -> tuple[int, ...]:
+        return tuple(id(frame.call) for frame in bindings
+                     if isinstance(frame, _SecurityHelperArgumentFrame) and frame.call is not None)
+
+    def _security_conditional_calls(self) -> set[int]:
+        """Written calls below a lazy edge in their *own* lexical scope.
+
+        A later lazy read of a local or global does not make its initializer
+        lazy. A nested request starts a new clock, independent of its caller.
+        """
+        lazy_calls = set()
+        pending = [(self.ctx.ast, False)]
+        pending.extend((item["expr_node"], False) for item in self._security_calls)
+        seen = set()
+        while pending:
+            node, lazy = pending.pop()
+            if node is None or (id(node), lazy) in seen:
+                continue
+            seen.add((id(node), lazy))
+            if self._budget is not None:
+                self._budget.check(node.loc, Phase.CODEGEN)
+            if lazy and isinstance(node, FuncCall):
+                lazy_calls.add(id(node))
+            eager = None
+            if isinstance(node, (IfStmt, Ternary, WhileStmt)):
+                eager = (node.condition,)
+            elif isinstance(node, SwitchStmt):
+                eager = (node.expr, node.cases[0][0] if node.cases else None)
+            elif isinstance(node, BinOp) and node.op in ("and", "or"):
+                eager = (node.left,)
+            elif isinstance(node, ForStmt):
+                eager = (node.start, node.end, node.step)
+            elif isinstance(node, ForInStmt):
+                eager = (node.iterable,)
+            elif isinstance(node, VarDecl) and (node.is_var or node.is_varip):
+                eager = ()
+            for child in self._security_dependency_children(node):
+                pending.append((child, lazy or (
+                    eager is not None and all(child is not value for value in eager))))
+        return lazy_calls
+
+    def _security_register_sparse_argument(self, read, bound, bindings) -> bool:
+        """Replace dense field/offset composition only for a sparse parameter."""
+        if not self._security_arg_history_discovering or not self._security_lazy_call_ids:
+            return False
+        owner = next((frame for frame in reversed(bindings)
+                      if frame.get(read.object.name) is bound), None)
+        if not isinstance(owner, _SecurityHelperArgumentFrame) or owner.call is None:
+            return False
+        path = self._security_argument_call_path((*owner.caller_stack, owner))
+        if self._security_lazy_call_ids.isdisjoint(path):
+            return False
+        source = bound.object if isinstance(bound, Subscript) else bound
+        field = self._security_bar_history_field(source) if isinstance(source, Identifier) else None
+        if field is None:
+            return False
+        offset = (None if self._security_index_reads_helper_local(read.index, bindings)
+                  else self._resolve_security_index_literal(read.index, bindings))
+        if offset is not None and offset <= 0:
+            # [0] alone needs no persistent history; literal negatives stay
+            # with the existing composer's diagnostics.
+            return False
+        sec_id = self._security_arg_history_sec
+        cells = self._security_sparse_arg_histories.setdefault(sec_id, {})
+        key = (path, read.object.name)
+        if key not in cells:
+            cells[key] = _SecurityArgumentSample(
+                f"_pf_arg_{len(cells)}", f"_sec{sec_id}_call_hist_{len(cells)}",
+                self._security_bar_hist_type(field))
+            # A conditional wrapper can emit statements for an inner call.
+            # Keep those statements inside the wrapper's execution as well.
+            paths = self._security_sparse_call_paths.setdefault(sec_id, set())
+            for depth, call_id in enumerate(path, 1):
+                if call_id in self._security_lazy_call_ids:
+                    paths.add(path[:depth])
+            paths.add(path)
+        return True
+
+    def _security_sparse_call_prelude(self, sec_id, stack, caller_depth, render_argument):
+        """Stage sparse parameters in a lambda entered at the written call.
+
+        Return None for ordinary calls. A conditional wrapper may need the
+        lambda even with no parameters of its own, to enclose an inner call.
+        """
+        paths = self._security_sparse_call_paths.get(sec_id)
+        if not paths:
+            return None
+        path = self._security_argument_call_path(stack)
+        if path not in paths:
+            return None
+        lines = []
+        cells = self._security_sparse_arg_histories[sec_id]
+        for frame in stack[caller_depth:]:
+            for param, arg in frame.items():
+                sample = cells.get((path, param))
+                if sample is None:
+                    continue
+                value = render_argument(arg, frame.caller_stack, lines)
+                # The last call in this bar wins. Only a complete evaluation
+                # that reached the call pushes, after every read of the bar.
+                self._security_global_hist_pushes[sample.member, sample.completed_type] = None
+                lines.extend((
+                    f"        const {sample.completed_type} {sample.current} = {value};",
+                    f"        {sample.member}_next = {sample.current}; {sample.member}_set = true;",
+                ))
+                frame.samples[param] = sample
+        return lines
+
     def _collect_security_ohlc_hist_fields(
         self,
         node,
@@ -3940,6 +4053,13 @@ class SecurityEmitter:
                     bound, bound_stack = binding
                     self._security_check_price_named_local_history(n)
                     if not isinstance(bound, str):
+                        if self._security_register_sparse_argument(n, bound, bindings):
+                            # An argument's own field offset stays on the
+                            # requested-bar clock; only the parameter offset
+                            # counts calls. Each has its own dependencies.
+                            walk(bound, bound_stack)
+                            walk(n.index, bindings)
+                            return
                         local_index = n.index
                         resolved_local_index = (
                             None
@@ -4117,6 +4237,26 @@ class SecurityEmitter:
 
     def _security_bar_hist_type(self, field: str) -> str:
         return SECURITY_BAR_FIELD_TYPES.get(field, "double")
+
+    def _security_completed_history_read(
+        self, node, current: str, hist: str, cpp_t: str, offset: int | None, build_index,
+    ) -> str:
+        """The current value is outside the ring; [1] is its last commit."""
+        if offset == 0:
+            return current
+        if offset is not None:
+            if offset < 0:
+                self._codegen_error(
+                    node, "request.security() bar-field history index must be non-negative")
+            return f"{hist}[{offset - 1}]"
+        index_cpp, check = self._history_offset_initializer_cpp(
+            build_index(), node.index, "_hidx", constant=False)
+        index_cpp = self._coerce_int_slot_with_cast(index_cpp, node.index, "int")
+        return (
+            f"([&]() -> {cpp_t} {{ int _hidx = {index_cpp}; {check}"
+            f"if (is_na(_hidx)) return na<{cpp_t}>(); "
+            f"return (_hidx <= 0) ? {current} : {hist}[_hidx - 1]; }}())"
+        )
 
     def _security_call_for_request(self, node) -> dict | None:
         """The ``request.security`` site ``node`` registered, as the value
@@ -4858,6 +4998,8 @@ class SecurityEmitter:
         for (sid, _node_id), meta in self._security_expr_hist_by_node.items():
             if sid == sec_id:
                 names.append(meta["name"])
+        names.extend(cell.member for cell in self._security_sparse_arg_histories.get(
+            sec_id, {}).values())
         return names
 
     def _emit_security_expr_hist_members(
@@ -4898,6 +5040,8 @@ class SecurityEmitter:
                 "may_skip": may_skip,
             }
             lines.append(f"    Series<{cpp_t}> {name}{mbb_suffix};")
+        for cell in self._security_sparse_arg_histories.get(sec_id, {}).values():
+            lines.append(f"    Series<{cell.completed_type}> {cell.member}{mbb_suffix};")
 
     def _build_security_math_call(
         self,
@@ -6533,7 +6677,7 @@ class SecurityEmitter:
                     default = defaults[index] if index < len(defaults) else None
                     target = declared if index and arg is default else written
                     target[param] = arg
-                frames = (_SecurityHelperArgumentFrame(written, base_stack, method=True),)
+                frames = (_SecurityHelperArgumentFrame(written, base_stack, method=True, call=node),)
                 if declared:
                     frames += (_SecurityHelperArgumentFrame(declared, (), method=True),)
                 float_parameters = frozenset(
@@ -9703,11 +9847,20 @@ class SecurityEmitter:
                     expr_node.index,
                 )
             if isinstance(expr_node.object, Identifier):
+                def build_index():
+                    return self._build_security_expr(
+                        sec_id, expr_node.index, ta_range, ta_results, resolving,
+                        security_mutable_names, helper_binding_stack, emitted_lines)
+
                 sample = self._security_sampled_argument(
                     expr_node.object.name, helper_binding_stack)
                 if sample is not None and sample.member is not None:
                     offset = self._resolve_security_index_literal(
                         expr_node.index, helper_binding_stack)
+                    if sample.completed_type:
+                        return self._security_completed_history_read(
+                            expr_node, sample.current, sample.member, sample.completed_type,
+                            offset, build_index)
                     if offset is None or offset < 0:
                         self._codegen_error(
                             expr_node,
@@ -9838,49 +9991,10 @@ class SecurityEmitter:
                         expr_node.index,
                         helper_binding_stack,
                     )
-                    if idx_lit is not None:
-                        if idx_lit == 0:
-                            return self._security_bar_field_expr(field, sec_id)
-                        if idx_lit >= 1:
-                            # lookahead_off: we evaluate when an HTF bar completes; `bar` is that
-                            # bar. On the HTF series, high[0]/time[0] is the current
-                            # (just-finished) bar; high[1]/time[1] is one HTF bar back
-                            # = hist[field][0] *before* we push `bar` (Series [0] =
-                            # most recent prior push). field[k] -> hist[k-1].
-                            hist = self._security_ohlc_hist_series_cpp(sec_id, field)
-                            return f"{hist}[{idx_lit - 1}]"
-                    if idx_lit is not None:
-                        self._codegen_error(
-                            expr_node,
-                            "request.security() bar-field history index must be non-negative",
-                        )
-                    hist = self._security_ohlc_hist_series_cpp(sec_id, field)
-                    cpp_t = self._security_bar_hist_type(field)
-                    current = self._security_bar_field_expr(field, sec_id)
-                    index_cpp = self._build_security_expr(
-                        sec_id,
-                        expr_node.index,
-                        ta_range,
-                        ta_results,
-                        resolving,
-                        security_mutable_names,
-                        helper_binding_stack,
-                        emitted_lines,
-                    )
-                    index_cpp, offset_check = self._history_offset_initializer_cpp(
-                        index_cpp, expr_node.index, "_hidx", constant=False,
-                    )
-                    index_cpp = self._coerce_int_slot_with_cast(
-                        index_cpp, expr_node.index, "int"
-                    )
-                    return (
-                        f"([&]() -> {cpp_t} {{ "
-                        f"int _hidx = {index_cpp}; "
-                        f"{offset_check}"
-                        f"if (is_na(_hidx)) return na<{cpp_t}>(); "
-                        f"return (_hidx <= 0) ? {current} : {hist}[_hidx - 1]; "
-                        f"}}())"
-                    )
+                    return self._security_completed_history_read(
+                        expr_node, self._security_bar_field_expr(field, sec_id),
+                        self._security_ohlc_hist_series_cpp(sec_id, field),
+                        self._security_bar_hist_type(field), idx_lit, build_index)
 
                 # Indirect TA binding: ``v = ta.ema(close, 55)`` then
                 # ``request.security(..., v[1], ...)``. _get_ta_site below only
@@ -10420,6 +10534,13 @@ class SecurityEmitter:
                     helper_binding_stack,
                 )
                 frame = plan["binding_stack"][-1]
+                sparse_body = self._security_sparse_call_prelude(
+                    sec_id, plan["binding_stack"], len(helper_binding_stack),
+                    lambda arg, stack, lines: self._build_security_expr(
+                        sec_id, arg, ta_range, ta_results, resolving,
+                        security_mutable_names, stack, lines))
+                if sparse_body is not None:
+                    emitted_lines = sparse_body
                 sampled_call_ids = {key[0] for key in cells}
                 sampled_arguments = {
                     parameter: argument
@@ -10493,7 +10614,7 @@ class SecurityEmitter:
                         resolving,
                     )
                 resolving.remove(call_key)
-                if has_samples:
+                if has_samples and sparse_body is None:
                     # One written call is one runtime result per evaluation.
                     # Distinct AST sites never use the pure-call value key.
                     prefix = (
@@ -10508,6 +10629,11 @@ class SecurityEmitter:
                     resolved = shared[share_key] = self._security_share_pure_call(
                         sec_id, resolved
                     )
+                if sparse_body is not None:
+                    # The argument and the entire body execute inside the
+                    # caller's ?:, &&, ||, branch or loop, even for a body
+                    # that emits local declarations before its result.
+                    return "([&]() {\n" + "\n".join(sparse_body) + f"\nreturn {resolved}; }}())"
                 return resolved
 
         if (
@@ -11377,9 +11503,10 @@ class SecurityEmitter:
         ``float g = 1`` global is re-emitted as ``1``)."""
         if node is None or depth > 64:
             return False
-        if isinstance(node, Identifier) and self._security_sampled_argument(
-                node.name, helper_binding_stack) is not None:
-            return True
+        if isinstance(node, Identifier):
+            sample = self._security_sampled_argument(node.name, helper_binding_stack)
+            if sample is not None:
+                return sample.completed_type in (None, "double")
         if (isinstance(node, Subscript)
                 and id(node) in getattr(self, "_security_double_hist_nodes", ())):
             # A global's history read on the requested clock is a double
