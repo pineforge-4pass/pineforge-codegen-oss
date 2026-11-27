@@ -164,7 +164,10 @@ class TopLevelEmitter:
         lines.append('#include <pineforge/ta.hpp>')
         lines.extend(['#if __has_include(<pineforge/checked_settings.hpp>)',
                       '#include <pineforge/checked_settings.hpp>', '#endif'])
-        if self._ta_uses_dynamic_lengths() or any(
+        block_extrema = any(self._is_block_extreme(site) for site in self.ctx.ta_call_sites)
+        if block_extrema:
+            lines.append("#include <deque>")
+        if block_extrema or self._ta_uses_dynamic_lengths() or any(
             site.class_name in self._TA_CHECKED_CLASSES
             for site in self.ctx.ta_call_sites
         ):
@@ -302,57 +305,46 @@ class TopLevelEmitter:
             site.class_name for site in getattr(self.ctx, "ta_call_sites", ())
         }
 
-        block_lengths = {
-            (self._ta_dynamic_plan(site) or {}).get("kind")
-            for site in self.ctx.ta_call_sites if self._is_block_extreme(site)
-        }
-        if block_lengths - {"series_extreme"}:
-            # The kernel sees adjacent ring slots but the real chart age for
-            # warm-up. Arguments (including nested TA) evaluate on the chart
-            # before entering this scope. The clock is checkpointed with its TA.
-            lines.append("""template<class Kernel>
+        if any(self._is_block_extreme(site) for site in self.ctx.ta_call_sites):
+            lines.append("""template<bool High, bool Bars = false>
 class _PFExecutedExtreme {
-    Kernel kernel_;
-    int last_bar_ = -1;
-    int slot_ = -1;
+    struct Sample { int bar; double value; };
+    std::deque<Sample> samples_;
+    int length_ = 0;
 public:
     _PFExecutedExtreme() = default;
-    explicit _PFExecutedExtreme(int length) : kernel_(length) {}
-    template<class... Args> double compute(int bar, Args&&... args) {
-        const bool append = bar != last_bar_;
-        if (append) { last_bar_ = bar; ++slot_; }
-        ta::BarContextScope context(slot_, static_cast<long long>(slot_) - bar);
-        return append ? kernel_.compute(args...) : kernel_.recompute(args...);
+    explicit _PFExecutedExtreme(int length) : length_(length) {}
+    double compute(int bar, double src) {
+        return update(bar, src, length_);
     }
-    template<class... Args> double recompute(int bar, Args&&... args) {
-        return compute(bar, args...);
-    }
-};
-""")
-        if "series_extreme" in block_lengths:
-            # A later length may grow past every previous length. Keep all
-            # reached sources; skipped chart bars occupy no slots.
-            lines.append("""template<bool High>
-class _PFExecutedSeriesExtreme {
-    std::vector<double> samples_;
-    int last_bar_ = -1;
-public:
     double compute(int bar, double src, double length) {
-        const int n = pineforge::source::simple_ta_length(
-            length, High ? "highest" : "lowest", "length");
-        if (last_bar_ == bar) samples_.back() = src;
-        else { samples_.push_back(src); last_bar_ = bar; }
-        if (bar < n - 1) return na<double>();
-        const auto count = std::min(samples_.size(), static_cast<std::size_t>(n));
-        double best = na<double>();
-        for (auto it = samples_.end() - count; it != samples_.end(); ++it) {
-            if (!is_na(*it) && (is_na(best) || (High ? *it > best : *it < best)))
-                best = *it;
-        }
-        return best;
+        const char* name = High ? (Bars ? "highestbars" : "highest")
+                                : (Bars ? "lowestbars" : "lowest");
+        return update(bar, src, pineforge::source::simple_ta_length(length, name, "length"));
     }
-    double recompute(int bar, double src, double length) {
-        return compute(bar, src, length);
+    template<class... Args> double recompute(Args... args) {
+        return compute(args...);
+    }
+private:
+    double update(int bar, double src, int n) {
+        if (n <= 0) return na<double>();
+        if (!samples_.empty() && samples_.back().bar == bar)
+            samples_.back().value = src;
+        else
+            samples_.push_back({bar, src});
+        // A series length (no constructor length) may grow past all previous lengths.
+        if (length_ > 0 && samples_.size() > static_cast<std::size_t>(n)) samples_.pop_front();
+        if (bar < n - 1) return na<double>();
+
+        const auto count = std::min(samples_.size(), static_cast<std::size_t>(n));
+        const Sample* best = nullptr;
+        for (auto it = samples_.end() - count; it != samples_.end(); ++it) {
+            if (!is_na(it->value) && (!best || (High ? it->value > best->value
+                                                      : it->value < best->value)))
+                best = &*it;
+        }
+        if (!best) return na<double>();
+        return Bars ? static_cast<double>(best->bar - bar) : best->value;
     }
 };
 """)

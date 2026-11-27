@@ -152,10 +152,12 @@ class TaSiteHelper:
         # that call site's clone: its own constructor arguments decide.
         site = self._ta_active_site(site)
         plan = self._ta_dynamic_plan(site)
+        if self._is_block_extreme(site):
+            # FirstCallBound consumes the factory, then forwards bar and
+            # source to the same window that the series-length form uses.
+            args = f"bar_index_, {args}"
         if plan is not None:
             args = self._ta_dynamic_compute_args(site, plan, args, self._visit_expr)
-        if self._is_block_extreme(site):
-            return f"bar_index_, {args}"
         return args
 
     def _ta_active_site(self, site: "TACallSite") -> "TACallSite":
@@ -1002,7 +1004,7 @@ class TaSiteHelper:
                 site = None if history_read else self._get_ta_site(node)
                 # The #458 fixture reads a direct value from an if body. The top-level
                 # head and a call's own [k] have separate clock rules.
-                if site is not None and site.class_name in ("ta::Lowest", "ta::Highest"):
+                if site is not None and site.class_name in self._BLOCK_EXTREME_TYPES:
                     block_extrema.add(id(node))
                 if (site is not None
                         and self._ta_name_from_site(site) in self.LAZY_SOURCE_CLOCK_TA
@@ -1045,8 +1047,17 @@ class TaSiteHelper:
         self._lazy_edge_hoist_plan_cache = plan
         return plan
 
+    # Direction and result (value or bar offset) are independent of the
+    # qualifier of the window length.
+    _BLOCK_EXTREME_TYPES = {
+        "ta::Highest": "_PFExecutedExtreme<true>",
+        "ta::Lowest": "_PFExecutedExtreme<false>",
+        "ta::HighestBars": "_PFExecutedExtreme<true, true>",
+        "ta::LowestBars": "_PFExecutedExtreme<false, true>",
+    }
+
     def _is_block_extreme(self, site: "TACallSite") -> bool:
-        return (site.class_name in ("ta::Lowest", "ta::Highest")
+        return (site.class_name in self._BLOCK_EXTREME_TYPES
                 and id(site.node) in self._lazy_edge_ta_hoist_plan()["block_extrema"])
 
     def _lazy_edge_hoisted_ta_call_nodes(self) -> set[int]:
@@ -1734,8 +1745,8 @@ class TaSiteHelper:
     #   first execution; a length goes through ``simple_ta_length`` (0, a
     #   negative length or na stops the run, as TradingView does).
     # * series, for ta.highest / ta.lowest / ta.highestbars / ta.lowestbars:
-    #   re-windowed on every call -- ``pineforge::source::Series*``, the length
-    #   passed per call.
+    #   re-windowed on every call. Chart if bodies use `_PFExecutedExtreme`;
+    #   other sites use ``pineforge::source::Series*``.
     # * series, for ta.percentile_nearest_rank: each call appends to its own
     #   buffer and passes source, length and percentage to
     #   ``pineforge::source::SeriesPercentileNearestRank``.
@@ -2483,10 +2494,17 @@ class TaSiteHelper:
         """The concrete fixed object used by declarations and every factory."""
         return self._TA_CHECKED_CLASSES.get(site.class_name, site.class_name)
 
-    def _ta_plan_cpp_type(self, site: "TACallSite", plan: dict | None) -> str:
+    def _ta_kernel_type(self, site: "TACallSite", *, chart: bool) -> str:
+        if chart and self._is_block_extreme(site):
+            return self._BLOCK_EXTREME_TYPES[site.class_name]
+        return self._ta_fixed_cpp_type(site)
+
+    def _ta_plan_cpp_type(self, site: "TACallSite", plan: dict | None, *, chart: bool) -> str:
         if plan is None:
-            return self._ta_fixed_cpp_type(site)
+            return self._ta_kernel_type(site, chart=chart)
         if plan["kind"] == "series_extreme":
+            if chart and self._is_block_extreme(site):
+                return self._BLOCK_EXTREME_TYPES[site.class_name]
             return self._TA_SERIES_EXTREME_CLASSES[plan["family"]]
         if plan["kind"] == "series_percentile":
             return self._TA_SERIES_PERCENTILE_CLASS
@@ -2494,23 +2512,18 @@ class TaSiteHelper:
             return "_PFSeriesSma"
         if plan["kind"] == "supertrend":
             return "pineforge::source::PineSupertrend"
-        return f"pineforge::source::FirstCallBound<{self._ta_fixed_cpp_type(site)}>"
+        return f"pineforge::source::FirstCallBound<{self._ta_kernel_type(site, chart=chart)}>"
 
     def _ta_member_cpp_type(self, site: "TACallSite") -> str:
         """The C++ type a site's member is declared with."""
-        plan = self._ta_dynamic_plan(site)
-        if self._is_block_extreme(site):
-            if plan is not None and plan["kind"] == "series_extreme":
-                high = "true" if plan["family"] == "highest" else "false"
-                return f"_PFExecutedSeriesExtreme<{high}>"
-            return f"_PFExecutedExtreme<{self._ta_plan_cpp_type(site, plan)}>"
-        return self._ta_plan_cpp_type(site, plan)
+        return self._ta_plan_cpp_type(site, self._ta_dynamic_plan(site), chart=True)
 
     def _ta_security_member_cpp_type(self, sec_id: int, site: "TACallSite",
                                      variant: dict) -> str:
         """The C++ type of one request.security copy of a site."""
         return self._ta_plan_cpp_type(
-            site, self._ta_security_plan(sec_id, site, variant.get("binding_stack", ())))
+            site, self._ta_security_plan(sec_id, site, variant.get("binding_stack", ())),
+            chart=False)
 
     def _ta_uses_dynamic_lengths(self) -> bool:
         """Whether any live site or request.security copy takes the lowering
@@ -2643,7 +2656,8 @@ class TaSiteHelper:
                 value = (f'pineforge::source::simple_ta_length({value}, '
                          f'"{family}", "{param.name}")')
             ctor.append(value)
-        make = f"[&]() {{ return {self._ta_fixed_cpp_type(site)}({', '.join(ctor)}); }}"
+        kernel = self._ta_kernel_type(site, chart="sec_id" not in plan)
+        make = f"[&]() {{ return {kernel}({', '.join(ctor)}); }}"
         return f"{make}, {base_args}" if base_args else make
 
     def _simple_ta_top_level_decls(self) -> dict:

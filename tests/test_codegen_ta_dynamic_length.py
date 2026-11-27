@@ -8,7 +8,8 @@ rules and their tapes are in the engine header
 ``tests/test_e2e_ta_dynamic_length.py``):
 
 * series length, ta.highest / ta.lowest / ta.highestbars / ta.lowestbars:
-  ``pineforge::source::Series*``, the length passed on every call;
+  the length passed on every call, to the reached-sample window in a chart
+  if body and ``pineforge::source::Series*`` otherwise;
 * series length, ta.percentile_nearest_rank:
   ``pineforge::source::SeriesPercentileNearestRank`` appends on every call;
 * ta.supertrend: ``pineforge::source::PineSupertrend``, factor and atrPeriod
@@ -319,7 +320,7 @@ if out + acc > top
     strategy.entry("L", strategy.long)
 """
     cpp = transpile(src)
-    [local] = _members(cpp, "_PFExecutedSeriesExtreme<true>")
+    [local] = _members(cpp, "_PFExecutedExtreme<true>")
     [loop] = _members(cpp, "pineforge::source::SeriesLowest")
     [top] = _members(cpp, "pineforge::source::FirstCallBound<ta::Highest>")
     body = cpp.split("int n = ", 1)[1]
@@ -350,8 +351,8 @@ plot(out)
 
 
 def test_an_explicit_series_declaration_is_rewindowed() -> None:
-    # Both window the reached bars. The series declaration still reads its
-    # length each time, while the simple declaration binds it on first use.
+    # Both window the reached bars. The series declaration reads m, while
+    # the simple declaration binds its syminfo expression on first use.
     src = """//@version=6
 strategy("declared qualifiers")
 series int m = syminfo.type == "crypto" ? 4 : 8
@@ -364,8 +365,8 @@ if bar_index % 9 < 2
 plot(a + c)
 """
     cpp = transpile(src)
-    [series] = _members(cpp, "_PFExecutedSeriesExtreme<false>")
-    [simple] = _members(cpp, "_PFExecutedExtreme<pineforge::source::FirstCallBound<ta::Lowest>>")
+    [series] = _members(cpp, "_PFExecutedExtreme<false>")
+    [simple] = _members(cpp, "pineforge::source::FirstCallBound<_PFExecutedExtreme<false>>")
     assert "ta_number(m)" in _compute_line(cpp, series)
     assert '"crypto"' in _compute_line(cpp, simple)
     compile_cpp(cpp, label="declared_qualifiers")

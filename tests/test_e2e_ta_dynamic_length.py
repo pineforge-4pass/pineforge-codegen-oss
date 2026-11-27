@@ -6,8 +6,8 @@ TradingView accepts a length the constructor cannot take. Its Pine qualifier
 decides when the call reads it:
 
 * a series length for ta.highest / ta.lowest / ta.highestbars /
-  ta.lowestbars re-windows every call; in a chart if body highest and
-  lowest window the sources on the last ``length`` executions (#458);
+  ta.lowestbars re-windows every call; in a chart if body all four window
+  the last ``length`` executions and offsets count chart bars (#458);
 * a series length for ta.percentile_nearest_rank appends every call to its
   call site's ``pineforge::source::SeriesPercentileNearestRank`` buffer;
 * ta.supertrend reads its factor once, on its first execution
@@ -77,28 +77,31 @@ def runs(tmp_path_factory):
 
 
 def _apply_execution_windows(expected, feed, windows):
-    # PROBE-458 (2026-11-16 TradingView reading): a sparse lowest/highest
-    # windows the reached sources, for every length qualifier. Update only
-    # those fields; keep the September CSV and its provenance intact.
+    # The November #458 probes supersede the sparse extrema columns in the
+    # September tapes. Derive those columns from the April OHLC; all other
+    # fields still come directly from the archived CSV.
     with feed.open() as stream:
         bars = list(csv.DictReader(stream))
     stamps = [int(row["timestamp"]) for row in bars]
     wanted = [FIRST_BAR_MS + b * 900_000 for b in range(BARS)]
     assert stamps == wanted, f"NOT COMPARED: chart grid; expected={wanted}, native={stamps}"
-    for columns, source, length_at in windows:
+    for value_columns, offset_columns, source, length_at in windows:
         seen = []
         extreme = min if source == "low" else max
         for b, row in enumerate(bars):
             length = length_at(b)  # zero denotes an unreached site
             if not length:
                 continue
-            seen.append(Decimal(row[source]))
+            seen.append((b, Decimal(row[source])))
             if b in expected:
-                value = ("na" if b + 1 < length else
-                         format(extreme(seen[-length:]).normalize(), "f"))
+                winner, price = extreme(seen[-length:], key=lambda item: item[1])
+                value = "na" if b + 1 < length else format(price.normalize(), "f")
+                offset = "na" if b + 1 < length else str(winner - b)
                 fields = expected[b].split("|")
-                for column in columns:
+                for column in value_columns:
                     fields[column] = value
+                for column in offset_columns:
+                    fields[column] = offset
                 expected[b] = "|".join(fields)
 
 
@@ -126,9 +129,10 @@ def replay(runs, probe: str, windows=()) -> tuple[str, int]:
 
 
 def test_series_length_extremes_rewindow_every_call(runs):
-    # Only g is the sparse highest; gb is highestbars and keeps its fixture.
+    # g takes the sparse high. Every reached streak starts at length one
+    # and grows by one per adjacent bar, so gb can use its original TV ID.
     cpp, compared = replay(runs, "series_extremes", (
-        ((7,), "high", lambda b: (b - 30) % 12 + 1 if b >= 30 and (b - 30) % 12 < 8 else 0),
+        ((7,), (), "high", lambda b: (b - 30) % 12 + 1 if b >= 30 and (b - 30) % 12 < 8 else 0),
     ))
     assert "#include <pineforge/source/pine_ta_length.hpp>" in cpp
     for cls in ("SeriesLowest", "SeriesHighest", "SeriesLowestBars", "SeriesHighestBars"):
@@ -163,15 +167,13 @@ def test_simple_length_is_the_constant(runs):
 
 
 def test_simple_window_length_reads_the_execution_window(runs):
-    # PROBE-458 (2026-11-16 TradingView reading) supersedes the two
-    # September lowest columns: ls and lr both use the last five executions.
+    # SW3 pins both length forms to the same values and bar distances.
     cpp, compared = replay(runs, "simple_window", (
-        ((2, 3), "low", lambda b: 5 if b % 9 < 2 else 0),
+        ((2, 3), (), "low", lambda b: 5 if b % 9 < 2 else 0),
+        ((), (4, 5), "high", lambda b: 5 if b % 9 < 2 else 0),
     ))
-    assert "_PFExecutedExtreme<pineforge::source::FirstCallBound<ta::Lowest>> " in cpp
-    assert "pineforge::source::FirstCallBound<ta::HighestBars> " in cpp
-    assert "_PFExecutedSeriesExtreme<false> " in cpp
-    assert "pineforge::source::SeriesHighestBars " in cpp
+    assert "_PFExecutedExtreme<false> " in cpp
+    assert "_PFExecutedExtreme<true, true> " in cpp
     print(f"simple vs series window: compared {compared} entry IDs")
 
 
@@ -182,12 +184,12 @@ def test_scopes_and_request_security_copies(runs):
     # callable's request.security cloned per call site. sh and sq are chart
     # extrema inside if bodies; the five requested-context columns are not.
     cpp, compared = replay(runs, "scoping_copies", (
-        ((1,), "high", lambda b: b % 7 + 1 if b % 3 else 0),
-        ((2,), "low", lambda b: 4 if b % 9 < 2 else 0),
+        ((1,), (), "high", lambda b: b % 7 + 1 if b % 3 else 0),
+        ((2,), (), "low", lambda b: 4 if b % 9 < 2 else 0),
     ))
     assert "pineforge::source::SeriesHighest " in cpp
-    assert "_PFExecutedSeriesExtreme<true> " in cpp
-    assert "_PFExecutedSeriesExtreme<false> " in cpp
+    assert "_PFExecutedExtreme<true> " in cpp
+    assert "_PFExecutedExtreme<false> " in cpp
     assert 'tf_multiplier("60")' in cpp
     print(f"scopes and request.security copies: compared {compared} entry IDs")
 

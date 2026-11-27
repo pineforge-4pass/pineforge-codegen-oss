@@ -333,11 +333,13 @@ you delete or weaken the special case, the test will tell you.
     `cum`/`barssince`/`valuewhen`/`cross*`/`rising`/`falling`/`math.sum`
     (`LAZY_PER_EXECUTION_TA`) keep the reached-only inline compute, which is
     TradingView's per-execution clock, and never precalc.
-    A direct `ta.highest` or `ta.lowest` value in a top-level `if` body takes
-    its window from the last `length` reached sources, including the current
-    one, for literal, input, simple and series lengths (#458). This window
-    does not apply to `ta.highestbars`, `ta.lowestbars` or a history read on
-    the call (`tests/test_issue_458_last_five_executions.py`).
+    A direct `ta.highest`, `ta.lowest`, `ta.highestbars` or `ta.lowestbars`
+    in a top-level `if` body takes its window from the last `length` reached
+    sources, including the current one, for literal, input, simple and series
+    lengths (#458). The `*bars` result is the winning sample's chart bar
+    index minus the current bar index. A history read on the call keeps its
+    own clock (`tests/test_issue_458_last_five_executions.py`,
+    `tests/test_issue_458_bar_distance_offsets.py`).
     A `change`/`mom`/`roc` in a top-level
     if block -- an else-if's or a nested if's condition and statements, and
     a value-form if's -- runs only on the bars its block runs and reads
