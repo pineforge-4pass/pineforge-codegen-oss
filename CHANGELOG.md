@@ -75,7 +75,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
   four and `pineforge/source/pine_ta_cci.hpp` for `ta.cci`, and reserves the
   names `PINEFORGE_HAS_PINE_SAR`, `PINEFORGE_HAS_PINE_DMI_REFERENCE`,
   `PINEFORGE_HAS_PINE_MFI`, `PINEFORGE_HAS_PINE_RCI` and
-  `PINEFORGE_HAS_PINE_CCI`; regenerate C++ and relink.
+  `PINEFORGE_HAS_PINE_CCI`. A script with `ta.sar`, `ta.rci` or `ta.cci`
+  requires `PINEFORGE_HAS_PINE_SAR`, `PINEFORGE_HAS_PINE_RCI` or
+  `PINEFORGE_HAS_PINE_CCI` after the include, so an engine header without the
+  type stops the build at an `#error` that names the macro. Regenerate C++
+  and relink.
 - A chart call whose length the script computes on each bar is no longer
   refused with `PF-E5009` for `ta.wma`, `ta.vwma`, `ta.alma`, `ta.linreg`,
   `ta.bb`, `ta.bbw`, `ta.stdev`, `ta.variance`, `ta.dev`, `ta.range`,
@@ -93,8 +97,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   names are now reserved. A constant or input length keeps its fixed-length
   class. Still refused: such a length inside `request.security`, one a
   function receives from its caller, one that reads a script-level `var` not
-  shown to change, and any other argument of these calls that varies by bar
-  (the `mult` of `ta.bb`, for example, which TradingView refuses too).
+  shown to change, a call written inside a loop (a loop-counter length, for
+  example: the call runs once on every pass, and no TradingView value of such
+  a call is recorded), and any other argument of these calls that varies by
+  bar (the `mult` of `ta.bb`, for example, which TradingView refuses too).
 - A `ta.linreg` `offset` that varies by bar, which TradingView refuses, is now
   refused with `PF-E5009`; it used to be read on every bar. A constant or
   input offset is unchanged.

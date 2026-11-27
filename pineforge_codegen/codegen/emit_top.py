@@ -268,6 +268,23 @@ class TopLevelEmitter:
             '#error "ta.iii and ta.wvad require the paired pineforge-engine flat-range adapters (PINEFORGE_HAS_PINE_FLAT_RANGE)"',
             "#endif",
         ),
+        # The Pine-layer types of ta.sar and ta.rci (the length header) and
+        # of ta.cci (its own header): PineSar, PineRci and PineCci.
+        "PINEFORGE_HAS_PINE_SAR": (
+            "#ifndef PINEFORGE_HAS_PINE_SAR",
+            '#error "ta.sar requires the paired pineforge-engine Pine-layer adapter (PINEFORGE_HAS_PINE_SAR)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_RCI": (
+            "#ifndef PINEFORGE_HAS_PINE_RCI",
+            '#error "ta.rci requires the paired pineforge-engine Pine-layer adapter (PINEFORGE_HAS_PINE_RCI)"',
+            "#endif",
+        ),
+        "PINEFORGE_HAS_PINE_CCI": (
+            "#ifndef PINEFORGE_HAS_PINE_CCI",
+            '#error "ta.cci requires the paired pineforge-engine Pine-layer adapter (PINEFORGE_HAS_PINE_CCI)"',
+            "#endif",
+        ),
         # The series classes of pine_ta_series_ma.hpp.
         "PINEFORGE_HAS_PINE_SERIES_WMA": (
             "#ifndef PINEFORGE_HAS_PINE_SERIES_WMA",

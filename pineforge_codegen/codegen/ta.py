@@ -1730,7 +1730,9 @@ class TaSiteHelper:
     #   ta.stoch, ta.cci, ta.mfi, ta.mom, ta.roc, ta.cmo, ta.wpr, ta.cog,
     #   ta.rising, ta.falling, and the stdev multiplier of ta.vwap's bands),
     #   outside request.security, and neither a length a callable receives
-    #   from its call sites nor an unadmitted persistent length: each call
+    #   from its call sites nor an unadmitted persistent length, nor (ta.sma
+    #   excepted) a call written inside a loop
+    #   (``_ta_series_length_call_is_in_loop``): each call
     #   passes its inputs and the length its call site binds to the
     #   function's ``pineforge::source::Series*`` class (ta.sma through
     #   ``_PFSeriesSma``). A length that reads a script-level
@@ -1755,7 +1757,9 @@ class TaSiteHelper:
     # ``mult`` of ta.bb and a series ``offset`` of ta.linreg too
     # (``_ta_linreg_series_offset``). A series length of a requested-context
     # or forwarded site (``_ta_length_is_forwarded``), or one with a
-    # script-level ``var`` length that is not shown to vary by bar, keeps the
+    # script-level ``var`` length that is not shown to vary by bar, or of a
+    # call written inside a loop (``_TA_SERIES_LENGTH_LOOP_CLASSES`` names the
+    # exception), keeps the
     # refusal, as does any other constructor argument that varies by bar.
     # Constant- and input-length sites never reach this plan: they retain
     # their constructor/reset/precalculation cadence. EMA-family objects use
@@ -2318,7 +2322,9 @@ class TaSiteHelper:
         None does not say that such a length varies by bar. One the script
         shows to vary by bar (``_ta_period_is_series``) is not ``persistent``
         here: it takes the series lowering, which reads the declaration's
-        storage at the call."""
+        storage at the call. A call written inside a loop keeps the refusal
+        as well, ta.sma's excepted
+        (``_ta_series_length_call_is_in_loop``)."""
         family = self._ta_site_function(site)
         if family == "percentile_nearest_rank":
             kind = "series_percentile" if simple[refused[0]] is None else "first_call"
@@ -2343,6 +2349,7 @@ class TaSiteHelper:
             # request.security payload).
             kind = "series_pivot"
         elif (not requested and not forwarded and not persistent
+                and not self._ta_series_length_call_is_in_loop(site)
                 and self._ta_series_length_admits(site, refused, simple)):
             kind = "series_length"
         else:
@@ -2372,6 +2379,52 @@ class TaSiteHelper:
         if 0 not in refused or simple[0] is not None:
             return False
         return all(simple[pos] is not None for pos in refused if pos != 0)
+
+    # The functions of ``_TA_SERIES_LENGTH_CLASSES`` whose per-bar length is
+    # lowered for a call written inside a loop as well. Such a call runs once
+    # on every pass, so one object is called several times on a bar, each
+    # time with that pass's length (a loop counter: ``for i = 2 to 4`` with
+    # ``ta.wma(close, i)``). An engine series class records one sample on
+    # every compute(), so its window then counts calls, not bars: the bar's
+    # source is in it once for every pass. No value of TradingView is
+    # recorded for such a call of any of these functions. The one recorded
+    # for a window function called from a loop, ta.percentile_nearest_rank
+    # (the engine's pine_ta_length.hpp), is not the sum of the same calls
+    # made outside the loop, so neither rule is claimed here: the call keeps
+    # its refusal, as before these classes were lowered. ta.sma is the one
+    # row lowered before them; its loop call already compiles, and stays so.
+    # A function joins this set only with its own recorded result.
+    _TA_SERIES_LENGTH_LOOP_CLASSES = frozenset({"ta::SMA"})
+
+    def _ta_loop_call_nodes(self) -> frozenset:
+        """``id`` of every call written inside a loop: anywhere under a
+        ``for``, ``for ... in`` or ``while`` statement, its header included,
+        in the script body or in a callable's."""
+        cached = self.__dict__.get("_ta_loop_call_nodes_cache")
+        if cached is None:
+            found: set[int] = set()
+            pending = [(self.ctx.ast, False)]
+            while pending:
+                node, in_loop = pending.pop()
+                if self._budget is not None:
+                    self._budget.check(node.loc, Phase.CODEGEN)
+                if in_loop and isinstance(node, FuncCall):
+                    found.add(id(node))
+                in_loop = in_loop or isinstance(node, (ForStmt, ForInStmt, WhileStmt))
+                pending.extend((child, in_loop) for child in syntax_children(node))
+            cached = frozenset(found)
+            self.__dict__["_ta_loop_call_nodes_cache"] = cached
+        return cached
+
+    def _ta_series_length_call_is_in_loop(self, site: "TACallSite") -> bool:
+        """Whether ``site`` is a call written inside a loop of a function
+        whose series class is not lowered there
+        (``_TA_SERIES_LENGTH_LOOP_CLASSES``). A clone answers for the call
+        it was cloned from: it keeps that call's node."""
+        if site.class_name in self._TA_SERIES_LENGTH_LOOP_CLASSES:
+            return False
+        node = getattr(site, "node", None)
+        return node is not None and id(node) in self._ta_loop_call_nodes()
 
     def _ta_series_length_rows(self) -> list[tuple]:
         """The rows of ``_TA_SERIES_LENGTH_CLASSES`` a live chart site is
