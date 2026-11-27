@@ -684,7 +684,7 @@ out = 1.smooth()
 '''
     cpp = transpile(source)
     # One SMA call with omitted len uses the method's literal default, 2.
-    assert "ta::SMA _ta_sma_1;" in cpp
+    assert "pineforge::source::PineFixedSma _ta_sma_1;" in cpp
     assert "explicit GeneratedStrategy() : _ta_sma_1(2)" in cpp
     assert "out = _udt_int_smooth_cs0(1, 2);" in cpp
     compile_cpp(cpp, label="forward-stateful-method-default")

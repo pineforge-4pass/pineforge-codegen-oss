@@ -1,5 +1,9 @@
 #include <pineforge/source/pine_strategy_host.hpp>
 #include <pineforge/ta.hpp>
+#include <pineforge/source/pine_ta_length.hpp>
+#ifndef PINEFORGE_HAS_PINE_FIXED_LENGTH
+#error "generated code requires the paired pineforge-engine fixed-length adapters (PINEFORGE_HAS_PINE_FIXED_LENGTH)"
+#endif
 #include <pineforge/math.hpp>
 #include <pineforge/series.hpp>
 #include <pineforge/na.hpp>
@@ -154,12 +158,12 @@ struct _PFCheckpointTraits<std::vector<_PFElement, _PFAllocator>> {
 
 class GeneratedStrategy : public pineforge::source::PineStrategyHost {
 public:
-    ta::SMA _ta_sma_1;
-    ta::SMA _ta_sma_2;
-    ta::SMA _ta_sma_3;
-    ta::SMA _ta_sma_4;
-    ta::SMA _ta_sma_5;
-    ta::SMA _ta_sma_6;
+    pineforge::source::PineFixedSma _ta_sma_1;
+    pineforge::source::PineFixedSma _ta_sma_2;
+    pineforge::source::PineFixedSma _ta_sma_3;
+    pineforge::source::PineFixedSma _ta_sma_4;
+    pineforge::source::PineFixedSma _ta_sma_5;
+    pineforge::source::PineFixedSma _ta_sma_6;
     ta::Crossover _ta_crossover_7;
     ta::Crossunder _ta_crossunder_8;
     bool _use_precalc = false;
@@ -366,12 +370,12 @@ public:
         } else {
         }
         if (!_ta_initialized_) {
-            _ta_sma_1 = ta::SMA(get_input_int("Length", 14));
-            _ta_sma_2 = ta::SMA(get_input_int("Length", 14));
-            _ta_sma_3 = ta::SMA(get_input_int("Length", 14));
-            _ta_sma_4 = ta::SMA(get_input_int("Length", 14));
-            _ta_sma_5 = ta::SMA(get_input_int("Length", 14));
-            _ta_sma_6 = ta::SMA(get_input_int("Length", 14));
+            _ta_sma_1 = pineforge::source::PineFixedSma(get_input_int("Length", 14));
+            _ta_sma_2 = pineforge::source::PineFixedSma(get_input_int("Length", 14));
+            _ta_sma_3 = pineforge::source::PineFixedSma(get_input_int("Length", 14));
+            _ta_sma_4 = pineforge::source::PineFixedSma(get_input_int("Length", 14));
+            _ta_sma_5 = pineforge::source::PineFixedSma(get_input_int("Length", 14));
+            _ta_sma_6 = pineforge::source::PineFixedSma(get_input_int("Length", 14));
             _ta_initialized_ = true;
         }
         v1 = (current_bar_.close - current_bar_.open);

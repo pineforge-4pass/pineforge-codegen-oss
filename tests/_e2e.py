@@ -37,6 +37,7 @@ import sys
 import tarfile
 import tempfile
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -134,17 +135,56 @@ def reference_codegen(commit: str) -> Path | None:
     return _REFERENCE_TREES[commit]
 
 
+@cache
+def reference_engine() -> Path:
+    """Pre-settings source host for the frozen session, history and sizing probes.
+
+    Provision engine v1.0.0 once, including its own build/ and scripts/. This
+    host has the 2400 session-clock correction and the original config defaults;
+    its runner uses the legacy setters. The corpus feed can be shared.
+    """
+    tag = "v1.0.0"
+    raw = os.environ.get("PINEFORGE_REFERENCE_ENGINE")
+    if not raw:
+        raise RuntimeError(f"NEEDS PINEFORGE_REFERENCE_ENGINE: built engine {tag} checkout")
+    root = Path(raw).resolve()
+    rev, pinned = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD", f"refs/tags/{tag}^{{commit}}"],
+        text=True).splitlines()
+    if rev != pinned:
+        raise RuntimeError(f"reference engine HEAD {rev}, expected {tag} ({pinned})")
+    for name in ("scripts/run_strategy.py", "include/pineforge/source/pine_strategy_host.hpp",
+                 "build/include/pineforge/version.h", "build/lib/libpineforge.a"):
+        path = root / name
+        if not path.is_file() or not path.stat().st_size:
+            raise RuntimeError(f"NEEDS engine {tag}: missing or empty {path}")
+    # CMake substitutes its checkout SHA into version.h (some builds use a
+    # short SHA). A current or synthesized version header is not a reference build.
+    header = (root / "build/include/pineforge/version.h").read_text()
+    if not any(rev.startswith(sha) for sha in re.findall(r"\b[0-9a-f]{7,40}\b", header)):
+        raise RuntimeError(f"reference build/include/pineforge/version.h does not identify {rev}")
+    return root
+
+
 def build_strategy_library(cpp: str, workdir: Path, *,
-                           extra_flags: tuple[str, ...] = ()) -> None:
+                           extra_flags: tuple[str, ...] = (),
+                           reference_host: Path | None = None) -> None:
     (workdir / "generated.cpp").write_text(cpp)
-    lib = str(compile_env._ENGINE_LIB)
+    if reference_host is None:
+        lib = str(compile_env._ENGINE_LIB)
+        includes = compile_env._include_flags(isolate_headers=True)
+    else:
+        lib = str(reference_host / "build/lib/libpineforge.a")
+        includes = ["-isystem", str(reference_host / "include"),
+                    "-isystem", str(reference_host / "build/include"),
+                    "-isystem", str(compile_env._EIGEN_INC)]
     if sys.platform == "darwin":
         link = [f"-Wl,-force_load,{lib}"]
     else:
         link = ["-Wl,--whole-archive", lib, "-Wl,--no-whole-archive"]
     cmd = [compile_env._COMPILER, "-std=c++17", "-O2", *compile_env.STRATEGY_FP_FLAGS,
            *extra_flags,
-           "-fPIC", "-shared", *compile_env._include_flags(isolate_headers=True),
+           "-fPIC", "-shared", *includes,
            str(workdir / "generated.cpp"), *link, "-o", str(workdir / "strategy.so")]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:

@@ -190,7 +190,7 @@ if bar_index == 0 and wrapped.get(0) == "x"
     assert "std::string read_value_cs0(" in cpp
     assert "read_value_cs1" not in cpp
     assert "_ta_sma_1_cs" not in cpp
-    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    assert cpp.count("pineforge::source::PineFixedSma _ta_sma_1;") == 1
     compile_cpp(cpp)
 
 
@@ -324,7 +324,7 @@ def test_stateful_temporary_receiver_shape_and_source_order_matrix(
     assert definitions == list(range(expected_clones))
     assert f"std::vector<std::string>{{produce_cs{expected_clones - 1}()}}" in cpp
     assert sum(
-        f"ta::SMA _ta_sma_1{'' if index == 0 else f'_cs{index}'};" in cpp
+        f"pineforge::source::PineFixedSma _ta_sma_1{'' if index == 0 else f'_cs{index}'};" in cpp
         for index in range(8)
     ) == expected_clones
     compile_cpp(cpp)
@@ -353,7 +353,7 @@ second = outer()
     assert "produce_cs2" not in cpp
     assert "middle_cs2" not in cpp
     assert "outer_cs2" not in cpp
-    assert cpp.count("ta::SMA _ta_sma_1") == 2
+    assert cpp.count("pineforge::source::PineFixedSma _ta_sma_1") == 2
     compile_cpp(cpp)
 
 
@@ -595,7 +595,7 @@ def test_stateful_keyword_copy_direct_producer_is_exact_in_both_source_orders(
     assert "double read_value_cs0(" not in cpp
     assert "std::vector<std::string>(std::vector<std::string>{produce_cs0()})" in cpp
     assert "produce_cs1" not in cpp
-    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    assert cpp.count("pineforge::source::PineFixedSma _ta_sma_1;") == 1
     compile_cpp(cpp)
 
 
@@ -624,7 +624,7 @@ def test_keyword_copy_of_nested_method_copy_is_exact_in_both_source_orders(
     assert "double read_value_cs0(" not in cpp
     assert cpp.count("std::vector<std::string>{produce_cs0()}") == 1
     assert "produce_cs1" not in cpp
-    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    assert cpp.count("pineforge::source::PineFixedSma _ta_sma_1;") == 1
     compile_cpp(cpp)
 
 
@@ -720,7 +720,7 @@ def test_nested_method_copy_temporary_stateful_matrix(
     assert "std::vector<std::string>(" in cpp
     assert "produce_cs0()" in cpp
     assert "produce_cs1" not in cpp
-    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    assert cpp.count("pineforge::source::PineFixedSma _ta_sma_1;") == 1
     compile_cpp(cpp)
 
 
@@ -867,7 +867,7 @@ def test_forward_local_identity_stateful_representation_matrix(
     assert "std::string local_value =" in cpp
     assert "produce_cs0()" in cpp
     assert "produce_cs1" not in cpp
-    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    assert cpp.count("pineforge::source::PineFixedSma _ta_sma_1;") == 1
     compile_cpp(cpp)
 
 
@@ -1116,7 +1116,7 @@ def test_direct_terminal_element_callee_no_shadow_controls(
     assert "double read_value_cs0(" not in cpp
     assert "produce_cs0()" in cpp
     assert "produce_cs1" not in cpp
-    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    assert cpp.count("pineforge::source::PineFixedSma _ta_sma_1;") == 1
     compile_cpp(cpp)
 
 
@@ -1138,7 +1138,7 @@ observed = reader()
     assert "double reader_cs0(" not in cpp
     assert "produce_cs0()" in cpp
     assert "produce_cs1" not in cpp
-    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    assert cpp.count("pineforge::source::PineFixedSma _ta_sma_1;") == 1
     compile_cpp(cpp)
 
 
@@ -1251,7 +1251,7 @@ observed = reader()
     assert "std::string local_value =" in cpp
     assert "produce_cs0()" in cpp
     assert "produce_cs1" not in cpp
-    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    assert cpp.count("pineforge::source::PineFixedSma _ta_sma_1;") == 1
     compile_cpp(cpp)
 
 
@@ -1281,7 +1281,7 @@ def test_forward_local_identity_self_named_alias_rhs_uses_global_udf(
     assert "std::string produce =" in cpp
     assert "produce_cs0()" in cpp
     assert "produce_cs1" not in cpp
-    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    assert cpp.count("pineforge::source::PineFixedSma _ta_sma_1;") == 1
     compile_cpp(cpp)
 
 
@@ -1371,7 +1371,7 @@ def test_expired_block_tuple_binding_does_not_shadow_element_callee(
     assert "double reader_cs0(" not in cpp
     assert "produce_cs0()" in cpp
     assert "produce_cs1" not in cpp
-    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    assert cpp.count("pineforge::source::PineFixedSma _ta_sma_1;") == 1
     compile_cpp(cpp)
 
 

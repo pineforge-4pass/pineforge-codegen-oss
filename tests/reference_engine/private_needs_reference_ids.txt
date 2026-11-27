@@ -1,0 +1,2 @@
+tests/test_e2e_cgint3_compositions.py::test_a_tail_assignment_returns_beside_a_flags_history
+tests/test_e2e_cgint3_compositions.py::test_main_returned_the_default

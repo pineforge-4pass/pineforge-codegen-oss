@@ -558,6 +558,41 @@ class CallHandlers:
             )
         return False
 
+    def _mark_execution_window_sites(self) -> None:
+        """Mark direct then-body reassignments of the extrema measured by #458."""
+        sites = {
+            id(site.node): site for site in self._ta_call_sites
+            if site.owner_func is None and isinstance(site.node, FuncCall)
+            and site.class_name in ("ta::Lowest", "ta::Highest", "ta::HighestBars")
+        }
+        if not sites:
+            return
+        qualifiers = None
+        for statement in self._ast.body:
+            if not isinstance(statement, IfStmt):
+                continue
+            for store in statement.body:
+                if not (isinstance(store, Assignment) and store.op == ":="
+                        and isinstance(store.target, Identifier)):
+                    continue
+                call = store.value
+                site = sites.get(id(call))
+                # Both probes used the explicit-source overload.
+                if site is None or len(call.args) + len(call.kwargs) != 2:
+                    continue
+                if site.class_name == "ta::HighestBars":
+                    # SW3 used simple and series lengths. A fixed constructor
+                    # can also hold a simple length; it does not prove const/input.
+                    if qualifiers is None:
+                        from .qualifiers import ParameterQualifiers
+                        qualifiers = ParameterQualifiers(
+                            self._ast, self._value_bindings.declaration_bindings,
+                            self._filename, self._budget, infer_only=True,
+                        )
+                    if not (site.ctor_nodes and qualifiers.is_simple_or_series(site.ctor_nodes[0])):
+                        continue
+                site.uses_execution_window = True
+
     def _handle_ta_call(self, func_name: str, node: FuncCall) -> PineType:
         """Handle ta.* function calls."""
         # Visit all args for side effects (series detection, etc.)

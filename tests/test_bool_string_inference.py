@@ -15,6 +15,7 @@ import pytest
 from pineforge_codegen import signatures, transpile
 from pineforge_codegen.errors import CompileError
 from pineforge_codegen.symbols import PineType
+from tests._checked_ta_cpp import with_pine_source_ta
 from tests._e2e import (
     build_strategy_library, reference_codegen, run_strategy,
     skip_unless_e2e_env, transpile_json,
@@ -480,7 +481,9 @@ def test_numeric_tostring_keeps_complete_reference_cpp(tmp_path, body, expressio
     previous = transpile_json(pine, reference)
     assert current["ok"], current.get("diagnostics")
     assert previous["ok"], previous.get("diagnostics")
-    assert current["cpp"] == previous["cpp"]
+    # The rows with a ta.sma build it from the checked fixed-length type
+    # today; a reference without such a call is compared as it is.
+    assert current["cpp"] == with_pine_source_ta(previous["cpp"])
 
 
 @pytest.mark.parametrize("initializer", (

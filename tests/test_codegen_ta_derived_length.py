@@ -128,7 +128,7 @@ plot(out)
     )
     reset = _reset_line(cpp, sized[0])
     assert 'get_input_int("BBW Basis Length", 7)' in reset
-    assert "ta::SMA(1)" not in cpp
+    assert "PineFixedSma(1)" not in cpp
 
 
 # ---------------------------------------------------------------------------
@@ -171,15 +171,15 @@ plot(sig)
         assert "input(15)" not in reset, (
             f"reset for {m} still carries the unresolved input() spelling: {reset}"
         )
-        assert " ta::RMA(len)" not in reset and "= len;" not in reset, (
+        assert "PineFixedRma(len)" not in reset and "= len;" not in reset, (
             f"reset for {m} references the bare param name: {reset}"
         )
     assert saw_input_backed, (
         "no RMA runtime reset references the input value; ctor args did not "
         f"resolve to input-backed expressions. members: {rma_members}"
     )
-    assert "ta::RMA(len)" not in cpp
-    assert "ta::RMA(input(15))" not in cpp
+    assert "PineFixedRma(len)" not in cpp
+    assert "PineFixedRma(input(15))" not in cpp
 
 
 def test_nested_user_func_untitled_inputs_share_a_key_warning():
@@ -318,7 +318,7 @@ plot(ta.sma(close, length))
     # stable-length spelling is reparsed for the runtime reset.
     assert '!(get_input_bool("Flag", false))' in reset
     assert "notflag" not in reset
-    assert "ta::SMA(1)" not in reset
+    assert "PineFixedSma(1)" not in reset
 
 
 # ---------------------------------------------------------------------------
@@ -539,15 +539,23 @@ plot(sig)
     cpp = transpile(src)
 
     # Every _ta_* identifier referenced in the emitted C++ MUST have a
-    # corresponding ``ta::<Class> <name>;`` declaration. This catches the
-    # exact regression: ``_ta_change_<n>_cs1`` / ``_ta_rma_<n>_cs1``
-    # referenced by the cloned ``dirmov_cs1`` body but dropped from the
-    # member list by the dead-code pass.
-    declared = set(re.findall(r"ta::\w+\s+(\w+)\s*;", cpp))
+    # corresponding ``ta::<Class> <name>;`` declaration (ta.rma's class is
+    # its checked fixed-length type, ``pineforge::source::PineFixedRma``).
+    # This catches the exact regression: ``_ta_change_<n>_cs1`` /
+    # ``_ta_rma_<n>_cs1`` referenced by the cloned ``dirmov_cs1`` body but
+    # dropped from the member list by the dead-code pass.
+    #
+    # The scan reads the code, not the preprocessor lines: a script with
+    # ta.rma includes <pineforge/source/pine_ta_length.hpp>, and that file
+    # name spells ``_ta_length.`` without naming a member.
+    code = "\n".join(
+        line for line in cpp.splitlines() if not line.lstrip().startswith("#")
+    )
+    declared = set(re.findall(r"(?:ta::|pineforge::source::)\w+\s+(\w+)\s*;", code))
     referenced = set()
-    for m in re.finditer(r"(_ta_\w+)\s*(?:\.|=)", cpp):
+    for m in re.finditer(r"(_ta_\w+)\s*(?:\.|=)", code):
         referenced.add(m.group(1))
-    referenced |= set(re.findall(r"(_ta_\w+)\s*\.", cpp))
+    referenced |= set(re.findall(r"(_ta_\w+)\s*\.", code))
     # Exclude internal bookkeeping flags (``_ta_initialized_``) -- those are
     # declared as ``bool _ta_initialized_ = false;`` separately, not as TA
     # members; they are not part of this regression.
@@ -716,7 +724,7 @@ plot(ta.sma(close, lenv))
     # The stable var must be fully expanded; no bare ``_tfSec`` symbol leaks.
     assert "_tfSec" not in reset
     assert "timeframe.in_seconds" not in reset
-    assert "ta::SMA(1)" not in reset
+    assert "PineFixedSma(1)" not in reset
 
 
 # R3 — combined shape: the exact gonzowiththewind-sisyphus reduction (both
