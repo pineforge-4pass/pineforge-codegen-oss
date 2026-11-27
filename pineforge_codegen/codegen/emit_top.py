@@ -1150,6 +1150,10 @@ class TopLevelEmitter:
             names.add("_security_helper_series_")
             if self._security_string_series_declared:
                 names.add("_security_helper_series_str_")
+            # A sparse call's flag says whether the last slot of its helper
+            # series in those maps is committed: they restore together.
+            for info in self._security_eval_info:
+                names.update(self._security_sparse_clock_members(info["sec_id"]))
         for info in self._security_eval_info:
             if info.get("chart_fallback", True):
                 continue

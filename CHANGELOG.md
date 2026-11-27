@@ -25,7 +25,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - Inside `request.security`, a conditionally called helper that indexes a bar
   field argument now counts completed calls at that site. For `f(x) => x[3]`,
   `f(time)` returns the time from three calls ago, even when the calls skip
-  requested bars. A separate call that runs on every bar keeps its own clock
+  requested bars. A separate call that runs on every bar keeps its own clock.
+  A value the helper keeps between such calls, such as a local it reads with
+  history, advances with the same completed calls. This applies to
+  `request.security`; `request.security_lower_tf` and requests of another
+  symbol, of Heikin-Ashi bars or with a run-time timeframe are unchanged
   ([#466](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/466)).
 
 - `// @pf-trace` now reads prior values of `time`, `time_close`, `bar_index` and other built-in series even when only the pragma indexes them. An indexed built-in without traceable history reports an error at the pragma ([#486](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/486)).
