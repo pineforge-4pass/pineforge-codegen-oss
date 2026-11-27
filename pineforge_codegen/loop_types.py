@@ -456,6 +456,31 @@ def has_fractional_int_value(node, sources, bindings):
     return query.infer(node) == _INT and query.value_spec(node) == _FLOAT
 
 
+# Array results computed in floating point whatever the element type: the
+# mean, the midpoint or the interpolation of int elements keeps a fraction.
+_FLOAT_ARRAY_RESULTS = frozenset({
+    "avg", "median", "stdev", "variance", "covariance", "percentrank",
+    "percentile_linear_interpolation",
+})
+
+
+class _ArgumentValueQuery(_NumericValueQuery):
+    """The value a written call passes, float array calculations included."""
+
+    @staticmethod
+    def array_result(name, spec):
+        if (name in _FLOAT_ARRAY_RESULTS and isinstance(spec, TypeSpec)
+                and spec.kind == "array" and spec.element in (_INT, _FLOAT)):
+            return _FLOAT
+        return _CounterQuery.array_result(name, spec)
+
+
+def has_float_argument_value(node, sources, bindings):
+    """Whether source evidence proves a float value; unknown is not float."""
+    check = _CounterQuery(sources, bindings, {})
+    return _ArgumentValueQuery(check).infer(node) == _FLOAT
+
+
 def for_counter_type(
     start, sources, bindings, scopes, *, step=None, pine_v5=False, counter_types=None,
     counter_name=None, step_location=None,

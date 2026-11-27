@@ -22,6 +22,14 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (1.15.0)
 
+- `// @pf-trace` now reads prior values of `time`, `time_close`, `bar_index` and other built-in series even when only the pragma indexes them. An indexed built-in without traceable history reports an error at the pragma ([#486](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/486)).
+
+- `// @pf-trace` can now read bar history such as `close[1]` even when the strategy body never reads that history ([#482](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/482)).
+
+- A `// @pf-trace` expression that reads the history of a scalar built-in, such as `time[1]`, `bar_index[1]` or `strategy.position_size[1]`, now reads the same history buffer as the strategy body. An indexed built-in that has no history is reported as `PF-E5099` instead of tracing its current value ([#486](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/486)).
+
+- String variables named after calendar built-ins, such as `second` or `minute`,
+  now compile when concatenated with another string.
 - `ta.pivothigh` and `ta.pivotlow` accept a `leftbars` or `rightbars` that
   changes from bar to bar, in both overloads. Such a call used to be refused
   with `PF-E5009` ("Unsupported TA constructor length"); it now reads its
@@ -128,6 +136,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the script computes on each bar keeps its series class. Regenerate C++ and
   relink.
 - A `ta.*` call in a `?:` arm or on the right of `and` or `or`, with no `[]` read on the call, now computes the same values in a run that may precalculate (no bar magnifier, empty timeframes) as in every other run: it is evaluated only on the bars that reach it. Such a run used to fill the call on every chart bar, so with `y = bar_index % 2 == 0 ? ta.sma(close, 3) : na` the closes of the odd bars entered the average. This applies to every `ta.*` function; `ta.ema`, and `ta.sma` on the right of `and`, already behaved this way. Unconditional calls and calls read with `[]` are unchanged.
+- An untyped user function now receives the fractional result of an array
+  calculation even when another call passes an integer. Previously, a median
+  of `2.5` could arrive as `2`, changing formatted comments and order quantities
+  calculated inside the function ([#476](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/476)).
 
 - Both strategy conversions and `request.currency_rate` use the host's rate in effect on each bar for the chart and account currencies, in either direction. Without a rate for the pair the request stops the run with the currency-conversion error, or returns `na` with a run warning when `ignore_invalid_currency` is true; other pairs still stop the run ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
 
@@ -196,6 +208,19 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - A chart `ta.sma` length that varies by bar is no longer refused with `PF-E5092` because one of the names it reads is a script-level `var` or `varip`: with `var int base = 2` and `n = base + bar_index % 2`, `ta.sma(close, n)` averages each bar's own window, and so does a `var` length that the script reassigns from its own value (`p := p + 1`). A `var` or `varip` length that is not shown to vary by bar keeps its previous handling (the constructor for an admitted literal or an input, the refusal otherwise), as do a `request.security` copy and a length that a function receives from its callers.
 
 - `strategy.convert_to_account` and `strategy.convert_to_symbol` now warn in the run report and return the input unchanged, still in its original currency, when no conversion rate is available ([#376](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/376)).
+
+### Known issues
+
+- Fractional arguments to user functions can be truncated. When an untyped
+  function parameter receives a fractional value at one call site and an
+  integer at another, the fraction can be lost before the function runs. This
+  can change an order quantity: for example, doubling 2.5 can place an order
+  for 4 units instead of 5. The first affected release is 1.13.0. There is no
+  verified workaround. Fixed in the next release for the reported forms. The
+  same truncation remains when the argument's array type cannot be proven from
+  syntax (for example values read through `array.get`, `map.get`, UDT fields
+  or `for … in` elements); that case is tracked in [#490](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/490)
+  ([#476](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/476)).
 
 ## 1.13.0 — 2026-11-18
 
@@ -296,6 +321,19 @@ supported as exact pairs; on the 0.x line they are independent. See the
   Compound assignments in requested selections retain the lexical binding
   of their target and its request-owned `var` or `varip` storage.
   See [#393](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/393).
+
+### Known issues
+
+- Fractional arguments to user functions can be truncated. When an untyped
+  function parameter receives a fractional value at one call site and an
+  integer at another, the fraction can be lost before the function runs. This
+  can change an order quantity: for example, doubling 2.5 can place an order
+  for 4 units instead of 5. The first affected release is 1.13.0. There is no
+  verified workaround. Fixed in the next release for the reported forms. The
+  same truncation remains when the argument's array type cannot be proven from
+  syntax (for example values read through `array.get`, `map.get`, UDT fields
+  or `for … in` elements); that case is tracked in [#490](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/490)
+  ([#476](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/476)).
 
 ## 1.12.0 — 2026-11-12
 

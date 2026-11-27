@@ -6371,10 +6371,11 @@ class TypeInferer:
             )
             if tuple_type is not None:
                 return tuple_type
-            if not tuple_binding and node.name in ("time", "time_close", "timenow"):
-                return "int64_t"
-            if (node.name in BAR_FIELDS
-                    or (node.name in BAR_BUILTINS and not tuple_binding)):
+            if self._reads_builtin_variable(node):
+                if node.name in ("time", "time_close", "timenow"):
+                    return "int64_t"
+                return "double"
+            if node.name in BAR_FIELDS:
                 return "double"
             if (node.name in self._known_vars
                     and not self._known_var_is_lexically_shadowed(node.name)):

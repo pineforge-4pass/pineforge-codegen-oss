@@ -6,8 +6,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen.analyzer import Analyzer
-from pineforge_codegen.analyzer.types import TypeHelper
-from pineforge_codegen.ast_nodes import BoolLiteral, NumberLiteral, Ternary
+from pineforge_codegen.ast_nodes import BoolLiteral, NumberLiteral, Program, Ternary
 from pineforge_codegen.codegen.types import TypeInferer
 from pineforge_codegen.errors import CompileError, Level, Phase
 from pineforge_codegen.lexer import Lexer
@@ -607,7 +606,7 @@ def test_na_adopts_each_value_family_refuses_bool_na(body: str, line: int, col: 
 
 
 @pytest.mark.parametrize(
-    "helper_class", [TypeHelper, TypeInferer], ids=["analyzer", "codegen"],
+    "helper_class", [Analyzer, TypeInferer], ids=["analyzer", "codegen"],
 )
 @pytest.mark.parametrize("nested_arm", ["true", "false"])
 def test_ternary_type_queries_visit_each_arm_once(
@@ -641,13 +640,13 @@ def test_ternary_type_queries_visit_each_arm_once(
 
     monkeypatch.setattr(helper_class, "_selection_contains_na", classmethod(contains_na))
     monkeypatch.setattr(helper_class, "_selection_type_spec", selection_spec)
-    helper = helper_class()
     if helper_class is TypeInferer:
         # Hand-derived: every value arm is an integer, so C++ inference returns int.
-        assert helper._infer_type(value) == "int"
+        assert TypeInferer()._infer_type(value) == "int"
     else:
-        # Hand-derived: a primitive selection without na keeps the analyzer's absent spec.
-        assert helper._type_spec_from_expr(value) is None
+        # A primitive selection without na has no spec in script scope.
+        analyzer = Analyzer(Program(version=6))
+        assert analyzer._type_spec_from_expr(value) is None
     # Hand-derived: 64 ternaries require 64 joins, independent of the nested arm.
     assert joins == 64
     # Hand-derived: 64 ternaries plus 65 terminal arms allow at most 129 structural checks.
