@@ -1,8 +1,9 @@
-"""color.from_gradient evaluates its arguments; its colour is still the na colour.
+"""color.from_gradient evaluates its arguments; its result is packed zero.
 
 color.from_gradient only tints charts, so its value reaches no order and
-PineForge keeps emitting the na colour (a warned visual-only stub). The
-lowering also dropped its arguments (``codegen/visit_call.py``
+PineForge keeps emitting packed zero (transparent black) as a warned
+visual-only stub. The lowering also dropped its arguments
+(``codegen/visit_call.py``
 ``_visit_color_call`` returned ``"0"`` for it), so a call in them never
 ran: a counting probe never counted, and a helper keeping a series in one
 never advanced (earlier open findings). TradingView evaluates each
@@ -10,8 +11,9 @@ argument once per execution, in parameter order, whether written by
 position or by keyword.
 
 The call now evaluates every argument that is not a side-effect-free read,
-once, in TradingView's parameter order, and yields the na colour; a call
-whose arguments are all plain reads keeps its ``0`` spelling. TradingView's
+once, in TradingView's parameter order, and yields packed zero (transparent
+black); a call whose arguments are all plain reads keeps its ``0`` spelling.
+TradingView's
 tape of ``fixtures/open_items_tv/from_gradient_args`` (lab tv --no-note)
 spells each counting probe's lag behind ``bar_index + 1`` (0: once per
 bar), by position and by keyword, and a helper's series stored on every
@@ -48,7 +50,7 @@ def _assignment(body: str) -> str:
     return next(l.strip() for l in cpp.splitlines() if l.strip().startswith("c = "))
 
 
-def test_plain_reads_keep_the_na_colour_spelling():
+def test_plain_reads_keep_the_packed_zero_colour_spelling():
     assert _assignment("c = color.from_gradient(close, low, high, color.red, color.green)") == "c = 0;"
 
 
