@@ -504,17 +504,25 @@ the source and uses the defaults.
 Booleans, floating values, strings and smaller integers raise `PF-E5094`
 with `option` and `minimum` arguments.
 
-`loop_timeout_ms` is the wall time available to each execution of a Pine
-`for`, `for … in` or `while`. `None` selects **2000 ms**; an override is an
-exact integer from 1 through 2147483647. It is compiled into the strategy;
+`loop_timeout_ms` is the wall time available to each generated Pine
+`for`, `for … in` or `while` on a chart bar. `None` selects **2000 ms**; an
+override is an exact integer from 1 through 2147483647. It is compiled into the strategy;
 it is not a Pine `input`. Invalid types and nonpositive values raise
 `PF-E5094`; integers above the native range raise `PF-E0036`.
 
-Each loop starts its own `std::chrono::steady_clock` timer when reached,
-including nested loops and loops in called functions and requested
-evaluators. It polls every **256 iterations** and checks on exit, including
-`break`. A slow iteration can run past the deadline before control returns
-to a check. An expired timer stops the run through `runtime.error`'s path:
+Each loop starts its own `std::chrono::steady_clock` timer on its first
+entry on the bar, including loops in called functions and requested evaluators.
+Later entries to the same loop on that bar retain the start time and iteration
+count. Elapsed wall time therefore includes time between those entries.
+Nested and sibling loops keep separate counts; a new bar or run starts fresh.
+
+After every **256 iterations**, the watchdog reads the clock just before the
+next iteration or when leaving the loop, including by `break`. Returning
+with a partial batch incurs no exit clock read: a loop that executes only
+three iterations per call reaches its first sample on the 86th call on that
+bar. A long-running iteration cannot be interrupted, and a loop that never
+completes 256 iterations on a bar has no elapsed-time check on that bar.
+An expired timer stops the run through `runtime.error`'s path:
 for example, `Error on bar 17: Pine line 6: loop time limit exceeded (2000 ms)`.
 The bar is the zero-based chart bar being processed; the line is the
 one-based Pine loop header. Proven-endless counted loops that already stop

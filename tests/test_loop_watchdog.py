@@ -132,3 +132,41 @@ def test_glue_forwards_the_limit_and_rejects_invalid_options():
             transpile(ENDLESS, loop_timeout_ms=invalid)
         result = json.loads(glue_json(ENDLESS, loop_timeout_ms=invalid))
         assert not result["ok"] and result["diagnostics"]
+
+
+def test_repeated_short_loop_times_out_at_its_sampled_exit():
+    skip_if_no_engine_lib()
+    source = HEADER + """float total = 0.0
+for outer = 1 to 200
+    total += 1000.0
+    for inner = 1 to 4
+        total += 1.0
+"""
+    cpp = transpile(source, loop_timeout_ms=2)
+    # Four iterations divide 256 exactly: each sample falls on a short exit.
+    # With a fresh timer per visit the old exit check blames the outer loop.
+    clock = r'''
+#include <chrono>
+struct CountingLoopClock {
+    using time_point = std::chrono::steady_clock::time_point;
+    static inline unsigned reads = 0;
+    static time_point now() { return time_point{} + std::chrono::milliseconds(reads++); }
+};
+'''
+    assert "std::chrono::steady_clock" in cpp
+    cpp = clock + cpp.replace("std::chrono::steady_clock", "CountingLoopClock")
+    driver = r'''
+#include <iostream>
+int main() {
+    Bar bar{10, 10, 10, 10, 1, 60000};
+    GeneratedStrategy strategy;
+    strategy.run(&bar, 1, "1", "1");
+    std::cout << strategy.last_error() << '|' << strategy.total << '|' << CountingLoopClock::reads;
+}
+'''
+    output = run_emitted_tu(cpp, driver, opt="-O2", label="repeated short loop")
+    message, completed, reads = output.split("|")
+    assert message == "Error on bar 0: Pine line 6: loop time limit exceeded (2 ms)", output
+    # The second full batch must trip at exit, before the 129th outer entry.
+    assert int(completed) == 128 * 1000 + 512, output
+    assert int(reads) == 4, output  # Two starts on this bar and two inner samples.

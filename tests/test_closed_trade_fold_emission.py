@@ -258,6 +258,7 @@ def test_fold_preserves_bound_visits_counter_names_and_later_plain_loop(monkeypa
     # The fold consumes loop number zero; the following unplanned loop keeps number one.
     assert "\n".join(lines) == dedent("""\
         ::_pf_LoopWatchdog _pf_loop_watchdog_1{bar_index_, 13};
+        _pf_loop_watchdog_1.begin(this->_pf_loop_watchdog_sites[1]);
         int _for_start_1 = (2);
         int _for_end_1 = (4);
         int _for_step_1 = (1);

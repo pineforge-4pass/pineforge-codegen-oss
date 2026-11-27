@@ -6578,7 +6578,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 9. Constructor with TA initializer list
         self._emit_constructor(lines)
         lines.append("")
-        self._emit_script_run_prepare(lines, _script_state_declarations)
+        watchdog_reset_at = self._emit_script_run_prepare(lines, _script_state_declarations)
         lines.append("")
         if self._uses_drawing:
             self._emit_drawing_collectors(lines)
@@ -6664,6 +6664,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         _runtime_templates: list[str] = []
         self._emit_runtime_security_templates(_runtime_templates)
         _script_state_hooks: list[str] = []
+        if self._loop_watchdog_count:
+            # Instrumentation state is per strategy and survives fill rollback.
+            # A fresh run (even one repeating only bar zero) must start clean.
+            sites = self._loop_watchdog_sites()
+            state_type = f"::{self._loop_watchdog_type()}::State"
+            _script_state_hooks.append(f"    {state_type} {sites}[{self._loop_watchdog_count}]{{}};")
+            lines.insert(watchdog_reset_at,
+                         f"        std::fill_n(this->{sites}, {self._loop_watchdog_count}, {state_type}{{}});")
         self._emit_script_state_hooks(_script_state_hooks, _script_state_members)
         _script_state_hooks = _runtime_templates + _script_state_hooks
         lines[_script_state_hooks_at:_script_state_hooks_at] = _script_state_hooks

@@ -2033,13 +2033,17 @@ class StmtVisitor:
     def _loop_watchdog_type(self) -> str:
         return self._generated_helper_name(("loop-watchdog-type",), "_pf_LoopWatchdog")
 
+    def _loop_watchdog_sites(self) -> str:
+        return self._generated_helper_name(("loop-watchdog-sites",), "_pf_loop_watchdog_sites")
+
     def _start_loop_watchdog(self, node, lines: list[str], indent: int) -> str:
-        """An automatic local: each entry (including a nested loop) starts fresh."""
+        """Bind this loop's timer to its own persistent sampling state."""
         index = self._loop_watchdog_count
         self._loop_watchdog_count += 1
         name = self._generated_helper_name(("loop-watchdog", index), f"_pf_loop_watchdog_{index}")
         pad = "    " * indent
         lines.append(f"{pad}::{self._loop_watchdog_type()} {name}{{bar_index_, {node.loc.line}}};")
+        lines.append(f"{pad}{name}.begin(this->{self._loop_watchdog_sites()}[{index}]);")
         return name
 
     @_loop_scoped_history_flags

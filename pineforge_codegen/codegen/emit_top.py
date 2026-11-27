@@ -120,16 +120,35 @@ from .unicode_case import CASE_MAPPING_CPP, CASE_MAPPING_MARKER
 ENUM_STRING_INCLUDE = '#include <pineforge/source/pine_policy_support.hpp>'
 LOOP_CLOCK_INCLUDE = '#include <chrono>'
 LOOP_WATCHDOG_CPP = """struct @TYPE@ {
+    static constexpr unsigned interval = 256;
+    struct State {
+        std::optional<std::int64_t> bar;
+        std::chrono::steady_clock::time_point start{};
+        unsigned remaining = 0;
+    };
     std::int64_t bar;
     int line;
-    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-    unsigned iterations = 0;
+    State* state = nullptr;
 
+    void begin(State& site) {
+        state = &site;
+        if (site.bar != bar) {
+            site.bar = bar;
+            site.start = std::chrono::steady_clock::now();
+            site.remaining = interval;
+        }
+    }
+
+    // Sample after a batch, either before the next body or on the way out.
     void poll() {
-        if ((++iterations & 255u) == 0) check();
+        check();
+        --state->remaining;
     }
     void check() const {
-        if (std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(::kLoopTimeLimitMs))
+        if (state->remaining != 0) return;
+        state->remaining = interval;
+        const auto elapsed = std::chrono::steady_clock::now() - state->start;
+        if (elapsed >= std::chrono::milliseconds(::kLoopTimeLimitMs))
             pine_runtime_error(std::string("Error on bar ") + std::to_string(bar)
                 + ": Pine line " + std::to_string(line) + ": loop time limit exceeded ("
                 + std::to_string(::kLoopTimeLimitMs) + " ms)");
@@ -813,7 +832,7 @@ class TopLevelEmitter:
                     names.add(flag)
         return names
 
-    def _emit_script_run_prepare(self, lines: list[str], declarations: list[str]) -> None:
+    def _emit_script_run_prepare(self, lines: list[str], declarations: list[str]) -> int:
         """Reset every declared script member, then prepare this run's cache.
 
         Unlike per-bar rollback, a new lifecycle also invalidates precalculated
@@ -841,6 +860,9 @@ class TopLevelEmitter:
             "        _pf_require_settings_ok();",
             "        _pf_script_state_checkpoint_.reset();",
         ])
+        # Evaluator emission can still discover loop sites. Insert their run
+        # reset here once their strategy-owned state has been sized.
+        watchdog_reset_at = len(lines)
         if any(item.get("runtime_context") for item in self._security_calls):
             lines.append("        runtime_contexts().enable_history();")
         seen: set[str] = set()
@@ -887,6 +909,7 @@ class TopLevelEmitter:
         else:
             lines.append("        (void)bars; (void)n; (void)allow_precalculation;")
         lines.append("    }")
+        return watchdog_reset_at
 
     def _emit_handle_checkpoint_traits(self, lines: list[str]) -> None:
         """Emit recursive rollback adapters for shared-ID collection state.

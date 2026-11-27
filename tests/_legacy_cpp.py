@@ -14,15 +14,27 @@ def without_loop_watchdog(cpp: str) -> str:
     if LOOP_CLOCK_INCLUDE + "\n" not in cpp:
         return cpp
     declaration = re.compile(
-        r"^ *::(?P<type>_pf_LoopWatchdog(?:__pf\d+)?) "
-        r"(?P<timer>_pf_loop_watchdog_\d+(?:__pf\d+)?)\{bar_index_, \d+\};\n", re.M)
-    instances = declaration.findall(cpp)
+        r"^(?P<indent> *)::(?P<type>_pf_LoopWatchdog(?:__pf\d+)?) "
+        r"(?P<timer>_pf_loop_watchdog_(?P<index>\d+)(?:__pf\d+)?)\{bar_index_, \d+\};\n"
+        r"(?P=indent)(?P=timer)\.begin\(this->(?P<sites>_pf_loop_watchdog_sites(?:__pf\d+)?)"
+        r"\[(?P=index)\]\);\n", re.M)
+    instances = list(declaration.finditer(cpp))
     assert instances, "watchdog support without a loop"
-    support = LOOP_WATCHDOG_CPP.replace("@TYPE@", instances[0][0]) + "\n\n"
+    kind, sites = instances[0].group("type", "sites")
+    support = LOOP_WATCHDOG_CPP.replace("@TYPE@", kind) + "\n\n"
     assert cpp.count(support) == 1
+    storage = re.findall(rf"^    ::{kind}::State {sites}\[([1-9]\d*)\]\{{\}};\n", cpp, re.M)
+    assert len(storage) == 1
+    size = storage[0]
+    assert all(m.group("type", "sites") == (kind, sites) and int(m["index"]) < int(size)
+               for m in instances)
+    member = f"    ::{kind}::State {sites}[{size}]{{}};\n"
+    reset = f"        std::fill_n(this->{sites}, {size}, ::{kind}::State{{}});\n"
+    assert cpp.count(reset) == 1
+    cpp = cpp.replace(member, "", 1).replace(reset, "", 1)
     cpp = cpp.replace(LOOP_CLOCK_INCLUDE + "\n", "", 1).replace(support, "", 1)
     cpp = declaration.sub("", cpp)
-    for _, timer in set(instances):
+    for timer in {m["timer"] for m in instances}:
         cpp, polls = re.subn(rf"(?m)^ *{timer}\.poll\(\);\n", "", cpp)
         cpp, checks = re.subn(rf"(?m)^ *{timer}\.check\(\);\n", "", cpp)
         assert polls and checks, f"incomplete watchdog {timer}: {polls} polls, {checks} exits"

@@ -22,8 +22,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (1.15.0)
 
-- Generated Pine loops now stop with the chart bar index and Pine source
-  line when they exceed `loop_timeout_ms` (default 2000 ms per invocation).
+- Generated Pine loops now report the chart bar index and Pine source
+  line when a clock sample reaches `loop_timeout_ms` (default 2000 ms per
+  loop per bar). A loop samples every 256 iterations across invocations.
   Regenerate C++ and relink to apply the watchdog
   ([#440](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/440)).
 
