@@ -27,7 +27,7 @@ plot(close)
 
 def test_input_color_routes_to_int64():
     """input.color routes to get_input_int64: a packed ARGB color
-    (0xAARRGGBB, e.g. color.red == 0xFFFF0000) overflows signed int32, so
+    (0xAARRGGBB, e.g. color.red == 0xFFF23645) overflows signed int32, so
     int32 truncates/sign-flips the value. int64 preserves it.
     """
     src = """//@version=6

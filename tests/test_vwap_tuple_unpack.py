@@ -7,6 +7,7 @@ import re
 import pytest
 from pineforge_codegen import transpile
 from pineforge_codegen.support_checker import CompileError
+from tests._compile import compile_cpp
 
 PRELUDE = '//@version=6\nstrategy("T")\n'
 
@@ -34,7 +35,7 @@ def test_vwap_3arg_compiles():
 if close > ub
     strategy.entry("long", strategy.long)
 """
-    assert _has_no_errors(src), "3-arg ta.vwap should compile without errors"
+    compile_cpp(_transpile(src), label="3-arg ta.vwap tuple unpack")
 
 
 def test_vwap_3arg_uses_vwapbands_class():
