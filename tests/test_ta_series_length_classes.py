@@ -11,7 +11,8 @@ three engine headers, each included only by a script that uses one of its
 classes and followed by the guard of that class's feature macro. A constant
 or input length keeps its fixed-length class and constructor. A call written
 inside a loop keeps its refusal: it would call one object once on every pass
-of every bar (``LOOP_REFUSED``).
+of every bar (``LOOP_REFUSED``). So does a call written in a function that a
+loop reaches through the script's calls (``REACHED_FROM_A_LOOP``).
 
 TradingView refuses a per-bar value for the length of ta.ema, ta.rma, ta.rsi,
 ta.atr, ta.hma, ta.tsi, ta.macd, ta.dmi, ta.kc, ta.kcw and ta.rci, for
@@ -526,12 +527,62 @@ def test_a_call_inside_a_loop_is_not_lowered_to_a_series_class(case: str) -> Non
         + "    total += out\n"
         + "plot(total)\n"
     )
+    # On a generator that lowers the call this transpile succeeds. The one
+    # diagnostic is the refusal of the length, located at the call it
+    # refuses: the first line of the loop body, line 5 (the header takes two
+    # lines, ``total`` and the loop one each).
+    diagnostic = _refusal(source)
+    assert diagnostic.code == PLAIN_CODE
+    assert diagnostic.location.line == 5
+    assert ENGINE not in diagnostic.message
+
+
+# A call written in a function runs whenever the function does. ``f`` holds
+# the ta.wma call and reads the script's per-bar length ``n``; the loop calls
+# it on each of its three passes, itself or through ``g``. One object would
+# then be called three times on a bar, as for a call written in the loop, so
+# the call keeps the same refusal, at the ta.wma call. What decides is that a
+# loop statement reaches the call through the script's calls: the same
+# function called only outside the loop is lowered, in a script with a loop.
+FUNCTION = "f() => ta.wma(close, n)\n"
+REACHED_FROM_A_LOOP = {
+    "called_in_the_loop": ("", "f()"),
+    "through_another_function": ("g() => f()\n", "g()"),
+}
+
+
+@pytest.mark.parametrize("case", list(REACHED_FROM_A_LOOP))
+def test_a_call_in_a_function_reached_from_a_loop_keeps_its_refusal(case: str) -> None:
+    wrapper, call = REACHED_FROM_A_LOOP[case]
+    source = (
+        HEADER + LENGTH + FUNCTION + wrapper
+        + "float total = 0.0\n"
+        + "for k = 1 to 3\n"
+        + f"    total += {call}\n"
+        + "plot(total)\n"
+    )
     # On a generator that lowers the call this transpile succeeds.
-    with pytest.raises(CompileError) as caught:
-        transpile(source)
-    assert caught.value.diagnostics
-    for diagnostic in caught.value.diagnostics:
-        assert ENGINE not in diagnostic.message
+    diagnostic = _refusal(source)
+    assert diagnostic.code == PLAIN_CODE
+    assert diagnostic.message.startswith(
+        "Unsupported TA constructor length 'n' for ta::WMA: ")
+    assert ENGINE not in diagnostic.message
+    # The header takes two lines and ``n`` one: the ta.wma call, the body of
+    # ``f``, is on line 4.
+    assert diagnostic.location.line == 4
+
+
+def test_a_function_called_only_outside_a_loop_is_still_lowered() -> None:
+    source = (
+        HEADER + LENGTH + FUNCTION
+        + "float out = f()\n"
+        + "float total = 0.0\n"
+        + "for k = 1 to 3\n"
+        + "    total += close\n"
+        + "plot(out + total)\n"
+    )
+    cpp = transpile(source)
+    assert len(_members(cpp, ENGINE + "Wma")) == 1
 
 
 def test_a_per_bar_linreg_offset_is_refused() -> None:
