@@ -74,7 +74,9 @@ from ..method_binding import bind_function_defaults
 from ..input_defaults import (
     PLAIN_INPUT_STRING_DEFAULT, input_param_names, plain_input_default, plain_input_type,
 )
-from ..loop_types import FLOAT_REASSIGNMENT, has_fractional_int_value
+from ..loop_types import (
+    FLOAT_REASSIGNMENT, has_float_argument_value, has_fractional_int_value,
+)
 from ..errors import Phase
 from ..limits import MAX_NESTING_DEPTH, limit_error
 from ..external_requests import FEED_LOWERING, LOWERING_ANNOTATION
@@ -1911,6 +1913,21 @@ class CallHandlers:
                     # An untyped parameter holds the argument's value. An
                     # int/int quotient has an int check type, but narrowing
                     # the callable boundary would discard its fraction.
+                    param_types[index] = PineType.FLOAT
+                    fractional_args.add(index)
+                elif (param_type in (PineType.VOID, PineType.UNKNOWN)
+                        and arg is not None
+                        and (index >= len(declared_specs)
+                             or declared_specs[index] is None)
+                        and not self._in_v5_library_definition(arg)
+                        and has_float_argument_value(
+                            arg, self._loop_type_sources,
+                            self._value_bindings.declaration_bindings,
+                        )):
+                    # The visitor leaves a collection call untyped, and an
+                    # untyped slot took another written call's type: an int
+                    # there narrowed this call's float. Unknown is not float;
+                    # only source evidence of a float value types the slot.
                     param_types[index] = PineType.FLOAT
                     fractional_args.add(index)
         effective_param_types = [

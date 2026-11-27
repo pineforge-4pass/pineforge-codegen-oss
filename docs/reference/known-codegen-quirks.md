@@ -270,7 +270,11 @@ you delete or weaken the special case, the test will tell you.
    `prepare_script_run()` calls `precalculate()` when the engine allows it
    (no magnifier, empty timeframes), and a call nested in an expression
    then reads `_precalc_<member>[bar_index_]` (a direct `x = ta.foo(...)`
-   assignment does not).
+   assignment does not). A call below a lazy edge (a `?:` arm, the right
+   of `and` / `or`) that quirk 15 does not hoist is never precalculated,
+   whatever its family: it is stepped only on the bars that reach it, in a
+   batch run as in an inline one
+   (`tests/test_lazy_edge_ta_batch_clock.py`).
    `precalculate()` builds each site from `_ta_run_ctor_args`, the same
    override-aware arguments as the `_ta_initialized_` reset, never from
    compile-time values — those are the input's default (or the placeholder

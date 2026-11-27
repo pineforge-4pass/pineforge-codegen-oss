@@ -19,7 +19,9 @@ from .finite_ta_length import expand_finite_choice_extrema_lengths
 from .function_overloads import bind_scalar_overloads
 from .input_keys import assign_input_keys
 from .library_inline import inline_libraries
-from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
+from .limits import (
+    TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom,
+)
 from .method_binding import validate_call_argument_order
 from .pragmas import extract_pf_trace_pragmas
 from .request_discovery import discover_requests, request_sites
@@ -101,7 +103,7 @@ def _generate(pine_source: str, check_support: bool, filename: str,
         check_ast_depth(ast, filename)
         budget.check(phase=Phase.ANALYZER)
         ctx = Analyzer(ast, filename=filename, budget=budget,
-                       session_clones=clones).analyze()
+                       session_clones=clones).analyze(trace_pragmas=pragmas)
         # Typed receiver dispatch is known only after analysis. Resolve method
         # payload arguments with those bindings, then type the rewritten bodies.
         if specialize_method_security_payloads(
@@ -110,13 +112,8 @@ def _generate(pine_source: str, check_support: bool, filename: str,
             ast = bind_builtin_keywords(expand_finite_choice_extrema_lengths(ast))
             check_ast_depth(ast, filename)
             ctx = Analyzer(ast, filename=filename, budget=budget,
-                           session_clones=clones).analyze()
+                           session_clones=clones).analyze(trace_pragmas=pragmas)
         budget.check(phase=Phase.ANALYZER)
-        # Attach after analysis: pragma expressions are not part of the
-        # program body, so the analyzer never inspects them; the codegen
-        # consumes them directly from the context to emit the on_bar tail
-        # ``if (trace_enabled_) { trace(...); ... }`` block.
-        ctx.pf_trace_pragmas = pragmas
         try:
             capacity_options = {}
             if history_capacity is not None:

@@ -338,9 +338,9 @@ class TaSiteHelper:
         top level, control-flow bodies, user-function bodies and UDT field
         defaults. Entering a statement resets both flags, expression nodes
         propagate them, and a ``request.security*`` payload is skipped because
-        its own evaluator lowers it. Consumed only by the block-scope opt-outs
-        in ``_ta_site_uses_precalc``; top-level statement operands are governed
-        by ``_lazy_edge_ta_hoist_plan`` instead.
+        its own evaluator lowers it. Consumed by the precalc gate in
+        ``_ta_site_uses_precalc``: a site below a lazy edge that
+        ``_lazy_edge_ta_hoist_plan`` does not hoist never precalcs.
         """
         cached = getattr(self, "_lazy_scope_ta_call_nodes", None)
         if cached is not None:
@@ -487,7 +487,8 @@ class TaSiteHelper:
     # 39/39 per-execution, na until three executed samples -- plus the exact
     # mirrors ``crossunder``/``falling``) keeps the inline compute and never
     # precalcs. Every other family keeps its existing lowering unchanged
-    # (inline compute when reached; precalc when static) until a tape pins
+    # (inline compute when reached, in batch and inline runs alike: a site
+    # below a lazy edge precalcs only when it is hoisted) until a tape pins
     # it -- ``_lazy_edge_hoist_plan()["skipped"]`` lists them per script.
     LAZY_EVERY_BAR_TA = frozenset({"highest", "lowest", "sma", "ema"})
     LAZY_SOURCE_CLOCK_TA = frozenset({"change", "mom", "roc"})
@@ -723,19 +724,21 @@ class TaSiteHelper:
         per-execution inline compute (cum/barssince/valuewhen/cross*/rising/...)
         must never precalc.
 
-        Re-pinned: the old opt-out for a chart ``ta.sma`` under an
-        ``and`` RHS (pf-probe-oliver-dual-vol-sma, "eager precalc is
-        TV-incorrect") and the matching recursive ``ta.ema`` rule encoded a
-        per-call clock that TradingView refuted for top-level shapes (a daily
-        US-stock probe, ``... and close > ta.sma(close,5)[1]``: the every-bar
-        clock matched every trade and the per-call clock did not; ``ta.ema``
-        likewise). The analyzer never marks a site inside an
-        ``if``/loop/function scope static, so after hoisting the opt-outs
-        only reach a static lazy-edge ``ta.sma``/``ta.ema`` that is not a
-        top-level statement operand -- in practice a UDT field default
-        (``test_ta_precalc_walks_type_field_defaults``), whose clock is the
-        ``Type.new()`` call site's and may sit in a block. Other TA families
-        and request.security sites retain their existing behavior."""
+        Every other site below a lazy edge (``_ta_call_nodes_under_lazy_rhs``:
+        an ``and``/``or`` right operand or a ``?:`` arm, in any statement) is
+        stepped only on the bars that reach it on the inline path, so it never
+        precalcs, whatever its family: precalculate() would step it on every
+        chart bar, and a batch run would read values that the inline run of
+        the same script never computes. The bare twins of the every-bar tapes
+        (``? ta.sma(close, 5) : na``, ``? ta.highest(high, 5) : na``) are
+        per-execution on TradingView
+        (``tests/test_lazy_edge_ta_every_bar.py``); the old opt-outs covered
+        only ``ta.sma`` under an ``and`` RHS and ``ta.ema``. The analyzer
+        never marks a site inside an ``if``/loop/function scope static, and a
+        ``request.security*`` payload is not classified: its own evaluator
+        lowers it. A conditional extreme in a top-level ``if`` body
+        (``_is_block_extreme``) keeps its execution window and never precalcs
+        either."""
         if not getattr(site, "is_static", False) or self._is_block_extreme(site):
             return False
         if self._ta_dynamic_plan(site) is not None:
@@ -752,18 +755,13 @@ class TaSiteHelper:
             return False
         if node is not None and id(node) in plan["call_nodes"]:
             return all(self._expr_safe_for_ta_precalc(arg) for arg in site.compute_args)
-        ta_name = self._ta_name_from_site(site)
-        if (
-            ta_name == "sma"
-            and node is not None
-            and id(node) in self._ta_call_nodes_under_and_rhs()
-        ):
-            return False
-        if (
-            ta_name == "ema"
-            and node is not None
-            and id(node) in self._ta_call_nodes_under_lazy_rhs()
-        ):
+        if node is not None and id(node) in self._ta_call_nodes_under_lazy_rhs():
+            # Reached-only on the inline path: an ``and``/``or`` right operand
+            # or a ``?:`` arm the hoist left alone steps the indicator only on
+            # the bars that reach it. precalculate() steps it on every chart
+            # bar, so a batch run read values the inline run never computes
+            # (``take ? ta.sma(close, 3) : na``: the closes of the unselected
+            # bars entered the window). Every family, not only sma/ema.
             return False
         return all(self._expr_safe_for_ta_precalc(arg) for arg in site.compute_args)
 
@@ -1745,16 +1743,28 @@ class TaSiteHelper:
     #   callable receives from its call sites nor an unadmitted persistent
     #   length): each call passes its source and
     #   the length its call site binds to ``pineforge::source::SeriesSma``
-    #   (through ``_PFSeriesSma``).
+    #   (through ``_PFSeriesSma``). A length that reads a script-level
+    #   ``var`` / ``varip`` is admitted when the script shows that it varies
+    #   by bar (``_ta_period_is_series``): the call reads that declaration's
+    #   storage, as it reads any other name of a series length.
     # * ta.supertrend: the factor (series or simple) of the first execution is
     #   the run's -- ``pineforge::source::PineSupertrend``.
+    # * series leftbars or rightbars, for ta.pivothigh / ta.pivotlow (both
+    #   overloads): each call passes its source and both strengths to
+    #   ``_PFSeriesPivotHigh`` / ``_PFSeriesPivotLow``, classes written into
+    #   the translation unit (``emit_top._TA_SERIES_PIVOT_CPP``). The call
+    #   keeps its own source history and tests ``source[rightbars]`` against
+    #   the ``leftbars`` values before it and the ``rightbars`` values after
+    #   it, with ta::PivotHigh / ta::PivotLow's comparisons and the strengths
+    #   of the current call. TradingView compiles these calls; its values for
+    #   a strength that changes between bars are not recorded here.
     #
     # TradingView refuses a series length for ta.rma / ema / rsi / atr / dmi /
     # macd / kc / hma / tsi / rci and supertrend's atrPeriod at compile time,
     # so those only ever carry a simple one here. A series length for the
     # other window functions (ta.wma, ...), and for a requested-context or
-    # forwarded ta.sma (``_ta_length_is_forwarded``) or one with an
-    # unsupported script-level ``var`` length, keeps the
+    # forwarded ta.sma (``_ta_length_is_forwarded``) or one with a
+    # script-level ``var`` length that is not shown to vary by bar, keeps the
     # refusal.
     # Constant- and input-length sites never reach this plan: they retain
     # their constructor/reset/precalculation cadence. EMA-family objects use
@@ -1806,6 +1816,12 @@ class TaSiteHelper:
     _TA_SERIES_PERCENTILE_CLASS = (
         "pineforge::source::SeriesPercentileNearestRank"
     )
+    # ta.pivothigh / ta.pivotlow with a series leftbars or rightbars: the
+    # classes ``_settle_ta_series_pivot`` writes into the translation unit.
+    _TA_SERIES_PIVOT_CLASSES = {
+        "pivothigh": "_PFSeriesPivotHigh",
+        "pivotlow": "_PFSeriesPivotLow",
+    }
     # Pure str.* functions of simple arguments (a simple result).
     _SIMPLE_STR_FUNCS = frozenset({
         "upper", "lower", "contains", "startswith", "endswith", "length",
@@ -1826,7 +1842,8 @@ class TaSiteHelper:
         """The lowering of a site with a constructor argument the constructor
         cannot take, or None (the ordinary constructor / runtime-reset path).
         ``kind`` is ``first_call`` / ``series_extreme`` /
-        ``series_percentile`` / ``supertrend``. A series Supertrend period
+        ``series_percentile`` / ``series_sma`` / ``series_pivot`` /
+        ``supertrend``. A series Supertrend period
         is reported here so the constructor guard cannot blame its factor."""
         plan = self._ta_cached_plan(site)
         if plan is not None and plan["kind"] == "refused":
@@ -2073,9 +2090,14 @@ class TaSiteHelper:
     def _ta_length_needs_stable_var(self, site: "TACallSite") -> bool:
         """Whether an authored constructor argument needs the stable-var
         path. Except for previously sized lengths written in a value block,
-        this includes any read of a script-level
+        and for a length the script shows to vary by bar
+        (``_ta_period_is_series``), this includes any read of a script-level
         persistent declaration (``var`` / ``varip``), itself or through the
-        declaration of a name it reads. Each identifier answers from the
+        declaration of a name it reads. TradingView qualifies a length with
+        that evidence series whatever declaration holds a part of it, so the
+        call reads it on every call; a persistent length without it may be
+        fixed for the run, which the series lowering does not claim to
+        answer. Each identifier answers from the
         declaration the analyzer bound it to (``_ta_read_declaration``), so a
         parameter, a loop counter, a block local or a tuple spelled like such
         a declaration is not one, whatever the call site's spelling of the
@@ -2084,7 +2106,10 @@ class TaSiteHelper:
         persistent = self._ta_script_var_decls()
         if not persistent:
             return False
-        pending = list(getattr(site, "ctor_nodes", None) or ())
+        nodes = list(getattr(site, "ctor_nodes", None) or ())
+        # Asked once, and only of a length that reads such a declaration.
+        varies_by_bar: bool | None = None
+        pending = list(nodes)
         seen: set[int] = set()
         while pending:
             if self._budget is not None:
@@ -2103,7 +2128,14 @@ class TaSiteHelper:
                     if init is None or self._runtime_ctor_arg_for_reset(init) is not None:
                         continue
                 if key in persistent:
-                    return True
+                    if varies_by_bar is None:
+                        varies_by_bar = any(
+                            self._ta_period_is_series(node) for node in nodes)
+                    if not varies_by_bar:
+                        return True
+                    # Read from its storage at the call: its initializer
+                    # runs once and is not part of the length.
+                    continue
                 if id(declaration) not in seen:
                     seen.add(id(declaration))
                     pending.append(declaration.value)
@@ -2259,7 +2291,10 @@ class TaSiteHelper:
         constructor from it (the literal admission, a runtime reset) or leaves
         the constructor guard's refusal. The simple spelling leaves those
         declarations out (``_simple_ta_top_level_decls``), so ``simple`` being
-        None does not say that such a length varies by bar."""
+        None does not say that such a length varies by bar. One the script
+        shows to vary by bar (``_ta_period_is_series``) is not ``persistent``
+        here: it takes the series lowering, which reads the declaration's
+        storage at the call."""
         family = self._ta_site_function(site)
         if family == "percentile_nearest_rank":
             kind = "series_percentile" if simple[refused[0]] is None else "first_call"
@@ -2276,6 +2311,13 @@ class TaSiteHelper:
             kind = "supertrend"
         elif all(simple[pos] is not None for pos in refused):
             kind = "first_call"
+        elif family in self._TA_SERIES_PIVOT_CLASSES:
+            # A strength that is a value of each bar: TradingView declares
+            # leftbars and rightbars series for both overloads. The call
+            # passes both strengths every time, wherever the series value is
+            # bound (a block, a loop, a callable, a script-level ``var``, a
+            # request.security payload).
+            kind = "series_pivot"
         elif (family == "sma" and not requested and not forwarded
                 and not persistent
                 and refused == [0] and len(site.ctor_args) == 1):
@@ -2476,14 +2518,58 @@ class TaSiteHelper:
     _TA_CHECKED_CLASSES = {
         "ta::EMA": "pineforge::source::PineEma",
         "ta::TSI": "pineforge::source::PineTsi",
+        "ta::Supertrend": "pineforge::source::PineFixedSupertrend",
         "ta::MACD": "pineforge::source::PineMacd",
         "_PFKC": "_PFKC",
         "_PFKCW": "_PFKCW",
     }
 
+    # TradingView's ta.mom and ta.roc read ``source[length]`` by bar position:
+    # a bar whose source is na keeps its place, and the call is na when either
+    # end is na. ta::Mom and ta::ROC count present samples instead, so the
+    # Pine call is built from the engine's Pine-layer objects, which keep one
+    # slot per call. They take the same constructor argument and never stop a
+    # run, so they are not checked classes: precalculation needs no handler.
+    _TA_POSITIONAL_LAG_CLASSES = {
+        "ta::Mom": "pineforge::source::PineMom",
+        "ta::ROC": "pineforge::source::PineRoc",
+    }
+
+    # TradingView's ta.vwma is ``ta.sma(source * volume, length) /
+    # ta.sma(volume, length)``, and each of the two averages skips an na input
+    # on its own: a bar whose source is na still enters the volume average,
+    # and the call answers the held product average over it. ta::VWMA keeps
+    # complete (source, volume) pairs instead and answers na on such a bar,
+    # so the Pine call is built from the engine's Pine-layer object, declared
+    # in the header of the classes above. It takes the same constructor
+    # argument and never stops a run: not a checked class either.
+    _TA_VOLUME_WEIGHTED_CLASSES = {
+        "ta::VWMA": "pineforge::source::PineVwma",
+    }
+
+    # TradingView's ta.iii and ta.wvad divide by the bar's range and are na on
+    # a bar whose high equals its low, where ta::III and ta::WVAD answer 0.
+    # The Pine variables are built from the engine's flat-range objects, which
+    # have a header of their own (``_TA_FLAT_RANGE_INCLUDE``,
+    # codegen/emit_top.py). They take no constructor argument and never stop
+    # a run either.
+    _TA_FLAT_RANGE_CLASSES = {
+        "ta::III": "pineforge::source::PineIii",
+        "ta::WVAD": "pineforge::source::PineWvad",
+    }
+
     def _ta_fixed_cpp_type(self, site: "TACallSite") -> str:
         """The concrete fixed object used by declarations and every factory."""
-        return self._TA_CHECKED_CLASSES.get(site.class_name, site.class_name)
+        name = site.class_name
+        for classes in (
+            self._TA_CHECKED_CLASSES,
+            self._TA_POSITIONAL_LAG_CLASSES,
+            self._TA_VOLUME_WEIGHTED_CLASSES,
+            self._TA_FLAT_RANGE_CLASSES,
+        ):
+            if name in classes:
+                return classes[name]
+        return name
 
     def _ta_kernel_type(self, site: "TACallSite", *, chart: bool) -> str:
         if chart and self._is_block_extreme(site):
@@ -2501,6 +2587,11 @@ class TaSiteHelper:
             return self._TA_SERIES_PERCENTILE_CLASS
         if plan["kind"] == "series_sma":
             return "_PFSeriesSma"
+        if plan["kind"] == "series_pivot":
+            # ``_settle_ta_series_pivot`` writes the classes once a member is
+            # declared with one of them.
+            self._uses_ta_series_pivot = True
+            return self._TA_SERIES_PIVOT_CLASSES[plan["family"]]
         if plan["kind"] == "supertrend":
             return "pineforge::source::PineSupertrend"
         return f"pineforge::source::FirstCallBound<{self._ta_kernel_type(site, chart=chart)}>"
@@ -2614,6 +2705,16 @@ class TaSiteHelper:
                 raise AssertionError("series ta.sma site must have one source")
             length = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
             return f"{base_args}, pineforge::source::ta_number({length})"
+        if kind == "series_pivot":
+            # The source is the call's own (``base_args``: the explicit
+            # source, else the bar's high / low); leftbars and rightbars are
+            # the call site's bindings, read on every call.
+            if len(site.ctor_args) != 2 or not base_args:
+                raise AssertionError("series pivot site must have one source")
+            left = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
+            right = self._ta_dynamic_ctor_arg(site, plan, 1, render_node)
+            return (f"{base_args}, pineforge::source::ta_number({left}), "
+                    f"pineforge::source::ta_number({right})")
         if kind == "series_percentile":
             if len(site.compute_args) != 2:
                 raise AssertionError(

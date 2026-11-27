@@ -410,9 +410,8 @@ class AnalyzerContext:
     block_var_renames: dict[int, dict[str, str]] = field(default_factory=dict)
     # ``// @pf-trace name=expr`` pragmas in source order. Populated by
     # :func:`pineforge_codegen.pragmas.extract_pf_trace_pragmas` from
-    # the original source text and attached after :class:`Analyzer`
-    # finishes (the analyzer never sees pragma expressions because the
-    # lexer strips comments). Codegen iterates this list to emit the
+    # the original source text. Analyzer registers their built-in history
+    # reads at script scope. Codegen iterates this list to emit the
     # ``if (trace_enabled_) { trace(...); ... }`` block at the bottom
     # of every ``on_bar()``; an empty list means zero overhead is
     # emitted. Stored as ``list`` (not ``list[PfTracePragma]``) to

@@ -19,6 +19,7 @@ from ..ast_nodes import (
 )
 from ..analyzer import (
     AnalyzerContext,
+    BUILTIN_VARS,
     TACallSite,
     FuncInfo,
     FixnanCallSite,
@@ -28,6 +29,7 @@ from ..analyzer import (
     TA_LENGTH_ONLY_DEFAULT_SOURCE,
 )
 from ..analyzer.value_bindings import ValueBindings
+from ..diagnostic_codes import render_diagnostic
 from ..symbols import PineType, TypeSpec
 from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
@@ -345,7 +347,7 @@ from .emit_top import ENUM_STRING_INCLUDE, TopLevelEmitter
 # plus the per-kind handlers for var-decl, assignment, tuple-assign,
 # if/for/while/switch and the if/switch-as-expression lowering).
 from .visit_stmt import StmtVisitor
-from .visit_expr import ExprVisitor
+from .visit_expr import ExprVisitor, _BUILTIN_NAMESPACE_NAMES
 from .visit_call import CallVisitor
 
 # DrawingVisitor owns the drawing-objects-as-data dispatch (line/box/label/
@@ -4205,6 +4207,48 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     walk(v)
         walk(self.ctx.ast)
 
+    def _prepare_trace_history(self) -> None:
+        """Register strategy buffers and refuse builtins with no history
+        lowering before a trace can index their current C++ scalar."""
+        self._trace_shadowed_series: set[str] = set()
+        for pragma in self.ctx.pf_trace_pragmas or ():
+            for node, _ in iter_ast_nodes(pragma.expr_node):
+                if not isinstance(node, Subscript):
+                    continue
+                receiver = node.object
+                parts = []
+                while isinstance(receiver, MemberAccess):
+                    parts.append(receiver.member)
+                    receiver = receiver.object
+                if isinstance(receiver, NaLiteral):
+                    name = "na"
+                elif isinstance(receiver, Identifier):
+                    root = receiver.name
+                    if not parts and root in BUILTIN_VARS:
+                        # A global declaration can shadow a scalar builtin.
+                        if self.ctx.identifier_decl_bindings.get(id(receiver)):
+                            if not self._reads_builtin_variable(receiver):
+                                self._trace_shadowed_series.add(root)
+                            continue
+                        if (root in self.ctx.series_bar_fields
+                                or root in BAR_BUILTINS and root in self.ctx.series_vars):
+                            continue
+                    elif (root not in _BUILTIN_NAMESPACE_NAMES
+                          or root in self._ordinary_global_binding_names
+                          or root in self._var_names):
+                        continue
+                    elif self._is_session_flag(node.object):
+                        continue  # _prescan_session_history includes traces
+                    elif (root == "strategy" and len(parts) == 1
+                          and parts[0] in self._STRAT_SERIES_PUSH):
+                        self._strategy_series_vars.add(f"_strat_{parts[0]}")
+                        continue
+                    name = ".".join([root, *reversed(parts)])
+                else:
+                    continue
+                message, hint = render_diagnostic("PF-E5099", {"name": name})
+                self._codegen_error(node, message, hint=hint)
+
     def _func_cpp_base_name(self, fname: str) -> str:
         """Return the actual emitted C++ base name for a UDF or UDT method."""
         fi = self._func_info_map.get(fname)
@@ -5495,6 +5539,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         prepare_retained_aliases(self)
         # Pre-scan for strategy series vars
         self._prescan_strategy_series()
+        self._prepare_trace_history()
         self._prescan_session_history()
         from .array_slice import prepare_names as prepare_slice_names, uses_slice
         self._uses_array_slice_views = uses_slice(self)
@@ -6652,6 +6697,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.insert(0, ENUM_STRING_INCLUDE)
         # The same for the UTF-16 unit helpers of str.length, str.pos and
         # str.substring: any body or evaluator may emit one of those calls.
+        # The per-bar pivot classes: a request.security copy may be the only
+        # member declared with one of them.
+        self._settle_ta_series_pivot(lines)
         self._settle_tv_string_units(lines)
         self._settle_tv_string_trim(lines)
         self._settle_case_mapping(lines)
