@@ -63,7 +63,7 @@ TA_SMOKE_CASES = {
     "mfi": ("x = ta.mfi(close, 5)", "ta::MFI"),
     "min": ("x = ta.min(close)", "ta::AllTimeMin"),
     "mode": ("x = ta.mode(close, 5)", "ta::Mode"),
-    "mom": ("x = ta.mom(close, 1)", "ta::Mom"),
+    "mom": ("x = ta.mom(close, 1)", "pineforge::source::PineMom"),
     "percentile_linear_interpolation": (
         "x = ta.percentile_linear_interpolation(close, 5, 50)",
         "ta::PercentileLinearInterpolation",
@@ -83,20 +83,23 @@ TA_SMOKE_CASES = {
     "rci": ("x = ta.rci(close, 5)", "ta::RCI"),
     "rising": ("x = ta.rising(close, 3)", "ta::Rising"),
     "rma": ("x = ta.rma(close, 5)", "ta::RMA"),
-    "roc": ("x = ta.roc(close, 1)", "ta::ROC"),
+    "roc": ("x = ta.roc(close, 1)", "pineforge::source::PineRoc"),
     "rsi": ("x = ta.rsi(close, 14)", "ta::RSI"),
     "sar": ("x = ta.sar(0.02, 0.02, 0.2)", "ta::SAR"),
     "sma": ("x = ta.sma(close, 5)", "ta::SMA"),
     "stdev": ("x = ta.stdev(close, 5)", "ta::StdDev"),
     "stoch": ("x = ta.stoch(close, high, low, 14)", "ta::Stoch"),
-    "supertrend": ("[s, d] = ta.supertrend(3.0, 10)", "ta::Supertrend"),
+    "supertrend": (
+        "[s, d] = ta.supertrend(3.0, 10)",
+        "pineforge::source::PineFixedSupertrend",
+    ),
     "swma": ("x = ta.swma(close)", "ta::SWMA"),
     "tr": ("x = ta.tr(true)", "ta::TR"),
     "tsi": ("x = ta.tsi(close, 13, 25)", "pineforge::source::PineTsi"),
     "valuewhen": ("x = ta.valuewhen(close > open, close, 0)", "ta::ValueWhen"),
     "variance": ("x = ta.variance(close, 5)", "ta::Variance"),
     "vwap": ("x = ta.vwap(close)", "ta::VWAP"),
-    "vwma": ("x = ta.vwma(close, 5)", "ta::VWMA"),
+    "vwma": ("x = ta.vwma(close, 5)", "pineforge::source::PineVwma"),
     "wma": ("x = ta.wma(close, 5)", "ta::WMA"),
     "wpr": ("x = ta.wpr(14)", "ta::WPR"),
 }
@@ -127,10 +130,20 @@ def test_every_official_ta_function_has_codegen_smoke(name):
     assert expected in cpp
 
 
+# The C++ type a property variable's object is declared with: the engine
+# class, or for ta.iii and ta.wvad the engine's Pine-layer type, which is na
+# on a bar whose high equals its low (tests/test_ta_iii_wvad_flat_bar.py).
+TA_VARIABLE_TYPES = {
+    "obv": "ta::OBV", "accdist": "ta::AccDist", "nvi": "ta::NVI",
+    "pvi": "ta::PVI", "pvt": "ta::PVT", "wad": "ta::WAD",
+    "wvad": "pineforge::source::PineWvad", "iii": "pineforge::source::PineIii",
+}
+
+
 @pytest.mark.parametrize("name", sorted(OFFICIAL_TA_VARIABLES))
 def test_official_ta_property_variables_compile_without_parentheses(name):
     cpp = transpile(_pine(f"x = ta.{name}"))
-    assert f"ta::{ {'obv': 'OBV', 'accdist': 'AccDist', 'nvi': 'NVI', 'pvi': 'PVI', 'pvt': 'PVT', 'wad': 'WAD', 'wvad': 'WVAD', 'iii': 'III'}[name] }" in cpp
+    assert TA_VARIABLE_TYPES[name] in cpp
 
 
 @pytest.mark.parametrize("name", sorted(OFFICIAL_TA_VARIABLES))

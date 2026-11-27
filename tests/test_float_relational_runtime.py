@@ -33,8 +33,12 @@ from tests import _compile as compile_env
 _PINE_MATRIX = """//@version=6
 strategy("Float relational runtime matrix")
 
-float lhs = input.float(1.0, "lhs")
-float rhs = input.float(1.0, "rhs")
+float lhs_input = input.float(1.0, "lhs")
+float rhs_input = input.float(1.0, "rhs")
+int operand_case = input.int(0, "operand_case")
+// 1 selects na; 2 and 3 overflow the signed finite lhs; 3 also overflows rhs.
+float lhs = operand_case == 1 ? na : operand_case >= 2 ? lhs_input * 2.0 : lhs_input
+float rhs = operand_case == 3 ? rhs_input * 2.0 : rhs_input
 mixed_i = input.time(0, "mixed_i")
 float mixed_f = input.float(0.0, "mixed_f")
 int eq_out = lhs == rhs ? 1 : 0
@@ -61,18 +65,21 @@ int once_out = bump() == 1.0 ? 1 : 0
 
 
 _CPP_DRIVER = r"""
+#include <cmath>
 #include <iostream>
 #include <limits>
 #include <iomanip>
 #include <sstream>
 
 int main() {
+    enum OperandCase { finite = 0, missing_lhs = 1, overflow_lhs = 2, overflow_both = 3 };
     struct Row {
         const char* name;
         double lhs;
         double rhs;
         int64_t mixed_i;
         double mixed_f;
+        OperandCase operand_case = finite;
     };
 
     const Row rows[] = {
@@ -92,17 +99,14 @@ int main() {
         {"tiny_equal_below", -0.00000000009, 0.0, 42, 42.0},
         {"tiny_ordered_above", 0.00000000011, 0.0, 43, 42.0},
         {"tiny_ordered_below", -0.00000000011, 0.0, 41, 42.0},
-        {"nan", std::numeric_limits<double>::quiet_NaN(), 1.0, 42, 42.0},
-        {"positive_infinity_equal", std::numeric_limits<double>::infinity(),
-             std::numeric_limits<double>::infinity(), 42, 42.0},
-        {"positive_infinity_above", std::numeric_limits<double>::infinity(),
-             1.0, 43, 42.0},
-        {"negative_infinity_below", -std::numeric_limits<double>::infinity(),
-             1.0, 41, 42.0},
+        {"nan", 0.0, 1.0, 42, 42.0, missing_lhs},
+        {"positive_infinity_equal", 1.0e308, 1.0e308, 42, 42.0, overflow_both},
+        {"positive_infinity_above", 1.0e308, 1.0, 43, 42.0, overflow_lhs},
+        {"negative_infinity_below", -1.0e308, 1.0, 41, 42.0, overflow_lhs},
         {"huge_equal", 1.0e300, 1.0e300, 42, 42.0},
         {"huge_ordered", 1.0e300, 9.0e299, 43, 42.0},
         {"huge_adjacent_ordered",
-             std::nextafter(1.0e300, std::numeric_limits<double>::infinity()),
+             std::nextafter(1.0e300, std::numeric_limits<double>::max()),
              1.0e300, 43, 42.0},
         // A naive abs(lhs-rhs) overflows here; ordering must remain defined.
         {"huge_opposite_signs", 1.0e308, -1.0e308, 41, 42.0},
@@ -115,9 +119,8 @@ int main() {
 
     for (const Row& row : rows) {
         GeneratedStrategy strategy;
-        // Numeric comparison operands are script inputs, not market bars.
-        // Preserve binary64 values and the full int64 mixed operand, including
-        // the NA sentinel, while executing against structurally valid OHLCV.
+        // Round-trip finite binary64 inputs and the full int64 mixed operand,
+        // including its integer NA sentinel. Only Pine produces NaN and ±inf.
         auto scalar = [](double value) {
             std::ostringstream out;
             out << std::setprecision(std::numeric_limits<double>::max_digits10)
@@ -126,11 +129,25 @@ int main() {
         };
         strategy.set_input("lhs", scalar(row.lhs));
         strategy.set_input("rhs", scalar(row.rhs));
+        strategy.set_input("operand_case", std::to_string(row.operand_case));
         strategy.set_input("mixed_i", std::to_string(row.mixed_i));
         strategy.set_input("mixed_f", scalar(row.mixed_f));
         Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 60000};
         strategy.run(&bar, 1);
-        if (!strategy.last_error().empty()) return 7;
+        if (!strategy.last_error().empty()) {
+            std::cerr << row.name << ": " << strategy.last_error() << '\n';
+            return 7;
+        }
+        // A finite lhs above 1 would give the same ordered comparisons as +inf.
+        // Verify the exceptional operands actually reached the comparator.
+        if ((row.operand_case == missing_lhs && !std::isnan(strategy.lhs)) ||
+            (row.operand_case >= overflow_lhs &&
+             (!std::isinf(strategy.lhs) || std::signbit(strategy.lhs) != std::signbit(row.lhs))) ||
+            (row.operand_case == overflow_both && !std::isinf(strategy.rhs))) {
+            std::cerr << row.name << ": unexpected operands " << strategy.lhs << ", "
+                      << strategy.rhs << "; last_error: " << strategy.last_error() << '\n';
+            return 8;
+        }
         std::cout
             << row.name
             << '\t' << strategy.eq_out
@@ -259,6 +276,7 @@ def test_generated_float_relational_runtime_matrix():
     observed: dict[str, tuple[int, ...]] = {}
     for line in stdout.splitlines():
         name, *raw_values = line.split("\t")
+        assert name not in observed, f"duplicate comparator row: {name}"
         observed[name] = tuple(int(value) for value in raw_values)
 
     assert set(observed) == set(_EXPECTED)

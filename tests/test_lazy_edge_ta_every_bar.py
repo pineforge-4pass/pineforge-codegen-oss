@@ -273,11 +273,10 @@ def test_bare_pins_keep_the_reached_only_inline_compute(label, body, member, arg
     stmt = _stmt(cpp, "c = (") if body.startswith("c =") else _stmt(cpp, "v = (")
     assert f"{member}.compute({arg})" in stmt, label
     assert _on_bar(cpp).count(f"{member}.compute(") == 1, label
-    # #58 behaviour is untouched: an ``and``-RHS sma/ema never precalcs. (A
-    # ternary-arm sma/ema and a static highest keep main's static-mode
-    # precalc eligibility; the lanes run dynamic mode.)
-    if body.startswith("c ="):
-        assert f"_precalc_{member}" not in cpp, label
+    # The reached-only clock holds in a batch run too: no bare pin precalcs,
+    # in a ternary arm as on an ``and`` RHS (#58), whatever its family
+    # (tests/test_lazy_edge_ta_batch_clock.py runs both modes).
+    assert f"_precalc_{member}" not in cpp, label
 
 
 
@@ -539,7 +538,8 @@ def test_security_payload_sites_are_not_hoisted():
 def test_unpinned_families_keep_their_existing_lowering():
     """Allow-list: a family without an every-bar tape is neither hoisted nor
     re-routed (2026-09-04 Cloud Run measurement of the broad hoist: -170
-    tiers / 30 hard lanes). Inline compute when reached; precalc as before."""
+    tiers / 30 hard lanes). Inline compute when reached, in a batch run too:
+    a site below a lazy edge has no precalculated vector."""
     cpp = _cpp(
         "pred = close > open\n"
         "a = pred and ta.rsi(close, 14) > 50\n"
@@ -552,8 +552,8 @@ def test_unpinned_families_keep_their_existing_lowering():
     assert "_PFLazySourceClock" not in cpp
     for var, member in (("a", "_ta_rsi_1"), ("b", "_ta_atr_2"), ("c", "_ta_stdev_3"), ("d", "_ta_wma_4")):
         assert f"{member}.compute(" in _stmt(cpp, f"{var} = ("), var
-    # Static sites keep main's precalc eligibility (static mode only).
-    assert "std::vector<double> _precalc__ta_rsi_1" in cpp
+        # precalculate() would step the site on every chart bar.
+        assert f"_precalc_{member}" not in cpp, var
 
 
 def test_eager_top_level_sites_are_unchanged():

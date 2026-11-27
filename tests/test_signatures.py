@@ -535,7 +535,7 @@ class TestTAKwargs:
 
     def test_ta_supertrend_kwargs(self):
         cpp = _generate(_pine('[st, dir] = ta.supertrend(factor=3.0, atrPeriod=10)'))
-        assert "ta::Supertrend" in cpp
+        assert "pineforge::source::PineFixedSupertrend" in cpp
 
     def test_ta_dmi_kwargs(self):
         cpp = _generate(_pine('[dp, dm, adx] = ta.dmi(diLength=14, adxSmoothing=14)'))
@@ -556,15 +556,15 @@ class TestTAKwargs:
 
     def test_ta_vwma_kwargs(self):
         cpp = _generate(_pine('x = ta.vwma(source=close, length=20)'))
-        assert "ta::VWMA" in cpp
+        assert "pineforge::source::PineVwma" in cpp
 
     def test_ta_mom_kwargs(self):
         cpp = _generate(_pine('x = ta.mom(source=close, length=10)'))
-        assert "ta::Mom" in cpp
+        assert "pineforge::source::PineMom" in cpp
 
     def test_ta_roc_kwargs(self):
         cpp = _generate(_pine('x = ta.roc(source=close, length=10)'))
-        assert "ta::ROC" in cpp
+        assert "pineforge::source::PineRoc" in cpp
 
     def test_ta_rising_kwargs(self):
         cpp = _generate(_pine('x = ta.rising(source=close, length=3)'))
