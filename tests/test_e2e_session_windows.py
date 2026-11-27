@@ -13,21 +13,11 @@ holds the reopen and is in market.
 
 Replayed under those sessions, on each tape's own bars and, for TSE:7203 and
 CBOT:ZC1!, on the 15-minute tape's bars the engine aggregates to 60 and 240
-minutes (TradingView's bars open where the engine's do; the engine aggregates
-HKEX:700 on a 09:30-anchored grid, 09:30, 10:30, ..., where TradingView's
-60-minute bars open on the clock hour after the first), every flag PineForge
-computes is TradingView's, but for two pinned divergences, each pinned by the
-bars it misses:
-
-- TradingView keeps TSE:7203's 15-minute bar that opens at 15:30 in the
-  session, which the published 15:30 end leaves out: out of market and
-  post-market, and the regular day's last bar is the 15:15 one; the chart's
-  day, which the post-market bar widens, ends on it as TradingView's does. A
-  session ending at 15:45 gives TradingView's flags on every bar.
-- TradingView flags both HKEX:700's 09:30 and 10:00 60-minute bars
-  isfirstbar, and each of its 240-minute bars isfirstbar and islastbar (the
-  ``_regular`` twins alike); the engine's session day has one first and one
-  last bar.
+minutes, every flag must match TradingView's except for the pinned TSE:7203
+15-minute close. TradingView keeps the 15:30 bar in session; the published
+15:30 end leaves it out of market and post-market, with 15:15 the regular
+day's last bar. The chart's day still ends on the 15:30 bar. A session ending
+at 15:45 gives TradingView's flags on every bar.
 
 The pre- and post-market windows are the engine's (``session_in_premarket``
 and ``session_in_postmarket`` in src/session_time.cpp, which the emitted
@@ -104,11 +94,12 @@ CASES = (
     Case("cgs2-flags-zc1-15", ZC),
     *(Case(f"ksw-flags-tse7203-{tf}", session, feed=feed) for tf in ("60", "240")
       for session in TSE for feed in (None, "cgs2-flags-tse7203-15")),
-    # TradingView's second first bar, and its 240-minute bars that are each
-    # the day's first and last.
-    Case("ksw-flags-hkex700-60", HKEX, {"F": {"10:00": 10}, "f": {"10:00": 10}}),
-    Case("ksw-flags-hkex700-240", HKEX, {"F": {"13:00": 10}, "L": {"09:30": 10},
-                                         "f": {"13:00": 10}, "l": {"09:30": 10}}),
+    # HKEX's opening cell is clipped: the next cell is also first. When that
+    # next cell closes the day, the opening cell is also last. Old misses on
+    # 60m: F/f at 10:00 ten times each -> {}; on 240m: F/f at 13:00 and
+    # L/l at 09:30 ten times each -> {} (plain and regular flags alike).
+    Case("ksw-flags-hkex700-60", HKEX),
+    Case("ksw-flags-hkex700-240", HKEX),
     *(Case(f"ksw-flags-zc1-{tf}", ZC, feed=feed) for tf in ("60", "240")
       for feed in (None, "cgs2-flags-zc1-15")),
 )
