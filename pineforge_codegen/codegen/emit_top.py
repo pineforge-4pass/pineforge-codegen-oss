@@ -123,35 +123,34 @@ LOOP_WATCHDOG_CPP = """struct @TYPE@ {
     static constexpr unsigned interval = 256;
     struct State {
         std::optional<std::int64_t> bar;
-        std::chrono::steady_clock::time_point start{};
-        unsigned remaining = 0;
+        std::chrono::steady_clock::time_point deadline{};
+        unsigned remaining = interval;
     };
     std::int64_t bar;
     int line;
     State* state = nullptr;
 
-    void begin(State& site) {
+    unsigned begin(State& site) {
         state = &site;
         if (site.bar != bar) {
             site.bar = bar;
-            site.start = std::chrono::steady_clock::now();
+            site.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(::kLoopTimeLimitMs);
             site.remaining = interval;
         }
+        // Bias by one: check after the Nth body, never before its side effects.
+        return site.remaining + 1;
     }
 
-    // Sample after a batch, either before the next body or on the way out.
-    void poll() {
-        check();
-        --state->remaining;
-    }
-    void check() const {
-        if (state->remaining != 0) return;
-        state->remaining = interval;
-        const auto elapsed = std::chrono::steady_clock::now() - state->start;
-        if (elapsed >= std::chrono::milliseconds(::kLoopTimeLimitMs))
+    [[gnu::noinline, gnu::cold]] unsigned poll() const {
+        if (std::chrono::steady_clock::now() >= state->deadline)
             pine_runtime_error(std::string("Error on bar ") + std::to_string(bar)
                 + ": Pine line " + std::to_string(line) + ": loop time limit exceeded ("
                 + std::to_string(::kLoopTimeLimitMs) + " ms)");
+        return interval;
+    }
+
+    void finish(unsigned count) const {
+        state->remaining = count == 1 ? poll() : count - 1;
     }
 };"""
 _TRADE_HISTORY_POLICY_MARKER = "        /* __PINEFORGE_TRADE_HISTORY_POLICY__ */"

@@ -74,6 +74,7 @@ classes from ``..ast_nodes``.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 import functools
 import re
 
@@ -124,6 +125,28 @@ from .tables import (
 # Sentinel for "no block-scoped overlay was activated" so an empty saved map
 # is still distinguishable from the no-op case.
 _NO_BLOCK_REMAP = object()
+
+
+@dataclass(frozen=True)
+class _LoopWatchdog:
+    """Names of the site handle and its automatic (never address-taken) counter."""
+    timer: str
+    count: str
+
+    def tick(self, lines: list[str], indent: int) -> None:
+        pad = "    " * indent
+        zero = f"--{self.count} == 0"
+        lines.extend((
+            "#if defined(__GNUC__) || defined(__clang__)",
+            f"{pad}if (::__builtin_expect({zero}, 0))",
+            "#else",
+            f"{pad}if ({zero})",
+            "#endif",
+            f"{pad}    {self.count} = {self.timer}.poll();",
+        ))
+
+    def finish(self, lines: list[str], indent: int) -> None:
+        lines.append(f"{'    ' * indent}{self.timer}.finish({self.count});")
 
 
 def _loop_scoped_history_flags(visit):
@@ -2036,15 +2059,16 @@ class StmtVisitor:
     def _loop_watchdog_sites(self) -> str:
         return self._generated_helper_name(("loop-watchdog-sites",), "_pf_loop_watchdog_sites")
 
-    def _start_loop_watchdog(self, node, lines: list[str], indent: int) -> str:
-        """Bind this loop's timer to its own persistent sampling state."""
+    def _start_loop_watchdog(self, node, lines: list[str], indent: int) -> _LoopWatchdog:
+        """Bind the deadline to its site; keep the live countdown in a local."""
         index = self._loop_watchdog_count
         self._loop_watchdog_count += 1
         name = self._generated_helper_name(("loop-watchdog", index), f"_pf_loop_watchdog_{index}")
+        count = self._generated_helper_name(("loop-count", index), f"_pf_loop_count_{index}")
         pad = "    " * indent
         lines.append(f"{pad}::{self._loop_watchdog_type()} {name}{{bar_index_, {node.loc.line}}};")
-        lines.append(f"{pad}{name}.begin(this->{self._loop_watchdog_sites()}[{index}]);")
-        return name
+        lines.append(f"{pad}unsigned {count} = {name}.begin(this->{self._loop_watchdog_sites()}[{index}]);")
+        return _LoopWatchdog(name, count)
 
     @_loop_scoped_history_flags
     def _visit_for(self, node: ForStmt, lines: list[str], indent: int,
@@ -2147,10 +2171,10 @@ class StmtVisitor:
             f"{var} += ({down_var} ? -{step_var} : {step_var})"
             f"{refresh}) {{"
         )
-        lines.append(f"{pad}    {timer}.poll();")
+        timer.tick(lines, indent + 1)
         self._emit_counted_loop_body(node, lines, indent + 1, value_target)
         lines.append(f"{pad}}}")
-        lines.append(f"{pad}{timer}.check();")
+        timer.finish(lines, indent)
 
     def _for_bound_may_be_missing(self, operand) -> bool:
         """Whether a counted-loop bound can hold the integer na sentinel at run time.
@@ -2234,7 +2258,7 @@ class StmtVisitor:
         self, node: ForStmt, lines: list[str], indent: int, *,
         start: str, start_cpp: str, var: str, names: tuple[str, str, str, str],
         counter_cpp_type: str, render, emit_body,
-        guard_na: bool = False, pine_v5: bool | None = None, timer: str | None = None,
+        guard_na: bool = False, pine_v5: bool | None = None, timer: _LoopWatchdog | None = None,
     ) -> None:
         """Shared chart/security lowering; callers supply lexical renderers.
 
@@ -2301,10 +2325,10 @@ class StmtVisitor:
             f"{var} += ({down_var} ? -{step_var} : {step_var})"
             f"{refresh}) {{"
         )
-        lines.append(f"{inner}    {timer}.poll();")
+        timer.tick(lines, indent + 2)
         emit_body(indent + 2)
         lines.append(f"{inner}}}")
-        lines.append(f"{inner}{timer}.check();")
+        timer.finish(lines, indent + 1)
         lines.append(f"{pad}}}")
 
     @contextmanager
@@ -2404,7 +2428,6 @@ class StmtVisitor:
         timer = self._start_loop_watchdog(node, lines, indent)
         signature = ", ".join([f"int {var}", *(f"auto& {name}" for name in parameters)])
         lines.append(f"{pad}auto {stem}step = [&]({signature}) {{")
-        lines.append(f"{pad}    {timer}.poll();")
         saved_remap = self._active_var_remap
         self._active_var_remap = {**saved_remap, **dict(zip(accumulators, parameters))}
         try:
@@ -2433,7 +2456,7 @@ class StmtVisitor:
             f"{pad}    while ({stem}limit > 0"
             f" && closed_trade_exit_time({stem}limit - 1) == {stem}run) {{"
         )
-        lines.append(f"{pad}        {timer}.poll();")
+        timer.tick(lines, indent + 2)
         lines.append(f"{pad}        --{stem}limit;")
         lines.append(f"{pad}    }}")
         lines.append(f"{pad}}}")
@@ -2445,24 +2468,26 @@ class StmtVisitor:
         for safe, saved in zip(accumulators, prefix):
             lines.append(f"{pad}    {saved} = {safe};")
         lines.append(f"{pad}}}")
-        lines.append(
-            f"{pad}for (int {stem}i = {stem}settled; {stem}i < {stem}limit; ++{stem}i)"
-        )
-        lines.append(f"{pad}    {stem}step({stem}i, {', '.join(prefix)});")
+
+        # Keep the countdown in the caller. Capturing it by reference in the
+        # shared fold-body lambda would reintroduce a load/store per row.
+        def emit_rows(first: str, end: str, values: list[str]) -> None:
+            lines.append(f"{pad}for (int {stem}i = {first}; {stem}i < {end}; ++{stem}i) {{")
+            timer.tick(lines, indent + 1)
+            lines.append(f"{pad}    {stem}step({stem}i, {', '.join(values)});")
+            lines.append(f"{pad}}}")
+
+        emit_rows(f"{stem}settled", f"{stem}limit", prefix)
         lines.append(
             f"{pad}if ({stem}limit > {stem}settled) {stem}settled = {stem}limit;"
         )
         lines.append(f"{pad}{stem}seen = {stem}n;")
         for safe, saved in zip(accumulators, prefix):
             lines.append(f"{pad}{safe} = {saved};")
-        lines.append(
-            f"{pad}for (int {stem}i = {stem}settled; {stem}i < {stem}n; ++{stem}i)"
-        )
-        lines.append(f"{pad}    {stem}step({stem}i, {', '.join(accumulators)});")
+        emit_rows(f"{stem}settled", f"{stem}n", accumulators)
 
         lines.append("#ifdef PINEFORGE_CLOSED_TRADE_FOLD_VERIFY")
-        lines.append(f"{pad}for (int {stem}i = 0; {stem}i < {stem}n; ++{stem}i)")
-        lines.append(f"{pad}    {stem}step({stem}i, {', '.join(checks)});")
+        emit_rows("0", f"{stem}n", checks)
         for safe, check in zip(accumulators, checks):
             lines.append(
                 f"{pad}if (std::memcmp(&{check}, &{safe}, sizeof({safe})) != 0)"
@@ -2471,7 +2496,7 @@ class StmtVisitor:
                 f'{pad}    throw std::runtime_error("closed-trade fold verification failed");'
             )
         lines.append("#endif")
-        lines.append(f"{pad}{timer}.check();")
+        timer.finish(lines, indent)
 
     @_loop_scoped_history_flags
     def _visit_for_in(self, node, lines: list[str], indent: int,
@@ -2633,7 +2658,7 @@ class StmtVisitor:
                 self._safe_name(name) for name in node.vars
             )
             lines.append(f"{pad}for (auto [{bindings}] : {iterable}) {{")
-        lines.append(f"{pad}    {timer}.poll();")
+        timer.tick(lines, indent + 1)
         _blk_saved = self._push_block_var_remap(node)
         loop_binding_names = (
             [node.var] if node.var else list(node.vars or [])
@@ -2679,7 +2704,7 @@ class StmtVisitor:
         finally:
             self._pop_block_var_remap(_blk_saved)
         lines.append(f"{pad}}}")
-        lines.append(f"{pad}{timer}.check();")
+        timer.finish(lines, indent)
         self._current_loop_vars = saved_loop
         self._current_loop_var_specs = saved_loop_specs
         self._current_counted_loop_vars = saved_counted
@@ -2694,14 +2719,14 @@ class StmtVisitor:
         )
         timer = self._start_loop_watchdog(node, lines, indent)
         lines.append(f"{pad}while ({cond}) {{")
-        lines.append(f"{pad}    {timer}.poll();")
+        timer.tick(lines, indent + 1)
         _blk_saved = self._push_block_var_remap(node)
         try:
             self._emit_loop_body(node.body, lines, indent + 1, value_target)
         finally:
             self._pop_block_var_remap(_blk_saved)
         lines.append(f"{pad}}}")
-        lines.append(f"{pad}{timer}.check();")
+        timer.finish(lines, indent)
 
     def _emit_loop_body(self, body: list, lines: list[str], indent: int,
                         value_target: tuple[str, str | None] | None) -> None:

@@ -5993,10 +5993,10 @@ class SecurityEmitter:
                 lines.append(
                     f"{pad}while ({self._coerce_bool_expr(cond_cpp, stmt.condition)}) {{"
                 )
-            lines.append(f"{pad}    {timer}.poll();")
+            timer.tick(lines, indent + 1)
             emit_body(indent + 1)
             lines.append(f"{pad}}}")
-            lines.append(f"{pad}{timer}.check();")
+            timer.finish(lines, indent)
 
         for stmt in plan["body"]:
             emit_stmt(stmt, local_cpp_bindings, indent=2)

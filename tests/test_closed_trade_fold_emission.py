@@ -10,6 +10,7 @@ from pineforge_codegen.ast_nodes import ForStmt, IfStmt
 from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
+from tests._legacy_cpp import loop_watchdog_tick
 from tests._numeric_expected import integer_arithmetic, integer_store, require_numeric_hunk
 
 
@@ -142,7 +143,6 @@ def test_fold_reuses_one_body_and_excludes_the_newest_final_run():
     )
     assert dedent("""\
         auto _pf_ctf0_step = [&](int i, auto& _pf_ctf0_a0, auto& _pf_ctf0_a1) {
-            _pf_loop_watchdog_0.poll();
             std::string entryId = closed_trade_entry_id(i);
             double profit = closed_trade_profit(i);
             if ((entryId == std::string("Long"))) {
@@ -152,6 +152,8 @@ def test_fold_reuses_one_body_and_excludes_the_newest_final_run():
         };
     """).rstrip() in cpp
     # Only the prefix before the final count's trailing exit-time run is settled.
+    scan_tick = loop_watchdog_tick("_pf_loop_count_0", "_pf_loop_watchdog_0", "        ")
+    row_tick = loop_watchdog_tick("_pf_loop_count_0", "_pf_loop_watchdog_0", "    ")
     assert dedent("""\
         const int _pf_ctf0_final = _pf_ctf0_n < _pf_ctf0_seen ? _pf_ctf0_n : _pf_ctf0_seen;
         int _pf_ctf0_limit = 0;
@@ -159,7 +161,7 @@ def test_fold_reuses_one_body_and_excludes_the_newest_final_run():
             const int64_t _pf_ctf0_run = closed_trade_exit_time(_pf_ctf0_final - 1);
             _pf_ctf0_limit = _pf_ctf0_final - 1;
             while (_pf_ctf0_limit > 0 && closed_trade_exit_time(_pf_ctf0_limit - 1) == _pf_ctf0_run) {
-                _pf_loop_watchdog_0.poll();
+        @SCAN_TICK@
                 --_pf_ctf0_limit;
             }
         }
@@ -168,15 +170,19 @@ def test_fold_reuses_one_body_and_excludes_the_newest_final_run():
             _pf_ctf0_s0 = count;
             _pf_ctf0_s1 = total;
         }
-        for (int _pf_ctf0_i = _pf_ctf0_settled; _pf_ctf0_i < _pf_ctf0_limit; ++_pf_ctf0_i)
+        for (int _pf_ctf0_i = _pf_ctf0_settled; _pf_ctf0_i < _pf_ctf0_limit; ++_pf_ctf0_i) {
+        @ROW_TICK@
             _pf_ctf0_step(_pf_ctf0_i, _pf_ctf0_s0, _pf_ctf0_s1);
+        }
         if (_pf_ctf0_limit > _pf_ctf0_settled) _pf_ctf0_settled = _pf_ctf0_limit;
         _pf_ctf0_seen = _pf_ctf0_n;
         count = _pf_ctf0_s0;
         total = _pf_ctf0_s1;
-        for (int _pf_ctf0_i = _pf_ctf0_settled; _pf_ctf0_i < _pf_ctf0_n; ++_pf_ctf0_i)
+        for (int _pf_ctf0_i = _pf_ctf0_settled; _pf_ctf0_i < _pf_ctf0_n; ++_pf_ctf0_i) {
+        @ROW_TICK@
             _pf_ctf0_step(_pf_ctf0_i, count, total);
-    """).rstrip() in cpp
+        }
+    """).rstrip().replace("@SCAN_TICK@", scan_tick).replace("@ROW_TICK@", row_tick) in cpp
     # Prefix, tail and verification execute the same single emitted accessor site.
     assert cpp.count("std::string entryId = closed_trade_entry_id(i);") == 1
     assert emitter._reads_trade_history
@@ -201,16 +207,19 @@ def test_verify_replays_from_declaration_values_and_compares_object_bytes():
         #endif
     """).rstrip() in cpp
     # The oracle replays indices zero through n-1 and compares both scalar representations.
+    row_tick = loop_watchdog_tick("_pf_loop_count_0", "_pf_loop_watchdog_0", "    ")
     assert dedent("""\
         #ifdef PINEFORGE_CLOSED_TRADE_FOLD_VERIFY
-        for (int _pf_ctf0_i = 0; _pf_ctf0_i < _pf_ctf0_n; ++_pf_ctf0_i)
+        for (int _pf_ctf0_i = 0; _pf_ctf0_i < _pf_ctf0_n; ++_pf_ctf0_i) {
+        @ROW_TICK@
             _pf_ctf0_step(_pf_ctf0_i, _pf_ctf0_v0, _pf_ctf0_v1);
+        }
         if (std::memcmp(&_pf_ctf0_v0, &count, sizeof(count)) != 0)
             throw std::runtime_error("closed-trade fold verification failed");
         if (std::memcmp(&_pf_ctf0_v1, &total, sizeof(total)) != 0)
             throw std::runtime_error("closed-trade fold verification failed");
         #endif
-    """).rstrip() in cpp
+    """).rstrip().replace("@ROW_TICK@", row_tick) in cpp
     # Literal capture precedes prefix initialization, which precedes the tail and oracle.
     assert (
         cpp.index("_pf_ctf0_v1 = total;")
@@ -258,7 +267,7 @@ def test_fold_preserves_bound_visits_counter_names_and_later_plain_loop(monkeypa
     # The fold consumes loop number zero; the following unplanned loop keeps number one.
     assert "\n".join(lines) == dedent("""\
         ::_pf_LoopWatchdog _pf_loop_watchdog_1{bar_index_, 13};
-        _pf_loop_watchdog_1.begin(this->_pf_loop_watchdog_sites[1]);
+        unsigned _pf_loop_count_1 = _pf_loop_watchdog_1.begin(this->_pf_loop_watchdog_sites[1]);
         int _for_start_1 = (2);
         int _for_end_1 = (4);
         int _for_step_1 = (1);
@@ -266,11 +275,13 @@ def test_fold_preserves_bound_visits_counter_names_and_later_plain_loop(monkeypa
         if (_for_step_1 == 0) _for_step_1 = 1;
         const bool _for_down_1 = (_for_start_1 > _for_end_1);
         for (int j = _for_start_1; (_for_down_1 ? (j >= _for_end_1) : (j <= _for_end_1)); j += (_for_down_1 ? -_for_step_1 : _for_step_1), _for_end_1 = (4)) {
-            _pf_loop_watchdog_1.poll();
+        @ROW_TICK@
             other += 1;
         }
-        _pf_loop_watchdog_1.check();
+        _pf_loop_watchdog_1.finish(_pf_loop_count_1);
     """).rstrip().replace(
+        "@ROW_TICK@", loop_watchdog_tick("_pf_loop_count_1", "_pf_loop_watchdog_1", "    "),
+    ).replace(
         "other += 1;",
         f"other = {integer_store(integer_arithmetic('other', '+', '1'))};",
     )

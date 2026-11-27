@@ -7,6 +7,18 @@ from pineforge_codegen.codegen.run_stops import (
 from tests._cpp_tokens import code_only, regions
 
 
+def loop_watchdog_tick(count: str, timer: str, pad: str) -> str:
+    """The exact guarded decrement accepted by historical lowering comparisons."""
+    return (
+        "#if defined(__GNUC__) || defined(__clang__)\n"
+        f"{pad}if (::__builtin_expect(--{count} == 0, 0))\n"
+        "#else\n"
+        f"{pad}if (--{count} == 0)\n"
+        "#endif\n"
+        f"{pad}    {count} = {timer}.poll();"
+    )
+
+
 def without_loop_watchdog(cpp: str) -> str:
     """Project a guarded TU onto the bytes used by pre-#440 lowering oracles."""
     from pineforge_codegen.codegen.emit_top import LOOP_CLOCK_INCLUDE, LOOP_WATCHDOG_CPP
@@ -16,7 +28,8 @@ def without_loop_watchdog(cpp: str) -> str:
     declaration = re.compile(
         r"^(?P<indent> *)::(?P<type>_pf_LoopWatchdog(?:__pf\d+)?) "
         r"(?P<timer>_pf_loop_watchdog_(?P<index>\d+)(?:__pf\d+)?)\{bar_index_, \d+\};\n"
-        r"(?P=indent)(?P=timer)\.begin\(this->(?P<sites>_pf_loop_watchdog_sites(?:__pf\d+)?)"
+        r"(?P=indent)unsigned (?P<count>_pf_loop_count_(?P=index)(?:__pf\d+)?) = "
+        r"(?P=timer)\.begin\(this->(?P<sites>_pf_loop_watchdog_sites(?:__pf\d+)?)"
         r"\[(?P=index)\]\);\n", re.M)
     instances = list(declaration.finditer(cpp))
     assert instances, "watchdog support without a loop"
@@ -34,9 +47,12 @@ def without_loop_watchdog(cpp: str) -> str:
     cpp = cpp.replace(member, "", 1).replace(reset, "", 1)
     cpp = cpp.replace(LOOP_CLOCK_INCLUDE + "\n", "", 1).replace(support, "", 1)
     cpp = declaration.sub("", cpp)
-    for timer in {m["timer"] for m in instances}:
-        cpp, polls = re.subn(rf"(?m)^ *{timer}\.poll\(\);\n", "", cpp)
-        cpp, checks = re.subn(rf"(?m)^ *{timer}\.check\(\);\n", "", cpp)
+    for timer, count in {m.group("timer", "count") for m in instances}:
+        # One pad for both target arms; the cold assignment is nested one level.
+        tick = re.escape(loop_watchdog_tick(count, timer, "@PAD@") + "\n")
+        tick = tick.replace("@PAD@", "(?P<pad> *)", 1).replace("@PAD@", "(?P=pad)")
+        cpp, polls = re.subn("^" + tick, "", cpp, flags=re.M)
+        cpp, checks = re.subn(rf"(?m)^ *{timer}\.finish\({count}\);\n", "", cpp)
         assert polls and checks, f"incomplete watchdog {timer}: {polls} polls, {checks} exits"
     if "::kLoopTimeLimitMs" not in cpp:  # An immediate stop still needs the limit.
         cpp = cpp.replace("inline constexpr int kLoopTimeLimitMs = 2000;\n\n", "", 1)
