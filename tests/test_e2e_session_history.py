@@ -496,7 +496,9 @@ REFUSED = {
         'x = request.security(syminfo.tickerid, "60", pre1())\n', (3, 30), "request.security"),
     "a variable a request.security expression reads": (
         "m = session.ismarket\n"
-        'x = request.security(syminfo.tickerid, "60", m[1])\n', (4, 48), "request.security"),
+        # #495 supports string globals; this session flag remains refused at
+        # its own written history operator, now located at the opening bracket.
+        'x = request.security(syminfo.tickerid, "60", m[1])\n', (4, 47), "request.security"),
     "a function called inside nz() in the expression": (
         "f() => session.ispostmarket[1]\n"
         "g() => nz(f() ? 1.0 : na)\n"

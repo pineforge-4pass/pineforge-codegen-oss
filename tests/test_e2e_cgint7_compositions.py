@@ -210,12 +210,12 @@ def test_a_history_read_under_a_builtin_keeps_mains_lowering(payload):
     assert line.strip().startswith("_req_sec_0 = ((double)(") and "/ (double)(2))" in line
 
 
-def test_a_string_global_history_on_the_requested_clock_is_refused():
-    with pytest.raises(CompileError) as err:
-        transpile(HEAD + "f() => str.tostring(bar_index)\ng = f()\n"
-                  'p = request.security(syminfo.tickerid, "60", g[1])\n'
-                  'if str.length(p) > 1\n    strategy.entry("L", strategy.long)\n')
-    assert "reads the string global 'g' with history" in str(err.value)
+def test_a_string_global_history_on_the_requested_clock_compiles():
+    # #495 lifts the old PF-E5005 refusal; retain this CGINT7 compile contract.
+    cpp = transpile(HEAD + "f() => str.tostring(bar_index)\ng = f()\n"
+                    'p = request.security(syminfo.tickerid, "60", g[1])\n'
+                    'if str.length(p) > 1\n    strategy.entry("L", strategy.long)\n')
+    compile_cpp(cpp, label="string global history on requested clock")
 
 
 def test_an_int_slot_narrows_a_global_history_na_preserving():
