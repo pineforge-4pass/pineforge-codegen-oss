@@ -22,7 +22,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased (1.15.0)
 
+- `// @pf-trace` now reads prior values of `time`, `time_close`, `bar_index` and other built-in series even when only the pragma indexes them. An indexed built-in without traceable history reports an error at the pragma ([#486](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/486)).
+
 - `// @pf-trace` can now read bar history such as `close[1]` even when the strategy body never reads that history ([#482](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/482)).
+
+- A `// @pf-trace` expression that reads the history of a scalar built-in, such as `time[1]`, `bar_index[1]` or `strategy.position_size[1]`, now reads the same history buffer as the strategy body. An indexed built-in that has no history is reported as `PF-E5099` instead of tracing its current value ([#486](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/486)).
 
 - String variables named after calendar built-ins, such as `second` or `minute`,
   now compile when concatenated with another string.

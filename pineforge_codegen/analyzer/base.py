@@ -52,6 +52,7 @@ from ..method_binding import (
     method_receiver_is_used,
     validate_call_argument_order,
 )
+from ..pragmas import PfTracePragma
 from .. import signatures as sigs
 from .. import tv_input_choices as tv_in
 # Output dataclasses (contract with the codegen) live in contracts.py so
@@ -632,12 +633,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     # Public entry point
     # ------------------------------------------------------------------
 
-    def analyze(self) -> AnalyzerContext:
+    def analyze(
+        self, *, trace_pragmas: list[PfTracePragma] | None = None,
+    ) -> AnalyzerContext:
         """Run semantic analysis and return the analyzer context."""
         from .callable_history_names import restore_callable_diagnostics
 
         try:
-            context = self._analyze()
+            context = self._analyze(trace_pragmas)
         except CompileError as error:
             if restore_callable_diagnostics(self._ast, error.diagnostics):
                 error.args = CompileError(error.diagnostics).args
@@ -645,7 +648,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         restore_callable_diagnostics(self._ast, context.diagnostics)
         return context
 
-    def _analyze(self) -> AnalyzerContext:
+    def _analyze(self, trace_pragmas: list[PfTracePragma] | None) -> AnalyzerContext:
         self._ensure_pine_v6()
         validate_call_argument_order(self._ast, filename=self._filename)
         from ..builtin_keywords import bind_builtin_keywords
@@ -687,6 +690,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         )
         self._check_direct_terminal_array_element_callee_shadows()
         self._visit(self._ast)
+        # Trace expressions run after the script body, at global scope. Bind
+        # indexed builtins just like body reads, without visiting unrelated
+        # trace calls (which would register executable TA/UDF call sites).
+        for pragma in trace_pragmas or ():
+            for node, _ in iter_ast_nodes(pragma.expr_node):
+                if (isinstance(node, Subscript) and isinstance(node.object, Identifier)
+                        and node.object.name in BUILTIN_VARS):
+                    self._visit_Identifier(node.object)
+                    self._register_history_receiver(
+                        node, self._history_receiver_type_spec(node.object),
+                    )
         if self._operator_condition_errors:
             condition_type, location = self._operator_condition_errors[0]
             self._error(
@@ -713,7 +727,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._ast, filename=self._filename, budget=self._budget,
                 session_clones=self._session_clones,
                 excluded_array_history_owners=self._excluded_array_history_owners,
-            ).analyze()
+            ).analyze(trace_pragmas=trace_pragmas)
         self._check_persistent_drawing_member_collisions()
 
         # Propagate call-site counts to sub-functions called within
@@ -731,7 +745,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return Analyzer(
                 self._ast, filename=self._filename, budget=self._budget,
                 session_clones=self._session_clones, excluded_array_history_owners=excluded,
-            ).analyze()
+            ).analyze(trace_pragmas=trace_pragmas)
 
         # Reject (loudly) a request.security whose timeframe is a UDF parameter
         # called with multiple distinct literal timeframes — a single evaluator
@@ -757,6 +771,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         return AnalyzerContext(
             ast=self._ast,
+            pf_trace_pragmas=trace_pragmas or [],
             symbols=self._symbols,
             ta_call_sites=self._ta_call_sites,
             series_vars=self._series_vars,
@@ -9177,7 +9192,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 (node, parameter_nodes)
             )
 
-        # Detect series vars / bar fields
+        self._register_history_receiver(node, object_spec)
+        return obj_type
+
+    def _register_history_receiver(self, node: Subscript, object_spec: TypeSpec | None) -> None:
+        """Record the bar field or exact variable binding whose history is read."""
         if isinstance(node.object, Identifier):
             name = node.object.name
             sym = self._symbols.resolve(name)
@@ -9219,7 +9238,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             self._func_series_history_nodes.setdefault(
                                 (parameter_owner, name), node
                             )
-                            return obj_type
+                            return
                         exact_member = getattr(sym, "_pf_var_member_name", None)
                         if exact_member is not None:
                             self._series_var_members.add(exact_member)
@@ -9272,8 +9291,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                                 (func_name, name), node
                             )
                         self._note_function_global_history_read(node, name, sym)
-
-        return obj_type
 
     def _refuse_collection_field_history(self, node: Subscript) -> None:
         """The history of an object's array, matrix or map field: TradingView

@@ -1943,7 +1943,7 @@ class TopLevelEmitter:
         #     own member is skipped.
         from .tables import BAR_BUILTINS
         for _bname in sorted(self.ctx.series_vars):
-            if _bname in self._var_names:
+            if _bname in self._var_names or _bname in self._trace_shadowed_series:
                 continue
             # A history-bearing top-level tuple binding pushes its own value
             # at the declaration; a builtin push would add a second bar slot.
@@ -2269,9 +2269,7 @@ class TopLevelEmitter:
     def _emit_pf_trace_block(self, lines: list[str], indent: int = 2) -> None:
         """Emit the ``// @pf-trace`` instrumentation block.
 
-        Reads ``self.ctx.pf_trace_pragmas`` (populated by
-        :func:`pineforge_codegen.pragmas.extract_pf_trace_pragmas` and
-        attached in :func:`pineforge_codegen.transpile`). For each
+        Reads ``self.ctx.pf_trace_pragmas`` from the analyzer. For each
         pragma ``// @pf-trace name=expr`` we emit:
 
             trace(std::string("name"), (double)(<expr_cpp>));
