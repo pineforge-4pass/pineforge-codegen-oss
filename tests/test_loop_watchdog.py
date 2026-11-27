@@ -134,17 +134,9 @@ def test_glue_forwards_the_limit_and_rejects_invalid_options():
         assert not result["ok"] and result["diagnostics"]
 
 
-def test_repeated_short_loop_times_out_at_its_sampled_exit():
+def _run_with_counting_clock(source, *, label):
     skip_if_no_engine_lib()
-    source = HEADER + """float total = 0.0
-for outer = 1 to 200
-    total += 1000.0
-    for inner = 1 to 4
-        total += 1.0
-"""
     cpp = transpile(source, loop_timeout_ms=2)
-    # Four iterations divide 256 exactly: each sample falls on a short exit.
-    # With a fresh timer per visit the old exit check blames the outer loop.
     clock = r'''
 #include <chrono>
 struct CountingLoopClock {
@@ -164,12 +156,42 @@ int main() {
     std::cout << strategy.last_error() << '|' << strategy.total << '|' << CountingLoopClock::reads;
 }
 '''
-    output = run_emitted_tu(cpp, driver, opt="-O2", label="repeated short loop")
+    return run_emitted_tu(cpp, driver, opt="-O2", label=label)
+
+
+def test_helper_loop_excludes_time_between_entries_on_the_same_bar():
+    source = HEADER + """f(int n) =>
+    int result = 0
+    for i = 1 to n
+        result += 1
+    result
+a = f(300)
+float total = a
+for j = 1 to 300
+    total += 1.0
+for k = 1 to 300
+    total += 1.0
+b = f(300)
+total += b
+"""
+    output = _run_with_counting_clock(source, label="same-bar helper re-entry")
+    # Each of the four entries takes one start read and one sample 1 ms later.
+    assert output == "|1200|8", output
+
+
+def test_short_inner_entries_leave_the_outer_deadline_running():
+    source = HEADER + """float total = 0.0
+for outer = 1 to 256
+    total += 1000.0
+    for inner = 1 to 4
+        total += 1.0
+"""
+    output = _run_with_counting_clock(source, label="nested loop entry deadlines")
     message, completed, reads = output.split("|")
-    assert message == "Error on bar 0: Pine line 6: loop time limit exceeded (2 ms)", output
-    # The second full batch must trip at exit, before the 129th outer entry.
-    assert int(completed) == 128 * 1000 + 512, output
-    assert int(reads) == 4, output  # Two starts on this bar and two inner samples.
+    assert message == "Error on bar 0: Pine line 4: loop time limit exceeded (2 ms)", output
+    assert int(completed) == 256 * (1000 + 4), output
+    # The four inner exit samples see 1 ms each; the outer exit sees the whole nest.
+    assert int(reads) == 1 + 256 + 4 + 1, output
 
 
 @pytest.mark.parametrize("pine_header,cpp_header", [
