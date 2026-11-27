@@ -213,8 +213,8 @@ def transpile(pine_source: str, *, check_support: bool = True, filename: str = "
         drawing_capacity: Optional live drawing bound (at least 1), separate
             from Pine collection counts, checked per collected type after
             collection. Typed stops require the paired engine catalog value.
-        loop_timeout_ms: Wall time from a loop's first entry on a chart bar,
-            sampled every 256 iterations across entries to that loop.
+        loop_timeout_ms: Wall time available to each entry of a loop. Its deadline
+            is checked every 256 iterations across entries to that loop on a chart bar.
             In milliseconds (1 to 2147483647; None selects 2000).
 
     Returns:

@@ -2060,7 +2060,7 @@ class StmtVisitor:
         return self._generated_helper_name(("loop-watchdog-sites",), "_pf_loop_watchdog_sites")
 
     def _start_loop_watchdog(self, node, lines: list[str], indent: int) -> _LoopWatchdog:
-        """Bind the deadline to its site; keep the live countdown in a local."""
+        """Start an entry's timer and load its site's countdown into a local."""
         index = self._loop_watchdog_count
         self._loop_watchdog_count += 1
         name = self._generated_helper_name(("loop-watchdog", index), f"_pf_loop_watchdog_{index}")

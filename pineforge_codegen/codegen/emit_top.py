@@ -123,18 +123,18 @@ LOOP_WATCHDOG_CPP = """struct @TYPE@ {
     static constexpr unsigned interval = 256;
     struct State {
         std::optional<std::int64_t> bar;
-        std::chrono::steady_clock::time_point deadline{};
         unsigned remaining = interval;
     };
     std::int64_t bar;
     int line;
+    std::chrono::steady_clock::time_point deadline{};
     State* state = nullptr;
 
     unsigned begin(State& site) {
         state = &site;
+        deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(::kLoopTimeLimitMs);
         if (site.bar != bar) {
             site.bar = bar;
-            site.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(::kLoopTimeLimitMs);
             site.remaining = interval;
         }
         // Bias by one: check after the Nth body, never before its side effects.
@@ -142,7 +142,7 @@ LOOP_WATCHDOG_CPP = """struct @TYPE@ {
     }
 
     [[gnu::noinline, gnu::cold]] unsigned poll() const {
-        if (std::chrono::steady_clock::now() >= state->deadline)
+        if (std::chrono::steady_clock::now() >= deadline)
             pine_runtime_error(std::string("Error on bar ") + std::to_string(bar)
                 + ": Pine line " + std::to_string(line) + ": loop time limit exceeded ("
                 + std::to_string(::kLoopTimeLimitMs) + " ms)");

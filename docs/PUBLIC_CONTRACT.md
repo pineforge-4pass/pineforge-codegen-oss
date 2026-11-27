@@ -504,24 +504,28 @@ the source and uses the defaults.
 Booleans, floating values, strings and smaller integers raise `PF-E5094`
 with `option` and `minimum` arguments.
 
-`loop_timeout_ms` is the wall time available to each generated Pine
-`for`, `for … in` or `while` on a chart bar. `None` selects **2000 ms**; an
+`loop_timeout_ms` is the wall time available each time a generated Pine
+`for`, `for … in` or `while` is entered. `None` selects **2000 ms**; an
 override is an exact integer from 1 through 2147483647. It is compiled into the strategy;
 it is not a Pine `input`. Invalid types and nonpositive values raise
 `PF-E5094`; integers above the native range raise `PF-E0036`.
 
-Each loop starts its own `std::chrono::steady_clock` timer on its first
-entry on the bar, including loops in called functions and requested evaluators.
-Later entries to the same loop on that bar retain the start time and iteration
-count. Elapsed wall time therefore includes time between those entries.
-Nested and sibling loops keep separate counts; a new bar or run starts fresh.
+Each entry starts a fresh `std::chrono::steady_clock` timer, including loops
+in called functions and requested evaluators. If a helper runs the same loop
+twice on one bar, the second entry gets the full budget. In a nest, the outer
+timer keeps running while the inner loop executes. TradingView sets a
+[500 ms loop limit and times out the outer loop first](https://www.tradingview.com/pine-script-docs/writing/limitations/#loop-execution).
+PineForge reports the loop whose sample detects an expired deadline. A long
+inner loop can therefore report its own line before the outer loop samples.
 
-After every **256 iterations**, the watchdog reads the clock just before the
-next iteration or when leaving the loop, including by `break`. Returning
-with a partial batch incurs no exit clock read: a loop that executes only
-three iterations per call reaches its first sample on the 86th call on that
-bar. A long-running iteration cannot be interrupted, and a loop that never
-completes 256 iterations on a bar has no elapsed-time check on that bar.
+Only the iteration count carries across entries to the same generated loop
+on a chart bar; a new bar or run resets it. After every **256 iterations**,
+the watchdog checks the current entry's deadline just before the next
+iteration or when leaving the loop, including by `break`. A partial batch
+incurs no exit clock read: a loop that executes three iterations per call
+first checks its deadline on the 86th call on that bar. A long-running
+iteration cannot be interrupted, and a loop that never completes 256
+iterations on a bar has no elapsed-time check on that bar.
 An expired timer stops the run through `runtime.error`'s path:
 for example, `Error on bar 17: Pine line 6: loop time limit exceeded (2000 ms)`.
 The bar is the zero-based chart bar being processed; the line is the

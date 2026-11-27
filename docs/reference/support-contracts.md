@@ -121,8 +121,10 @@ its result reaches an effect. Omission is limited to an unused loop statement
 with no calls, whose writes have no readers except self-updates, a break
 condition or one further unused variable declaration. Other flagged loops stop
 when their result is read in a shape not measured, where TradingView may drop
-them. Endless loops in functions, methods and `request.security` still never end
-here while TradingView stops them; data-dependent endless loops still hang.
+them. Other generated loops, including data-dependent loops and loops in
+functions, methods and `request.security` evaluators, use the
+[loop watchdog](../PUBLIC_CONTRACT.md#python-functions). It stops an
+overrun at an iteration sample; it cannot interrupt a single stuck iteration.
 
 A float-counter loop accumulates its counter by repeated double addition.
 TradingView's measured loop-end rule admits a counter whose excess beyond

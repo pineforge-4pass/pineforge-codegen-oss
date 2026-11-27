@@ -188,7 +188,7 @@ transpile(
     check_support: bool = True,   # run the support checker before codegen
     filename: str = "<input>",    # name used in error locations
     libraries: Mapping[str, str] | None = None,   # imported Pine libraries (new in 1.0.0)
-    loop_timeout_ms: int | None = None,   # 2000 ms per loop per chart bar
+    loop_timeout_ms: int | None = None,   # 2000 ms per loop entry
 ) -> str
 ```
 
@@ -199,12 +199,13 @@ and has no input limits). It does not return nonfatal diagnostics (warnings and,
 since 1.5.0, notes); use `transpile_full()` to inspect them.
 
 Each generated `for`, `for … in` and `while` has a wall-time limit of
-**2000 ms per loop on a chart bar**. To change it, pass e.g.
+**2000 ms per entry**. To change it, pass e.g.
 `transpile(pine, loop_timeout_ms=100)`, then rebuild the strategy. The
-timer starts the first time that loop is reached on the bar. Repeated calls
-carry its count forward: the watchdog reads the clock after each 256
-iterations. Exits with a partial count add no clock read. An overrun detected
-at a sample stops the run with the chart bar index and the loop's Pine line.
+timer restarts each time the loop is reached, even on the same bar. The
+iteration count carries forward on that bar: after each 256 iterations the
+watchdog checks the current entry's deadline. Exits with a partial count add
+no clock read. An overrun detected at a sample stops the run with the chart
+bar index and the loop's Pine line.
 See the [public contract](docs/PUBLIC_CONTRACT.md#python-functions) for bounds.
 
 `libraries` is new in 1.0.0. It maps an import path to the library's
