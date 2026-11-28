@@ -963,11 +963,11 @@ def test_test_check_rejects_aggregate_script_replaced_by_exit_zero(tmp_path):
         assert_aggregate_rejects(mutant, "failure", tmp_path)
 
 
-# Independent engine resolver/authz policy, retaining codegen's hosted runner.
+# Independent copy of the canonical template's resolver/authz job.
 # Never derive this pin from the workflow under test.
 PROMOTE_GUARD = r'''  promote-guard:
     name: promote-guard
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Resolution needs read access in private repos; no secrets or OIDC here.
     permissions:
       pull-requests: read
@@ -992,6 +992,8 @@ PROMOTE_GUARD = r'''  promote-guard:
           INPUT_PR_NUMBER: ${{ github.event.inputs.pr_number }}
           INPUT_PR_URL: ${{ github.event.inputs.pr_url }}
           INPUT_MERGED_AT: ${{ github.event.inputs.merged_at }}
+          # The push event's actor, never the commit's author or committer.
+          PUSH_ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
           fail() { echo "::error title=authz::$1"; echo "authz: REFUSED: $1" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
@@ -1287,6 +1289,70 @@ PROMOTE_GUARD = r'''  promote-guard:
               sleep 20
             fi
           done
+          # A release commit has no pull request: release.yml pushes it with the
+          # release App's token. Only that push actor, with every changed path
+          # in RELEASE_COMMIT_PATHS, skips here; anything else is refused below.
+          RELEASE_PUSH_ACTOR='pineforge-app[bot]'
+          release_status=1
+          if [ "$PUSH_ACTOR" = "$RELEASE_PUSH_ACTOR" ]; then
+            # Every page of the pushed commit's file list; a failed read refuses.
+            if commit=$(gh api --paginate --slurp "repos/$REPO/commits/$SHA?per_page=100"); then
+              release_status=0
+              python3 - 3<<<"$commit" <<'RELEASE_PY' || release_status=$?
+          import json
+          import os
+          import re
+
+          # The only paths the engine's release commit changes: its release.yml
+          # commits the first two, and a root-level CHANGELOG* is the third.
+          ENGINE_RELEASE_PATHS = re.compile(
+              r"VERSION|docker/run_failure_codes_diff\.json|CHANGELOG[^/]*")
+          # The only path the code generator's release commit changes: its
+          # release.yml commits VERSION alone.
+          CODEGEN_RELEASE_PATHS = re.compile(r"VERSION")
+          # One set per repository, never the union of the two. The axis rule is
+          # the "Determine repo axis" step's: a repository name containing
+          # `codegen` is the codegen axis, any other is the engine axis.
+          RELEASE_COMMIT_PATHS = (
+              CODEGEN_RELEASE_PATHS if "codegen" in os.environ["REPO"]
+              else ENGINE_RELEASE_PATHS)
+          # The commit API lists at most 3000 files: a list that long may be cut.
+          FILE_LIST_LIMIT = 3000
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pages = json.load(stream, parse_constant=reject_constant)
+          except (OSError, ValueError, RecursionError):
+              raise SystemExit(1)
+          if not isinstance(pages, list) or not pages:
+              raise SystemExit(1)
+          paths = []
+          for page in pages:
+              files = page.get("files") if isinstance(page, dict) else None
+              if not isinstance(files, list) or page.get("sha") != os.environ["SHA"]:
+                  raise SystemExit(1)
+              for changed in files:
+                  if not isinstance(changed, dict):
+                      raise SystemExit(1)
+                  paths.append(changed.get("filename"))
+                  if "previous_filename" in changed:
+                      # A rename also changes the path it leaves.
+                      paths.append(changed["previous_filename"])
+          if (not paths or len(paths) >= FILE_LIST_LIMIT
+                  or not all(isinstance(path, str) and RELEASE_COMMIT_PATHS.fullmatch(path)
+                             for path in paths)):
+              raise SystemExit(1)
+          RELEASE_PY
+            fi
+          fi
+          if [ "$release_status" -eq 0 ]; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "release commit: baseline is recorded by the release_tag route, not post-merge promote"
+            exit 0
+          fi
           echo "ok=false" >> "$GITHUB_OUTPUT"
           echo "::error title=baseline-promotion::DEFERRED_NOT_FOUND: no merged PR found for $SHA after 3 attempts; baseline unchanged"
           echo "baseline promotion: DEFERRED_NOT_FOUND: no merged PR found for $SHA after 3 attempts; baseline unchanged" >> "$GITHUB_STEP_SUMMARY"
@@ -1357,7 +1423,13 @@ def assert_promotion_guard(workflow):
         workflow,
         re.M,
     ), "promotion must not define workflow-level defaults or env"
-    trigger = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+    header = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+    # The lock sits between the triggers and the permissions: every run
+    # shares one group, and a run in progress is never cancelled.
+    trigger, lock, concurrency = header.partition("\nconcurrency:\n")
+    assert lock and concurrency == (
+        "  group: promote-baseline\n  cancel-in-progress: false\n"
+    ), "promotion must run one at a time and never cancel a run in progress"
     assert re.findall(r"^  ([a-z_]+):", trigger, re.M) == [
         "push", "workflow_dispatch",
     ], "promotion accepts only push to main and manual dispatch"
@@ -1390,7 +1462,7 @@ def assert_promotion_guard(workflow):
     assert promote.startswith(
         "\n    needs: [promote-guard]\n"
         "    if: ${{ needs.promote-guard.result == 'success' && needs.promote-guard.outputs.ok == 'true' }}\n"
-        "    runs-on: ubuntu-latest\n"
+        "    runs-on: ubuntu-24.04\n"
         "    environment: release-bot\n"
         "    steps:\n"
     ), "credential job must depend on the guard without a status-function bypass"
@@ -1825,6 +1897,7 @@ def test_decision_table_rejects_guard_script_mutations(original, replacement, ca
     "EVENT", "REPO", "HEAD_REPO", "HEAD_IS_FORK", "ASSOCIATION", "PR_AUTHOR",
     "MERGED_BY", "GH_TOKEN", "ALLOWED_BOTS", "EVENT_NAME", "REF", "SHA",
     "INPUT_MERGE_SHA", "INPUT_HEAD_SHA", "INPUT_PR_NUMBER", "INPUT_PR_URL", "INPUT_MERGED_AT",
+    "PUSH_ACTOR",
 ])
 def test_promotion_guard_rejects_missing_event_and_identity_fields(name):
     workflow = (WORKFLOWS / "promote-baseline.yml").read_text(encoding="utf-8")
@@ -1966,9 +2039,19 @@ def test_promotion_guard_rejects_missing_event_and_identity_fields(name):
         id="credential-job-bypasses-failed-guard",
     ),
     pytest.param(
-        "    runs-on: ubuntu-latest\n    environment: release-bot\n    steps:\n",
+        "    runs-on: ubuntu-24.04\n    environment: release-bot\n    steps:\n",
         "    runs-on: unreviewed-runner\n    environment: release-bot\n    steps:\n",
         id="credential-runner-changed",
+    ),
+    pytest.param(
+        "  cancel-in-progress: false\n",
+        "  cancel-in-progress: true\n",
+        id="run-in-progress-cancelled",
+    ),
+    pytest.param(
+        "concurrency:\n  group: promote-baseline\n",
+        "concurrency:\n  group: promote-baseline-${{ github.sha }}\n",
+        id="lock-group-per-commit",
     ),
     pytest.param(
         "    steps:\n      - name: Determine repo axis\n",
@@ -2634,6 +2717,9 @@ def run_promotion_entry(workflow, pages, tmp_path, *, full_pr=None, overrides=No
         "HEAD_REPO": "owner/repo", "HEAD_IS_FORK": "false",
         "ASSOCIATION": "MEMBER", "PR_AUTHOR": "member", "MERGED": "true",
         "MERGED_BY": "writer", "ALLOWED_BOTS": "dependabot[bot] pineforge-app[bot]",
+        # The push actor is a person here: after three empty answers the step
+        # reads no file list and refuses.
+        "PUSH_ACTOR": "writer",
         "GITHUB_OUTPUT": str(output_path), "GITHUB_STEP_SUMMARY": str(summary_path),
         "GH_CALLS": str(calls_path), "GH_PULLS": json.dumps(pages),
         "SLEEP_CALLS": str(tmp_path / "sleeps"),
@@ -2839,15 +2925,34 @@ def test_promotion_resolver_refuses_changed_full_pr_records(change, tmp_path):
 
 CODEGEN_GATE_REQUIREMENT = r'''            runs=$(gh api --paginate \
               "repos/${{ github.repository }}/commits/$HEAD_SHA/check-runs?per_page=100")
-            gate=$(jq -s '[.[].check_runs[] | select(.name == "gate" and .conclusion == "success")] | length' <<< "$runs")
-            statuses=$(gh api --paginate \
+            check_result=$(jq -ers '
+              if length == 0 or any(.[]; (.check_runs | type) != "array") then
+                error("invalid check-runs response")
+              else
+                [.[].check_runs[]] | group_by([.app.id, .name]) | map(max_by(.id))
+                | [any(.name == "gate" and .conclusion == "success"),
+                   (map(select(.conclusion == "failure" or .conclusion == "cancelled"
+                               or .conclusion == "timed_out" or .conclusion == "action_required")) | length)]
+                | @tsv
+              end
+            ' <<< "$runs")
+            read -r gate bad <<< "$check_result"
+            gate_statuses=$(gh api --paginate \
               "repos/${{ github.repository }}/commits/$HEAD_SHA/statuses?per_page=100")
-            gate_status=$(jq -sr '[.[][] | select(.context == "gate")][0].state // "absent"' <<< "$statuses")
-            if { [ "$gate_status" = absent ] && [ "$gate" = "0" ]; } || { [ "$gate_status" != absent ] && [ "$gate_status" != success ]; }; then
+            gate_status=$(jq -ers '
+              if length == 0 or any(.[]; type != "array") then
+                error("invalid statuses response")
+              else
+                [ .[][] | select(.context == "gate") ][0]
+                | if . == null then "absent"
+                  elif .state == "success" then "success"
+                  else "blocked" end
+              end
+            ' <<< "$gate_statuses")
+            if [[ "$gate_status" != success && ( "$gate_status" != absent || "$gate" != true ) ]]; then
               echo "::notice::the required gate context has not succeeded on $HEAD_SHA — not green; skipping"
               echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
             fi
-            bad=$(jq -s '[[.[].check_runs[]] | group_by([.app.id, .name])[] | max_by(.id) | select(.conclusion=="failure" or .conclusion=="cancelled" or .conclusion=="timed_out" or .conclusion=="action_required")] | length' <<< "$runs")
             if [ "$bad" != "0" ]; then
               echo "::notice::$bad failing check-run(s) on $HEAD_SHA — not green; skipping"
               echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
@@ -2886,12 +2991,12 @@ def test_codegen_promotion_gate_mutations_are_rejected(mutation):
         assert count == 1
     else:
         original = (
-            '[ "$gate_status" != success ]' if mutation == "missing-context"
+            '[[ "$gate_status" != success && ' if mutation == "missing-context"
             else "max_by(.id)"
         )
         assert workflow.count(original) == 1
         mutant = workflow.replace(
-            original, '[ "$gate_status" = success ]' if mutation == "missing-context"
+            original, '[[ "$gate_status" = success && ' if mutation == "missing-context"
             else "min_by(.id)", 1,
         )
     assert mutant != workflow

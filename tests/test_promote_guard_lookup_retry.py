@@ -9,6 +9,13 @@ the step writes ok=false, reports DEFERRED_NOT_FOUND and fails.
 An answer that lists a pull request is final. No match and two matches skip as
 before, without another lookup. A lookup that fails ends the step.
 
+One push has no pull request by design: the release commit. After the third
+empty answer the step reads the pushed commit's file list, but only when the
+release App pushed it. It then skips green, with ok=false and one line naming
+the release_tag route, only when every changed path is in this repository's
+release file set, which is VERSION alone. Another push actor, or one more
+changed path, ends in DEFERRED_NOT_FOUND like every other exhausted lookup.
+
 Each row runs the shipped step script with bash. The `gh` and `sleep` commands
 on PATH are stand-ins that record their calls; the `sleep` one never waits.
 """
@@ -33,11 +40,27 @@ HEAD_SHA = "b" * 40
 LOOKUP = f"gh api --paginate --slurp repos/{REPO}/commits/{MERGE_SHA}/pulls?per_page=100"
 FULL_PR = f"gh api repos/{REPO}/pulls/17"
 WAIT = "sleep 20"
+# The release rows run as this repository: its name puts the step on the
+# code generator's axis, whose release file set is VERSION alone.
+CODEGEN_REPO = "pineforge-4pass/pineforge-codegen-oss"
+CODEGEN_LOOKUP = (
+    f"gh api --paginate --slurp repos/{CODEGEN_REPO}/commits/{MERGE_SHA}/pulls?per_page=100"
+)
+CHANGED_FILES = (
+    f"gh api --paginate --slurp repos/{CODEGEN_REPO}/commits/{MERGE_SHA}?per_page=100"
+)
+RELEASE_APP = "pineforge-app[bot]"
+PERSON = "writer"
+RELEASE_LINE = (
+    "release commit: baseline is recorded by the release_tag route, "
+    "not post-merge promote\n"
+)
 
 # Gives each association lookup the next reply of its row: the pages GitHub
 # lists, or an API error. A lookup after the last reply exits 93 and is never
-# answered again. The full PR comes from the environment. Any other call
-# exits 97.
+# answered again. The pushed commit's file list is answered only for a row
+# that names changed paths; without them that read exits 95. The full PR
+# comes from the environment. Any other call exits 97.
 GH_STUB = r'''set -eu
 printf "gh %s\n" "$*" >> "$CALLS"
 if [ "$#" -eq 4 ] && [ "$1" = api ] && [ "$2" = --paginate ] && [ "$3" = --slurp ] &&
@@ -53,6 +76,13 @@ if [ "$#" -eq 4 ] && [ "$1" = api ] && [ "$2" = --paginate ] && [ "$3" = --slurp
     exit 1
   else
     exit 93
+  fi
+elif [ "$#" -eq 4 ] && [ "$1" = api ] && [ "$2" = --paginate ] && [ "$3" = --slurp ] &&
+    [ "$4" = "repos/$REPO/commits/$SHA?per_page=100" ]; then
+  if [ -e "$GH_REPLIES/files.json" ]; then
+    printf "%s\n" "$(<"$GH_REPLIES/files.json")"
+  else
+    exit 95
   fi
 elif [ "$#" -eq 2 ] && [ "$1" = api ] && [ "$2" = "repos/$REPO/pulls/17" ]; then
   printf "%s\n" "$GH_PR"
@@ -134,6 +164,11 @@ class Row:
     calls: tuple
     summary: str = ""
     stderr: str = ""
+    # The repository the step runs in, and the actor of the push event.
+    repository: str = REPO
+    push_actor: str = PERSON
+    # The paths the pushed commit changes, as its file list reports them.
+    changed: tuple = ()
 
 
 ROWS = [
@@ -182,6 +217,49 @@ ROWS = [
         calls=(LOOKUP, WAIT, LOOKUP),
         stderr="HTTP 403\n",
     ),
+    Row(
+        "the release App pushing only VERSION with no PR skips green",
+        replies=(EMPTY, EMPTY, EMPTY, FOUND),
+        exit_code=0,
+        stdout=retry_notice(1) + retry_notice(2) + RELEASE_LINE,
+        outputs={"ok": "false"},
+        calls=(
+            CODEGEN_LOOKUP, WAIT, CODEGEN_LOOKUP, WAIT, CODEGEN_LOOKUP, CHANGED_FILES,
+        ),
+        repository=CODEGEN_REPO, push_actor=RELEASE_APP, changed=("VERSION",),
+    ),
+    Row(
+        "the same VERSION commit pushed by another actor ends in DEFERRED_NOT_FOUND",
+        replies=(EMPTY, EMPTY, EMPTY, FOUND),
+        exit_code=1,
+        stdout=(
+            retry_notice(1) + retry_notice(2)
+            + f"::error title=baseline-promotion::{NOT_FOUND}\n"
+        ),
+        outputs={"ok": "false"},
+        # Another actor's push never reaches the file list.
+        calls=(CODEGEN_LOOKUP, WAIT, CODEGEN_LOOKUP, WAIT, CODEGEN_LOOKUP),
+        summary=f"baseline promotion: {NOT_FOUND}\n",
+        repository=CODEGEN_REPO, push_actor=PERSON, changed=("VERSION",),
+    ),
+    Row(
+        "the release App changing VERSION and a file of the other release set "
+        "ends in DEFERRED_NOT_FOUND",
+        replies=(EMPTY, EMPTY, EMPTY, FOUND),
+        exit_code=1,
+        stdout=(
+            retry_notice(1) + retry_notice(2)
+            + f"::error title=baseline-promotion::{NOT_FOUND}\n"
+        ),
+        outputs={"ok": "false"},
+        calls=(
+            CODEGEN_LOOKUP, WAIT, CODEGEN_LOOKUP, WAIT, CODEGEN_LOOKUP, CHANGED_FILES,
+        ),
+        summary=f"baseline promotion: {NOT_FOUND}\n",
+        repository=CODEGEN_REPO, push_actor=RELEASE_APP,
+        # The second path belongs to the engine's release commit only.
+        changed=("VERSION", "docker/run_failure_codes_diff.json"),
+    ),
 ]
 
 
@@ -200,7 +278,7 @@ def resolve_step_script():
     return textwrap.dedent(scripts[0])
 
 
-def run_resolve_step(replies, tmp_path):
+def run_resolve_step(row, tmp_path):
     bash = shutil.which("bash")
     if bash is None:
         pytest.fail("NOT RUN: the promotion guard lookup rows require bash on the test runner")
@@ -213,11 +291,17 @@ def run_resolve_step(replies, tmp_path):
         stub.chmod(0o700)
     replies_dir = tmp_path / "replies"
     replies_dir.mkdir()
-    for index, reply in enumerate(replies, start=1):
+    for index, reply in enumerate(row.replies, start=1):
         if isinstance(reply, ApiError):
             (replies_dir / f"{index}.error").write_text(reply.stderr + "\n", encoding="utf-8")
         else:
             (replies_dir / f"{index}.json").write_text(json.dumps(reply) + "\n", encoding="utf-8")
+    if row.changed:
+        # The pushed commit with its file list, as one page of a paged read.
+        files = [{"filename": path, "status": "modified"} for path in row.changed]
+        (replies_dir / "files.json").write_text(
+            json.dumps([{"sha": MERGE_SHA, "files": files}]) + "\n", encoding="utf-8",
+        )
     script = tmp_path / "resolve.bash"
     script.write_text(resolve_step_script(), encoding="utf-8")
     output_path = tmp_path / "output"
@@ -225,7 +309,8 @@ def run_resolve_step(replies, tmp_path):
     calls_path = tmp_path / "calls"
     env = {
         "PATH": str(bin_dir),
-        "EVENT_NAME": "push", "REF": "refs/heads/main", "REPO": REPO, "SHA": MERGE_SHA,
+        "EVENT_NAME": "push", "REF": "refs/heads/main", "REPO": row.repository,
+        "SHA": MERGE_SHA, "PUSH_ACTOR": row.push_actor,
         "GH_TOKEN": "",
         "INPUT_MERGE_SHA": "", "INPUT_HEAD_SHA": "", "INPUT_PR_NUMBER": "",
         "INPUT_PR_URL": "", "INPUT_MERGED_AT": "",
@@ -247,7 +332,7 @@ def run_resolve_step(replies, tmp_path):
 
 @pytest.mark.parametrize("row", ROWS, ids=[row.name for row in ROWS])
 def test_promote_guard_lookup_retry(row, tmp_path):
-    result, outputs, calls, summary = run_resolve_step(row.replies, tmp_path)
+    result, outputs, calls, summary = run_resolve_step(row, tmp_path)
     got = (
         f"{row.name}: exit {result.returncode}\nstdout: {result.stdout}\n"
         f"stderr: {result.stderr}\noutputs: {outputs}\ncalls: {calls}\nsummary: {summary}"
