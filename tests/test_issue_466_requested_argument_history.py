@@ -152,6 +152,60 @@ def test_sparse_and_dense_requested_timestamps(helpers, lag, field_lag, depth, t
         assert (sparse, dense) == expected, (i, complete, sparse, dense, expected)
 
 
+_LOCAL_BESIDE_PARAMETER = """lag(float x) =>
+    y = x
+    nz(y[2], 0.0) * 1000 + nz(x[2], 0.0)"""
+
+# Why the local is expected to read the parameter's entry.
+_LOCAL_CLOCK_REASON = (
+    "Pine Script User Manual, Execution model, Time series in scopes: [] on a "
+    "local variable reads its last committed value as of the bar at the offset"
+)
+
+
+def test_local_history_in_a_conditional_call_reads_the_parameters_entry():
+    # ``y = x`` then ``y[2]`` beside ``x[2]`` in one conditional call: both
+    # read the argument as of two requested bars back. The helper returns
+    # 1000 * y[2] + x[2] with na as 0, and requested bar i has high 20 + i:
+    # 22022 is "both read bar 2", 20022 "the local reads bar 0 and the
+    # parameter bar 2".
+    # Reason for the expected value: Pine Script User Manual, Execution
+    # model, Time series in scopes, which states the rule for a local
+    # variable. It is documentation, not a measurement: the captures stored
+    # in tests/fixtures/udt_history_tv (README.md) read a helper local one
+    # back only, where one entry per bar and one entry per call give the
+    # same value, and none is taken inside a request. This row applies the
+    # manual's rule to requested bars.
+    source = _PINE.replace("lag(time)", "lag(high)").replace(
+        "lag(int x) => x[3]", _LOCAL_BESIDE_PARAMETER)
+    evaluations = _evaluations(
+        source, _TAKEN, "local and parameter history in one conditional call",
+        high=lambda i: 20 + i,
+    )
+    for i, complete, called, sparse, dense in evaluations:
+        # The call that runs on every requested bar: both reads are bar i - 2.
+        dense_entry = 20 + i - 2 if i >= 2 else 0
+        assert dense == dense_entry * 1001, (
+            f"NOT COMPARED: on bar {i} the dense call reads {dense}, expected "
+            f"{dense_entry * 1001}; the conditional call was not judged"
+        )
+        if not called:
+            assert sparse == -2, (i, complete, sparse)
+            continue
+        committed = [j for j in _TAKEN if j <= i - 2]
+        entry = 20 + committed[-1] if committed else 0
+        local, parameter = divmod(sparse, 1000)
+        assert parameter == entry, (
+            f"NOT COMPARED: on bar {i} x[2] reads {parameter}, expected {entry}; "
+            "the local was not judged"
+        )
+        assert local == parameter, (
+            f"bar {i} complete={complete}: y[2] reads {local} and x[2] reads "
+            f"{parameter} (0 is na, 20 + j is requested bar j). Expected equal: "
+            f"{_LOCAL_CLOCK_REASON}"
+        )
+
+
 def test_dense_helper_and_conditional_field_read_keep_base_cpp(tmp_path):
     # Neither helper declares a var; the conditional field read alone must
     # not change this control's C++ or move its reference commit.
