@@ -6099,6 +6099,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if _ta_idx in self._dead_ta_indices:
                 continue
             lines.append(f"    {self._ta_member_cpp_type(site)} {site.member_name};")
+            if self._ta_keeps_one_sample_per_bar(site):
+                # The bar of the member's open sample (codegen/ta.py). Declared
+                # here, it is rollback and run-reset state like the member.
+                lines.append(f"    int {self._ta_bar_marker(site.member_name)} = -1;")
             if self._ta_site_uses_precalc(site):
                 vtype = self._ta_return_type(site)
                 lines.append(f"    std::vector<{vtype}> _precalc_{site.member_name};")

@@ -2304,6 +2304,11 @@ class CallVisitor:
                     f"(history_advances_new_bar() ? {ta_mem}.compute({compute_args}) "
                     f": {ta_mem}.recompute({compute_args})))"
                 )
+            # A ta.sma call a loop can run several times on a bar keeps one
+            # sample per bar (``_ta_one_sample_per_bar_cpp``, codegen/ta.py).
+            once_per_bar = self._ta_one_sample_per_bar_cpp(ta_mem, compute_args)
+            if once_per_bar is not None:
+                return once_per_bar
             return (
                 f"(history_advances_new_bar() ? {ta_mem}.compute({compute_args}) "
                 f": {ta_mem}.recompute({compute_args}))"

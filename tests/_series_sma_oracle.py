@@ -53,8 +53,9 @@ RISING_BAR_REFERENCE = (
 )
 
 # Three passes on every bar, the call running on each of them, as one call
-# inside ``for q = 1 to 3`` does. The value left after the loop is the third
-# pass's: the mean of the last three values the call was given.
+# inside ``for q = 1 to 3`` does. The call keeps one sample per bar, the input
+# of the bar's last pass, so the value left after the loop is the mean of the
+# last three bars' closes, and na on the first two bars.
 LOOP_REFERENCE = (
     '//@version=6\nstrategy("constant-length sma reference, loop")\n'
     "float picked = na\n"

@@ -156,6 +156,21 @@ class TaSiteHelper:
             # FirstCallBound consumes the factory, then forwards bar and
             # source to the same window that the series-length form uses.
             args = f"bar_index_, {args}"
+            if (plan is None and site.ctor_nodes
+                    and site.class_name in ("ta::Lowest", "ta::Highest")):
+                # A constant or an input length keeps its constructor, and
+                # the window checks no constructor length: for one of zero
+                # or less it answered na on every call. The call passes its
+                # length too, as the series-length form does, so the check
+                # the window makes on a per-call length
+                # (``simple_ta_length``) stops the run on the first call,
+                # with TradingView's text for the function and the value.
+                # Only ta.lowest and ta.highest: TradingView's answer was
+                # measured for them. ta.highestbars shares the window and
+                # keeps this base form, so its length of zero or less still
+                # answers na.
+                length = self._visit_expr(site.ctor_nodes[0])
+                args = f"{args}, pineforge::source::ta_number({length})"
         if plan is not None:
             args = self._ta_dynamic_compute_args(site, plan, args, self._visit_expr)
         return args
@@ -2518,6 +2533,66 @@ class TaSiteHelper:
         node = getattr(site, "node", None)
         return node is not None and id(node) in self._ta_loop_call_nodes()
 
+    # ta.sma keeps one sample per bar per call site. A loop can run one call
+    # several times on a bar (``_ta_loop_call_nodes``), and the execution's
+    # new-bar flag stays true on every pass, so every pass called compute()
+    # and the window held the last n CALL inputs, across bars. TradingView's
+    # window holds one sample for each bar the call ran on, the input of that
+    # bar's LAST call (issue #502: a loop of one, two or three calls of
+    # ``ta.sma(close + i, 3)`` per bar answered the mean of the last three
+    # bars' last inputs on every decisive bar, never that of the last three
+    # calls). Such a site owns a bar marker beside its member
+    # (``_ta_bar_marker``): the first call on a bar opens the bar's sample
+    # with compute(), and every later call on that bar replaces it with
+    # recompute(), as a recalculation of the bar already does. The window
+    # then spans bars. The constant-length form, the first-call form and the
+    # per-bar-length form of the call take the same arguments in both
+    # methods, so one rule serves the three. A call no loop reaches runs once
+    # on a bar and keeps its lowering, byte for byte. A function joins this
+    # set only with its own recorded result: every other class of a call a
+    # loop runs still records one sample per call.
+    _TA_ONE_SAMPLE_PER_BAR_CLASSES = frozenset({"ta::SMA"})
+
+    def _ta_keeps_one_sample_per_bar(self, site: "TACallSite") -> bool:
+        """Whether ``site`` is a chart call of a
+        ``_TA_ONE_SAMPLE_PER_BAR_CLASSES`` function that a loop can run more
+        than once on a bar (``_ta_loop_call_nodes``). A clone answers for the
+        call it was cloned from, as in ``_ta_series_length_call_is_in_loop``,
+        so the member of every call site's copy has a marker."""
+        if site.class_name not in self._TA_ONE_SAMPLE_PER_BAR_CLASSES:
+            return False
+        node = getattr(site, "node", None)
+        return node is not None and id(node) in self._ta_loop_call_nodes()
+
+    def _ta_bar_marker(self, member: str) -> str:
+        """The class member that holds the bar of ``member``'s open sample
+        (-1 before the first call of a run), allocated once against the
+        authored spellings."""
+        markers = self.__dict__.setdefault("_ta_bar_marker_names", {})
+        marker = markers.get(member)
+        if marker is None:
+            used = self.__dict__.setdefault(
+                "_ta_bar_marker_used", set(getattr(self, "_safe_name_occupied", ())))
+            marker = markers[member] = self._allocate_generated_cpp_name(
+                f"_pf_ta_bar{member}", used)
+        return marker
+
+    def _ta_one_sample_per_bar_cpp(self, member: str, compute_args: str) -> str | None:
+        """The step of the site that owns ``member`` when it keeps one sample
+        per bar (``_ta_keeps_one_sample_per_bar``), or None for every other
+        member, which keeps the plain new-bar test. ``member`` is the member
+        the call steps (``_ta_member_name``), so a call site's copy has its
+        own marker, and the answer is the one its declaration was given."""
+        owner = self._ta_site_by_member().get(member)
+        if owner is None or not self._ta_keeps_one_sample_per_bar(owner):
+            return None
+        marker = self._ta_bar_marker(member)
+        return (
+            f"(history_advances_new_bar() && {marker} != bar_index_ "
+            f"? ({marker} = bar_index_, {member}.compute({compute_args})) "
+            f": {member}.recompute({compute_args}))"
+        )
+
     def _ta_series_length_rows(self) -> list[tuple]:
         """The rows of ``_TA_SERIES_LENGTH_CLASSES`` a live chart site is
         lowered to, in the table's order: their headers are included and
@@ -2907,8 +2982,11 @@ class TaSiteHelper:
         # feature macro stands for all twelve. A chart site that keeps an
         # execution window (``_is_block_extreme``) is not declared with its
         # row's type: ``_ta_kernel_type`` gives it ``_PFExecutedExtreme``,
-        # which answers na for a constructor length of zero or less and
-        # stops no run. Its request.security copies are the row's type.
+        # which checks no constructor length. A ta.lowest or ta.highest call
+        # passes its length too, and the check the window makes on a
+        # per-call length stops the run there (``_ta_compute_args_for_site``);
+        # a ta.highestbars call does not, and a length of zero or less
+        # answers na. Its request.security copies are the row's type.
         "ta::RMA": (
             "pineforge::source::PineFixedRma", _TA_LENGTH_HEADER,
             "PINEFORGE_HAS_PINE_FIXED_LENGTH", True,
