@@ -7,7 +7,7 @@ from pineforge_codegen.errors import CompileError
 
 
 _HEADER = '//@version=6\nstrategy("Timeframe conversion")\n'
-_BASE = "9b17c40e074a1bcab7ec581b5e71f13b171deb42"
+_BASE = "fb5a21c7e0c4e20f5888005a12116726b4e5fdb9"
 
 # TradingView, measured 2026-11-28, in the order measured; the trailing
 # comments number the rows from zero. Pairs are (from_seconds input, decoded
