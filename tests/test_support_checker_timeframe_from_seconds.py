@@ -9,9 +9,10 @@ from pineforge_codegen.errors import CompileError
 _HEADER = '//@version=6\nstrategy("Timeframe conversion")\n'
 _BASE = "9b17c40e074a1bcab7ec581b5e71f13b171deb42"
 
-# TVF-431 C1 in plot-slot order. Pairs are (from_seconds input, decoded
+# TradingView, measured 2026-11-28, in the order measured; the trailing
+# comments number the rows from zero. Pairs are (from_seconds input, decoded
 # string) or (in_seconds input, decoded integer). Keep the repeated controls.
-_C1 = (
+_MEASURED = (
     (30, "30S"), (900, "15"), (3600, "60"), (86_400, "1D"),          # 0–3
     (604_800, "1W"), (1, "1S"), (2, "5S"), (5, "5S"),               # 4–7
     (6, "10S"), (45, "1"), (46, "1"), (59, "1"),                    # 8–11
@@ -35,19 +36,28 @@ _C1 = (
 
 
 def _from_seconds_cases():
-    for slot, (argument, decoded) in enumerate(_C1):
+    for row, (argument, decoded) in enumerate(_MEASURED):
         if isinstance(argument, int):
-            yield f"C1-{slot}", argument, decoded
+            yield f"measured-row-{row}-input-{argument}", argument, decoded
         elif argument.endswith("M"):
             # 50–52 measured the other direction. Use TV's seconds as input;
             # this does not assert that the engine can produce those seconds.
-            yield f"C1-{slot}-outer", decoded, argument
-    yield "C2-0", 0, "1S"
-    yield "C2-1", -1, "1S"
+            yield f"measured-row-{row}-seconds-of-{argument}", decoded, argument
+    # TradingView, measured 2026-11-28: zero and minus one both give "1S".
+    yield "measured-zero", 0, "1S"
+    yield "measured-minus-one", -1, "1S"
     # Compatibility in gaps in the tape, not attributed to TradingView.
     yield "untaped-15", 15, "15S"
     yield "untaped-31", 31, "45S"
     yield "untaped-44", 44, "45S"
+    # Not measured on TradingView either (as of 2026-11-28). Each expected
+    # value is the output from before the measured rule, which may change
+    # measured inputs only; these rows are not TradingView's answers.
+    yield "unmeasured-1209599", 1_209_599, "2W"     # one second below 2 weeks
+    yield "unmeasured-5255999", 5_255_999, "2M"     # below the measured 5,256,000
+    yield "unmeasured-7884000", 7_884_000, "3M"     # 3 months of 2,628,000 seconds
+    yield "unmeasured-7884009", 7_884_009, "92D"    # 3 months of 2,628,003 seconds
+    yield "unmeasured-31449599", 31_449_599, "52W"  # one second below 52 weeks
 
 
 _FROM_SECONDS = tuple(_from_seconds_cases())
@@ -93,15 +103,20 @@ def test_timeframe_from_seconds_helper_compiles_and_runs(optimization):
         for slot, seconds, expected in _FROM_SECONDS
     ]
     rows.extend([
-        ("C2-literal-negative", "timeframe.from_seconds(-1)", "1S"),
-        ("C3", "timeframe.from_seconds(int(na))", "0D"),
+        # TradingView, measured 2026-11-28: a literal minus one, and int(na).
+        ("measured-minus-one-literal", "timeframe.from_seconds(-1)", "1S"),
+        ("measured-int-na", "timeframe.from_seconds(int(na))", "0D"),
         # Same supported missing argument without the cast; only int(na) was taped.
         ("bare-na", "timeframe.from_seconds(na)", "0D"),
     ])
     # Exercise the direct in_seconds controls that do not need the engine's month fix.
-    for slot, (argument, decoded) in enumerate(_C1):
+    for row, (argument, decoded) in enumerate(_MEASURED):
         if isinstance(argument, str) and not argument.endswith("M"):
-            rows.append((f"C1-{slot}-in", f'timeframe.in_seconds("{argument}")', decoded))
+            rows.append((
+                f"measured-row-{row}-in-seconds-{argument}",
+                f'timeframe.in_seconds("{argument}")',
+                decoded,
+            ))
     source = _HEADER + "".join(f"row{i} = {expr}\n" for i, (_, expr, _) in enumerate(rows))
     prints = [f'    std::cout << "{slot}=" << strategy.row{i} << "\\n";'
               for i, (slot, _, _) in enumerate(rows)]
