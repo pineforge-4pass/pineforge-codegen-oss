@@ -9,81 +9,56 @@ from pineforge_codegen.errors import CompileError
 _HEADER = '//@version=6\nstrategy("Timeframe conversion")\n'
 _BASE = "9b17c40e074a1bcab7ec581b5e71f13b171deb42"
 
-# TradingView captures are pending for these rule-only groups. The expected
-# values below come from the documented rounding rule, not from a tape.
-RULE_ONLY_CASES = [
-    pytest.param(
-        "tf2 = timeframe.from_seconds(2)\n",
-        {"tf2": "5S"},
-        id="rule-only-2",
-    ),
-    pytest.param(
-        "tf46 = timeframe.from_seconds(46)\n",
-        {"tf46": "1"},
-        id="rule-only-46",
-    ),
-    pytest.param(
-        "tf61 = timeframe.from_seconds(61)\n",
-        {"tf61": "2"},
-        id="rule-only-61",
-    ),
-    pytest.param(
-        "tf86401 = timeframe.from_seconds(86401)\n",
-        {"tf86401": "2D"},
-        id="rule-only-86401",
-    ),
-    pytest.param(
-        "tf_month = timeframe.from_seconds(2628000)\n",
-        {"tf_month": "1M"},
-        id="rule-only-month",
-    ),
-    pytest.param(
-        "tf_month_before = timeframe.from_seconds(2627999)\n"
-        "tf_month_after = timeframe.from_seconds(2628001)\n",
-        {"tf_month_before": "1M", "tf_month_after": "31D"},
-        id="rule-only-month-ties",
-    ),
-    pytest.param(
-        "tf_year_before = timeframe.from_seconds(31535999)\n"
-        "tf_year_exact = timeframe.from_seconds(31536000)\n"
-        "tf_year_after = timeframe.from_seconds(31536001)\n",
-        {
-            "tf_year_before": "12M",
-            "tf_year_exact": "12M",
-            "tf_year_after": "12M",
-        },
-        id="rule-only-year-boundaries",
-    ),
-    pytest.param(
-        "tf_zero = timeframe.from_seconds(0)\n"
-        "tf_negative = timeframe.from_seconds(-1)\n",
-        {"tf_zero": "1S", "tf_negative": "1S"},
-        id="rule-only-nonpositive",
-    ),
-]
+# TVF-431 C1 in plot-slot order. Pairs are (from_seconds input, decoded
+# string) or (in_seconds input, decoded integer). Keep the repeated controls.
+_C1 = (
+    (30, "30S"), (900, "15"), (3600, "60"), (86_400, "1D"),          # 0–3
+    (604_800, "1W"), (1, "1S"), (2, "5S"), (5, "5S"),               # 4–7
+    (6, "10S"), (45, "1"), (46, "1"), (59, "1"),                    # 8–11
+    (60, "1"), (61, "2"), (86_340, "1439"), (86_341, "1440"),        # 12–15
+    (86_399, "1440"), (86_401, "2D"), (518_400, "6D"), (518_401, "7D"),
+    (604_799, "7D"), (604_801, "8D"), (1_209_600, "2W"), (2_592_000, "30D"),
+    (2_592_001, "31D"), (2_600_000, "31D"), (2_627_999, "31D"), (2_628_000, "31D"),
+    (2_628_001, "31D"), (2_628_002, "31D"), (2_628_003, "1M"), (2_628_004, "31D"),
+    (2_678_400, "31D"), (5_256_000, "61D"), (5_256_001, "61D"), (5_256_006, "2M"),
+    (31_449_600, "52W"), (31_449_601, "365D"), (31_500_000, "365D"), (31_535_999, "365D"),
+    (31_536_000, "12M"), (31_536_001, "12M"), (31_536_036, "12M"), (31_536_037, "12M"),
+    (31_622_399, "12M"), (31_622_400, "12M"), (31_622_401, "12M"), (63_072_000, "12M"),
+    ("1D", 86_400), ("1W", 604_800), ("1M", 2_628_003), ("2M", 5_256_006),  # 48–51
+    ("12M", 31_536_036), ("365D", 31_536_000), ("52W", 31_449_600),           # 52–54
+    # 55–59: substitute the TV integer in the outer call; the pinned engine
+    # cannot supply the inner month duration. Offsets are +1 and -1 in 58–59.
+    (2_628_003, "1M"), (5_256_006, "2M"), (31_536_036, "12M"),
+    (2_628_004, "31D"), (2_628_002, "31D"),
+    (900, "15"), (604_800, "1W"), ("60", 3600), (30, "30S"),         # 60–63
+)
 
 
-@pytest.mark.parametrize(("body", "expected"), RULE_ONLY_CASES)
-def test_rule_only_timeframe_from_seconds_rows(body, expected):
-    cpp = transpile(_HEADER + body)
-    for name, value in expected.items():
-        assert (
-            f'{name} = std::string("{value}");' in cpp
-            or f"{name} = ::_pf_timeframe_from_seconds(" in cpp
-        )
+def _from_seconds_cases():
+    for slot, (argument, decoded) in enumerate(_C1):
+        if isinstance(argument, int):
+            yield f"C1-{slot}", argument, decoded
+        elif argument.endswith("M"):
+            # 50–52 measured the other direction. Use TV's seconds as input;
+            # this does not assert that the engine can produce those seconds.
+            yield f"C1-{slot}-outer", decoded, argument
+    yield "C2-0", 0, "1S"
+    yield "C2-1", -1, "1S"
+    # Compatibility in gaps in the tape, not attributed to TradingView.
+    yield "untaped-15", 15, "15S"
+    yield "untaped-31", 31, "45S"
+    yield "untaped-44", 44, "45S"
 
 
-@pytest.mark.parametrize(("argument", "expected"), [
-    pytest.param("30", "30S", id="seconds"),
-    pytest.param("900", "15", id="reporter"),
-    pytest.param("seconds = 3600", "60", id="named-hour-as-minutes"),
-    pytest.param("86400", "1D", id="day"),
-    pytest.param("604800", "1W", id="week"),
-    # Nominal-month conversion; a TradingView capture of this input is pending.
-    pytest.param("2628000", "1M", id="nominal-month"),
+_FROM_SECONDS = tuple(_from_seconds_cases())
+
+
+@pytest.mark.parametrize("seconds,expected", [
+    pytest.param(seconds, expected, id=slot)
+    for slot, seconds, expected in _FROM_SECONDS if seconds >= 0
 ])
-def test_literal_seconds_emit_a_timeframe_string(argument, expected):
-    cpp = transpile(_HEADER + f"tf = timeframe.from_seconds({argument})\n")
+def test_literal_seconds_emit_a_timeframe_string(seconds, expected):
+    cpp = transpile(_HEADER + f"tf = timeframe.from_seconds(seconds = {seconds})\n")
     assert f'tf = std::string("{expected}");' in cpp
 
 
@@ -100,34 +75,40 @@ def test_series_seconds_are_lowered_to_a_string():
 def test_computed_request_registers_both_converted_timeframes():
     cpp = transpile(
         _HEADER
-        + "tf = timeframe.from_seconds(close > open ? 900 : 3600)\n"
+        + "tf = timeframe.from_seconds(close > open ? 604799 : 604800)\n"
         + "requested = request.security(syminfo.tickerid, tf, close)\n"
     )
-    assert 'register_security_eval(0, "15",' in cpp
-    assert 'register_security_eval(1, "60",' in cpp
+    assert 'register_security_eval(0, "7D",' in cpp
+    assert 'register_security_eval(1, "1W",' in cpp
 
 
 @pytest.mark.parametrize("optimization", ["-O0", "-O2"])
 def test_timeframe_from_seconds_helper_compiles_and_runs(optimization):
     from tests._compile import run_emitted_tu
 
-    source = _HEADER + (
-        "tf2 = timeframe.from_seconds(2)\n"
-        "tf46 = timeframe.from_seconds(46)\n"
-        "tf61 = timeframe.from_seconds(61)\n"
-        "tf86401 = timeframe.from_seconds(86401)\n"
-        "tfMonth = timeframe.from_seconds(2628000)\n"
-        "tfMonthBefore = timeframe.from_seconds(2627999)\n"
-        "tfMonthAfter = timeframe.from_seconds(2628001)\n"
-        "tfYearBefore = timeframe.from_seconds(31535999)\n"
-        "tfYearExact = timeframe.from_seconds(31536000)\n"
-        "tfYearAfter = timeframe.from_seconds(31536001)\n"
-        "tfZero = timeframe.from_seconds(0)\n"
-        "tfNegative = timeframe.from_seconds(-1)\n"
-        "tfNa = timeframe.from_seconds(na)\n"
-    )
+    # bar_index is zero on our one bar. The literal test above folds; these
+    # calls reach the emitted helper for every row, regardless of the literal.
+    rows = [
+        (slot, f"timeframe.from_seconds(bar_index + ({seconds}))", expected)
+        for slot, seconds, expected in _FROM_SECONDS
+    ]
+    rows.extend([
+        ("C2-literal-negative", "timeframe.from_seconds(-1)", "1S"),
+        ("C3", "timeframe.from_seconds(int(na))", "0D"),
+        # Same supported missing argument without the cast; only int(na) was taped.
+        ("bare-na", "timeframe.from_seconds(na)", "0D"),
+    ])
+    # Exercise the direct in_seconds controls that do not need the engine's month fix.
+    for slot, (argument, decoded) in enumerate(_C1):
+        if isinstance(argument, str) and not argument.endswith("M"):
+            rows.append((f"C1-{slot}-in", f'timeframe.in_seconds("{argument}")', decoded))
+    source = _HEADER + "".join(f"row{i} = {expr}\n" for i, (_, expr, _) in enumerate(rows))
+    prints = [f'    std::cout << "{slot}=" << strategy.row{i} << "\\n";'
+              for i, (slot, _, _) in enumerate(rows)]
     driver = r'''
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <vector>
 int main() {
     std::vector<pineforge::Bar> bars(1);
@@ -140,32 +121,19 @@ int main() {
         std::cerr << strategy.last_error() << "\n";
         return 1;
     }
-    std::cout
-        << strategy.tf2 << "\n"
-        << strategy.tf46 << "\n"
-        << strategy.tf61 << "\n"
-        << strategy.tf86401 << "\n"
-        << strategy.tfMonth << "\n"
-        << strategy.tfMonthBefore << "\n"
-        << strategy.tfMonthAfter << "\n"
-        << strategy.tfYearBefore << "\n"
-        << strategy.tfYearExact << "\n"
-        << strategy.tfYearAfter << "\n"
-        << strategy.tfZero << "\n"
-        << strategy.tfNegative << "\n"
-        << "[" << strategy.tfNa << "]\n";
-}
-'''
+    std::cout << std::setprecision(std::numeric_limits<double>::max_digits10);
+''' + "\n".join(prints) + "\n}\n"
     output = run_emitted_tu(
         transpile(source),
         driver,
         opt=optimization,
         label="timeframe.from_seconds",
     )
-    assert output.splitlines() == [
-        "5S", "1", "2", "2D", "1M", "1M", "31D",
-        "12M", "12M", "12M", "1S", "1S", "[]",
-    ]
+    actual = output.splitlines()
+    assert len(actual) == len(rows), (
+        f"NOT COMPARED: expected {len(rows)} output rows, received {len(actual)}"
+    )
+    assert actual == [f"{slot}={expected}" for slot, _, expected in rows]
 
 
 @pytest.mark.parametrize(("arguments", "message"), [
