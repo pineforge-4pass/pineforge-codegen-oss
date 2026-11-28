@@ -12,6 +12,7 @@ from pineforge_codegen import transpile
 from pineforge_codegen.codegen.endless_for import plan_endless_for_loops
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
+from tests._legacy_cpp import without_loop_watchdog
 from tests._endless_for_cases import (
     BASELINE, BASELINE_SOURCES, CONTROLS, FIXTURES, FUNCTION_RUNS,
     LATER_FINITE_LOOP, LATER_LOOP_SOURCES, LATER_LOOP_TARGETS,
@@ -89,7 +90,7 @@ def prior_cpp_hashes():
 
 
 def _assert_prior_cpp(name, prior_cpp_hashes):
-    cpp = transpile(BASELINE_SOURCES[name])
+    cpp = without_loop_watchdog(transpile(BASELINE_SOURCES[name]))
     assert hashlib.sha256(cpp.encode("utf-8")).hexdigest() == (
         prior_cpp_hashes[name]["cpp_sha256"]
     ), f"C++ differs from the prior counted-loop lowering: {name}"
@@ -336,7 +337,7 @@ def test_replacing_a_loop_keeps_the_later_finite_loops_cpp(
     assert hashlib.sha256(cpp.encode("utf-8")).hexdigest() != (
         prior_cpp_hashes[name]["cpp_sha256"]
     ), f"The endless loop was not replaced: {name}"
-    actual_loop = LATER_FINITE_LOOP.search(cpp)
+    actual_loop = LATER_FINITE_LOOP.search(without_loop_watchdog(cpp))
     assert actual_loop is not None, f"Later finite loop missing from C++: {name}"
     assert hashlib.sha256(actual_loop.group().encode("utf-8")).hexdigest() == (
         prior_cpp_hashes[name]["later_loop_sha256"]

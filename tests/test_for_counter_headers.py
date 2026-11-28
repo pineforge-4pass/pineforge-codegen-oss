@@ -12,6 +12,7 @@ import pytest
 from pineforge_codegen import transpile
 from tests import _compile as compile_env
 from tests._e2e import build_strategy_library
+from tests._legacy_cpp import without_loop_watchdog
 from tests._for_counter_header_cases import (
     BASELINE_SOURCES, INT_START_SOURCES, MAIN_COMMIT,
 )
@@ -336,9 +337,8 @@ def test_existing_loop_cpp_matches_reference_except_step_stop(
         f"{name}: the source inventory differs from its reference"
     )
     cpp = transpile(pine)
-    # RE10021 requires a guard even for a dynamic step that happens to be
-    # positive. Exclude only the added run-stop statement; all other bytes
-    # still match the reference output.
+    # Project away #440's watchdog and RE10021's nonpositive-step stop.
+    cpp = without_loop_watchdog(cpp)
     cpp = re.sub(
         r"(?m)^ *if \(!is_na\((_for_step_\d+)\) && \1 <= 0\) "
         r"""pine_runtime_error\("'step' in loop must be greater than zero"\);\n""",

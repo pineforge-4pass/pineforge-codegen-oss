@@ -1,6 +1,5 @@
 """TradingView loop-step type boundaries and integer-loop controls."""
 
-import hashlib
 import re
 
 import pytest
@@ -9,6 +8,7 @@ from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.errors import CompileError
 from tests import _compile as compile_env
 from tests._e2e import reference_codegen, transpile_json
+from tests._legacy_cpp import without_loop_watchdog
 from tests._for_counter_header_cases import MAIN_COMMIT as LOOP_CPP_REFERENCE
 from tests._for_float_step import (
     DIVISION_STARTS, DIVISION_VALUE_STARTS,
@@ -352,7 +352,7 @@ def test_proved_integral_division_matches_an_int_start(start, twin, tmp_path):
         pine.write_text(source, encoding="utf-8")
         before = transpile_json(pine, root=reference)
         assert before["ok"], before["diagnostics"]
-        assert cpp == before["cpp"]
+        assert without_loop_watchdog(cpp) == before["cpp"]
         end = re.search(r"(?m)^ *int _for_end_\d+ = (.+);$", cpp)
         step = re.search(r"(?m)^ *int _for_step_\d+ = (.+);$", cpp)
         body = re.search(r"(?m)^ *for \(int i = [^\n]+\{\n(?P<body>.*?)^ *}", cpp, re.S)
@@ -397,17 +397,14 @@ def test_integer_counter_keeps_frozen_cpp(prefix, start, end, tmp_path):
     assert re.search(r"\bfor \(int i = ", cpp), cpp
     for slot in ("start", "end", "step"):
         assert re.search(rf"\bint _for_{slot}_\d+ = ", cpp), cpp
-    # Use the loop inventory's immutable reference, without replacing any
-    # stored hash or excluding any emitted text from the digest.
+    # The header and body still match the reference outside the watchdog.
     reference = reference_codegen(LOOP_CPP_REFERENCE)
     assert reference is not None, "Required loop C++ reference unavailable; restore git history."
     pine = tmp_path / "strategy.pine"
     pine.write_text(source, encoding="utf-8")
     before = transpile_json(pine, root=reference)
     assert before["ok"], before["diagnostics"]
-    assert hashlib.sha256(cpp.encode("utf-8")).hexdigest() == hashlib.sha256(
-        before["cpp"].encode("utf-8"),
-    ).hexdigest()
+    assert without_loop_watchdog(cpp) == before["cpp"]
 
 
 @pytest.mark.parametrize("name", sorted(DIVISION_VALUE_STARTS))

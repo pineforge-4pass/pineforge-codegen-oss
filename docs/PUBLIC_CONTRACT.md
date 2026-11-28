@@ -484,23 +484,64 @@ transpile(pine_source: str, *, check_support: bool = True,
           filename: str = "<input>",
           libraries: Mapping[str, str] | None = None,
           history_capacity: int | None = None,
-          drawing_capacity: int | None = None) -> str
+          drawing_capacity: int | None = None,
+          loop_timeout_ms: int | None = None) -> str
 
 transpile_full(pine_source: str, *, check_support: bool = True,
                filename: str = "<input>",
                libraries: Mapping[str, str] | None = None,
                history_capacity: int | None = None,
-               drawing_capacity: int | None = None) -> dict
+               drawing_capacity: int | None = None,
+               loop_timeout_ms: int | None = None) -> dict
 ```
 
-The same keyword-only capacity options are accepted by
+The same keyword-only capacity and loop timeout options are accepted by
 `transpile_with_request_inventory()` and root `gate/glue.py`.
 The JavaScript worker template in `scripts/worker-template.mjs` passes only
-the source and does not forward either option.
+the source and uses the defaults.
 `history_capacity` is an exact integer of at least 2 or `None`;
 `drawing_capacity` is an exact integer of at least 1 or `None`.
 Booleans, floating values, strings and smaller integers raise `PF-E5094`
 with `option` and `minimum` arguments.
+
+`loop_timeout_ms` is the wall time available each time a generated Pine
+`for`, `for … in` or `while` is entered. `None` selects **2000 ms**; an
+override is an exact integer from 1 through 2147483647. It is compiled into the strategy;
+it is not a Pine `input`. Invalid types and nonpositive values raise
+`PF-E5094`; integers above the native range raise `PF-E0036`.
+
+Each entry starts a fresh `std::chrono::steady_clock` timer, including loops
+in called functions and requested evaluators. If a helper runs the same loop
+twice on one bar, the second entry gets the full budget.
+
+In a nest, the outer timer keeps running while the inner loop executes, but
+the watchdog checks it only at the outer loop's own samples. Each inner
+entry can use a full budget, so the total time of nested loops can exceed a
+single limit. Lower `loop_timeout_ms` to shorten each entry's budget, or
+enter the inner loop fewer times.
+
+TradingView sets a
+[500 ms loop limit and times out the outer loop first](https://www.tradingview.com/pine-script-docs/writing/limitations/#loop-execution).
+PineForge reports the loop whose sample detects an expired deadline. A long
+inner loop can therefore report its own line before the outer loop samples.
+
+Only the iteration count carries across entries to the same generated loop
+on a chart bar; a new bar or run resets it. After every **256 iterations**,
+the watchdog checks the current entry's deadline just before the next
+iteration or when leaving the loop, including by `break`. A partial batch
+incurs no exit clock read: a loop that executes three iterations per call
+first checks its deadline on the 86th call on that bar. A long-running
+iteration cannot be interrupted, and a loop that never completes 256
+iterations on a bar has no elapsed-time check on that bar.
+An expired timer stops the run through `runtime.error`'s path:
+for example, `Error on bar 17: Pine line 6: loop time limit exceeded (2000 ms)`.
+The bar is the zero-based chart bar being processed; the line is the
+one-based Pine loop header. Proven-endless counted loops that already stop
+immediately retain their TradingView stop and report the configured limit.
+Scripts with no generated Pine loops need no clock.
+
+The worst case for the added clock overhead is a short inner loop inside a
+tight outer loop: every inner entry costs one clock read.
 
 History retention depends on the source and these parameters, never the
 number of bars or trades. With `history_capacity=None`, existing Pine
@@ -758,7 +799,7 @@ An explicit title that is not a compile-time string constant raises
 ## Pyodide and gate/glue JSON
 
 `gate/glue.py` defines
-`transpile_json(source: str, *, history_capacity: int | None = None, drawing_capacity: int | None = None) -> str`.
+`transpile_json(source: str, *, history_capacity: int | None = None, drawing_capacity: int | None = None, loop_timeout_ms: int | None = None) -> str`.
 It returns a
 serialized JSON **string**. The shipped Pyodide worker runs that glue. Its
 success and compile-error envelopes are:

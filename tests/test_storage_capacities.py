@@ -12,6 +12,7 @@ from pineforge_codegen import (
 from pineforge_codegen.errors import CompileError
 from tests._checked_ta_cpp import with_pine_source_ta
 from tests._e2e import reference_codegen, transpile_json
+from tests._legacy_cpp import without_loop_watchdog
 
 
 BASE = "8d615dd27b31acd4fe92b57be7c1811cc42ecbda"
@@ -428,5 +429,5 @@ def test_under_capacity_scripts_keep_the_entire_reference_cpp(tmp_path, body, he
     # The ta.sma row builds its object from the checked fixed-length type
     # today; a reference without such a call is returned as it is.
     expected = with_pine_source_ta(expected)
-    assert cpp == expected
+    assert without_loop_watchdog(cpp) == expected
     assert transpile(source, history_capacity=None, drawing_capacity=None) == cpp

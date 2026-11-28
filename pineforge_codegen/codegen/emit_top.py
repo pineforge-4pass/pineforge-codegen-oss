@@ -118,6 +118,41 @@ from .unicode_case import CASE_MAPPING_CPP, CASE_MAPPING_MARKER
 
 # Keep the late-selected include beside the headers the C++ allowlist reads.
 ENUM_STRING_INCLUDE = '#include <pineforge/source/pine_policy_support.hpp>'
+LOOP_CLOCK_INCLUDE = '#include <chrono>'
+LOOP_WATCHDOG_CPP = """struct @TYPE@ {
+    static constexpr unsigned interval = 256;
+    struct State {
+        std::optional<std::int64_t> bar;
+        unsigned remaining = interval;
+    };
+    std::int64_t bar;
+    int line;
+    std::chrono::steady_clock::time_point deadline{};
+    State* state = nullptr;
+
+    unsigned begin(State& site) {
+        state = &site;
+        deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(::kLoopTimeLimitMs);
+        if (site.bar != bar) {
+            site.bar = bar;
+            site.remaining = interval;
+        }
+        // Bias by one: check after the Nth body, never before its side effects.
+        return site.remaining + 1;
+    }
+
+    [[gnu::noinline, gnu::cold]] unsigned poll() const {
+        if (std::chrono::steady_clock::now() >= deadline)
+            pine_runtime_error(std::string("Error on bar ") + std::to_string(bar)
+                + ": Pine line " + std::to_string(line) + ": loop time limit exceeded ("
+                + std::to_string(::kLoopTimeLimitMs) + " ms)");
+        return interval;
+    }
+
+    void finish(unsigned count) const {
+        state->remaining = count == 1 ? poll() : count - 1;
+    }
+};"""
 _TRADE_HISTORY_POLICY_MARKER = "        /* __PINEFORGE_TRADE_HISTORY_POLICY__ */"
 
 # ta.pivothigh / ta.pivotlow with a series leftbars or rightbars
@@ -613,8 +648,7 @@ class TopLevelEmitter:
         from .endless_for import plan_endless_for_loops
         self._endless_for_actions = plan_endless_for_loops(self.ctx.ast)
         if "stop" in self._endless_for_actions.values():
-            lines.append("inline constexpr int kLoopTimeLimitMs = 2000;")
-            lines.append("")
+            lines.extend((self._loop_timeout_constant(), ""))
         lines.append(RUN_STOP_SHIMS_CPP)
         if self._uses_timestamp_calendar:
             lines.append(TIMEZONE_STOP_SHIM_CPP)
@@ -643,6 +677,9 @@ class TopLevelEmitter:
         # Syminfo derivation helpers (_pf_derive_main_tickerid, _pf_derive_country)
         from .helpers_syminfo import emit_syminfo_helpers
         lines.extend(emit_syminfo_helpers())
+
+    def _loop_timeout_constant(self) -> str:
+        return f"inline constexpr int kLoopTimeLimitMs = {self._loop_timeout_ms};"
 
     def _emit_ta_compat_shims(self, lines: list[str]) -> None:
         """Emit source-level adapters for TA1 arguments and anchored forms.
@@ -1036,7 +1073,7 @@ private:
                     names.add(flag)
         return names
 
-    def _emit_script_run_prepare(self, lines: list[str], declarations: list[str]) -> None:
+    def _emit_script_run_prepare(self, lines: list[str], declarations: list[str]) -> int:
         """Reset every declared script member, then prepare this run's cache.
 
         Unlike per-bar rollback, a new lifecycle also invalidates precalculated
@@ -1064,6 +1101,9 @@ private:
             "        _pf_require_settings_ok();",
             "        _pf_script_state_checkpoint_.reset();",
         ])
+        # Evaluator emission can still discover loop sites. Insert their run
+        # reset here once their strategy-owned state has been sized.
+        watchdog_reset_at = len(lines)
         if any(item.get("runtime_context") for item in self._security_calls):
             lines.append("        runtime_contexts().enable_history();")
         seen: set[str] = set()
@@ -1110,6 +1150,7 @@ private:
         else:
             lines.append("        (void)bars; (void)n; (void)allow_precalculation;")
         lines.append("    }")
+        return watchdog_reset_at
 
     def _emit_handle_checkpoint_traits(self, lines: list[str]) -> None:
         """Emit recursive rollback adapters for shared-ID collection state.

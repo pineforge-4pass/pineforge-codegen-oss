@@ -10,6 +10,7 @@ from pineforge_codegen import transpile
 from pineforge_codegen.diagnostic_codes import render_diagnostic
 from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._e2e import reference_codegen, transpile_json
+from tests._legacy_cpp import without_loop_watchdog
 from tests._numeric_expected import (
     INT64_STORE_BRANCHES, int64_store, integer_arithmetic, integer_store,
     require_numeric_hunk,
@@ -414,7 +415,7 @@ def _assert_unchanged(source, reference, tmp_path, hunks=()):
         # The new fragment must appear exactly once; it is put back to what the
         # reference emits and the whole translation unit is compared.
         cpp = require_numeric_hunk(cpp, previous, expected)
-    assert cpp == before["cpp"]
+    assert without_loop_watchdog(cpp) == before["cpp"]
 
 
 @pytest.mark.parametrize("source,control,code,position", _CASES)

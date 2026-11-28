@@ -19,6 +19,7 @@ from pineforge_codegen.errors import CompileError, Level, Phase
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from tests._compile import compile_cpp
+from tests._legacy_cpp import without_loop_watchdog
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "lexical_scope"
@@ -192,7 +193,7 @@ def test_measured_acceptance_keeps_fixed_main_cpp(probe, accepted_cpp_baseline):
     expected = accepted_cpp_baseline[probe]
     assert hashlib.sha256(source.encode()).hexdigest() == expected["source_sha256"]
     cpp = transpile(source, filename=probe + ".pine")
-    assert hashlib.sha256(cpp.encode()).hexdigest() == expected["cpp_sha256"], probe
+    assert hashlib.sha256(without_loop_watchdog(cpp).encode()).hexdigest() == expected["cpp_sha256"], probe
 
 
 @pytest.mark.parametrize("probe", ACCEPTED)

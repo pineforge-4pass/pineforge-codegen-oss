@@ -21,6 +21,7 @@ from pineforge_codegen.symbols import TypeSpec
 from tests import _compile as compile_env
 from tests._e2e import reference_codegen, transpile_json
 from tests._for_float_step import assert_float_step_refused
+from tests._legacy_cpp import without_loop_watchdog
 from tests._numeric_expected import (
     integer_arithmetic, integer_store, require_numeric_hunk,
 )
@@ -522,6 +523,7 @@ def test_integer_and_unmeasured_controls_keep_complete_frozen_cpp(name, tmp_path
             f"s = {integer_store(integer_arithmetic('s', '+', '1'))};",
         )
         if name == "loop_body_integer_write":
+            cpp = without_loop_watchdog(cpp)
             cpp = require_numeric_hunk(
                 cpp, "total += s;",
                 f"total = {integer_arithmetic('total', '+', 's')};",
@@ -594,4 +596,4 @@ def test_parameter_loop_start_is_unchanged_by_the_storage_fix(
     else:
         cpp = transpile(pine)
         assert re.search(r"\bfor \(double i = ", cpp), cpp
-        assert cpp == before["cpp"]
+        assert without_loop_watchdog(cpp) == before["cpp"]

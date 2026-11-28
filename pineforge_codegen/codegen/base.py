@@ -37,7 +37,7 @@ from ..limits import TimeBudget, iter_ast_nodes, syntax_children
 from ..matrix_overloads import matrix_sum_has_rhs
 from ..reference_casts import na_reference_cast_kind
 from . import graph_journal
-from .capacities import CapacityPolicy, validate_capacity_options
+from .capacities import CapacityPolicy, validate_codegen_options
 from ..session_reads import emitted_session_reads
 from ..block_locals import block_declarations, decl_key
 from ..pine_spelling import (
@@ -341,7 +341,7 @@ from .security import SecurityEmitter
 # constructor, on_bar, extern "C") plus the per-function emission helpers
 # (_emit_func_def / _emit_udt_method_cpp_name) used by both regular
 # Pine functions and UDT instance methods.
-from .emit_top import ENUM_STRING_INCLUDE, TopLevelEmitter
+from .emit_top import ENUM_STRING_INCLUDE, LOOP_CLOCK_INCLUDE, LOOP_WATCHDOG_CPP, TopLevelEmitter
 
 # StmtVisitor owns the statement-level visitors (_visit_stmt dispatcher
 # plus the per-kind handlers for var-decl, assignment, tuple-assign,
@@ -405,11 +405,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     def __init__(self, ctx: AnalyzerContext,
                  budget: TimeBudget | None = None, *,
                  history_capacity: int | None = None,
-                 drawing_capacity: int | None = None) -> None:
-        validate_capacity_options(history_capacity, drawing_capacity, ctx.filename)
+                 drawing_capacity: int | None = None,
+                 loop_timeout_ms: int | None = None) -> None:
+        validate_codegen_options(history_capacity, drawing_capacity, loop_timeout_ms, ctx.filename)
         self.ctx = ctx
         self._history_capacity = history_capacity
         self._drawing_capacity = drawing_capacity
+        self._loop_timeout_ms = 2000 if loop_timeout_ms is None else loop_timeout_ms
+        self._loop_watchdog_count = 0
         self._max_bars_back_cap = None
         self._inferred_history_capacity = None
         self._order_shape_calls = {}
@@ -6575,7 +6578,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 9. Constructor with TA initializer list
         self._emit_constructor(lines)
         lines.append("")
-        self._emit_script_run_prepare(lines, _script_state_declarations)
+        watchdog_reset_at = self._emit_script_run_prepare(lines, _script_state_declarations)
         lines.append("")
         if self._uses_drawing:
             self._emit_drawing_collectors(lines)
@@ -6661,6 +6664,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         _runtime_templates: list[str] = []
         self._emit_runtime_security_templates(_runtime_templates)
         _script_state_hooks: list[str] = []
+        if self._loop_watchdog_count:
+            # Instrumentation state is per strategy and survives fill rollback.
+            # A fresh run (even one repeating only bar zero) must start clean.
+            sites = self._loop_watchdog_sites()
+            state_type = f"::{self._loop_watchdog_type()}::State"
+            _script_state_hooks.append(f"    {state_type} {sites}[{self._loop_watchdog_count}]{{}};")
+            lines.insert(watchdog_reset_at,
+                         f"        std::fill_n(this->{sites}, {self._loop_watchdog_count}, {state_type}{{}});")
         self._emit_script_state_hooks(_script_state_hooks, _script_state_members)
         _script_state_hooks = _runtime_templates + _script_state_hooks
         lines[_script_state_hooks_at:_script_state_hooks_at] = _script_state_hooks
@@ -6692,6 +6703,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # A float counter may first appear in a requested evaluator.
         if self._uses_tv_float_step_end:
             lines.insert(tv_float_step_end_at, TV_FLOAT_STEP_END_CPP)
+        # Share the existing immediate-stop constant if both forms occur.
+        if self._loop_watchdog_count:
+            support = [] if "stop" in self._endless_for_actions.values() else [
+                self._loop_timeout_constant(), ""]
+            support.extend([LOOP_WATCHDOG_CPP.replace("@TYPE@", self._loop_watchdog_type()), ""])
+            lines[tv_float_step_end_at:tv_float_step_end_at] = support
+            lines.insert(0, LOOP_CLOCK_INCLUDE)
         # Function bodies and security evaluators can select the enum lookup.
         if self._uses_enum_string_lookup:
             lines.insert(0, ENUM_STRING_INCLUDE)
