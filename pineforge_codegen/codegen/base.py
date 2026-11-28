@@ -901,6 +901,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._uses_tv_string_units = False
         self._uses_tv_string_trim = False
         self._uses_case_mapping = False
+        self._timeframe_from_seconds_name: str | None = None
         # Retain each loop node alongside its plan; ids are lookup keys only.
         self._closed_trade_folds: dict[int, tuple[ForStmt, object]] = {}
         self._tuple_assign_counter = 0
@@ -6742,6 +6743,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._settle_tv_string_units(lines)
         self._settle_tv_string_trim(lines)
         self._settle_case_mapping(lines)
+        self._settle_timeframe_from_seconds(lines)
         cpp = "\n".join(lines)
         if self._uses_array_slice_views:
             from .array_slice import lower_storage

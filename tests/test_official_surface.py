@@ -201,10 +201,6 @@ OFFICIAL_FOOTPRINT = frozenset({"buy_volume", "delta", "poc", "sell_volume", "va
 SUPPORTED_FOOTPRINT = frozenset({"delta"})
 KNOWN_FOOTPRINT_OMISSIONS = frozenset({"buy_volume", "poc", "sell_volume", "vah", "val"})
 
-# timeframe.from_seconds requires a runtime seconds_to_tf inverse mapping
-# that the engine does not currently expose; both layers omit it.
-KNOWN_TIMEFRAME_OMISSIONS = frozenset({"from_seconds"})
-
 # color.from_gradient is a charting/plot helper; PineForge has no plotter so
 # it is a cosmetic no-op (warned via COSMETIC_COLOR_FUNC) — not in
 # SUPPORTED_COLOR_FUNC, hence still an "omission" from the supported set.
@@ -277,11 +273,10 @@ def test_supported_color_matches_official_minus_from_gradient():
     )
 
 
-def test_supported_timeframe_matches_official_minus_known_omissions():
-    expected = OFFICIAL_TIMEFRAME - KNOWN_TIMEFRAME_OMISSIONS
-    assert SUPPORTED_TIMEFRAME_FUNC == expected, (
-        f"missing: {sorted(expected - SUPPORTED_TIMEFRAME_FUNC)}, "
-        f"extra: {sorted(SUPPORTED_TIMEFRAME_FUNC - expected)}"
+def test_supported_timeframe_matches_official():
+    assert SUPPORTED_TIMEFRAME_FUNC == OFFICIAL_TIMEFRAME, (
+        f"missing: {sorted(OFFICIAL_TIMEFRAME - SUPPORTED_TIMEFRAME_FUNC)}, "
+        f"extra: {sorted(SUPPORTED_TIMEFRAME_FUNC - OFFICIAL_TIMEFRAME)}"
     )
 
 
@@ -391,8 +386,6 @@ def test_namespace_smoke_round_trips_through_transpile(label):
 INTENTIONALLY_REJECTED = [
     # log namespace
     'log.foo("x")',
-    # timeframe.from_seconds — Pine v6 official but no runtime backing.
-    'x = timeframe.from_seconds(60)',
     # opentrades has no exit_* fields in Pine v6.
     'x = strategy.opentrades.exit_price(0)',
     'x = strategy.opentrades.exit_time(0)',

@@ -111,6 +111,7 @@ from .tables import (
 from ..limits import iter_ast_nodes
 from .drawing import DRAWING_LIFETIME_CPP, POLYLINE_HANDLE_CPP
 from .helpers import cpp_code_only
+from .timeframe_from_seconds import TIMEFRAME_FROM_SECONDS_MARKER, timeframe_from_seconds_cpp
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 from .tv_string_trim import TV_STRING_TRIM_CPP, TV_STRING_TRIM_MARKER, TV_STRING_TRIM_NAME
 from .tv_string_units import TV_STRING_UNITS_CPP, TV_STRING_UNITS_MARKER
@@ -681,6 +682,7 @@ class TopLevelEmitter:
         lines.extend((TV_STRING_TRIM_MARKER, ""))
         lines.append(CASE_MAPPING_MARKER)
         lines.append("")
+        lines.extend((TIMEFRAME_FROM_SECONDS_MARKER, ""))
         # Syminfo derivation helpers (_pf_derive_main_tickerid, _pf_derive_country)
         from .helpers_syminfo import emit_syminfo_helpers
         lines.extend(emit_syminfo_helpers())
@@ -2703,6 +2705,14 @@ private:
                 lines[marker] = CASE_MAPPING_CPP
                 return
         del lines[marker:marker + 2]
+
+    def _settle_timeframe_from_seconds(self, lines: list[str]) -> None:
+        marker = lines.index(TIMEFRAME_FROM_SECONDS_MARKER)
+        name = self._timeframe_from_seconds_name
+        if name is not None and f"::{name}(" in cpp_code_only("\n".join(lines)):
+            lines[marker] = timeframe_from_seconds_cpp(name)
+        else:
+            del lines[marker:marker + 2]
 
     def _emit_extern_c(self, lines: list[str]) -> None:
         lines.append('extern "C" {')
