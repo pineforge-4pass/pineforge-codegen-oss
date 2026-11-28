@@ -156,7 +156,8 @@ class TaSiteHelper:
             # FirstCallBound consumes the factory, then forwards bar and
             # source to the same window that the series-length form uses.
             args = f"bar_index_, {args}"
-            if plan is None and site.ctor_nodes:
+            if (plan is None and site.ctor_nodes
+                    and site.class_name in ("ta::Lowest", "ta::Highest")):
                 # A constant or an input length keeps its constructor, and
                 # the window checks no constructor length: for one of zero
                 # or less it answered na on every call. The call passes its
@@ -164,6 +165,10 @@ class TaSiteHelper:
                 # the window makes on a per-call length
                 # (``simple_ta_length``) stops the run on the first call,
                 # with TradingView's text for the function and the value.
+                # Only ta.lowest and ta.highest: TradingView's answer was
+                # measured for them. ta.highestbars shares the window and
+                # keeps this base form, so its length of zero or less still
+                # answers na.
                 length = self._visit_expr(site.ctor_nodes[0])
                 args = f"{args}, pineforge::source::ta_number({length})"
         if plan is not None:
@@ -2977,10 +2982,11 @@ class TaSiteHelper:
         # feature macro stands for all twelve. A chart site that keeps an
         # execution window (``_is_block_extreme``) is not declared with its
         # row's type: ``_ta_kernel_type`` gives it ``_PFExecutedExtreme``,
-        # which checks no constructor length. Its call passes its length
-        # too, and the check the window makes on a per-call length stops
-        # the run there (``_ta_compute_args_for_site``). Its
-        # request.security copies are the row's type.
+        # which checks no constructor length. A ta.lowest or ta.highest call
+        # passes its length too, and the check the window makes on a
+        # per-call length stops the run there (``_ta_compute_args_for_site``);
+        # a ta.highestbars call does not, and a length of zero or less
+        # answers na. Its request.security copies are the row's type.
         "ta::RMA": (
             "pineforge::source::PineFixedRma", _TA_LENGTH_HEADER,
             "PINEFORGE_HAS_PINE_FIXED_LENGTH", True,

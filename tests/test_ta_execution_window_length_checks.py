@@ -312,3 +312,34 @@ def test_a_length_of_zero_or_less_stops_on_the_first_call(case):
             }
             assert {key: row[key] for key in expected} == expected, row
             assert int(row["PRESENT"]) >= 1, row
+
+
+# ta.highestbars reaches the same window class with a length declared
+# `simple` (tests/test_issue_458_narrow_reach.py), but TradingView's answer for
+# its length of zero or less in this form is not measured. So its call keeps
+# the base form: it passes no length, and a length of zero or less answers na
+# on every call without stopping the run.
+_HIGHESTBARS = Case("highestbars-simple-zero", "highestbars", "high",
+                    "lengthSimple", "simple int lengthSimple = 0\n",
+                    "_PFExecutedExtreme<true, true>", "0")
+
+
+def test_highestbars_keeps_the_base_form_for_a_length_of_zero_or_less():
+    case = _HIGHESTBARS
+    cpp = transpile(_script(case))
+    member = _window_member(cpp, case)
+    calls = _call_arguments(cpp, member)
+    assert len(calls) >= 2, f"NOT COMPARED: calls of {member}; actual={calls}"
+    for arguments in calls:
+        assert len(arguments) == 2 and arguments[0] == "bar_index_", calls
+    rows = _hosted_rows(
+        cpp, [("script", None)], label="window_length_highestbars_simple_zero",
+    )
+    for route in _ROUTES:
+        row = rows[f"script {route}"]
+        expected = {
+            "STATUS": "0", "NAME": "", "CALLBACK": "0",
+            "VISITED": str(BARS), "COMPLETED": str(BARS),
+            "RECORDED": str(BARS), "PRESENT": "0", "TEXT": "",
+        }
+        assert {key: row[key] for key in expected} == expected, row
