@@ -2686,6 +2686,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         writes = self._value_bindings.writes_by_declaration(self._ast)
         incomplete = {name for name, decl in self._direct_program_vars.items()
                       if (sites := writes.get((id(decl), name))) and not sites <= indexed_writes}
+        # A tuple declaration is not a statement the evaluator replays
+        # (``can_replay_statement``). A name it binds is read as the
+        # declaration's value; a reassigned one would never receive that
+        # store, so it cannot be replayed completely.
+        tuples = {name: stmt for stmt in self._ast.body if isinstance(stmt, TupleAssign)
+                  for name in stmt.names if name != "_"}
+        incomplete.update(self._global_reassigned_names.intersection(tuples))
 
         def replayable(names, replay) -> bool:
             # The evaluator can replay each statement that holds a store.
@@ -2709,15 +2716,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             names: set[str] = set()
             histories: dict[str, VarDecl] = {}
 
-            def sample(decl):
+            def sample(name):
                 # Already replaying a current value is not proof that
                 # its later writes' inputs were inventoried for sampling.
-                if decl.name not in names:
-                    names.add(decl.name)
-                    pending.extend((expr, True) for expr in inputs.get(decl.name, ()))
+                if name not in names:
+                    names.add(name)
+                    pending.extend((expr, True) for expr in inputs.get(name, ()))
 
             for decl in declarations:
-                sample(decl)
+                sample(decl.name)
             seen = set()
             while pending:
                 node, sampling = pending.pop()
@@ -2735,7 +2742,22 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     pending.append((node.index, True))
                 elif isinstance(node, Identifier):
                     decl = self._identifier_binding_nodes.get(id(node))
-                    if decl is None or decl is not self._direct_program_vars.get(node.name):
+                    if decl is None:
+                        # A sampled value that reads a name of a top-level
+                        # tuple declaration (``[a, n] = pair(txt)``) is
+                        # computed from that declaration's value: follow it,
+                        # as the read-time walk does
+                        # (``_collect_security_mutable_globals``).
+                        declaration = tuples.get(node.name)
+                        if (sampling and declaration is not None
+                                and self._identifier_decl_bindings.get(id(node))
+                                == (id(declaration), node.name)):
+                            if node.name in self._global_reassigned_names:
+                                sample(node.name)
+                            else:
+                                pending.append((declaration.value, True))
+                        continue
+                    if decl is not self._direct_program_vars.get(node.name):
                         continue
                     if not (decl.is_var or decl.is_varip
                             or decl.name in self._global_reassigned_names):
@@ -2744,7 +2766,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     if not sampling:
                         continue
                 if decl is not None:
-                    sample(decl)
+                    sample(decl.name)
                     continue
                 if isinstance(node, FuncCall):
                     if self._is_input_func_call(node):
