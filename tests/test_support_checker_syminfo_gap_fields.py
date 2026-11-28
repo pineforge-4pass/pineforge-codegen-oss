@@ -1,21 +1,12 @@
-"""Silent-gap warnings for ALL na-accept syminfo fields (audit item A7).
-
-``_SYMINFO_SILENT_GAP_FIELDS`` used to cover only 6 fields; the metadata-
-backed fields (employees, shareholders, shares_outstanding_*,
-recommendations_*, target_price_*) and the na-literal fields (root,
-pricescale, minmove) silently returned na with NO warning. The set is now
-derived from SYMINFO_MEMBER_MAP so it cannot drift.
-
-The warning used to fire ONLY inside an if/ternary condition, so a field read
-directly in a plain expression (``x = syminfo.pricescale * 2``) slipped out as
-na with no signal. The gate now fires for EVERY read — conditional AND plain.
-"""
+"""Warnings for symbol fields that can be missing, in and out of conditions."""
 import pytest
 
+from pineforge_codegen import transpile_full
+from pineforge_codegen.diagnostic_codes import render
+from pineforge_codegen.errors import Level
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from pineforge_codegen.support_checker import SupportChecker
-from pineforge_codegen.errors import Level
 
 
 def _diags(src: str):
@@ -104,6 +95,85 @@ def test_plain_arithmetic_use_warns():
     assert warns, "syminfo.pricescale * 2.0 must warn (read flows out as na)"
     errs = [d for d in _diags(src) if d.level == Level.ERROR]
     assert errs == [], "silent-gap fields warn, they do not error"
+
+
+@pytest.mark.parametrize("condition", [
+    pytest.param("na(syminfo.pricescale)", id="na-test-is-true"),
+    pytest.param("syminfo.pricescale > 0", id="direct-comparison-is-false"),
+])
+def test_condition_warning_describes_the_field_read(condition):
+    source = (
+        '//@version=6\nstrategy("Missing symbol field in a condition")\n'
+        f'if {condition}\n    strategy.entry("L", strategy.long)\n'
+    )
+    diagnostics = transpile_full(source)["diagnostics"]
+    [warning] = [d for d in diagnostics if d.code == "PF-W1522"]
+    expected = "In this condition, PineForge returns na for syminfo.pricescale."
+    assert (warning.level, warning.args, warning.message) == (
+        Level.WARNING, {"member": "pricescale"}, expected,
+    )
+    assert render(warning.user_message, warning.args) == expected
+
+
+def test_plain_warning_does_not_claim_the_result_of_nz():
+    source = (
+        '//@version=6\nstrategy("Replace a missing symbol field")\n'
+        'replacement = nz(syminfo.pricescale, 1.0)\nplot(replacement)\n'
+    )
+    diagnostics = transpile_full(source)["diagnostics"]
+    [warning] = [d for d in diagnostics if d.code == "PF-W1521"]
+    expected = "PineForge returns na for syminfo.pricescale."
+    assert (warning.level, warning.args, warning.message) == (
+        Level.WARNING, {"member": "pricescale"}, expected,
+    )
+    assert render(warning.user_message, warning.args) == expected
+
+
+def test_symbol_field_that_the_run_can_supply_warns_about_missing_metadata():
+    source = (
+        '//@version=6\nstrategy("Symbol field supplied with the run")\n'
+        'if syminfo.employees > 0\n    strategy.entry("L", strategy.long)\n'
+    )
+    diagnostics = transpile_full(source)["diagnostics"]
+    [warning] = [
+        d for d in diagnostics if d.code in {"PF-W1520", "PF-W1521", "PF-W1522"}
+    ]
+    assert (warning.code, warning.level, warning.args, warning.message) == (
+        "PF-W1520", Level.WARNING, {"member": "employees"},
+        'syminfo.employees is na unless the run declares a value for '
+        '"employees" in its symbol metadata.',
+    )
+    assert render(warning.user_message, warning.args) == (
+        "PineForge returns na for syminfo.employees unless the run supplies a value."
+    )
+
+
+def test_strategy_without_symbol_field_reads_matches_base_cpp(tmp_path):
+    from tests._e2e import reference_codegen, transpile_json
+
+    pine = tmp_path / "unrelated.pine"
+    pine.write_text(
+        '//@version=6\nstrategy("Strategy without symbol field reads")\n'
+        'if close > open\n    strategy.entry("L", strategy.long)\n',
+        encoding="utf-8",
+    )
+    head = transpile_json(pine)
+    head_cpp = (head.get("cpp") or "").encode("utf-8")
+    base_sha = "9b17c40e074a1bcab7ec581b5e71f13b171deb42"
+    base_root = reference_codegen(base_sha)
+    if base_root is None:
+        pytest.skip(
+            f"NOT COMPARED: base {base_sha} is unavailable "
+            f"(base C++=missing, candidate C++={len(head_cpp)} bytes)"
+        )
+    base = transpile_json(pine, root=base_root)
+    base_cpp = (base.get("cpp") or "").encode("utf-8")
+    assert base["ok"] and base_cpp and head["ok"] and head_cpp, (
+        "NOT COMPARED: transpilation failed or produced no C++ "
+        f"(base: ok={base['ok']}, bytes={len(base_cpp)}; "
+        f"candidate: ok={head['ok']}, bytes={len(head_cpp)})"
+    )
+    assert head_cpp == base_cpp, f"generated C++ differs from base {base_sha}"
 
 
 @pytest.mark.parametrize("field", ["mintick", "tickerid", "currency", "timezone"])

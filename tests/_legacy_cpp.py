@@ -7,6 +7,64 @@ from pineforge_codegen.codegen.run_stops import (
 from tests._cpp_tokens import code_only, regions
 
 
+def loop_watchdog_tick(count: str, timer: str, pad: str) -> str:
+    """The exact guarded decrement accepted by historical lowering comparisons."""
+    return (
+        "#if defined(__GNUC__) || defined(__clang__)\n"
+        f"{pad}if (::__builtin_expect(--{count} == 0, 0))\n"
+        "#else\n"
+        f"{pad}if (--{count} == 0)\n"
+        "#endif\n"
+        f"{pad}    {count} = {timer}.poll();"
+    )
+
+
+def without_loop_watchdog(cpp: str) -> str:
+    """Project a guarded TU onto the bytes used by pre-#440 lowering oracles."""
+    from pineforge_codegen.codegen.emit_top import LOOP_CLOCK_INCLUDE, LOOP_WATCHDOG_CPP
+
+    if LOOP_CLOCK_INCLUDE + "\n" not in cpp:
+        return cpp
+    declaration = re.compile(
+        r"^(?P<indent> *)::(?P<type>_pf_LoopWatchdog(?:__pf\d+)?) "
+        r"(?P<timer>_pf_loop_watchdog_(?P<index>\d+)(?:__pf\d+)?)\{bar_index_, \d+\};\n"
+        r"(?P=indent)unsigned (?P<count>_pf_loop_count_(?P=index)(?:__pf\d+)?) = "
+        r"(?P=timer)\.begin\(this->(?P<sites>_pf_loop_watchdog_sites(?:__pf\d+)?)"
+        r"\[(?P=index)\]\);\n", re.M)
+    instances = list(declaration.finditer(cpp))
+    assert instances, "watchdog support without a loop"
+    kind, sites = instances[0].group("type", "sites")
+    support = LOOP_WATCHDOG_CPP.replace("@TYPE@", kind) + "\n\n"
+    assert cpp.count(support) == 1
+    storage = re.findall(rf"^    ::{kind}::State {sites}\[([1-9]\d*)\]\{{\}};\n", cpp, re.M)
+    assert len(storage) == 1
+    size = storage[0]
+    assert all(m.group("type", "sites") == (kind, sites) and int(m["index"]) < int(size)
+               for m in instances)
+    member = f"    ::{kind}::State {sites}[{size}]{{}};\n"
+    reset = f"        std::fill_n(this->{sites}, {size}, ::{kind}::State{{}});\n"
+    assert cpp.count(reset) == 1
+    cpp = cpp.replace(member, "", 1).replace(reset, "", 1)
+    cpp = cpp.replace(LOOP_CLOCK_INCLUDE + "\n", "", 1).replace(support, "", 1)
+    cpp = declaration.sub("", cpp)
+    for timer, count in {m.group("timer", "count") for m in instances}:
+        # One pad for both target arms; the cold assignment is nested one level.
+        tick = re.escape(loop_watchdog_tick(count, timer, "@PAD@") + "\n")
+        tick = tick.replace("@PAD@", "(?P<pad> *)", 1).replace("@PAD@", "(?P=pad)")
+        cpp, polls = re.subn("^" + tick, "", cpp, flags=re.M)
+        cpp, checks = re.subn(rf"(?m)^ *{timer}\.finish\({count}\);\n", "", cpp)
+        assert polls and checks, f"incomplete watchdog {timer}: {polls} polls, {checks} exits"
+    if "::kLoopTimeLimitMs" not in cpp:  # An immediate stop still needs the limit.
+        cpp = cpp.replace("inline constexpr int kLoopTimeLimitMs = 2000;\n\n", "", 1)
+    # The receipt lists actual host reads. A script that already read bar_index_
+    # keeps its entry; only the read contributed by the timer disappears.
+    if not re.search(r"\bbar_index_\b", code_only(cpp)):
+        cpp = re.sub(r'(\\"host_reads\\":\[)(.*?)\]', lambda m: (
+            m[1] + ",".join(k for k in m[2].split(",") if k != r'\"bar_index_\"') + "]"
+        ), cpp)
+    return cpp
+
+
 # Exact source-bearing spellings emitted by base.py (host base),
 # emit_top.py (its includes, host/config/override uses), checked_settings.py
 # (config), security.py (host time_close), and ta.py (length adapters and

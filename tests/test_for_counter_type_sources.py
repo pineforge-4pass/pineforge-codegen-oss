@@ -17,6 +17,7 @@ from pineforge_codegen.loop_types import LoopTypeSources, _CounterQuery
 from pineforge_codegen.parser import Parser
 from pineforge_codegen.symbols import PineType, TypeSpec
 from tests import _compile as compile_env
+from tests._legacy_cpp import without_loop_watchdog
 from tests._for_counter_header_cases import INT_START_SOURCES
 from tests._for_float_step import (
     DIVISION_STARTS, DIVISION_VALUE_STARTS, assert_float_step_refused, loop_step_source,
@@ -96,7 +97,8 @@ def test_source_inventory_and_unchanged_cpp(name, main_cpp_hashes):
     baseline = main_cpp_hashes[name]
     assert hashlib.sha256(pine.encode("utf-8")).hexdigest() == baseline["source_sha256"]
     cpp = transpile(pine)
-    # This run-stop guard is the only change permitted for int-counter rows.
+    # Compare the original typing after removing the two added runtime guards.
+    cpp = without_loop_watchdog(cpp)
     cpp = re.sub(
         r"(?m)^ *if \(!is_na\((_for_step_\d+)\) && \1 <= 0\) "
         r"""pine_runtime_error\("'step' in loop must be greater than zero"\);\n""",

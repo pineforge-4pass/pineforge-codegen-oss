@@ -50,7 +50,7 @@ def test_input_int_getter():
 
 def test_input_color_getter_routes_to_int64():
     # Color packs into 0xAARRGGBB, which overflows signed int32 (e.g.
-    # color.red == 0xFFFF0000), so it routes through get_input_int64.
+    # color.red == 0xFFF23645), so it routes through get_input_int64.
     # defval must be a color constant/builder (see
     # test_support_checker_input_color).
     assert "get_input_int64(" in _emit('input.color(color.red, "c")')
@@ -130,10 +130,12 @@ def test_input_color_hex_literal_with_alpha():
 
 
 def test_input_color_all_defval_shapes_pack_to_int64():
-    """Compile golden for input.color (formerly a corpus probe — color is
-    cosmetic, no trade parity). Every defval shape lowers to a packed-ARGB
-    int64 via get_input_int64: const, #RRGGBB (opaque), #RRGGBBAA (explicit
-    alpha), and the color.new(...) builder."""
+    """Codegen golden for input.color (transpile-only; color is cosmetic).
+
+    Every defval shape lowers to a packed-ARGB int64 via get_input_int64:
+    const, #RRGGBB (opaque), #RRGGBBAA (explicit alpha), and the
+    color.new(...) builder.
+    """
     src = '''//@version=6
 strategy("t")
 cConst = input.color(color.red, "Const")

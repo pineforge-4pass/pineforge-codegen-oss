@@ -23,8 +23,9 @@ import re
 import pytest
 
 from pineforge_codegen import transpile, transpile_full
+from pineforge_codegen.codegen.security import SecurityEmitter
 from pineforge_codegen.errors import CompileError
-from tests._compile import compile_cpp
+from tests._compile import compile_cpp, run_emitted_tu
 
 
 HEAD = (
@@ -73,6 +74,115 @@ def test_nested_helper_inputs_register_their_getters():
         '1, get_input_string("B", std::string("240")), input_tf_, true, false',
     ]
     compile_cpp(cpp, label="nested-inputs")
+
+
+def test_issue_694_case_5_reads_the_engine_chart_publication():
+    # Pinned C++ fixtures for lookahead_on requests are stale if they expect
+    # every chart read to use the live requested cell.
+    cpp = transpile(
+        '//@version=6\nstrategy("issue 694 case 5")\n'
+        'daily = request.security(syminfo.tickerid, "D", close, '
+        'lookahead = barmerge.lookahead_on)\n'
+        'plot(daily)\n'
+    )
+    assert (
+        'class GeneratedStrategy : public pineforge::source::PineStrategyHost,\n'
+        '                          public pineforge::source::PineSecurityChartPublisher {'
+    ) in cpp
+    assert (
+        'register_security_chart_eval(0, "D", input_tf_, true, false, false);'
+    ) in cpp
+    assert "PINEFORGE_HAS_SECURITY_CHART_PUBLICATION_V1" in cpp
+    assert "double _chart_sec_0 = na<double>();" in cpp
+    assert "_req_sec_0 = bar.close;" in cpp
+    assert "_chart_sec_0 = _req_sec_0;" in cpp
+    assert (
+        "void publish_security_chart(int sec_id, const Bar& projected) override {"
+    ) in cpp
+    assert "case 0: _chart_sec_0 = projected.close; break;" in cpp
+    assert "daily = _chart_sec_0;" in cpp
+    compile_cpp(cpp, label="issue-694-case-5-chart-publication")
+
+
+def test_issue_694_case_5_publishes_the_final_daily_close_on_every_hour():
+    cpp = transpile(
+        '//@version=6\nstrategy("issue 694 case 5 values")\n'
+        'daily = request.security(syminfo.tickerid, "D", close, '
+        'lookahead = barmerge.lookahead_on)\n'
+        'plot(daily)\n'
+    )
+    # Keep the real batch scheduler; observe the Pine value after each chart body.
+    driver = r"""
+#include <iostream>
+#include <vector>
+
+struct DailyCloseCapture : GeneratedStrategy {
+    void on_source_bar(const pineforge::Bar& bar) override {
+        GeneratedStrategy::on_source_bar(bar);
+        std::cout << bar.timestamp << ' ' << bar.close << ' '
+                  << static_cast<double>(daily) << '\n';
+    }
+};
+
+int main() {
+    std::vector<pineforge::Bar> bars(72);
+    for (int i = 0; i < 72; ++i) {
+        auto& bar = bars[i];
+        bar.timestamp = 1704067200000LL + i * 3600000LL;  // 2024-01-01 00:00 UTC
+        bar.open = bar.high = bar.low = bar.close = 100.0 + i;
+        bar.volume = 1.0;
+    }
+    DailyCloseCapture strategy;
+    strategy.set_syminfo_session("24x7");  // The engine's default timezone is UTC.
+    strategy.run(bars.data(), bars.size(), "60", "60");
+    if (!strategy.last_error().empty()) {
+        std::cerr << "NOT COMPARED: expected no engine error, got "
+                  << strategy.last_error() << '\n';
+        return 1;
+    }
+}
+"""
+    output = run_emitted_tu(cpp, driver, opt="-O0", label="issue-694-case-5-values")
+    rows = [line.split() for line in output.splitlines()]
+    assert len(rows) == 72, (
+        f"NOT COMPARED: expected 72 hourly chart callbacks, got {len(rows)}"
+    )
+    for i, row in enumerate(rows):
+        expected_chart = (1704067200000 + i * 3600000, 100.0 + i)
+        assert len(row) == 3, f"NOT COMPARED: row {i} expected 3 fields, got {row!r}"
+        actual_chart = (int(row[0]), float(row[1]))
+        assert actual_chart == expected_chart, (
+            f"NOT COMPARED: hour {i} expected chart {expected_chart}, got {actual_chart}"
+        )
+    daily_closes = [float(row[2]) for row in rows]
+    assert daily_closes == [close for close in (123.0, 147.0, 171.0) for _ in range(24)]
+    assert [i for i, row in enumerate(rows) if daily_closes[i] == float(row[1])] == [
+        23, 47, 71,
+    ]
+
+
+def test_issue_694_offset_control_keeps_legacy_cpp_byte_identical(monkeypatch):
+    # Complements
+    # test_security_series_timeframe.py::test_setup_timeframes_are_byte_identical_without_expansion:
+    # this is the exact old emitter path with the new admission door disabled.
+    source = (
+        '//@version=6\nstrategy("issue 694 case 5 control")\n'
+        'daily = request.security(syminfo.tickerid, "D", close[1], '
+        'lookahead = barmerge.lookahead_on)\n'
+        'plot(daily)\n'
+    )
+    actual = transpile(source)
+    monkeypatch.setattr(
+        SecurityEmitter,
+        "_security_chart_publication_eligible",
+        lambda self, item, resolved_tf: False,
+        raising=False,
+    )
+    expected = transpile(source)
+    assert actual == expected
+    assert "register_security_eval(0, \"D\", input_tf_, true, false);" in actual
+    assert "register_security_chart_eval" not in actual
+    assert "PineSecurityChartPublisher" not in actual
 
 
 def test_paths_of_different_depths_share_a_context():

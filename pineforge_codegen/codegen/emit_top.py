@@ -104,6 +104,7 @@ from .tables import (
     DRAWING_TYPE_TO_CPP,
     PINE_TYPE_TO_CPP,
     PINE_V6_STRATEGY_DEFAULTS,
+    RUNTIME_REGISTER_SECURITY_CHART_EVAL_FN,
     RUNTIME_REGISTER_SECURITY_EVAL_FN,
     RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN,
 )
@@ -118,6 +119,41 @@ from .unicode_case import CASE_MAPPING_CPP, CASE_MAPPING_MARKER
 
 # Keep the late-selected include beside the headers the C++ allowlist reads.
 ENUM_STRING_INCLUDE = '#include <pineforge/source/pine_policy_support.hpp>'
+LOOP_CLOCK_INCLUDE = '#include <chrono>'
+LOOP_WATCHDOG_CPP = """struct @TYPE@ {
+    static constexpr unsigned interval = 256;
+    struct State {
+        std::optional<std::int64_t> bar;
+        unsigned remaining = interval;
+    };
+    std::int64_t bar;
+    int line;
+    std::chrono::steady_clock::time_point deadline{};
+    State* state = nullptr;
+
+    unsigned begin(State& site) {
+        state = &site;
+        deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(::kLoopTimeLimitMs);
+        if (site.bar != bar) {
+            site.bar = bar;
+            site.remaining = interval;
+        }
+        // Bias by one: check after the Nth body, never before its side effects.
+        return site.remaining + 1;
+    }
+
+    [[gnu::noinline, gnu::cold]] unsigned poll() const {
+        if (std::chrono::steady_clock::now() >= deadline)
+            pine_runtime_error(std::string("Error on bar ") + std::to_string(bar)
+                + ": Pine line " + std::to_string(line) + ": loop time limit exceeded ("
+                + std::to_string(::kLoopTimeLimitMs) + " ms)");
+        return interval;
+    }
+
+    void finish(unsigned count) const {
+        state->remaining = count == 1 ? poll() : count - 1;
+    }
+};"""
 _TRADE_HISTORY_POLICY_MARKER = "        /* __PINEFORGE_TRADE_HISTORY_POLICY__ */"
 
 # ta.pivothigh / ta.pivotlow with a series leftbars or rightbars
@@ -244,11 +280,14 @@ class TopLevelEmitter:
     }
 
     # The guard a translation unit carries after a header's include, by the
-    # feature macro a class table names: for a fixed type, when the script
-    # has a call of the class identity; for a series type, when a call is
-    # lowered to it. An engine header older than the type is then reported by
-    # the macro's name. A feature macro without an entry here is reserved
-    # only, and an engine header without its type fails at the type's name.
+    # feature macro a class table names, when the unit declares a member of
+    # the type: for a fixed type, a member of the type or a FirstCallBound of
+    # it (``_ta_fixed_type_classes``, codegen/ta.py); for a series type, a
+    # call lowered to it. An engine header older than the type is then
+    # reported by the macro's name, and a unit that declares no such member
+    # requires nothing of that header. A feature macro without an entry here
+    # is reserved only, and an engine header without its type fails at the
+    # type's name.
     _TA_PINE_LAYER_GUARDS = {
         "PINEFORGE_HAS_PINE_FIXED_SUPERTREND": (
             "#ifndef PINEFORGE_HAS_PINE_FIXED_SUPERTREND",
@@ -428,11 +467,15 @@ class TopLevelEmitter:
     def _ta_pine_layer_include_lines(self) -> list[str]:
         """The include line of every engine header this script's ``ta.*``
         objects are declared in, each followed by the guards of the types
-        the script has in that header, in the tables' order.
+        the translation unit declares from that header, in the tables' order.
 
-        For a fixed type every call site of its class identity counts, a dead
-        chart member included: its request.security copies are still
-        declared. A series type counts where a live chart site is lowered to
+        A fixed type's header is written for every call site of its class
+        identity, a dead chart member included. Its feature macro is
+        required only when a member is declared with the type
+        (``_ta_fixed_type_classes``): a site with a per-bar length, one that
+        keeps an execution window and a dead one declare another type or
+        none, and their header is then written without that guard. A series
+        type counts, header and guard, where a live chart site is lowered to
         it (``_ta_series_length_rows``). The length header is also written
         for a site or request.security copy that takes the dynamic-length
         lowering, whatever its class, and for a chart site that keeps an
@@ -442,9 +485,11 @@ class TopLevelEmitter:
         dynamic = self._ta_uses_dynamic_lengths() or any(
             self._is_block_extreme(site) for site in self.ctx.ta_call_sites
         )
-        # (header, feature macro) of every type the script has.
+        named = self._ta_fixed_type_classes()
+        # (header, feature macro) of every type the script has: the macro of
+        # a fixed type only where a member names the type.
         declared = [
-            (row[1], row[2])
+            (row[1], row[2] if class_name in named else None)
             for class_name, row in self._TA_PINE_LAYER_CLASSES.items()
             if class_name in used
         ]
@@ -594,6 +639,12 @@ class TopLevelEmitter:
             '#error "generated code requires pineforge-engine native lowering v1 (PINEFORGE_HAS_NATIVE_LOWERING_V1)"',
             "#endif",
         ])
+        if any(info.get("chart_publication") for info in self._security_eval_info):
+            lines.extend([
+                "#ifndef PINEFORGE_HAS_SECURITY_CHART_PUBLICATION_V1",
+                '#error "historical request.security chart publication requires the paired PineForge engine (PINEFORGE_HAS_SECURITY_CHART_PUBLICATION_V1)"',
+                "#endif",
+            ])
         lines.append("")
         # Compatibility shim for the namespace-wrap refactor: unqualified
         # references to BacktestEngine / Bar / na<T>() / ta::* / etc. resolve
@@ -604,8 +655,7 @@ class TopLevelEmitter:
         from .endless_for import plan_endless_for_loops
         self._endless_for_actions = plan_endless_for_loops(self.ctx.ast)
         if "stop" in self._endless_for_actions.values():
-            lines.append("inline constexpr int kLoopTimeLimitMs = 2000;")
-            lines.append("")
+            lines.extend((self._loop_timeout_constant(), ""))
         lines.append(RUN_STOP_SHIMS_CPP)
         if self._uses_timestamp_calendar:
             lines.append(TIMEZONE_STOP_SHIM_CPP)
@@ -634,6 +684,9 @@ class TopLevelEmitter:
         # Syminfo derivation helpers (_pf_derive_main_tickerid, _pf_derive_country)
         from .helpers_syminfo import emit_syminfo_helpers
         lines.extend(emit_syminfo_helpers())
+
+    def _loop_timeout_constant(self) -> str:
+        return f"inline constexpr int kLoopTimeLimitMs = {self._loop_timeout_ms};"
 
     def _emit_ta_compat_shims(self, lines: list[str]) -> None:
         """Emit source-level adapters for TA1 arguments and anchored forms.
@@ -1027,7 +1080,7 @@ private:
                     names.add(flag)
         return names
 
-    def _emit_script_run_prepare(self, lines: list[str], declarations: list[str]) -> None:
+    def _emit_script_run_prepare(self, lines: list[str], declarations: list[str]) -> int:
         """Reset every declared script member, then prepare this run's cache.
 
         Unlike per-bar rollback, a new lifecycle also invalidates precalculated
@@ -1055,6 +1108,9 @@ private:
             "        _pf_require_settings_ok();",
             "        _pf_script_state_checkpoint_.reset();",
         ])
+        # Evaluator emission can still discover loop sites. Insert their run
+        # reset here once their strategy-owned state has been sized.
+        watchdog_reset_at = len(lines)
         if any(item.get("runtime_context") for item in self._security_calls):
             lines.append("        runtime_contexts().enable_history();")
         seen: set[str] = set()
@@ -1101,6 +1157,7 @@ private:
         else:
             lines.append("        (void)bars; (void)n; (void)allow_precalculation;")
         lines.append("    }")
+        return watchdog_reset_at
 
     def _emit_handle_checkpoint_traits(self, lines: list[str]) -> None:
         """Emit recursive rollback adapters for shared-ID collection state.
@@ -1928,6 +1985,12 @@ private:
                         lines.append(
                             f"        {RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN}"
                             f"({sec_id}, {tf_expr}, input_tf_);"
+                        )
+                    elif info.get("chart_publication"):
+                        lines.append(
+                            f"        {RUNTIME_REGISTER_SECURITY_CHART_EVAL_FN}"
+                            f"({sec_id}, {tf_expr}, input_tf_, {la}, {go}, "
+                            f"{'true' if info.get('heikinashi') else 'false'});"
                         )
                     elif info.get("foreign"):
                         self._emit_foreign_security_registration(info, tf_expr, la, go, lines)

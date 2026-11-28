@@ -254,7 +254,9 @@ def test_exact_catalog_delta_and_legacy_pin():
         "PF-E6073": {"message"},
         "PF-E6074": {"message"},
         "PF-W1505": {"message", "hint", "explanation"},
-        "PF-W1520": {"message"},
+        "PF-W1520": {"message", "explanation"},
+        "PF-W1521": {"message", "explanation"},
+        "PF-W1522": {"message", "explanation"},
         "PF-W5010": {"message", "explanation"},
     }
     assert {code for code in legacy if legacy[code] != current[code]} == (

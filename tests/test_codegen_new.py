@@ -1113,6 +1113,7 @@ def test_color_new_visual_noop():
 def test_color_from_gradient():
     src = "c = color.from_gradient(50, 0, 100, color.red, color.green)\n"
     cpp = _generate_raw(src)
+    # This visual-only lowering uses packed zero, which is transparent black.
     assert "0" in cpp
 
 

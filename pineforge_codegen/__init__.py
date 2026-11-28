@@ -7,7 +7,7 @@ from .parser import Parser
 from .analyzer import Analyzer
 from .analyzer.value_bindings import ValueBindings
 from .codegen import CodeGen
-from .codegen.capacities import validate_capacity_options as _validate_capacity_options
+from .codegen.capacities import validate_codegen_options as _validate_codegen_options
 from .cpp_allowlist import REASONS, check_generated_cpp
 from .diagnostic_codes import diagnostics_catalog, render_diagnostic
 from .errors import (
@@ -58,7 +58,8 @@ def _parse_bounded(pine_source: str, filename: str, budget: TimeBudget | None = 
 def _generate(pine_source: str, check_support: bool, filename: str,
               libraries: Mapping[str, str] | None = None, *,
               history_capacity: int | None = None,
-              drawing_capacity: int | None = None):
+              drawing_capacity: int | None = None,
+              loop_timeout_ms: int | None = None):
     """The pipeline, first without the per-call clones of functions that read
     a ``session.<flag>[k]``, as scripts compiled before such reads were
     supported; then again with the functions whose reads that C++ holds
@@ -76,7 +77,7 @@ def _generate(pine_source: str, check_support: bool, filename: str,
     Returns ``(codegen, ctx, cpp, support_diagnostics, sites)``: ``sites``
     are the requests of another symbol's data the support checker lowered
     (``request_discovery.request_sites``)."""
-    _validate_capacity_options(history_capacity, drawing_capacity, filename)
+    _validate_codegen_options(history_capacity, drawing_capacity, loop_timeout_ms, filename)
     budget = None
     clones: frozenset[str] = frozenset()
     renamed: frozenset = frozenset()
@@ -115,12 +116,14 @@ def _generate(pine_source: str, check_support: bool, filename: str,
                            session_clones=clones).analyze(trace_pragmas=pragmas)
         budget.check(phase=Phase.ANALYZER)
         try:
-            capacity_options = {}
+            options = {}
             if history_capacity is not None:
-                capacity_options["history_capacity"] = history_capacity
+                options["history_capacity"] = history_capacity
             if drawing_capacity is not None:
-                capacity_options["drawing_capacity"] = drawing_capacity
-            gen = CodeGen(ctx, budget=budget, **capacity_options)
+                options["drawing_capacity"] = drawing_capacity
+            if loop_timeout_ms is not None:
+                options["loop_timeout_ms"] = loop_timeout_ms
+            gen = CodeGen(ctx, budget=budget, **options)
             cpp = gen.generate()
         except CodegenInvariantError as error:
             node_kind = error.node_kind
@@ -168,7 +171,8 @@ def _generate(pine_source: str, check_support: bool, filename: str,
 def transpile(pine_source: str, *, check_support: bool = True, filename: str = "<input>",
               libraries: Mapping[str, str] | None = None,
               history_capacity: int | None = None,
-              drawing_capacity: int | None = None) -> str:
+              drawing_capacity: int | None = None,
+              loop_timeout_ms: int | None = None) -> str:
     """Transpile PineScript v6 source code to C++ code.
 
     Semantic rules enforced in :class:`Analyzer` (before codegen), including:
@@ -209,6 +213,9 @@ def transpile(pine_source: str, *, check_support: bool = True, filename: str = "
         drawing_capacity: Optional live drawing bound (at least 1), separate
             from Pine collection counts, checked per collected type after
             collection. Typed stops require the paired engine catalog value.
+        loop_timeout_ms: Wall time available to each entry of a loop. Its deadline
+            is checked every 256 iterations across entries to that loop on a chart bar.
+            In milliseconds (1 to 2147483647; None selects 2000).
 
     Returns:
         Generated C++ source string.
@@ -216,6 +223,7 @@ def transpile(pine_source: str, *, check_support: bool = True, filename: str = "
     _gen, _ctx, cpp, _support, _sites = _generate(
         pine_source, check_support, filename, libraries,
         history_capacity=history_capacity, drawing_capacity=drawing_capacity,
+        loop_timeout_ms=loop_timeout_ms,
     )
     return cpp
 
@@ -224,7 +232,8 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
                    filename: str = "<input>",
                    libraries: Mapping[str, str] | None = None,
                    history_capacity: int | None = None,
-                   drawing_capacity: int | None = None) -> dict:
+                   drawing_capacity: int | None = None,
+                   loop_timeout_ms: int | None = None) -> dict:
     """Transpile like :func:`transpile`, plus the host-UI input manifest.
 
     Runs the pipeline (Lexer -> Parser -> support check -> Analyzer ->
@@ -268,6 +277,7 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
     gen, ctx, cpp, support_diagnostics, sites = _generate(
         pine_source, check_support, filename, libraries,
         history_capacity=history_capacity, drawing_capacity=drawing_capacity,
+        loop_timeout_ms=loop_timeout_ms,
     )
     return {
         "cpp": cpp,
@@ -284,7 +294,8 @@ def transpile_with_request_inventory(pine_source: str, *, check_support: bool = 
                                      libraries: Mapping[str, str] | None = None,
                                      primary_chart_timeframe: str | None = None,
                                      history_capacity: int | None = None,
-                                     drawing_capacity: int | None = None) -> dict:
+                                     drawing_capacity: int | None = None,
+                                     loop_timeout_ms: int | None = None) -> dict:
     """Transpile like :func:`transpile_full`, plus the request-feed inventory
     bound to the C++ it returns (``pineforge_codegen.request_feed_inventory``).
 
@@ -325,6 +336,7 @@ def transpile_with_request_inventory(pine_source: str, *, check_support: bool = 
     gen, ctx, cpp, support_diagnostics, sites = _generate(
         pine_source, check_support, filename, libraries,
         history_capacity=history_capacity, drawing_capacity=drawing_capacity,
+        loop_timeout_ms=loop_timeout_ms,
     )
     return {
         "cpp": cpp,

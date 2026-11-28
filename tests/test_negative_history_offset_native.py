@@ -9,6 +9,7 @@ import pytest
 from pineforge_codegen import transpile
 from tests._checked_ta_cpp import with_pine_source_ta
 from tests._e2e import reference_codegen, transpile_json
+from tests._legacy_cpp import without_loop_watchdog
 from tests.test_bool_string_inference import _messages, _run_native, native_env
 
 
@@ -369,6 +370,8 @@ def test_other_scripts_keep_complete_reference_cpp(tmp_path, shape):
     before = transpile_json(pine, root=reference)
     assert before["ok"], before.get("diagnostics")
     cpp = transpile(source)
+    if shape == "discarded_iteration_offset":
+        cpp = without_loop_watchdog(cpp)
     # ``no_history`` and ``ta_constants`` build their ta.sma and ta.highest
     # from the checked fixed-length types today; the other references are
     # compared as they are.
