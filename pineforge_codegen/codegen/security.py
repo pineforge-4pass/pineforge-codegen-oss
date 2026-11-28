@@ -4156,6 +4156,50 @@ class SecurityEmitter:
         clock["used"] = True
         return clock["slot"]
 
+    def _security_bar_cell(self, series_name, declare=False):
+        """The per-requested-bar cell of a helper local read with history, or
+        None while the local keeps the slot protocol
+        (``_emit_security_series_value``).
+
+        Only a local that a sparse call's body declares has one: the body of
+        a helper called conditionally inside ``request.security``, lowered on
+        the requested bar. It follows its parameter's rule (Pine Script User
+        Manual, Execution model, Time series in scopes: ``[]`` on a local
+        variable reads its last committed value as of the bar at the offset):
+        one entry per requested bar, the value of the call's last completed
+        run, which a bar without the call copies. Its ring is its own helper
+        series, which then holds completed requested bars only; its current
+        value is the staging variable ``<series>_next``, and the evaluator
+        commits it with the local's own push (``_emit_security_evaluator``),
+        apart from the one parameters and sampled globals share. The manual
+        states the rule for a script's own bars; it is applied to requested
+        bars here, as it is for the parameter. ``declare`` opens the cell at
+        the local's declaration.
+
+        Every other helper local keeps the slot protocol and the code it had:
+        a local of a call on the requested bar's clock, a ``var``, a string
+        local, and the evaluator every earlier build emitted (whose expression
+        visitor spells a history read from the series itself). The table is
+        evaluator-local, as the call clock is: with no evaluator open, a text
+        rewrite (``_rewrite_security_cpp``) has no table and finds no cell.
+        """
+        cells = getattr(self, "_security_call_bar_series", None)
+        if cells is None:
+            return None
+        cell = cells.get(series_name)
+        if (cell is None and declare and self._security_call_clock is not None
+                and self._security_requested_calls
+                and series_name not in self._security_string_series):
+            cell = cells[series_name] = _SecurityArgumentSample(
+                f"{series_name}_next", self._security_helper_series_ref(series_name),
+                "double")
+            # A read the expression visitor rendered on the chart's terms
+            # would index the ring as if it still held the current value.
+            # With a cell open, such a payload keeps every earlier build's
+            # evaluator (the existing mixed-clock guard).
+            self._security_requested_used = True
+        return cell
+
     def _security_sparse_call_prelude(self, sec_id, stack, caller_depth, render_argument):
         """Stage sparse parameters in a lambda entered at the written call.
 
@@ -5687,6 +5731,15 @@ class SecurityEmitter:
 
     def _security_helper_series_value(self, series_name: str, index_cpp: str) -> str:
         """A helper series read, restoring a color's ordinary integer type."""
+        cell = self._security_bar_cell(series_name)
+        if cell is not None:
+            # The ring holds completed requested bars only: the current value
+            # is the staging variable and [k] is the ring's entry k - 1.
+            if index_cpp == "0":
+                return cell.current
+            return (f"([&]() -> {cell.completed_type} {{ const int _hidx = ({index_cpp}); "
+                    f"if (_hidx < 0) return na<{cell.completed_type}>(); "
+                    f"return _hidx == 0 ? {cell.current} : {cell.member}[_hidx - 1]; }}())")
         value = f"{self._security_helper_series_ref(series_name)}[{index_cpp}]"
         if series_name in self._security_color_series:
             return na_preserving_int_cast(value, PINE_TYPE_TO_CPP[PineType.COLOR])
@@ -5935,6 +5988,14 @@ class SecurityEmitter:
         def emit_series_value(series_name: str, expr_cpp: str, pad: str) -> None:
             """One requested bar's value of a helper local read with history:
             pushed on a new requested bar, rewritten on a recomputation."""
+            cell = self._security_bar_cell(series_name, declare=True)
+            if cell is not None:
+                # A sparse call's local is staged here, and the evaluator
+                # commits it once per completed requested bar with the
+                # local's own push (``_security_bar_cell``).
+                lines.append(
+                    f"{pad}{cell.current} = {expr_cpp}; {series_name}_set = true;")
+                return
             ref = self._security_helper_series_ref(series_name)
             self._emit_security_series_value(sec_id, ref, expr_cpp, pad, lines)
 
@@ -6129,6 +6190,23 @@ class SecurityEmitter:
                     expr_cpp = self._security_float_cpp(
                         expr_cpp, stmt.value, runtime_stack_local)
                 if series_name is not None:
+                    cell = self._security_bar_cell(series_name)
+                    if cell is not None:
+                        # A sparse call's local (``_security_bar_cell``): the
+                        # staged value is its current one, and the evaluator
+                        # commits the last one where it closes.
+                        if stmt.op != ":=":
+                            is_double = (
+                                series_name not in self._security_color_series
+                                and series_name not in self._security_string_series)
+                            rhs = self._compound_assign_rhs(
+                                cell.current, stmt.op, expr_cpp, stmt.target, stmt.value,
+                                target_is_double=is_double, value_is_double=is_double)
+                            if rhs is None:
+                                rhs = f"{cell.current} {stmt.op[0]} {expr_cpp}"
+                            expr_cpp = rhs
+                        lines.append(f"{pad}{cell.current} = {expr_cpp};")
+                        return
                     ref = self._security_helper_series_ref(series_name)
                     if stmt.op == ":=":
                         lines.append(f'{pad}{ref}.update({expr_cpp});')
@@ -9224,6 +9302,11 @@ class SecurityEmitter:
         self._security_call_clock = None
         self._security_call_ta = owned_ta = {}
         self._security_call_series = {}
+        # series name -> cell of a sparse call's local read with history
+        # (``_security_bar_cell``). This evaluator commits each with the
+        # local's own push, below.
+        outer_bar_series = getattr(self, "_security_call_bar_series", None)
+        self._security_call_bar_series = bar_series = {}
         outer_arg_sec = self._security_arg_history_sec
         outer_arg_values = self._security_arg_call_values
         outer_arg_globals = self._security_arg_globals
@@ -9249,6 +9332,7 @@ class SecurityEmitter:
              self._security_double_hist_nodes, self._security_array_values) = outer
             (self._security_call_clocks, self._security_call_clock,
              self._security_call_ta, self._security_call_series) = outer_clocks
+            self._security_call_bar_series = outer_bar_series
         if clocks:
             # Each call prelude marks its place exactly once. Count the
             # finished statements, including copies of a shared expression
@@ -9279,6 +9363,24 @@ class SecurityEmitter:
             definitions = [
                 f"        {cpp_t} {hist}_next = na<{cpp_t}>(); bool {hist}_set = false;"
                 for hist, cpp_t in pushes] + definitions
+        if bar_series:
+            # A sparse call's local read with history has its own push, apart
+            # from the one above that parameters and sampled globals share:
+            # the value staged last where the call ran, and the entry before
+            # it where none did (an empty ring reads na). Its ring is its
+            # entry of the helper series map, not an identifier, so its
+            # staging variables are named after the series
+            # (``_security_bar_cell``).
+            commits.extend(
+                ["        if (is_complete) {"]
+                + [f"            {cell.member}.push({name}_set ? {cell.current} : "
+                   f"({cell.member}[0]));"
+                   for name, cell in bar_series.items()]
+                + ["        }"])
+            definitions = [
+                f"        {cell.completed_type} {cell.current} = "
+                f"na<{cell.completed_type}>(); bool {name}_set = false;"
+                for name, cell in bar_series.items()] + definitions
         if commits:
             close = max(i for i in range(start, len(lines)) if lines[i] == "    }")
             lines[close:close] = commits
@@ -10338,6 +10440,17 @@ class SecurityEmitter:
                     self._security_check_price_named_local_history(expr_node)
                     if isinstance(bound, str):
                         series_name = self._security_series_binding_target(bound)
+                        cell = (None if series_name is None
+                                else self._security_bar_cell(series_name))
+                        if cell is not None:
+                            offset = self._resolve_security_index_literal(
+                                expr_node.index, helper_binding_stack)
+                            if offset is None or offset >= 0:
+                                # The parameter's read: [k] is entry k - 1 of
+                                # a ring of completed requested bars.
+                                return self._security_completed_history_read(
+                                    expr_node, cell.current, cell.member,
+                                    cell.completed_type, offset, build_index)
                         if series_name is not None:
                             index_cpp = self._build_security_expr(
                                 sec_id,

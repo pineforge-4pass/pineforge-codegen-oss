@@ -892,6 +892,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # and persistent helper cells keyed by written call and declaration.
         self._security_call_ta: dict | None = None
         self._security_call_series: dict | None = None
+        # Evaluator-local: a sparse call's locals read with history that keep
+        # one entry per requested bar, series name -> staged cell.
+        self._security_call_bar_series: dict | None = None
         self._security_arg_history_sec: int | None = None
         self._security_arg_history_discovering = False
         self._security_arg_call_values: dict[tuple, str] = {}
