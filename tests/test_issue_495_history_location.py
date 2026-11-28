@@ -2,7 +2,7 @@
 
 import pytest
 
-from pineforge_codegen import transpile
+from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.analyzer import Analyzer
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
@@ -111,7 +111,11 @@ v = request.security(syminfo.tickerid, "240", held)
 held := h()
 plot(v)
 """
-    compile_cpp(transpile(source), label="later store with a loop-written string")
+    result = transpile_full(source, filename="loop.pine")
+    compile_cpp(result["cpp"], label="later store with a loop-written string")
+    warnings = [(d.args, d.location.file, d.location.line, d.location.col)
+                for d in result["diagnostics"] if d.code == "PF-W3013"]
+    assert warnings == [({"object_name": "txt"}, "loop.pine", 6, 22)]
 
 
 @pytest.mark.parametrize("writer", [
@@ -138,16 +142,130 @@ v = request.security(syminfo.tickerid, "240", held)
 held := h()
 plot(v)
 """
+    assert _four_hour_values_after_warmup(source) == [5, 6, 7]
+
+
+@pytest.mark.parametrize("source", [
+    pytest.param("""//@version=6
+strategy("store in an if expression")
+string txt = ""
+x = if close > open
+    txt := str.tostring(close)
+    1
+else
+    0
+h() => str.length(txt[2])
+var int held = 0
+v = request.security(syminfo.tickerid, "240", held)
+held := h()
+plot(v + x)
+""", id="store-in-if-value"),
+    pytest.param("""//@version=6
+strategy("store in a switch expression")
+string txt = ""
+x = switch
+    close > open =>
+        txt := str.tostring(close)
+        1
+    => 0
+h() => str.length(txt[2])
+var int held = 0
+v = request.security(syminfo.tickerid, "240", held)
+held := h()
+plot(v + x)
+""", id="store-in-switch-value"),
+    pytest.param("""//@version=6
+strategy("string from an if that writes a plain global")
+float last = na
+string txt = ""
+txt := if close > open
+    last := close
+    str.tostring(close)
+else
+    ""
+h() => str.length(txt[2])
+var int held = 0
+v = request.security(syminfo.tickerid, "240", held)
+held := h()
+plot(v)
+""", id="value-writes-plain-global"),
+])
+def test_later_store_keeps_chart_history_for_selection_value(source):
+    assert _four_hour_values_after_warmup(source) == [5, 6, 7]
+
+
+def test_blocked_request_reads_chart_string_even_when_another_request_samples_it():
+    source = """//@version=6
+strategy("two strings on a blocked request")
+string txt = str.tostring(close)
+string u = ""
+var int other = 0
+if close > open
+    u := "up"
+    for i = 0 to 1
+        other += i
+hourly = request.security(syminfo.tickerid, "60", str.length(txt[1]))
+h() => 10 * str.length(txt[2]) + str.length(u[1])
+var int held = 0
+v = request.security(syminfo.tickerid, "240", held)
+held := h()
+plot(hourly + v + other)
+"""
+    # The tens digit measures txt alone. The preceding rising chart child
+    # wrote "up" to u, contributing 2 in each group.
+    assert _four_hour_values_after_warmup(source, sec_id=1) == [52, 62, 72]
+
+
+def _four_hour_values_after_warmup(source, *, sec_id=0):
     # The first three hourly children rise and write strings of the same
     # length. At the four-hour close, chart txt[2] therefore has that length.
     groups = tuple(
         (start, start + 1, start + 2, final)
         for start, final in ((100, 7), (1000, 42), (10000, 316), (100000, 2024), (1000000, 5))
     )
-    rows = _run_requested(transpile(source), {"chart60": (60, groups)}, group_minutes=240)
+    rows = _run_requested(transpile(source), {"chart60": (60, groups)},
+                          group_minutes=240, sec_id=sec_id)
     completed = [row for row in rows["chart60"] if row.complete]
     actual = [(row.timestamp, row.close) for row in completed]
     expected = [(slot * 240 * 60_000, group[-1]) for slot, group in enumerate(groups)]
     assert actual == expected, f"NOT COMPARED: completed bars {actual}, expected {expected}"
-    # Four-hour bars two slots back closed at 7, 42, 316; their strings have lengths 1, 2, 3.
-    assert [row.value for row in completed[2:]] == [5, 6, 7]
+    # In contrast, txt[2] on the requested clock would see closes 7, 42, 316
+    # and return lengths 1, 2, 3 in these same three slots.
+    return [row.value for row in completed[2:]]
+
+
+def test_first_requested_missing_string_length_matches_chart_na():
+    source = """//@version=6
+strategy("first requested missing string")
+f_cls(string s) =>
+    int n = str.length(s)
+    na(n) ? -1 : n
+h() =>
+    int k = int(time / 3600000) % 3
+    string txt = k == 0 ? "a" : k == 1 ? "bb" : "ccc"
+    string prev = txt[1]
+    int cls = na(prev) ? f_cls(prev) : 1000 + f_cls(prev)
+    var int firstCls = na
+    if na(firstCls)
+        firstCls := cls
+    firstCls
+string none = na
+int a = f_cls(none)
+int chartFieldA = a + 2
+int c = request.security(syminfo.tickerid, "60", h())
+plot(chartFieldA + c)
+"""
+    # The first hour closes after three earlier chart bars have evaluated A.
+    # Keep C4's +2 on A so an unwritten chart member cannot stand in for 0.
+    rows = _run_requested(
+        transpile(source), text_result=True,
+        value_expression='std::to_string(chartFieldA) + " " + std::to_string(_req_sec_0)',
+    )["chart15"]
+    first = [row for row in rows if row.complete and row.timestamp == 0]
+    bars = [(row.timestamp, row.close) for row in first]
+    assert bars == [(0, 3)], f"NOT COMPARED: first completed hour {bars}, expected [(0, 3)]"
+    fields = first[0].value.split()
+    assert len(fields) == 2, f"NOT COMPARED: expected fields A and C, got {fields}"
+    chart_field, requested_length = map(float, fields)
+    assert chart_field == 2  # Field A: str.length(none) == 0.
+    assert requested_length == 0  # Field C, slot 0 of the requested evaluator.
