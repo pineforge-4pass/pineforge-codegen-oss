@@ -5,8 +5,8 @@ The review of the #466 change left notes on what a conditional
 them as its target:
 
 * a ``ta.*`` site the evaluator computed where it opens advanced with the
-  requested bar, while ``x[1]`` beside it counted the call's completed runs
-  (N1);
+  requested bar, while ``x[1]`` beside it read the last completed call's
+  argument (N1);
 * a ``var`` kept the seed of the first run that reached it, even when that
   run was a provisional one the completed evaluation replaced (N3);
 * a call a helper reads in two arms was lowered once per arm, each lowering
@@ -133,9 +133,11 @@ plot(out)
 @pytest.mark.parametrize("name", sorted(_CALL_CLOCK_TA))
 def test_hoisted_ta_follows_the_call_clock(name):
     # Requested bar i has high 20 + i. At a run of the call, x[1] is the high
-    # of the last completed call and ta.sma(x[1], 2) the mean of that and of
-    # the completed call before it: both count completed calls. The value
-    # keeps them apart, 1000 * mean + x[1].
+    # of the last completed call (the parameter keeps one entry per requested
+    # bar, and the previous bar's holds that call's argument) and
+    # ta.sma(x[1], 2) the mean of that and of the completed call before it:
+    # the average takes one sample per completed call. The value keeps them
+    # apart, 1000 * mean + x[1].
     source, reaches = _CALL_CLOCK_TA[name]
     rows = _rows(source, lambda i: (20 + i,) * 3, f"ta.* on a conditional call's clock ({name})")
     for i, complete, close, _high, value in rows:
