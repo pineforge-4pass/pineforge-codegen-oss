@@ -496,6 +496,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # request.security rebinding helpers for mutable globals
         self._global_binding_infos: dict[str, MutableGlobalInfo] = {}
         self._requested_string_history_globals: dict[str, VarDecl] = {}
+        # The histories read by the request expression being inventoried.
+        self._security_string_history_reads: dict[str, VarDecl] = {}
         self._price_string_history_reads: list[tuple[Subscript, TypeSpec | None, Symbol]] = []
         self._global_reassigned_names: set[str] = set()
         self._current_top_level_stmt: ASTNode | None = None
@@ -785,8 +787,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             k: v for k, v in self._global_expr_map.items() if k not in mutable_global_infos
         }
         # Keep immutable initializers available to requests which only need
-        # their current value. Requests which index one recorded it in their
-        # replay inventory at the read, just like a reassigned series.
+        # their current value. Requests which index one hold it in their
+        # replay inventory, just like a reassigned series.
         for name, decl in self._requested_string_history_globals.items():
             if name not in mutable_global_infos:
                 mutable_global_infos[name] = replace(
@@ -2515,6 +2517,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             and callee.object.name == "input"
         )
 
+    def _security_replay_inventory(
+        self, node: ASTNode | None,
+    ) -> tuple[tuple[str, ...], dict[str, VarDecl]]:
+        """A request's replayed names, and the string histories its expression reads."""
+        self._security_string_history_reads = reads = {}
+        names = self._collect_security_mutable_globals(node)
+        return tuple(sorted(names)), reads
+
     def _collect_security_mutable_globals(
         self, node: ASTNode | None, resolving: set[str] | None = None
     ) -> set[str]:
@@ -2527,8 +2537,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         string_decl = self._string_history_declaration(node)
         if string_decl is not None:
-            self._requested_string_history_globals[string_decl.name] = string_decl
-            out.add(string_decl.name)
+            # Not every store is known yet. The read joins the replay after
+            # the visit (``_complete_replayed_string_histories``).
+            self._security_string_history_reads[string_decl.name] = string_decl
 
         if isinstance(node, Identifier):
             scope = self._identifier_binding_scopes.get(id(node))
@@ -2617,19 +2628,27 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return None
 
     def _complete_replayed_string_histories(self) -> None:
-        """Include string histories used to compute a request's replayed stores.
+        """Decide which string histories each request replays.
 
-        A request registers the state it reads at its source position. The
-        evaluator also replays subsequent stores to that state; their RHSs
-        and guards are known only after the script has been visited.
+        A request registers the state it reads at its source position. A
+        string history its own expression reads joins the replay here, and
+        so do the histories used to compute the stores the evaluator replays
+        to that state: every store, its RHS and its guards are known only
+        after the script has been visited.
         """
-        calls = [call for call in self._security_calls if call.mutable_globals and not call.dead
-                 and call.sec_id not in self._excluded_string_replays]
-        if not calls or not self._global_reassigned_names:
+        def replaying():
+            return [call for call in self._security_calls
+                    if call.mutable_globals and not call.dead
+                    and call.sec_id not in self._excluded_string_replays]
+
+        reading = [call for call in self._security_calls if call.string_history_reads]
+        if not reading and not replaying():
             return
-        if not any(info.pine_type == PineType.STRING
-                   and (name in self._series_vars or name in BAR_FIELDS)
-                   for name, info in self._global_binding_infos.items()):
+        later_stores = bool(self._global_reassigned_names) and any(
+            info.pine_type == PineType.STRING
+            and (name in self._series_vars or name in BAR_FIELDS)
+            for name, info in self._global_binding_infos.items())
+        if not reading and not later_stores:
             return
 
         from ..codegen.security import can_replay_statement
@@ -2663,7 +2682,30 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         incomplete = {name for name, decl in self._direct_program_vars.items()
                       if (sites := writes.get((id(decl), name))) and not sites <= indexed_writes}
 
-        for call in calls:
+        def replays_completely(names, replay) -> bool:
+            # Every store of each name is indexed, and the evaluator can
+            # replay each statement that holds one.
+            if not names.isdisjoint(incomplete):
+                return False
+            sources = {id(stmt): stmt for name in names
+                       for stmt in self._global_binding_infos[name].source_stmts}
+            return all(can_replay_statement(stmt, replay, self._global_binding_infos)
+                       for stmt in sources.values())
+
+        for call in reading:
+            # The request's own expression reads these histories. Otherwise
+            # the request keeps the boundary it registered at the read.
+            reads = call.string_history_reads
+            replay = set(call.mutable_globals).union(reads)
+            if not replays_completely(set(reads), replay):
+                continue
+            self._requested_string_history_globals.update(reads)
+            call.mutable_globals = tuple(sorted(replay))
+            call.depends_on_mutable_globals = True
+        if not later_stores:
+            return
+
+        for call in replaying():
             replay = set(call.mutable_globals)
             sampled_inputs: set[str] = set()
             histories: dict[str, VarDecl] = {}
@@ -2721,11 +2763,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 continue
             # Keep the request's original replay boundary if any sampled
             # producer is incomplete or the evaluator cannot replay a source.
-            sources = {id(stmt): stmt for name in sampled_inputs
-                       for stmt in self._global_binding_infos[name].source_stmts}
-            if (not sampled_inputs.isdisjoint(incomplete)
-                    or not all(can_replay_statement(stmt, replay, self._global_binding_infos)
-                               for stmt in sources.values())):
+            if not replays_completely(sampled_inputs, replay):
                 continue
             if (replay.difference(call.mutable_globals)
                     or histories.keys() - self._requested_string_history_globals.keys()):

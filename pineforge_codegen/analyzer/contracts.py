@@ -204,6 +204,10 @@ class SecurityCallInfo:
     # Source-order request before timeframe cloning, if its later stores
     # added optional history. A refusal can drop just this extension.
     string_replay_origin: int | None = None
+    # String declarations whose history the request's own expression reads,
+    # by name in reading order. They join ``mutable_globals`` only after the
+    # visit, under the same test as a history a later store reads.
+    string_history_reads: dict = field(default_factory=dict)
 
 
 @dataclass

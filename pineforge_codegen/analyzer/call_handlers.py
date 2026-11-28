@@ -50,7 +50,7 @@ Sibling-mixin methods consumed via ``self``:
 - ``self._warn_if_unknown_source_id`` (``DiagnosticsHelper``).
 - ``self._input_diag_loc`` (``DiagnosticsHelper``).
 - ``self._extract_literal_value`` (``TypeHelper``).
-- ``self._collect_security_mutable_globals`` (``Analyzer.base``):
+- ``self._security_replay_inventory`` (``Analyzer.base``):
   stays on the host class because it walks the AST collecting
   mutable globals -- not an isolated call-handling concern.
 
@@ -970,7 +970,7 @@ class CallHandlers:
             gaps_node = all_args[3] if len(all_args) > 3 else None
             lookahead_node = all_args[4] if len(all_args) > 4 else None
 
-            mutable_globals = tuple(sorted(self._collect_security_mutable_globals(expr_node)))
+            mutable_globals, string_history_reads = self._security_replay_inventory(expr_node)
             # A helper request's symbol and timeframe, resolved through its
             # call paths (``security_contexts``), register in its place.
             notes = node.annotations or {}
@@ -1017,6 +1017,7 @@ class CallHandlers:
                 foreign=notes.get(LOWERING_ANNOTATION) == FEED_LOWERING,
                 ignore_invalid=node.kwargs.get("ignore_invalid_symbol"),
                 loc=node.loc,
+                string_history_reads=string_history_reads,
             ))
 
             return PineType.STRING if string_result else PineType.FLOAT
@@ -1138,7 +1139,7 @@ class CallHandlers:
 
         sec_id = len(self._security_calls)
 
-        mutable_globals = tuple(sorted(self._collect_security_mutable_globals(expr_node)))
+        mutable_globals, string_history_reads = self._security_replay_inventory(expr_node)
         notes = node.annotations or {}
         context = notes.get(CONTEXT_ANNOTATION)
         self._security_calls.append(SecurityCallInfo(
@@ -1157,6 +1158,7 @@ class CallHandlers:
             context_resolved=context is not None,
             dead=bool(notes.get(DEAD_ANNOTATION)),
             loc=node.loc,
+            string_history_reads=string_history_reads,
         ))
 
         # ``request.security_lower_tf`` returns an array; the value-level
