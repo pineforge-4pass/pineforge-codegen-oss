@@ -4063,18 +4063,25 @@ class SecurityEmitter:
         paths = getattr(self, "_security_sparse_call_paths", {}).get(sec_id, {})
         return [f"_sec{sec_id}_call_open_{ordinal}" for ordinal in paths.values()]
 
+    @staticmethod
+    def _security_inline_ta_variants(info):
+        """TA variants computed in a helper body, in declaration order."""
+        inline = info.get("inline_helper_ta_indices")
+        if not inline:
+            return
+        for idx, variants in info["ta_variants"].items():
+            for variant in variants:
+                if (idx, variant["signature"]) in inline:
+                    yield idx, variant
+
     def _security_owned_ta_clock_members(self, sec_id) -> list[str]:
-        """Open flags for variants that can be hoisted on a sparse clock.
-        Inline variants keep their own lowering. Unlike the helper maps,
-        each TA and its open flag belong to one evaluator for rollback."""
+        """Each sparse TA and its open flag belong to one evaluator for rollback."""
         if not getattr(self, "_security_sparse_call_paths", {}).get(sec_id):
             return []
         info = self._security_eval_info[sec_id]
-        inline = info["inline_helper_ta_indices"]
         return [f"{variant['member_name']}_open"
-                for idx, variants in info["ta_variants"].items() for variant in variants
-                if (idx, variant["signature"]) not in inline
-                and self._security_call_owns_ta(sec_id, variant)]
+                for variants in info["ta_variants"].values() for variant in variants
+                if self._security_call_owns_ta(sec_id, variant)]
 
     def _security_slot_is_new_cpp(self, sec_id) -> str:
         """Whether helper state lowered here opens a new slot, as C++.
@@ -4194,9 +4201,12 @@ class SecurityEmitter:
         if not pending or ta_results is None or lines is None:
             return ()
         signature = self._security_binding_stack_signature(stack)
+        # An inline site's arguments can read locals assigned later in the
+        # body, or the site can be in a skipped arm. Sample it at its read.
+        inline = self._security_eval_info[sec_id]["inline_helper_ta_indices"]
         opened = []
         for key, variant in pending.items():
-            if key[1] != signature or key in ta_results:
+            if key[1] != signature or key in ta_results or key in inline:
                 continue
             ta_results[key] = self._security_read_owned_ta(
                 sec_id, key[0], variant, stack, ta_results, security_mutable_names, lines)
@@ -5265,7 +5275,8 @@ class SecurityEmitter:
     def _emit_security_expr_hist_members(
         self, sec_id: int, expr_node, lines: list[str], mbb_suffix: str
     ) -> None:
-        mutable_names = self._security_eval_info[sec_id].get("mutable_globals") or ()
+        info = self._security_eval_info[sec_id]
+        mutable_names = info.get("mutable_globals") or ()
         if self._security_reads_bar_index(expr_node, mutable_names):
             # The requested bar's ``bar_index``: one count per requested bar,
             # advanced where the evaluator opens its slot.
@@ -5302,6 +5313,10 @@ class SecurityEmitter:
             lines.append(f"    Series<{cpp_t}> {name}{mbb_suffix};")
         for cell in self._security_sparse_cells(sec_id).values():
             lines.append(f"    Series<{cell.completed_type}> {cell.member}{mbb_suffix};")
+        # A bare TA in a conditional linear helper needs the call's scope
+        # even if neither a parameter nor the TA result is read with [].
+        for _, variant in self._security_inline_ta_variants(info):
+            self._security_discover_helper_clock(variant["binding_stack"])
         for name in (*self._security_sparse_clock_members(sec_id),
                      *self._security_owned_ta_clock_members(sec_id)):
             lines.append(f"    bool {name} = false;")
@@ -9304,6 +9319,23 @@ class SecurityEmitter:
             else:
                 pre_rebind_ta_indices.append(idx)
 
+        def register_owned_ta(idx, variant):
+            self._security_call_ta[idx, variant["signature"]] = variant
+            site = self.ctx.ta_call_sites[idx]
+            # Keep the kernel result type (including a missing int held as
+            # a double); tuple and array results are values too.
+            cpp_t = self._ta_return_type(site)
+            if not site.returns_tuple:
+                inferred = self._infer_cpp_type_for_security_elem(site.node)
+                if inferred == "bool" or inferred.startswith("std::vector<"):
+                    cpp_t = inferred
+            self._security_shared_definitions.append(
+                f"        std::optional<{cpp_t}> {variant['member_name']}_sample;")
+
+        for idx, variant in self._security_inline_ta_variants(info):
+            if self._security_call_owns_ta(sec_id, variant):
+                register_owned_ta(idx, variant)
+
         def emit_security_ta(indices: list[int]) -> None:
             # Pine only reaches a lazy site through a short-circuited operand
             # or an untaken ternary branch. Leave it out of the eager
@@ -9323,17 +9355,7 @@ class SecurityEmitter:
                     # Retain dependency order but sample where the helper
                     # runs, with its argument history in scope. Reaches of
                     # the same written variant share this evaluator local.
-                    self._security_call_ta[idx, variant["signature"]] = variant
-                    site = self.ctx.ta_call_sites[idx]
-                    # Keep the kernel result type (including a missing int
-                    # held as a double); tuple and array results are values too.
-                    cpp_t = self._ta_return_type(site)
-                    if not site.returns_tuple:
-                        inferred = self._infer_cpp_type_for_security_elem(site.node)
-                        if inferred == "bool" or inferred.startswith("std::vector<"):
-                            cpp_t = inferred
-                    self._security_shared_definitions.append(
-                        f"        std::optional<{cpp_t}> {variant['member_name']}_sample;")
+                    register_owned_ta(idx, variant)
                     continue
                 self._emit_security_prologue_ta(
                     sec_id, idx, variant, ta_results, security_mutable_names, lines,
@@ -10605,10 +10627,12 @@ class SecurityEmitter:
                             "request.security multi-statement helper TA history is not supported",
                             hint="Use a single-expression helper for TA history offsets.",
                         )
-                    value = self._build_security_expr(
+                    stage = self._build_security_expr(
                         sec_id, expr_node.object, ta_range, ta_results, resolving,
                         security_mutable_names, ta_binding_stack, emitted_lines)
-                    stage = self._security_stage_ta_history(member_name, value)
+                    # An owned TA stages its result inside the sample guard.
+                    if result_key not in self._security_call_ta:
+                        stage = self._security_stage_ta_history(member_name, stage)
                     current = f"{hist}_next"
                 if idx_lit is None:
                     prelude = f"{stage}; " if stage else ""

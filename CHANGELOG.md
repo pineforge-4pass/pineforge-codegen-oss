@@ -31,8 +31,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   call in its body. `ta.sma(x, 5)[1]` reads the average from the previous
   completed call, even when requested bars were skipped. Two reads of one
   written call share its state, including reads in different blocks. Passing
-  a moving average through a helper that reads its argument twice uses the
-  same average both times; it does not add a second sample to the window.
+  a moving average computed from a helper local, or its previous value,
+  to another helper that reads its argument twice adds only one sample
+  to the window.
   A helper's `var` takes its seed from the confirmed evaluation of its first
   call, including when the helper runs on every requested bar. The
   completed-call history applies to
