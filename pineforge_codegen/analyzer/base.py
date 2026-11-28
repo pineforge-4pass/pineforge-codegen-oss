@@ -38,6 +38,7 @@ from ..input_keys import assign_input_keys
 from ..loop_types import FLOAT_REASSIGNMENT, LoopTypeSources, for_counter_type
 from ..security_contexts import (
     GLOBAL_ANNOTATION, PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series,
+    _request_name, _request_payload,
 )
 from ..session_reads import emitted_session_reads
 from ..collection_history import (
@@ -163,7 +164,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def __init__(self, ast: Program, filename: str = "<stdin>",
                  budget: TimeBudget | None = None,
                  session_clones: frozenset[str] | None = None,
-                 excluded_array_history_owners: frozenset[str] = frozenset()) -> None:
+                 excluded_array_history_owners: frozenset[str] = frozenset(),
+                 excluded_string_replays: frozenset[int] = frozenset()) -> None:
         self._ast = ast
         self._filename = filename
         self._budget = budget
@@ -176,6 +178,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # time adds the ones whose reads the C++ holds).
         self._session_clones = session_clones
         self._excluded_array_history_owners = excluded_array_history_owners
+        self._excluded_string_replays = excluded_string_replays
         self._session_uncloned: frozenset[str] = frozenset()
         self._budget_visit_count = 0
         self._method_signatures = {}
@@ -225,11 +228,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             for name in stmt.names
             if name != "_"
         )
-        self._direct_program_binding_names: set[str] = {
-            stmt.name
-            for stmt in ast.body
-            if isinstance(stmt, VarDecl)
+        self._direct_program_vars = {
+            stmt.name: stmt for stmt in ast.body if isinstance(stmt, VarDecl)
         }
+        self._direct_program_binding_names: set[str] = set(self._direct_program_vars)
         self._direct_program_binding_names.update(
             name
             for stmt in ast.body
@@ -494,6 +496,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._enum_member_strings: dict[str, list[str]] = {}
         # request.security rebinding helpers for mutable globals
         self._global_binding_infos: dict[str, MutableGlobalInfo] = {}
+        self._requested_string_history_globals: dict[str, VarDecl] = {}
+        # The histories read by the request expression being inventoried.
+        self._security_string_history_reads: dict[str, VarDecl] = {}
+        self._price_string_history_reads: list[tuple[Subscript, TypeSpec | None, Symbol]] = []
         self._global_reassigned_names: set[str] = set()
         self._current_top_level_stmt: ASTNode | None = None
         self._global_scope = True
@@ -701,6 +707,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     self._register_history_receiver(
                         node, self._history_receiver_type_spec(node.object),
                     )
+        self._complete_replayed_string_histories()
+        # A requested string global needs a string Series in the ordinary
+        # emitted helper too. Keep the old chart-only price binding when no
+        # request reads the declaration's history.
+        for read, spec, symbol in self._price_string_history_reads:
+            if self._requested_string_history_globals.get(symbol.name) is symbol._pf_decl_node:
+                self._register_history_receiver(read, spec, script_symbol=symbol)
+            else:
+                self._series_bar_fields.add(symbol.name)
         if self._operator_condition_errors:
             condition_type, location = self._operator_condition_errors[0]
             self._error(
@@ -727,6 +742,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._ast, filename=self._filename, budget=self._budget,
                 session_clones=self._session_clones,
                 excluded_array_history_owners=self._excluded_array_history_owners,
+                excluded_string_replays=self._excluded_string_replays,
             ).analyze(trace_pragmas=trace_pragmas)
         self._check_persistent_drawing_member_collisions()
 
@@ -745,6 +761,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return Analyzer(
                 self._ast, filename=self._filename, budget=self._budget,
                 session_clones=self._session_clones, excluded_array_history_owners=excluded,
+                excluded_string_replays=self._excluded_string_replays,
             ).analyze(trace_pragmas=trace_pragmas)
 
         # Reject (loudly) a request.security whose timeframe is a UDF parameter
@@ -769,6 +786,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         pure_global_expr_map = {
             k: v for k, v in self._global_expr_map.items() if k not in mutable_global_infos
         }
+        # Keep immutable initializers available to requests which only need
+        # their current value. Requests which index one hold it in their
+        # replay inventory, just like a reassigned series.
+        for name, decl in self._requested_string_history_globals.items():
+            if name not in mutable_global_infos:
+                mutable_global_infos[name] = replace(
+                    self._global_binding_infos[name], is_series=True, source_stmts=[decl]
+                )
 
         return AnalyzerContext(
             ast=self._ast,
@@ -790,6 +815,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             filename=self._filename,
             global_var_decls=self._global_var_decls,
             global_expr_map=pure_global_expr_map,
+            requested_string_history_globals=self._requested_string_history_globals,
             identifier_binding_scopes=dict(self._identifier_binding_scopes),
             identifier_decl_bindings=dict(self._identifier_decl_bindings),
             primitive_block_shadow_types=dict(self._primitive_block_shadow_types),
@@ -2491,6 +2517,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             and callee.object.name == "input"
         )
 
+    def _security_replay_inventory(
+        self, node: ASTNode | None,
+    ) -> tuple[tuple[str, ...], dict[str, VarDecl]]:
+        """A request's replayed names, and the string histories its expression reads."""
+        self._security_string_history_reads = reads = {}
+        names = self._collect_security_mutable_globals(node)
+        return tuple(sorted(names)), reads
+
     def _collect_security_mutable_globals(
         self, node: ASTNode | None, resolving: set[str] | None = None
     ) -> set[str]:
@@ -2501,6 +2535,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         out: set[str] = set()
 
+        string_decl = self._string_history_declaration(node)
+        if string_decl is not None:
+            # Not every store is known yet. The read joins the replay after
+            # the visit (``_complete_replayed_string_histories``). A
+            # reassigned or ``var`` string is also added below as a current
+            # value; the same pass takes it back out if it cannot be replayed.
+            self._security_string_history_reads[string_decl.name] = string_decl
+
         if isinstance(node, Identifier):
             scope = self._identifier_binding_scopes.get(id(node))
             if scope != "global" and not (
@@ -2510,16 +2552,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return out
             name = node.name
             info = self._global_binding_infos.get(name)
-            if info is not None:
-                if info.is_var or name in self._global_reassigned_names:
-                    out.add(name)
-                    if name in resolving:
-                        return out
-                    resolving.add(name)
-                    for stmt in info.source_stmts:
-                        out |= self._collect_security_mutable_globals(stmt, resolving)
-                    resolving.remove(name)
+            if info is not None and (info.is_var or name in self._global_reassigned_names):
+                out.add(name)
+                if name in resolving:
                     return out
+                resolving.add(name)
+                for stmt in info.source_stmts:
+                    out |= self._collect_security_mutable_globals(stmt, resolving)
+                resolving.remove(name)
+                return out
             value = self._global_expr_map.get(name)
             if value is None and info is not None and isinstance(info.decl_node, VarDecl):
                 # The legacy series-name set can omit this global from the
@@ -2576,6 +2617,264 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             out |= self._collect_security_mutable_globals(child, resolving)
 
         return out
+
+    def _string_history_declaration(self, node: ASTNode) -> VarDecl | None:
+        if isinstance(node, Subscript) and isinstance(node.object, Identifier):
+            obj = node.object
+            info = self._global_binding_infos.get(obj.name)
+            if (info is not None and info.pine_type == PineType.STRING
+                    and isinstance(info.decl_node, VarDecl)
+                    and info.decl_node is self._direct_program_vars.get(obj.name)
+                    and self._identifier_binding_nodes.get(id(obj)) is info.decl_node):
+                return info.decl_node
+        return None
+
+    def _complete_replayed_string_histories(self) -> None:
+        """Decide which string histories each request replays.
+
+        A request registers the state it reads at its source position. A
+        string history its own expression reads joins the replay here, and
+        so do the histories used to compute the stores the evaluator replays
+        to that state: every store, its RHS and its guards are known only
+        after the script has been visited. Both routes ask one question of
+        every name such a string is computed from. A string that the read
+        itself registered as state leaves the replay here when it, or a
+        name that feeds it, has a store the evaluator would pass over.
+        """
+        def replaying():
+            return [call for call in self._security_calls
+                    if call.mutable_globals and not call.dead
+                    and call.sec_id not in self._excluded_string_replays]
+
+        reading = [call for call in self._security_calls if call.string_history_reads]
+        if not reading and not replaying():
+            return
+        later_stores = bool(self._global_reassigned_names) and any(
+            info.pine_type == PineType.STRING
+            and (name in self._series_vars or name in BAR_FIELDS)
+            for name, info in self._global_binding_infos.items())
+        if not reading and not later_stores:
+            return
+
+        from ..codegen.security import can_replay_statement
+
+        # The replay index follows statement arms, not statements inside
+        # values. Compare exact assignment sites against the independent
+        # lexical write inventory; a declaration alone is not a producer.
+        inputs: dict[str, list[ASTNode]] = {}
+        indexed_writes: set[int] = set()
+
+        def index_stores(statements, guards=()):
+            for stmt in statements:
+                if self._budget is not None:
+                    self._budget.check(stmt.loc, Phase.ANALYZER)
+                if isinstance(stmt, IfStmt):
+                    inner = (*guards, stmt.condition)
+                    index_stores(stmt.body, inner)
+                    index_stores(stmt.else_body or (), inner)
+                elif isinstance(stmt, VarDecl) and self._direct_program_vars.get(stmt.name) is stmt:
+                    inputs.setdefault(stmt.name, []).append(stmt.value)
+                elif isinstance(stmt, Assignment) and isinstance(stmt.target, Identifier):
+                    name = stmt.target.name
+                    info = self._global_binding_infos.get(name)
+                    binding = self._value_bindings.write_declaration(stmt.target)
+                    if info is not None and binding == (id(info.decl_node), name):
+                        inputs.setdefault(name, []).extend((*guards, stmt.value))
+                        indexed_writes.add(id(stmt))
+
+        index_stores(self._ast.body)
+        writes = self._value_bindings.writes_by_declaration(self._ast)
+        incomplete = {name for name, decl in self._direct_program_vars.items()
+                      if (sites := writes.get((id(decl), name))) and not sites <= indexed_writes}
+        # A tuple declaration is not a statement the evaluator replays
+        # (``can_replay_statement``). A name it binds is read as the
+        # declaration's value; a reassigned one would never receive that
+        # store, so it cannot be replayed completely.
+        tuples = {name: stmt for stmt in self._ast.body if isinstance(stmt, TupleAssign)
+                  for name in stmt.names if name != "_"}
+        incomplete.update(self._global_reassigned_names.intersection(tuples))
+
+        def replayable(names, replay) -> bool:
+            # The evaluator can replay each statement that holds a store.
+            sources = {id(stmt): stmt for name in names
+                       for stmt in self._global_binding_infos[name].source_stmts}
+            return all(can_replay_statement(stmt, replay, self._global_binding_infos)
+                       for stmt in sources.values())
+
+        def replays_completely(names, replay) -> bool:
+            # Every store of each name is indexed, and the evaluator can
+            # replay each statement that holds one.
+            return names.isdisjoint(incomplete) and replayable(names, replay)
+
+        def sampled(pending, declarations=()):
+            """Every reassigned or ``var`` name that feeds a sampled history.
+
+            ``pending`` pairs each node with whether its value is sampled;
+            ``declarations`` are strings whose history is read as it stands.
+            The string histories the walk meets are returned too. A sampled
+            name whose value the walk cannot follow is returned as well, and
+            joins ``incomplete`` (the fail-safe before the return).
+            """
+            names: set[str] = set()
+            histories: dict[str, VarDecl] = {}
+            # Sampled reads of a name the walk passes over.
+            unfollowed: list[Identifier] = []
+
+            def sample(name):
+                # Already replaying a current value is not proof that
+                # its later writes' inputs were inventoried for sampling.
+                if name not in names:
+                    names.add(name)
+                    pending.extend((expr, True) for expr in inputs.get(name, ()))
+
+            for decl in declarations:
+                sample(decl.name)
+            seen = set()
+            while pending:
+                node, sampling = pending.pop()
+                key = (id(node), sampling)
+                if node is None or key in seen:
+                    continue
+                seen.add(key)
+                if self._budget is not None:
+                    self._budget.check(node.loc, Phase.ANALYZER)
+                decl = self._string_history_declaration(node)
+                if decl is not None:
+                    histories[decl.name] = decl
+                    # The index is a value on this clock too. Follow the
+                    # declaration's stores below, not its name as another read.
+                    pending.append((node.index, True))
+                elif isinstance(node, Identifier):
+                    decl = self._identifier_binding_nodes.get(id(node))
+                    if decl is None:
+                        # A sampled value that reads a name of a top-level
+                        # tuple declaration (``[a, n] = pair(txt)``) is
+                        # computed from that declaration's value: follow it,
+                        # as the read-time walk does
+                        # (``_collect_security_mutable_globals``).
+                        declaration = tuples.get(node.name)
+                        if (sampling and declaration is not None
+                                and self._identifier_decl_bindings.get(id(node))
+                                == (id(declaration), node.name)):
+                            if node.name in self._global_reassigned_names:
+                                sample(node.name)
+                            else:
+                                pending.append((declaration.value, True))
+                        elif sampling:
+                            unfollowed.append(node)
+                        continue
+                    if decl is not self._direct_program_vars.get(node.name):
+                        if sampling:
+                            unfollowed.append(node)
+                        continue
+                    if not (decl.is_var or decl.is_varip
+                            or decl.name in self._global_reassigned_names):
+                        pending.append((decl.value, sampling))
+                        continue
+                    if not sampling:
+                        continue
+                if decl is not None:
+                    sample(decl.name)
+                    continue
+                if isinstance(node, FuncCall):
+                    if self._is_input_func_call(node):
+                        value = node.args[0] if node.args else node.kwargs.get("defval")
+                        pending.append((value, sampling))
+                        continue
+                    if isinstance(node.callee, Identifier):
+                        function = self._func_defs.get(node.callee.name)
+                        if function is not None:
+                            pending.extend((stmt, sampling) for stmt in function.body)
+                # The nested request owns its expression, not this replay.
+                payload = _request_payload(node) if _request_name(node) else None
+                pending.extend((child, sampling) for child in syntax_children(node)
+                               if child is not payload)
+            # The fail-safe, keyed on the declaration. A sampled read the
+            # walk passed over names a value it never followed, unless the
+            # name has no declaration to follow (a builtin such as ``close``
+            # and a parameter have none) or the walk visited that
+            # declaration as a statement, as it does every statement of a
+            # helper body it walks. Any other name, such as a local of a
+            # top-level ``if`` block (``string loc = u + "!"``, then
+            # ``txt := loc``), counts as incomplete: the names it is
+            # computed from are missing from this set, so a read that
+            # depends on it stays on chart history.
+            for node in unfollowed:
+                binding = self._identifier_decl_bindings.get(id(node))
+                if binding is None:
+                    continue
+                declaration, name = binding
+                if (declaration, True) not in seen and (declaration, False) not in seen:
+                    names.add(name)
+                    incomplete.add(name)
+            return names, histories
+
+        feeds: dict[str, set[str]] = {}
+
+        def fed_by(decl) -> set[str]:
+            # The names a read string is computed from, itself included: the
+            # walk the later stores use, once per declaration.
+            if decl.name not in feeds:
+                feeds[decl.name] = sampled([], (decl,))[0]
+            return feeds[decl.name]
+
+        for call in reading:
+            if self._budget is not None:
+                self._budget.check(call.loc, Phase.ANALYZER)
+            # The request's own expression reads these histories.
+            reads = call.string_history_reads
+            current = set(call.mutable_globals)
+            replay = current.union(reads)
+            # A replayed string is computed from the names that feed it, so
+            # each of them is asked too, not only the subscripted string.
+            feeding = {name: fed_by(decl) for name, decl in reads.items()}
+            if replays_completely(set().union(*feeding.values()), replay):
+                self._requested_string_history_globals.update(reads)
+                call.mutable_globals = tuple(sorted(replay))
+                call.depends_on_mutable_globals = True
+                continue
+            # A reassigned or ``var`` string joined the replay at the read,
+            # as a current value (``_collect_security_mutable_globals``), and
+            # the emitter binds every read of a replayed name to the
+            # request's copy (``_rewrite_security_cpp``). The evaluator
+            # passes over a holder it does not replay, so with an unindexed
+            # store, its own or one of a name that feeds it, that copy would
+            # never receive the store: the string leaves the replay and its
+            # history stays the chart's.
+            unreplayed = {name for name in current.intersection(reads)
+                          if not feeding[name].isdisjoint(incomplete)}
+            kept = current - unreplayed
+            # The boundary registered at the read stays where the evaluator
+            # refuses it as it stands, where a statement still replayed
+            # stores to the string inside its value (that store does
+            # replay), and once a refusal has sent the request back to it.
+            if (not unreplayed or call.sec_id in self._excluded_string_replays
+                    or not replayable(current, current) or not replayable(kept, kept)):
+                continue
+            call.mutable_globals = tuple(sorted(kept))
+            call.depends_on_mutable_globals = bool(kept)
+            call.string_replay_origin = call.sec_id
+        if not later_stores:
+            return
+
+        for call in replaying():
+            # Find history reads in stores, without reclassifying every
+            # ordinary read in a later store as a new mutable dependency.
+            sampled_inputs, histories = sampled(
+                [(expr, False) for name in call.mutable_globals
+                 for expr in inputs.get(name, ())])
+            if not histories:
+                continue
+            replay = sampled_inputs.union(call.mutable_globals)
+            # Keep the request's original replay boundary if any sampled
+            # producer is incomplete or the evaluator cannot replay a source.
+            if not replays_completely(sampled_inputs, replay):
+                continue
+            if (replay.difference(call.mutable_globals)
+                    or histories.keys() - self._requested_string_history_globals.keys()):
+                call.string_replay_origin = call.sec_id
+            self._requested_string_history_globals.update(histories)
+            call.mutable_globals = tuple(sorted(replay))
 
     def _retain_security_value_copies(
         self, mutable_infos: dict[str, MutableGlobalInfo],
@@ -4562,6 +4861,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     foreign=sec.foreign,
                     ignore_invalid=sec.ignore_invalid,
                     loc=sec.loc,
+                    string_replay_origin=sec.string_replay_origin,
                 )
                 new_calls.append(clone)
                 next_sec_id += 1
@@ -9205,18 +9505,24 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._register_history_receiver(node, object_spec)
         return obj_type
 
-    def _register_history_receiver(self, node: Subscript, object_spec: TypeSpec | None) -> None:
+    def _register_history_receiver(
+        self, node: Subscript, object_spec: TypeSpec | None, *, script_symbol: Symbol | None = None,
+    ) -> None:
         """Record the bar field or exact variable binding whose history is read."""
         if isinstance(node.object, Identifier):
             name = node.object.name
-            sym = self._symbols.resolve(name)
+            sym = script_symbol or self._symbols.resolve(name)
             local_declaration = (
                 sym is not None and sym.scope != "global"
                 and bool(self._collection_scope_stack)
                 and getattr(sym, "_pf_decl_node_id", None) is not None
             )
-            if name in BAR_FIELDS and not local_declaration:
-                self._series_bar_fields.add(name)
+            if name in BAR_FIELDS and not local_declaration and script_symbol is None:
+                if (sym is not None and sym.scope == "global" and sym.pine_type == PineType.STRING
+                        and isinstance(getattr(sym, "_pf_decl_node", None), VarDecl)):
+                    self._price_string_history_reads.append((node, object_spec, sym))
+                else:
+                    self._series_bar_fields.add(name)
             else:
                 if sym is not None:
                     if getattr(sym, "_pf_shadows_map_state", False):

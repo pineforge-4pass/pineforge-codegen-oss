@@ -5,12 +5,11 @@ A requested helper's non-``var`` string local named ``open``, ``high``,
 whose history it reads keeps the base commit's PF-E3011 refusal at that read.
 Every other built-in-named local, the numeric locals of those names and their
 string locals without a history read keep the neutral control's C++. A string
-global, a string parameter and a library local of those names, read with
-history in a requested helper, are not such locals and keep what the base
-commit gives. Sources come from the scope comparison's builders. The base rows
-read the base commit's outcome (its refusal, or its C++ where it accepts the
-script) through the glue run on that commit's tree; every other row runs this
-checkout's transpiler only, and no row compiles C++.
+parameter and a library local of those spellings keep what the base commit
+gives; a string global follows #495's requested-clock history contract.
+Sources come from the scope comparison's builders. The base rows read the
+reference commit's outcome through its glue. The string-global rows observe
+the native evaluator on completed requested bars.
 
 The scope and helper test files, which this module imports on load, import
 ``PRICE_FIELD_NAMES`` and ``assert_price_refusal`` inside their test bodies.
@@ -23,6 +22,7 @@ from pineforge_codegen.errors import CompileError, Level, Phase
 from tests._e2e import reference_codegen, transpile_json
 from tests._older_codegen import with_utf16_units
 from tests._pine_libraries import Layout
+from tests.test_issue_495_requested_string_history import _requested_values
 from tests.test_builtin_named_locals_scope import (
     _LOCAL_NAMES, _chart_local_source, _normalize_local, _program,
     _requested_source, _variant_source,
@@ -179,9 +179,9 @@ def test_price_named_string_local_positional_history_keeps_the_base_refusal(
 
 
 # The refusal is keyed on a non-``var`` string local declared in the helper
-# whose authored spelling is a price name. A string global, a string parameter
-# and a library local of those spellings are other bindings: whatever the base
-# commit gives them, they keep.
+# whose authored spelling is a price name. A string global of that spelling
+# keeps its own requested history. The parameter and library-local controls
+# still compare against the base commit.
 def _string_global_source(name):
     return _requested_source(
         f"    bb = {name}[1]\n    str.length(bb)\n", string=False,
@@ -215,8 +215,10 @@ def _library_text(name):
 
 
 @pytest.mark.parametrize("name", PRICE_FIELD_NAMES)
-def test_price_named_string_global_history_keeps_the_base_outcome(name, reference, tmp_path):
-    _assert_keeps_the_base_outcome(_string_global_source(name), reference, tmp_path)
+def test_price_named_string_global_history_matches_requested_values(name):
+    # #495: slot 0 (the first requested bar's na) awaits a TradingView reading
+    # in the next batch. Keep the earlier chart close[n] in the original source.
+    assert _requested_values(_string_global_source(name))[1:] == [1, 2, 3, 4]
 
 
 @pytest.mark.parametrize("name", PRICE_FIELD_NAMES)

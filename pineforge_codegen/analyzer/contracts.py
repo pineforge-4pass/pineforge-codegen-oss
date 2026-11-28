@@ -201,6 +201,17 @@ class SecurityCallInfo:
     # The request call's source location (``request_discovery`` names the
     # site by its line).
     loc: Any = None
+    # Source-order request before timeframe cloning, if the pass after the
+    # visit changed its replay boundary: its later stores added optional
+    # history, or a string its own expression reads left the replay. A
+    # refusal can undo just that change.
+    string_replay_origin: int | None = None
+    # String declarations whose history the request's own expression reads,
+    # by name in reading order. They join ``mutable_globals`` only after the
+    # visit, under the same test as a history a later store reads; one the
+    # read registered as a current value leaves it when a store would be
+    # passed over.
+    string_history_reads: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -248,6 +259,10 @@ class AnalyzerContext:
     filename: str = "<stdin>"
     global_var_decls: list = field(default_factory=list)  # [(name, PineType)] non-var global scope vars
     global_expr_map: dict = field(default_factory=dict)   # name -> defining AST expr (global, non-var)
+    # Script string declarations read through [] in a requested expression.
+    # Keep the declaration so a price of the same spelling (including in
+    # the declaration's own initializer) remains an independent binding.
+    requested_string_history_globals: dict = field(default_factory=dict)
     # Exact lexical binding scope for each visited Identifier AST node.  Raw
     # name lookup is not enough once a UDF parameter, block local, or loop
     # iterator shadows a same-spelled global binding.
