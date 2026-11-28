@@ -3275,3 +3275,46 @@ def test_codegen_promotion_gate_refuses_a_record_it_cannot_read(row, tmp_path):
     assert written == [], got
     assert calls == list(row.calls), got
     assert row.error in result.stderr, got
+
+
+# The latest-run rule decides the gate too: an older success no longer counts
+# once a newer run of the same app and name ended another way. With no gate
+# status, that check-run is the only gate there is.
+NO_GATE_STATUS = []
+GATE_NOT_SUCCEEDED = (
+    f"::notice::the required gate context has not succeeded on {GATE_HEAD} "
+    "— not green; skipping\n"
+)
+
+
+@pytest.mark.parametrize("conclusion", [
+    pytest.param("skipped", id="newer-skipped-run-same-app-no-gate-status"),
+    pytest.param("neutral", id="newer-neutral-run-same-app-no-gate-status"),
+])
+def test_codegen_promotion_gate_older_success_then_newer_run_is_not_green(conclusion, tmp_path):
+    workflow = (WORKFLOWS / "promote-baseline.yml").read_text(encoding="utf-8")
+    # The control: the older successful gate check-run alone, with no gate
+    # status, is green.
+    result, written, calls = run_codegen_gate(
+        workflow, tmp_path / "control", PASSED_CHECK_RUNS, NO_GATE_STATUS,
+    )
+    assert (result.returncode, written, calls) == (
+        0, ["green=true"], [CHECK_RUNS_CALL, STATUSES_CALL],
+    ), f"control: exit {result.returncode}\nstderr: {result.stderr}\n{written}\n{calls}"
+    # The same app then reports a newer gate run that ended another way.
+    older = PASSED_CHECK_RUNS["check_runs"][0]
+    newer = {**older, "id": older["id"] + 1, "conclusion": conclusion}
+    result, written, calls = run_codegen_gate(
+        workflow, tmp_path / "newer",
+        {"total_count": 2, "check_runs": [older, newer]}, NO_GATE_STATUS,
+    )
+    got = (
+        f"a newer {conclusion} gate run: exit {result.returncode}\nstdout: {result.stdout}\n"
+        f"stderr: {result.stderr}\noutputs: {written}\ncalls: {calls}"
+    )
+    # The step ends normally and reports not green, with its notice: the newer
+    # run replaces the older success.
+    assert result.returncode == 0, got
+    assert written == ["green=false"], got
+    assert calls == [CHECK_RUNS_CALL, STATUSES_CALL], got
+    assert result.stdout == GATE_NOT_SUCCEEDED, got

@@ -19,7 +19,16 @@ parent is the commit main held before the push) and every changed path is in
 this repository's release file set, which is VERSION alone. Another push
 actor, a push of more than one commit, one more changed path, or a renamed
 record that does not name the path it left, ends in DEFERRED_NOT_FOUND like
-every other exhausted lookup.
+every other exhausted lookup. So does a commit read that lists no parents or
+whose first parent names no commit, and a push event that names no previous
+commit.
+
+The shipped file also holds the release file set of the engine's repository,
+which a repository name without `codegen` selects: VERSION,
+docker/run_failure_codes_diff.json and a root-level CHANGELOG*. The rows that
+count file records run there. A file list of 3,000 records is refused: the
+commit API lists no more, so a list that long may be cut. The limit counts
+records, never the path names they carry, so 1,500 renames still skip.
 
 Each row runs the shipped step script with bash. The `gh` and `sleep` commands
 on PATH are stand-ins that record their calls; the `sleep` one never waits.
@@ -59,6 +68,9 @@ CODEGEN_LOOKUP = (
 CHANGED_FILES = (
     f"gh api --paginate --slurp repos/{CODEGEN_REPO}/commits/{MERGE_SHA}?per_page=100"
 )
+# The same read in REPO. That name holds no `codegen`: it puts the step on the
+# engine's axis, whose release file set names a root-level CHANGELOG* too.
+ENGINE_CHANGED_FILES = f"gh api --paginate --slurp repos/{REPO}/commits/{MERGE_SHA}?per_page=100"
 RELEASE_APP = "pineforge-app[bot]"
 PERSON = "writer"
 RELEASE_LINE = (
@@ -186,9 +198,14 @@ class Row:
     changed: tuple = ()
     # Further file records of the pushed commit, given exactly as listed.
     records: tuple = ()
-    # The pushed commit's parents, first parent first. A push of that one
+    # The pushed commit's parents, first parent first: each the commit it
+    # names, or a parent record given exactly as listed. A push of that one
     # commit has the commit main held before the push as its first parent.
-    parents: tuple = (BEFORE_SHA,)
+    # None is a commit read that lists no parents at all.
+    parents: tuple | None = (BEFORE_SHA,)
+    # The commit main held before the push, as the push event names it. An
+    # empty value is a push event that names no previous commit.
+    before: str = BEFORE_SHA
 
 
 # The release App pushing its one VERSION commit. It is a row of the table
@@ -296,7 +313,16 @@ ROWS = [
 ]
 
 
-def refused_release(name, **push):
+def release_calls(repository):
+    """Every call of a release App push: three lookups, two waits, then the commit read."""
+    lookup, changed_files = {
+        CODEGEN_REPO: (CODEGEN_LOOKUP, CHANGED_FILES),
+        REPO: (LOOKUP, ENGINE_CHANGED_FILES),
+    }[repository]
+    return (lookup, WAIT, lookup, WAIT, lookup, changed_files)
+
+
+def refused_release(name, *, repository=CODEGEN_REPO, **push):
     """A release App push that reads the commit and still ends in DEFERRED_NOT_FOUND."""
     return Row(
         name,
@@ -307,15 +333,27 @@ def refused_release(name, **push):
             + f"::error title=baseline-promotion::{NOT_FOUND}\n"
         ),
         outputs={"ok": "false"},
-        calls=(
-            CODEGEN_LOOKUP, WAIT, CODEGEN_LOOKUP, WAIT, CODEGEN_LOOKUP, CHANGED_FILES,
-        ),
+        calls=release_calls(repository),
         summary=f"baseline promotion: {NOT_FOUND}\n",
-        repository=CODEGEN_REPO, push_actor=RELEASE_APP, **push,
+        repository=repository, push_actor=RELEASE_APP, **push,
     )
 
 
-# Each of these differs from RELEASE_SKIPS in one fact of the pushed commit.
+def skipped_release(name, *, repository, **push):
+    """A release App push that reads the commit and skips green with the release line."""
+    return Row(
+        name,
+        replies=(EMPTY, EMPTY, EMPTY, FOUND),
+        exit_code=0,
+        stdout=retry_notice(1) + retry_notice(2) + RELEASE_LINE,
+        outputs={"ok": "false"},
+        calls=release_calls(repository),
+        repository=repository, push_actor=RELEASE_APP, **push,
+    )
+
+
+# Each of these differs from RELEASE_SKIPS in one fact of the push: of the
+# pushed commit, or of the push event.
 REFUSED_RELEASES = [
     pytest.param(
         refused_release(
@@ -334,6 +372,74 @@ REFUSED_RELEASES = [
             records=({"filename": "VERSION", "status": "renamed"},),
         ),
         id="renamed-version-record-without-previous-filename",
+    ),
+    pytest.param(
+        refused_release(
+            "a commit read that lists no parents ends in DEFERRED_NOT_FOUND",
+            changed=("VERSION",), parents=None,
+        ),
+        id="commit-read-that-lists-no-parents",
+    ),
+    pytest.param(
+        refused_release(
+            "a commit read whose first parent names no commit ends in DEFERRED_NOT_FOUND",
+            # The one parent record carries no commit id.
+            changed=("VERSION",), parents=({},),
+        ),
+        id="commit-read-whose-first-parent-names-no-commit",
+    ),
+    pytest.param(
+        refused_release(
+            "a push event that names no previous commit ends in DEFERRED_NOT_FOUND",
+            changed=("VERSION",), before="",
+        ),
+        id="push-event-that-names-no-previous-commit",
+    ),
+]
+
+
+def root_changelog_rename(index):
+    """One file record that carries two path names, both root-level CHANGELOG names."""
+    return {
+        "filename": f"CHANGELOG-{index}.md", "status": "renamed",
+        "previous_filename": f"CHANGELOG-{index}.txt",
+    }
+
+
+# The commit API's own limit is 3,000 file records, so the limit counts
+# records: a rename is one record that carries two path names. These rows run
+# in REPO, on the engine's axis, where every root-level CHANGELOG* name is a
+# release path. Each entry holds the pushes of one row, in the order they run.
+RECORD_COUNT_ROWS = [
+    pytest.param(
+        (
+            skipped_release(
+                "the release App pushing 1,500 renames between root-level CHANGELOG names "
+                "skips green",
+                repository=REPO,
+                records=tuple(root_changelog_rename(index) for index in range(1500)),
+            ),
+        ),
+        id="engine-axis-1500-renames-between-root-level-changelog-names-skip-green",
+    ),
+    pytest.param(
+        (
+            # Control: one rename among 2,999 records makes 3,000 path names,
+            # one record below the limit.
+            skipped_release(
+                "the release App pushing 2,999 records carrying 3,000 path names skips green",
+                repository=REPO,
+                changed=tuple(f"CHANGELOG-{index}.md" for index in range(1, 2999)),
+                records=(root_changelog_rename(0),),
+            ),
+            refused_release(
+                "the release App pushing a file list of 3,000 records "
+                "ends in DEFERRED_NOT_FOUND",
+                repository=REPO,
+                changed=tuple(f"CHANGELOG-{index}.md" for index in range(3000)),
+            ),
+        ),
+        id="engine-axis-3000-records-refused-and-2999-records-carrying-3000-path-names-still-skip",
     ),
 ]
 
@@ -376,10 +482,13 @@ def run_resolve_step(row, tmp_path):
         # of a paged read.
         files = [{"filename": path, "status": "modified"} for path in row.changed]
         files.extend(row.records)
-        commit = {
-            "sha": MERGE_SHA, "parents": [{"sha": parent} for parent in row.parents],
-            "files": files,
-        }
+        commit = {"sha": MERGE_SHA}
+        if row.parents is not None:
+            commit["parents"] = [
+                parent if isinstance(parent, dict) else {"sha": parent}
+                for parent in row.parents
+            ]
+        commit["files"] = files
         (replies_dir / "files.json").write_text(json.dumps([commit]) + "\n", encoding="utf-8")
     script = tmp_path / "resolve.bash"
     script.write_text(resolve_step_script(), encoding="utf-8")
@@ -389,7 +498,7 @@ def run_resolve_step(row, tmp_path):
     env = {
         "PATH": str(bin_dir),
         "EVENT_NAME": "push", "REF": "refs/heads/main", "REPO": row.repository,
-        "SHA": MERGE_SHA, "PUSH_ACTOR": row.push_actor, "BEFORE": BEFORE_SHA,
+        "SHA": MERGE_SHA, "PUSH_ACTOR": row.push_actor, "BEFORE": row.before,
         "GH_TOKEN": "",
         "INPUT_MERGE_SHA": "", "INPUT_HEAD_SHA": "", "INPUT_PR_NUMBER": "",
         "INPUT_PR_URL": "", "INPUT_MERGED_AT": "",
@@ -434,5 +543,15 @@ def test_release_app_push_is_refused_unless_it_is_one_commit_with_every_path_nam
     # VERSION commit still skips green. Only then is the row's push refused.
     for name, case in (("control", RELEASE_SKIPS), ("refused", row)):
         directory = tmp_path / name
+        directory.mkdir()
+        assert_row(case, directory)
+
+
+@pytest.mark.parametrize("pushes", RECORD_COUNT_ROWS)
+def test_release_file_list_limit_counts_records_not_path_names(pushes, tmp_path):
+    # Every push runs in a directory of its own. Where a row holds two, the
+    # first is its control: it must skip green before the second is refused.
+    for number, case in enumerate(pushes, start=1):
+        directory = tmp_path / f"push-{number}"
         directory.mkdir()
         assert_row(case, directory)
