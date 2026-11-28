@@ -1376,6 +1376,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     )
                     self._security_ta_variant_names[(sec_id, idx, signature)] = member_name
                 ta_variants[idx] = variants
+            chart_publication = self._security_chart_publication_eligible(item, tf_str)
+            item["chart_publication"] = chart_publication
             self._security_eval_info.append({
                 "sec_id": sec_id,
                 "tf": tf_str,
@@ -1406,6 +1408,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "ignore_invalid_node": item.get("ignore_invalid_node"),
                 "series_tf_invalid": item.get("series_tf_invalid"),
                 "runtime_context": bool(item.get("runtime_context")),
+                "chart_publication": chart_publication,
             })
         self._security_selection_local_members = self._security_selection_local_member_names()
         self._global_member_vars.difference_update(self._security_selection_local_members)
@@ -5858,7 +5861,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         _session_market_at = len(lines)
 
         # 2. Open class
-        lines.append("class GeneratedStrategy : public pineforge::source::PineStrategyHost {")
+        if any(info.get("chart_publication") for info in self._security_eval_info):
+            lines.extend([
+                "class GeneratedStrategy : public pineforge::source::PineStrategyHost,",
+                "                          public pineforge::source::PineSecurityChartPublisher {",
+            ])
+        else:
+            lines.append("class GeneratedStrategy : public pineforge::source::PineStrategyHost {")
         lines.append("public:")
         _script_state_decl_start = len(lines)
         for source, member in self._retained_alias_plan.sources.items():
@@ -6003,6 +6012,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     lines.append(f"    std::string _req_sec_{sec_id} = na<std::string>();")
                 else:
                     lines.append(f"    double _req_sec_{sec_id} = na<double>();")
+                if item.get("chart_publication"):
+                    lines.append(f"    double _chart_sec_{sec_id} = na<double>();")
             for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):
                 ctype = self._security_bar_hist_type(field)
                 lines.append(

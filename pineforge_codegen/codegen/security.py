@@ -2441,6 +2441,61 @@ class SecurityEmitter:
             "callsite_idx": None,
         }
 
+    def _security_chart_publication_eligible(
+        self, item: dict, resolved_tf: str | None,
+    ) -> bool:
+        """Select only the direct issue-694 case-5 request shape.
+
+        The engine's publication door is deliberately opt-in per site. Keep
+        this first generator adapter narrower than the full publication
+        contract: direct chart symbols, a literal daily timeframe, direct
+        ``close`` with no history offset, omitted gaps (the report's default),
+        and the literal ``lookahead_on`` enum. The engine decides at runtime
+        whether that daily request is actually higher than the chart timeframe;
+        equal or otherwise ineligible registrations simply retain their live
+        fallback. Aliases, explicit gaps, foreign/HA/dynamic requests,
+        tuples, helper payloads, and every offset remain on the old route until
+        their chart calculation is implemented.
+        """
+        if (
+            item.get("dead")
+            or item.get("foreign")
+            or item.get("heikinashi")
+            or item.get("is_lower_tf_array")
+            or item.get("runtime_context")
+            or item.get("series_tf_extra")
+            or item.get("series_tf_sites")
+            or resolved_tf not in {"D", "1D"}
+        ):
+            return False
+        symbol = item.get("symbol_node")
+        if not (
+            isinstance(symbol, MemberAccess)
+            and isinstance(symbol.object, Identifier)
+            and symbol.object.name == "syminfo"
+            and symbol.member in {"tickerid", "ticker"}
+        ):
+            return False
+        timeframe = item.get("tf_node")
+        if not isinstance(timeframe, StringLiteral) or timeframe.value not in {"D", "1D"}:
+            return False
+        expression = item.get("expr_node")
+        if not (
+            isinstance(expression, Identifier)
+            and expression.name == "close"
+            and self.ctx.identifier_binding_nodes.get(id(expression)) is None
+        ):
+            return False
+        lookahead = item.get("lookahead_node")
+        if not (
+            isinstance(lookahead, MemberAccess)
+            and isinstance(lookahead.object, Identifier)
+            and lookahead.object.name == "barmerge"
+            and lookahead.member == "lookahead_on"
+        ):
+            return False
+        return item.get("gaps_node") is None
+
     def _security_ta_tuple_element_field(self, name: str) -> str | None:
         """The result field a global names when a top-level tuple declaration
         binds it to an element of a TA tuple call (``[m, s, h] =
@@ -9031,6 +9086,8 @@ class SecurityEmitter:
         else:
             expr_cpp = self._security_float_cpp(expr_cpp, expr_node)
             lines.append(f"        _req_sec_{sec_id} = {expr_cpp};")
+            if item.get("chart_publication"):
+                lines.append(f"        _chart_sec_{sec_id} = _req_sec_{sec_id};")
         self._emit_security_ohlc_hist_pushes(sec_id, lines)
         self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
         lines.append("    }")
@@ -9118,6 +9175,24 @@ class SecurityEmitter:
             lines.append(f"            case {sec_id}: _eval_security_{sec_id}(bar, is_complete); break;")
         lines.append("        }")
         lines.append("    }")
+
+        chart_sites = [
+            item for item in self._security_calls
+            if item.get("chart_publication")
+        ]
+        if chart_sites:
+            lines.append("")
+            lines.append(
+                "    void publish_security_chart(int sec_id, const Bar& projected) override {"
+            )
+            lines.append("        switch (sec_id) {")
+            for item in chart_sites:
+                sec_id = item["sec_id"]
+                lines.append(
+                    f"            case {sec_id}: _chart_sec_{sec_id} = projected.close; break;"
+                )
+            lines.append("        }")
+            lines.append("    }")
 
         lines.append("    void clear_security(int sec_id) override {")
         lines.append("        switch (sec_id) {")
@@ -9223,7 +9298,14 @@ class SecurityEmitter:
                         lines.append(f"                {name}.clear();")
                     lines.append("                break;")
                 else:
-                    lines.append(f"            case {sec_id}: _req_sec_{sec_id} = {na_cpp}; break;")
+                    chart_clear = (
+                        f" _chart_sec_{sec_id} = na<double>();"
+                        if item.get("chart_publication") else ""
+                    )
+                    lines.append(
+                        f"            case {sec_id}: _req_sec_{sec_id} = {na_cpp};"
+                        f"{chart_clear} break;"
+                    )
         lines.append("        }")
         lines.append("    }")
 

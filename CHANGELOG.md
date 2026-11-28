@@ -30,6 +30,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
   Regenerate C++ and relink to apply the watchdog
   ([#440](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/440)).
 
+- A direct same-symbol daily `request.security(..., close,
+  lookahead = barmerge.lookahead_on)` now reads the paired engine's historical
+  chart publication for [issue #694](https://github.com/pineforge-4pass/pineforge-engine/issues/694) case 5. This emitted C++ requires
+  `PINEFORGE_HAS_SECURITY_CHART_PUBLICATION_V1`; offset payloads and other
+  request shapes retain their existing route. Regenerate and relink with the
+  paired engine.
 - In the then body of a top-level chart `if`, a direct reassignment such as
   `x := ta.lowest(src, length)` uses the last `length` executions. This covers
   `ta.lowest` and `ta.highest` with literal, input, simple or series lengths,

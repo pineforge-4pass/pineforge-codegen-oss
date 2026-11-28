@@ -104,6 +104,7 @@ from .tables import (
     DRAWING_TYPE_TO_CPP,
     PINE_TYPE_TO_CPP,
     PINE_V6_STRATEGY_DEFAULTS,
+    RUNTIME_REGISTER_SECURITY_CHART_EVAL_FN,
     RUNTIME_REGISTER_SECURITY_EVAL_FN,
     RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN,
 )
@@ -638,6 +639,12 @@ class TopLevelEmitter:
             '#error "generated code requires pineforge-engine native lowering v1 (PINEFORGE_HAS_NATIVE_LOWERING_V1)"',
             "#endif",
         ])
+        if any(info.get("chart_publication") for info in self._security_eval_info):
+            lines.extend([
+                "#ifndef PINEFORGE_HAS_SECURITY_CHART_PUBLICATION_V1",
+                '#error "historical request.security chart publication requires the paired PineForge engine (PINEFORGE_HAS_SECURITY_CHART_PUBLICATION_V1)"',
+                "#endif",
+            ])
         lines.append("")
         # Compatibility shim for the namespace-wrap refactor: unqualified
         # references to BacktestEngine / Bar / na<T>() / ta::* / etc. resolve
@@ -1978,6 +1985,12 @@ private:
                         lines.append(
                             f"        {RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN}"
                             f"({sec_id}, {tf_expr}, input_tf_);"
+                        )
+                    elif info.get("chart_publication"):
+                        lines.append(
+                            f"        {RUNTIME_REGISTER_SECURITY_CHART_EVAL_FN}"
+                            f"({sec_id}, {tf_expr}, input_tf_, {la}, {go}, "
+                            f"{'true' if info.get('heikinashi') else 'false'});"
                         )
                     elif info.get("foreign"):
                         self._emit_foreign_security_registration(info, tf_expr, la, go, lines)
