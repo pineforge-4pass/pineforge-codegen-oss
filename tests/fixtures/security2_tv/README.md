@@ -68,3 +68,28 @@ What each tape shows:
 - `sec2_payload_udf`: user functions, a user method and a TA call under
   builtin calls in a payload (`nz(f())`, `close.g()`, `nz(ta.sma(close, 3))`,
   `k(close)` reading `nz(src[1])`): every value is the requested bar's.
+
+## `sec2_tuple_assign`, week 2026w02
+
+A second TradingView trade list of `sec2_tuple_assign` (the same `.pine`, byte
+for byte), from a fresh TradingView run of the probe on 2026-11-28 16:20 UTC,
+on BINANCE:ETHUSDT.P at 15 minutes for the week 2026-01-05 00:00 UTC to
+2026-01-12 00:00 UTC.
+
+TradingView computed the probe from its first loaded bar, 2025-10-01 00:00
+UTC, and the list holds the trades of that week, numbered from 1. The week's
+672 bars were loaded without a gap. The probe is sized at 100% of equity, and
+the week's first listed trade already carries a `Cumulative PnL USDT` of
+-10901.784: the equity it is sized from is the result of the trades since
+2025-10-01, so which of the week's entries are refused for margin depends on
+that path. TradingView books 256 of the week's closes. The `Date and time`
+column is Asia/Taipei (UTC+8), as above, and the Signal fields are those
+listed above for this probe.
+
+| Probe | sha256 of the `.pine` | Tape (256 trades) | Tape sha256 |
+|---|---|---|---|
+| `sec2_tuple_assign` | `20b360748e333ed6e1c78a95008a2264e4dac323263544f5f05e28d765fa6217` | `sec2_tuple_assign_tv_trades_2026w02.csv` | `818da0bbbcc35e2b94d45df7e6c29fb10810fcdcc0cd14116fea6557ad03aca3` |
+
+The April tape of this probe (`sec2_tuple_assign_tv_trades.csv`, in the first
+list) is kept. `tests/test_e2e_security_helper_tuple_decls.py` reads the
+2026w02 tape; the other probes keep the April week.
