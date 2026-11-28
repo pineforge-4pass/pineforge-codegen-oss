@@ -36,6 +36,19 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `PINEFORGE_HAS_SECURITY_CHART_PUBLICATION_V1`; offset payloads and other
   request shapes retain their existing route. Regenerate and relink with the
   paired engine.
+- A `request.security` helper can read a string global's history. For example,
+  `str.length(txt[1])` uses the string `txt` held on the previous requested
+  bar, including when the script names the variable `open`. A later
+  assignment that the request replays also reads that history on the
+  request's timeframe, including reassignments of the string itself.
+  If the request cannot replay all the writes that produce that string,
+  an existing read such as `str.length(txt[2])` in a later assignment
+  keeps using chart history, with a warning at the subscript. This includes
+  writes inside an `if` or `switch` used as a value, a loop beside the
+  assignment in the same `if`, and a string initializer or assignment that
+  would also write a plain chart variable
+  ([#495](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/495)).
+
 - In the then body of a top-level chart `if`, a direct reassignment such as
   `x := ta.lowest(src, length)` uses the last `length` executions. This covers
   `ta.lowest` and `ta.highest` with literal, input, simple or series lengths,

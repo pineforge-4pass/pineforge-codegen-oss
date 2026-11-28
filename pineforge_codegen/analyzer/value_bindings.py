@@ -188,6 +188,17 @@ class ValueBindings(DiagnosticsHelper):
         self.written_declarations.add(key)
         node.annotations = {**(node.annotations or {}), _WRITE_DECL: key}
 
+    @staticmethod
+    def writes_by_declaration(program: Program) -> dict[tuple[int, str], set[int]]:
+        """Every authored assignment, including writes inside expression blocks."""
+        writes: dict[tuple[int, str], set[int]] = {}
+        for node, _ in iter_ast_nodes(program):
+            if isinstance(node, Assignment) and isinstance(node.target, Identifier):
+                binding = ValueBindings.write_declaration(node.target)
+                if binding is not None:
+                    writes.setdefault(binding, set()).add(id(node))
+        return writes
+
     def check_use(self, node: Identifier) -> None:
         use = (node.annotations or {}).get(_VALUE_USE)
         if (not isinstance(use, _ValueUse) or use.binding is not None

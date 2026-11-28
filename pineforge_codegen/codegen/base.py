@@ -892,6 +892,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # and persistent helper cells keyed by written call and declaration.
         self._security_call_ta: dict | None = None
         self._security_call_series: dict | None = None
+        # Evaluator-local: a sparse call's locals read with history that keep
+        # one entry per requested bar, series name -> staged cell.
+        self._security_call_bar_series: dict | None = None
         self._security_arg_history_sec: int | None = None
         self._security_arg_history_discovering = False
         self._security_arg_call_values: dict[tuple, str] = {}
@@ -3218,12 +3221,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """Collect known constant values from the AST for constant propagation."""
         # First, find all variables that are reassigned anywhere in the AST.
         # These cannot be inlined as constants since their value changes at runtime.
-        self._writes_by_decl: dict[tuple[int, str], set[int]] = {}
-        for node, _ in iter_ast_nodes(self.ctx.ast):
-            if isinstance(node, Assignment) and isinstance(node.target, Identifier):
-                binding = ValueBindings.write_declaration(node.target)
-                if binding is not None:
-                    self._writes_by_decl.setdefault(binding, set()).add(id(node))
+        self._writes_by_decl = ValueBindings.writes_by_declaration(self.ctx.ast)
         # Prior constructor route for a persistent length written in a value
         # block: None denotes an admitted literal, otherwise its setup expression.
         self._written_var_setups: dict[int, str | None] = {}

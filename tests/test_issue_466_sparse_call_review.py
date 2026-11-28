@@ -1,15 +1,16 @@
 """#466 review: what a conditional helper call's own clock must keep working.
 
-The first #466 change gave ``x[k]`` of a bar-field argument the clock of its
-written call when that call is conditional. Its review named four defects;
-each test here has one of them as its target:
+The first #466 change gave ``x[k]`` of a bar-field argument a history of its
+own when its written call is conditional: one entry per requested bar, holding
+the last completed call's argument. Its review named four defects; each test
+here has one of them as its target:
 
 * a ``ta.*`` site the evaluator computes where it opens still reads the
   requested-bar history of that argument, which must stay declared (F1);
 * state a helper keeps on such a call -- a local read with history, a
   ``var`` -- advances with the call's completed runs (F2);
-* only ``request.security`` counts calls; the other request kinds keep the
-  requested-bar clock they had (F3);
+* only ``request.security`` keeps one entry per requested bar for such a
+  call; the other request kinds keep the bar field's own history (F3);
 * a name the caller binds is never read as a bar field for its spelling (F4).
 
 No value here is TradingView's. As in the #466 rows, the expectations are the
@@ -237,8 +238,8 @@ plot(request.security(syminfo.tickerid, "15", close > open ? f(close) : g))
 # --- F3 and F4 --------------------------------------------------------------
 
 def _registered_ring_types(request_flags, argument, caller_frames=()):
-    """Element types of the call-clock rings discovery registers for
-    ``lag(argument)``'s ``x[1]``, the call being conditional."""
+    """Element types of the rings, one entry per requested bar, discovery
+    registers for ``lag(argument)``'s ``x[1]``, the call being conditional."""
     call = FuncCall(callee=Identifier(name="lag"), args=[argument])
     frame = security_module._SecurityHelperArgumentFrame(
         {"x": argument}, tuple(caller_frames), call=call)
@@ -265,9 +266,9 @@ _OTHER_REQUEST_KINDS = ("is_lower_tf_array", "foreign", "heikinashi", "runtime_c
 
 
 @pytest.mark.parametrize("kind", _OTHER_REQUEST_KINDS)
-def test_only_request_security_counts_calls(kind):
+def test_only_request_security_keeps_one_entry_per_requested_bar(kind):
     assert _registered_ring_types({}, Identifier(name="close")) == ["double"], (
-        "NOT COMPARED: request.security registered no call-clock ring"
+        "NOT COMPARED: request.security registered no ring of one entry per requested bar"
     )
     assert _registered_ring_types({kind: True}, Identifier(name="close")) == []
 

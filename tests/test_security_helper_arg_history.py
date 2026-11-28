@@ -52,7 +52,7 @@ class _Evaluation(NamedTuple):
     complete: bool
     open: float
     close: float
-    value: float
+    value: float | str
 
 
 def _hourly_closes() -> list[float]:
@@ -112,10 +112,10 @@ struct RequestedHistoryObserver : GeneratedStrategy {
 
     void evaluate_security(int sec_id, const Bar& bar, bool is_complete) override {
         GeneratedStrategy::evaluate_security(sec_id, bar, is_complete);
-        if (sec_id == 0) {
+        if (sec_id == OBSERVED_ID) {
             std::cout << tag << ' ' << bar.timestamp << ' ' << is_complete
                       << ' ' << bar.open << ' ' << bar.close
-                      << ' ' << _req_sec_0 << '\n';
+                      << ' ' << OBSERVED_VALUE << '\n';
         }
     }
 };
@@ -129,27 +129,36 @@ def _run_requested(
     cpp: str,
     feeds: dict[str, tuple[int, tuple[tuple[float, ...], ...]]] | None = None,
     *,
-    value_expression: str = "_req_sec_0",
+    value_expression: str | None = None,
+    sec_id: int = 0,
+    group_minutes: int = 60,
+    text_result: bool = False,
 ) -> dict[str, list[_Evaluation]]:
     """Observe the real requested evaluator during the normal native run.
 
-    Each feed is (chart minutes, five rows of chart closes). The first child
-    opens at its specified hourly open; later children open at the previous
+    Each feed is (chart minutes, five groups of chart closes). The first child
+    opens at its specified group open; later children open at the previous
     child close. These valid OHLC bars aggregate to the inputs of the oracle.
     No engine callbacks, slot flags or generated histories are mocked.
-    value_expression can observe a stored tuple component through the same driver.
+    Observe a selected request, or a tuple component via value_expression.
+    text_result retains a single-line string result verbatim, including empty.
     """
     if feeds is None:
         feeds = {"chart15": (15, _CHART_CLOSES)}
     runs = []
-    for tag, (minutes, hourly_children) in feeds.items():
+    for tag, (minutes, groups) in feeds.items():
         assert re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", tag)
-        assert len(hourly_children) == len(_HOURLY_OPENS)
+        assert len(groups) == len(_HOURLY_OPENS), (
+            f"NOT COMPARED: {tag} has {len(groups)} groups, expected {len(_HOURLY_OPENS)}"
+        )
         bars = []
-        for hour, (open_, children) in enumerate(zip(_HOURLY_OPENS, hourly_children)):
-            assert len(children) * minutes == 60
+        for group, (open_, children) in enumerate(zip(_HOURLY_OPENS, groups)):
+            assert len(children) * minutes == group_minutes, (
+                f"NOT COMPARED: {tag} group {group} spans {len(children) * minutes} minutes, "
+                f"expected {group_minutes}"
+            )
             for child, close in enumerate(children):
-                timestamp = hour * _HOUR_MS + child * minutes * 60 * 1000
+                timestamp = (group * group_minutes + child * minutes) * 60_000
                 fields = (open_, max(open_, close), min(open_, close), close, 1.0)
                 bars.append(
                     "        Bar{"
@@ -165,22 +174,28 @@ def _run_requested(
             + ",\n".join(bars)
             + "\n        };\n"
             + f'        strategy.run(bars, {len(bars)}, "{minutes}", "{minutes}");\n'
+            + "        if (!strategy.last_error().empty()) {\n"
+            + "            std::cerr << strategy.last_error(); return 1;\n"
+            + "        }\n"
             + "    }\n"
         )
-    observer = _OBSERVER.replace(
-        "<< _req_sec_0 <<", f"<< {value_expression} <<"
-    )
+    value = value_expression if value_expression is not None else f"_req_sec_{sec_id}"
+    if text_result:
+        value = f"static_cast<const std::string&>({value})"
+    observer = _OBSERVER.replace("OBSERVED_ID", str(sec_id)).replace(
+        "OBSERVED_VALUE", value)
     output = _compile_and_run(cpp + observer + "".join(runs) + "    return 0;\n}\n")
     evaluations: dict[str, list[_Evaluation]] = {tag: [] for tag in feeds}
     for line in output.splitlines():
-        fields = line.split()
-        assert len(fields) == 6, f"unexpected native probe output: {line!r}"
+        fields = line.split(" ", 5) if text_result else line.split()
+        assert len(fields) == 6, f"NOT COMPARED: expected 6 fields, received {fields!r}"
         tag, timestamp, complete, open_, close, value = fields
-        assert tag in evaluations, line
-        assert complete in {"0", "1"}, line
+        assert tag in evaluations, f"NOT COMPARED: expected a tag in {list(feeds)}, received {tag!r}"
+        assert complete in {"0", "1"}, f"NOT COMPARED: expected 0 or 1, received {complete!r}"
         evaluations[tag].append(
             _Evaluation(
-                int(timestamp), complete == "1", float(open_), float(close), float(value)
+                int(timestamp), complete == "1", float(open_), float(close),
+                value if text_result else float(value),
             )
         )
     return evaluations

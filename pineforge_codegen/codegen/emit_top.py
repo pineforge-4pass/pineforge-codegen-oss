@@ -2246,7 +2246,8 @@ private:
         #     own member is skipped.
         from .tables import BAR_BUILTINS
         for _bname in sorted(self.ctx.series_vars):
-            if _bname in self._var_names or _bname in self._trace_shadowed_series:
+            if (_bname in self._var_names or _bname in self._trace_shadowed_series
+                    or _bname in self.ctx.requested_string_history_globals):
                 continue
             # A history-bearing top-level tuple binding pushes its own value
             # at the declaration; a builtin push would add a second bar slot.

@@ -51,6 +51,7 @@ from tests._compile import compile_cpp
 from tests._e2e import Build, skip_unless_e2e_env
 from tests._security_tapes import TAPE_TZ, replay, source, tape_exits
 from tests._tail_e_tapes import BAR_MS, DAY_MS, START_MS, build, engine_rows, feed, mismatches
+from tests.test_issue_495_requested_string_history import _requested_values
 
 FIXTURES = Path(__file__).parent / "fixtures" / "cgint7_tv"
 PRODUCTS = "cgint7_int_products"
@@ -210,12 +211,12 @@ def test_a_history_read_under_a_builtin_keeps_mains_lowering(payload):
     assert line.strip().startswith("_req_sec_0 = ((double)(") and "/ (double)(2))" in line
 
 
-def test_a_string_global_history_on_the_requested_clock_is_refused():
-    with pytest.raises(CompileError) as err:
-        transpile(HEAD + "f() => str.tostring(bar_index)\ng = f()\n"
-                  'p = request.security(syminfo.tickerid, "60", g[1])\n'
-                  'if str.length(p) > 1\n    strategy.entry("L", strategy.long)\n')
-    assert "reads the string global 'g' with history" in str(err.value)
+def test_a_string_global_returns_the_previous_requested_bar_index():
+    # #495: compare the actual text, not just the length or the C++ type.
+    script = (HEAD + "f() => str.tostring(bar_index)\ng = f()\n"
+              'p = request.security(syminfo.tickerid, "60", g[1])\n'
+              'if str.length(p) > 1\n    strategy.entry("L", strategy.long)\n')
+    assert _requested_values(script, text_result=True)[1:] == ["0", "1", "2", "3"]
 
 
 def test_an_int_slot_narrows_a_global_history_na_preserving():
