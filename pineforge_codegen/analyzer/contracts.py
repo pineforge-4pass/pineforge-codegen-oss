@@ -201,12 +201,16 @@ class SecurityCallInfo:
     # The request call's source location (``request_discovery`` names the
     # site by its line).
     loc: Any = None
-    # Source-order request before timeframe cloning, if its later stores
-    # added optional history. A refusal can drop just this extension.
+    # Source-order request before timeframe cloning, if the pass after the
+    # visit changed its replay boundary: its later stores added optional
+    # history, or a string its own expression reads left the replay. A
+    # refusal can undo just that change.
     string_replay_origin: int | None = None
     # String declarations whose history the request's own expression reads,
     # by name in reading order. They join ``mutable_globals`` only after the
-    # visit, under the same test as a history a later store reads.
+    # visit, under the same test as a history a later store reads; one the
+    # read registered as a current value leaves it when a store would be
+    # passed over.
     string_history_reads: dict = field(default_factory=dict)
 
 

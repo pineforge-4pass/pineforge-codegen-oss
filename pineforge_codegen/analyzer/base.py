@@ -2538,7 +2538,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         string_decl = self._string_history_declaration(node)
         if string_decl is not None:
             # Not every store is known yet. The read joins the replay after
-            # the visit (``_complete_replayed_string_histories``).
+            # the visit (``_complete_replayed_string_histories``). A
+            # reassigned or ``var`` string is also added below as a current
+            # value; the same pass takes it back out if it cannot be replayed.
             self._security_string_history_reads[string_decl.name] = string_decl
 
         if isinstance(node, Identifier):
@@ -2634,7 +2636,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         string history its own expression reads joins the replay here, and
         so do the histories used to compute the stores the evaluator replays
         to that state: every store, its RHS and its guards are known only
-        after the script has been visited.
+        after the script has been visited. A string that the read itself
+        registered as state, and that has a store the evaluator would pass
+        over, leaves the replay here.
         """
         def replaying():
             return [call for call in self._security_calls
@@ -2682,26 +2686,49 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         incomplete = {name for name, decl in self._direct_program_vars.items()
                       if (sites := writes.get((id(decl), name))) and not sites <= indexed_writes}
 
-        def replays_completely(names, replay) -> bool:
-            # Every store of each name is indexed, and the evaluator can
-            # replay each statement that holds one.
-            if not names.isdisjoint(incomplete):
-                return False
+        def replayable(names, replay) -> bool:
+            # The evaluator can replay each statement that holds a store.
             sources = {id(stmt): stmt for name in names
                        for stmt in self._global_binding_infos[name].source_stmts}
             return all(can_replay_statement(stmt, replay, self._global_binding_infos)
                        for stmt in sources.values())
 
+        def replays_completely(names, replay) -> bool:
+            # Every store of each name is indexed, and the evaluator can
+            # replay each statement that holds one.
+            return names.isdisjoint(incomplete) and replayable(names, replay)
+
         for call in reading:
-            # The request's own expression reads these histories. Otherwise
-            # the request keeps the boundary it registered at the read.
+            if self._budget is not None:
+                self._budget.check(call.loc, Phase.ANALYZER)
+            # The request's own expression reads these histories.
             reads = call.string_history_reads
-            replay = set(call.mutable_globals).union(reads)
-            if not replays_completely(set(reads), replay):
+            current = set(call.mutable_globals)
+            replay = current.union(reads)
+            if replays_completely(set(reads), replay):
+                self._requested_string_history_globals.update(reads)
+                call.mutable_globals = tuple(sorted(replay))
+                call.depends_on_mutable_globals = True
                 continue
-            self._requested_string_history_globals.update(reads)
-            call.mutable_globals = tuple(sorted(replay))
-            call.depends_on_mutable_globals = True
+            # A reassigned or ``var`` string joined the replay at the read,
+            # as a current value (``_collect_security_mutable_globals``), and
+            # the emitter binds every read of a replayed name to the
+            # request's copy (``_rewrite_security_cpp``). The evaluator
+            # passes over a holder it does not replay, so with an unindexed
+            # store that copy would never receive the store: the string
+            # leaves the replay and its history stays the chart's.
+            unreplayed = current.intersection(reads, incomplete)
+            kept = current - unreplayed
+            # The boundary registered at the read stays where the evaluator
+            # refuses it as it stands, where a statement still replayed
+            # stores to the string inside its value (that store does
+            # replay), and once a refusal has sent the request back to it.
+            if (not unreplayed or call.sec_id in self._excluded_string_replays
+                    or not replayable(current, current) or not replayable(kept, kept)):
+                continue
+            call.mutable_globals = tuple(sorted(kept))
+            call.depends_on_mutable_globals = bool(kept)
+            call.string_replay_origin = call.sec_id
         if not later_stores:
             return
 
