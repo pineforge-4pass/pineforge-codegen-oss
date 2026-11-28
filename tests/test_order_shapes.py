@@ -16,10 +16,13 @@ RECEIPT_PATTERN = r'checked_settings::receipt\(("(?:[^"\\]|\\.)*"), json, capaci
 
 
 def receipt(body, declaration=SOURCE, *, check_support=True):
-    cpp = transpile(declaration + body, check_support=check_support)
+    return _receipt_from_cpp(transpile(declaration + body, check_support=check_support))
+
+
+def _receipt_from_cpp(cpp):
     documents = re.findall(RECEIPT_PATTERN, cpp)
     # Capabilities, confirmed bar, order shapes, then the id-sites receipt.
-    assert len(documents) == 4
+    assert len(documents) == 4, f"NOT COMPARED: expected 4 embedded receipts, got {len(documents)}"
     document = json.loads(documents[2])
     result = json.loads(document)
     assert json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False) == document
@@ -331,6 +334,36 @@ def test_host_reads_names_policy_setter_for_non_readers_only():
     assert "set_trade_history_streamable" in non_reader["host_reads"]
     assert "set_trade_history_streamable" not in reader["host_reads"]
     assert "closed_trade_profit" in reader["host_reads"]
+
+
+@pytest.mark.parametrize(("body", "call", "extra_reads"), [
+    pytest.param(
+        'daily = request.security(syminfo.tickerid, "D", close, '
+        'lookahead = barmerge.lookahead_on)\nplot(daily)\n',
+        "register_security_chart_eval(",
+        ["clear_security", "configure_security_evaluators", "evaluate_security",
+         "input_tf_", "register_security_chart_eval", "security_eval_states_"],
+        id="daily-chart-publication",
+    ),
+    pytest.param(
+        'x = timeframe.change("D")\n',
+        "tf_change(",
+        ["current_bar_", "prev_bar_timestamp_", "script_tf_", "syminfo_", "tf_change"],
+        id="timeframe-change",
+    ),
+])
+def test_host_reads_for_daily_chart_publication_and_timeframe_change(body, call, extra_reads):
+    cpp = transpile('//@version=6\nstrategy("host reads")\n' + body)
+    assert call in cpp, f"NOT COMPARED: expected {call} in the emitted C++, got no such call"
+    # Include the standard strategy scaffold in the exact receipt comparison.
+    assert _receipt_from_cpp(cpp)["host_reads"] == sorted([
+        "StreamPhase", "commit_script_state", "config_", "configure_pine_strategy",
+        "fill_report", "inputs_", "last_error", "last_error_", "on_source_bar", "override_",
+        "prepare_script_run", "restore_script_state", "run", "script_bars_processed",
+        "set_input", "set_magnifier_volume_weighted", "set_strategy_override",
+        "set_trade_history_streamable", "snapshot_script_state", "stream_phase_",
+        *extra_reads,
+    ])
 
 
 @pytest.mark.parametrize(("cpp", "reads"), [
