@@ -963,13 +963,15 @@ def test_test_check_rejects_aggregate_script_replaced_by_exit_zero(tmp_path):
         assert_aggregate_rejects(mutant, "failure", tmp_path)
 
 
-# Independent engine resolver/authz policy, retaining codegen's hosted runner.
+# Independent copy of the canonical template's resolver/authz job.
 # Never derive this pin from the workflow under test.
 PROMOTE_GUARD = r'''  promote-guard:
     name: promote-guard
-    runs-on: ubuntu-latest
-    # Resolution needs read access in private repos; no secrets or OIDC here.
+    runs-on: ubuntu-24.04
+    # Resolution reads pull request records and the pushed commit's file list:
+    # a private repo needs both grants for them. No secrets or OIDC here.
     permissions:
+      contents: read
       pull-requests: read
     outputs:
       ok: ${{ steps.authorize.outputs.ok }}
@@ -992,6 +994,10 @@ PROMOTE_GUARD = r'''  promote-guard:
           INPUT_PR_NUMBER: ${{ github.event.inputs.pr_number }}
           INPUT_PR_URL: ${{ github.event.inputs.pr_url }}
           INPUT_MERGED_AT: ${{ github.event.inputs.merged_at }}
+          # The push event's actor, never the commit's author or committer.
+          PUSH_ACTOR: ${{ github.actor }}
+          # The commit main pointed at before this push.
+          BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           fail() { echo "::error title=authz::$1"; echo "authz: REFUSED: $1" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
@@ -1172,10 +1178,13 @@ PROMOTE_GUARD = r'''  promote-guard:
             push) ;;
             *) fail "event $EVENT_NAME does not run baseline promotion (only push and workflow_dispatch are allowed)" ;;
           esac
-          # Search every page: a second match must defer, never pick a PR.
-          pulls=$(gh api --paginate --slurp \
-            "repos/$REPO/commits/$SHA/pulls?per_page=100")
-          python3 - 3<<<"$pulls" <<'PY'
+          # Only an empty association result may be eventually consistent.
+          for attempt in 1 2 3; do
+            # Search every page: a second match must defer, never pick a PR.
+            pulls=$(gh api --paginate --slurp \
+              "repos/$REPO/commits/$SHA/pulls?per_page=100")
+            lookup_status=0
+            python3 - 3<<<"$pulls" <<'PY' || lookup_status=$?
           import json
           import os
           import re
@@ -1216,12 +1225,20 @@ PROMOTE_GUARD = r'''  promote-guard:
                   or any(not isinstance(pr, dict) for page in pages for pr in page)):
               skip("invalid merged PR response page array")
               raise SystemExit(0)
+          # An answer with no page at all is an anomaly, never an empty result:
+          # it fails the run at once, with no retry and no release exemption.
+          if not pages:
+              fail("merged PR response has no page")
           matches = [pr for page in pages for pr in page
                      if pr.get("state") == "closed"
                      and pr.get("merged_at") is not None
                      and pr.get("merge_commit_sha") == sha
                      and isinstance(pr.get("base"), dict)
                      and pr["base"].get("ref") == "main"]
+          if not matches and not any(pages):
+              # A valid empty result alone permits another lookup: one or
+              # more pages, every one of them an empty list.
+              raise SystemExit(3)
           if len(matches) != 1:
               skip(f"found {len(matches)} merged PRs with merge commit {sha} and base main")
               raise SystemExit(0)
@@ -1272,6 +1289,104 @@ PROMOTE_GUARD = r'''  promote-guard:
               for key, value in values.items():
                   output.write(f"{key}={value}\n")
           PY
+            if [ "$lookup_status" -eq 0 ]; then
+              exit 0
+            fi
+            [ "$lookup_status" -eq 3 ] || exit "$lookup_status"
+            if [ "$attempt" -lt 3 ]; then
+              echo "::notice::No merged PR found for $SHA (attempt $attempt/3); retrying in 20 seconds"
+              sleep 20
+            fi
+          done
+          # A release commit has no pull request: release.yml pushes it with the
+          # release App's token, one commit per push. Only that push actor,
+          # pushing one commit whose every changed path is in
+          # RELEASE_COMMIT_PATHS, skips here; anything else is refused below.
+          RELEASE_PUSH_ACTOR='pineforge-app[bot]'
+          release_status=1
+          if [ "$PUSH_ACTOR" = "$RELEASE_PUSH_ACTOR" ]; then
+            # Every page of the pushed commit's file list; a failed read refuses.
+            if commit=$(gh api --paginate --slurp "repos/$REPO/commits/$SHA?per_page=100"); then
+              release_status=0
+              python3 - 3<<<"$commit" <<'RELEASE_PY' || release_status=$?
+          import json
+          import os
+          import re
+
+          # The only paths the engine's release commit changes: its release.yml
+          # commits the first two, and a root-level CHANGELOG* is the third.
+          ENGINE_RELEASE_PATHS = re.compile(
+              r"VERSION|docker/run_failure_codes_diff\.json|CHANGELOG[^/]*")
+          # The only path the code generator's release commit changes: its
+          # release.yml commits VERSION alone.
+          CODEGEN_RELEASE_PATHS = re.compile(r"VERSION")
+          # One set per repository, never the union of the two. The axis rule is
+          # the "Determine repo axis" step's: a repository name containing
+          # `codegen` is the codegen axis, any other is the engine axis.
+          RELEASE_COMMIT_PATHS = (
+              CODEGEN_RELEASE_PATHS if "codegen" in os.environ["REPO"]
+              else ENGINE_RELEASE_PATHS)
+          # The commit API lists at most 3000 file records: a list that long may
+          # be cut. The limit counts records, never the path names they carry.
+          FILE_LIST_LIMIT = 3000
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          # A release is one commit, so its first parent is the commit main
+          # held before the push. A push event without that commit refuses.
+          before = os.environ.get("BEFORE", "")
+          if not re.fullmatch(r"[0-9a-f]{40}", before):
+              raise SystemExit(1)
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pages = json.load(stream, parse_constant=reject_constant)
+          except (OSError, ValueError, RecursionError):
+              raise SystemExit(1)
+          if not isinstance(pages, list) or not pages:
+              raise SystemExit(1)
+          records = 0
+          paths = []
+          for page in pages:
+              files = page.get("files") if isinstance(page, dict) else None
+              if not isinstance(files, list) or page.get("sha") != os.environ["SHA"]:
+                  raise SystemExit(1)
+              # An absent or unreadable first parent refuses, as does any
+              # parent other than the commit before the push: more than one
+              # commit was pushed, and only the last one is listed here.
+              parents = page.get("parents")
+              first = parents[0] if isinstance(parents, list) and parents else None
+              parent = first.get("sha") if isinstance(first, dict) else None
+              if not isinstance(parent, str) or parent != before:
+                  raise SystemExit(1)
+              records += len(files)
+              for changed in files:
+                  if not isinstance(changed, dict):
+                      raise SystemExit(1)
+                  paths.append(changed.get("filename"))
+                  if changed.get("status") == "renamed" or "previous_filename" in changed:
+                      # A rename also changes the path it leaves. A renamed
+                      # record that does not name that path refuses the read.
+                      previous = changed.get("previous_filename")
+                      if not isinstance(previous, str):
+                          raise SystemExit(1)
+                      paths.append(previous)
+          if (not paths or records >= FILE_LIST_LIMIT
+                  or not all(isinstance(path, str) and RELEASE_COMMIT_PATHS.fullmatch(path)
+                             for path in paths)):
+              raise SystemExit(1)
+          RELEASE_PY
+            fi
+          fi
+          if [ "$release_status" -eq 0 ]; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "release commit: baseline is recorded by the release_tag route, not post-merge promote"
+            exit 0
+          fi
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          echo "::error title=baseline-promotion::DEFERRED_NOT_FOUND: no merged PR found for $SHA after 3 attempts; baseline unchanged"
+          echo "baseline promotion: DEFERRED_NOT_FOUND: no merged PR found for $SHA after 3 attempts; baseline unchanged" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
       - name: Only our own merged pull requests and dispatches promote the baseline
         id: authorize
@@ -1332,12 +1447,41 @@ PROMOTE_GUARD = r'''  promote-guard:
 '''
 
 
+def assert_promotion_lock(workflow):
+    """The promote job alone holds the lock; the workflow and the guard hold none.
+
+    A lock on the workflow queues a run before its guard has validated it, so
+    an invalid dispatch could take the place of a waiting merge.
+    """
+    assert not re.search(
+        r"""^(?:concurrency|'concurrency'|"concurrency")[ \t]*:""", workflow, re.M
+    ), "promotion must not hold a workflow-level lock"
+    jobs = job_blocks(workflow)
+    assert tuple(jobs) == ("promote-guard", "promote"), "promotion must start with its guard"
+    assert not re.search(r"^[ \t]*concurrency[ \t]*:", jobs["promote-guard"], re.M), (
+        "promotion guard must not hold the lock"
+    )
+    assert re.findall(r"^    concurrency:\n((?:      [^\n]*\n)+)", jobs["promote"], re.M) == [
+        "      group: promote-baseline\n      cancel-in-progress: false\n",
+    ], "the promote job must run one at a time and never cancel a run in progress"
+
+
+def assert_guard_permissions(guard):
+    """The guard reads pull request records and the pushed commit's file list, no more."""
+    assert re.findall(r"^    permissions:\n((?:      [^\n]*\n)+)", guard, re.M) == [
+        "      contents: read\n      pull-requests: read\n",
+    ], "promotion guard must hold exactly contents: read and pull-requests: read"
+
+
 def assert_promotion_guard(workflow):
     assert not re.search(
         r"""^(?:defaults|env|'defaults'|'env'|"defaults"|"env")[ \t]*:[ \t]*""",
         workflow,
         re.M,
     ), "promotion must not define workflow-level defaults or env"
+    # Nothing sits between the triggers and the permissions: the lock is the
+    # promote job's, so a run queues only after its guard has validated it.
+    assert_promotion_lock(workflow)
     trigger = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
     assert re.findall(r"^  ([a-z_]+):", trigger, re.M) == [
         "push", "workflow_dispatch",
@@ -1356,11 +1500,7 @@ def assert_promotion_guard(workflow):
     assert "secrets." not in guard, "promotion guard must not receive secrets"
     assert "checkout" not in guard.lower(), "promotion guard must not check out code"
     assert "id-token" not in guard, "promotion guard must not request an OIDC token"
-    assert re.findall(r"^    permissions:\n((?:      [^\n]*\n)+)", guard, re.M) == [
-        "      pull-requests: read\n",
-    ], (
-        "promotion guard must have only pull-request read permission"
-    )
+    assert_guard_permissions(guard)
     guard_block = re.search(
         r"^  promote-guard:[^\n]*\n.*?(?=^  promote:)", workflow, re.M | re.S
     )
@@ -1371,11 +1511,16 @@ def assert_promotion_guard(workflow):
     assert promote.startswith(
         "\n    needs: [promote-guard]\n"
         "    if: ${{ needs.promote-guard.result == 'success' && needs.promote-guard.outputs.ok == 'true' }}\n"
-        "    runs-on: ubuntu-latest\n"
+        "    runs-on: ubuntu-24.04\n"
         "    environment: release-bot\n"
+        "    # One promotion at a time, and a run in progress is never cancelled. The\n"
+        "    # lock is on this job, so a run queues only after promote-guard passed it.\n"
+        "    concurrency:\n"
+        "      group: promote-baseline\n"
+        "      cancel-in-progress: false\n"
         "    steps:\n"
     ), "credential job must depend on the guard without a status-function bypass"
-    for key in ("needs", "if", "runs-on", "steps"):
+    for key in ("needs", "if", "runs-on", "concurrency", "steps"):
         assert len(re.findall(rf"^    {key}:", promote, re.M)) == 1, (
             f"credential job must not override {key}"
         )
@@ -1806,6 +1951,7 @@ def test_decision_table_rejects_guard_script_mutations(original, replacement, ca
     "EVENT", "REPO", "HEAD_REPO", "HEAD_IS_FORK", "ASSOCIATION", "PR_AUTHOR",
     "MERGED_BY", "GH_TOKEN", "ALLOWED_BOTS", "EVENT_NAME", "REF", "SHA",
     "INPUT_MERGE_SHA", "INPUT_HEAD_SHA", "INPUT_PR_NUMBER", "INPUT_PR_URL", "INPUT_MERGED_AT",
+    "PUSH_ACTOR", "BEFORE",
 ])
 def test_promotion_guard_rejects_missing_event_and_identity_fields(name):
     workflow = (WORKFLOWS / "promote-baseline.yml").read_text(encoding="utf-8")
@@ -1910,12 +2056,12 @@ def test_promotion_guard_rejects_missing_event_and_identity_fields(name):
         id="extra-event-accepted",
     ),
     pytest.param(
-        "    permissions:\n      pull-requests: read\n",
+        "    permissions:\n      contents: read\n      pull-requests: read\n",
         "",
         id="guard-inherits-oidc-permissions",
     ),
     pytest.param(
-        "    permissions:\n      pull-requests: read\n",
+        "    permissions:\n      contents: read\n      pull-requests: read\n",
         "    permissions:\n      id-token: write\n",
         id="guard-requests-oidc-token",
     ),
@@ -1947,9 +2093,20 @@ def test_promotion_guard_rejects_missing_event_and_identity_fields(name):
         id="credential-job-bypasses-failed-guard",
     ),
     pytest.param(
-        "    runs-on: ubuntu-latest\n    environment: release-bot\n    steps:\n",
-        "    runs-on: unreviewed-runner\n    environment: release-bot\n    steps:\n",
+        "    runs-on: ubuntu-24.04\n    environment: release-bot\n",
+        "    runs-on: unreviewed-runner\n    environment: release-bot\n",
         id="credential-runner-changed",
+    ),
+    # The lock is the promote job's block: both mutations change it there.
+    pytest.param(
+        "    concurrency:\n      group: promote-baseline\n      cancel-in-progress: false\n",
+        "    concurrency:\n      group: promote-baseline\n      cancel-in-progress: true\n",
+        id="run-in-progress-cancelled",
+    ),
+    pytest.param(
+        "    concurrency:\n      group: promote-baseline\n",
+        "    concurrency:\n      group: promote-baseline-${{ github.sha }}\n",
+        id="lock-group-per-commit",
     ),
     pytest.param(
         "    steps:\n      - name: Determine repo axis\n",
@@ -1997,6 +2154,77 @@ def test_promotion_guard_rejects_late_credential_job_overrides(override):
     # Preserve the checked header and append a duplicate key to the real job.
     mutant = workflow + f"\n    {override}\n"
     with pytest.raises(AssertionError, match="credential job must not override"):
+        assert_promotion_guard(mutant)
+
+
+PROMOTE_JOB_LOCK = (
+    "    concurrency:\n      group: promote-baseline\n      cancel-in-progress: false\n"
+)
+WORKFLOW_LOCK = "concurrency:\n  group: promote-baseline\n  cancel-in-progress: false\n"
+GUARD_PERMISSIONS = "    permissions:\n      contents: read\n      pull-requests: read\n"
+
+
+@pytest.mark.parametrize("original,replacement,refusal", [
+    pytest.param(
+        "\npermissions:\n  contents: read\n",
+        "\n" + WORKFLOW_LOCK + "\npermissions:\n  contents: read\n",
+        "must not hold a workflow-level lock",
+        id="lock-also-on-the-workflow",
+    ),
+    pytest.param(
+        PROMOTE_JOB_LOCK,
+        "",
+        "the promote job must run one at a time",
+        id="lock-removed-from-the-promote-job",
+    ),
+    pytest.param(
+        "    runs-on: ubuntu-24.04\n    # Resolution reads",
+        "    runs-on: ubuntu-24.04\n" + PROMOTE_JOB_LOCK + "    # Resolution reads",
+        "guard must not hold the lock",
+        id="lock-also-on-the-guard",
+    ),
+])
+def test_promotion_lock_sits_on_the_promote_job_and_not_on_the_workflow(
+    original, replacement, refusal,
+):
+    workflow = (WORKFLOWS / "promote-baseline.yml").read_text(encoding="utf-8")
+    # The shipped workflow first: no workflow-level lock, and the promote
+    # job's own block holds the one group without cancelling.
+    assert_promotion_lock(workflow)
+    assert workflow.count(original) == 1, "mutation must match the actual workflow exactly once"
+    mutant = workflow.replace(original, replacement, 1)
+    assert mutant != workflow, "mutation must change the actual workflow"
+    with pytest.raises(AssertionError, match=refusal):
+        assert_promotion_lock(mutant)
+    with pytest.raises(AssertionError, match=refusal):
+        assert_promotion_guard(mutant)
+
+
+@pytest.mark.parametrize("replacement", [
+    pytest.param(
+        "    permissions:\n      contents: write\n      pull-requests: read\n",
+        id="contents-write",
+    ),
+    pytest.param(
+        "    permissions:\n      contents: read\n      pull-requests: write\n",
+        id="pull-requests-write",
+    ),
+    pytest.param(
+        "    permissions:\n      pull-requests: read\n",
+        id="old-single-line",
+    ),
+])
+def test_promotion_guard_holds_exactly_contents_read_and_pull_requests_read(replacement):
+    workflow = (WORKFLOWS / "promote-baseline.yml").read_text(encoding="utf-8")
+    refusal = "must hold exactly contents: read and pull-requests: read"
+    # The shipped guard first: both read grants, and nothing else.
+    assert_guard_permissions(job_blocks(workflow)["promote-guard"])
+    assert workflow.count(GUARD_PERMISSIONS) == 1, "mutation must match the actual guard exactly once"
+    mutant = workflow.replace(GUARD_PERMISSIONS, replacement, 1)
+    assert mutant != workflow, "mutation must change the actual workflow"
+    with pytest.raises(AssertionError, match=refusal):
+        assert_guard_permissions(job_blocks(mutant)["promote-guard"])
+    with pytest.raises(AssertionError, match=refusal):
         assert_promotion_guard(mutant)
 
 
@@ -2598,6 +2826,11 @@ def run_promotion_entry(workflow, pages, tmp_path, *, full_pr=None, overrides=No
         encoding="utf-8",
     )
     gh.chmod(0o700)
+    # The push path waits between association lookups. This stand-in
+    # records each wait and never waits.
+    sleep = tmp_path / "sleep"
+    sleep.write_text(f'#!{bash}\nprintf "%s\\n" "$*" >> "$SLEEP_CALLS"\n', encoding="utf-8")
+    sleep.chmod(0o700)
     script = tmp_path / "entry.bash"
     script.write_text(scripts[0], encoding="utf-8")
     output_path = tmp_path / "output"
@@ -2610,8 +2843,12 @@ def run_promotion_entry(workflow, pages, tmp_path, *, full_pr=None, overrides=No
         "HEAD_REPO": "owner/repo", "HEAD_IS_FORK": "false",
         "ASSOCIATION": "MEMBER", "PR_AUTHOR": "member", "MERGED": "true",
         "MERGED_BY": "writer", "ALLOWED_BOTS": "dependabot[bot] pineforge-app[bot]",
+        # The push actor is a person here: after three empty answers the step
+        # reads no file list and refuses.
+        "PUSH_ACTOR": "writer",
         "GITHUB_OUTPUT": str(output_path), "GITHUB_STEP_SUMMARY": str(summary_path),
         "GH_CALLS": str(calls_path), "GH_PULLS": json.dumps(pages),
+        "SLEEP_CALLS": str(tmp_path / "sleeps"),
         "GH_PR": json.dumps(promotion_pr() if full_pr is None else full_pr),
         "INPUT_MERGE_SHA": "", "INPUT_HEAD_SHA": "", "INPUT_PR_NUMBER": "",
         "INPUT_PR_URL": "", "INPUT_MERGED_AT": "",
@@ -2634,6 +2871,35 @@ def run_promotion_entry(workflow, pages, tmp_path, *, full_pr=None, overrides=No
 
 def assert_promotion_resolution(workflow, pages, tmp_path, expected_count):
     result, outputs, calls, summary = run_promotion_entry(workflow, pages, tmp_path)
+    sleeps_path = tmp_path / "sleeps"
+    sleeps = sleeps_path.read_text(encoding="utf-8").splitlines() if sleeps_path.exists() else []
+    listed = [pr for page in pages for pr in page]
+    if expected_count == 0 and not listed:
+        # GitHub can list the PR of a fresh merge late. Only an answer that
+        # lists no PR at all is looked up again: 3 lookups, 20 seconds apart.
+        # After the third the step reports DEFERRED_NOT_FOUND and fails.
+        sha = "a" * 40
+        lookup = f"api --paginate --slurp repos/owner/repo/commits/{sha}/pulls?per_page=100"
+        deferred = (
+            f"DEFERRED_NOT_FOUND: no merged PR found for {sha} after 3 attempts; "
+            "baseline unchanged"
+        )
+        got = (
+            f"an empty answer must end in DEFERRED_NOT_FOUND; got {result.returncode}: "
+            f"{result.stdout}{result.stderr}"
+        )
+        assert result.returncode == 1, got
+        assert result.stdout == (
+            f"::notice::No merged PR found for {sha} (attempt 1/3); retrying in 20 seconds\n"
+            f"::notice::No merged PR found for {sha} (attempt 2/3); retrying in 20 seconds\n"
+            f"::error title=baseline-promotion::{deferred}\n"
+        ), got
+        assert summary == f"baseline promotion: {deferred}\n", got
+        assert outputs == {"ok": "false"} and result.stderr == "", got
+        assert calls == [lookup] * 3, f"an empty answer must be looked up 3 times: {calls}"
+        assert sleeps == ["20", "20"], f"an empty answer must wait 20 seconds twice: {sleeps}"
+        return
+    assert sleeps == [], f"an answer that lists a PR must not wait: {sleeps}"
     assert result.returncode == 0, (
         f"push resolution must exit green; got {result.returncode}: "
         f"{result.stdout}{result.stderr}"
@@ -2680,7 +2946,9 @@ def test_promotion_push_resolves_exactly_one_merged_main_pr(pages, count, tmp_pa
 
 
 @pytest.mark.parametrize("replacement,pages,count", [
-    pytest.param("if len(matches) > 1:", [[]], 0, id="zero-not-deferred"),
+    # An answer that lists no PR never reaches this guard: it is looked up again.
+    pytest.param("if len(matches) > 1:", [[promotion_pr(base="release")]], 0,
+                 id="zero-not-deferred"),
     pytest.param("guess-nonmatching-pr", [[promotion_pr(state="open")]], 0,
                  id="zero-guessed-from-nonmatch"),
     pytest.param("if len(matches) < 1:", [[promotion_pr()], [promotion_pr(18)]], 2,
@@ -2783,15 +3051,48 @@ def test_promotion_resolver_refuses_changed_full_pr_records(change, tmp_path):
 
 CODEGEN_GATE_REQUIREMENT = r'''            runs=$(gh api --paginate \
               "repos/${{ github.repository }}/commits/$HEAD_SHA/check-runs?per_page=100")
-            gate=$(jq -s '[.[].check_runs[] | select(.name == "gate" and .conclusion == "success")] | length' <<< "$runs")
-            statuses=$(gh api --paginate \
+            check_result=$(jq -ers '
+              def run_ok:
+                type == "object" and (.id | type) == "number" and (.name | type) == "string"
+                and (.app | type) == "object" and (.app.id | type) == "number"
+                and has("conclusion") and (.conclusion == null or (.conclusion | type) == "string");
+              def page_ok:
+                type == "object" and (.total_count | type) == "number"
+                and (.check_runs | type) == "array" and all(.check_runs[]; run_ok);
+              if length == 0 or (all(.[]; page_ok) | not)
+                 or (([.[].check_runs | length] | add) as $records
+                     | any(.[]; .total_count != $records)) then
+                error("invalid check-runs response")
+              else
+                [.[].check_runs[]] | group_by([.app.id, .name]) | map(max_by(.id))
+                | [any(.name == "gate" and .conclusion == "success"),
+                   (map(select(.conclusion == "failure" or .conclusion == "cancelled"
+                               or .conclusion == "timed_out" or .conclusion == "action_required")) | length)]
+                | @tsv
+              end
+            ' <<< "$runs")
+            read -r gate bad <<< "$check_result"
+            gate_statuses=$(gh api --paginate \
               "repos/${{ github.repository }}/commits/$HEAD_SHA/statuses?per_page=100")
-            gate_status=$(jq -sr '[.[][] | select(.context == "gate")][0].state // "absent"' <<< "$statuses")
-            if { [ "$gate_status" = absent ] && [ "$gate" = "0" ]; } || { [ "$gate_status" != absent ] && [ "$gate_status" != success ]; }; then
+            # A statuses page must be a list of objects, each with a string
+            # context and a string state: a null record stops the step and is
+            # never read as an absent gate.
+            gate_status=$(jq -ers '
+              def status_ok:
+                type == "object" and (.context | type) == "string" and (.state | type) == "string";
+              if length == 0 or (all(.[]; type == "array" and all(.[]; status_ok)) | not) then
+                error("invalid statuses response")
+              else
+                [ .[][] | select(.context == "gate") ][0]
+                | if . == null then "absent"
+                  elif .state == "success" then "success"
+                  else "blocked" end
+              end
+            ' <<< "$gate_statuses")
+            if [[ "$gate_status" != success && ( "$gate_status" != absent || "$gate" != true ) ]]; then
               echo "::notice::the required gate context has not succeeded on $HEAD_SHA — not green; skipping"
               echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
             fi
-            bad=$(jq -s '[[.[].check_runs[]] | group_by([.app.id, .name])[] | max_by(.id) | select(.conclusion=="failure" or .conclusion=="cancelled" or .conclusion=="timed_out" or .conclusion=="action_required")] | length' <<< "$runs")
             if [ "$bad" != "0" ]; then
               echo "::notice::$bad failing check-run(s) on $HEAD_SHA — not green; skipping"
               echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
@@ -2830,14 +3131,190 @@ def test_codegen_promotion_gate_mutations_are_rejected(mutation):
         assert count == 1
     else:
         original = (
-            '[ "$gate_status" != success ]' if mutation == "missing-context"
+            '[[ "$gate_status" != success && ' if mutation == "missing-context"
             else "max_by(.id)"
         )
         assert workflow.count(original) == 1
         mutant = workflow.replace(
-            original, '[ "$gate_status" = success ]' if mutation == "missing-context"
+            original, '[[ "$gate_status" = success && ' if mutation == "missing-context"
             else "min_by(.id)", 1,
         )
     assert mutant != workflow
     with pytest.raises(AssertionError, match="confirm the gate|require its gate context"):
         assert_codegen_promotion_gate(mutant)
+
+
+# The rows below run the shipped "Confirm the gate on the PR head" script on
+# the code generator's axis, with bash and the runner's own jq. Only `gh` is a
+# stand-in: it prints the one page a row gives for the check-runs and for the
+# statuses of the PR head, records its calls, and exits 97 on any other call.
+GATE_REPO = "owner/codegen"
+GATE_HEAD = "b" * 40
+CHECK_RUNS_CALL = f"api --paginate repos/{GATE_REPO}/commits/{GATE_HEAD}/check-runs?per_page=100"
+STATUSES_CALL = f"api --paginate repos/{GATE_REPO}/commits/{GATE_HEAD}/statuses?per_page=100"
+# A passed gate, reported both ways: the legacy check-run and the status.
+PASSED_CHECK_RUNS = {
+    "total_count": 1,
+    "check_runs": [{"id": 1, "name": "gate", "app": {"id": 7}, "conclusion": "success"}],
+}
+PASSED_STATUSES = [{"context": "gate", "state": "success"}]
+
+
+def run_codegen_gate(workflow, tmp_path, check_runs, statuses):
+    """Run the gate step's own script; return its result, output lines and gh calls."""
+    step = re.search(
+        r"^      - name: Confirm the gate on the PR head\n.*?(?=^      - |\Z)",
+        job_blocks(workflow)["promote"], re.M | re.S,
+    )
+    assert step is not None, "promotion must confirm the gate on the PR head"
+    scripts = re.findall(r"^        run: \|\n((?:          [^\n]*\n|\n)+)", step[0], re.M)
+    assert len(scripts) == 1, "the gate step must hold exactly one run script"
+    # The repository name is the script's only workflow expression.
+    expression = "${{ github.repository }}"
+    assert set(re.findall(r"\$\{\{.*?\}\}", scripts[0])) == {expression}, (
+        "the gate script must read no workflow expression but the repository name"
+    )
+    bash, jq = shutil.which("bash"), shutil.which("jq")
+    if bash is None or jq is None:
+        pytest.fail("NOT RUN: the codegen gate rows require bash and jq on the test runner")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "jq").symlink_to(jq)
+    gh = bin_dir / "gh"
+    gh.write_text(
+        f"#!{bash}\n"
+        "set -eu\n"
+        'printf "%s\\n" "$*" >> "$GH_CALLS"\n'
+        '[ "$#" -eq 3 ] && [ "$1" = api ] && [ "$2" = --paginate ] || exit 97\n'
+        'case "$3" in\n'
+        f'  "repos/{GATE_REPO}/commits/$HEAD_SHA/check-runs?per_page=100")\n'
+        '    printf "%s\\n" "$GH_CHECK_RUNS" ;;\n'
+        f'  "repos/{GATE_REPO}/commits/$HEAD_SHA/statuses?per_page=100")\n'
+        '    printf "%s\\n" "$GH_STATUSES" ;;\n'
+        "  *) exit 97 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o700)
+    script = tmp_path / "gate.bash"
+    script.write_text(
+        textwrap.dedent(scripts[0]).replace(expression, GATE_REPO), encoding="utf-8",
+    )
+    output_path = tmp_path / "output"
+    calls_path = tmp_path / "calls"
+    env = {
+        "PATH": str(bin_dir), "AXIS": "codegen", "HEAD_SHA": GATE_HEAD, "GH_TOKEN": "",
+        "GITHUB_OUTPUT": str(output_path), "GH_CALLS": str(calls_path),
+        "GH_CHECK_RUNS": json.dumps(check_runs), "GH_STATUSES": json.dumps(statuses),
+    }
+    result = subprocess.run(
+        [bash, "--noprofile", "--norc", str(script)],
+        cwd=tmp_path, env=env, capture_output=True, text=True, check=False,
+    )
+    written = output_path.read_text(encoding="utf-8").splitlines() if output_path.exists() else []
+    calls = calls_path.read_text(encoding="utf-8").splitlines() if calls_path.exists() else []
+    return result, written, calls
+
+
+@dataclass(frozen=True)
+class GateRefusal:
+    name: str
+    # The one page of each answer, as GitHub would return it.
+    check_runs: dict
+    statuses: list
+    # The error the step stops with, and every gh call it made before that.
+    error: str
+    calls: tuple
+
+
+GATE_REFUSALS = [
+    GateRefusal(
+        "check-runs-page-reports-one-check-and-holds-none",
+        check_runs={"total_count": 1, "check_runs": []},
+        statuses=PASSED_STATUSES,
+        error="invalid check-runs response",
+        calls=(CHECK_RUNS_CALL,),
+    ),
+    GateRefusal(
+        "check-runs-array-holds-only-null",
+        check_runs={"total_count": 1, "check_runs": [None]},
+        statuses=PASSED_STATUSES,
+        error="invalid check-runs response",
+        calls=(CHECK_RUNS_CALL,),
+    ),
+    GateRefusal(
+        # The passed legacy check-run must not stand in for the unread status.
+        "null-status-record",
+        check_runs=PASSED_CHECK_RUNS,
+        statuses=[None],
+        error="invalid statuses response",
+        calls=(CHECK_RUNS_CALL, STATUSES_CALL),
+    ),
+]
+
+
+@pytest.mark.parametrize("row", GATE_REFUSALS, ids=[row.name for row in GATE_REFUSALS])
+def test_codegen_promotion_gate_refuses_a_record_it_cannot_read(row, tmp_path):
+    workflow = (WORKFLOWS / "promote-baseline.yml").read_text(encoding="utf-8")
+    # The control: the same step, given a passed gate it can read, is green.
+    result, written, calls = run_codegen_gate(
+        workflow, tmp_path / "control", PASSED_CHECK_RUNS, PASSED_STATUSES,
+    )
+    assert (result.returncode, written, calls) == (
+        0, ["green=true"], [CHECK_RUNS_CALL, STATUSES_CALL],
+    ), f"control: exit {result.returncode}\nstderr: {result.stderr}\n{written}\n{calls}"
+    result, written, calls = run_codegen_gate(
+        workflow, tmp_path / "refused", row.check_runs, row.statuses,
+    )
+    got = (
+        f"{row.name}: exit {result.returncode}\nstdout: {result.stdout}\n"
+        f"stderr: {result.stderr}\noutputs: {written}\ncalls: {calls}"
+    )
+    # The step stops with no verdict: it fails, and writes neither green value.
+    assert result.returncode != 0, got
+    assert written == [], got
+    assert calls == list(row.calls), got
+    assert row.error in result.stderr, got
+
+
+# The latest-run rule decides the gate too: an older success no longer counts
+# once a newer run of the same app and name ended another way. With no gate
+# status, that check-run is the only gate there is.
+NO_GATE_STATUS = []
+GATE_NOT_SUCCEEDED = (
+    f"::notice::the required gate context has not succeeded on {GATE_HEAD} "
+    "— not green; skipping\n"
+)
+
+
+@pytest.mark.parametrize("conclusion", [
+    pytest.param("skipped", id="newer-skipped-run-same-app-no-gate-status"),
+    pytest.param("neutral", id="newer-neutral-run-same-app-no-gate-status"),
+])
+def test_codegen_promotion_gate_older_success_then_newer_run_is_not_green(conclusion, tmp_path):
+    workflow = (WORKFLOWS / "promote-baseline.yml").read_text(encoding="utf-8")
+    # The control: the older successful gate check-run alone, with no gate
+    # status, is green.
+    result, written, calls = run_codegen_gate(
+        workflow, tmp_path / "control", PASSED_CHECK_RUNS, NO_GATE_STATUS,
+    )
+    assert (result.returncode, written, calls) == (
+        0, ["green=true"], [CHECK_RUNS_CALL, STATUSES_CALL],
+    ), f"control: exit {result.returncode}\nstderr: {result.stderr}\n{written}\n{calls}"
+    # The same app then reports a newer gate run that ended another way.
+    older = PASSED_CHECK_RUNS["check_runs"][0]
+    newer = {**older, "id": older["id"] + 1, "conclusion": conclusion}
+    result, written, calls = run_codegen_gate(
+        workflow, tmp_path / "newer",
+        {"total_count": 2, "check_runs": [older, newer]}, NO_GATE_STATUS,
+    )
+    got = (
+        f"a newer {conclusion} gate run: exit {result.returncode}\nstdout: {result.stdout}\n"
+        f"stderr: {result.stderr}\noutputs: {written}\ncalls: {calls}"
+    )
+    # The step ends normally and reports not green, with its notice: the newer
+    # run replaces the older success.
+    assert result.returncode == 0, got
+    assert written == ["green=false"], got
+    assert calls == [CHECK_RUNS_CALL, STATUSES_CALL], got
+    assert result.stdout == GATE_NOT_SUCCEEDED, got

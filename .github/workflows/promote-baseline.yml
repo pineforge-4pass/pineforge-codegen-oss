@@ -9,7 +9,7 @@
 # now on the base branch carries the gated PR head's TREE (a squash merge mints
 # a new commit; the strict up-to-date rule keeps its tree the head's), the gate
 # is green on that head, and `lab promote` finds the verdict that binds it:
-#   engine   pineforge/verify and pineforge/parity success on the PR head;
+#   engine   pineforge/verify and pineforge/parity success on the PR head (verify required in this product; the template's advisory rule (#375) is not applied here);
 #            lab promote adopts the pair the merge gate's parity verdict
 #            measured — the merged engine with the codegen the sweep measured
 #            (ruling R2, 2026-09-26), PASS or neutral alike
@@ -18,7 +18,7 @@
 #            whose newest run (per app and name) failed; lab promote needs a pr-gate PASS binding (baseline
 #            engine, the PR head) and re-reads both trees from GitHub (the
 #            verdict records commits, not trees; GH_TOKEN below)
-# Otherwise it exits green without promoting.
+# Otherwise the baseline stands. Exhausted empty PR lookups fail loudly.
 # A docs-only codegen receipt names no measured snapshot. lab promote refuses
 # it explicitly: the baseline stands, even when the required gate is green.
 #
@@ -26,9 +26,39 @@
 # promotion identity's workload-identity condition pins job_workflow_ref to
 # `<repo>/.github/workflows/promote-baseline.yml@refs/heads/main` and the run
 # ref to refs/heads/main (terraform/gcp/github-wif.tf). The pushed SHA must
-# resolve to exactly one merged PR with that merge commit and base main; no
-# match or ambiguity skips promotion. It checks out and runs no PR code:
+# resolve to exactly one merged PR with that merge commit and base main.
+# A nonempty nonmatching result or ambiguity skips promotion. Empty results allow
+# three lookup attempts, 20 seconds apart, before failing; an answer with no page
+# at all fails at once. It checks out and runs no PR code:
 # it fetches the PR head's objects only to compare trees.
+#
+# A release commit has no pull request: each product's release.yml pushes it
+# with the org App's token. When all three lookups are empty and the push actor
+# is that App's bot, the run reads the pushed commit's parent and changed
+# files. It skips, green and without promoting, only when the push is that one
+# commit (its first parent is the commit main held before the push) and every
+# changed path belongs to this repository's release file set; the release_tag
+# route records that baseline.
+# The set is picked by the repo axis and is never the union of the two:
+#   engine   VERSION, docker/run_failure_codes_diff.json and a root-level
+#            CHANGELOG* file
+#   codegen  VERSION
+# Any other push actor, a push of more than one commit, any other changed
+# path, or a file list that cannot be read, fails as every other exhausted
+# lookup does.
+#
+# A manual dispatch is checked before it can promote. Its inputs must be well
+# formed: merge_commit and head_sha are 40 lowercase hex characters, pr_number
+# is a positive number, pr_url is exactly this repository's URL of that PR, and
+# merged_at is a UTC time in YYYY-MM-DDTHH:MM:SSZ form. The pull request API
+# must then show the same PR number, merged, with that merge commit, that head,
+# base main and that merge time, and the merge commit must list exactly that
+# one PR. Any mismatch refuses the run.
+#
+# The promote job holds one concurrency group, and a run in progress is never
+# cancelled: one promotion finishes before the next one starts. The lock is on
+# that job, not on the workflow, so a run queues only after its guard has
+# validated it: an invalid dispatch never queues.
 #
 # The plane is GCP: the
 # promotion reads the active baseline and the gate ledger from the Postgres
@@ -71,9 +101,9 @@ name: promote-baseline
 on:
   push:
     branches: [main]
-  # Dispatch from main re-fires a promotion for an already merged PR.
-  # Its five inputs are checked against the pull request API; a refusal means
-  # a wrong input, not a workflow fault.
+  # Manual re-fire, from main, for a merge whose event already passed (e.g. a
+  # PR merged before this workflow was installed): the commit now on the base
+  # branch, the PR head the gate cleared, and the PR.
   workflow_dispatch:
     inputs:
       merge_commit:
@@ -86,10 +116,10 @@ on:
         description: "the PR number"
         required: true
       pr_url:
-        description: "the PR url (recorded in the merge receipt)"
+        description: "the PR URL in this repository (recorded in the merge receipt)"
         required: true
       merged_at:
-        description: "ISO-8601 merge time"
+        description: "UTC merge time in YYYY-MM-DDTHH:MM:SSZ form"
         required: true
 
 permissions:
@@ -97,8 +127,8 @@ permissions:
   # commits/{sha}/pulls needs pull-request read access for the repo-scoped
   # token, including when this unchanged workflow is installed in a private repo.
   pull-requests: read
-  # The engine's gate is two commit statuses (pineforge/verify,
-  # pineforge/parity): `statuses`. The codegen axis reads check-runs: `checks`.
+  # The engine axis admits on pineforge/verify and pineforge/parity: verify required in this product; the template's advisory rule (#375) is not applied here.
+  # Read `statuses`; the codegen axis reads check-runs: `checks`.
   statuses: read
   checks: read
   # Workload identity federation mints the GCP credential from the job's own
@@ -108,9 +138,11 @@ permissions:
 jobs:
   promote-guard:
     name: promote-guard
-    runs-on: ubuntu-latest
-    # Resolution needs read access in private repos; no secrets or OIDC here.
+    runs-on: ubuntu-24.04
+    # Resolution reads pull request records and the pushed commit's file list:
+    # a private repo needs both grants for them. No secrets or OIDC here.
     permissions:
+      contents: read
       pull-requests: read
     outputs:
       ok: ${{ steps.authorize.outputs.ok }}
@@ -133,6 +165,10 @@ jobs:
           INPUT_PR_NUMBER: ${{ github.event.inputs.pr_number }}
           INPUT_PR_URL: ${{ github.event.inputs.pr_url }}
           INPUT_MERGED_AT: ${{ github.event.inputs.merged_at }}
+          # The push event's actor, never the commit's author or committer.
+          PUSH_ACTOR: ${{ github.actor }}
+          # The commit main pointed at before this push.
+          BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           fail() { echo "::error title=authz::$1"; echo "authz: REFUSED: $1" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
@@ -313,10 +349,13 @@ jobs:
             push) ;;
             *) fail "event $EVENT_NAME does not run baseline promotion (only push and workflow_dispatch are allowed)" ;;
           esac
-          # Search every page: a second match must defer, never pick a PR.
-          pulls=$(gh api --paginate --slurp \
-            "repos/$REPO/commits/$SHA/pulls?per_page=100")
-          python3 - 3<<<"$pulls" <<'PY'
+          # Only an empty association result may be eventually consistent.
+          for attempt in 1 2 3; do
+            # Search every page: a second match must defer, never pick a PR.
+            pulls=$(gh api --paginate --slurp \
+              "repos/$REPO/commits/$SHA/pulls?per_page=100")
+            lookup_status=0
+            python3 - 3<<<"$pulls" <<'PY' || lookup_status=$?
           import json
           import os
           import re
@@ -357,12 +396,20 @@ jobs:
                   or any(not isinstance(pr, dict) for page in pages for pr in page)):
               skip("invalid merged PR response page array")
               raise SystemExit(0)
+          # An answer with no page at all is an anomaly, never an empty result:
+          # it fails the run at once, with no retry and no release exemption.
+          if not pages:
+              fail("merged PR response has no page")
           matches = [pr for page in pages for pr in page
                      if pr.get("state") == "closed"
                      and pr.get("merged_at") is not None
                      and pr.get("merge_commit_sha") == sha
                      and isinstance(pr.get("base"), dict)
                      and pr["base"].get("ref") == "main"]
+          if not matches and not any(pages):
+              # A valid empty result alone permits another lookup: one or
+              # more pages, every one of them an empty list.
+              raise SystemExit(3)
           if len(matches) != 1:
               skip(f"found {len(matches)} merged PRs with merge commit {sha} and base main")
               raise SystemExit(0)
@@ -413,6 +460,104 @@ jobs:
               for key, value in values.items():
                   output.write(f"{key}={value}\n")
           PY
+            if [ "$lookup_status" -eq 0 ]; then
+              exit 0
+            fi
+            [ "$lookup_status" -eq 3 ] || exit "$lookup_status"
+            if [ "$attempt" -lt 3 ]; then
+              echo "::notice::No merged PR found for $SHA (attempt $attempt/3); retrying in 20 seconds"
+              sleep 20
+            fi
+          done
+          # A release commit has no pull request: release.yml pushes it with the
+          # release App's token, one commit per push. Only that push actor,
+          # pushing one commit whose every changed path is in
+          # RELEASE_COMMIT_PATHS, skips here; anything else is refused below.
+          RELEASE_PUSH_ACTOR='pineforge-app[bot]'
+          release_status=1
+          if [ "$PUSH_ACTOR" = "$RELEASE_PUSH_ACTOR" ]; then
+            # Every page of the pushed commit's file list; a failed read refuses.
+            if commit=$(gh api --paginate --slurp "repos/$REPO/commits/$SHA?per_page=100"); then
+              release_status=0
+              python3 - 3<<<"$commit" <<'RELEASE_PY' || release_status=$?
+          import json
+          import os
+          import re
+
+          # The only paths the engine's release commit changes: its release.yml
+          # commits the first two, and a root-level CHANGELOG* is the third.
+          ENGINE_RELEASE_PATHS = re.compile(
+              r"VERSION|docker/run_failure_codes_diff\.json|CHANGELOG[^/]*")
+          # The only path the code generator's release commit changes: its
+          # release.yml commits VERSION alone.
+          CODEGEN_RELEASE_PATHS = re.compile(r"VERSION")
+          # One set per repository, never the union of the two. The axis rule is
+          # the "Determine repo axis" step's: a repository name containing
+          # `codegen` is the codegen axis, any other is the engine axis.
+          RELEASE_COMMIT_PATHS = (
+              CODEGEN_RELEASE_PATHS if "codegen" in os.environ["REPO"]
+              else ENGINE_RELEASE_PATHS)
+          # The commit API lists at most 3000 file records: a list that long may
+          # be cut. The limit counts records, never the path names they carry.
+          FILE_LIST_LIMIT = 3000
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          # A release is one commit, so its first parent is the commit main
+          # held before the push. A push event without that commit refuses.
+          before = os.environ.get("BEFORE", "")
+          if not re.fullmatch(r"[0-9a-f]{40}", before):
+              raise SystemExit(1)
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  pages = json.load(stream, parse_constant=reject_constant)
+          except (OSError, ValueError, RecursionError):
+              raise SystemExit(1)
+          if not isinstance(pages, list) or not pages:
+              raise SystemExit(1)
+          records = 0
+          paths = []
+          for page in pages:
+              files = page.get("files") if isinstance(page, dict) else None
+              if not isinstance(files, list) or page.get("sha") != os.environ["SHA"]:
+                  raise SystemExit(1)
+              # An absent or unreadable first parent refuses, as does any
+              # parent other than the commit before the push: more than one
+              # commit was pushed, and only the last one is listed here.
+              parents = page.get("parents")
+              first = parents[0] if isinstance(parents, list) and parents else None
+              parent = first.get("sha") if isinstance(first, dict) else None
+              if not isinstance(parent, str) or parent != before:
+                  raise SystemExit(1)
+              records += len(files)
+              for changed in files:
+                  if not isinstance(changed, dict):
+                      raise SystemExit(1)
+                  paths.append(changed.get("filename"))
+                  if changed.get("status") == "renamed" or "previous_filename" in changed:
+                      # A rename also changes the path it leaves. A renamed
+                      # record that does not name that path refuses the read.
+                      previous = changed.get("previous_filename")
+                      if not isinstance(previous, str):
+                          raise SystemExit(1)
+                      paths.append(previous)
+          if (not paths or records >= FILE_LIST_LIMIT
+                  or not all(isinstance(path, str) and RELEASE_COMMIT_PATHS.fullmatch(path)
+                             for path in paths)):
+              raise SystemExit(1)
+          RELEASE_PY
+            fi
+          fi
+          if [ "$release_status" -eq 0 ]; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "release commit: baseline is recorded by the release_tag route, not post-merge promote"
+            exit 0
+          fi
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          echo "::error title=baseline-promotion::DEFERRED_NOT_FOUND: no merged PR found for $SHA after 3 attempts; baseline unchanged"
+          echo "baseline promotion: DEFERRED_NOT_FOUND: no merged PR found for $SHA after 3 attempts; baseline unchanged" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
       - name: Only our own merged pull requests and dispatches promote the baseline
         id: authorize
@@ -473,8 +618,13 @@ jobs:
   promote:
     needs: [promote-guard]
     if: ${{ needs.promote-guard.result == 'success' && needs.promote-guard.outputs.ok == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: release-bot
+    # One promotion at a time, and a run in progress is never cancelled. The
+    # lock is on this job, so a run queues only after promote-guard passed it.
+    concurrency:
+      group: promote-baseline
+      cancel-in-progress: false
     steps:
       - name: Determine repo axis
         id: axis
@@ -504,8 +654,8 @@ jobs:
           set -euo pipefail
           # The PR head's objects, to read its tree: fetched, never checked out or run.
           git fetch --quiet origin "$BASE_REF" "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/pr-head"
-          if ! git merge-base --is-ancestor "$MERGE_SHA" "origin/$BASE_REF"; then
-            echo "::notice::merge commit $MERGE_SHA is not on origin/$BASE_REF; skipping"
+          if ! git merge-base --is-ancestor "$MERGE_SHA" "refs/remotes/origin/$BASE_REF"; then
+            echo "::notice::merge commit $MERGE_SHA is not on refs/remotes/origin/$BASE_REF; skipping"
             echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
           merge_tree=$(git rev-parse "$MERGE_SHA^{tree}")
@@ -542,23 +692,58 @@ jobs:
               echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
             fi
           else
-            # Codegen's required context is `gate`, from the trusted reporter
-            # or the legacy check-run (ruleset "PineForge strict CI base"), and no
-            # other check-run may have failed: only the newest run of each (app,
-            # name) counts, since a run on the same head (an edit, a fork's PR,
-            # a re-run) supersedes an older red one. Every page is
-            # {total_count, check_runs}; slurp them into one list.
+            # A current gate status takes priority over the legacy gate
+            # check-run. Evaluate only the latest check-run of each app/name.
+            # Every record is checked before any is read. A check-runs page
+            # must be an object with a numeric total_count and a check_runs
+            # list of objects, each with a numeric id, a string name, an app
+            # object with a numeric id, and a conclusion that is a string or
+            # null. Every page's total_count must equal the number of records
+            # over all pages. Anything else stops the step with no verdict.
             runs=$(gh api --paginate \
               "repos/${{ github.repository }}/commits/$HEAD_SHA/check-runs?per_page=100")
-            gate=$(jq -s '[.[].check_runs[] | select(.name == "gate" and .conclusion == "success")] | length' <<< "$runs")
-            statuses=$(gh api --paginate \
+            check_result=$(jq -ers '
+              def run_ok:
+                type == "object" and (.id | type) == "number" and (.name | type) == "string"
+                and (.app | type) == "object" and (.app.id | type) == "number"
+                and has("conclusion") and (.conclusion == null or (.conclusion | type) == "string");
+              def page_ok:
+                type == "object" and (.total_count | type) == "number"
+                and (.check_runs | type) == "array" and all(.check_runs[]; run_ok);
+              if length == 0 or (all(.[]; page_ok) | not)
+                 or (([.[].check_runs | length] | add) as $records
+                     | any(.[]; .total_count != $records)) then
+                error("invalid check-runs response")
+              else
+                [.[].check_runs[]] | group_by([.app.id, .name]) | map(max_by(.id))
+                | [any(.name == "gate" and .conclusion == "success"),
+                   (map(select(.conclusion == "failure" or .conclusion == "cancelled"
+                               or .conclusion == "timed_out" or .conclusion == "action_required")) | length)]
+                | @tsv
+              end
+            ' <<< "$runs")
+            read -r gate bad <<< "$check_result"
+            gate_statuses=$(gh api --paginate \
               "repos/${{ github.repository }}/commits/$HEAD_SHA/statuses?per_page=100")
-            gate_status=$(jq -sr '[.[][] | select(.context == "gate")][0].state // "absent"' <<< "$statuses")
-            if { [ "$gate_status" = absent ] && [ "$gate" = "0" ]; } || { [ "$gate_status" != absent ] && [ "$gate_status" != success ]; }; then
+            # A statuses page must be a list of objects, each with a string
+            # context and a string state: a null record stops the step and is
+            # never read as an absent gate.
+            gate_status=$(jq -ers '
+              def status_ok:
+                type == "object" and (.context | type) == "string" and (.state | type) == "string";
+              if length == 0 or (all(.[]; type == "array" and all(.[]; status_ok)) | not) then
+                error("invalid statuses response")
+              else
+                [ .[][] | select(.context == "gate") ][0]
+                | if . == null then "absent"
+                  elif .state == "success" then "success"
+                  else "blocked" end
+              end
+            ' <<< "$gate_statuses")
+            if [[ "$gate_status" != success && ( "$gate_status" != absent || "$gate" != true ) ]]; then
               echo "::notice::the required gate context has not succeeded on $HEAD_SHA — not green; skipping"
               echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
             fi
-            bad=$(jq -s '[[.[].check_runs[]] | group_by([.app.id, .name])[] | max_by(.id) | select(.conclusion=="failure" or .conclusion=="cancelled" or .conclusion=="timed_out" or .conclusion=="action_required")] | length' <<< "$runs")
             if [ "$bad" != "0" ]; then
               echo "::notice::$bad failing check-run(s) on $HEAD_SHA — not green; skipping"
               echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
@@ -598,6 +783,11 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Install campaign dependencies
+        if: steps.ci.outputs.green == 'true'
+        # Install before the auth action creates its GCP credentials.
+        run: npm ci --prefix .workflow/campaign
+
       - name: Authenticate to GCP
         if: steps.ci.outputs.green == 'true'
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
@@ -619,21 +809,23 @@ jobs:
           curl -fsSLo /tmp/cloud-sql-proxy \
             https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.14.1/cloud-sql-proxy.linux.amd64
           chmod +x /tmp/cloud-sql-proxy
+          if ( : </dev/tcp/127.0.0.1/5433 ) 2>/dev/null; then
+            echo "cloud-sql-proxy port 5433 is already in use" >&2
+            exit 1
+          fi
           /tmp/cloud-sql-proxy --port 5433 \
             gen-lang-client-0864094636:asia-east1:pineforge-workflow-pg &
           proxy_pid=$!
-          while true; do
-            if (exec 3<>/dev/tcp/127.0.0.1/5433) 2>/dev/null; then exit 0; fi
+          for _ in {1..30}; do
             if ! kill -0 "$proxy_pid" 2>/dev/null; then
-              echo "cloud-sql-proxy exited before it became ready" >&2
+              echo "cloud-sql-proxy exited before becoming ready" >&2
               exit 1
             fi
+            if ( : </dev/tcp/127.0.0.1/5433 ) 2>/dev/null; then exit 0; fi
             sleep 1
           done
-
-      - name: Install campaign dependencies
-        if: steps.ci.outputs.green == 'true'
-        run: npm ci --prefix .workflow/campaign
+          echo "cloud-sql-proxy did not become ready" >&2
+          exit 1
 
       - name: Promote baseline
         if: steps.ci.outputs.green == 'true'
