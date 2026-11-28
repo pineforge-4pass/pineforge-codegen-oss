@@ -50,17 +50,25 @@ int main() {
 """
 
 
-@pytest.mark.parametrize(("helpers", "lag", "field_lag"), [
-    pytest.param("lag(int x) => x[3]", "lag(time)", 0, id="direct-time"),
+@pytest.mark.parametrize(("helpers", "lag", "field_lag", "depth"), [
+    # [1] after a gap is the last call's argument: the read that decides
+    # whether a signal fires on the first call after skipped bars.
+    pytest.param("lag(int x) => x[1]", "lag(time)", 0, 1, id="direct-time-depth-1"),
+    pytest.param("lag(int x) => x[2]", "lag(time)", 0, 2, id="direct-time-depth-2"),
+    pytest.param("lag(int x) => x[3]", "lag(time)", 0, 3, id="direct-time"),
     # The two outer calls share one written inner call. Its history must
     # belong to each invocation path, and [1] is taken *before* sampling.
     pytest.param("lag(int x) => x[3]\nwrapped() => lag(time[1])",
-                 "wrapped()", 1, id="wrapped-shifted-time"),
+                 "wrapped()", 1, 3, id="wrapped-shifted-time"),
 ])
-def test_sparse_and_dense_requested_timestamps(helpers, lag, field_lag):
-    # Inference from the issue's call-site rule, not a TradingView plot or
-    # stored fixture (no capture date). At bar 8, [3] means bar 0 at the
-    # sparse site and bar 5 at the dense site; the last sparse call was bar 7.
+def test_sparse_and_dense_requested_timestamps(helpers, lag, field_lag, depth):
+    # TradingView's documented rule (Execution model, "Time series in
+    # scopes"), not a TradingView plot or stored fixture (no capture date): a
+    # written call keeps one entry per bar, committed only on a bar whose
+    # closing evaluation ran the call, and [k] reads the last entry committed
+    # as of k bars back. At bar 8, [3] is bar 5's entry at both sites: bar 5
+    # itself at the dense site, and at the sparse site bar 2, the last call
+    # up to bar 5 (the calls at bars 7 and 8 are later than the offset).
     # The first child takes the opposite branch from the completed bar: a
     # provisional call must neither consume history nor leave a phantom slot.
     times = [_START + i * _BAR_MS for i in range(16)]
@@ -97,9 +105,10 @@ def test_sparse_and_dense_requested_timestamps(helpers, lag, field_lag):
     )
     for timestamp, complete, close, sparse, dense in rows:
         i = index[int(timestamp)]
-        prior = [j for j in _TAKEN if j < i]
-        sparse_index = prior[-3] - field_lag if len(prior) >= 3 else -1
-        dense_index = i - 3 - field_lag
+        # The entry of bar i - depth: the last completed call up to that bar.
+        committed = [j for j in _TAKEN if j <= i - depth]
+        sparse_index = committed[-1] - field_lag if committed else -1
+        dense_index = i - depth - field_lag
         expected_sparse = times[sparse_index] if sparse_index >= 0 else -1
         expected = (expected_sparse if float(close) > 10 else -2,
                     times[dense_index] if dense_index >= 0 else -1)
