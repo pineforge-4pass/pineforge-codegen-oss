@@ -7,7 +7,9 @@ request at all: 3 lookups, 20 seconds apart. If the third answer is empty too,
 the step writes ok=false, reports DEFERRED_NOT_FOUND and fails.
 
 An answer that lists a pull request is final. No match and two matches skip as
-before, without another lookup. A lookup that fails ends the step.
+before, without another lookup. A lookup that fails ends the step. So does an
+answer with no page at all: it is not an empty answer, and the step refuses it
+at once.
 
 Each row runs the shipped step script with bash. The `gh` and `sleep` commands
 on PATH are stand-ins that record their calls; the `sleep` one never waits.
@@ -107,11 +109,15 @@ def skip_notice(count):
 
 
 EMPTY = [[]]
+# An answer of zero pages. EMPTY is one page that lists no pull request; here
+# no page was returned at all.
+NO_PAGE = []
 FOUND = [[listed(merged_pr())]]
 NOT_FOUND = (
     f"DEFERRED_NOT_FOUND: no merged PR found for {MERGE_SHA} after 3 attempts; "
     "baseline unchanged"
 )
+NO_PAGE_REFUSAL = "merged PR response has no page"
 RESOLVED_OUTPUTS = {
     "merge_sha": MERGE_SHA, "head_sha": HEAD_SHA, "pr_number": "17",
     "pr_url": f"https://github.com/{REPO}/pull/17",
@@ -156,6 +162,15 @@ ROWS = [
         outputs={"ok": "false"},
         calls=(LOOKUP, WAIT, LOOKUP, WAIT, LOOKUP),
         summary=f"baseline promotion: {NOT_FOUND}\n",
+    ),
+    Row(
+        "three answers of zero pages are refused at once, without a retry",
+        replies=(NO_PAGE, NO_PAGE, NO_PAGE, FOUND),
+        exit_code=1,
+        stdout=f"::error title=authz::{NO_PAGE_REFUSAL}\n",
+        outputs={},
+        calls=(LOOKUP,),
+        summary=f"authz: REFUSED: {NO_PAGE_REFUSAL}\n",
     ),
     Row(
         "a non-empty answer without a match skips without a retry",

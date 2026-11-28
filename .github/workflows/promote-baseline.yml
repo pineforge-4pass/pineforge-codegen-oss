@@ -360,6 +360,10 @@ jobs:
                   or any(not isinstance(pr, dict) for page in pages for pr in page)):
               skip("invalid merged PR response page array")
               raise SystemExit(0)
+          # An answer with no page at all is an anomaly, never an empty result:
+          # it fails the run at once, with no retry and no release exemption.
+          if not pages:
+              fail("merged PR response has no page")
           matches = [pr for page in pages for pr in page
                      if pr.get("state") == "closed"
                      and pr.get("merged_at") is not None
