@@ -7,7 +7,7 @@ from tests._e2e import reference_codegen, transpile_json
 from tests.test_security_helper_arg_history import _run_requested
 
 
-_BASE = "11568b99a3272ef1f40ab94cf7debf74f24f4eec"
+_BASE = "c6ba97f29d4a72437292878dc93a1f5a93ff365f"
 _ISSUE = """//@version=6
 strategy("string history in a requested helper")
 string txt = str.tostring(close)
