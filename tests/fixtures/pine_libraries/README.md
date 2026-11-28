@@ -1,7 +1,7 @@
 # Synthetic Pine libraries
 
-Clean-room libraries written for PineForge's library inliner tests (lanes
-XSYM-C, CG-SESSION-REPIN and TAIL-F), laid out as `PINEFORGE_PINE_LIBRARIES` lays a
+Clean-room libraries written for PineForge's library inliner tests,
+laid out as `PINEFORGE_PINE_LIBRARIES` lays a
 library out: `<user>/<name>/<version>.pine`. Every file carries an SPDX
 Apache-2.0 header and is published nowhere; the `pftest` user does not exist
 on TradingView.

@@ -1,37 +1,37 @@
-"""Where a lane integrated by CGINT5a meets a rule already on main, or changes
-a function one of main's lanes changed, the integration keeps both rules
-(integration cases for items 1, 2 and 4, cut on 9361dbb, on
-main's CGINT4 and TV-DEFAULTS; item 3 and CG-CHART-EMA-SEED are held). Each
+"""Where an integrated change meets a rule already on main, or changes
+a function an earlier change on main changed, the integration keeps both rules
+(integration cases for items 1, 2 and 4, cut on 9361dbb;
+item 3 is held). Each
 case runs the composition end to end -- ``transpile_json``, the built
 runtime, ``run_strategy.py`` -- or pins the C++ where the rules decide the
 lowering. ``MAIN`` is the integration base, replayed beside a case to show
 what it missed:
 
 * ``ExprVisitor._visit_binop`` / ``_lower_binop`` and the payload builder's
-  ``lower()`` (``SecurityEmitter._build_security_expr``): CG-SILENT item 1
+  ``lower()`` (``SecurityEmitter._build_security_expr``): item 1
   folds integer arithmetic over constants past int32 into a 64-bit literal
   (``_fold_int32_overflow_cpp``: a payload expands a global into its
   declaration); main's quirk 19 binds a binary operator's left operand first
-  when the other can observe its effect (``_left_operand_first``), and XSYM-C
+  when the other can observe its effect (``_left_operand_first``), and main
   refuses ``==`` / ``!=`` of a v5 library's bool. One expression that needs
   the order and holds such a product keeps both, on the chart and in a
   payload; a payload builtin's argument, which the chart's visitor renders
   (``nz(400 * MS)``), folds in ``_lower_binop``; and a v5 library body folds
   its constant's product while its bool comparison stays refused.
-* A top-level constant's 64-bit slot and an if without else: CG-SILENT item
+* A top-level constant's 64-bit slot and an if without else: item
   1 declares the slot a top-level constant past int32 initializes
-  ``int64_t`` (``_literal_wide_global``), and CG-OPEN-ITEMS (main) gives an
+  ``int64_t`` (``_literal_wide_global``), and main gives an
   if that runs no arm the na of its target's C++ type
   (``_visit_selection_value``): ``na<int64_t>()``, and the arm's value keeps
   64 bits.
 * A history-read top-level ``var`` with a ``switch`` / ``if`` initializer:
-  CG-XSYM-A2 (main) runs such a selection at the declaration of a primitive
+  main runs such a selection at the declaration of a primitive
   ``var``, but a top-level one read at ``[k]`` kept the first-bar preamble,
-  whose analyzer spelling of a selection did not compile; CG-SILENT item 4
+  whose analyzer spelling of a selection did not compile; item 4
   sends a history-read ``var`` whose initializer is not a constant to its
   declaration, where the selection now runs into its element-typed local.
 * A helper-local ``var`` TA length in a helper the payload reads a parameter
-  of: XSYM-A (main) copies the request per parameter value, CG-SILENT item 2
+  of: main copies the request per parameter value, item 2
   reads the local on the requested bars. Each copy counts its own requested
   bars and equals its spelled-out twin over the payload's ``bar_index``.
 """
@@ -87,7 +87,7 @@ def _main_cpp(tmp_path: Path, source: str) -> dict:
 
 # ---------------------------------------------------------------------------
 # One binary operator: 64-bit constant folding beside the left-first order
-# (CG-SILENT item 1 x quirk 19 x XSYM-C's v5 bool comparison)
+# (item 1 x quirk 19 x the v5 bool comparison)
 # ---------------------------------------------------------------------------
 
 BINOP = HEAD + '''const int MS = 7200000
@@ -158,7 +158,7 @@ def test_a_v5_library_folds_its_products_and_refuses_its_bool_comparison():
 
 # ---------------------------------------------------------------------------
 # A top-level constant's 64-bit slot takes the 64-bit na of an if without else
-# (CG-SILENT item 1 x CG-OPEN-ITEMS 9ad5694)
+# (item 1 x change 9ad5694)
 # ---------------------------------------------------------------------------
 
 WIDE_IF_NA = HEAD + '''const int MS = 7200000
@@ -185,7 +185,7 @@ def test_the_wide_slot_is_int64_and_takes_its_own_na():
 
 # ---------------------------------------------------------------------------
 # A history-read top-level var with a selection initializer
-# (CG-SILENT item 4 x CG-XSYM-A2 68b0a1d)
+# (item 4 x change 68b0a1d)
 # ---------------------------------------------------------------------------
 
 VAR_SELECTION = HEAD + '''mode = input.string("A", "Mode", options = ["A", "B", "C"])
@@ -230,7 +230,7 @@ def test_main_pushed_the_analyzers_spelling_of_the_selection(tmp_path):
 
 # ---------------------------------------------------------------------------
 # A helper's var TA length in per-value payload copies
-# (CG-SILENT item 2 x XSYM-A 2565f5f)
+# (item 2 x change 2565f5f)
 # ---------------------------------------------------------------------------
 
 HELPER_VAR_LENGTH = HEAD + '''h(src) =>

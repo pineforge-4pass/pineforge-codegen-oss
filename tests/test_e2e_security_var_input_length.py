@@ -9,8 +9,8 @@ INT_MIN, and the run segfaulted (a pre-existing review defect). A plain
 input read there already used its getter; ``_security_var_input_call`` now
 gives a never-reassigned ``var`` input the same getter.
 
-TradingView's tape of ``fixtures/open_items_tv/sec_var_input_len`` (lab tv
---no-note, BINANCE:ETHUSDT.P 15, 265 closes) spells the helper with the
+TradingView's tape of ``fixtures/open_items_tv/sec_var_input_len``
+(BINANCE:ETHUSDT.P 15, 265 closes) spells the helper with the
 ``var`` input length, bare and under ``nz``, beside the helper with the
 literal 6; the replay compares all 265 closes, and an override of the input
 builds the length it names.

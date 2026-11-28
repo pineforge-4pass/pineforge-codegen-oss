@@ -1,4 +1,4 @@
-# CG-SECURITY-2 TradingView trade evidence
+# `request.security` helper shapes: TradingView trade evidence
 
 Synthetic probes for `request.security` helper
 shapes) and their unedited TradingView trade exports. They contain no closed

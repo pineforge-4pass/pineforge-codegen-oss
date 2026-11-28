@@ -7,9 +7,6 @@ for byte: `strategy.pine`, `tv_trades.csv` (times at UTC+8), `metrics.json`,
 `meta.json`. The probes are synthetic, written for these lanes; no closed or
 third-party strategy is involved. Every readout is an entry whose comment carries
 the values the script read on its bar (the entry fills at the next bar's open).
-The `w8b-*` tapes are copied from
-`exec/W8B-SIGSTATE-2-scratch/synth/tapes/`), the `w9dg-*` tapes lane
-CG-W9-MISC's.
 
 Each tape was exported from a TradingView run on BINANCE:ETHUSDT.P at 15
 minutes for 2025-04-01 to 2025-05-01.
@@ -67,8 +64,8 @@ The two evidence-only tapes do not replay through PineForge today: a
 `map<int, box>` is outside the supported map subset and `na()` of a string
 does not compile. `-holders3` and `-label-collect2` are their replayable
 variants. `w9dg-pin-holders2`, whose non-var box carried by `s := s[1]`
-declared as `Series<double>` and did not compile, replays since lane
-CG-UDT-HIST stores a drawing's history as its handles.
+declared as `Series<double>` and did not compile, replays since a
+drawing's history is stored as its handles.
 
 `tests/test_e2e_drawing_lifetime.py` replays the sixteen replayable tapes end
 to end -- `transpile_json`, the built runtime, `run_strategy.py` over the corpus

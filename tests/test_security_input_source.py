@@ -9,14 +9,14 @@ RSI of its source), and refused its history through a helper parameter
 (``logeq(_s, _l) => ta.change(_s, _l) / _s[_l]`` called as
 ``logeq(lemaSrc, lemaLen)``, job-1361-shitholed-lema-system-v2-4): "request.
 security helper-parameter history currently requires a direct OHLC/time
-bar-series binding". CG-W9-SEC (on main) reads the requested bar's value of
+bar-series binding". Main reads the requested bar's value of
 the series ``get_input_source`` selects (the ``_pf_src`` lambda,
 ``_security_source_input_expr``) and keeps one per completed requested bar
 for its history (``_sec<N>_hist_input_source_K``); the earlier cases carried
 the same rule on a base without it, and its builder gave way to main's in
-the integration (CGINT4). A parameter of the helper holding the request,
-bound to such a value, is put in its place (``security_contexts``, lane
-CG-XSYM-A2): ``g(_e) => request.security(..., _e[1])`` called as ``g(src)``
+the integration. A parameter of the helper holding the request,
+bound to such a value, is put in its place (``security_contexts``):
+``g(_e) => request.security(..., _e[1])`` called as ``g(src)``
 read na, and ``h(_v) => request.security(..., ta.sma(_v, 3))`` was refused
 ("Unknown variable '_v'").
 
@@ -146,9 +146,9 @@ def test_method_reading_a_source_history_inlines_on_the_requested_bar():
 
 
 def test_source_beside_a_global_under_builtins_reads_the_requested_bar():
-    # CG-W9-SEC (on main) reads a source input on the requested bar under a
-    # builtin call as well, and CG-OPEN-ITEMS 5b3791d re-evaluates the global
-    # g there: the evaluator keeps no chart read. (Lane CG-XSYM-A2 pinned the
+    # Main reads a source input on the requested bar under a
+    # builtin call as well, and 5b3791d re-evaluates the global
+    # g there: the evaluator keeps no chart read. (An earlier pin held the
     # chart fallback of nz(src) here, on a base with neither rule.)
     result = transpile_full(PRELUDE + (
         'src = input.source(close, "S")\ng = ta.sma(close, 5)\n'

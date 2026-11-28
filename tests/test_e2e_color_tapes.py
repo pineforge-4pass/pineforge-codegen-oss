@@ -43,6 +43,7 @@ import pytest
 from tests._e2e import (
     build_strategy_library, closed_trades, skip_unless_e2e_env, transpile_json,
 )
+from tests._fixture_range import assert_range_covered
 from tests._pine_libraries import Layout
 
 
@@ -118,9 +119,7 @@ def test_tapes_are_the_recorded_exports() -> None:
         pine_bytes = (FIXTURES / slug / "strategy.pine").read_bytes()
         assert hashlib.sha256(tape_bytes).hexdigest() == metrics["tvTradesCsvHash"], slug
         assert hashlib.sha256(pine_bytes).hexdigest() == metrics["sourceArtifactHash"], slug
-        assert (metrics["range"]["covered"] is True
-                and metrics["range"]["returned"]["from"] <= metrics["range"]["requested"]["from"]
-                and metrics["range"]["returned"]["to"] >= metrics["range"]["requested"]["to"]), slug
+        assert_range_covered(metrics, slug)
         assert len(read_tape(slug)) == metrics["trades"], slug
     # t<k>: color.t of color.new(color.red, k) and of color.new(color.red, k + 0.5), ...
     sweep = {comment.split(":")[0]: comment.split(":")[1].split(",")

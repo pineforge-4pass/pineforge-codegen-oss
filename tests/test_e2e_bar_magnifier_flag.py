@@ -40,6 +40,7 @@ from tests._e2e import (
     REPO_ROOT, build_strategy_library, derive_chart_feed, reference_codegen, reference_engine,
     skip_unless_e2e_env, transpile_json,
 )
+from tests._fixture_range import assert_range_covered
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "bar_magnifier"
@@ -196,9 +197,7 @@ def test_the_tapes_are_the_recorded_exports():
         pine = hashlib.sha256((FIXTURES / tape / "strategy.pine").read_bytes()).hexdigest()
         assert digest == metrics["tvTradesCsvHash"] == meta["tv_trades_sha256"], tape
         assert pine == meta["pine_sha256"], tape
-        assert (metrics["range"]["covered"] is True
-                and metrics["range"]["returned"]["from"] <= metrics["range"]["requested"]["from"]
-                and metrics["range"]["returned"]["to"] >= metrics["range"]["requested"]["to"]), tape
+        assert_range_covered(metrics, tape)
         assert (metrics["symbol"], metrics["interval"]) == ("BINANCE:ETHUSDT.P", "15"), tape
         assert (meta["chart"]["from"], meta["chart"]["to"]) == ("2026-01-29", "2026-02-01"), tape
         declared = "use_bar_magnifier=true" in (FIXTURES / tape / "strategy.pine").read_text()

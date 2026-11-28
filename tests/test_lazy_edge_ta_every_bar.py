@@ -80,7 +80,7 @@ def _index(cpp: str, line: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# The four lab tv pins (verbatim strategy.pine bodies) + the production shape
+# The four TradingView pins (verbatim strategy.pine bodies) + the production shape
 # ---------------------------------------------------------------------------
 
 PIN_RING_LAZYAND = (

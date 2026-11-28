@@ -1,7 +1,7 @@
 """Find a fixture that lives in the private fixtures repository.
 
-Fixtures that cannot be public are overlaid by the lab onto the paired ENGINE tree, under ``tests/codegen-fixtures/``, with
-``PINEFORGE_PRIVATE_FIXTURES=<commit>`` exported (``lab remote submit --private-fixtures``). A test names such a file
+Fixtures that cannot be public are overlaid onto the paired ENGINE tree, under ``tests/codegen-fixtures/``, with
+``PINEFORGE_PRIVATE_FIXTURES=<commit>`` exported. A test names such a file
 relative to that folder and calls ``private_fixture``:
 
 * the file is there: its path comes back;

@@ -1,6 +1,6 @@
 """KC's middle band follows TradingView's warm-up EMA basis.
 
-The covered TradingView tape in ``/tmp/CG-NABOOL-scratch/tv-kc`` records both
+A covered TradingView tape records both
 the KC middle and an independent EMA as ``na`` on bar 0, first finite at bar
 19. The generated KC shim applies that warm-up to its internal basis. The
 standalone engine EMA still has its historical finite bar-0 behavior; the

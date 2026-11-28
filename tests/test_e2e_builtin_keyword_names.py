@@ -3,7 +3,7 @@
 TradingView's signatures are ``nz(source, replacement)``, ``fixnan(source)``
 and ``str.repeat(source, repeat, separator)``; ``nz(x = ...)`` and
 ``str.repeat(..., count = ...)`` are its compile errors ("The ... function
-does not have an argument with the name ...", lab tv --no-note). The
+does not have an argument with the name ..."). The
 signature registry named them ``x`` / ``y``, ``x`` and ``source`` /
 ``count`` without ``separator``, and the codegen read nz and fixnan by
 position: ``nz(x, replacement = y)`` read 0, ``nz(source = x)`` and

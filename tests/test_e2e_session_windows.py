@@ -43,6 +43,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from tests._e2e import build_strategy_library, run_strategy, skip_unless_e2e_env, transpile_json
+from tests._fixture_range import assert_range_covered
 from tests.test_e2e_session_ismarket import FLAGS, TRACE, next_chart_bar, read_tape, tape_file
 
 
@@ -162,7 +163,7 @@ def _recorded_window_tape(slug: str) -> tuple[set[str], set[str]]:
         == metrics["tvTradesCsvHash"], slug
     assert hashlib.sha256(tape_file(slug, "strategy.pine").read_bytes()).hexdigest() \
         == metrics["sourceArtifactHash"], slug
-    assert metrics["range"]["covered"] is True, slug
+    assert_range_covered(metrics, slug)
     tape = read_tape(slug)
     assert len(tape) == bars == metrics["trades"], slug
     assert all(flags["M"] and not flags["P"] and not flags["Q"] for _, flags in tape), slug

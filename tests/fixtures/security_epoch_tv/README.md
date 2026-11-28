@@ -8,8 +8,8 @@ BINANCE:BTCUSDT); `w9sec_epoch_security` spells the values. Each was exported
 on 2026-09-28 from a TradingView run on BINANCE:ETHUSDT.P at 15 minutes for
 2025-04-01 to 2025-04-08.
 
-TradingView ran each from 2025-04-01 00:00 UTC (the requested and returned
-ranges are equal). The
+TradingView ran each from 2025-04-01 00:00 UTC (the returned range covers
+the requested one). The
 `Date and time` column is Asia/Taipei (UTC+8); an exit with no `Signal` is
 TradingView closing the open trade at the range's end.
 

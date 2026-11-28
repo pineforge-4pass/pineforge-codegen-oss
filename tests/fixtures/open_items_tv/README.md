@@ -1,9 +1,9 @@
-# CG-OPEN-ITEMS TradingView trade evidence
+# Open items: TradingView trade evidence
 
 Synthetic public probes for open items and their unedited
 TradingView trade exports. They contain no closed or third-party source. Each
 was exported from a TradingView run on BINANCE:ETHUSDT.P at 15 minutes for
-2025-04-01 to 2025-04-03 (the requested and returned ranges are equal); the
+2025-04-01 to 2025-04-03 (the returned range covers the requested one); the
 tapes' `Date and time` column is the exporting
 account's chart timezone, Asia/Taipei (UTC+8). Every probe enters a long at
 00:00, 06:00, 12:00 and 18:00 UTC and closes it a bar later with an exit
@@ -148,8 +148,8 @@ although the colour only tints the chart.
 
 ## A global under a builtin call in a request.security payload
 
-This probe follows the CG-SECURITY-2 convention (`tests/fixtures/security2_tv/
-README.md`): exported for 2025-04-01 to 2025-04-08, it enters on
+This probe follows the convention of `tests/fixtures/security2_tv/
+README.md`: exported for 2025-04-01 to 2025-04-08, it enters on
 the bars at minute 0 and 30 and closes on the bars at minute 15 and 45, and
 TradingView books 265 of the closes.
 

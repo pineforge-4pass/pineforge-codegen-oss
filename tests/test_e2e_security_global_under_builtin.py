@@ -13,8 +13,8 @@ back to the builder. Its history under a builtin (``nz(s[1])``) stays the
 visitor's chart series, as the builder keeps no requested history of a
 global's expression, and now warns.
 
-TradingView's tape of ``fixtures/open_items_tv/sec_global_builtin`` (lab tv
---no-note, BINANCE:ETHUSDT.P 15, 265 closes) spells ``nz(s)``, ``nz(g)``
+TradingView's tape of ``fixtures/open_items_tv/sec_global_builtin``
+(BINANCE:ETHUSDT.P 15, 265 closes) spells ``nz(s)``, ``nz(g)``
 with ``g`` a ta.sma, ``nz(s, -1) + 1``, ``math.max(nz(s), 0)``,
 ``nz(s) + nz(f())`` and the bare ``s`` on every close; the replay compares
 all 265.

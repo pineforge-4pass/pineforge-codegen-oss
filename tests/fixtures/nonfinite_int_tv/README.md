@@ -2,8 +2,8 @@
 
 A public probe for a nonfinite Pine int and its unedited TradingView trade export. It contains
 no closed or third-party source. Exported on 2026-09-29 from a TradingView run on
-`BINANCE:ETHUSDT.P`, 15-minute chart, for 2025-04-01 to 2025-04-04; the requested and returned
-ranges are equal. The tape's `Date and time` column
+`BINANCE:ETHUSDT.P`, 15-minute chart, for 2025-04-01 to 2025-04-04; the returned range covers
+the requested one. The tape's `Date and time` column
 is the exporting account's chart timezone, Asia/Taipei (UTC+8).
 
 | File | sha256 |

@@ -77,6 +77,7 @@ from tests._e2e import (
     REPO_ROOT, build_strategy_library, reference_codegen, reference_engine, run_strategy,
     skip_unless_e2e_env, transpile_json,
 )
+from tests._fixture_range import assert_range_covered
 from tests._private_fixtures import private_fixture
 
 
@@ -366,9 +367,7 @@ def _recorded_tape(slug: str) -> list[tuple[int, dict[str, bool]]]:
     pine_bytes = tape_file(slug, "strategy.pine").read_bytes()
     assert hashlib.sha256(tape_bytes).hexdigest() == metrics["tvTradesCsvHash"], slug
     assert hashlib.sha256(pine_bytes).hexdigest() == metrics["sourceArtifactHash"], slug
-    assert (metrics["range"]["covered"] is True
-            and metrics["range"]["returned"]["from"] <= metrics["range"]["requested"]["from"]
-            and metrics["range"]["returned"]["to"] >= metrics["range"]["requested"]["to"]), slug
+    assert_range_covered(metrics, slug, extended_hours=slug == EXTENDED)
     tape = read_tape(slug)
     assert len(tape) == metrics["trades"], slug
     return tape

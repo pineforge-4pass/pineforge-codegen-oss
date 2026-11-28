@@ -1,8 +1,8 @@
 """Replay of the exit-comment tapes in ``fixtures/open_items_tv``.
 
 Each synthetic probe there opens a trade every six hours and spells the
-values under test in its exit comment; ``lab tv --no-note`` exported
-TradingView's trades on BINANCE:ETHUSDT.P 15 from 2025-04-01. ``tape``
+values under test in its exit comment; the tapes are TradingView's
+trades on BINANCE:ETHUSDT.P 15 from 2025-04-01. ``tape``
 reads an export (its ``Date and time`` column is the exporting account's
 chart timezone, Asia/Taipei), ``window_feed`` cuts the corpus ETH 15m feed
 to TradingView's run window, so a series' history and a ``var``'s first bar

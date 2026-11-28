@@ -3,7 +3,7 @@
 Public probes for runtime errors and their unedited TradingView trade
 exports. They contain no closed or third-party source. Exported on 2026-09-26
 from TradingView runs on `BINANCE:ETHUSDT.P`, 15-minute chart (`env_facts` again
-on 2026-09-27); the requested and returned ranges are equal for each. The tapes'
+on 2026-09-27); the returned range covers the requested one for each. The tapes'
 `Date and time` column is the exporting account's chart timezone, Asia/Taipei
 (UTC+8).
 
@@ -18,7 +18,7 @@ and `array_negative_index`, and 2025-04-01 to 2025-04-05 for `env_facts`.
 | `int64_cast_tv_trades.csv` (2 trades) | `e124a2ec381196546e2c87f0195cd04c8c3ebdf0135ce62b5fab0c4aacbcacbe` |
 | `array_negative_index.pine` | `e933c70282c0f1de83e9357a357f62246b871dad18d110c5f37089c29b0f7821` |
 | `array_negative_index_tv_trades.csv` (6 trades) | `37381433214bd5be03a12116dd6e200de44ef61fe1b398c912cf4a146a6d58e7` |
-| `array_negative_index_verdicts.json` | `7fb6cb4804d98fef0a7b59a8764457a4041f9b372c10e37ceddff94fecf66a33` |
+| `array_negative_index_verdicts.json` | `433903f42f093b9080adc86147a19bf4d5687c6e794145c7f4b0d4389e04e5d8` |
 | `env_facts.pine` | `5e40491653a205dcb81b1840852930232314d35028fb531e1bceb7dcf435fa2c` |
 | `env_facts_tv_trades.csv` (3 trades) | `2ca208c664a828979ceadfb7a42264affde15886c293cbdb390069997fc76939` |
 

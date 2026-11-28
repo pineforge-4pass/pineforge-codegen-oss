@@ -1,20 +1,20 @@
 """Where the silent cases meet codegen main's rules (integration cases).
 
-CG-SILENT-2 was cut before CGINT5a and CG-SESSION-REPIN reached main, and
-several of its items meet a rule one of those lanes made:
+The silent cases were cut before two later changes reached main, and
+several of their items meet a rule one of those changes made:
 
 - item 1 binds ``color.new`` / ``color.rgb`` keyword arguments, and
-  CG-SESSION-REPIN hands a transparency that is not an integer literal to the
+  main hands a transparency that is not an integer literal to the
   engine as a double: a keyword transparency takes a positional one's
   conversion (``_whole_transparency`` reads the bound argument);
 - item 3 computes a run-time integer ``+ - *`` past int32 in 64 bits, and
-  CGINT5a folds one over constants into a 64-bit literal: operands the C++
+  main folds one over constants into a 64-bit literal: operands the C++
   spells as int literals keep the fold, on the chart and in a payload, and the
   run-time product applies to the rest (``_visit_binop``, the payload's
-  ``BinOp``); a reassigned top-level constant past int32 (CGINT5a's
+  ``BinOp``); a reassigned top-level constant past int32 (main's
   ``int64_t`` slot) is no 32-bit operand (``_narrow_int_name_info``), and an
   input's named bound reads the top-level constant (``_input_int_bound``);
-- item 3's width is a provenance keyed by spelling, and CGINT5a keeps a
+- item 3's width is a provenance keyed by spelling, and main keeps a
   constant's width out of ``request.security`` helper state: a helper
   ``var``'s state family is read in the epoch-only mode
   (``_security_helper_var_state_type``), so a helper's ``var int n`` beside
@@ -27,14 +27,14 @@ several of its items meet a rule one of those lanes made:
   read that double as undefined behaviour (quirk 9).
 
 TradingView's tape of ``fixtures/cgint6_tv/cgint6_compositions`` spells each
-composition on every close, item 5c's nested helper call over CGINT5a's
+composition on every close, item 5c's nested helper call over main's
 helper ``var`` TA length and item 5a's color arrays included; the probe
 compiles on neither parent (main: a color ``array.from`` braced into doubles;
 the lane: the helper's ``c := math.min(c + 1, 5)`` recursed). Two divergences
 of main's rules are pinned, each with its own tape: TradingView truncates a
 constant ``color.new`` transparency (``cgint6_const_transp``; the
 composition tape's ``a0``), and ``ta.sma(src, 5)`` over ``var src =
-input.source(...)`` reads na (``cgint6_var_source``, CG-SILENT-2 item 5e).
+input.source(...)`` reads na (``cgint6_var_source``, item 5e).
 """
 
 from __future__ import annotations
@@ -113,9 +113,9 @@ def test_a_constant_color_new_transparency_is_truncated_on_tradingview(replays):
 
 
 def test_a_var_source_input_keeps_its_first_bar(replays):
-    """CG-SILENT-2 item 5e, re-checked on main: ``var src =
+    """Item 5e, re-checked on main: ``var src =
     input.source(close)`` read with history emitted raw Pine (``input``) that
-    did not compile until CGINT5a ran a history-read ``var``'s initializer at
+    did not compile until main ran a history-read ``var``'s initializer at
     its declaration. It holds the first bar's value on the chart and on the
     requested bars, as TradingView's tape shows. Pinned: ``ta.sma(src, 5)`` on
     the chart reads na, where TradingView reads the var's value --
@@ -149,7 +149,7 @@ def test_a_constant_product_keeps_its_fold_beside_a_run_time_one():
     cpp = transpile(HEAD + "const int MS = 7200000\nvar int q = 400\nq += 1\n"
                     "w = q * 7200000 + 400 * MS\nplot(w)\n")
     line = next(l.strip() for l in cpp.splitlines() if l.strip().startswith("w = "))
-    # CGINT5a's fold spells the constant product; CG-SILENT-2 computes the
+    # Main's fold spells the constant product; the run-time rule computes the
     # script variable's product in 64 bits, na-aware.
     assert "static_cast<int64_t>(2880000000LL)" in line
     assert "auto _pf_wide_l = (q); auto _pf_wide_r = (7200000);" in line

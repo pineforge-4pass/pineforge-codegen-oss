@@ -16,12 +16,12 @@ one later trade: side = sign of the value, quantity = |value| + 1. Each tape
 was exported from a TradingView run on BINANCE:ETHUSDT.P at 15 minutes for
 2025-04-01 to 2025-04-03.
 
-| tape | lane | trades | tv_trades.csv sha256 |
-|---|---|---:|---|
-| `w8e-r4-fn-global-history` | W8E-EXITS | 4 | `96be3d3fbf6ed865d0758dea6086e87ba48830a82486ceb69d9f1fe754417666` |
-| `w8e-r5-fn-builtin-history` | W8E-EXITS | 6 | `d6ded64b3de4b5d7be78bbc80df8ced2d13844f4258060ea511554ae54ceea16` |
-| `w9-fn-history-model` | CG-W9-FN | 7 | `e3ec407cd47c1eba3602e43bb6eed0da1837645b2ba491897e01b845f7ef184c` |
-| `w9-fn-history-conditional` | CG-W9-FN | 5 | `878d93629818a0b44f3a92e479e8e989869f190558fbdada32d41f9e27db0d63` |
+| tape | trades | tv_trades.csv sha256 |
+|---|---:|---|
+| `w8e-r4-fn-global-history` | 4 | `96be3d3fbf6ed865d0758dea6086e87ba48830a82486ceb69d9f1fe754417666` |
+| `w8e-r5-fn-builtin-history` | 6 | `d6ded64b3de4b5d7be78bbc80df8ced2d13844f4258060ea511554ae54ceea16` |
+| `w9-fn-history-model` | 7 | `e3ec407cd47c1eba3602e43bb6eed0da1837645b2ba491897e01b845f7ef184c` |
+| `w9-fn-history-conditional` | 5 | `878d93629818a0b44f3a92e479e8e989869f190558fbdada32d41f9e27db0d63` |
 
 What TradingView reads (bar index differences; the calls sit 8 bars apart,
 at 10:00 and 12:00 UTC, unless stated):

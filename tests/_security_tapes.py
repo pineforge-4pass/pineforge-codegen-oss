@@ -1,4 +1,4 @@
-"""Replays of the CG-SECURITY-2 TradingView tapes (``fixtures/security2_tv``).
+"""Replays of the TradingView tapes in ``fixtures/security2_tv``.
 
 Each probe closes its position with a comment spelling the values it read on
 that bar, so a tape's exit Signals are TradingView's values. A replay runs

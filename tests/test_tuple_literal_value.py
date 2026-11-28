@@ -1,7 +1,7 @@
 """A tuple literal is refused where TradingView refuses it.
 
 TradingView takes a tuple literal only as a function's or an if/switch arm's
-value and as a request.security expression. ``lab tv --no-note`` exports of
+value and as a request.security expression. TradingView exports of
 the three probes in ``fixtures/open_items_tv`` fail at TradingView's compiler:
 
 - ``tuple_literal_decl``: ``[a, b] = [close, open]`` is "Syntax error at input
@@ -15,7 +15,7 @@ PineForge dropped both tuple declarations ("/* unsupported tuple
 assignment */", a and b left at 0.0) and emitted the plain declaration as a
 tuple assigned to a double, which failed the C++ compile. The support
 checker now refuses each, located where TradingView's error is. None of the
-989 population, 536 scrapper or 643 public sources has one of the shapes, so
+989 population, 536 third-party or 643 public sources has one of the shapes, so
 no script that runs today is refused.
 """
 

@@ -9,7 +9,7 @@ fHist's doubles and the TU did not compile (the f04_tails_b probe,
 which TradingView runs). The member now takes the type of the local in the
 scope of the function that keeps the series.
 
-Two TradingView tapes (lab tv --no-note) are replayed:
+Two TradingView tapes are replayed:
 ``f04_tails_b`` (``fixtures/open_items_tv/tails_b``, fHist's series ``f``
 beside a string function ``f`` defined after it) and
 ``func_local_name`` (a float series beside a string and an int function,

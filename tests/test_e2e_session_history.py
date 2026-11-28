@@ -61,6 +61,7 @@ from tests._e2e import (
     REPO_ROOT, build_strategy_library, reference_codegen, run_strategy,
     skip_unless_e2e_env, transpile_json,
 )
+from tests._fixture_range import assert_range_covered
 from tests._private_fixtures import private_fixture
 from tests._legacy_cpp import without_trade_history_policy
 from tests.test_e2e_session_ismarket import next_chart_bar
@@ -280,9 +281,7 @@ def test_tapes_are_the_recorded_exports() -> None:
         pine_bytes = tape_file(slug, "strategy.pine").read_bytes()
         assert hashlib.sha256(tape_bytes).hexdigest() == metrics["tvTradesCsvHash"], slug
         assert hashlib.sha256(pine_bytes).hexdigest() == metrics["sourceArtifactHash"], slug
-        assert (metrics["range"]["covered"] is True
-                and metrics["range"]["returned"]["from"] <= metrics["range"]["requested"]["from"]
-                and metrics["range"]["returned"]["to"] >= metrics["range"]["requested"]["to"]), slug
+        assert_range_covered(metrics, slug, extended_hours=slug == EXTENDED)
         tape = read_tape(slug)
         assert len(tape) == metrics["trades"], slug
         values = [flags for _, flags in tape]
@@ -300,9 +299,7 @@ def test_tapes_are_the_recorded_exports() -> None:
         == metrics["tvTradesCsvHash"]
     assert hashlib.sha256(tape_file(FUNCTIONS, "strategy.pine").read_bytes()).hexdigest() \
         == metrics["sourceArtifactHash"]
-    assert (metrics["range"]["covered"] is True
-            and metrics["range"]["returned"]["from"] <= metrics["range"]["requested"]["from"]
-            and metrics["range"]["returned"]["to"] >= metrics["range"]["requested"]["to"])
+    assert_range_covered(metrics, FUNCTIONS, extended_hours=True)
     tape = read_function_tape()
     assert len(tape) == metrics["trades"] == 639
     values = [flags for _, flags in tape]
@@ -520,7 +517,7 @@ REFUSED = {
         "a = w()\n"
         'x = request.security(syminfo.tickerid, "60", w()) or a\n', (5, 39), "a method"),
     # A builtin call's argument (``nz(session.ismarket[1] ? 1.0 : na)``) is no
-    # longer here: CG-SECURITY-2's payload builder lowers the history under a
+    # longer here: the payload builder lowers the history under a
     # builtin on the requested clock, the Series this lane gives a direct read
     # (tests/test_e2e_lane_compositions.py pins it against that read).
     "a method called on a receiver PineForge cannot type": (

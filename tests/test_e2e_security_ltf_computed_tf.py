@@ -1,5 +1,5 @@
 """A request timeframe the first bar computes with ``:=`` is registered with
-the value the first bar computes (W9-CG-LTF-TF-REGISTRATION).
+the value the first bar computes.
 
 The engine registers every request in ``configure_security_evaluators()``,
 before any bar. Registration expands the globals a timeframe reads into their

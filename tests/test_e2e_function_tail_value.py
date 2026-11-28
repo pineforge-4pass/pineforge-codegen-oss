@@ -8,7 +8,7 @@ channel of cs-lev-tradleware-gaussian-channel-stochrsi-eth ends its filter in
 (9 population probes, 0 trades against TradingView's 2 to 551).
 The same held for an ``if`` / ``switch`` arm whose last statement was one.
 
-TradingView's own tapes (``fixtures/w2_trio_tv/tail_*``, lab tv --no-note)
+TradingView's own tapes (``fixtures/w2_trio_tv/tail_*``)
 pin every shape, and the functions now return them:
 
 - ``x := e`` and each compound ``x op= e``: x's new value, typed as x;

@@ -10,7 +10,7 @@ metadata key ``"mincontract"`` (``runtime_overrides.syminfo_metadata``, the
 channel the lanes already declare ``qty_step`` through) and stays na when the
 run declares none.
 
-lab tv --no-note read-outs give TradingView's value per lane: 0.0001 on
+TradingView read-outs give its value per symbol: 0.0001 on
 BINANCE:ETHUSDT.P, 0.00001 on BINANCE:BTCUSDT, 0.01 on OANDA:EURUSD and
 OANDA:XAUUSD, 1 on NSE:NIFTY, CME_MINI:ES1! and NQ1!.
 The ETH one (``fixtures/w2_trio_tv/mincontract_exit``) replays on the corpus

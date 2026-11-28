@@ -1,6 +1,6 @@
-# CG-POPFIX TradingView trade evidence
+# `popfix_tv`: TradingView trade evidence
 
-Public probes written for CG-POPFIX and their unedited TradingView trade
+Public probes and their unedited TradingView trade
 exports. They contain no closed or third-party source. Exported on 2026-09-26
 from TradingView runs on `BINANCE:ETHUSDT.P`, 15-minute chart. The tapes'
 `Date and time` column is the exporting account's chart timezone,

@@ -1,4 +1,4 @@
-# CG-ARRAY-HIST TradingView evidence
+# Array history: TradingView evidence
 
 Synthetic probes for array history: the history-referencing
 operator `[]` on an array or a matrix, and an int value given to a float

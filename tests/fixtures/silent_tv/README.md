@@ -1,4 +1,4 @@
-# CG-SILENT TradingView trade evidence
+# Silent evaluation: TradingView trade evidence
 
 Synthetic probes for silent evaluation and their unedited TradingView
 trade exports. They contain no closed or third-party source. Each was exported

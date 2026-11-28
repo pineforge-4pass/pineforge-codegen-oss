@@ -1,4 +1,4 @@
-# CG-UDT-HIST TradingView evidence
+# User-defined-type history: TradingView evidence
 
 Synthetic probes for user-defined-type history: the history-referencing
 operator `[]` on a user-defined object or a drawing reference. They contain no

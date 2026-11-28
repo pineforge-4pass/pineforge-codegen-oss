@@ -1,7 +1,7 @@
-# CG-XSYM-A2 TradingView trade evidence
+# `request.security` payload probes: TradingView trade evidence
 
 Synthetic probes for a `request.security` payload
-defects XSYM-A left open) and their unedited TradingView trade exports. They
+defects the `xsym_tv` probes left open) and their unedited TradingView trade exports. They
 contain no closed or third-party source. Each was exported on 2026-09-28 from
 a TradingView run on BINANCE:ETHUSDT.P at 15 minutes for 2025-04-01 to
 2025-04-08.

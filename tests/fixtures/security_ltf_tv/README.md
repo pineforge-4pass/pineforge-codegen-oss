@@ -5,8 +5,8 @@ trade export. It contains no closed or third-party source. It was exported on
 2026-09-28 from a TradingView run on BINANCE:ETHUSDT.P at 15 minutes for
 2025-04-01 to 2025-04-08.
 
-TradingView ran it from 2025-04-01 00:00 UTC (the requested and returned
-ranges are equal). The
+TradingView ran it from 2025-04-01 00:00 UTC (the returned range covers
+the requested one). The
 probe enters on the bars at minute 0 and 30 and closes on the bars at minute
 15 and 45; each close's comment spells the values it reads on that bar
 (265 trades). The `Date and time` column is Asia/Taipei (UTC+8).

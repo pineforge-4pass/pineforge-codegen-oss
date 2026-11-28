@@ -2,7 +2,7 @@
 
 TradingView's verdict on 46 spellings (``fixtures/popfix_tv/
 version_directive_spellings.json``: each probe is the same strategy using
-v6-only syntax, exported with ``lab tv --no-note``; a v6 compile books 23
+v6-only syntax, exported from TradingView; a v6 compile books 23
 trades, anything else fails to compile). The directive is the FIRST line that
 holds nothing but ``//``, ``@version``, ``=`` and ASCII digits, with optional
 spaces, tabs or form feeds before ``//``, between ``//`` and ``@version``,

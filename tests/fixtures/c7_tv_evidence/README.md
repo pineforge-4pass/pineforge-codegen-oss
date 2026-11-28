@@ -120,8 +120,8 @@ and its band form retain `ta::VWAP` / `ta::VWAPBands`.
 
 ### Private VWAP first-value tape
 
-TradingView trade list for forex, kept in a private repository and overlaid by
-the lab onto the paired engine tree at `tests/codegen-fixtures/c7_tv_evidence/`.
+TradingView trade list for forex, kept in a private repository and overlaid
+onto the paired engine tree at `tests/codegen-fixtures/c7_tv_evidence/`.
 The source is read by the private fixture battery in
 `tests/test_host_member_names.py`. `tests/test_e2e_vwap_anchor.py` checks the
 first-value rule on the public engine feed.
