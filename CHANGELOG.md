@@ -42,6 +42,28 @@ supported as exact pairs; on the 0.x line they are independent. See the
   and `ta.highestbars` with simple or series lengths. Its offset counts chart
   bars back to the winning execution, including skipped bars
   ([#458](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/458)).
+- `ta.sma` called more than once on a bar, for example inside a `for` loop or
+  in a function a loop calls, now keeps one sample per bar for that call: the
+  input of the bar's last call, as TradingView does. Its window holds the
+  last `length` bars' samples. Every call used to add its input, so the
+  window held the last `length` call inputs, across bars, and the result
+  differed from TradingView on every bar where the call ran more than once,
+  with no message. This covers a constant, input, simple or per-bar length.
+  A `ta.sma` call that no loop reaches emits the same C++ as before, and
+  every other `ta.*` function called from a loop is unchanged. Regenerate
+  C++ and relink to apply the fix
+  ([#502](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/502)).
+- `ta.lowest` and `ta.highest` reassigned in the then body of a top-level
+  `if`, the form that uses the last `length` executions (#458, above), now
+  stop the run on the call's first execution when a constant or input length
+  is zero or less, as on TradingView, with its text for the call ("Invalid
+  value of the 'length' argument (0) in the 'lowest' function. It must be >
+  0."). Such a call used to return `na` on every bar and keep running. The
+  generated call now passes its length to the window as well; a valid length
+  computes what it computed before. `ta.highestbars` in the same form keeps
+  returning `na` for such a length: TradingView's answer there is not
+  measured. Regenerate C++ and relink
+  ([#503](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/503)).
 - `// @pf-trace` now reads prior values of `time`, `time_close`, `bar_index` and other built-in series even when only the pragma indexes them. An indexed built-in without traceable history reports an error at the pragma ([#486](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/486)).
 
 - `// @pf-trace` can now read bar history such as `close[1]` even when the strategy body never reads that history ([#482](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/482)).
@@ -159,8 +181,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `pineforge/source/pine_ta_length.hpp`; that name is now reserved. A length
   the script computes on each bar keeps its series class. A `ta.lowest` or
   `ta.highest` call that uses the last `length` executions of a top-level
-  `if` body (#458, above) is not declared with these types on the chart: with
-  a constant or input length of zero or less it still returns `na`.
+  `if` body (#458, above) is not declared with these types on the chart; with
+  a constant or input length of zero or less it stops the same way (#503).
   Regenerate C++ and relink.
 - Generated code requires a `PINEFORGE_HAS_PINE_*` feature macro after an
   engine header's include only when it declares an object of the type the

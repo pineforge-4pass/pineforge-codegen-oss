@@ -120,11 +120,15 @@ def test_n2_matrix_emits_distinct_plain_var_history_and_rollback_cells():
     assert "_security_helper_series_" not in cell00
 
     # 10: var forces requested-context persistence even without an explicit
-    # history read. Its initializer is captured once, new bars carry state,
-    # and same-bar recomputation rolls back to the prior bar (or first seed).
+    # history read. The first bar's close is provisional until confirmed;
+    # new bars carry state, and recomputations roll back before incrementing.
     key10 = _series_key(cell10)
     seed10 = f"{key10}@var_seed"
     assert f'_security_helper_series_["{seed10}"].push(bar.close);' in cell10
+    assert (
+        f'if (_security_helper_series_["{key10}"].size() == 1) '
+        f'_security_helper_series_["{seed10}"].update(bar.close);'
+    ) in cell10
     assert (
         f'_security_helper_series_["{key10}"].push('
         f'_security_helper_series_["{key10}"][0]);'
@@ -222,10 +226,9 @@ int main() {
 }
 """
     values = tuple(float(value) for value in _compile_and_run(transpile(_N2_MATRIX) + driver).split())
-    # f10's initializer captures close=1 only once. Each two-minute requested
-    # bar then increments once: 1 -> 2 -> 3. Without same-slot rollback the
-    # four child evaluations would incorrectly produce 5.
-    assert values == (5.0, 3.0, 2.0, 2.0)
+    # f10's first confirmed close is 2. Each two-minute requested bar adds
+    # one: 2 -> 3 -> 4. The provisional close of 1 must not become the seed.
+    assert values == (5.0, 4.0, 2.0, 2.0)
 
 
 def test_concordance_tuple_helper_shape_composes_offsets_and_compiles():

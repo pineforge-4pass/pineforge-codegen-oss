@@ -454,13 +454,15 @@ def _per_bar(cpp: str, members, label: str):
 # five of them.
 REBOUND_LENGTHS = {
     # ``for q = 1 to 3`` calls ta.sma three times on every bar, and each call
-    # is given the bar's close. The value kept is the third call's (q = 3):
-    # the mean of that close three times over.
+    # is given the bar's close. The call keeps one sample per bar, the input
+    # of the bar's last call, so the value kept, the third call's (q = 3), is
+    # the mean of the last three bars' closes: na on the first two bars, then
+    # 10 + 12 + 11 = 33 over 3, 12 + 11 + 15 = 38 over 3, and so on.
     "loop-binder": (
         oracle.LOOP_REFERENCE, ("picked",), lambda rows, table: oracle.column(rows),
-        ((3, 30), (3, 36), (3, 33), (3, 45), (3, 42), (3, 54),
-         (3, 39), (3, 51), (3, 60), (3, 48), (3, 66), (3, 57),
-         (3, 75), (3, 63), (3, 72), (3, 84), (3, 69), (3, 81)),
+        ((3, None), (3, None), (3, 33), (3, 38), (3, 40), (3, 47),
+         (3, 45), (3, 48), (3, 50), (3, 53), (3, 58), (3, 57),
+         (3, 66), (3, 65), (3, 70), (3, 73), (3, 75), (3, 78)),
     ),
     # ``int q = 7`` inside ``if close > open``: the call runs on the rising
     # bars only (0, 1, 3, 5, 7, 8, 10, 12, 14, 15, 17) and is given their

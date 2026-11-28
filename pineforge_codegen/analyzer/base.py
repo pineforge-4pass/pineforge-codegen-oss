@@ -118,6 +118,7 @@ from .operators import (
     source_builtin_result,
 )
 from .callable_history_names import AUTHORED_LOCAL_NAMES
+from .value_bindings import ValueBindings
 
 
 _BUILTIN_NAMESPACE_NAMES = frozenset({
@@ -665,7 +666,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             kind = drawing_all_kind(node)
             if kind is not None and id(node) not in allowed_drawing_reads:
                 self._error(drawing_all_refusal(kind), node.loc)
-        from .value_bindings import ValueBindings
         self._value_bindings = ValueBindings(self._ast, self._filename, self._budget)
         self._value_bindings.resolve()
         from .callable_history_names import separate_builtin_callable_locals
@@ -6979,6 +6979,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         return PineType.INT
                     if callee.member == "tonumber":
                         return PineType.FLOAT
+                if (callee.object.name == "timeframe" and callee.member == "from_seconds"
+                        and not ValueBindings.has_value_binding(callee.object)):
+                    return PineType.STRING
             return PineType.UNKNOWN
         return PineType.UNKNOWN
 
@@ -7970,11 +7973,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return main_type
         return result_type
 
-    def _check_timeframe_string_arguments(
+    def _check_timeframe_arguments(
         self, node: FuncCall,
         parameter_types: dict[str, PineType | TypeSpec] | None = None,
     ) -> None:
-        """Check string signature slots using lexical and written-call types."""
+        """Check timeframe signature slots using lexical and written-call types."""
         if self._pine_version != 6 or self._in_v5_library_definition(node):
             return
         callee = node.callee
@@ -7989,14 +7992,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return
         bound = self._bind_callable_args(node, intrinsic.param_names)
         for parameter, value in zip(intrinsic.primary.params, bound):
-            if value is None or parameter.pine_type != PineType.STRING:
+            if value is None:
                 continue
             actual = self._operator_operand_type(value, parameter_types)
-            if actual is None or actual in {
-                TypeSpec.primitive("string"), TypeSpec.primitive("na"),
-            }:
+            accepted = {parameter.pine_type.value, "na"}
+            if parameter.pine_type == PineType.INT:
+                # "number" proves a numeric domain but leaves its overload open.
+                accepted.update(("int64", "number"))
+            if actual is None or (actual.kind == "primitive" and actual.name in accepted):
                 # Untyped helper parameters stay open until their written
-                # call supplies a type. Bare na adopts the string signature.
+                # call supplies a type. Bare na adopts the parameter type.
                 continue
             function_name = intrinsic.name
             argument_type = public_type_name(actual) or str(actual)
@@ -8140,7 +8145,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 visited_member_arg_types[id(arg)] = self._visit(arg)
             for val in node.kwargs.values():
                 visited_member_arg_types[id(val)] = self._visit(val)
-            self._check_timeframe_string_arguments(node)
+            self._check_timeframe_arguments(node)
+            if (isinstance(obj, Identifier) and obj.name == "timeframe"
+                    and member == "from_seconds"
+                    and not ValueBindings.has_value_binding(obj)):
+                return PineType.STRING
             # UDT method call-site typing.  Method definitions may contain an
             # untyped parameter history read; resolve receiver + args here and
             # apply the same deferred map-history gate as regular UDFs before

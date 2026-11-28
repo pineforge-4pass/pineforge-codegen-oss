@@ -3098,6 +3098,10 @@ class TypeInferer:
             return None
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            if (namespace == "timeframe" and func_name == "from_seconds"
+                    and isinstance(node.callee.object, Identifier)
+                    and not ValueBindings.has_value_binding(node.callee.object)):
+                return TypeSpec.primitive("string")
             if (namespace is None and func_name in ("line", "box")
                     and len(node.args) == 1 and not node.kwargs
                     and self._is_na_expr(node.args[0])):

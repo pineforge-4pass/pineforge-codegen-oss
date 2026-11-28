@@ -182,6 +182,7 @@ from .helpers import (
 )
 from .id_sites import BUILTIN_NAMESPACES
 from .run_stops import request_stop
+from .timeframe_from_seconds import TIMEFRAME_FROM_SECONDS_NAME, timeframe_from_seconds
 from .tv_string_trim import TV_STRING_TRIM_NAME
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
@@ -2303,6 +2304,11 @@ class CallVisitor:
                     f"(history_advances_new_bar() ? {ta_mem}.compute({compute_args}) "
                     f": {ta_mem}.recompute({compute_args})))"
                 )
+            # A ta.sma call a loop can run several times on a bar keeps one
+            # sample per bar (``_ta_one_sample_per_bar_cpp``, codegen/ta.py).
+            once_per_bar = self._ta_one_sample_per_bar_cpp(ta_mem, compute_args)
+            if once_per_bar is not None:
+                return once_per_bar
             return (
                 f"(history_advances_new_bar() ? {ta_mem}.compute({compute_args}) "
                 f": {ta_mem}.recompute({compute_args}))"
@@ -3247,6 +3253,9 @@ class CallVisitor:
         # comes from a literal, an input or a user call. Bind by parameter
         # name and resolve the evaluated string, not the argument's AST form.
         if namespace == "timeframe":
+            if (func_name == "from_seconds" and isinstance(callee.object, Identifier)
+                    and not ValueBindings.has_value_binding(callee.object)):
+                return self._visit_timeframe_from_seconds(node)
             if func_name in ("change", "in_seconds"):
                 argument = self._resolve_func_args(
                     node, f"timeframe.{func_name}",
@@ -4595,6 +4604,44 @@ class CallVisitor:
     # ------------------------------------------------------------------
     # Arg/kwarg resolution (PineScript parameter signatures)
     # ------------------------------------------------------------------
+
+    def _visit_timeframe_from_seconds(self, node: FuncCall) -> str:
+        intrinsic = sigs.BUILTIN_FUNCTIONS["timeframe.from_seconds"]
+        parameter, = intrinsic.primary.params
+        argument = self._resolve_func_args(node, intrinsic.name).get(parameter.name)
+        if argument is None or len(node.args) + len(node.kwargs) != 1:
+            message, hint = render_diagnostic("PF-E1088", {
+                "name": intrinsic.name,
+                "message": f"requires exactly one '{parameter.name}' argument",
+                "spelled": f"{intrinsic.name}({parameter.name})",
+            })
+            self._codegen_error(node, message, hint)
+        if isinstance(argument, NumberLiteral) and type(argument.value) is int:
+            return self._cpp_std_string(timeframe_from_seconds(argument.value))
+
+        actual = self._type_spec_from_expr(argument)
+        cpp_type = self._text_type(argument)
+        if (cpp_type not in ("int", "int64_t", "double")
+                or (actual is not None and (
+                    actual.kind != "primitive"
+                    or actual.name not in ("int", "int64", "float", "number", "na")
+                ))):
+            from ..pine_spelling import expr_start
+
+            argument_type = public_type_name(actual) or public_cpp_type_name(cpp_type)
+            message, hint = render_diagnostic("PF-E2095", {
+                "function_name": intrinsic.name,
+                "argument_type": argument_type,
+                "parameter_type": parameter.pine_type.value,
+                "name": parameter.name,
+            })
+            self._codegen_error(expr_start(argument), message, hint)
+        if self._timeframe_from_seconds_name is None:
+            self._timeframe_from_seconds_name = self._allocate_generated_cpp_name(
+                TIMEFRAME_FROM_SECONDS_NAME, self._safe_name_occupied.copy(),
+            )
+        value = na_preserving_int_cast(self._visit_expr(argument), "int64_t")
+        return f"::{self._timeframe_from_seconds_name}({value})"
 
     def _visit_float_arg(self, node, default: str = "na<double>()") -> str:
         """Render an actual double argument through the numeric destination rule."""
