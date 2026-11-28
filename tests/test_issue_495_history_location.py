@@ -8,6 +8,7 @@ from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from tests._compile import compile_cpp
 from tests.test_issue_495_requested_string_history import _requested_values
+from tests.test_security_helper_arg_history import _run_requested
 
 
 @pytest.mark.parametrize("name", [
@@ -111,3 +112,42 @@ held := h()
 plot(v)
 """
     compile_cpp(transpile(source), label="later store with a loop-written string")
+
+
+@pytest.mark.parametrize("writer", [
+    pytest.param("""if close > open
+    for i = 0 to 1
+        txt := str.tostring(close + i)""", id="store-in-loop"),
+    pytest.param("""var int other = 0
+if close < open
+    other := 0
+else if close > open
+    txt := str.tostring(close)
+    for i = 0 to 1
+        other += i
+plot(other)""", id="loop-beside-store"),
+])
+def test_later_store_keeps_chart_history_for_if_with_loop(writer):
+    source = f"""//@version=6
+strategy("store in an if with a loop")
+string txt = ""
+{writer}
+h() => str.length(txt[2])
+var int held = 0
+v = request.security(syminfo.tickerid, "240", held)
+held := h()
+plot(v)
+"""
+    # The first three hourly children rise and write strings of the same
+    # length. At the four-hour close, chart txt[2] therefore has that length.
+    groups = tuple(
+        (start, start + 1, start + 2, final)
+        for start, final in ((100, 7), (1000, 42), (10000, 316), (100000, 2024), (1000000, 5))
+    )
+    rows = _run_requested(transpile(source), {"chart60": (60, groups)}, group_minutes=240)
+    completed = [row for row in rows["chart60"] if row.complete]
+    actual = [(row.timestamp, row.close) for row in completed]
+    expected = [(slot * 240 * 60_000, group[-1]) for slot, group in enumerate(groups)]
+    assert actual == expected, f"NOT COMPARED: completed bars {actual}, expected {expected}"
+    # Four-hour bars two slots back closed at 7, 42, 316; their strings have lengths 1, 2, 3.
+    assert [row.value for row in completed[2:]] == [5, 6, 7]
