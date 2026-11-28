@@ -2627,18 +2627,23 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                    for name, info in self._global_binding_infos.items()):
             return
 
-        # Match _emit_security_rebind_stmt: a replay runs the RHS of a
-        # selected store and its enclosing conditions, not its siblings.
+        # Rebinding evaluates selected stores and their guards, but
+        # _emit_security_rebind_stmt visits both arms of each selected if.
+        # A loop or switch in either arm blocks replay of the whole source.
         inputs: dict[str, list[ASTNode]] = {}
+        blocked_sources: set[int] = set()
 
-        def index_stores(statements, guards=()):
+        def index_stores(statements, guards=(), source=None):
             for stmt in statements:
                 if self._budget is not None:
                     self._budget.check(stmt.loc, Phase.ANALYZER)
+                top_stmt = stmt if source is None else source
                 if isinstance(stmt, IfStmt):
                     inner = (*guards, stmt.condition)
-                    index_stores(stmt.body, inner)
-                    index_stores(stmt.else_body or (), inner)
+                    index_stores(stmt.body, inner, top_stmt)
+                    index_stores(stmt.else_body or (), inner, top_stmt)
+                elif isinstance(stmt, (ForStmt, ForInStmt, WhileStmt, SwitchStmt)):
+                    blocked_sources.add(id(top_stmt))
                 elif isinstance(stmt, VarDecl) and self._direct_program_vars.get(stmt.name) is stmt:
                     inputs.setdefault(stmt.name, []).append(stmt.value)
                 elif isinstance(stmt, Assignment) and isinstance(stmt.target, Identifier):
@@ -2706,12 +2711,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                                if child is not payload)
             if not histories:
                 continue
-            # Add the string and its producers together. A loop or switch
-            # writer cannot be replayed by _emit_security_rebind_stmt. Keep
-            # this request's existing lowering if the new plan would send
-            # such a writer to that refusal (e.g. str.length(txt[2])).
+            # Add the string and its producers together only if their
+            # source statements can be replayed. Otherwise keep chart history.
             additions = replay.difference(call.mutable_globals)
-            if any(isinstance(stmt, (ForStmt, ForInStmt, WhileStmt, SwitchStmt))
+            if any(id(stmt) in blocked_sources
                    for name in additions for stmt in self._global_binding_infos[name].source_stmts):
                 continue
             self._requested_string_history_globals.update(histories)

@@ -26,7 +26,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `str.length(txt[1])` uses the string `txt` held on the previous requested
   bar, including when the script names the variable `open`. A later
   assignment that the request replays also reads that history on the
-  request's timeframe, including reassignments of the string itself
+  request's timeframe, including reassignments of the string itself.
+  If sampling the string would require replaying a loop or `switch`, even
+  beside its assignment in the same `if`, an existing read such as
+  `str.length(txt[2])` in a later assignment keeps using chart history
   ([#495](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/495)).
 
 - Inside `request.security`, a conditionally called helper that indexes a bar
