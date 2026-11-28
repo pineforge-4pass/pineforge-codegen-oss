@@ -23,7 +23,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 ## Unreleased (1.15.0)
 
 - `timeframe.from_seconds(seconds)` now returns Pine timeframe strings for
-  integer seconds, including series values ([#431](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/431)).
+  integer seconds, including series values. For example, 45 seconds gives
+  `"1"`, 86,399 gives `"1440"`, and 604,799 gives `"7D"`; an exact week
+  gives `"1W"`. One month is 2,628,003 seconds for this conversion. At
+  31,536,000 seconds the result reaches `"12M"`. A missing integer gives
+  `"0D"` ([#431](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/431)).
 
 - `// @pf-trace` now reads prior values of `time`, `time_close`, `bar_index` and other built-in series even when only the pragma indexes them. An indexed built-in without traceable history reports an error at the pragma ([#486](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/486)).
 
