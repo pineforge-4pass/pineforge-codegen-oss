@@ -495,6 +495,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # request.security rebinding helpers for mutable globals
         self._global_binding_infos: dict[str, MutableGlobalInfo] = {}
         self._global_reassigned_names: set[str] = set()
+        # Per request payload (node id): the number of statements each global
+        # had where the request is called (``_security_call_replay_names``).
+        self._security_call_knowledge: dict[int, dict[str, int]] = {}
         self._current_top_level_stmt: ASTNode | None = None
         self._global_scope = True
         self._static_vars: set[str] = set()
@@ -764,6 +767,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if info.is_var or name in self._global_reassigned_names
         }
         self._retain_security_value_copies(mutable_global_infos)
+        self._replay_later_store_reads()
         self._mark_execution_window_sites()
 
         pure_global_expr_map = {
@@ -2576,6 +2580,85 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             out |= self._collect_security_mutable_globals(child, resolving)
 
         return out
+
+    def _security_call_replay_names(self, expr_node: ASTNode | None) -> tuple[str, ...]:
+        """The names a request replays, as its call knows them: the mutable
+        globals its payload reads through the statements recorded so far
+        (``_collect_security_mutable_globals``).
+
+        The call cannot see a store recorded after it. The number of
+        statements each global had by then is kept with the payload, so
+        ``_replay_later_store_reads`` can tell the later ones."""
+        if expr_node is None:
+            return ()
+        if self._budget is not None:
+            self._budget.check(getattr(expr_node, "loc", None), Phase.ANALYZER)
+        names = self._collect_security_mutable_globals(expr_node)
+        # The first registration of a payload keeps its counts.
+        self._security_call_knowledge.setdefault(id(expr_node), {
+            name: len(info.source_stmts)
+            for name, info in self._global_binding_infos.items()
+        })
+        return tuple(sorted(names))
+
+    def _replay_later_store_reads(self) -> None:
+        """Replay the names that a request's later stores read.
+
+        The evaluator replays every statement of a name the request holds,
+        a store recorded after the request's call included, and it binds a
+        read of a name the request does not hold to the chart's member,
+        which holds what the previous chart bar left. A call's inventory
+        cannot see a later store (``held := a`` after
+        ``request.security(..., held[2])``), so the names such a store reads
+        join here, for every request, whichever route built its set: the
+        inventory of its call, or the copies
+        ``_retain_security_value_copies`` adds.
+
+        Each later statement goes through the walk the call used
+        (``_collect_security_mutable_globals``), which follows a name that
+        joins into its own statements. The walk stops at a name the request
+        already holds: the statements the call saw keep the call's
+        judgement, so a name only they read stays outside
+        (``_retain_security_value_copies``). A request keeps the set it had
+        when a name that would join has a statement the statement replay
+        refuses (a top-level switch or loop), so nothing is newly refused
+        for that reason.
+        """
+        def replays(stmt) -> bool:
+            # codegen/security.py, ``_emit_security_rebind_stmt``.
+            if isinstance(stmt, (SwitchStmt, ForStmt, ForInStmt, WhileStmt)):
+                return False
+            if isinstance(stmt, IfStmt):
+                return all(replays(child)
+                           for child in (*stmt.body, *(stmt.else_body or ())))
+            return True
+
+        for call in self._security_calls:
+            seen = self._security_call_knowledge.get(id(call.expression))
+            names = set(call.mutable_globals)
+            if seen is None or not names:
+                continue
+            if self._budget is not None:
+                self._budget.check(call.loc, Phase.ANALYZER)
+            # Held names, then every name already walked: each is walked once.
+            resolving = set(names)
+            joined: set[str] = set()
+            for name in sorted(names):
+                info = self._global_binding_infos.get(name)
+                if info is None:
+                    continue
+                for stmt in info.source_stmts[seen.get(name, 0):]:
+                    if self._budget is not None:
+                        self._budget.check(getattr(stmt, "loc", None), Phase.ANALYZER)
+                    reads = self._collect_security_mutable_globals(stmt, resolving)
+                    joined |= reads - names
+                    resolving |= reads
+            if not joined or not all(
+                    replays(stmt) for name in sorted(joined)
+                    for stmt in self._global_binding_infos[name].source_stmts):
+                continue
+            call.mutable_globals = tuple(sorted(names | joined))
+            call.depends_on_mutable_globals = bool(call.mutable_globals)
 
     def _retain_security_value_copies(
         self, mutable_infos: dict[str, MutableGlobalInfo],
