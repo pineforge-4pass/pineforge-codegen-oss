@@ -1,16 +1,12 @@
 # TAIL-H TradingView trade evidence: TA lengths read through an alias
 
 Synthetic probes for alias length and their unedited TradingView trade
-exports. They contain no closed or scraped source. Each was exported on
-2026-09-29 with
-
-```bash
-lab tv --pine <name>.pine --slug pf-<name, underscores as dashes> --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-08
-```
+exports. They contain no closed or third-party source. Each was exported on
+2026-09-29 from a TradingView run on BINANCE:ETHUSDT.P at 15 minutes for
+2025-04-01 to 2025-04-08.
 
 TradingView ran each from 2025-04-01 00:00 UTC (the export's requested and
-returned range, `rangeProof: covered`). Every probe trades a fixed quantity
+returned range). Every probe trades a fixed quantity
 of 1, enters on the bars at minute 0 and 30 and closes on the bars at minute
 15 and 45; each close's comment spells the values the probe reads on that
 bar, so a tape's exit `Signal`s are TradingView's values, one sample per

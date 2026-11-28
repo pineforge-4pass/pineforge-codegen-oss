@@ -1,22 +1,14 @@
 # K-RUNERR TradingView trade evidence
 
 Public probes for runtime errors and their unedited TradingView trade
-exports. They contain no closed or scraped source. Exported on 2026-09-26 with
-`lab tv --no-note` on `BINANCE:ETHUSDT.P`, 15-minute chart (`env_facts` again
-on 2026-09-27); `rangeProof` `covered` for each. The tapes'
+exports. They contain no closed or third-party source. Exported on 2026-09-26
+from TradingView runs on `BINANCE:ETHUSDT.P`, 15-minute chart (`env_facts` again
+on 2026-09-27); the requested and returned ranges are equal for each. The tapes'
 `Date and time` column is the exporting account's chart timezone, Asia/Taipei
 (UTC+8).
 
-```bash
-lab tv --pine int64_provenance.pine --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-03
-lab tv --pine int64_cast.pine --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-03
-lab tv --pine array_negative_index.pine --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-03
-lab tv --pine env_facts.pine --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-05
-```
+The window is 2025-04-01 to 2025-04-03 for `int64_provenance`, `int64_cast`
+and `array_negative_index`, and 2025-04-01 to 2025-04-05 for `env_facts`.
 
 | File | sha256 |
 |---|---|

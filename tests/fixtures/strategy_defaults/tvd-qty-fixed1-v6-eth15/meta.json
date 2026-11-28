@@ -1,8 +1,7 @@
 {
   "title": "TVD qty fixed1 v6",
   "slug": "tvd-qty-fixed1-v6-eth15",
-  "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
+  "source": "a TradingView run on 2026-09-26: BINANCE:ETHUSDT.P, 15 minutes, 2025-04-01 to 2025-05-01",
   "exportedAt": "2026-09-26T03:48:28.239Z",
   "chart": {
     "symbol": "BINANCE:ETHUSDT.P",

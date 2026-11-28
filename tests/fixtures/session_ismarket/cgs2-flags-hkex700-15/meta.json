@@ -1,8 +1,7 @@
 {
   "title": "CG-ISMARKET session flags",
   "slug": "cgs2-flags-hkex700-15",
-  "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
+  "source": "a TradingView run on 2026-09-26: HKEX:700, 15 minutes, 2025-03-03 to 2025-03-15",
   "exportedAt": "2026-09-26T09:28:07.471Z",
   "chart": {
     "symbol": "HKEX:700",

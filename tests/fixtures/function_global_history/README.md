@@ -7,20 +7,14 @@ or not) or on `bar_index` reads the history of that call site, not the
 chart's. The chart built-ins (`open`, `high`, `low`, `close`, `volume`,
 `time`, `hl2`, ...) keep the chart's history.
 
-Each directory is one `lab tv` export (channel `ws-report-v1`, `rangeProof`
-covered), byte for byte: `strategy.pine`, `tv_trades.csv` (times at UTC+8),
+Each directory is one TradingView export (the requested and returned ranges
+are equal), byte for byte: `strategy.pine`, `tv_trades.csv` (times at UTC+8),
 `metrics.json`, `meta.json`. `metrics.json` `tvTradesCsvHash` is the sha256
-of `tv_trades.csv`. The probes are synthetic; no closed or scraped strategy is
+of `tv_trades.csv`. The probes are synthetic; no closed or third-party strategy is
 involved. Every probe computes its values on 2025-04-01 and encodes each as
-one later trade: side = sign of the value, quantity = |value| + 1. The
-command, run once per tape on BINANCE:ETHUSDT.P 15 (`--no-note`: no campaign
-note was recorded):
-
-```sh
-source ~/code/pineforge-workflow/campaign/env.sh
-lab tv --pine <probe>.pine --symbol BINANCE:ETHUSDT.P --interval 15 \
-  --from 2025-04-01 --to 2025-04-03 --out <dir>/<tape> --slug <tape> --no-note --json
-```
+one later trade: side = sign of the value, quantity = |value| + 1. Each tape
+was exported from a TradingView run on BINANCE:ETHUSDT.P at 15 minutes for
+2025-04-01 to 2025-04-03.
 
 | tape | lane | trades | tv_trades.csv sha256 |
 |---|---|---:|---|
