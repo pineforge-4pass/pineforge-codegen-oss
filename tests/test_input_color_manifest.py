@@ -23,7 +23,9 @@ plot(close, color=lineColor)
 # Hand-transcribed from the independent TradingView v6 readout in
 # fixtures/color_tv/w11-color-v6-eth15/{strategy.pine,tv_trades.csv}: n0, n1,
 # n2 spell each named color's r,g,b,t. All seventeen have transparency 0.
-# This is test evidence, never the production palette or an engine substitute.
+# The fixture README records this inventory's provenance and packed-ARGB
+# spelling; this is test evidence, never the production palette or an engine
+# substitute.
 V6_REFERENCE = [
     ("aqua", 0xFF00BCD4), ("black", 0xFF363A45), ("blue", 0xFF2962FF),
     ("fuchsia", 0xFFE040FB), ("gray", 0xFF787B86), ("green", 0xFF4CAF50),
@@ -155,7 +157,16 @@ def test_all_literal_color_defaults_equal_the_paired_engines_compiled_values():
     assert all(entry["type"] == "color" for entry in full["inputs"])
     receipt = json.loads(run_emitted_tu(full["cpp"], RECEIPT_DRIVER, opt="-O0",
                                        label="input.color compiled defaults #231"))
-    for entry, checked, (_, expected) in zip(full["inputs"], receipt["inputs"], expressions):
+    manifest_inputs = full["inputs"]
+    checked_inputs = receipt["inputs"]
+    counts = (len(manifest_inputs), len(checked_inputs), len(expressions))
+    if len(set(counts)) != 1:
+        pytest.fail(
+            "NOT COMPARED: input.color rows have different counts: "
+            f"manifest={len(manifest_inputs)}, native={len(checked_inputs)}, "
+            f"expressions={len(expressions)}"
+        )
+    for entry, checked, (_, expected) in zip(manifest_inputs, checked_inputs, expressions):
         assert entry["title"] == checked["name"]
         assert entry["default"] == int(checked["default"]) == expected
         assert entry["supported"] is checked["supported"] is True

@@ -15,6 +15,15 @@ fractional one goes through the byte (`color.new(c, 10.5)` reads 11 and
 `color.red` (#FF5252), `color.teal` (#00897B) and `color.yellow` (#FFEB3B)
 only.
 
+The v6 packed ARGB inventory used by the input-color manifest is
+`aqua=0xFF00BCD4`, `black=0xFF363A45`, `blue=0xFF2962FF`,
+`fuchsia=0xFFE040FB`, `gray=0xFF787B86`, `green=0xFF4CAF50`,
+`lime=0xFF00E676`, `maroon=0xFF880E4F`, `navy=0xFF311B92`,
+`olive=0xFF808000`, `orange=0xFFFF9800`, `purple=0xFF9C27B0`,
+`red=0xFFF23645`, `silver=0xFFB2B5BE`, `teal=0xFF089981`,
+`white=0xFFFFFFFF`, and `yellow=0xFFFDD835`. Every value has `t=0`
+and therefore an `0xFF` alpha byte.
+
 Each directory is one `lab tv --no-note` export (channel `ws-report-v1`,
 `rangeProof` covered), byte for byte: `strategy.pine`, `tv_trades.csv` (times
 at UTC+8), `metrics.json` and `meta.json`, on BINANCE:ETHUSDT.P 15 from
