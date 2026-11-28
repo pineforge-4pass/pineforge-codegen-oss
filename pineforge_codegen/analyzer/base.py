@@ -2711,10 +2711,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
             ``pending`` pairs each node with whether its value is sampled;
             ``declarations`` are strings whose history is read as it stands.
-            The string histories the walk meets are returned too.
+            The string histories the walk meets are returned too. A sampled
+            name whose value the walk cannot follow is returned as well, and
+            joins ``incomplete`` (the fail-safe before the return).
             """
             names: set[str] = set()
             histories: dict[str, VarDecl] = {}
+            # Sampled reads of a name the walk passes over.
+            unfollowed: list[Identifier] = []
 
             def sample(name):
                 # Already replaying a current value is not proof that
@@ -2756,8 +2760,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                                 sample(node.name)
                             else:
                                 pending.append((declaration.value, True))
+                        elif sampling:
+                            unfollowed.append(node)
                         continue
                     if decl is not self._direct_program_vars.get(node.name):
+                        if sampling:
+                            unfollowed.append(node)
                         continue
                     if not (decl.is_var or decl.is_varip
                             or decl.name in self._global_reassigned_names):
@@ -2781,6 +2789,24 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 payload = _request_payload(node) if _request_name(node) else None
                 pending.extend((child, sampling) for child in syntax_children(node)
                                if child is not payload)
+            # The fail-safe, keyed on the declaration. A sampled read the
+            # walk passed over names a value it never followed, unless the
+            # name has no declaration to follow (a builtin such as ``close``
+            # and a parameter have none) or the walk visited that
+            # declaration as a statement, as it does every statement of a
+            # helper body it walks. Any other name, such as a local of a
+            # top-level ``if`` block (``string loc = u + "!"``, then
+            # ``txt := loc``), counts as incomplete: the names it is
+            # computed from are missing from this set, so a read that
+            # depends on it stays on chart history.
+            for node in unfollowed:
+                binding = self._identifier_decl_bindings.get(id(node))
+                if binding is None:
+                    continue
+                declaration, name = binding
+                if (declaration, True) not in seen and (declaration, False) not in seen:
+                    names.add(name)
+                    incomplete.add(name)
             return names, histories
 
         feeds: dict[str, set[str]] = {}

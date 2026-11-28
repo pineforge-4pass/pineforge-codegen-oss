@@ -4,7 +4,6 @@ import pytest
 
 from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.analyzer import Analyzer
-from pineforge_codegen.errors import CompileError, Level
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from tests._compile import compile_cpp
@@ -267,20 +266,9 @@ h() => str.length(copy[2])
 v = request.security(syminfo.tickerid, "240", h())
 plot(v + x + n)
 """
-    try:
-        values = _four_hour_values_after_warmup(source)
-    except CompileError as refusal:
-        # Refusing the script at translation time is the other accepted
-        # outcome: no value is read, so none is misread.
-        located = [(d.code, d.location.line, d.location.col) for d in refusal.diagnostics
-                   if d.level == Level.ERROR and d.location is not None]
-        assert located and all(code.startswith("PF-E") for code, _, _ in located), (
-            "refused with a diagnostic is a pass for this script, but this refusal "
-            f"has no located PF-E diagnostic: {refusal.diagnostics}"
-        )
-        return
+    values = _four_hour_values_after_warmup(source)
     assert values == [7, 8, 9], (
-        f"read {values}; a pass is chart history [7, 8, 9] or refused with a diagnostic "
+        f"read {values}; a pass is chart history [7, 8, 9] "
         "(the requested clock reads [3, 4, 5]; a txt that never gets its store, [2, 2, 2])"
     )
 
