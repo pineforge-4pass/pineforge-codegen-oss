@@ -1172,10 +1172,13 @@ PROMOTE_GUARD = r'''  promote-guard:
             push) ;;
             *) fail "event $EVENT_NAME does not run baseline promotion (only push and workflow_dispatch are allowed)" ;;
           esac
-          # Search every page: a second match must defer, never pick a PR.
-          pulls=$(gh api --paginate --slurp \
-            "repos/$REPO/commits/$SHA/pulls?per_page=100")
-          python3 - 3<<<"$pulls" <<'PY'
+          # Only an empty association result may be eventually consistent.
+          for attempt in 1 2 3; do
+            # Search every page: a second match must defer, never pick a PR.
+            pulls=$(gh api --paginate --slurp \
+              "repos/$REPO/commits/$SHA/pulls?per_page=100")
+            lookup_status=0
+            python3 - 3<<<"$pulls" <<'PY' || lookup_status=$?
           import json
           import os
           import re
@@ -1222,6 +1225,9 @@ PROMOTE_GUARD = r'''  promote-guard:
                      and pr.get("merge_commit_sha") == sha
                      and isinstance(pr.get("base"), dict)
                      and pr["base"].get("ref") == "main"]
+          if not matches and not any(pages):
+              # A valid empty result alone permits another lookup.
+              raise SystemExit(3)
           if len(matches) != 1:
               skip(f"found {len(matches)} merged PRs with merge commit {sha} and base main")
               raise SystemExit(0)
@@ -1272,6 +1278,19 @@ PROMOTE_GUARD = r'''  promote-guard:
               for key, value in values.items():
                   output.write(f"{key}={value}\n")
           PY
+            if [ "$lookup_status" -eq 0 ]; then
+              exit 0
+            fi
+            [ "$lookup_status" -eq 3 ] || exit "$lookup_status"
+            if [ "$attempt" -lt 3 ]; then
+              echo "::notice::No merged PR found for $SHA (attempt $attempt/3); retrying in 20 seconds"
+              sleep 20
+            fi
+          done
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          echo "::error title=baseline-promotion::DEFERRED_NOT_FOUND: no merged PR found for $SHA after 3 attempts; baseline unchanged"
+          echo "baseline promotion: DEFERRED_NOT_FOUND: no merged PR found for $SHA after 3 attempts; baseline unchanged" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
       - name: Only our own merged pull requests and dispatches promote the baseline
         id: authorize
@@ -2598,6 +2617,11 @@ def run_promotion_entry(workflow, pages, tmp_path, *, full_pr=None, overrides=No
         encoding="utf-8",
     )
     gh.chmod(0o700)
+    # The push path waits between association lookups. This stand-in
+    # records each wait and never waits.
+    sleep = tmp_path / "sleep"
+    sleep.write_text(f'#!{bash}\nprintf "%s\\n" "$*" >> "$SLEEP_CALLS"\n', encoding="utf-8")
+    sleep.chmod(0o700)
     script = tmp_path / "entry.bash"
     script.write_text(scripts[0], encoding="utf-8")
     output_path = tmp_path / "output"
@@ -2612,6 +2636,7 @@ def run_promotion_entry(workflow, pages, tmp_path, *, full_pr=None, overrides=No
         "MERGED_BY": "writer", "ALLOWED_BOTS": "dependabot[bot] pineforge-app[bot]",
         "GITHUB_OUTPUT": str(output_path), "GITHUB_STEP_SUMMARY": str(summary_path),
         "GH_CALLS": str(calls_path), "GH_PULLS": json.dumps(pages),
+        "SLEEP_CALLS": str(tmp_path / "sleeps"),
         "GH_PR": json.dumps(promotion_pr() if full_pr is None else full_pr),
         "INPUT_MERGE_SHA": "", "INPUT_HEAD_SHA": "", "INPUT_PR_NUMBER": "",
         "INPUT_PR_URL": "", "INPUT_MERGED_AT": "",
@@ -2634,6 +2659,35 @@ def run_promotion_entry(workflow, pages, tmp_path, *, full_pr=None, overrides=No
 
 def assert_promotion_resolution(workflow, pages, tmp_path, expected_count):
     result, outputs, calls, summary = run_promotion_entry(workflow, pages, tmp_path)
+    sleeps_path = tmp_path / "sleeps"
+    sleeps = sleeps_path.read_text(encoding="utf-8").splitlines() if sleeps_path.exists() else []
+    listed = [pr for page in pages for pr in page]
+    if expected_count == 0 and not listed:
+        # GitHub can list the PR of a fresh merge late. Only an answer that
+        # lists no PR at all is looked up again: 3 lookups, 20 seconds apart.
+        # After the third the step reports DEFERRED_NOT_FOUND and fails.
+        sha = "a" * 40
+        lookup = f"api --paginate --slurp repos/owner/repo/commits/{sha}/pulls?per_page=100"
+        deferred = (
+            f"DEFERRED_NOT_FOUND: no merged PR found for {sha} after 3 attempts; "
+            "baseline unchanged"
+        )
+        got = (
+            f"an empty answer must end in DEFERRED_NOT_FOUND; got {result.returncode}: "
+            f"{result.stdout}{result.stderr}"
+        )
+        assert result.returncode == 1, got
+        assert result.stdout == (
+            f"::notice::No merged PR found for {sha} (attempt 1/3); retrying in 20 seconds\n"
+            f"::notice::No merged PR found for {sha} (attempt 2/3); retrying in 20 seconds\n"
+            f"::error title=baseline-promotion::{deferred}\n"
+        ), got
+        assert summary == f"baseline promotion: {deferred}\n", got
+        assert outputs == {"ok": "false"} and result.stderr == "", got
+        assert calls == [lookup] * 3, f"an empty answer must be looked up 3 times: {calls}"
+        assert sleeps == ["20", "20"], f"an empty answer must wait 20 seconds twice: {sleeps}"
+        return
+    assert sleeps == [], f"an answer that lists a PR must not wait: {sleeps}"
     assert result.returncode == 0, (
         f"push resolution must exit green; got {result.returncode}: "
         f"{result.stdout}{result.stderr}"
@@ -2680,7 +2734,9 @@ def test_promotion_push_resolves_exactly_one_merged_main_pr(pages, count, tmp_pa
 
 
 @pytest.mark.parametrize("replacement,pages,count", [
-    pytest.param("if len(matches) > 1:", [[]], 0, id="zero-not-deferred"),
+    # An answer that lists no PR never reaches this guard: it is looked up again.
+    pytest.param("if len(matches) > 1:", [[promotion_pr(base="release")]], 0,
+                 id="zero-not-deferred"),
     pytest.param("guess-nonmatching-pr", [[promotion_pr(state="open")]], 0,
                  id="zero-guessed-from-nonmatch"),
     pytest.param("if len(matches) < 1:", [[promotion_pr()], [promotion_pr(18)]], 2,

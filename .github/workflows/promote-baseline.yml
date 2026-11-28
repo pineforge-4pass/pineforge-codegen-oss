@@ -313,10 +313,13 @@ jobs:
             push) ;;
             *) fail "event $EVENT_NAME does not run baseline promotion (only push and workflow_dispatch are allowed)" ;;
           esac
-          # Search every page: a second match must defer, never pick a PR.
-          pulls=$(gh api --paginate --slurp \
-            "repos/$REPO/commits/$SHA/pulls?per_page=100")
-          python3 - 3<<<"$pulls" <<'PY'
+          # Only an empty association result may be eventually consistent.
+          for attempt in 1 2 3; do
+            # Search every page: a second match must defer, never pick a PR.
+            pulls=$(gh api --paginate --slurp \
+              "repos/$REPO/commits/$SHA/pulls?per_page=100")
+            lookup_status=0
+            python3 - 3<<<"$pulls" <<'PY' || lookup_status=$?
           import json
           import os
           import re
@@ -363,6 +366,9 @@ jobs:
                      and pr.get("merge_commit_sha") == sha
                      and isinstance(pr.get("base"), dict)
                      and pr["base"].get("ref") == "main"]
+          if not matches and not any(pages):
+              # A valid empty result alone permits another lookup.
+              raise SystemExit(3)
           if len(matches) != 1:
               skip(f"found {len(matches)} merged PRs with merge commit {sha} and base main")
               raise SystemExit(0)
@@ -413,6 +419,19 @@ jobs:
               for key, value in values.items():
                   output.write(f"{key}={value}\n")
           PY
+            if [ "$lookup_status" -eq 0 ]; then
+              exit 0
+            fi
+            [ "$lookup_status" -eq 3 ] || exit "$lookup_status"
+            if [ "$attempt" -lt 3 ]; then
+              echo "::notice::No merged PR found for $SHA (attempt $attempt/3); retrying in 20 seconds"
+              sleep 20
+            fi
+          done
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          echo "::error title=baseline-promotion::DEFERRED_NOT_FOUND: no merged PR found for $SHA after 3 attempts; baseline unchanged"
+          echo "baseline promotion: DEFERRED_NOT_FOUND: no merged PR found for $SHA after 3 attempts; baseline unchanged" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
       - name: Only our own merged pull requests and dispatches promote the baseline
         id: authorize
