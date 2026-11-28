@@ -285,6 +285,34 @@ plot(v + x + n)
     )
 
 
+def test_direct_read_of_string_stored_from_block_local_keeps_chart_history():
+    # The request reads txt[2]; txt's store, inside a top-level if block,
+    # takes the block-local loc, which is computed from u. Replaying txt from
+    # a u that never receives the store its holder keeps reads "!" alone:
+    # length 1 in every slot. The requested clock gives 2, 3, 4.
+    source = """//@version=6
+strategy("direct read of a string stored from a block-local")
+string u = ""
+x = if close > open
+    u := str.tostring(close)
+    1
+else
+    0
+string txt = ""
+if close != 0
+    string loc = u + "!"
+    txt := loc
+h() => str.length(txt[2])
+v = request.security(syminfo.tickerid, "240", h())
+plot(v + x)
+"""
+    values = _four_hour_values_after_warmup(source)
+    assert values == [6, 7, 8], (
+        f"read {values}; a pass is chart history [6, 7, 8] "
+        "(the requested clock reads [2, 3, 4]; a u that never gets its store, [1, 1, 1])"
+    )
+
+
 def test_blocked_request_reads_chart_string_even_when_another_request_samples_it():
     source = """//@version=6
 strategy("two strings on a blocked request")
