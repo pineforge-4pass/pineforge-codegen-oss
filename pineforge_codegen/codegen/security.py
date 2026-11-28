@@ -4054,7 +4054,8 @@ class SecurityEmitter:
             or item.get("heikinashi") or item.get("runtime_context"))
 
     def _security_register_sparse_argument(self, read, bound, bindings) -> bool:
-        """Give a sparse parameter its call's clock, beside the dense one."""
+        """Give a sparse parameter its own history beside the dense one: one
+        entry per requested bar, holding the last completed call's argument."""
         if not self._security_arg_history_discovering or not self._security_lazy_call_ids:
             return False
         sec_id = self._security_arg_history_sec
@@ -4184,9 +4185,12 @@ class SecurityEmitter:
                 # One slot per completed requested bar, pushed after every
                 # read of the bar: the last call's argument where a call ran,
                 # and the slot before it where none did (an empty ring reads
-                # na). TradingView keeps one entry per bar for a written
-                # call, so ``x[k]`` counts requested bars and a bar without
-                # the call reads the last committed argument.
+                # na). Measured on TradingView charts
+                # (tests/fixtures/udt_history_tv/README.md, ``udth_clock``):
+                # a written call keeps one entry per bar, so ``x[k]`` counts
+                # requested bars and a bar without the call reads the last
+                # committed argument. No stored capture is taken inside a
+                # request; the chart rule is applied to requested bars.
                 self._security_global_hist_pushes[sample.member, sample.completed_type] = (
                     f"{sample.member}[0]")
                 lines.extend((
