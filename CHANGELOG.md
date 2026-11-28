@@ -27,9 +27,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
   bar, including when the script names the variable `open`. A later
   assignment that the request replays also reads that history on the
   request's timeframe, including reassignments of the string itself.
-  If sampling the string would require replaying a loop or `switch`, even
-  beside its assignment in the same `if`, an existing read such as
-  `str.length(txt[2])` in a later assignment keeps using chart history
+  If the request cannot replay all the writes that produce that string,
+  an existing read such as `str.length(txt[2])` in a later assignment
+  keeps using chart history, with a warning at the subscript. This includes
+  writes inside an `if` or `switch` used as a value, a loop beside the
+  assignment in the same `if`, and a string initializer or assignment that
+  would also write a plain chart variable
   ([#495](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/495)).
 
 - Inside `request.security`, a conditionally called helper that indexes a bar

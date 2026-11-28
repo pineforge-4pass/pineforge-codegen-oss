@@ -80,6 +80,7 @@ def _generate(pine_source: str, check_support: bool, filename: str,
     budget = None
     clones: frozenset[str] = frozenset()
     renamed: frozenset = frozenset()
+    excluded_string_replays: frozenset[int] = frozenset()
     while True:
         ast, pragmas, budget = _parse_bounded(pine_source, filename, budget)
         ast = inline_libraries(ast, pine_source, libraries=libraries,
@@ -102,8 +103,10 @@ def _generate(pine_source: str, check_support: bool, filename: str,
         ast = bind_builtin_keywords(expand_finite_choice_extrema_lengths(ast))
         check_ast_depth(ast, filename)
         budget.check(phase=Phase.ANALYZER)
-        ctx = Analyzer(ast, filename=filename, budget=budget,
-                       session_clones=clones).analyze(trace_pragmas=pragmas)
+        ctx = Analyzer(
+            ast, filename=filename, budget=budget, session_clones=clones,
+            excluded_string_replays=excluded_string_replays,
+        ).analyze(trace_pragmas=pragmas)
         # Typed receiver dispatch is known only after analysis. Resolve method
         # payload arguments with those bindings, then type the rewritten bodies.
         if specialize_method_security_payloads(
@@ -111,8 +114,10 @@ def _generate(pine_source: str, check_support: bool, filename: str,
             del ctx
             ast = bind_builtin_keywords(expand_finite_choice_extrema_lengths(ast))
             check_ast_depth(ast, filename)
-            ctx = Analyzer(ast, filename=filename, budget=budget,
-                           session_clones=clones).analyze(trace_pragmas=pragmas)
+            ctx = Analyzer(
+                ast, filename=filename, budget=budget, session_clones=clones,
+                excluded_string_replays=excluded_string_replays,
+            ).analyze(trace_pragmas=pragmas)
         budget.check(phase=Phase.ANALYZER)
         try:
             capacity_options = {}
@@ -122,6 +127,23 @@ def _generate(pine_source: str, check_support: bool, filename: str,
                 capacity_options["drawing_capacity"] = drawing_capacity
             gen = CodeGen(ctx, budget=budget, **capacity_options)
             cpp = gen.generate()
+        except CompileError as error:
+            if getattr(error, "limit", False):
+                raise
+            # Some refusals need more than a statement (e.g. a helper's
+            # bindings or a TA constructor). Ask the actual evaluator. If
+            # shared member setup failed before an evaluator was reached,
+            # retry with the original inventories. A genuine error still
+            # propagates from that lowering; no partial C++ or state is kept.
+            origin = getattr(error, "string_replay_origin", None)
+            refused = ({origin} if origin is not None else {
+                call.string_replay_origin for call in ctx.security_calls
+                if call.string_replay_origin is not None
+            })
+            if refused <= excluded_string_replays:
+                raise
+            excluded_string_replays = excluded_string_replays.union(refused)
+            continue
         except CodegenInvariantError as error:
             node_kind = error.node_kind
             location = getattr(error.node, "loc", None)

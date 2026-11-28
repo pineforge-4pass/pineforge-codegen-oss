@@ -201,6 +201,9 @@ class SecurityCallInfo:
     # The request call's source location (``request_discovery`` names the
     # site by its line).
     loc: Any = None
+    # Source-order request before timeframe cloning, if its later stores
+    # added optional history. A refusal can drop just this extension.
+    string_replay_origin: int | None = None
 
 
 @dataclass

@@ -163,7 +163,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def __init__(self, ast: Program, filename: str = "<stdin>",
                  budget: TimeBudget | None = None,
                  session_clones: frozenset[str] | None = None,
-                 excluded_array_history_owners: frozenset[str] = frozenset()) -> None:
+                 excluded_array_history_owners: frozenset[str] = frozenset(),
+                 excluded_string_replays: frozenset[int] = frozenset()) -> None:
         self._ast = ast
         self._filename = filename
         self._budget = budget
@@ -176,6 +177,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # time adds the ones whose reads the C++ holds).
         self._session_clones = session_clones
         self._excluded_array_history_owners = excluded_array_history_owners
+        self._excluded_string_replays = excluded_string_replays
         self._session_uncloned: frozenset[str] = frozenset()
         self._budget_visit_count = 0
         self._method_signatures = {}
@@ -738,6 +740,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._ast, filename=self._filename, budget=self._budget,
                 session_clones=self._session_clones,
                 excluded_array_history_owners=self._excluded_array_history_owners,
+                excluded_string_replays=self._excluded_string_replays,
             ).analyze(trace_pragmas=trace_pragmas)
         self._check_persistent_drawing_member_collisions()
 
@@ -756,6 +759,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return Analyzer(
                 self._ast, filename=self._filename, budget=self._budget,
                 session_clones=self._session_clones, excluded_array_history_owners=excluded,
+                excluded_string_replays=self._excluded_string_replays,
             ).analyze(trace_pragmas=trace_pragmas)
 
         # Reject (loudly) a request.security whose timeframe is a UDF parameter
@@ -2619,7 +2623,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         evaluator also replays subsequent stores to that state; their RHSs
         and guards are known only after the script has been visited.
         """
-        calls = [call for call in self._security_calls if call.mutable_globals and not call.dead]
+        calls = [call for call in self._security_calls if call.mutable_globals and not call.dead
+                 and call.sec_id not in self._excluded_string_replays]
         if not calls or not self._global_reassigned_names:
             return
         if not any(info.pine_type == PineType.STRING
@@ -2627,23 +2632,22 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                    for name, info in self._global_binding_infos.items()):
             return
 
-        # Rebinding evaluates selected stores and their guards, but
-        # _emit_security_rebind_stmt visits both arms of each selected if.
-        # A loop or switch in either arm blocks replay of the whole source.
-        inputs: dict[str, list[ASTNode]] = {}
-        blocked_sources: set[int] = set()
+        from ..codegen.security import can_replay_statement
 
-        def index_stores(statements, guards=(), source=None):
+        # The replay index follows statement arms, not statements inside
+        # values. Compare exact assignment sites against the independent
+        # lexical write inventory; a declaration alone is not a producer.
+        inputs: dict[str, list[ASTNode]] = {}
+        indexed_writes: set[int] = set()
+
+        def index_stores(statements, guards=()):
             for stmt in statements:
                 if self._budget is not None:
                     self._budget.check(stmt.loc, Phase.ANALYZER)
-                top_stmt = stmt if source is None else source
                 if isinstance(stmt, IfStmt):
                     inner = (*guards, stmt.condition)
-                    index_stores(stmt.body, inner, top_stmt)
-                    index_stores(stmt.else_body or (), inner, top_stmt)
-                elif isinstance(stmt, (ForStmt, ForInStmt, WhileStmt, SwitchStmt)):
-                    blocked_sources.add(id(top_stmt))
+                    index_stores(stmt.body, inner)
+                    index_stores(stmt.else_body or (), inner)
                 elif isinstance(stmt, VarDecl) and self._direct_program_vars.get(stmt.name) is stmt:
                     inputs.setdefault(stmt.name, []).append(stmt.value)
                 elif isinstance(stmt, Assignment) and isinstance(stmt.target, Identifier):
@@ -2652,8 +2656,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     binding = self._value_bindings.write_declaration(stmt.target)
                     if info is not None and binding == (id(info.decl_node), name):
                         inputs.setdefault(name, []).extend((*guards, stmt.value))
+                        indexed_writes.add(id(stmt))
 
         index_stores(self._ast.body)
+        writes = self._value_bindings.writes_by_declaration(self._ast)
+        incomplete = {name for name, decl in self._direct_program_vars.items()
+                      if (sites := writes.get((id(decl), name))) and not sites <= indexed_writes}
 
         for call in calls:
             replay = set(call.mutable_globals)
@@ -2711,12 +2719,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                                if child is not payload)
             if not histories:
                 continue
-            # Add the string and its producers together only if their
-            # source statements can be replayed. Otherwise keep chart history.
-            additions = replay.difference(call.mutable_globals)
-            if any(id(stmt) in blocked_sources
-                   for name in additions for stmt in self._global_binding_infos[name].source_stmts):
+            # Keep the request's original replay boundary if any sampled
+            # producer is incomplete or the evaluator cannot replay a source.
+            sources = {id(stmt): stmt for name in sampled_inputs
+                       for stmt in self._global_binding_infos[name].source_stmts}
+            if (not sampled_inputs.isdisjoint(incomplete)
+                    or not all(can_replay_statement(stmt, replay, self._global_binding_infos)
+                               for stmt in sources.values())):
                 continue
+            if (replay.difference(call.mutable_globals)
+                    or histories.keys() - self._requested_string_history_globals.keys()):
+                call.string_replay_origin = call.sec_id
             self._requested_string_history_globals.update(histories)
             call.mutable_globals = tuple(sorted(replay))
 
@@ -4705,6 +4718,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     foreign=sec.foreign,
                     ignore_invalid=sec.ignore_invalid,
                     loc=sec.loc,
+                    string_replay_origin=sec.string_replay_origin,
                 )
                 new_calls.append(clone)
                 next_sec_id += 1

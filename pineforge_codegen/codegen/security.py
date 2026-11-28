@@ -80,6 +80,7 @@ from ..analyzer import (
 from ..analyzer.callable_history_names import (
     AUTHORED_LOCAL_NAMES, authored_callable_parameters,
 )
+from ..analyzer.value_bindings import ValueBindings
 from .. import signatures as sigs
 from ..errors import CompileError, Phase
 from ..external_requests import (
@@ -93,7 +94,7 @@ from .helpers import (
 )
 from ..security_contexts import (
     GLOBAL_ANNOTATION, TIMEFRAME_SOURCES_ANNOTATION, UNREACHED_ANNOTATION,
-    _FIXED_INPUT_KINDS,
+    _FIXED_INPUT_KINDS, _request_name, _request_payload,
 )
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .tables import (
@@ -193,6 +194,74 @@ def _security_tuple_binding(func_name: str, name: str) -> str:
 class _SecurityKeepChart(Exception):
     """An evaluator decided before its emission to keep every earlier
     build's lowering (``_security_chart_evaluators``)."""
+
+
+def _selection_global_write_refusal(name, replay, bindings) -> str | None:
+    info = bindings.get(name)
+    if name in replay and info is not None and info.is_var:
+        return None
+    return "PF-E3103"
+
+
+def can_replay_statement(stmt: ASTNode, names, bindings, *, emit=None, lines=None,
+                         reject=None) -> bool:
+    """Can the request replay this statement? Optionally emit it or diagnose why.
+
+    Both passes use the same statement walk and selection ownership rule.
+    The emitter also renders each value in its actual helper/TA context.
+    """
+    def value_refusal(expr):
+        pending = [expr] if expr is not None else []
+        while pending:
+            node = pending.pop()
+            if isinstance(node, Assignment) and isinstance(node.target, Identifier):
+                name = node.target.name
+                info = bindings.get(name)
+                if (info is not None and ValueBindings.write_declaration(node.target)
+                        == (id(info.decl_node), name)):
+                    code = _selection_global_write_refusal(name, names, bindings)
+                    if code is not None:
+                        return node, code
+            payload = _request_payload(node) if _request_name(node) else None
+            pending.extend(child for child in syntax_children(node) if child is not payload)
+        return None
+
+    def visit(node, output, depth):
+        if isinstance(node, IfStmt):
+            arms = ([], []) if emit is not None else (None, None)
+            active = False
+            for body, arm in zip((node.body, node.else_body), arms):
+                for child in body:
+                    refusal, selected = visit(child, arm, depth + 1)
+                    if refusal is not None:
+                        return refusal, False
+                    active |= selected
+            if not active:
+                return None, False
+            value = node.condition
+        elif isinstance(node, VarDecl) and node.name in names:
+            arms, value = None, node.value
+        elif (isinstance(node, Assignment) and isinstance(node.target, Identifier)
+              and node.target.name in names):
+            arms, value = None, node.value
+        elif isinstance(node, SwitchStmt):
+            return (node, "PF-E3040"), False
+        elif isinstance(node, (ForStmt, ForInStmt, WhileStmt)):
+            return (node, "PF-E3041"), False
+        else:
+            return None, False
+        if emit is not None:
+            # The real expression builder checks at the use, with its helper
+            # bindings and selection-local storage. Do not pre-empt an
+            # existing lowering with a speculative refusal.
+            emit(node, output, arms, depth)
+            return None, True
+        return value_refusal(value), True
+
+    refusal, _ = visit(stmt, lines, 0)
+    if refusal is not None and reject is not None:
+        reject(*refusal)
+    return refusal is None
 
 
 class _SecurityHelperArgumentFrame(dict):
@@ -2419,6 +2488,7 @@ class SecurityEmitter:
                 "heikinashi": bool(getattr(item, "heikinashi", False)),
                 "depends_on_mutable_globals": bool(getattr(item, "depends_on_mutable_globals", False)),
                 "mutable_globals": list(getattr(item, "mutable_globals", ()) or ()),
+                "string_replay_origin": getattr(item, "string_replay_origin", None),
                 "is_lower_tf_array": bool(getattr(item, "is_lower_tf_array", False)),
                 "containing_func": getattr(item, "containing_func", "") or "",
                 "callsite_idx": getattr(item, "callsite_idx", None),
@@ -8261,61 +8331,42 @@ class SecurityEmitter:
         indent: int,
         emitted_lines: list[str] | None = None,
     ) -> None:
-        if isinstance(node, VarDecl):
-            self._emit_security_rebind_var_decl(
-                sec_id, node, lines, relevant_names, ta_results, indent, emitted_lines
-            )
-            return
-        if isinstance(node, Assignment):
-            self._emit_security_rebind_assignment(
-                sec_id, node, lines, relevant_names, ta_results, indent, emitted_lines
-            )
-            return
-        if isinstance(node, IfStmt):
-            body_lines: list[str] = []
-            else_lines: list[str] = []
-            for stmt in node.body:
-                self._emit_security_rebind_stmt(
-                    sec_id, stmt, body_lines, relevant_names, ta_results, indent + 1, emitted_lines
-                )
-            for stmt in node.else_body:
-                self._emit_security_rebind_stmt(
-                    sec_id, stmt, else_lines, relevant_names, ta_results, indent + 1, emitted_lines
-                )
+        def emit(stmt, output, arms, depth):
+            level = indent + depth
+            if arms is None:
+                writer = (self._emit_security_rebind_var_decl if isinstance(stmt, VarDecl)
+                          else self._emit_security_rebind_assignment)
+                writer(sec_id, stmt, output, relevant_names, ta_results, level, emitted_lines)
+                return
+            body_lines, else_lines = arms
             if not body_lines and not else_lines:
                 return
-            pad = "    " * indent
+            pad = "    " * level
             cond_cpp = self._build_security_expr(
                 sec_id,
-                node.condition,
+                stmt.condition,
                 None,
                 ta_results,
                 security_mutable_names=relevant_names,
                 emitted_lines=emitted_lines,
             )
-            lines.append(
-                f"{pad}if ({self._coerce_bool_expr(cond_cpp, node.condition)}) {{"
+            output.append(
+                f"{pad}if ({self._coerce_bool_expr(cond_cpp, stmt.condition)}) {{"
             )
-            lines.extend(body_lines)
+            output.extend(body_lines)
             if else_lines:
-                lines.append(f"{pad}}} else {{")
-                lines.extend(else_lines)
-                lines.append(f"{pad}}}")
-            else:
-                lines.append(f"{pad}}}")
-            return
-        if isinstance(node, SwitchStmt):
-            self._codegen_error(
-                node,
-                "request.security mutable global rebinding does not support top-level switch",
-                hint="Rewrite the switch as if/else assignments before passing the value to request.security().",
-            )
-        if isinstance(node, (ForStmt, ForInStmt, WhileStmt)):
-            self._codegen_error(
-                node,
-                "request.security mutable global rebinding does not support top-level loops",
-                hint="Move loop-driven mutable state out of request.security() expressions or rewrite it as direct assignments.",
-            )
+                output.append(f"{pad}}} else {{")
+                output.extend(else_lines)
+            output.append(f"{pad}}}")
+
+        def reject(at, code):
+            from ..diagnostic_codes import render_diagnostic
+
+            message, hint = render_diagnostic(code, {})
+            self._codegen_error(at, message, hint=hint)
+
+        can_replay_statement(node, relevant_names, self._global_mutable_infos,
+                             emit=emit, lines=lines, reject=reject)
 
     def _emit_security_rebinds(
         self,
@@ -8599,6 +8650,15 @@ class SecurityEmitter:
         lines.append("        }")
 
     def _emit_security_evaluator_requested(self, item: dict, lines: list[str]) -> None:
+        try:
+            self._emit_security_evaluator_with_chart_fallback(item, lines)
+        except CompileError as error:
+            # Both evaluator modes refused. Keep the original diagnostic for
+            # required state; the pipeline may retry optional history alone.
+            error.string_replay_origin = item.get("string_replay_origin")
+            raise
+
+    def _emit_security_evaluator_with_chart_fallback(self, item: dict, lines: list[str]) -> None:
         """Emit one evaluator, lowering its payload's user calls under builtin
         calls (``nz(f())``) and its typed method calls on the requested bar.
 
@@ -10955,8 +11015,8 @@ class SecurityEmitter:
             expr_node, sec_id, helper_binding_stack,
         )
         chart: set[int] = set()
+        self._security_warn_global_history(expr_node, helper_binding_stack, sec_id)
         if self._security_requested_calls:
-            self._security_warn_global_history(expr_node, helper_binding_stack, sec_id)
             chart_read = (
                 "history it does not keep on the requested clock"
                 if tuple_history is not None else self._security_root_chart_read(
@@ -11297,18 +11357,19 @@ class SecurityEmitter:
                     # A nested selection can still write a declaration owned
                     # by the enclosing requested selection.
                     return
-                info = self._global_mutable_infos.get(target.name)
                 bound = self._security_lookup_helper_binding_context(target.name, binding_stack)
-                if (bound is None and target.name in mutable_names
-                        and info is not None and info.is_var):
-                    return
                 # A helper's persistent local is already bound to its
                 # request-owned series; ordinary prefix locals are not.
-                if bound is not None and isinstance(bound[0], str):
-                    series = self._security_series_binding_target(bound[0])
-                    if series in self._security_persistent_helper_series:
+                if bound is None:
+                    code = _selection_global_write_refusal(
+                        target.name, mutable_names, self._global_mutable_infos)
+                    if code is None:
                         return
-                code = "PF-E3103"
+                else:
+                    if isinstance(bound[0], str) and self._security_series_binding_target(
+                            bound[0]) in self._security_persistent_helper_series:
+                        return
+                    code = "PF-E3103"
             message, hint = render_diagnostic(code, {})
             self._codegen_error(at, message, hint=hint)
 
@@ -12023,12 +12084,9 @@ class SecurityEmitter:
         helper_binding_stack: tuple[dict[str, ASTNode], ...],
         sec_id: int,
     ) -> None:
-        """Warn where an argument of a builtin call in a payload reads a
-        global's history (``nz(s[1])``): the visitor renders it from the
-        chart's series, while TradingView evaluates it on the requested bar,
-        and the builder keeps no requested history of a global's expression.
-        The global's value is the builder's (``_security_fallback_owns_global``)."""
+        """Warn at a history subscript the visitor reads from the chart."""
         global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        replay = self._security_calls[sec_id].get("mutable_globals") or ()
         warned = getattr(self, "_security_warned_global_history", None)
         if warned is None:
             warned = self._security_warned_global_history = set()
@@ -12036,8 +12094,13 @@ class SecurityEmitter:
             if (n is not root
                     and isinstance(n, Subscript) and isinstance(n.object, Identifier)
                     and self._security_identifier_is_global_binding(n.object)
-                    and n.object.name in global_expr_map
-                    and n.object.name not in self._global_mutable_infos
+                    and ((self._security_requested_calls and n.object.name in global_expr_map
+                          and n.object.name not in self._global_mutable_infos)
+                         or (n.object.name not in replay
+                             and (info := self._global_mutable_infos.get(n.object.name))
+                             and info.pine_type == PineType.STRING
+                             and self.ctx.identifier_binding_nodes.get(id(n.object))
+                             is info.decl_node))
                     and not self._security_fallback_owns(n, helper_binding_stack, sec_id)
                     and id(n) not in warned):
                 warned.add(id(n))
