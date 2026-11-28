@@ -33,6 +33,8 @@ tests/test_e2e_session_ismarket.py::test_session_market_is_emitted_once_when_rea
 tests/test_e2e_session_ismarket.py::test_tapes_are_the_recorded_exports
 tests/test_e2e_strategy_defaults.py::test_a_script_that_declares_every_default_is_unchanged[tvd-cap-x1m-v6-eth15]
 tests/test_e2e_strategy_defaults.py::test_a_script_that_declares_every_default_is_unchanged[tvd-qty-fixed1-v6-eth15]
+tests/test_e2e_strategy_defaults.py::test_a_script_that_declares_every_default_transpiles_to_the_legacy_cpp[tvd-cap-x1m-v6-eth15]
+tests/test_e2e_strategy_defaults.py::test_a_script_that_declares_every_default_transpiles_to_the_legacy_cpp[tvd-qty-fixed1-v6-eth15]
 tests/test_e2e_strategy_defaults.py::test_every_trade_is_tradingviews[tvd-all-omit-v6-eth15]
 tests/test_e2e_strategy_defaults.py::test_every_trade_is_tradingviews[tvd-cap-omit-v6-eth15]
 tests/test_e2e_strategy_defaults.py::test_every_trade_is_tradingviews[tvd-cap-x1m-v6-eth15]
