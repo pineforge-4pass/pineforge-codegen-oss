@@ -1450,6 +1450,7 @@ private:
             if info.get("chart_fallback", True):
                 continue
             sec_id = info["sec_id"]
+            names.update(self._security_owned_ta_clock_members(sec_id))
             names.update(
                 self._security_ohlc_hist_series_cpp(sec_id, field)
                 for field in self._security_ohlc_hist_fields_by_sec.get(sec_id, ())

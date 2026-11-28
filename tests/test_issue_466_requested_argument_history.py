@@ -116,6 +116,8 @@ def test_sparse_and_dense_requested_timestamps(helpers, lag, field_lag, depth):
 
 
 def test_dense_helper_and_conditional_field_read_keep_base_cpp(tmp_path):
+    # Neither helper declares a var; the conditional field read alone must
+    # not change this control's C++ or move its reference commit.
     source = """//@version=6
 strategy("Dense argument clock")
 lag(float x) => x[2]

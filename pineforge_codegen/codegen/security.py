@@ -65,6 +65,7 @@ tables and types come from ``codegen/tables.py``, ``..ast_nodes``,
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, replace
 
 from ..ast_nodes import (
@@ -89,7 +90,7 @@ from ..external_requests import _nodes as walk_request_nodes
 from ..limits import iter_ast_nodes, syntax_children
 from .helpers import (
     _CPP_COMMENT_OR_LITERAL as _SECURITY_CPP_LITERALS,
-    na_preserving_int_cast, unary_sign_cpp,
+    cpp_code_only, na_preserving_int_cast, unary_sign_cpp,
 )
 from ..security_contexts import (
     GLOBAL_ANNOTATION, TIMEFRAME_SOURCES_ANNOTATION, UNREACHED_ANNOTATION,
@@ -2135,7 +2136,9 @@ class SecurityEmitter:
     # count as per-bar; ordinary global cycles stop at their resetting binding.
     # These path checks make traversal finite. Loop bindings count as per-bar;
     # other unknown identifiers retain their existing fixed classification.
-    def _security_tf_expr_is_per_bar(self, node, *, implicit_calls: bool = True) -> bool:
+    def _security_tf_expr_is_per_bar(
+        self, node, *, implicit_calls: bool = True, helper_bindings=None,
+    ) -> bool:
         """Follow bar dependencies without requiring a setup replay proof.
 
         Arguments and user bodies both contribute reads. Recursive calls and
@@ -2144,18 +2147,21 @@ class SecurityEmitter:
         Computed timeframe values can disable implicit call state so an opaque
         call accepted by the setup emitter keeps that path in the absence of
         explicit chart dependencies. Selection conditions retain the full rule.
+        For a helper initializer, resolve parameter reads at this written call.
         """
         from .visit_expr import _BUILTIN_NAMESPACE_NAMES
 
         expressions = getattr(self.ctx, "global_expr_map", {}) or {}
 
-        def per_bar(value, local=frozenset(), active=frozenset()):
+        def reads(value, local=frozenset(), active=frozenset()):
             if isinstance(value, (list, tuple)):
                 return any(per_bar(part, local, active) for part in value)
             if isinstance(value, dict):
                 return any(per_bar(part, local, active) for part in value.values())
             if not isinstance(value, ASTNode):
                 return False
+            if helper_bindings is not None and self._budget is not None:
+                self._budget.check(value.loc, Phase.CODEGEN)
             if TIMEFRAME_SOURCES_ANNOTATION in (value.annotations or {}):
                 return True
             if isinstance(value, Identifier):
@@ -2182,6 +2188,16 @@ class SecurityEmitter:
                 if name in local and not global_binding:
                     # The enclosing body also inspects every local definition.
                     return False
+                if helper_bindings and not global_binding:
+                    # A seed can read the argument of this written call, also
+                    # through a local initializer. Its AST is in caller scope.
+                    bound = self._security_lookup_helper_binding_context(name, helper_bindings)
+                    if bound is not None:
+                        argument, caller = bound
+                        if isinstance(argument, str):
+                            return True  # a materialized local with no value proof
+                        return self._security_tf_expr_is_per_bar(
+                            argument, implicit_calls=implicit_calls, helper_bindings=caller)
                 if name in BAR_BUILTINS or name in SECURITY_BAR_FIELDS:
                     return True
                 if self._binding_is_series(name):
@@ -2201,6 +2217,10 @@ class SecurityEmitter:
                 return True
             if isinstance(value, MemberAccess):
                 obj = value.object
+                if (helper_bindings is not None and isinstance(obj, Identifier)
+                        and obj.name in _SECURITY_PURE_MEMBER_NAMESPACES
+                        and self.ctx.identifier_binding_nodes.get(id(obj)) is None):
+                    return False
                 if (isinstance(obj, Identifier) and obj.name not in local
                         and not self._security_identifier_is_global_binding(obj)
                         and obj.name in _BUILTIN_NAMESPACE_NAMES):
@@ -2219,6 +2239,8 @@ class SecurityEmitter:
                 return per_bar(obj, local, active)
             if isinstance(value, FuncCall):
                 name, namespace = self._resolve_callee(value.callee)
+                if helper_bindings is not None and self._get_ta_site(value) is not None:
+                    return True
                 if per_bar([*value.args, *value.kwargs.values()], local, active):
                     return True
                 info = self._func_info_map.get(name) if namespace is None else None
@@ -2254,6 +2276,20 @@ class SecurityEmitter:
                 for field, part in vars(value).items()
                 if field not in ("loc", "annotations")
             )
+
+        per_bar = reads
+        if helper_bindings is not None:
+            # One helper seed can reach the same definition through both
+            # sides of a diamond. Reuse completed answers for this stack.
+            memo = {}
+
+            def per_bar(value, local=frozenset(), active=frozenset()):
+                if not isinstance(value, ASTNode):
+                    return reads(value, local, active)
+                key = (id(value), local)
+                if key not in memo:
+                    memo[key] = reads(value, local, active)
+                return memo[key]
 
         return per_bar(node)
 
@@ -4009,9 +4045,11 @@ class SecurityEmitter:
         security_lower_tf``, another symbol's feed, Heikin-Ashi bars and a
         runtime timeframe keep the requested-bar clock they had.
         """
-        item = next((item for item in getattr(self, "_security_calls", ())
-                     if item.get("sec_id") == sec_id), None)
-        return item is not None and not (
+        calls = getattr(self, "_security_calls", ())
+        if sec_id is None or not 0 <= sec_id < len(calls):
+            return False
+        item = calls[sec_id]
+        return not (
             item.get("is_lower_tf_array") or item.get("foreign")
             or item.get("heikinashi") or item.get("runtime_context"))
 
@@ -4053,19 +4091,52 @@ class SecurityEmitter:
             cells[key] = _SecurityArgumentSample(
                 f"_pf_arg_{len(cells)}", f"_sec{sec_id}_call_hist_{len(cells)}",
                 self._security_bar_hist_type(field))
-            # A conditional wrapper can emit statements for an inner call.
-            # Keep those statements inside the wrapper's execution as well.
-            paths = self._security_sparse_call_paths.setdefault(sec_id, {})
-            for depth, call_id in enumerate(path, 1):
-                if call_id in self._security_lazy_call_ids:
-                    paths.setdefault(path[:depth], len(paths))
-            paths.setdefault(path, len(paths))
+            self._security_register_call_clock(sec_id, path)
         return True
+
+    def _security_register_call_clock(self, sec_id, path) -> None:
+        # A conditional wrapper can emit statements for an inner call.
+        # Keep those statements inside the wrapper's execution as well.
+        paths = self._security_sparse_call_paths.setdefault(sec_id, {})
+        for depth, call_id in enumerate(path, 1):
+            if call_id in self._security_lazy_call_ids:
+                paths.setdefault(path[:depth], len(paths))
+        paths.setdefault(path, len(paths))
+
+    def _security_discover_helper_clock(self, stack) -> None:
+        """A local series, var or TA history needs a clock in its own right."""
+        if not getattr(self, "_security_arg_history_discovering", False):
+            return
+        sec_id = self._security_arg_history_sec
+        path = self._security_argument_call_path(stack)
+        if (not self._security_lazy_call_ids.isdisjoint(path)
+                and self._security_sparse_request(sec_id)):
+            self._security_register_call_clock(sec_id, path)
 
     def _security_sparse_clock_members(self, sec_id) -> list[str]:
         """One flag per sparse call: its last run is not committed yet."""
         paths = getattr(self, "_security_sparse_call_paths", {}).get(sec_id, {})
         return [f"_sec{sec_id}_call_open_{ordinal}" for ordinal in paths.values()]
+
+    @staticmethod
+    def _security_inline_ta_variants(info):
+        """TA variants computed in a helper body, in declaration order."""
+        inline = info.get("inline_helper_ta_indices")
+        if not inline:
+            return
+        for idx, variants in info["ta_variants"].items():
+            for variant in variants:
+                if (idx, variant["signature"]) in inline:
+                    yield idx, variant
+
+    def _security_owned_ta_clock_members(self, sec_id) -> list[str]:
+        """Each sparse TA and its open flag belong to one evaluator for rollback."""
+        if not getattr(self, "_security_sparse_call_paths", {}).get(sec_id):
+            return []
+        info = self._security_eval_info[sec_id]
+        return [f"{variant['member_name']}_open"
+                for variants in info["ta_variants"].values() for variant in variants
+                if self._security_call_owns_ta(sec_id, variant)]
 
     def _security_slot_is_new_cpp(self, sec_id) -> str:
         """Whether helper state lowered here opens a new slot, as C++.
@@ -4074,15 +4145,15 @@ class SecurityEmitter:
         requested bar. Inside a sparse call the statements run only when the
         call does, so that test would keep a provisional run's slot when the
         completed bar skips the call, and overwrite the previous call's slot
-        when the call first runs on a later evaluation. Such state opens a
-        slot when the call's last run was committed, and otherwise recomputes
-        the one still open (``_emit_security_evaluator`` commits it).
+        when the call first runs on a later evaluation. If several places
+        execute this written call, a later reach rewrites the slot the first
+        one opened. A loop repeating a single place keeps its own cadence.
         """
         clock = getattr(self, "_security_call_clock", None)
         if clock is None:
             return f"security_series_slot_is_new({sec_id})"
         clock["used"] = True
-        return clock["new"]
+        return clock["slot"]
 
     def _security_sparse_call_prelude(self, sec_id, stack, caller_depth, render_argument):
         """Stage sparse parameters in a lambda entered at the written call.
@@ -4103,7 +4174,7 @@ class SecurityEmitter:
             # field discovery declares beside the ring.
             return None
         lines = []
-        cells = self._security_sparse_arg_histories[sec_id]
+        cells = self._security_sparse_cells(sec_id)
         for frame in stack[caller_depth:]:
             for param, arg in frame.items():
                 sample = cells.get((path, param))
@@ -4125,15 +4196,113 @@ class SecurityEmitter:
                 frame.samples[param] = sample
         return lines
 
-    def _security_sparse_call_clock(self, sec_id, stack) -> dict:
-        """The C++ names of the clock of the sparse call ``stack`` ends at:
-        its ``open`` member (``_security_sparse_clock_members``) and the
-        evaluator's ``new`` and ``ran`` locals (``_emit_security_evaluator``)."""
+    def _security_sparse_call_clock(self, sec_id, stack, enclosing_lines) -> dict:
+        """One persistent open flag and one evaluator-local reached flag per
+        written call. ``slot`` is their decision at entry to this reach.
+        A global the call reads is lowered in the outermost call's scope."""
         ordinal = self._security_sparse_call_paths[sec_id][
             self._security_argument_call_path(stack)]
         stem = f"_sec{sec_id}_call"
-        return {"open": f"{stem}_open_{ordinal}", "new": f"{stem}_new_{ordinal}",
-                "ran": f"{stem}_ran_{ordinal}", "used": False}
+        outer = getattr(self, "_security_call_clock", None)
+        lines, scope = (
+            (enclosing_lines, getattr(self, "_security_scope_path", ()))
+            if outer is None else (outer["lines"], outer["scope"]))
+        return {"open": f"{stem}_open_{ordinal}", "ran": f"{stem}_ran_{ordinal}",
+                "dup": f"{stem}_dup_{ordinal}", "slot": f"{stem}_slot_{ordinal}",
+                "used": False, "lines": lines, "scope": scope}
+
+    def _security_call_owns_ta(self, sec_id, variant) -> bool:
+        """Whether this TA variant belongs to a helper on a sparse clock."""
+        paths = getattr(self, "_security_sparse_call_paths", {}).get(sec_id)
+        if not paths:
+            return False
+        path = self._security_argument_call_path(variant.get("binding_stack", ()))
+        return any(path[:depth] in paths for depth in range(1, len(path) + 1))
+
+    def _security_read_owned_ta(
+        self, sec_id, idx, variant, stack, ta_results, security_mutable_names, lines,
+    ) -> str:
+        """Sample an owned variant at its first executed reach, including
+        when it is read as another TA's argument. The optional belongs to
+        this evaluator invocation, not to one lowering or one requested bar."""
+        site = self.ctx.ta_call_sites[idx]
+        member = variant["member_name"]
+        cached = f"{member}_sample"
+        open_slot = f"{member}_open"
+        # Argument preludes can themselves read state. Keep them in the
+        # cache miss, in the binding scope of this reach.
+        body = []
+        scope = self._security_open_scope()
+        try:
+            args = self._security_ta_compute_args_for_site(
+                sec_id, site, ta_results, security_mutable_names, stack, emitted_lines=body)
+        finally:
+            self._security_scope_path = scope
+        value = (f"!{open_slot} ? {member}.compute({args}) "
+                 f": {member}.recompute({args})")
+        if idx in self._security_ta_hist_idx_by_sec.get(sec_id, ()) and not site.returns_tuple:
+            value = self._security_stage_ta_history(member, value)
+        body.append(f"            {cached} = {value};")
+        guard = f"        if (!{cached}) {{\n" + "\n".join(body) + "\n        }"
+        if lines is None:
+            return f"([&]() {{\n{guard}\n            return *{cached}; }}())"
+        lines.append(guard)
+        return f"(*{cached})"
+
+    def _security_open_call_ta(self, sec_id, stack, ta_results, security_mutable_names, lines):
+        """Make this call's hoisted results available to its body in
+        dependency order. Later reaches can run in disjoint C++ scopes."""
+        pending = getattr(self, "_security_call_ta", None)
+        if not pending or ta_results is None or lines is None:
+            return ()
+        signature = self._security_binding_stack_signature(stack)
+        # An inline site's arguments can read locals assigned later in the
+        # body, or the site can be in a skipped arm. Sample it at its read.
+        inline = self._security_eval_info[sec_id]["inline_helper_ta_indices"]
+        opened = []
+        for key, variant in pending.items():
+            if key[1] != signature or key in ta_results or key in inline:
+                continue
+            ta_results[key] = self._security_read_owned_ta(
+                sec_id, key[0], variant, stack, ta_results, security_mutable_names, lines)
+            opened.append(key)
+        return opened
+
+    def _security_stage_ta_history(self, member, value) -> str:
+        """Compute once at this reach. The evaluator pushes the last sample
+        after all reads, only if this evaluation completed and reached it."""
+        hist = self._security_ta_hist_series_cpp(member)
+        self._security_global_hist_pushes[hist, "double"] = None
+        return f"({hist}_set = true, {hist}_next = ({value}))"
+
+    def _security_local_series_name(self, sec_id, func, decl, name, stack) -> str:
+        """A sparse helper's state belongs to a declaration at a written path.
+
+        Re-lower each reach in its own C++ scope. Its temporaries may differ,
+        but every read/write of this cell (including its var seed) uses the
+        same map key. Two calls of the same function have different paths.
+        """
+        if self._security_call_clock is None:
+            return self._security_next_inline_name(sec_id, func, name)
+        cells = self._security_call_series
+        key = (self._security_argument_call_path(stack), id(decl), name)
+        if key not in cells:
+            cells[key] = self._security_next_inline_name(sec_id, func, name)
+        return cells[key]
+
+    def _security_var_reseed_lines(self, stmt, stack, ref, seed_ref, expr_cpp, pad) -> list[str]:
+        """Re-evaluate a helper's first seed until its first slot commits."""
+        if getattr(self, "_security_call_clock", None) is None:
+            # On the requested-bar clock, only ordinary helper vars with a
+            # bar-dependent initializer need any change to the generated TU.
+            # A selection in the payload itself has no enclosing helper.
+            sec_id = self._security_arg_history_sec
+            if (stmt.is_varip or sec_id is None
+                    or self._security_calls[sec_id].get("is_lower_tf_array")
+                    or not self._security_argument_call_path(stack)
+                    or not self._security_tf_expr_is_per_bar(stmt.value, helper_bindings=stack)):
+                return []
+        return [f"{pad}    if ({ref}.size() == 1) {seed_ref}.update({expr_cpp});"]
 
     def _collect_security_ohlc_hist_fields(
         self,
@@ -4206,10 +4375,10 @@ class SecurityEmitter:
                             # requested bar. Each has its own dependencies.
                             walk(bound, bound_stack)
                             # The ring serves the reads lowered inside the
-                            # call. A ta.* site the evaluator computes where
-                            # it opens lowers this read with the variant's
-                            # bindings, outside any call, on the requested-bar
-                            # clock: the composition below stays declared.
+                            # call, a ta.* site's arguments included: the
+                            # call computes its sites where it opens
+                            # (``_security_open_call_ta``). Keep the field
+                            # composition available for reads outside it.
                         local_index = n.index
                         resolved_local_index = (
                             None
@@ -4274,6 +4443,8 @@ class SecurityEmitter:
                         return
                     resolving.add(call_key)
                     plan = self._security_helper_call_plan(n, bindings)
+                    if plan.get("local_series_names") or self.ctx.func_var_members.get(func_name):
+                        self._security_discover_helper_clock(plan["binding_stack"])
                     if plan["mode"] == "expr":
                         walk(plan["expr"], plan["binding_stack"])
                     else:
@@ -4672,7 +4843,7 @@ class SecurityEmitter:
             binding (``v = ta.ema(close, 55)`` then ``...v[1]...``)."""
             site = self._get_ta_site(obj)
             if site is not None:
-                return site
+                return site, bindings
             if isinstance(obj, Identifier):
                 if seen is None:
                     seen = set()
@@ -4737,13 +4908,18 @@ class SecurityEmitter:
                     return
 
             if isinstance(n, Subscript):
-                site = resolve_ta_site(n.object, bindings)
-                if site is not None:
+                resolved = resolve_ta_site(n.object, bindings)
+                if resolved is not None:
+                    site, site_stack = resolved
                     idx_lit = self._resolve_security_index_literal(n.index, bindings)
                     if idx_lit is None or idx_lit >= 1:
                         site_idx = self._ta_index_by_site_id.get(id(site))
                         if site_idx is not None:
                             out.add(site_idx)
+                            # TA result history needs the helper's clock even
+                            # when no parameter has a history subscript.
+                            if site_stack and getattr(site, "owner_func", None):
+                                self._security_discover_helper_clock(site_stack)
 
             if isinstance(n, FuncCall):
                 func_name = self._security_user_call_key(n)
@@ -5154,7 +5330,8 @@ class SecurityEmitter:
     def _emit_security_expr_hist_members(
         self, sec_id: int, expr_node, lines: list[str], mbb_suffix: str
     ) -> None:
-        mutable_names = self._security_eval_info[sec_id].get("mutable_globals") or ()
+        info = self._security_eval_info[sec_id]
+        mutable_names = info.get("mutable_globals") or ()
         if self._security_reads_bar_index(expr_node, mutable_names):
             # The requested bar's ``bar_index``: one count per requested bar,
             # advanced where the evaluator opens its slot.
@@ -5191,7 +5368,12 @@ class SecurityEmitter:
             lines.append(f"    Series<{cpp_t}> {name}{mbb_suffix};")
         for cell in self._security_sparse_cells(sec_id).values():
             lines.append(f"    Series<{cell.completed_type}> {cell.member}{mbb_suffix};")
-        for name in self._security_sparse_clock_members(sec_id):
+        # A bare TA in a conditional linear helper needs the call's scope
+        # even if neither a parameter nor the TA result is read with [].
+        for _, variant in self._security_inline_ta_variants(info):
+            self._security_discover_helper_clock(variant["binding_stack"])
+        for name in (*self._security_sparse_clock_members(sec_id),
+                     *self._security_owned_ta_clock_members(sec_id)):
             lines.append(f"    bool {name} = false;")
 
     def _build_security_math_call(
@@ -5774,7 +5956,9 @@ class SecurityEmitter:
                     binding = active_bindings.get(stmt.name)
                     if binding is None:
                         binding = self._security_series_binding(
-                            self._security_next_inline_name(sec_id, plan["func_info"].name, stmt.name)
+                            self._security_local_series_name(
+                                sec_id, plan["func_info"].name, stmt, stmt.name,
+                                plan["binding_stack"])
                         )
                     series_name = self._security_series_binding_target(binding)
                     assert series_name is not None
@@ -5833,9 +6017,7 @@ class SecurityEmitter:
                         # requested bar it rolls back before the helper body is
                         # evaluated again.  ``Series[1]`` is that rollback
                         # value after the first bar.  The companion seed entry
-                        # preserves the once-only initializer for first-bar
-                        # recomputations without adding another generated
-                        # member/state family.
+                        # holds the seed for this first-bar evaluation.
                         seed_name = f"{series_name}@var_seed"
                         ref = self._security_helper_series_ref(series_name)
                         seed_ref = self._security_helper_series_ref(seed_name)
@@ -5846,6 +6028,8 @@ class SecurityEmitter:
                         lines.append(f'{pad}}} else if ({is_new}) {{')
                         lines.append(f'{pad}    {ref}.push({ref}[0]);')
                         lines.append(f'{pad}}} else {{')
+                        lines.extend(self._security_var_reseed_lines(
+                            stmt, runtime_stack_local, ref, seed_ref, expr_cpp, pad))
                         lines.append(
                             f'{pad}    {ref}.update({ref}.size() > 1 '
                             f'? {ref}[1] : {seed_ref}[0]);'
@@ -6108,8 +6292,8 @@ class SecurityEmitter:
                                 hint="Declare the element with its own string variable.",
                             )
                         binding = self._security_series_binding(
-                            self._security_next_inline_name(
-                                sec_id, plan["func_info"].name, name
+                            self._security_local_series_name(
+                                sec_id, plan["func_info"].name, stmt, name, plan["binding_stack"]
                             )
                         )
                         emit_series_value(
@@ -6321,8 +6505,7 @@ class SecurityEmitter:
         return self._for_counter_cpp_type(start, step=step, pine_v5=pine_v5)
 
     def _security_binding_stack_signature(
-        self,
-        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+        self, helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
     ) -> tuple:
         if not helper_binding_stack:
             return ()
@@ -6332,16 +6515,25 @@ class SecurityEmitter:
             return id(value)
 
         sig_frames = []
+        sparse = False
+        lazy = getattr(self, "_security_lazy_call_ids", ())
         for idx, frame in enumerate(helper_binding_stack):
             if idx == 0 or isinstance(frame, _SecurityHelperArgumentFrame):
                 sig_frames.append(
                     tuple((name, _sig_value(node)) for name, node in sorted(frame.items()))
                 )
+                if isinstance(frame, _SecurityHelperArgumentFrame) and frame.call is not None:
+                    sparse = sparse or id(frame.call) in lazy
             else:
                 # Helper-local bindings only need to preserve which locals have been
                 # materialized at this point; using raw runtime names here causes
                 # the declaration/lookup paths to disagree on the same TA variant.
                 sig_frames.append(tuple(sorted(frame.keys())))
+        if sparse and self._security_sparse_request(self._security_arg_history_sec):
+            # Even two calls with *no* parameters can have independent TA
+            # state. Different reaches of one call keep the same key. Ids
+            # are used for lookup only (_security_variant_order_key).
+            sig_frames.append(self._security_argument_call_path(helper_binding_stack))
         return tuple(sig_frames)
 
     def _security_user_call_key(self, node) -> str | None:
@@ -8468,8 +8660,9 @@ class SecurityEmitter:
           requested context that global is its own unconditional top-level
           statement, so it evaluates on every HTF bar wherever it is read
           (this is what keeps chart-side ``t0``-shaped code exact).
-        - Sites with a history offset (``ta.ema(close, 55)[1]``) keep the
-          committed ``_secval_*`` their per-bar Series push reads.
+        - Sites with a history offset (``ta.ema(close, 55)[1]``) need one
+          computed result to commit. The evaluator owns that computation
+          unless a sparse helper stages the result on its own call clock.
         - Securities that rebind mutable globals, and multi-statement helper
           calls, bail entirely: both lower through statement emitters that
           consume ``ta_results`` outside this expression.
@@ -9017,12 +9210,16 @@ class SecurityEmitter:
         self._security_array_values = {}
         # This evaluator's global history reads lowered as doubles.
         self._security_double_hist_nodes = set()
-        # open member -> (new, ran) locals of each sparse call whose body
-        # keeps state (``_security_slot_is_new_cpp``).
+        # open member -> evaluator-local (ran, dup). The same call text can
+        # occur at several places even if it was lowered only once.
         outer_clocks = (getattr(self, "_security_call_clocks", None),
-                        getattr(self, "_security_call_clock", None))
+                        getattr(self, "_security_call_clock", None),
+                        getattr(self, "_security_call_ta", None),
+                        getattr(self, "_security_call_series", None))
         self._security_call_clocks = clocks = {}
         self._security_call_clock = None
+        self._security_call_ta = owned_ta = {}
+        self._security_call_series = {}
         outer_arg_sec = self._security_arg_history_sec
         outer_arg_values = self._security_arg_call_values
         outer_arg_globals = self._security_arg_globals
@@ -9046,22 +9243,29 @@ class SecurityEmitter:
             (self._security_shared_calls, self._security_shared_definitions,
              self._security_shared_globals, self._security_global_hist_pushes,
              self._security_double_hist_nodes, self._security_array_values) = outer
-            self._security_call_clocks, self._security_call_clock = outer_clocks
+            (self._security_call_clocks, self._security_call_clock,
+             self._security_call_ta, self._security_call_series) = outer_clocks
         if clocks:
-            # A sparse call's slots open when its last run was committed. A
-            # run on the completed evaluation commits them; one on an earlier
-            # evaluation leaves them open for the next run to recompute.
-            close = max(i for i in range(start, len(lines)) if lines[i] == "    }")
-            lines[close:close] = [
-                f"        if ({ran}) {open_} = !is_complete;"
-                for open_, (_new, ran) in clocks.items()]
+            # Each call prelude marks its place exactly once. Count the
+            # finished statements, including copies of a shared expression
+            # and excluding quoted Pine text. A single place in a loop is
+            # still one place, however many times the loop executes it.
+            body = cpp_code_only("\n".join(definitions + lines[start:]))
+            reaches = Counter(re.findall(r"\b(_sec\d+_call_ran_\d+)\s*=\s*true\s*;", body))
             definitions = [
-                f"        const bool {new} = !{open_}; bool {ran} = false;"
-                for open_, (new, ran) in clocks.items()] + definitions
+                f"        bool {ran} = false; constexpr bool {dup} = "
+                f"{'true' if reaches[ran] > 1 else 'false'};"
+                for ran, dup in clocks.values()] + definitions
+        # A nested TA can be skipped even when the enclosing call ran.
+        # Close only the slots actually reached in the final evaluation.
+        commits = [f"        if ({ran}) {open_} = !is_complete;"
+                   for open_, (ran, _dup) in clocks.items()]
+        for variant in owned_ta.values():
+            member = variant["member_name"]
+            commits.append(f"        if ({member}_sample) {member}_open = !is_complete;")
         if pushes:
             # Commit after all reads have seen the previous requested bar.
-            close = max(i for i in range(start, len(lines)) if lines[i] == "    }")
-            lines[close:close] = (
+            commits.extend(
                 ["        if (is_complete) {"]
                 + [(f"            if ({hist}_set) {hist}.push({hist}_next);"
                     if fallback is None else
@@ -9071,6 +9275,9 @@ class SecurityEmitter:
             definitions = [
                 f"        {cpp_t} {hist}_next = na<{cpp_t}>(); bool {hist}_set = false;"
                 for hist, cpp_t in pushes] + definitions
+        if commits:
+            close = max(i for i in range(start, len(lines)) if lines[i] == "    }")
+            lines[close:close] = commits
         lines[start + 1:start + 1] = definitions
 
     def _security_share_pure_call(self, sec_id: int, text: str) -> str:
@@ -9170,6 +9377,23 @@ class SecurityEmitter:
             else:
                 pre_rebind_ta_indices.append(idx)
 
+        def register_owned_ta(idx, variant):
+            self._security_call_ta[idx, variant["signature"]] = variant
+            site = self.ctx.ta_call_sites[idx]
+            # Keep the kernel result type (including a missing int held as
+            # a double); tuple and array results are values too.
+            cpp_t = self._ta_return_type(site)
+            if not site.returns_tuple:
+                inferred = self._infer_cpp_type_for_security_elem(site.node)
+                if inferred == "bool" or inferred.startswith("std::vector<"):
+                    cpp_t = inferred
+            self._security_shared_definitions.append(
+                f"        std::optional<{cpp_t}> {variant['member_name']}_sample;")
+
+        for idx, variant in self._security_inline_ta_variants(info):
+            if self._security_call_owns_ta(sec_id, variant):
+                register_owned_ta(idx, variant)
+
         def emit_security_ta(indices: list[int]) -> None:
             # Pine only reaches a lazy site through a short-circuited operand
             # or an untaken ternary branch. Leave it out of the eager
@@ -9185,6 +9409,12 @@ class SecurityEmitter:
             for idx, variant in self._security_prologue_order(
                 sec_id, entries, ta_results, security_mutable_names,
             ):
+                if self._security_call_owns_ta(sec_id, variant):
+                    # Retain dependency order but sample where the helper
+                    # runs, with its argument history in scope. Reaches of
+                    # the same written variant share this evaluator local.
+                    register_owned_ta(idx, variant)
+                    continue
                 self._emit_security_prologue_ta(
                     sec_id, idx, variant, ta_results, security_mutable_names, lines,
                 )
@@ -10380,15 +10610,10 @@ class SecurityEmitter:
             ta_site = self._get_ta_site(expr_node.object)
             if ta_site is not None:
                 # ``ta.<fn>(...)[k]`` inside request.security(): the inner TA call
-                # runs in the HTF (security) context and commits one value per
-                # COMPLETED HTF bar. Read the already-emitted security TA result —
-                # offset 0 reuses the current committed value (``_secval_*``),
-                # offset k>=1 reads a per-site Series that advances on
-                # ``is_complete`` (HTF-bar boundary) in ``_eval_security_N``. The
-                # buggy generic path re-lowered the inner TA to the CHART member
-                # and gated a ``_hist_call`` buffer on ``is_first_tick_`` (chart
-                # tick), so without a magnifier it advanced every chart bar and
-                # produced the chart-tf TA instead of the confirmed HTF value.
+                # runs on the requested bar or its sparse helper's clock.
+                # Offset zero uses the current evaluation. Positive offsets
+                # read only completed values; the evaluator commits after
+                # every read has seen the old history.
                 idx = self._ta_index_by_site_id.get(id(ta_site))
                 # A top-level TA site reached through a global alias owns the
                 # global variant even when the subscript index was authored
@@ -10400,6 +10625,7 @@ class SecurityEmitter:
                     else helper_binding_stack
                 )
                 sig = self._security_binding_stack_signature(ta_binding_stack)
+                result_key = (idx, sig)
                 idx_lit = self._resolve_security_index_literal(
                     expr_node.index, helper_binding_stack
                 )
@@ -10450,38 +10676,7 @@ class SecurityEmitter:
                     index_cpp = self._coerce_int_slot_with_cast(
                         index_cpp, expr_node.index, "int"
                     )
-                    result_key = (idx, sig)
-                    self._security_note_ta_read(result_key)
-                    if result_key not in ta_results:
-                        self._codegen_error(
-                            expr_node,
-                            "request.security multi-statement helper TA history is not supported",
-                            hint="Use a single-expression helper for TA history offsets.",
-                        )
-                    current = self._build_security_expr(
-                        sec_id,
-                        expr_node.object,
-                        ta_range,
-                        ta_results,
-                        resolving,
-                        security_mutable_names,
-                        ta_binding_stack,
-                        emitted_lines,
-                    )
-                    member_name = self._security_ta_variant_names.get(
-                        (sec_id, idx, sig),
-                        f"_sec{sec_id}_{ta_site.member_name}",
-                    )
-                    hist = self._security_ta_hist_series_cpp(member_name)
-                    return (
-                        "([&]() -> double { "
-                        f"int _hidx = {index_cpp}; "
-                        f"{offset_check}"
-                        "if (is_na(_hidx) || _hidx < 0) return na<double>(); "
-                        f"return (_hidx == 0) ? {current} : {hist}[_hidx - 1]; "
-                        "}())"
-                    )
-                if idx_lit < 0:
+                elif idx_lit < 0:
                     self._codegen_error(
                         expr_node,
                         "request.security() TA history index must be non-negative",
@@ -10498,21 +10693,44 @@ class SecurityEmitter:
                         ta_binding_stack,
                         emitted_lines,
                     )
-                self._security_note_ta_read((idx, sig))
-                if (idx, sig) not in ta_results:
-                    self._codegen_error(
-                        expr_node,
-                        "request.security multi-statement helper TA history is not supported",
-                        hint="Use a single-expression helper for TA history offsets.",
-                    )
+                self._security_note_ta_read(result_key)
                 member_name = self._security_ta_variant_names.get(
                     (sec_id, idx, sig),
                     f"_sec{sec_id}_{ta_site.member_name}",
                 )
                 hist = self._security_ta_hist_series_cpp(member_name)
-                # ta(...)[k] -> hist[k-1]: hist[0] is the prior completed HTF bar
-                # (current value not yet pushed — push happens after this assign).
-                return f"{hist}[{idx_lit - 1}]"
+                current = ta_results.get(result_key)
+                stage = ""
+                if current is None:
+                    # A linear helper's TA can read a C++ local declared in
+                    # its body. Compute it here, where the local is in scope.
+                    if (self._security_call_clock is None or not ta_binding_stack
+                            or getattr(ta_site, "returns_tuple", False)
+                            or (sec_id, idx, sig) not in self._security_ta_variant_names):
+                        self._codegen_error(
+                            expr_node,
+                            "request.security multi-statement helper TA history is not supported",
+                            hint="Use a single-expression helper for TA history offsets.",
+                        )
+                    stage = self._build_security_expr(
+                        sec_id, expr_node.object, ta_range, ta_results, resolving,
+                        security_mutable_names, ta_binding_stack, emitted_lines)
+                    # An owned TA stages its result inside the sample guard.
+                    if result_key not in self._security_call_ta:
+                        stage = self._security_stage_ta_history(member_name, stage)
+                    current = f"{hist}_next"
+                if idx_lit is None:
+                    prelude = f"{stage}; " if stage else ""
+                    return (
+                        f"([&]() -> double {{ {prelude}int _hidx = {index_cpp}; "
+                        f"{offset_check}"
+                        "if (is_na(_hidx) || _hidx < 0) return na<double>(); "
+                        f"return (_hidx == 0) ? {current} : {hist}[_hidx - 1]; "
+                        "}())"
+                    )
+                # Current value not pushed yet: [0] holds the last commit.
+                prior = f"{hist}[{idx_lit - 1}]"
+                return f"({stage}, {prior})" if stage else prior
 
         # A literal comparison uses the expression visitor's shared lowering
         # below, with the same fallback frame and index bindings as a getter.
@@ -10818,15 +11036,16 @@ class SecurityEmitter:
                 call_clock = None
                 if sparse_body is not None:
                     call_clock = self._security_sparse_call_clock(
-                        sec_id, plan["binding_stack"])
-                    # Where the outermost sparse call sits: a global its body
-                    # reads is lowered there (``_build_security_expr``).
-                    call_clock["lines"], call_clock["scope"] = (
-                        (enclosing_lines, getattr(self, "_security_scope_path", ()))
-                        if outer_clock is None else
-                        (outer_clock["lines"], outer_clock["scope"]))
+                        sec_id, plan["binding_stack"], enclosing_lines)
                     self._security_call_clock = call_clock
+                opened_ta = ()
                 try:
+                    # Inside a sparse call, the ta.* variants the evaluator
+                    # did not compute where it opens are computed where this
+                    # call does, on the sparse call's clock.
+                    opened_ta = self._security_open_call_ta(
+                        sec_id, plan["binding_stack"], ta_results,
+                        security_mutable_names, emitted_lines)
                     if plan["mode"] == "expr":
                         resolved = self._build_security_expr(
                             sec_id,
@@ -10854,6 +11073,8 @@ class SecurityEmitter:
                         )
                 finally:
                     self._security_call_clock = outer_clock
+                    for opened_key in opened_ta:
+                        ta_results.pop(opened_key, None)
                 resolving.remove(call_key)
                 if has_samples and sparse_body is None:
                     # One written call is one runtime result per evaluation.
@@ -10872,15 +11093,19 @@ class SecurityEmitter:
                     )
                 if sparse_body is not None:
                     if call_clock["used"]:
-                        # The evaluator opens and commits this call's slots
-                        # only when a run reached the call.
-                        self._security_call_clocks[call_clock["open"]] = (
-                            call_clock["new"], call_clock["ran"])
-                        sparse_body.insert(0, f"        {call_clock['ran']} = true;")
+                        # C++ locals are scoped to each lowering. Persistent
+                        # cells and the decision to open them belong to the
+                        # written call, including across disjoint blocks.
+                        open_, ran, dup, slot = (
+                            call_clock[k] for k in ("open", "ran", "dup", "slot"))
+                        self._security_call_clocks.setdefault(open_, (ran, dup))
+                        sparse_body.insert(
+                            0, f"        const bool {slot} = !{open_} && !({dup} && {ran}); "
+                               f"{ran} = true;")
                     # The argument and the entire body execute inside the
                     # caller's ?:, &&, ||, branch or loop, even for a body
                     # that emits local declarations before its result.
-                    return "([&]() {\n" + "\n".join(sparse_body) + f"\nreturn {resolved}; }}())"
+                    resolved = "([&]() {\n" + "\n".join(sparse_body) + f"\nreturn {resolved}; }}())"
                 return resolved
 
         if (
@@ -10967,6 +11192,11 @@ class SecurityEmitter:
                 self._security_note_ta_read(result_key)
                 if result_key in ta_results:
                     return ta_results[result_key]
+                owned = getattr(self, "_security_call_ta", None)
+                if owned and result_key in owned:
+                    return self._security_read_owned_ta(
+                        sec_id, idx, owned[result_key], helper_binding_stack,
+                        ta_results, security_mutable_names, None)
             sec_name = self._security_ta_variant_names.get(
                 (sec_id, idx, sig),
                 f"_sec{sec_id}_{site.member_name}",
@@ -11255,7 +11485,11 @@ class SecurityEmitter:
             for stmt in body:
                 if isinstance(stmt, VarDecl):
                     walk(stmt.value, env)
-                    name = self._security_next_inline_name(args[0], "selection", stmt.name)
+                    if stmt.is_var or stmt.is_varip:
+                        name = self._security_local_series_name(
+                            args[0], "selection", stmt, stmt.name, args[5])
+                    else:
+                        name = self._security_next_inline_name(args[0], "selection", stmt.name)
                     declarations[id(stmt)] = name
                     cpp_type = self._type_for_decl(stmt)
                     if stmt.is_var or stmt.is_varip:
@@ -11543,6 +11777,7 @@ class SecurityEmitter:
                     f"{pad}}} else if ({is_new}) {{",
                     f"{pad}    {ref}.push({ref}[0]);",
                     f"{pad}}} else {{",
+                    *self._security_var_reseed_lines(node, args[5], ref, seed, value, pad),
                     f"{pad}    {ref}.update({ref}.size() > 1 ? {ref}[1] : {seed}[0]);",
                     f"{pad}}}",
                 ))
