@@ -58,6 +58,9 @@ BEFORE_SHA = "c" * 40
 EARLIER_SHA = "d" * 40
 LOOKUP = f"gh api --paginate --slurp repos/{REPO}/commits/{MERGE_SHA}/pulls?per_page=100"
 FULL_PR = f"gh api repos/{REPO}/pulls/17"
+# A resolved push then reads the first-parent commits ending at the pushed
+# one, once: the merges before its own.
+WINDOW = f"gh api repos/{REPO}/commits?sha={MERGE_SHA}&per_page=100"
 WAIT = "sleep 20"
 # The release rows run as this repository: its name puts the step on the
 # code generator's axis, whose release file set is VERSION alone.
@@ -82,7 +85,9 @@ RELEASE_LINE = (
 # lists, or an API error. A lookup after the last reply exits 93 and is never
 # answered again. The pushed commit's file list is answered only for a row
 # that names changed paths or file records; without them that read exits 95.
-# The full PR comes from the environment. Any other call exits 97.
+# The full PR comes from the environment, and so does the list of the
+# first-parent commits ending at the pushed one: the pushed commit alone, a
+# root commit, so no earlier merge is examined. Any other call exits 97.
 GH_STUB = r'''set -eu
 printf "gh %s\n" "$*" >> "$CALLS"
 if [ "$#" -eq 4 ] && [ "$1" = api ] && [ "$2" = --paginate ] && [ "$3" = --slurp ] &&
@@ -108,6 +113,8 @@ elif [ "$#" -eq 4 ] && [ "$1" = api ] && [ "$2" = --paginate ] && [ "$3" = --slu
   fi
 elif [ "$#" -eq 2 ] && [ "$1" = api ] && [ "$2" = "repos/$REPO/pulls/17" ]; then
   printf "%s\n" "$GH_PR"
+elif [ "$#" -eq 2 ] && [ "$1" = api ] && [ "$2" = "repos/$REPO/commits?sha=$SHA&per_page=100" ]; then
+  printf "%s\n" "$GH_COMMITS"
 else
   exit 97
 fi
@@ -229,7 +236,7 @@ ROWS = [
         exit_code=0,
         stdout=retry_notice(1),
         outputs=RESOLVED_OUTPUTS,
-        calls=(LOOKUP, WAIT, LOOKUP, FULL_PR),
+        calls=(LOOKUP, WAIT, LOOKUP, FULL_PR, WINDOW),
     ),
     Row(
         "three empty association answers end in DEFERRED_NOT_FOUND",
@@ -466,6 +473,14 @@ def run_resolve_step(row, tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "python3").symlink_to(sys.executable)
+    # An answer that lists a pull request is checked with the runner's own
+    # grep, and a resolved push records the commits before its own with
+    # mkdir, jq and head. GitHub's answers and the wait stay the stand-ins.
+    for tool in ("grep", "mkdir", "jq", "head"):
+        real = shutil.which(tool)
+        if real is None:
+            pytest.fail(f"NOT RUN: the promotion guard lookup rows require {tool} on the test runner")
+        (bin_dir / tool).symlink_to(real)
     for name, body in (("gh", GH_STUB), ("sleep", SLEEP_STUB)):
         stub = bin_dir / name
         stub.write_text(f"#!{bash}\n{body}", encoding="utf-8")
@@ -505,6 +520,8 @@ def run_resolve_step(row, tmp_path):
         "GITHUB_OUTPUT": str(output_path), "GITHUB_STEP_SUMMARY": str(summary_path),
         "CALLS": str(calls_path), "GH_REPLIES": str(replies_dir),
         "GH_PR": json.dumps(merged_pr()),
+        "GH_COMMITS": json.dumps([{"sha": MERGE_SHA, "parents": []}]),
+        "RUNNER_TEMP": str(tmp_path / "runner-temp"),
     }
     result = subprocess.run(
         [bash, "--noprofile", "--norc", str(script)],

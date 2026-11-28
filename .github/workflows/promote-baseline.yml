@@ -15,7 +15,10 @@
 #            (ruling R2, 2026-09-26), PASS or neutral alike
 #   codegen  the required `gate` context green (the trusted reporter's commit
 #            status, else the check-run) and no check-run on the PR head
-#            whose newest run (per app and name) failed; lab promote needs a pr-gate PASS binding (baseline
+#            whose newest run (per app and name) failed, a cancelled run
+#            never counting as the newest; and no required check (a context
+#            of main's active branch rules, or `gate`) whose only completed
+#            runs on the PR head were cancelled; lab promote needs a pr-gate PASS binding (baseline
 #            engine, the PR head) and re-reads both trees from GitHub (the
 #            verdict records commits, not trees; GH_TOKEN below)
 # Otherwise the baseline stands. Exhausted empty PR lookups fail loudly.
@@ -59,6 +62,71 @@
 # cancelled: one promotion finishes before the next one starts. The lock is on
 # that job, not on the workflow, so a run queues only after its guard has
 # validated it: an invalid dispatch never queues.
+#
+# GitHub keeps one run in progress and ONE run waiting for a group: a merge
+# that lands while another run is already waiting takes its place, and the
+# replaced run is cancelled before it promoted anything. So every push run
+# also examines the merges before its own: the last CATCH_UP_WINDOW (10)
+# first-parent commits ending at the pushed one. Each earlier commit goes
+# through the same steps as the run's own merge: one PR lookup, with no retry
+# and no release exemption, then the same authorisation, tree check and gate.
+# `lab promote --catch-up` then promotes what is owed: the newest merge that
+# promotes first, then the merges after it in merge order. Every examined
+# merge ends with one line in the step summary; a merge whose content a newer
+# promoted merge already holds is reported as superseded, never silently
+# dropped. An earlier merge that is refused, or cannot be read, fails the run
+# at its end, after the others had their turn. A commit list that cannot be
+# read examines nothing and is reported; the run's own merge then proceeds as
+# before. A burst longer than the window is reported with the number of
+# commits nobody examined. A manual dispatch promotes exactly the merge it
+# names.
+#
+# A run that waited for the lock may no longer be the newest merge. So the
+# promote job's first step, holding the lock and before any credential exists,
+# reads main's tip. When the tip is the run's own merge, nothing changes. When
+# main has moved on, the run still promotes the merges it examined, and every
+# first-parent commit after its own merge is reported by name as NOT COMPARED
+# ("not examined by this run: its own run may still follow; else dispatch
+# it"); the run then ends red. No merge is missed silently.
+# Each of those rows names the commit by its first 12 characters and its pull
+# request, from one read-only lookup, and carries the line that dispatches
+# that commit's own promotion:
+#   gh workflow run promote-baseline.yml --ref main -f merge_commit=<sha>
+#     -f head_sha=<sha> -f pr_number=<n> -f pr_url=<url> -f merged_at=<UTC>
+# When the lookup fails, or names no single merged pull request, the row says
+# which, gives that line with the field it has, names the fields still
+# needed, and gives the route by hand: `lab promote --repo <axis>
+# --merge-commit <sha> ... --dry-run` first, then the same without --dry-run.
+#
+# The run at main's tip always catches up, even when its own merge does not
+# promote: a docs-only merge, a merge no verdict binds, an engine merge the
+# diff rule cleared (each is deferred), or a merge handled with no baseline
+# row. The earlier owed merges of its window are still attempted. The
+# promotion of every merge, whichever run makes it, is bound to the baseline
+# it was planned on: two runs never append twice on one baseline.
+#
+# An answer that cannot be read is never taken for "nothing there". For an
+# earlier commit, a lookup answer that is not readable, a failed lookup, a
+# failed tree check and a failed gate read are that commit's own row,
+# unresolved: the other merges, the run's own included, still have their
+# turn, and the run ends red. The last step always runs and writes one row for
+# every examined commit to its log and to the step summary, whether or not the
+# promotion ran. A row's reason is a fixed text: what a failed read printed
+# stays in the log of the step that made it.
+#
+# Only exit code 2 of `lab promote --catch-up` is a deferral (every attempt
+# was refused). A usage or plan error is 64 and fails the run. Before the
+# call the run asks the tooling's own `--help` for `--catch-up`, and fails
+# with a clear message when the tooling at WORKFLOW_REF predates it.
+#
+# A merge is promoted only when the active baseline's commit is its ancestor.
+# When it is not (the active commit is off main), the merge is NOT COMPARED
+# and never attempted; when that is the run's own merge, the run fails, with
+# the row naming both commits: a run never ends green having promoted nothing
+# without saying why. With no baseline registered at all, nothing changes: the
+# run's own merge is attempted as it always was and refused by the promotion's
+# own check (deferred, nothing written), and earlier merges are NOT COMPARED.
+# This workflow registers no first baseline.
 #
 # The plane is GCP: the
 # promotion reads the active baseline and the gate ledger from the Postgres
@@ -151,6 +219,10 @@ jobs:
       pr_number: ${{ steps.pr.outputs.pr_number }}
       pr_url: ${{ steps.pr.outputs.pr_url }}
       merged_at: ${{ steps.pr.outputs.merged_at }}
+      # Every commit this run examines, oldest first, the run's own merge
+      # last; and what was read of the commits before it.
+      merges: ${{ steps.authorize.outputs.merges }}
+      window: ${{ steps.authorize.outputs.window }}
     steps:
       - name: Resolve the merged PR
         id: pr
@@ -349,13 +421,20 @@ jobs:
             push) ;;
             *) fail "event $EVENT_NAME does not run baseline promotion (only push and workflow_dispatch are allowed)" ;;
           esac
-          # Only an empty association result may be eventually consistent.
-          for attempt in 1 2 3; do
-            # Search every page: a second match must defer, never pick a PR.
-            pulls=$(gh api --paginate --slurp \
-              "repos/$REPO/commits/$SHA/pulls?per_page=100")
-            lookup_status=0
-            python3 - 3<<<"$pulls" <<'PY' || lookup_status=$?
+          # A push run also examines the merges before its own: the last
+          # CATCH_UP_WINDOW first-parent commits ending at the pushed one.
+          CATCH_UP_WINDOW=10
+          # One commit's merged PR, from the lookup answer on file descriptor 3.
+          # The caller names the commit, the file that takes its outputs and
+          # the file that takes a refusal. Status 0: the answer was read, and
+          # the outputs hold the PR's values or a skip (ok=false). Status 3: a
+          # valid empty answer. Any other status: a check failed.
+          # An answer that cannot be read (not JSON, or not pages of pull
+          # request records) is a skip for the run's own merge, as it always
+          # was. For an earlier commit the caller names a fourth argument, the
+          # status such an answer ends with: unread is never "no pull request".
+          resolve_pulls() {
+            SHA="$1" GITHUB_OUTPUT="$2" GITHUB_STEP_SUMMARY="$3" UNREADABLE_STATUS="${4:-0}" python3 - <<'PY'
           import json
           import os
           import re
@@ -365,6 +444,14 @@ jobs:
               print(f"::notice::{reason}; skipping")
               with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
                   output.write("ok=false\n")
+
+          def unreadable(reason):
+              status = int(os.environ["UNREADABLE_STATUS"])
+              if status == 0:
+                  skip(reason)
+              else:
+                  print(f"{reason}; not resolved")
+              raise SystemExit(status)
 
           def fail(reason):
               print(f"::error title=authz::{reason}")
@@ -389,13 +476,11 @@ jobs:
           try:
               pages = json.loads(open(3, encoding="utf-8").read(), parse_constant=reject_constant)
           except (ValueError, RecursionError):
-              skip("invalid merged PR response JSON")
-              raise SystemExit(0)
+              unreadable("invalid merged PR response JSON")
           if (not isinstance(pages, list)
                   or any(not isinstance(page, list) for page in pages)
                   or any(not isinstance(pr, dict) for page in pages for pr in page)):
-              skip("invalid merged PR response page array")
-              raise SystemExit(0)
+              unreadable("invalid merged PR response page array")
           # An answer with no page at all is an anomaly, never an empty result:
           # it fails the run at once, with no retry and no release exemption.
           if not pages:
@@ -460,7 +545,111 @@ jobs:
               for key, value in values.items():
                   output.write(f"{key}={value}\n")
           PY
+          }
+          # The first-parent commits before the pushed one, oldest first, for
+          # the next step. Each gets ONE lookup, with no retry and no release
+          # exemption, and its result is a row there, never this step's exit.
+          # A commit list that cannot be read is recorded and examines nothing.
+          examine_window() {
+            local commits missed oldest pulls status window_status=0
+            local guard_dir="$RUNNER_TEMP/promote-guard"
+            mkdir -p "$guard_dir"
+            commits=$(gh api "repos/$REPO/commits?sha=$SHA&per_page=100") || window_status=$?
+            if [ "$window_status" -eq 0 ]; then
+              python3 - "$CATCH_UP_WINDOW" 3<<<"$commits" > "$guard_dir/window" <<'WINDOW_PY' || window_status=$?
+          import json
+          import os
+          import re
+          import sys
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          def commit_id(value):
+              if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value):
+                  return value
+              return None
+
+          limit = int(sys.argv[1])
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  records = json.load(stream, parse_constant=reject_constant)
+          except (OSError, ValueError, RecursionError):
+              raise SystemExit(1)
+          if not isinstance(records, list):
+              raise SystemExit(1)
+          # Each listed commit with its first parent; a root commit has none.
+          first_parent = {}
+          for record in records:
+              commit = commit_id(record.get("sha")) if isinstance(record, dict) else None
+              parents = record.get("parents") if isinstance(record, dict) else None
+              if commit is None or not isinstance(parents, list):
+                  raise SystemExit(1)
+              parent = None
+              if parents:
+                  parent = commit_id(parents[0].get("sha")) if isinstance(parents[0], dict) else None
+                  if parent is None:
+                      raise SystemExit(1)
+              first_parent[commit] = parent
+          current = os.environ["SHA"]
+          if current not in first_parent:
+              raise SystemExit(1)
+          # Walk first parents back from the pushed commit, which is the
+          # window's newest member. A parent the list does not hold is unread:
+          # the window is refused, never cut short.
+          earlier = []
+          while len(earlier) < limit - 1:
+              current = first_parent[current]
+              if current is None:
+                  break
+              if current not in first_parent:
+                  raise SystemExit(1)
+              earlier.append(current)
+          for commit in reversed(earlier):
+              print(commit)
+          WINDOW_PY
+            fi
+            if [ "$window_status" -ne 0 ]; then
+              jq -cn --argjson limit "$CATCH_UP_WINDOW" \
+                --arg error "the first-parent commits before $SHA could not be read (status $window_status)" \
+                '{limit: $limit, error: $error}' > "$guard_dir/window.json"
+              return 0
+            fi
+            oldest=$(head -n 1 "$guard_dir/window")
+            [ -n "$oldest" ] || oldest="$SHA"
+            jq -cn --argjson limit "$CATCH_UP_WINDOW" --arg oldest "$oldest" \
+              '{limit: $limit, oldest: $oldest}' > "$guard_dir/window.json"
+            while IFS= read -r missed <&4; do
+              [ -n "$missed" ] || continue
+              status=0
+              pulls=$(gh api --paginate --slurp \
+                "repos/$REPO/commits/$missed/pulls?per_page=100" 2> "$guard_dir/$missed.log") || status="lookup failed (exit $?)"
+              if [ "$status" = 0 ]; then
+                # An answer that cannot be read ends with status 4 here: an unread answer is never a skip.
+                resolve_pulls "$missed" "$guard_dir/$missed.out" "$guard_dir/$missed.refusal" 4 3<<<"$pulls" \
+                  > "$guard_dir/$missed.log" 2>&1 || status=$?
+              fi
+              echo "$status" > "$guard_dir/$missed.status"
+              # What the lookup and the rules printed stays in this job's log, each line behind the commit's
+              # name so that none is read as a workflow command. The row the next step writes carries a
+              # fixed reason: nothing a failed read printed reaches an output, the summary or an annotation.
+              sed "s/^/earlier commit $missed: /" "$guard_dir/$missed.log" >&2
+            done 4< "$guard_dir/window"
+            return 0
+          }
+          # Only an empty association result may be eventually consistent.
+          for attempt in 1 2 3; do
+            # Search every page: a second match must defer, never pick a PR.
+            pulls=$(gh api --paginate --slurp \
+              "repos/$REPO/commits/$SHA/pulls?per_page=100")
+            lookup_status=0
+            resolve_pulls "$SHA" "$GITHUB_OUTPUT" "$GITHUB_STEP_SUMMARY" 3<<<"$pulls" || lookup_status=$?
             if [ "$lookup_status" -eq 0 ]; then
+              # Resolved: now the merges before it. A skip (ok=false) examines
+              # nothing, as no later step runs.
+              if grep -qx 'ok=true' "$GITHUB_OUTPUT"; then
+                examine_window
+              fi
               exit 0
             fi
             [ "$lookup_status" -eq 3 ] || exit "$lookup_status"
@@ -570,6 +759,12 @@ jobs:
           ASSOCIATION: ${{ steps.pr.outputs.association }}
           PR_AUTHOR: ${{ steps.pr.outputs.pr_author }}
           MERGED_BY: ${{ steps.pr.outputs.merged_by }}
+          # The run's own merge as resolved above: the last row this step writes.
+          MERGE_SHA: ${{ steps.pr.outputs.merge_sha }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+          MERGED_AT: ${{ steps.pr.outputs.merged_at }}
           GH_TOKEN: ${{ github.token }}   # read-only use: permission lookups for the PR author and merger
           # Bot logins whose same-repository pull requests count as ours: dependabot[bot] (CI-DEPBOT A)
           # and the org's own GitHub App bot logins by name (space-separated), nothing else.
@@ -577,6 +772,9 @@ jobs:
         run: |
           set -euo pipefail
           fail() { echo "::error title=authz::$1"; echo "authz: REFUSED: $1" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          # One merge's authorisation, by the event and that merge's own identity values. The body is a
+          # subshell: a refusal ends it with status 1, and the caller decides what that status means.
+          authorize_one() (
           case "$EVENT" in
             workflow_dispatch)
               # Only someone with write access to this repository (or our App's token) can cause these
@@ -612,7 +810,84 @@ jobs:
               esac ;;
             *) fail "event $EVENT does not run baseline promotion (only push and workflow_dispatch are allowed)" ;;
           esac
+          )
+          # The run's own merge: a refusal fails the job, as it always did.
+          authorize_one
           echo "authz: allowed ($EVENT${PR_AUTHOR:+ by $PR_AUTHOR})" >> "$GITHUB_STEP_SUMMARY"
+          # Every commit this run examines, oldest first, one JSON row each: on a push the commits before
+          # the run's own merge, then that merge. A row is a candidate (resolved and authorised), skipped
+          # (no single merged pull request names the commit), refused (this authorisation) or unresolved
+          # (a failed read). Only candidates go on; a refused or unresolved row fails the run at its end.
+          guard_dir="$RUNNER_TEMP/promote-guard"
+          mkdir -p "$guard_dir"
+          rows="$guard_dir/rows"
+          : > "$rows"
+          value_of() { sed -n "s/^$1=//p" "$2"; }
+          # A dispatch names one merge and has no window. A push whose window was never recorded examined
+          # its own commit alone.
+          window=null
+          if [ "$EVENT" = push ]; then
+            window='{"limit":1,"error":"the commits before this merge were not recorded"}'
+            if [ -f "$guard_dir/window.json" ]; then window=$(cat "$guard_dir/window.json"); fi
+            if [ -f "$guard_dir/window" ] && jq -e '.error == null' <<< "$window" > /dev/null; then
+              while IFS= read -r missed <&4; do
+                [ -n "$missed" ] || continue
+                out="$guard_dir/$missed.out"
+                status=unrecorded
+                if [ -f "$guard_dir/$missed.status" ]; then status=$(cat "$guard_dir/$missed.status"); fi
+                # A row's reason is one of the fixed texts below, or this workflow's own refusal text: never a
+                # line a failed read printed. That stays in the log of the step that made the read.
+                if [ "$status" = 0 ] && [ -f "$out" ] && grep -qx 'ok=true' "$out"; then
+                  # The same authorisation as the run's own merge, on this merge's identity values. Its
+                  # refusal is this merge's row, never this step's exit.
+                  authz=0
+                  (
+                    HEAD_REPO=$(value_of head_repo "$out"); HEAD_IS_FORK=$(value_of head_is_fork "$out")
+                    ASSOCIATION=$(value_of association "$out"); PR_AUTHOR=$(value_of pr_author "$out")
+                    MERGED_BY=$(value_of merged_by "$out"); GITHUB_STEP_SUMMARY="$guard_dir/$missed.refusal"
+                    authorize_one
+                  ) > "$guard_dir/$missed.authz" 2>&1 || authz=$?
+                  if [ "$authz" -eq 0 ]; then
+                    jq -cn --arg sha "$missed" --arg head "$(value_of head_sha "$out")" \
+                      --arg number "$(value_of pr_number "$out")" --arg url "$(value_of pr_url "$out")" \
+                      --arg at "$(value_of merged_at "$out")" \
+                      '{row: "candidate", merge_sha: $sha, head_sha: $head, pr_number: $number, pr_url: $url, merged_at: $at}' >> "$rows"
+                  else
+                    reason="authorisation ended with status $authz"
+                    if [ -s "$guard_dir/$missed.refusal" ]; then
+                      reason=$(sed -n 's/^authz: REFUSED: //p' "$guard_dir/$missed.refusal" | tail -n 1)
+                    fi
+                    jq -cn --arg sha "$missed" --arg number "$(value_of pr_number "$out")" --arg reason "$reason" \
+                      '{row: "refused", merge_sha: $sha, pr_number: $number, reason: $reason}' >> "$rows"
+                  fi
+                elif [ "$status" = 0 ]; then
+                  jq -cn --arg sha "$missed" \
+                    '{row: "skipped", merge_sha: $sha, reason: "no single merged pull request with base main names this commit"}' >> "$rows"
+                elif [ "$status" = 3 ]; then
+                  jq -cn --arg sha "$missed" \
+                    '{row: "skipped", merge_sha: $sha, reason: "no merged pull request lists this commit"}' >> "$rows"
+                else
+                  # Unread is never "no pull request": an answer that could not be read, a failed read and
+                  # a refused resolution are unresolved, and fail the run at its end.
+                  case "$status" in
+                    4) reason="lookup answer unreadable" ;;
+                    "lookup failed (exit "[0-9]")"|"lookup failed (exit "[0-9][0-9]")"|"lookup failed (exit "[0-9][0-9][0-9]")") reason="$status" ;;
+                    [0-9]|[0-9][0-9]|[0-9][0-9][0-9]) reason="lookup refused (status $status)" ;;
+                    *) reason="lookup not recorded" ;;
+                  esac
+                  jq -cn --arg sha "$missed" --arg reason "$reason" \
+                    '{row: "unresolved", merge_sha: $sha, reason: $reason}' >> "$rows"
+                fi
+              done 4< "$guard_dir/window"
+            fi
+          fi
+          jq -cn --arg sha "$MERGE_SHA" --arg head "$HEAD_SHA" --arg number "$PR_NUMBER" --arg url "$PR_URL" --arg at "$MERGED_AT" \
+            '{row: "candidate", merge_sha: $sha, head_sha: $head, pr_number: $number, pr_url: $url, merged_at: $at, own: true}' >> "$rows"
+          # One summary line for each earlier commit that does not go on.
+          jq -r 'select(.row != "candidate") | "missed merge \(.merge_sha): \(.row): \(.reason)"' "$rows" >> "$GITHUB_STEP_SUMMARY"
+          merges=$(jq -cs . "$rows")
+          echo "window=$window" >> "$GITHUB_OUTPUT"
+          echo "merges=$merges" >> "$GITHUB_OUTPUT"
           echo "ok=true" >> "$GITHUB_OUTPUT"
 
   promote:
@@ -626,6 +901,150 @@ jobs:
       group: promote-baseline
       cancel-in-progress: false
     steps:
+      # This job holds the lock. Before any credential exists, read where main
+      # stands now: a run that waited for the lock may no longer be the newest
+      # merge, and the run of a newer merge may have been replaced while it
+      # waited. This run still promotes the merges it examined (they are
+      # ancestors of main's tip). Every first-parent commit main holds after
+      # this run's own merge is recorded here, by name, as not examined; the
+      # last step reports each one and ends the run red. Read-only: one commit
+      # list, through the job's own token. A list that cannot be read is
+      # recorded as such, never as "nothing later".
+      - name: Read main's tip
+        id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MERGE_SHA: ${{ needs.promote-guard.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          results="$RUNNER_TEMP/promote"
+          mkdir -p "$results"
+          # Main's newest commits, the tip first. What a failed read prints stays in this step's log.
+          status=0
+          commits=$(gh api "repos/$REPO/commits?sha=main&per_page=100") || status=$?
+          if [ "$status" -eq 0 ]; then
+            python3 - 3<<<"$commits" > "$results/tip.json" <<'TIP_PY' || status=$?
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          def reject_constant(value):
+              raise ValueError(f"invalid JSON constant: {value}")
+
+          def commit_id(value):
+              if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value):
+                  return value
+              return None
+
+          # One lookup for a commit main gained after this run's own merge: the
+          # pull request that merged it, by the guard's own rule (exactly one
+          # closed, merged pull request with that merge commit and base main).
+          # The last step names the commit with it, and fills the line that
+          # dispatches its promotion. A lookup that fails, cannot be read or
+          # names no single merged pull request is recorded as that, never as
+          # a pull request. What a failed read prints stays in this step's log.
+          def merged_pull(sha):
+              unread = {"sha": sha, "found": "unread", "why": "lookup answer unreadable"}
+              try:
+                  answer = subprocess.run(
+                      ["gh", "api", "--paginate", "--slurp",
+                       f"repos/{os.environ['REPO']}/commits/{sha}/pulls?per_page=100"],
+                      capture_output=True, text=True)
+              except OSError:
+                  return {"sha": sha, "found": "unread", "why": "lookup could not be started"}
+              for line in answer.stderr.splitlines():
+                  sys.stderr.write(f"later commit {sha}: {line}\n")
+              if answer.returncode != 0:
+                  return {"sha": sha, "found": "unread", "why": f"lookup failed (exit {answer.returncode})"}
+              try:
+                  pages = json.loads(answer.stdout, parse_constant=reject_constant)
+              except (ValueError, RecursionError):
+                  return unread
+              if (not isinstance(pages, list) or not pages
+                      or any(not isinstance(page, list) for page in pages)
+                      or any(not isinstance(pr, dict) for page in pages for pr in page)):
+                  return unread
+              matches = [pr for page in pages for pr in page
+                         if pr.get("state") == "closed"
+                         and pr.get("merged_at") is not None
+                         and pr.get("merge_commit_sha") == sha
+                         and isinstance(pr.get("base"), dict)
+                         and pr["base"].get("ref") == "main"]
+              if len(matches) != 1:
+                  return {"sha": sha, "found": "none",
+                          "why": f"{len(matches)} merged pull requests with base main name this commit"}
+              number = matches[0].get("number")
+              head = matches[0].get("head")
+              head_sha = commit_id(head.get("sha")) if isinstance(head, dict) else None
+              merged_at = matches[0].get("merged_at")
+              if (type(number) is not int or number <= 0 or head_sha is None
+                      or not isinstance(merged_at, str)
+                      or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", merged_at)):
+                  return unread
+              # The dispatch takes exactly this repository's URL of that pull request.
+              return {"sha": sha, "found": "one", "pr_number": number, "head_sha": head_sha,
+                      "pr_url": f"https://github.com/{os.environ['REPO']}/pull/{number}", "merged_at": merged_at}
+
+          own = commit_id(os.environ.get("MERGE_SHA"))
+          if own is None:
+              raise SystemExit(1)
+          try:
+              with open(3, encoding="utf-8") as stream:
+                  records = json.load(stream, parse_constant=reject_constant)
+          except (OSError, ValueError, RecursionError):
+              raise SystemExit(1)
+          if not isinstance(records, list) or not records:
+              raise SystemExit(1)
+          # Each listed commit with its first parent; a root commit has none.
+          first_parent = {}
+          for record in records:
+              commit = commit_id(record.get("sha")) if isinstance(record, dict) else None
+              parents = record.get("parents") if isinstance(record, dict) else None
+              if commit is None or not isinstance(parents, list):
+                  raise SystemExit(1)
+              parent = None
+              if parents:
+                  parent = commit_id(parents[0].get("sha")) if isinstance(parents[0], dict) else None
+                  if parent is None:
+                      raise SystemExit(1)
+              first_parent[commit] = parent
+          tip = commit_id(records[0].get("sha"))
+          # Walk first parents back from the tip to this run's own merge. A parent the list does not
+          # hold, or a first commit reached before that merge, leaves the rest unread: it is said so.
+          later = []
+          unread = None
+          current = tip
+          while current != own:
+              later.append(current)
+              current = first_parent[current]
+              if current == own:
+                  break
+              if current is None:
+                  unread = "main's first commit was reached before this run's own merge"
+                  break
+              if current not in first_parent:
+                  unread = "the list of main's newest commits ends before this run's own merge"
+                  break
+          later.reverse()
+          json.dump({"tip": tip, "own": own, "later": later, "unread": unread,
+                     "lookups": [merged_pull(sha) for sha in later]}, sys.stdout)
+          TIP_PY
+          fi
+          if [ "$status" -ne 0 ]; then
+            jq -cn --arg own "$MERGE_SHA" --arg unread "main's tip could not be read (status $status)" \
+              '{tip: null, own: $own, later: [], unread: $unread, lookups: []}' > "$results/tip.json"
+          fi
+          later=$(jq -r '.later | length' "$results/tip.json")
+          unread=$(jq -r '.unread // ""' "$results/tip.json")
+          if [ "$later" = 0 ] && [ -z "$unread" ]; then
+            echo "main's tip is this run's own merge $MERGE_SHA"
+          else
+            echo "::warning title=baseline-promotion::main is not at this run's own merge $MERGE_SHA: $later later first-parent commit(s) are not examined by this run${unread:+; $unread}. The run goes on and ends red at its last step."
+          fi
+
       - name: Determine repo axis
         id: axis
         run: |
@@ -650,8 +1069,13 @@ jobs:
           HEAD_SHA: ${{ needs.promote-guard.outputs.head_sha }}
           PR_NUMBER: ${{ needs.promote-guard.outputs.pr_number }}
           BASE_REF: main
+          # Every commit the guard examined, oldest first, this run's own merge last.
+          MERGES: ${{ needs.promote-guard.outputs.merges }}
         run: |
           set -euo pipefail
+          # One merge's tree check, on that merge's own MERGE_SHA, HEAD_SHA and PR_NUMBER, its result in the
+          # file GITHUB_OUTPUT names. It is called in a subshell, so `exit 0` ends that merge's check alone.
+          exact_tree() {
           # The PR head's objects, to read its tree: fetched, never checked out or run.
           git fetch --quiet origin "$BASE_REF" "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/pr-head"
           if ! git merge-base --is-ancestor "$MERGE_SHA" "refs/remotes/origin/$BASE_REF"; then
@@ -666,6 +1090,35 @@ jobs:
           fi
           echo "merge_tree=$merge_tree" >> "$GITHUB_OUTPUT"
           echo "ok=true" >> "$GITHUB_OUTPUT"
+          }
+          results="$RUNNER_TEMP/promote"
+          mkdir -p "$results"
+          # The list must end at this run's own merge, with the values the guard resolved for it.
+          jq -e --arg sha "$MERGE_SHA" --arg head "$HEAD_SHA" --arg number "$PR_NUMBER" \
+            'type == "array" and length > 0 and (.[-1] | .row == "candidate" and .merge_sha == $sha and .head_sha == $head and .pr_number == $number)' \
+            <<< "$MERGES" > /dev/null || { echo "::error title=baseline-promotion::the examined merges do not end at this run's own merge $MERGE_SHA"; exit 1; }
+          jq -r '.[] | select(.row == "candidate") | "\(.merge_sha) \(.head_sha) \(.pr_number)"' <<< "$MERGES" > "$results/candidates"
+          # Each candidate in turn, the run's own merge last. A deterministic skip is that merge's result.
+          # A failed fetch or read of the run's own merge fails the step, as it always did. For an earlier
+          # merge it is that merge's result alone (the last step reports it unresolved and ends the run red):
+          # a pull request ref that is gone never keeps the run's own merge from its turn.
+          # The step is ok when any merge carries its gated tree.
+          any=false
+          while read -r sha head number <&4; do
+            : > "$results/$sha.tree"
+            set +e
+            ( set -e; MERGE_SHA="$sha"; HEAD_SHA="$head"; PR_NUMBER="$number"; GITHUB_OUTPUT="$results/$sha.tree"; exact_tree )
+            status=$?
+            set -e
+            if [ "$status" -ne 0 ]; then
+              [ "$sha" != "$MERGE_SHA" ] || { echo "::error title=baseline-promotion::the tree check of merge $sha failed (status $status)"; exit "$status"; }
+              echo "::warning title=baseline-promotion::the tree check of earlier merge $sha failed (status $status); the run goes on and ends red at its last step"
+              echo "error=tree check failed" > "$results/$sha.tree"
+              continue
+            fi
+            if grep -qx 'ok=true' "$results/$sha.tree"; then any=true; fi
+          done 4< "$results/candidates"
+          echo "ok=$any" >> "$GITHUB_OUTPUT"
 
       - name: Confirm the gate on the PR head
         id: ci
@@ -674,8 +1127,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.promote-guard.outputs.head_sha }}
           AXIS: ${{ steps.axis.outputs.repo }}
+          # Every commit the guard examined, oldest first, this run's own merge last.
+          MERGES: ${{ needs.promote-guard.outputs.merges }}
         run: |
           set -euo pipefail
+          # One merge's gate, on that merge's own HEAD_SHA, its verdict in the file GITHUB_OUTPUT names. It
+          # is called in a subshell, so `exit 0` ends that merge's gate alone and a refused answer is its status.
+          gate_one() {
           if [ "$AXIS" = engine ]; then
             # The engine merge gate. GitHub lists newest statuses first; keep
             # the first occurrence of each context across pages, so an older
@@ -692,14 +1150,60 @@ jobs:
               echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
             fi
           else
+            # What the base branch requires: the contexts of the
+            # required_status_checks rules among main's active branch rules
+            # (repository and organisation rulesets alike), each with the app
+            # it is bound to, if any. The job's own token reads them. The
+            # gate context is always required: this step's own green claim
+            # rests on it. A rules page must be a list of objects, each with
+            # a string type, and a required_status_checks rule must carry its
+            # list of checks, each with a non-empty string context and an
+            # integration id that is a number, null or absent. A read that
+            # fails, an empty answer or an answer of another shape stops the
+            # step with no verdict: it never reads as "nothing is required".
+            rules=$(gh api --paginate \
+              "repos/${{ github.repository }}/rules/branches/main?per_page=100")
+            required=$(jq -cs '
+              def check_ok:
+                type == "object" and (.context | type) == "string" and .context != ""
+                and (.integration_id == null or (.integration_id | type) == "number");
+              def rule_ok:
+                type == "object" and (.type | type) == "string"
+                and (.type != "required_status_checks"
+                     or ((.parameters | type) == "object"
+                         and (.parameters.required_status_checks | type) == "array"
+                         and all(.parameters.required_status_checks[]; check_ok)));
+              if length == 0 or (all(.[]; type == "array" and all(.[]; rule_ok)) | not) then
+                error("invalid branch rules response")
+              else
+                [.[][] | select(.type == "required_status_checks")
+                 | .parameters.required_status_checks[] | {context, integration_id}]
+                + [{context: "gate", integration_id: null}]
+              end
+            ' <<< "$rules")
             # A current gate status takes priority over the legacy gate
-            # check-run. Evaluate only the latest check-run of each app/name.
-            # Every record is checked before any is read. A check-runs page
+            # check-run. Evaluate only the latest check-run of each app/name
+            # that was not cancelled. When GitHub cancels a run on a head (an
+            # edit, a draft conversion), it completes that run's check-runs
+            # as cancelled, and one of them can carry a newer id than the
+            # green run of the same check. A cancelled check-run is therefore
+            # dropped before the newest is taken, and never counts as
+            # failing: it stands neither for nor over a completed run, for
+            # the gate check-run as for every other. A newest run that
+            # failed, timed out or needs action still blocks, and a newer
+            # skipped or neutral run still replaces an older success.
+            # Every record is checked before any is read or dropped,
+            # cancelled ones included. A check-runs page
             # must be an object with a numeric total_count and a check_runs
             # list of objects, each with a numeric id, a string name, an app
             # object with a numeric id, and a conclusion that is a string or
             # null. Every page's total_count must equal the number of records
             # over all pages. Anything else stops the step with no verdict.
+            # A required check is the one exception to the drop: the
+            # required-check rule below. Only this axis has that rule: the
+            # engine axis reads statuses only, and a status has no cancelled
+            # state.
+            # If the engine ever moves its required contexts to check-runs, the same required-cancelled rule must follow.
             runs=$(gh api --paginate \
               "repos/${{ github.repository }}/commits/$HEAD_SHA/check-runs?per_page=100")
             check_result=$(jq -ers '
@@ -715,14 +1219,37 @@ jobs:
                      | any(.[]; .total_count != $records)) then
                 error("invalid check-runs response")
               else
-                [.[].check_runs[]] | group_by([.app.id, .name]) | map(max_by(.id))
+                [.[].check_runs[] | select(.conclusion != "cancelled")]
+                | group_by([.app.id, .name]) | map(max_by(.id))
                 | [any(.name == "gate" and .conclusion == "success"),
-                   (map(select(.conclusion == "failure" or .conclusion == "cancelled"
+                   (map(select(.conclusion == "failure"
                                or .conclusion == "timed_out" or .conclusion == "action_required")) | length)]
                 | @tsv
               end
             ' <<< "$runs")
             read -r gate bad <<< "$check_result"
+            # The required-check rule. Dropping a cancelled check-run must
+            # not make a required check vanish. A check (an app and a name)
+            # that the base branch requires, or the gate check, with a
+            # cancelled run and no completed run that was not cancelled has
+            # no verdict on this head: the head is not green, and the notice
+            # names the check. A requirement bound to an app covers that
+            # app's check alone; an unbound one (no app, or app id -1)
+            # covers every app's check of that name. A check that is not
+            # required may still vanish. The program above has already
+            # checked every record read here.
+            unverified=$(jq -rs --argjson required "$required" '
+              [.[].check_runs[]] | group_by([.app.id, .name])
+              | map(select(any(.[]; .conclusion == "cancelled")
+                           and all(.[]; .conclusion == null or .conclusion == "cancelled"))
+                    | .[0]
+                    | select(. as $run
+                             | any($required[]; .context == $run.name
+                                                and (.integration_id == null or .integration_id == -1
+                                                     or .integration_id == $run.app.id)))
+                    | .name | tojson)
+              | unique | join(", ")
+            ' <<< "$runs")
             gate_statuses=$(gh api --paginate \
               "repos/${{ github.repository }}/commits/$HEAD_SHA/statuses?per_page=100")
             # A statuses page must be a list of objects, each with a string
@@ -744,12 +1271,45 @@ jobs:
               echo "::notice::the required gate context has not succeeded on $HEAD_SHA — not green; skipping"
               echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
             fi
+            if [ -n "$unverified" ]; then
+              echo "::notice::required check(s) whose only completed run(s) on $HEAD_SHA were cancelled: $unverified — not green; skipping"
+              echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
             if [ "$bad" != "0" ]; then
               echo "::notice::$bad failing check-run(s) on $HEAD_SHA — not green; skipping"
               echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
             fi
           fi
           echo "green=true" >> "$GITHUB_OUTPUT"
+          }
+          results="$RUNNER_TEMP/promote"
+          # The list must end at this run's own merge, on the head the guard resolved for it.
+          jq -e --arg head "$HEAD_SHA" \
+            'type == "array" and length > 0 and (.[-1] | .row == "candidate" and .head_sha == $head)' \
+            <<< "$MERGES" > /dev/null || { echo "::error title=baseline-promotion::the examined merges do not end at this run's own gated head $HEAD_SHA"; exit 1; }
+          jq -r '.[] | select(.row == "candidate") | "\(.merge_sha) \(.head_sha)"' <<< "$MERGES" > "$results/gated"
+          # Each merge that carries its gated tree, the run's own last. A gate that is not green is that
+          # merge's result. A refused or failed answer for the run's own merge stops the step, as it always
+          # did. For an earlier merge it is that merge's result alone (the last step reports it unresolved
+          # and ends the run red). The step is green when any merge is.
+          own=$(jq -r '.[-1].merge_sha' <<< "$MERGES")
+          any=false
+          while read -r sha head <&4; do
+            grep -qx 'ok=true' "$results/$sha.tree" || continue
+            : > "$results/$sha.gate"
+            set +e
+            ( set -e; HEAD_SHA="$head"; GITHUB_OUTPUT="$results/$sha.gate"; gate_one )
+            status=$?
+            set -e
+            if [ "$status" -ne 0 ]; then
+              [ "$sha" != "$own" ] || exit "$status"
+              echo "::warning title=baseline-promotion::the gate of earlier merge $sha could not be read (status $status); the run goes on and ends red at its last step"
+              echo "error=gate read failed" > "$results/$sha.gate"
+              continue
+            fi
+            if grep -qx 'green=true' "$results/$sha.gate"; then any=true; fi
+          done 4< "$results/gated"
+          echo "green=$any" >> "$GITHUB_OUTPUT"
 
       # The campaign tooling lives in the private pineforge-workflow repo. Rather
       # than a long-lived PAT, mint a short-lived, read-only token from the org
@@ -787,6 +1347,23 @@ jobs:
         if: steps.ci.outputs.green == 'true'
         # Install before the auth action creates its GCP credentials.
         run: npm ci --prefix .workflow/campaign
+
+      - name: Confirm the campaign tooling takes --catch-up
+        if: steps.ci.outputs.green == 'true'
+        # The promotion below is one `lab promote --catch-up` call. Tooling pinned
+        # to a ref from before that mode (WORKFLOW_REF) answers it with a usage
+        # error, and no merge would ever promote again. Ask the tooling itself,
+        # and fail here, loudly, before any cloud credential is minted.
+        run: |
+          set -euo pipefail
+          if ! help=$(node .workflow/campaign/src/baseline-promote.mjs --help); then
+            echo "::error title=baseline-promotion::the campaign tooling did not answer promote --help; nothing was promoted"
+            exit 1
+          fi
+          if ! grep -q -e '--catch-up <plan.json>' <<< "$help"; then
+            echo "::error title=baseline-promotion::the campaign tooling at this ref has no promote --catch-up; nothing was promoted. Leave WORKFLOW_REF at main, or pin it to a ref that names --catch-up in promote --help."
+            exit 1
+          fi
 
       - name: Authenticate to GCP
         if: steps.ci.outputs.green == 'true'
@@ -842,23 +1419,51 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MERGE_SHA: ${{ needs.promote-guard.outputs.merge_sha }}
           HEAD_SHA: ${{ needs.promote-guard.outputs.head_sha }}
-          MERGE_TREE: ${{ steps.exacttree.outputs.merge_tree }}
           PR_NUMBER: ${{ needs.promote-guard.outputs.pr_number }}
           PR_URL: ${{ needs.promote-guard.outputs.pr_url }}
           MERGED_AT: ${{ needs.promote-guard.outputs.merged_at }}
+          # Every commit the guard examined, oldest first, this run's own merge
+          # last; and what it read of the commits before that merge.
+          MERGES: ${{ needs.promote-guard.outputs.merges }}
+          WINDOW: ${{ needs.promote-guard.outputs.window }}
         run: |
           set -euo pipefail
-          ms=$(node -e "process.stdout.write(String(Date.parse(process.env.MERGED_AT)))")
+          results="$RUNNER_TEMP/promote"
+          # The list must end at this run's own merge, with every value the guard resolved for it.
+          jq -e --arg sha "$MERGE_SHA" --arg head "$HEAD_SHA" --arg number "$PR_NUMBER" --arg url "$PR_URL" --arg at "$MERGED_AT" \
+            'type == "array" and length > 0 and (.[-1] | .row == "candidate" and .merge_sha == $sha and .head_sha == $head and .pr_number == $number and .pr_url == $url and .merged_at == $at)' \
+            <<< "$MERGES" > /dev/null || { echo "::error title=baseline-promotion::the examined merges do not end at this run's own merge $MERGE_SHA"; exit 1; }
+          # The plan: every candidate that carries its gated tree and is green, oldest first, with the same
+          # values the single-axis call takes. A candidate that stopped at the tree check or the gate gets
+          # its row from the last step, which reports every examined merge.
+          : > "$results/plan.rows"
+          count=$(jq 'length' <<< "$MERGES")
+          for ((index = 0; index < count; index++)); do
+            entry=$(jq -c ".[$index]" <<< "$MERGES")
+            [ "$(jq -r '.row' <<< "$entry")" = candidate ] || continue
+            sha=$(jq -r '.merge_sha' <<< "$entry")
+            grep -qx 'ok=true' "$results/$sha.tree" || continue
+            [ -f "$results/$sha.gate" ] && grep -qx 'green=true' "$results/$sha.gate" || continue
+            tree=$(sed -n 's/^merge_tree=//p' "$results/$sha.tree")
+            ms=$(MERGED_AT="$(jq -r '.merged_at' <<< "$entry")" node -e "process.stdout.write(String(Date.parse(process.env.MERGED_AT)))")
+            jq -c --arg tree "$tree" --arg ms "$ms" --arg own "$MERGE_SHA" \
+              '{mergeCommit: .merge_sha, headSha: .head_sha, mergeTree: $tree, prNumber: (.pr_number | tonumber), prUrl: .pr_url, mergedAtMs: ($ms | tonumber), own: (.merge_sha == $own)}' \
+              <<< "$entry" >> "$results/plan.rows"
+          done
+          jq -cs --argjson window "$WINDOW" '{window: $window, merges: .}' "$results/plan.rows" > "$results/plan.json"
           set +e
           node .workflow/campaign/src/baseline-promote.mjs \
             --repo "${{ steps.axis.outputs.repo }}" \
-            --merge-commit "$MERGE_SHA" --head-sha "$HEAD_SHA" --merge-tree "$MERGE_TREE" \
-            --ci-head "$HEAD_SHA" --ci-green \
-            --pr-number "$PR_NUMBER" --pr-url "$PR_URL" --merged-at-ms "$ms"
+            --catch-up "$RUNNER_TEMP/promote/plan.json" > "$RUNNER_TEMP/promote/report.txt"
           code=$?
           set -e
-          # Exit 2 is `refuse`: no verdict binds this merge as a single-axis
-          # advance -- a cross-cutting engine+codegen change (gated as a composite
+          # One line per merge of the plan, here in the log: promoted, superseded, deferred and every other
+          # row. The last step copies them into the step summary, with the rows of every other examined
+          # commit. What a promotion printed on its error stream is in this log only, never in a row.
+          cat "$results/report.txt"
+          # Exit 2 only: a usage or plan error of the call is 64 and fails the run, never a deferral.
+          # Exit 2: nothing promoted and every attempt was a `refuse` -- no verdict binds the merge as a
+          # single-axis advance: a cross-cutting engine+codegen change (gated as a composite
           # the single axis cannot complete), an ungated merge, a codegen merge
           # gated only neutral (lab promote takes a pr-gate PASS), a merge tree
           # GitHub does not show as the gated head's, or an engine merge the
@@ -866,7 +1471,118 @@ jobs:
           # hand with `lab promote --composite` once both repos merge (see the
           # baseline-promote skill). Any other non-zero is a real error.
           if [ "$code" = "2" ]; then
-            echo "::notice::baseline not promoted (deferred): no verdict binds this merge as a single-axis advance (see the lab promote refusal above). If this was a cross-cutting engine+codegen change, run the composite promote by hand once both repos are merged. Nothing was changed."
+            echo "::notice::baseline not promoted (deferred): every candidate deferred -- no verdict binds any examined merge as a single-axis advance (see the deferred rows above). If this was a cross-cutting engine+codegen change, run the composite promote by hand once both repos are merged. Nothing was changed."
             exit 0
           fi
           exit "$code"
+
+      # Every commit this run examined ends with one row, in this step's log and
+      # in the step summary, whether or not the promotion ran: the rows of the
+      # promotion's own report; a row for each commit that stopped before it
+      # (skipped, refused, unresolved, another tree, a gate that is not green);
+      # the window, when it was not read; and each first-parent commit main
+      # holds after this run's own merge, which nobody examined here. Then the
+      # run ends red for an earlier merge that was refused or could not be read,
+      # and for a commit after its own merge: as loudly as that merge's own run
+      # would have been, and after every other merge had its turn. A row's
+      # reason is a fixed text; what a failed read printed is in the log of the
+      # step that made the read.
+      - name: Report every examined merge
+        if: ${{ always() }}
+        env:
+          MERGES: ${{ needs.promote-guard.outputs.merges }}
+          WINDOW: ${{ needs.promote-guard.outputs.window }}
+          # For the by-hand route a row names when a later commit's pull request is not known.
+          AXIS: ${{ steps.axis.outputs.repo }}
+        run: |
+          set -euo pipefail
+          results="$RUNNER_TEMP/promote"
+          mkdir -p "$results"
+          rows="$results/rows.txt"
+          red="$results/red.txt"
+          : > "$rows"
+          : > "$red"
+          # A list that cannot be read is an error, never "nothing refused".
+          jq -e 'type == "array" and length > 0' <<< "$MERGES" > /dev/null || { echo "::error title=baseline-promotion::the examined merges could not be read"; exit 1; }
+          # The promotion's report, when the call was made and answered.
+          reported=false
+          if [ -s "$results/report.txt" ]; then reported=true; fi
+          # The window: the report says it when there is one. Without a report, a commit list that was not
+          # read is said here, in the report's own words.
+          if [ "$reported" = false ] && [ -n "$WINDOW" ]; then
+            jq -r --arg lead "NOT COMPARED: the merges before this run's own were not read" \
+              'select(type == "object" and .error != null) | "\($lead): \(.error); no missed merge was attempted"' <<< "$WINDOW" >> "$rows"
+          fi
+          # One row for each examined commit that is not in the promotion's report, oldest first.
+          count=$(jq 'length' <<< "$MERGES")
+          for ((index = 0; index < count; index++)); do
+            entry=$(jq -c ".[$index]" <<< "$MERGES")
+            kind=$(jq -r '.row' <<< "$entry")
+            sha=$(jq -r '.merge_sha' <<< "$entry")
+            if [ "$kind" != candidate ]; then
+              line="$kind: merge $sha: $(jq -r '.reason' <<< "$entry")"
+              echo "$line" >> "$rows"
+              case "$kind" in refused|unresolved) echo "earlier merge $line" >> "$red" ;; esac
+              continue
+            fi
+            tree="$results/$sha.tree"
+            gate="$results/$sha.gate"
+            if [ ! -f "$tree" ]; then
+              echo "NOT ATTEMPTED: merge $sha: its tree was not checked" >> "$rows"
+            elif grep -q '^error=' "$tree"; then
+              line="unresolved: merge $sha: tree check failed"
+              echo "$line" >> "$rows"
+              echo "earlier merge $line" >> "$red"
+            elif ! grep -qx 'ok=true' "$tree"; then
+              echo "not attempted: merge $sha: its tree is not its gated head's tree" >> "$rows"
+            elif [ ! -f "$gate" ]; then
+              echo "NOT ATTEMPTED: merge $sha: its gate was not read" >> "$rows"
+            elif grep -q '^error=' "$gate"; then
+              line="unresolved: merge $sha: gate read failed"
+              echo "$line" >> "$rows"
+              echo "earlier merge $line" >> "$red"
+            elif ! grep -qx 'green=true' "$gate"; then
+              echo "not attempted: merge $sha: the gate is not green on its head" >> "$rows"
+            elif [ "$reported" = false ]; then
+              echo "NOT ATTEMPTED: merge $sha: the promotion gave no report" >> "$rows"
+            fi
+          done
+          if [ "$reported" = true ]; then cat "$results/report.txt" >> "$rows"; fi
+          # Main's tip, as the first step recorded it while this job held the lock. Each commit main gained
+          # after this run's own merge is named by its first 12 characters and its pull request, with the
+          # line that dispatches its own promotion: this workflow has a workflow_dispatch trigger, and the
+          # row says so. The fields come from the one lookup the first step made for that commit. When that
+          # lookup failed, could not be read, or named no single merged pull request, the row says which,
+          # gives the line with the one field it has, names the fields still needed, and gives the route by
+          # hand: a dry run of the promotion first, then the same call without --dry-run.
+          axis="${AXIS:-<engine or codegen>}"
+          if [ -s "$results/tip.json" ]; then
+            jq -r --arg axis "$axis" '
+              def dispatch(head; number; url; at):
+                "gh workflow run promote-baseline.yml --ref main -f merge_commit=\(.sha) -f head_sha=\(head) -f pr_number=\(number) -f pr_url=\(url) -f merged_at=\(at)";
+              def lead(who):
+                "NOT COMPARED: commit \(.sha[0:12]) (\(who)): not examined by this run: its own run may still follow; else dispatch it (this workflow has a workflow_dispatch trigger): ";
+              (.lookups // [.later[] | {sha: ., found: "unread", why: "lookup not recorded"}])[]
+              | if .found == "one" then
+                  lead("PR #\(.pr_number)") + dispatch(.head_sha; .pr_number; .pr_url; .merged_at)
+                else
+                  lead("PR not known: \(.why)") + dispatch("<head_sha>"; "<pr_number>"; "<pr_url>"; "<merged_at>")
+                  + "; still needed: head_sha, pr_number, pr_url, merged_at; or by hand: lab promote --repo \($axis) --merge-commit \(.sha) --head-sha <head_sha> --merge-tree <tree of the merge commit> --pr-number <pr_number> --pr-url <pr_url> --merged-at-ms <merge time in ms> --ci-head <head_sha> --ci-green --dry-run first, then the same without --dry-run"
+                end' "$results/tip.json" >> "$rows"
+            jq -r --arg lead "the commits after this run's own merge" \
+              'select(.unread != null) | "NOT COMPARED: \($lead) \(.own) were not all read: \(.unread)"' "$results/tip.json" >> "$rows"
+            jq -r --arg lead "main moved past this run's own merge" \
+              'select((.later | length) > 0) | "\($lead) \(.own): \(.later | length) later first-parent commit(s) not examined by this run (the NOT COMPARED rows name each)"' "$results/tip.json" >> "$red"
+            jq -r --arg lead "the commits after this run's own merge" \
+              'select(.unread != null) | "\($lead) \(.own) were not all read: \(.unread)"' "$results/tip.json" >> "$red"
+          else
+            echo "NOT COMPARED: main's tip was not recorded by this run: the commits after its own merge were not examined" >> "$rows"
+            echo "main's tip was not recorded by this run: the commits after its own merge were not examined" >> "$red"
+          fi
+          cat "$rows"
+          { echo '```'; cat "$rows"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ ! -s "$red" ]; then exit 0; fi
+          while IFS= read -r line; do
+            echo "::error title=baseline-promotion::$line"
+          done < "$red"
+          exit 1
