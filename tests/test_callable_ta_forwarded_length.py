@@ -225,7 +225,17 @@ int main() {
     std::cout << strategy.unrelatedOut << "\n";
 }
 '''
-    assert _compile_and_run(cpp + driver) == "12.7835\n"
+    # A chart ta.ema is na until `length` inputs exist, then starts from their
+    # simple average and steps ema[1] + alpha * (src - ema[1]), with
+    # alpha = 2 / (length + 1): the engine's default since pineforge-engine
+    # 3c2fc33a (#1059), as on TradingView. In the engine at 9f900bbf:
+    # the rule and its TradingView basis, CHANGELOG.md:42;
+    # on by default, include/pineforge/source/pine_strategy_host.hpp:1615-1621;
+    # the seed and the step, src/ta_moving_averages.cpp:307-328.
+    # Closes 1..21 and length 20: bar 20 reads mean(1..20) = 10.5 and bar 21
+    # reads 10.5 + (2 / 21) * (21 - 10.5) = 11.5. Widened to the length 2 that
+    # `outer` forwards, this EMA would read 20.5 on bar 21.
+    assert _compile_and_run(cpp + driver) == "11.5\n"
 
 
 def test_reverse_defined_three_method_chain_forwards_parameter_length() -> None:
