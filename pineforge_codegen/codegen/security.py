@@ -244,8 +244,9 @@ class _SecurityArgumentSample:
     # None marks an eager current-value argument sampled in caller scope,
     # without a backing history member; it must never supply a subscript read.
     member: str | None
-    # A sparse call commits at evaluator exit. Its ring still ends at the
-    # previous call while the body runs; its current argument is separate.
+    # A sparse call commits at evaluator exit, one slot per completed
+    # requested bar. Its ring still ends at the previous requested bar while
+    # the body runs; its current argument is separate.
     completed_type: str | None = None
 
 
@@ -4054,9 +4055,14 @@ class SecurityEmitter:
                 if sample is None:
                     continue
                 value = render_argument(arg, frame.caller_stack, lines)
-                # The last call in this bar wins. Only a complete evaluation
-                # that reached the call pushes, after every read of the bar.
-                self._security_global_hist_pushes[sample.member, sample.completed_type] = None
+                # One slot per completed requested bar, pushed after every
+                # read of the bar: the last call's argument where a call ran,
+                # and the slot before it where none did (an empty ring reads
+                # na). TradingView keeps one entry per bar for a written
+                # call, so ``x[k]`` counts requested bars and a bar without
+                # the call reads the last committed argument.
+                self._security_global_hist_pushes[sample.member, sample.completed_type] = (
+                    f"{sample.member}[0]")
                 lines.extend((
                     f"        const {sample.completed_type} {sample.current} = {value};",
                     f"        {sample.member}_next = {sample.current}; {sample.member}_set = true;",
@@ -4140,8 +4146,9 @@ class SecurityEmitter:
                     if not isinstance(bound, str):
                         if self._security_register_sparse_argument(n, bound, bindings):
                             # An argument's own field offset stays on the
-                            # requested-bar clock; only the parameter offset
-                            # counts calls. Each has its own dependencies.
+                            # requested-bar clock; the parameter offset reads
+                            # the call's committed samples, one slot per
+                            # requested bar. Each has its own dependencies.
                             walk(bound, bound_stack)
                             # The ring serves the reads lowered inside the
                             # call. A ta.* site the evaluator computes where
