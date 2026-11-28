@@ -12,25 +12,26 @@ with start 100, 1000, 10000, 100000, 1000000; the fourth closes at 7, 42,
 316, 2024, 5. The helper returns the request's value at the four-hour
 closes of groups 2, 3 and 4. The three outcomes to tell apart:
 
-- [5, 6, 7], the chart-history fallback: held[2] on the chart clock is the
-  second child's close, "10001", "100001", "1000001".
 - [1, 2, 3], the requested clock: held is the four-hour close, "7", "42",
-  "316" in slots 0, 1, 2.
+  "316" in slots 0, 1, 2. This is the only pass.
 - [3, 4, 5], the wrong value: the request replays held's store but not a, so
   the store reads the a the previous chart bar left, the third child's
   "102", "1002", "10002".
+- [5, 6, 7], chart history: held[2] on the chart clock is the second
+  child's close, "10001", "100001", "1000001". No route of this base keeps
+  a requested string on chart history, so this reading fails its row too.
 
-Either of the first two is a pass: neither is a silent wrong value. Any
-other reading fails its row. The rows measure values only: a compile
-refusal fails its row too. Each row prints what it read, so a passing run
-still shows which of the two values the head produced (pytest -rP).
+The rows measure values only: a compile refusal fails its row too. Each
+row prints what it read (pytest -rP).
 
-A limit on the third outcome: [3, 4, 5] assumes the evaluator runs
-before the chart bar's own script. Were it to run after, a store that
-reads the chart's a would also read [1, 2, 3] on this feed.
+A limit on the wrong value: [3, 4, 5] assumes the evaluator runs before
+the chart bar's own script. Were it to run after, a store that reads the
+chart's a would also read [1, 2, 3] on this feed.
 
-A third row is a control on the later-store route, on the same feed. It is
-described where it is defined, after the two measurement rows.
+Two more rows, on the same feed, measure a tuple name whose declared value
+is read: its overwrite is conditional, or reads the name itself. A last row
+is a control on the later-store route. Each is described where it is
+defined, after the two measurement rows.
 """
 
 from __future__ import annotations
@@ -45,6 +46,9 @@ from typing import NamedTuple
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.analyzer import Analyzer
+from pineforge_codegen.lexer import Lexer
+from pineforge_codegen.parser import Parser
 from tests import _compile as compile_env
 
 # The harness below is copied byte for byte from this repository's tests at
@@ -251,7 +255,11 @@ def _four_hour_values_after_warmup(source, *, sec_id=0):
 
 
 # The script from #520, the tuple form: the nine lines between the quotes
-# are kept verbatim.
+# are kept verbatim. The statement replay passes over a tuple declaration,
+# so the request's copy of a never receives "seed". Here nothing reads that
+# value: the store on the next line overwrites a on every bar without
+# reading it. So a joins the request and held's store reads the requested
+# bar's a.
 _SCRIPT_TUPLE_FORM = """\
 //@version=6
 strategy("direct read of a var string whose later store reads an overwritten tuple name")
@@ -282,20 +290,86 @@ plot(v)
 def test_tuple_form_later_store_reads_an_overwritten_tuple_name():
     values = _four_hour_values_after_warmup(_SCRIPT_TUPLE_FORM)
     print(f"The tuple form read {values}")
-    assert values in ([5, 6, 7], [1, 2, 3]), (
-        f"read {values}; a pass is the chart-history fallback [5, 6, 7] "
-        "or the requested clock [1, 2, 3]; [3, 4, 5] is the wrong value "
-        "(held's store replayed with the a the previous chart bar left)"
+    assert values == [1, 2, 3], (
+        f"read {values}; the only pass is the requested clock [1, 2, 3]; "
+        "[3, 4, 5] is the wrong value (held's store replayed with the a the "
+        "previous chart bar left), and no route of this base keeps a "
+        "requested string on chart history, [5, 6, 7]"
     )
 
 
 def test_plain_form_later_store_reads_a_reassigned_plain_name():
     values = _four_hour_values_after_warmup(_SCRIPT_PLAIN_FORM)
     print(f"The plain form read {values}")
-    assert values in ([5, 6, 7], [1, 2, 3]), (
-        f"read {values}; a pass is the chart-history fallback [5, 6, 7] "
-        "or the requested clock [1, 2, 3]; [3, 4, 5] is the wrong value "
-        "(held's store replayed with the a the previous chart bar left)"
+    assert values == [1, 2, 3], (
+        f"read {values}; the only pass is the requested clock [1, 2, 3]; "
+        "[3, 4, 5] is the wrong value (held's store replayed with the a the "
+        "previous chart bar left), and no route of this base keeps a "
+        "requested string on chart history, [5, 6, 7]"
+    )
+
+
+# A tuple name whose declared value is read. A name that a later store reads
+# joins the request only if the statement replay emits every statement that
+# writes it (_replay_later_store_reads in pineforge_codegen/analyzer/base.py).
+# The replay passes over a tuple declaration, so a copy of a would never
+# receive "seed". In the two scripts below that value is read, so a stays
+# outside the request: held's store reads the chart's a, as it did before
+# the names a later store reads joined.
+#
+# The conditional form: the tuple form under its own title, with the store
+# under `if close < 0`, which no bar of the feed satisfies; its ten lines
+# are kept verbatim. a is "seed" on every bar of either clock, so held is
+# "seed" and str.length(held[2]) is 4 in slots 2, 3, 4. A copy of a that
+# only the `if` writes stays "" and reads [0, 0, 0].
+_SCRIPT_TUPLE_CONDITIONAL_OVERWRITE = """\
+//@version=6
+strategy("later store reads a tuple name whose overwrite is conditional")
+pair() => ["seed", 1]
+[a, n] = pair()
+if close < 0
+    a := str.tostring(close)
+var string held = ""
+v = request.security(syminfo.tickerid, "240", str.length(held[2]))
+held := a
+plot(v + n)
+"""
+
+# The self-reading form: the conditional form with one unconditional store,
+# `a := a + "!"`, in place of the `if` and its store. Every other line is
+# the conditional form's, the title included. a is "seed!" after every bar
+# of either clock, so held is "seed!" and str.length(held[2]) is 5 in slots
+# 2, 3, 4. A copy of a that never receives "seed" grows by one "!" at every
+# evaluation instead.
+_SCRIPT_TUPLE_SELF_READING_OVERWRITE = """\
+//@version=6
+strategy("later store reads a tuple name whose overwrite is conditional")
+pair() => ["seed", 1]
+[a, n] = pair()
+a := a + "!"
+var string held = ""
+v = request.security(syminfo.tickerid, "240", str.length(held[2]))
+held := a
+plot(v + n)
+"""
+
+
+def test_tuple_name_with_a_conditional_overwrite_keeps_its_declared_value():
+    values = _four_hour_values_after_warmup(_SCRIPT_TUPLE_CONDITIONAL_OVERWRITE)
+    print(f"The conditional form read {values}")
+    assert values == [4, 4, 4], (
+        f"read {values}; a is 'seed' on every bar, so held[2] has length 4; "
+        "[0, 0, 0] is a copy of a that never received the declared value"
+    )
+
+
+def test_tuple_name_with_a_self_reading_overwrite_keeps_its_declared_value():
+    values = _four_hour_values_after_warmup(_SCRIPT_TUPLE_SELF_READING_OVERWRITE)
+    print(f"The self-reading form read {values}")
+    assert values == [5, 5, 5], (
+        f"read {values}; a is 'seed!' after every bar, so held[2] has "
+        "length 5; a growing value is a copy of a that never received the "
+        "declared value"
     )
 
 
@@ -314,7 +388,8 @@ def test_plain_form_later_store_reads_a_reassigned_plain_name():
 # pineforge_codegen/analyzer/base.py) adds nothing here, a is not replayed
 # although it is reassigned, since no statement the request replays reads
 # it, and the request's replay set is ("held",) with and without that rule.
-# This row reads the same values on both.
+# This row reads the same values on both. The values cannot show the set,
+# so the row first asserts it through the analyzer, which needs no engine.
 _SCRIPT_CONTROL_LATER_STORE = """\
 //@version=6
 strategy("direct read of a var string whose later store reads an overwritten tuple name")
@@ -328,6 +403,15 @@ plot(v)
 
 
 def test_control_later_store_route_reads_the_requested_clock():
+    program = Parser(
+        Lexer(_SCRIPT_CONTROL_LATER_STORE).tokenize(),
+        source=_SCRIPT_CONTROL_LATER_STORE,
+    ).parse()
+    replayed = [call.mutable_globals for call in Analyzer(program).analyze().security_calls]
+    assert replayed == [("held",)], (
+        f"the control's one request replays {replayed}; it replays held and "
+        "no other name, since its later store reads no name"
+    )
     values = _four_hour_values_after_warmup(_SCRIPT_CONTROL_LATER_STORE)
     print(f"Control (later-store route) read {values}")
     assert values == [1, 2, 3], (
