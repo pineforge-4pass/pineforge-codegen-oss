@@ -145,9 +145,25 @@ matches skip promotion green. It rereads that PR's full record, binds its gated
 head, merge commit, author, merger, number, URL and merge time, then checks
 authorization and tree equality. Codegen still requires the `gate` context
 to succeed on that head (the trusted reporter's status, else a success
-check-run) and no failing newest check-run per app and name. The hosted runner,
+check-run) and no failing newest check-run per app and name. A cancelled
+check-run is dropped before the newest run of each app and name is taken, so
+it never counts as failing and never stands for a completed run. The step
+also reads `main`'s active branch rules: a required check (a context of a
+`required_status_checks` rule, or `gate`) whose only completed runs on that
+head were cancelled has no verdict, so the head is not green and the notice
+names the check. A rules read that fails, or an answer that cannot be read,
+stops the step with no verdict. The hosted runner,
 release environment and WIF workflow-path/main-ref binding remain in place;
 the workflow checks out and runs no PR code.
+
+A push run also examines the merges before its own: the last 10 first-parent
+commits ending at the pushed one. Each earlier commit gets one PR lookup, the
+same authorization, tree check and gate, and `lab promote --catch-up` promotes
+what is owed. Holding the lock, the promote job first reads `main`'s tip: a
+commit `main` gained after the run's own merge is reported by name as NOT
+COMPARED with the line that dispatches its promotion, and the run ends red.
+The last step writes one row for every examined commit to the step summary.
+A manual dispatch promotes exactly the merge it names.
 
 Runner-group and merge-authority configuration are operator work outside this
 repository change. Any future PR pod routing must enable only
