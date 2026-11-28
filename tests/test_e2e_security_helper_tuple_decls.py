@@ -15,32 +15,111 @@ and mutable-global dependencies walk both.
 
 TradingView's tape of ``sec2_tuple_assign`` (``fixtures/security2_tv``): a
 ``ta.bb`` tuple, a nested helper's tuple, ``_`` placeholders and a helper read
-at ``[1]`` under ``lookahead_on``, beside the same helper on the chart -- all
-265 exit Signals match.
+at ``[1]`` under ``lookahead_on``, beside the same helper on the chart. The
+replay test reads the tape of the week of 2026-01-05, recorded on 2026-11-29,
+which TradingView computed from 2025-10-01 00:00 UTC; the other probes of
+that directory keep their April week.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 
 import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
-from tests._e2e import Build, skip_unless_e2e_env
-from tests._security_tapes import mismatches, replay, source, tape_exits
+from tests._e2e import Build, closed_trades, skip_unless_e2e_env
+from tests._security_tapes import TAPE_TZ, replay, source, tape_exits, tape_feed
+
+
+# The 2026w02 tape of ``sec2_tuple_assign`` (fixtures/security2_tv/README.md).
+TAPE_2026W02 = "sec2_tuple_assign_tv_trades_2026w02.csv"
+BAR_MS = 900_000               # the chart's 15 minutes
+RUN_START_MS = 1759276800000   # 2025-10-01 00:00 UTC: TradingView's first computed bar
+WEEK_START_MS = 1767571200000  # 2026-01-05 00:00 UTC: the tape's requested range
+WEEK_END_MS = 1768176000000    # 2026-01-12 00:00 UTC: its end, and the replay's
+WEEK_BARS = 672                # TradingView loaded the week without a gap
+# The fewest exit instants that must be on both sides: three quarters of the
+# tape's 256. With fewer, the replay's equity path is not the tape's.
+SHARED_FLOOR = 192
+SIGNAL_FIELDS = ("bMid", "bW", "bR", "lastU", "cMid", "cW", "cR")
+
+
+def _stamp(ms: int) -> str:
+    """An exit instant as the tape spells it in its ``Date and time`` column."""
+    return f"{dt.datetime.fromtimestamp(ms / 1000, TAPE_TZ):%Y-%m-%d %H:%M}"
+
+
+def _field_differences(tv: str, engine: str) -> list[str]:
+    """The Signal fields whose text differs, by name, with both texts."""
+    tv_fields, engine_fields = tv.split("|"), engine.split("|")
+    if not len(tv_fields) == len(engine_fields) == len(SIGNAL_FIELDS):
+        return [f"Signal tv {tv!r} engine {engine!r}"]
+    return [f"{name} tv {a} engine {b}"
+            for name, a, b in zip(SIGNAL_FIELDS, tv_fields, engine_fields) if a != b]
 
 
 def test_helper_tuple_declarations_match_the_tape(tmp_path_factory):
+    """At every exit instant that is on both the tape and the replay, the
+    seven Signal fields are equal as text, the chart band width ``cW`` among
+    them.
+
+    The replay starts on TradingView's first computed bar, 2025-10-01 00:00
+    UTC, and ends with the week, at 2026-01-12 00:00 UTC. The comparison
+    covers the exits strictly inside the week; an exit exactly at its first
+    instant belongs to an entry before the week and is left out on both sides.
+    The runner's range-end close of a position still open after the last
+    replayed bar is no exit of the script and is left out too.
+
+    The probe sizes at 100% of equity, so whether an entry is refused for
+    margin depends on the equity path of the three months before the week. An
+    exit instant that only one side has is therefore counted and printed by
+    side, and does not fail the test by itself. So that it cannot pass on a
+    handful, 192 instants (``SHARED_FLOOR``, 3/4 of the tape's 256) must be
+    on both sides. A replay feed that is not the 15-minute bars TradingView
+    computed, from its first bar to the week's end with none missing, fails
+    as NOT COMPARED."""
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("security2_tuple_assign")
-    exits = replay(engine, base, {"probe": Build(source("sec2_tuple_assign"))})
-    tape = tape_exits("sec2_tuple_assign")
-    assert len(tape) == 265
-    missed = mismatches(tape, exits["probe"])
-    assert not missed, "\n".join(missed[:10])
-    print(f"helper tuple declarations: {len(tape)} of {len(tape)} exit Signals equal "
-          "TradingView's")
+    feed = tape_feed(engine, base, RUN_START_MS, WEEK_END_MS)
+    stamps = [int(line.split(",", 1)[0]) for line in feed.read_text().splitlines()[1:]]
+    computed = list(range(RUN_START_MS, WEEK_END_MS, BAR_MS))
+    if stamps != computed:
+        in_week = sum(WEEK_START_MS <= stamp for stamp in stamps)
+        pytest.fail(
+            "NOT COMPARED: the replay feed is not the bars TradingView computed: first bar "
+            f"{stamps[0] if stamps else None} (TradingView's {RUN_START_MS}), {len(stamps)} "
+            f"bars to the week's end (TradingView's {len(computed)}), {in_week} of them in "
+            f"the week (TradingView's {WEEK_BARS})", pytrace=False)
+    replay(engine, base, {"probe": Build(source("sec2_tuple_assign"))}, feed=feed)
+    tape = tape_exits("sec2_tuple_assign", tape=TAPE_2026W02)
+    assert len(tape) == 256
+    assert all(WEEK_START_MS < ms < WEEK_END_MS for ms in tape)
+    # The built probe's trade rows once more: they carry the range-end mark.
+    week = {trade["exit_time"]: trade["exit_comment"]
+            for trade in closed_trades(engine, base / "probe", feed)
+            if WEEK_START_MS < trade["exit_time"] < WEEK_END_MS
+            and not trade.get("open_at_end")}
+    shared = sorted(tape.keys() & week.keys())
+    one_side = {"tape only": sorted(tape.keys() - week.keys()),
+                "engine only": sorted(week.keys() - tape.keys())}
+    print(f"helper tuple declarations, week 2026w02: {len(shared)} exit instants on both "
+          f"sides, {len(one_side['tape only'])} on the tape only, "
+          f"{len(one_side['engine only'])} on the engine only (tape {len(tape)}, engine "
+          f"{len(week)}; times in the tape's timezone)")
+    for side, instants in one_side.items():
+        print(f"  {side} ({len(instants)}): " + (", ".join(map(_stamp, instants)) or "none"))
+    differing = [f"{_stamp(ms)} " + "; ".join(fields) for ms in shared
+                 if (fields := _field_differences(tape[ms], week[ms]))]
+    assert not differing, (
+        f"{len(differing)} of {len(shared)} shared exit instants differ in a Signal field:\n"
+        + "\n".join(differing[:10]))
+    assert len(shared) >= SHARED_FLOOR, (
+        f"NOT COMPARED: {len(shared)} exit instants are on both sides, the floor is "
+        f"{SHARED_FLOOR} (tape {len(tape)}, engine {len(week)})")
+    print(f"  all seven Signal fields equal TradingView's at the {len(shared)} shared instants")
 
 
 def test_helper_tuple_declaration_binds_ta_fields_and_nested_tuples():

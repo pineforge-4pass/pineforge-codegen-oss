@@ -30,9 +30,12 @@ def source(name: str, fixtures: Path = FIXTURES) -> str:
     return (fixtures / f"{name}.pine").read_text(encoding="utf-8")
 
 
-def tape_exits(name: str, fixtures: Path = FIXTURES) -> dict[int, str]:
-    """Exit instant (UTC ms) -> Signal of every trade on a probe's tape."""
-    with (fixtures / f"{name}_tv_trades.csv").open(encoding="utf-8-sig") as fh:
+def tape_exits(name: str, fixtures: Path = FIXTURES,
+               tape: str | None = None) -> dict[int, str]:
+    """Exit instant (UTC ms) -> Signal of every trade on a probe's tape:
+    ``<name>_tv_trades.csv``, or the file ``tape`` of a probe that was
+    recorded again on another week."""
+    with (fixtures / (tape or f"{name}_tv_trades.csv")).open(encoding="utf-8-sig") as fh:
         rows = list(csv.DictReader(fh))
     return {
         int(dt.datetime.strptime(row["Date and time"], "%Y-%m-%d %H:%M")
@@ -41,23 +44,28 @@ def tape_exits(name: str, fixtures: Path = FIXTURES) -> dict[int, str]:
     }
 
 
-def tape_feed(engine: Path, base: Path) -> Path:
-    """The corpus 15m chart feed over the tapes' range."""
+def tape_feed(engine: Path, base: Path, start_ms: int = START_MS,
+              end_ms: int = END_MS) -> Path:
+    """The corpus 15m chart feed over ``[start_ms, end_ms)``: the tapes' range,
+    unless a probe names its own."""
     full = derive_chart_feed(engine, base / "full_chart.csv")
     feed = base / "tape_chart.csv"
     with full.open() as inp, feed.open("w") as out:
         out.write(next(inp))
         for line in inp:
-            if START_MS <= int(line.split(",", 1)[0]) < END_MS:
+            if start_ms <= int(line.split(",", 1)[0]) < end_ms:
                 out.write(line)
     return feed
 
 
 def replay(engine: Path, base: Path, builds: dict[str, Build],
-           params: dict[str, dict] | None = None) -> dict[str, dict[int, str]]:
-    """Run each build on the tape feed: its exit comments by exit instant,
-    under ``params[key]`` (input overrides by title) when given."""
-    feed = tape_feed(engine, base)
+           params: dict[str, dict] | None = None,
+           feed: Path | None = None) -> dict[str, dict[int, str]]:
+    """Run each build on the tape feed, or on ``feed`` when a probe cut its
+    own: its exit comments by exit instant, under ``params[key]`` (input
+    overrides by title) when given."""
+    if feed is None:
+        feed = tape_feed(engine, base)
     runs = execute_all(engine, feed, base, builds)
     exits: dict[str, dict[int, str]] = {}
     for key in builds:
