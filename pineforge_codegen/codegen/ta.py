@@ -489,7 +489,7 @@ class TaSiteHelper:
     # precalcs. Every other family keeps its existing lowering unchanged
     # (inline compute when reached, in batch and inline runs alike: a site
     # below a lazy edge precalcs only when it is hoisted) until a tape pins
-    # it -- ``_lazy_edge_hoist_plan()["skipped"]`` lists them per script.
+    # it -- ``_lazy_edge_ta_hoist_plan()["skipped"]`` lists them per script.
     LAZY_EVERY_BAR_TA = frozenset({"highest", "lowest", "sma", "ema"})
     LAZY_SOURCE_CLOCK_TA = frozenset({"change", "mom", "roc"})
     LAZY_PER_EXECUTION_TA = frozenset({

@@ -584,24 +584,19 @@ def _resolve_member_chain(node: ASTNode) -> str | None:
 class SupportChecker:
     """AST walker that produces Diagnostic objects for unsupported features."""
 
-    # syminfo fields that emit na<T>() (or route through the runtime metadata
-    # map, which returns na until a feed injects a value) due to missing data;
-    # warn when used in conditional context (if-condition or ternary
-    # condition) because the condition will always evaluate to false/na.
-    # Derived from the emission table so new na-accept fields cannot drift
-    # out of the warning: every SYMINFO_MEMBER_MAP entry whose emission is an
-    # ``na<T>()`` literal or a ``get_syminfo_metadata(...)`` lookup is a
-    # silent gap (sector/industry/isin/expiration_date/current_contract/
-    # mincontract/root/pricescale/minmove + employees/shareholders/
-    # shares_outstanding_*/recommendations_*/target_price_*).
+    # Warn on every read of a field that emits a literal na. A read inside
+    # a condition does not tell us what the condition evaluates to.
     _SYMINFO_SILENT_GAP_FIELDS: frozenset[str] = frozenset(
         member
         for member, emission in SYMINFO_MEMBER_MAP.items()
-        if "na<" in emission or "get_syminfo_metadata" in emission
+        if emission.startswith("na<")
     )
-    # Fields that read a value from the run's symbol metadata and return na
-    # when the run does not declare that value.
-    _SYMINFO_RUN_FACT_FIELDS: frozenset[str] = frozenset({"mincontract"})
+    # These fields read the run's symbol metadata and return na if it is missing.
+    _SYMINFO_RUN_FACT_FIELDS: frozenset[str] = frozenset(
+        member
+        for member, emission in SYMINFO_MEMBER_MAP.items()
+        if emission.startswith("get_syminfo_metadata(")
+    )
 
     def __init__(self, ast: Program, filename: str = "<input>") -> None:
         self._ast = ast
@@ -2304,22 +2299,13 @@ class SupportChecker:
                     f'"{node.member}" in its symbol metadata.',
                 )
             elif node.member in self._SYMINFO_SILENT_GAP_FIELDS:
-                # These fields silently return na in current PineForge. Warn on
-                # EVERY read — not just inside an if/ternary condition — because
-                # a field used directly in a plain expression (e.g. ``x =
-                # syminfo.pricescale * 2``) slips out as na with no signal too.
-                # The conditional phrasing is kept where it applies.
-                extra = (
-                    " condition will always be false."
-                    if self._in_conditional_depth > 0
-                    else " any expression using it will be na."
-                )
-                self._warn(
-                    node,
-                    f"syminfo.{node.member} returns na in current PineForge;"
-                    f"{extra} "
-                    "Will be backfilled by pineforge-data product.",
-                )
+                if self._in_conditional_depth > 0:
+                    self._warn(
+                        node,
+                        f"In this condition, PineForge returns na for syminfo.{node.member}.",
+                    )
+                else:
+                    self._warn(node, f"PineForge returns na for syminfo.{node.member}.")
         self._visit_children(node)
 
     # -- request.security parameter rules --
