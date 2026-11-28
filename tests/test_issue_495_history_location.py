@@ -226,6 +226,26 @@ def test_direct_read_keeps_chart_history_for_selection_value(source):
     assert _four_hour_values_after_warmup(source) == [5, 6, 7]
 
 
+def test_direct_read_of_derived_string_keeps_chart_history_for_selection_value():
+    # The request reads copy[2], and copy is computed from txt. Replaying
+    # copy from a txt that never receives the store its holder keeps reads
+    # "!" alone: length 1 in every slot. The requested clock gives 2, 3, 4.
+    source = """//@version=6
+strategy("direct read of a derived string, store in an if expression")
+string txt = ""
+x = if close > open
+    txt := str.tostring(close)
+    1
+else
+    0
+string copy = txt + "!"
+h() => str.length(copy[2])
+v = request.security(syminfo.tickerid, "240", h())
+plot(v + x)
+"""
+    assert _four_hour_values_after_warmup(source) == [6, 7, 8]
+
+
 def test_blocked_request_reads_chart_string_even_when_another_request_samples_it():
     source = """//@version=6
 strategy("two strings on a blocked request")
