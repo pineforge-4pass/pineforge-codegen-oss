@@ -2636,9 +2636,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         string history its own expression reads joins the replay here, and
         so do the histories used to compute the stores the evaluator replays
         to that state: every store, its RHS and its guards are known only
-        after the script has been visited. A string that the read itself
-        registered as state, and that has a store the evaluator would pass
-        over, leaves the replay here.
+        after the script has been visited. Both routes ask one question of
+        every name such a string is computed from. A string that the read
+        itself registered as state leaves the replay here when it, or a
+        name that feeds it, has a store the evaluator would pass over.
         """
         def replaying():
             return [call for call in self._security_calls
@@ -2698,48 +2699,25 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # replay each statement that holds one.
             return names.isdisjoint(incomplete) and replayable(names, replay)
 
-        for call in reading:
-            if self._budget is not None:
-                self._budget.check(call.loc, Phase.ANALYZER)
-            # The request's own expression reads these histories.
-            reads = call.string_history_reads
-            current = set(call.mutable_globals)
-            replay = current.union(reads)
-            if replays_completely(set(reads), replay):
-                self._requested_string_history_globals.update(reads)
-                call.mutable_globals = tuple(sorted(replay))
-                call.depends_on_mutable_globals = True
-                continue
-            # A reassigned or ``var`` string joined the replay at the read,
-            # as a current value (``_collect_security_mutable_globals``), and
-            # the emitter binds every read of a replayed name to the
-            # request's copy (``_rewrite_security_cpp``). The evaluator
-            # passes over a holder it does not replay, so with an unindexed
-            # store that copy would never receive the store: the string
-            # leaves the replay and its history stays the chart's.
-            unreplayed = current.intersection(reads, incomplete)
-            kept = current - unreplayed
-            # The boundary registered at the read stays where the evaluator
-            # refuses it as it stands, where a statement still replayed
-            # stores to the string inside its value (that store does
-            # replay), and once a refusal has sent the request back to it.
-            if (not unreplayed or call.sec_id in self._excluded_string_replays
-                    or not replayable(current, current) or not replayable(kept, kept)):
-                continue
-            call.mutable_globals = tuple(sorted(kept))
-            call.depends_on_mutable_globals = bool(kept)
-            call.string_replay_origin = call.sec_id
-        if not later_stores:
-            return
+        def sampled(pending, declarations=()):
+            """Every reassigned or ``var`` name that feeds a sampled history.
 
-        for call in replaying():
-            replay = set(call.mutable_globals)
-            sampled_inputs: set[str] = set()
+            ``pending`` pairs each node with whether its value is sampled;
+            ``declarations`` are strings whose history is read as it stands.
+            The string histories the walk meets are returned too.
+            """
+            names: set[str] = set()
             histories: dict[str, VarDecl] = {}
-            # Find history reads in stores, without reclassifying every
-            # ordinary read in a later store as a new mutable dependency.
-            pending = [(expr, False) for name in call.mutable_globals
-                       for expr in inputs.get(name, ())]
+
+            def sample(decl):
+                # Already replaying a current value is not proof that
+                # its later writes' inputs were inventoried for sampling.
+                if decl.name not in names:
+                    names.add(decl.name)
+                    pending.extend((expr, True) for expr in inputs.get(decl.name, ()))
+
+            for decl in declarations:
+                sample(decl)
             seen = set()
             while pending:
                 node, sampling = pending.pop()
@@ -2766,12 +2744,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     if not sampling:
                         continue
                 if decl is not None:
-                    # Already replaying a current value is not proof that
-                    # its later writes' inputs were inventoried for sampling.
-                    if decl.name not in sampled_inputs:
-                        sampled_inputs.add(decl.name)
-                        replay.add(decl.name)
-                        pending.extend((expr, True) for expr in inputs.get(decl.name, ()))
+                    sample(decl)
                     continue
                 if isinstance(node, FuncCall):
                     if self._is_input_func_call(node):
@@ -2786,8 +2759,65 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 payload = _request_payload(node) if _request_name(node) else None
                 pending.extend((child, sampling) for child in syntax_children(node)
                                if child is not payload)
+            return names, histories
+
+        feeds: dict[str, set[str]] = {}
+
+        def fed_by(decl) -> set[str]:
+            # The names a read string is computed from, itself included: the
+            # walk the later stores use, once per declaration.
+            if decl.name not in feeds:
+                feeds[decl.name] = sampled([], (decl,))[0]
+            return feeds[decl.name]
+
+        for call in reading:
+            if self._budget is not None:
+                self._budget.check(call.loc, Phase.ANALYZER)
+            # The request's own expression reads these histories.
+            reads = call.string_history_reads
+            current = set(call.mutable_globals)
+            replay = current.union(reads)
+            # A replayed string is computed from the names that feed it, so
+            # each of them is asked too, not only the subscripted string.
+            feeding = {name: fed_by(decl) for name, decl in reads.items()}
+            if replays_completely(set().union(*feeding.values()), replay):
+                self._requested_string_history_globals.update(reads)
+                call.mutable_globals = tuple(sorted(replay))
+                call.depends_on_mutable_globals = True
+                continue
+            # A reassigned or ``var`` string joined the replay at the read,
+            # as a current value (``_collect_security_mutable_globals``), and
+            # the emitter binds every read of a replayed name to the
+            # request's copy (``_rewrite_security_cpp``). The evaluator
+            # passes over a holder it does not replay, so with an unindexed
+            # store, its own or one of a name that feeds it, that copy would
+            # never receive the store: the string leaves the replay and its
+            # history stays the chart's.
+            unreplayed = {name for name in current.intersection(reads)
+                          if not feeding[name].isdisjoint(incomplete)}
+            kept = current - unreplayed
+            # The boundary registered at the read stays where the evaluator
+            # refuses it as it stands, where a statement still replayed
+            # stores to the string inside its value (that store does
+            # replay), and once a refusal has sent the request back to it.
+            if (not unreplayed or call.sec_id in self._excluded_string_replays
+                    or not replayable(current, current) or not replayable(kept, kept)):
+                continue
+            call.mutable_globals = tuple(sorted(kept))
+            call.depends_on_mutable_globals = bool(kept)
+            call.string_replay_origin = call.sec_id
+        if not later_stores:
+            return
+
+        for call in replaying():
+            # Find history reads in stores, without reclassifying every
+            # ordinary read in a later store as a new mutable dependency.
+            sampled_inputs, histories = sampled(
+                [(expr, False) for name in call.mutable_globals
+                 for expr in inputs.get(name, ())])
             if not histories:
                 continue
+            replay = sampled_inputs.union(call.mutable_globals)
             # Keep the request's original replay boundary if any sampled
             # producer is incomplete or the evaluator cannot replay a source.
             if not replays_completely(sampled_inputs, replay):
