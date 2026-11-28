@@ -364,6 +364,7 @@ jobs:
         with:
           repository: pineforge-4pass/pineforge-engine
           ref: "5718c5dc05086fc5b66b4cb565617efe837131e3"
+          fetch-depth: 0
           path: reference-engine
           persist-credentials: false
       - name: "Require the reference engine to be exactly that commit"
@@ -373,6 +374,11 @@ jobs:
           out="$RUNNER_TEMP/reference-engine"
           mkdir -p "$out"
           head=$(git -C reference-engine rev-parse --verify 'HEAD^{commit}')
+          release=$(git -C reference-engine rev-parse --verify 'refs/tags/v1.0.0^{commit}')
+          if [[ "$release" != "$head" ]]; then
+            echo "::error::reference release tag resolves to $release, not checked-out $head"
+            exit 1
+          fi
           if [[ "$head" != "$REFERENCE_ENGINE_SHA" ]]; then
             echo "::error::reference engine HEAD is $head, not $REFERENCE_ENGINE_SHA"
             exit 1
