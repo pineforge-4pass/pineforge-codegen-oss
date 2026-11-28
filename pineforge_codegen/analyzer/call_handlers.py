@@ -50,9 +50,10 @@ Sibling-mixin methods consumed via ``self``:
 - ``self._warn_if_unknown_source_id`` (``DiagnosticsHelper``).
 - ``self._input_diag_loc`` (``DiagnosticsHelper``).
 - ``self._extract_literal_value`` (``TypeHelper``).
-- ``self._collect_security_mutable_globals`` (``Analyzer.base``):
-  stays on the host class because it walks the AST collecting
-  mutable globals -- not an isolated call-handling concern.
+- ``self._security_call_replay_names`` (``Analyzer.base``): the names
+  a request replays, as its call knows them. It stays on the host
+  class with ``_collect_security_mutable_globals``, the walk of the
+  AST it collects them with -- not an isolated call-handling concern.
 
 Output dataclasses (``TACallSite`` / ``FuncInfo`` / ``FixnanCallSite``
 / ``SecurityCallInfo``) are imported from sibling ``contracts.py`` so
@@ -970,7 +971,7 @@ class CallHandlers:
             gaps_node = all_args[3] if len(all_args) > 3 else None
             lookahead_node = all_args[4] if len(all_args) > 4 else None
 
-            mutable_globals = tuple(sorted(self._collect_security_mutable_globals(expr_node)))
+            mutable_globals = self._security_call_replay_names(expr_node)
             # A helper request's symbol and timeframe, resolved through its
             # call paths (``security_contexts``), register in its place.
             notes = node.annotations or {}
@@ -1138,7 +1139,7 @@ class CallHandlers:
 
         sec_id = len(self._security_calls)
 
-        mutable_globals = tuple(sorted(self._collect_security_mutable_globals(expr_node)))
+        mutable_globals = self._security_call_replay_names(expr_node)
         notes = node.annotations or {}
         context = notes.get(CONTEXT_ANNOTATION)
         self._security_calls.append(SecurityCallInfo(
