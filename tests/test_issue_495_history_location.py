@@ -4,6 +4,7 @@ import pytest
 
 from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.analyzer import Analyzer
+from pineforge_codegen.errors import CompileError, Level
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from tests._compile import compile_cpp
@@ -244,6 +245,44 @@ v = request.security(syminfo.tickerid, "240", h())
 plot(v + x)
 """
     assert _four_hour_values_after_warmup(source) == [6, 7, 8]
+
+
+def test_direct_read_of_string_from_tuple_declaration_keeps_chart_history():
+    # The request reads copy[2]; copy is computed from a, which a tuple
+    # declaration takes from pair(txt). Replaying copy from a txt that never
+    # receives the store its holder keeps reads "!?" alone: length 2 in every
+    # slot. The requested clock gives 3, 4, 5.
+    source = """//@version=6
+strategy("direct read of a string derived through a tuple declaration")
+string txt = ""
+x = if close > open
+    txt := str.tostring(close)
+    1
+else
+    0
+pair(string s) => [s + "!", 1]
+[a, n] = pair(txt)
+string copy = a + "?"
+h() => str.length(copy[2])
+v = request.security(syminfo.tickerid, "240", h())
+plot(v + x + n)
+"""
+    try:
+        values = _four_hour_values_after_warmup(source)
+    except CompileError as refusal:
+        # Refusing the script at translation time is the other accepted
+        # outcome: no value is read, so none is misread.
+        located = [(d.code, d.location.line, d.location.col) for d in refusal.diagnostics
+                   if d.level == Level.ERROR and d.location is not None]
+        assert located and all(code.startswith("PF-E") for code, _, _ in located), (
+            "refused with a diagnostic is a pass for this script, but this refusal "
+            f"has no located PF-E diagnostic: {refusal.diagnostics}"
+        )
+        return
+    assert values == [7, 8, 9], (
+        f"read {values}; a pass is chart history [7, 8, 9] or refused with a diagnostic "
+        "(the requested clock reads [3, 4, 5]; a txt that never gets its store, [2, 2, 2])"
+    )
 
 
 def test_blocked_request_reads_chart_string_even_when_another_request_samples_it():
