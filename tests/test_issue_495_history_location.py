@@ -194,6 +194,38 @@ def test_later_store_keeps_chart_history_for_selection_value(source):
     assert _four_hour_values_after_warmup(source) == [5, 6, 7]
 
 
+@pytest.mark.parametrize("source", [
+    pytest.param("""//@version=6
+strategy("direct read, store in an if expression")
+string txt = ""
+x = if close > open
+    txt := str.tostring(close)
+    1
+else
+    0
+h() => str.length(txt[2])
+v = request.security(syminfo.tickerid, "240", h())
+plot(v + x)
+""", id="store-in-if-value"),
+    pytest.param("""//@version=6
+strategy("direct read, store in a switch expression")
+string txt = ""
+x = switch
+    close > open =>
+        txt := str.tostring(close)
+        1
+    => 0
+h() => str.length(txt[2])
+v = request.security(syminfo.tickerid, "240", h())
+plot(v + x)
+""", id="store-in-switch-value"),
+])
+def test_direct_read_keeps_chart_history_for_selection_value(source):
+    # The request's own expression reads txt[2]. Replaying txt without the
+    # store its holder keeps would leave it empty: length 0 in every slot.
+    assert _four_hour_values_after_warmup(source) == [5, 6, 7]
+
+
 def test_blocked_request_reads_chart_string_even_when_another_request_samples_it():
     source = """//@version=6
 strategy("two strings on a blocked request")
