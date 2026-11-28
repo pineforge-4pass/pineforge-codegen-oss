@@ -1,6 +1,6 @@
 """issue #178: ta.atr / ta.tr take the previous CHART bar's close.
 
-TradingView pin (2026-09-06, lab tv i178-sparse-atr-sense, BINANCE:BTCUSDT 60,
+TradingView pin (2026-09-06, i178-sparse-atr-sense, BINANCE:BTCUSDT 60,
 398/398 sparse executions): ``ta.atr(n)`` called inside a block that does not
 execute every bar advances its RMA on the executions only, but its true range
 always reads ``close[1]`` of the CHART, never the close of the site's previous

@@ -1,15 +1,15 @@
 """Where the CGINT7 picks meet each other and codegen main's rules
 (integration CGINT7).
 
-- Lane TAIL-F computes an int product a ``%`` or ``/`` reads in 64 bits
-  (``_wide_int_products``), and main's rule (CGINT6, CG-SILENT-2 item 3)
+- One pick computes an int product a ``%`` or ``/`` reads in 64 bits
+  (``_wide_int_products``), and main's rule
   computes every integer ``+ - *`` whose operands' bounds can leave int32 in
   64 bits, na-aware (``_int_arith_leaves_int32``, ``_wide_int_arith_cpp``). A
-  product both rules reach keeps main's form: TAIL-F's cast wrapped it a
-  second time (``_lower_binop``'s ``widened``). TAIL-F's form covers the
+  product both rules reach keeps main's form: the pick's cast wrapped it a
+  second time (``_lower_binop``'s ``widened``). The pick's form covers the
   products main's bounds do not see (an ``array.get`` operand) or that fit
-  int32; main's form covers a product no ``%`` or ``/`` reads, which the lane
-  left 32 bits wide, and keeps an na operand na where the lane's cast read
+  int32; main's form covers a product no ``%`` or ``/`` reads, which the pick
+  left 32 bits wide, and keeps an na operand na where the pick's cast read
   ``na<int>()`` as -2147483648.
 - Lane TAIL-A keeps the history of a global a ``request.security`` payload
   reads at an offset on the requested bars, typed from the global: it is

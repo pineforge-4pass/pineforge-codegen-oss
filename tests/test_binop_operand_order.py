@@ -10,8 +10,7 @@ the operands of ``+ - * / %`` and of an overloaded operator (``std::string``'s
 ``+`` and ``==``, the ``std::fmod`` of ``%``) unspecified. AppleClang evaluates
 them left to right; GCC on x86-64 evaluated std::string ``operator+``'s right
 operand first, so the Linux build spelled ``45,50,99,5,10,20,30,45,99``
-(lab remote job rj-20260927t190702-ab025b,
-test_e2e_krunerr_array_negative_index).
+(test_e2e_krunerr_array_negative_index).
 
 When one operand has an effect the other one can observe (an array, map or
 matrix mutation, a drawing, an order, a log line, or a user function or method

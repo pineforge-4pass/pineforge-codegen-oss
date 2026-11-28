@@ -38,6 +38,7 @@ from tests._e2e import (
     REPO_ROOT, Build, assert_same_runs, chart_feed_head, execute_all, ok,
     reference_codegen, skip_unless_e2e_env, transpile_json,
 )
+from tests._fixture_range import assert_range_covered
 from tests._private_fixtures import private_fixture
 from tests.test_e2e_session_history import LEGACY, QUARTER, _replay, _utc_ms
 from tests.test_e2e_session_ismarket import next_chart_bar
@@ -396,7 +397,7 @@ def test_tradingview_keeps_builtins_beside_host_named_variables() -> None:
         == metrics["tvTradesCsvHash"]
     assert hashlib.sha256(tape_file("strategy.pine").read_bytes()).hexdigest() \
         == metrics["sourceArtifactHash"]
-    assert metrics["wsProvenance"]["rangeProof"] == "covered"
+    assert_range_covered(metrics, "cgs2-hostnames-aapl-15-reg")
     tape = [values for _, values in read_host_tape()]
     assert len(tape) == metrics["trades"] == 260
 

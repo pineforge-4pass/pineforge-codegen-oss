@@ -296,8 +296,8 @@ def test_time_single_arg_forwards_syminfo_default_with_empty_session():
 def test_time_session_day_args_shim_emitted_after_session_time_include():
     # The trailing (syminfo tz, session) pair is compiled out on engines whose
     # session_time.hpp lacks PF_PINE_TIME_HAS_SESSION_DAY, so the same TU
-    # builds against the base and the candidate headers (lab experiment
-    # cells). The shim must follow the include (the macro it tests is
+    # builds against the base and the candidate headers.
+    # The shim must follow the include (the macro it tests is
     # defined there) and must not add parentheses (preprocessed call is
     # byte-identical to the plain 7-arg form).
     cpp = _generate('//@version=6\nstrategy("T")\nx = time("60", "0800-1600")\n')
@@ -2007,7 +2007,7 @@ n = peek(close > open)
 # Recovered-strategy regression tests (transpile-error -> supported).
 #
 # Each pins a distinct codegen fix that recovered a previously-rejected
-# scraped strategy. They run the FULL pipeline (support_checker + analyzer +
+# third-party strategy. They run the FULL pipeline (support_checker + analyzer +
 # codegen) via ``transpile`` and assert the load-bearing emitted construct.
 # ===========================================================================
 

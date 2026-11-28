@@ -80,7 +80,7 @@ def test_narrow_arithmetic_keeps_its_spelling(body, spelling):
 def test_arithmetic_over_a_variable_is_not_folded():
     # ``n`` is no constant, so nothing folds it; past int32 its product is
     # computed at run time in 64 bits, na-aware since a script variable can
-    # be na (CG-SILENT-2 item 3: the C++ int product ``(n * 7200000)`` this
+    # be na (the C++ int product ``(n * 7200000)`` this
     # used to pin overflowed at n = 401).
     cpp = transpile('//@version=6\nstrategy("narrow")\n'
                     "var int n = 400\nn += 1\nx = n * 7200000\nplot(x)")
@@ -99,7 +99,7 @@ def test_a_parameter_named_like_a_constant_is_not_folded():
         "plot(f(2))\n"
     )
     assert "static_cast<int64_t>(2880000000LL)" not in cpp
-    # The parameter's product is CG-SILENT-2 item 3's run-time 64-bit one.
+    # The parameter's product is the run-time 64-bit one.
     assert "auto _pf_wide_l = (400); auto _pf_wide_r = (MS);" in cpp
 
 

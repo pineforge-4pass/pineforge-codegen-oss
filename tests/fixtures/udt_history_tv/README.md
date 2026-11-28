@@ -1,16 +1,13 @@
-# CG-UDT-HIST TradingView evidence
+# User-defined-type history: TradingView evidence
 
 Synthetic probes for user-defined-type history: the history-referencing
 operator `[]` on a user-defined object or a drawing reference. They contain no
-closed or scraped source. The twelve tapes were exported on 2026-10-01 with
-
-```bash
-lab tv --pine <name>.pine --slug pf-<name, underscores as dashes> --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-08
-```
+closed or third-party source. The twelve tapes were exported on 2026-10-01 from
+TradingView runs on BINANCE:ETHUSDT.P at 15 minutes for 2025-04-01 to
+2025-04-08.
 
 TradingView ran each from 2025-04-01 00:00 UTC (the export's requested and
-returned range, `rangeProof: covered`). Every probe trades a fixed quantity
+returned range). Every probe trades a fixed quantity
 of 1, enters on the bars at minute 0 and 30 and closes on the bars at minute
 15 and 45; each close's comment spells the values the probe reads on that
 bar, so a tape's exit `Signal`s are TradingView's values, one sample per
@@ -143,7 +140,7 @@ probes' `-1` / `x` placeholders):
 
 ## Spellings TradingView refuses or stops on
 
-TradingView's pine-facade compiler (`save/new_draft`, 2026-10-01) refuses
+TradingView's compiler (2026-10-01) refuses
 these probes, so they have no tape:
 
 | Probe | TradingView's answer |

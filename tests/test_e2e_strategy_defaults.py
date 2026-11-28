@@ -42,6 +42,7 @@ from tests._e2e import (
     REPO_ROOT, build_strategy_library, derive_chart_feed, reference_codegen, reference_engine,
     skip_unless_e2e_env, transpile_json,
 )
+from tests._fixture_range import assert_range_covered
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "strategy_defaults"
@@ -242,5 +243,5 @@ def test_the_tapes_are_the_recorded_exports():
         meta = json.loads((FIXTURES / case.tape / "meta.json").read_text())
         digest = hashlib.sha256((FIXTURES / case.tape / "tv_trades.csv").read_bytes()).hexdigest()
         assert digest == metrics["tvTradesCsvHash"] == meta["tv_trades_sha256"], case.tape
-        assert metrics["wsProvenance"]["rangeProof"] == "covered", case.tape
+        assert_range_covered(metrics, case.tape)
         assert (metrics["symbol"], metrics["interval"]) == ("BINANCE:ETHUSDT.P", "15"), case.tape

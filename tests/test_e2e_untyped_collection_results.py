@@ -10,8 +10,8 @@ Each now yields an array spec -- a row or column of the matrix's element
 type, eigenvalues and the numeric transforms as vectors of doubles, and
 sort_indices as a vector of integers.
 
-TradingView's tape of ``fixtures/open_items_tv/untyped_collections`` (lab tv
---no-note) spells a read of each binding on every exit bar; the replay
+TradingView's tape of ``fixtures/open_items_tv/untyped_collections``
+spells a read of each binding on every exit bar; the replay
 compares every exit comment. Each shape also compiles bound to a global and
 to a function local.
 """

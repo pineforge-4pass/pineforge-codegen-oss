@@ -6,29 +6,29 @@ composition end to end -- ``transpile_json``, the built runtime,
 ``MAIN`` is the integration base, replayed beside a case to show what it
 missed:
 
-* ``TypeInferer._series_type_for``: CG-OPEN-ITEMS bf805c2 resolves a
+* ``TypeInferer._series_type_for``: change bf805c2 resolves a
   function's local spelled like another user function in its own function's
-  scope (``_variable_symbol``); CG-W9-SEC c86c0de widens a name an epoch
+  scope (``_variable_symbol``); change c86c0de widens a name an epoch
   reaches to ``int64_t`` only when its symbol is no float, bool or string.
   Both now read the one symbol: an ``int f = time`` local beside a string
   function ``f`` keeps 64 bits and a ``float h = time`` beside a string
   function ``h`` is a double. Main resolved both to the string functions
   (``Series<std::string>``, which did not compile); the lane alone declared
   ``Series<int>`` and narrowed the epoch.
-* ``StmtVisitor._visit_selection_value``: CG-OPEN-ITEMS 9ad5694 gives an if
+* ``StmtVisitor._visit_selection_value``: change 9ad5694 gives an if
   without else (a switch without default) that runs no arm the na of its
-  slot; K-RUNERR stores an ``int`` an epoch reaches as ``int64_t``. That
+  slot; main stores an ``int`` an epoch reaches as ``int64_t``. That
   slot's na is ``na<int64_t>()``: the lane spelled ``na<int>()`` for a
   global, switch or reassigned target (Pine's ``int``), which widens to a
   value, so ``na(t)`` read false. Main kept the previous bar's value.
-* ``pineforge_codegen._generate``: CG-OPEN-ITEMS f3e1816 rewrites ``nz`` /
+* ``pineforge_codegen._generate``: change f3e1816 rewrites ``nz`` /
   ``fixnan`` keyword arguments to their positions (``bind_builtin_keywords``)
-  after XSYM-A's passes in main's ``_generate`` loop: ``lower_no_data_requests``
+  after the request passes in main's ``_generate`` loop: ``lower_no_data_requests``
   and ``specialize_security_contexts``, which copies a helper per context and
   puts a payload parameter's value in its place. A keyword call through each
   is C++ byte for byte its positional twin; main raised IndexError on each.
-* One function on two clocks: CG-W9-FN reads ``bar_index[k]`` in a function
-  by its chart call site's calls (``_fn_global_hist_*``), CG-OPEN-ITEMS
+* One function on two clocks: main reads ``bar_index[k]`` in a function
+  by its chart call site's calls (``_fn_global_hist_*``), change
   41c5e4f a payload's ``bar_index`` on the requested bars
   (``_sec<N>_bar_index_``). One function called on irregular chart bars and
   inside a request equals, on each clock, its own twin.
@@ -39,15 +39,15 @@ missed:
   A foreign site now sets the member from the context, a chart site keeps
   41c5e4f's count of requested bars: ``bar_index`` and ``bar_index[1]`` of
   the foreign payload are the feed's own index and the one before it.
-* A foreign helper's source parameter: CG-XSYM-A2 e44a7c8 puts a helper
+* A foreign helper's source parameter: change e44a7c8 puts a helper
   parameter bound to an ``input.source`` in its place (``security_contexts``),
-  XSYM-E copies that helper per symbol, and CG-W9-SEC's builder (on main)
+  another change copies that helper per symbol, and main's builder
   reads the source on the requested bar -- here each symbol's own feed bar:
   ``f(sym, v) => request.security(sym, "60", ta.sma(v, 3))`` called for two
   symbols with ``src`` equals the SMA of each feed's selected series, under
   the default and under an override (main gave a deferred refusal).
-  CG-XSYM-A2 9964233 also names a helper the analyzer emits once in its
-  calls, which closes XSYM-E's open ``f_cs0`` item: a helper fed a ternary
+  Change 9964233 also names a helper the analyzer emits once in its
+  calls, which closes the open ``f_cs0`` item: a helper fed a ternary
   symbol compiles.
 * A payload's series TA length over ``bar_index``: K-TA-DYNLEN windows
   ``ta.highest(high, bar_index % 5 + 1)`` every call
@@ -55,12 +55,12 @@ missed:
   bars, where K-TA-DYNLEN's pin spelled the chart's ``pine_bar_index()``
   (none of its tapes reads ``bar_index`` in a payload). The window equals
   its spelled-out ``math.max`` over the requested bars' highs.
-* A flag's history beside a global under a payload's builtin: CG-SESSION-2
+* A flag's history beside a global under a payload's builtin: main
   keeps ``session.<flag>[k]`` on the requested clock only where the
-  evaluator is on the requested bar's terms, and CG-SECURITY-2 kept an
-  evaluator whose builtin also read a global on the chart's (CGINT2 pinned
+  evaluator is on the requested bar's terms, and kept an
+  evaluator whose builtin also read a global on the chart's (an earlier case pinned
   ``nz(session.ismarket[1] ? g : na)`` with ``g = close`` as refused).
-  CG-OPEN-ITEMS 5b3791d re-evaluates such a global on the requested bar, so
+  Change 5b3791d re-evaluates such a global on the requested bar, so
   the read now runs and equals its spelling with ``close``; a per-run global
   (``timeframe.*``) still keeps the chart's terms and the refusal
   (``tests/test_e2e_lane_compositions.py``).
@@ -70,12 +70,12 @@ missed:
   them. Inlined on every pass, a library function reading a flag at an
   offset gets a clone per call site (``_session_call_*``), and a keyword
   ``nz`` in library code is its positional twin byte for byte.
-* CG-XSYM-A2 a2cab6f names each ``_`` of a structured binding
-  ``_tuple_unused_N``; CG-OPEN-ITEMS d3e086b keeps script names out of the
+* Change a2cab6f names each ``_`` of a structured binding
+  ``_tuple_unused_N``; change d3e086b keeps script names out of the
   emitter's temporaries, which now include those: a script variable
   ``_tuple_unused_0`` is escaped, where the block's binding captured it.
-* CG-OPEN-ITEMS d504053 parenthesizes a lambda history offset; CG-SESSION-2's
-  flag histories and CG-W9-FN's function histories index through
+* Change d504053 parenthesizes a lambda history offset; the
+  flag histories and the function histories index through
   ``pine_index_int_cast``. A fractional runtime offset on every emitter
   compiles and opens no C++ attribute.
 """
@@ -122,7 +122,7 @@ def _main_transpiled(tmp_path: Path, source: str) -> dict:
 
 # ---------------------------------------------------------------------------
 # A function's local named like a function keeps its epoch width
-# (CG-OPEN-ITEMS bf805c2 x CG-W9-SEC c86c0de x K-RUNERR)
+# (changes bf805c2 and c86c0de)
 # ---------------------------------------------------------------------------
 
 FUNC_LOCAL = HEAD + '''f(x) => str.tostring(x)
@@ -164,7 +164,7 @@ def test_main_typed_both_locals_as_the_string_functions(tmp_path: Path) -> None:
 
 # ---------------------------------------------------------------------------
 # An if without else in an epoch slot is the 64-bit na
-# (CG-OPEN-ITEMS 9ad5694 x K-RUNERR)
+# (change 9ad5694)
 # ---------------------------------------------------------------------------
 
 IF_NA = HEAD + '''var int w = na
@@ -207,7 +207,7 @@ def test_an_epoch_slot_takes_the_64_bit_na() -> None:
 
 # ---------------------------------------------------------------------------
 # One function on the chart's clock and on the requested clock
-# (CG-W9-FN x CG-OPEN-ITEMS 41c5e4f)
+# (change 41c5e4f)
 # ---------------------------------------------------------------------------
 
 BAR_CLOCKS = HEAD + '''f() => bar_index[1]
@@ -230,7 +230,7 @@ chart = bar_index[1]
 
 # ---------------------------------------------------------------------------
 # A series TA length over a payload's bar_index
-# (K-TA-DYNLEN x CG-OPEN-ITEMS 41c5e4f)
+# (change 41c5e4f, on a series length)
 # ---------------------------------------------------------------------------
 
 DYN_BAR_INDEX = HEAD + '''w = request.security(syminfo.tickerid, "240", ta.highest(high, bar_index % 5 + 1))
@@ -333,7 +333,7 @@ def test_a_payload_series_length_counts_the_requested_bars(runs):
 
 # ---------------------------------------------------------------------------
 # Another symbol's payload reads its context's bar_index
-# (XSYM-E 96b4939 x CG-OPEN-ITEMS 41c5e4f)
+# (changes 96b4939 and 41c5e4f)
 # ---------------------------------------------------------------------------
 
 def test_a_foreign_payloads_bar_index_is_its_contexts(tmp_path_factory) -> None:
@@ -368,8 +368,8 @@ def test_a_foreign_payloads_bar_index_is_its_contexts(tmp_path_factory) -> None:
 
 
 # ---------------------------------------------------------------------------
-# A foreign helper's source parameter (CG-XSYM-A2 e44a7c8 x XSYM-E x
-# CG-W9-SEC), and a ternary symbol through a helper (CG-XSYM-A2 9964233)
+# A foreign helper's source parameter (change e44a7c8),
+# and a ternary symbol through a helper (change 9964233)
 # ---------------------------------------------------------------------------
 
 FOREIGN_SOURCE = HEAD + '''src = input.source(close, "S")
@@ -443,8 +443,8 @@ def test_a_script_name_spelled_like_a_placeholder_binding_is_escaped() -> None:
 
 
 # ---------------------------------------------------------------------------
-# nz / fixnan keyword calls through XSYM-A's request passes
-# (CG-OPEN-ITEMS f3e1816 x XSYM-A)
+# nz / fixnan keyword calls through the request passes
+# (change f3e1816)
 # ---------------------------------------------------------------------------
 
 KEYWORD_TWINS = {
@@ -506,7 +506,7 @@ def test_main_crashed_on_the_keyword_call(tmp_path: Path, case: str) -> None:
 
 # ---------------------------------------------------------------------------
 # A flag's history beside a global under a payload's builtin
-# (CG-SESSION-2 x CG-SECURITY-2 x CG-OPEN-ITEMS 5b3791d), on the session
+# (change 5b3791d), on the session
 # tapes' bars in the paired engine's private tests/codegen-fixtures/session_ismarket/
 # ---------------------------------------------------------------------------
 
@@ -550,7 +550,7 @@ def test_main_refused_the_flags_history_beside_the_global(tmp_path: Path) -> Non
 
 # ---------------------------------------------------------------------------
 # An imported library through _generate's passes
-# (XSYM-C 046687a x CG-SESSION-2 x CG-OPEN-ITEMS f3e1816)
+# (changes 046687a and f3e1816)
 # ---------------------------------------------------------------------------
 
 LIBRARY = '''//@version=6
@@ -580,7 +580,7 @@ def test_an_inlined_library_takes_every_pass() -> None:
 
 # ---------------------------------------------------------------------------
 # A fractional history offset on every emitter
-# (CG-OPEN-ITEMS d504053 x CG-SESSION-2 x CG-W9-FN)
+# (change d504053)
 # ---------------------------------------------------------------------------
 
 FRACTIONAL = HEAD + '''lag = (bar_index % 3) / 2

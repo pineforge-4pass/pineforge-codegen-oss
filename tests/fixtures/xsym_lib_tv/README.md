@@ -1,23 +1,20 @@
 # XSYM-C TradingView trade evidence
 
 Synthetic probes for Pine libraries inlined at transpile
-time) and their unedited TradingView trade exports. They contain no closed,
-scraped or third-party source. Each was exported on 2026-09-28 with
+time) and their unedited TradingView trade exports. They contain no closed
+or third-party source. Each was exported on 2026-09-28 from a TradingView run
+on BINANCE:ETHUSDT.P at 15 minutes for 2025-04-01 to the End date in the
+table below.
 
-```bash
-lab tv --pine <name>.pine --slug pf-<name, underscores as dashes>-eth15 --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to <to>
-```
-
-`xc_v5_lib`'s daily tape (`xc_v5_lib_eth1d_tv_trades.csv`) was exported with
-`--slug pf-xc-v5-lib-eth1d --interval 1D`. TradingView ran each from
+`xc_v5_lib`'s daily tape (`xc_v5_lib_eth1d_tv_trades.csv`) was exported from
+a TradingView run at 1D. TradingView ran each from
 2025-04-01 00:00 UTC (the export's requested and returned range). The tapes'
 `Date and time` column is the exporting account's chart timezone,
 Asia/Taipei (UTC+8). A probe enters on even bars and closes on odd bars, each
 close's comment spelling the values it reads on that bar, so a tape's exit
 `Signal`s are TradingView's values.
 
-| Probe | `--to` | sha256 of the `.pine` | Tape sha256 | Trades |
+| Probe | End | sha256 of the `.pine` | Tape sha256 | Trades |
 |---|---|---|---|---|
 | `xc_string_na` | 2025-04-03 | `806747e96250f7eeaadec626db1b33be0f8ca3fa83244d2a4f500c76ebc79fc9` | `1bee56dc2c9c4e7aa5aba515de5de01456f056d04bc80d2d3df73a30c344119c` | 96 |
 | `xc_string_cast_na` | 2025-04-03 | `959560af9d2cca4b8b585c6bbc1f4036b88633316e563b000c9a0c4285b4b2a6` | `ce5bceb00b5577a26cb01b2cbe091796623619783c57ff616aaeb8745a034075` | 96 |

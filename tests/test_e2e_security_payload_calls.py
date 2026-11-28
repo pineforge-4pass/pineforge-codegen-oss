@@ -1,5 +1,5 @@
 """User calls under builtin calls in a ``request.security`` payload read the
-requested bar (CG-ISMARKET finding F4).
+requested bar.
 
 ``_build_security_expr`` inlines a user function it meets, but a node it has
 no case for (``nz(...)``, ``na(...)``, ``str.tostring(...)``, a user method

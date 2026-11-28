@@ -12,7 +12,7 @@ one (a callable's ``var`` read at ``[1]``) selects into a local of the
 member's own element type (string, int, drawing) and replaces its current
 slot. A top-level ``var`` read at ``[k]`` kept the legacy first-bar
 preamble, whose analyzer spelling of a selection (``<?>``) never compiled;
-since CG-SILENT item 4 it runs at its declaration too
+it now runs at its declaration too
 (``tests/test_e2e_cgint5_compositions.py``).
 
 TradingView's tape of ``xa2_var_selection`` (``fixtures/xsym_a2_tv``,

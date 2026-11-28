@@ -1,47 +1,47 @@
-"""Where two lanes integrated together change one function, or lower one
+"""Where two changes integrated together change one function, or lower one
 shape, the integration keeps both rule sets (integration case:
-CG-POPFIX, K-RUNERR, K-TA-DYNLEN, CG-SECURITY-2 and CG-SESSION-2 on one
+five changes on one
 branch). Each case below runs the composition end to end -- ``transpile_json``,
 the built runtime, ``run_strategy.py`` -- against a spelling that reaches each
-lane's rule on its own, or pins the C++ where the rules decide the lowering:
+change's rule on its own, or pins the C++ where the rules decide the lowering:
 
-* ``SecurityEmitter._emit_security_evaluators``: CG-SECURITY-2 moved the
+* ``SecurityEmitter._emit_security_evaluators``: one change moved the
   evaluator body into ``_emit_security_evaluator`` (a per-variant prologue,
-  all or nothing per evaluator); K-TA-DYNLEN lets a TA constructor argument
+  all or nothing per evaluator); another lets a TA constructor argument
   that depends on a rebound mutable global run after the rebinds when its
   lowering reads the length on the call. One payload holding both, a
   ``ta.lowest`` whose length a ``var`` global rebinds and a user call under
   ``nz()``, equals the two payloads apart, bar for bar.
-* TA constructor arguments CG-SECURITY-2's spelled string literals bring to
+* TA constructor arguments that spelled string literals bring to
   the constructor: an ``input.string`` choice of a length is input-derived and
-  keeps the constructor and its reset (CG-SECURITY-2); any other such
+  keeps the constructor and its reset; any other such
   argument -- a ``syminfo.*`` or ``timeframe.*`` comparison, or a choice of a
-  float parameter, which the reset would cast to an int -- keeps K-TA-DYNLEN's
-  lowering, spelled from the declarations as K-TA-DYNLEN spelled it: a
+  float parameter, which the reset would cast to an int -- keeps the run-time
+  lowering, spelled from the declarations: a
   payload's ``timeframe.*`` is the requested timeframe, a float keeps its
   value, a callable's one evaluator refuses call sites passing different
   lengths, and one it cannot spell stays refused.
-* ``session.<flag>[k]`` under a builtin call in a payload: CG-SECURITY-2's
+* ``session.<flag>[k]`` under a builtin call in a payload: the payload
   builder lowers a builtin's arguments on the requested clock, and
-  CG-SESSION-2 keeps a payload's flag history in a bool Series there, so
+  a payload's flag history is kept in a bool Series there, so
   ``nz(session.ismarket[1] ? 1.0 : na)`` equals the direct read. An
-  evaluator CG-SECURITY-2 keeps on the chart's terms still refuses it.
-* ``TopLevelEmitter._emit_func_def``: K-RUNERR widens a declared-int
-  parameter an epoch reaches, CG-SESSION-2 emits a function reading a flag at
+  evaluator kept on the chart's terms still refuses it.
+* ``TopLevelEmitter._emit_func_def``: one change widens a declared-int
+  parameter an epoch reaches, another emits a function reading a flag at
   an offset once per call site: a function doing both equals the top-level
   spelling.
-* ``TypeInferer._infer_type``: K-RUNERR types ``chart.is_*`` as bool,
-  CG-SECURITY-2 types a string payload ``std::string``: the requested
+* ``TypeInferer._infer_type``: one change types ``chart.is_*`` as bool,
+  another types a string payload ``std::string``: the requested
   ``str.tostring(chart.is_standard)`` reads ``"true"``.
-* ``CodeGen.generate``: K-RUNERR's 64-bit epoch global, CG-SECURITY-2's
-  string helper-tuple element, K-TA-DYNLEN's constant-length class built on
-  the first call and CG-SESSION-2's flag Series in one TU each equal a
+* ``CodeGen.generate``: a 64-bit epoch global, a
+  string helper-tuple element, a constant-length class built on
+  the first call and a flag Series in one TU each equal a
   spelling of their own.
-* ``scripts/gen_host_members.py``: CG-SESSION-2 derives the reserved host
-  members from the emitter's string constants, leaving out the Pine names the
-  emitter only matches on; K-TA-DYNLEN's ``_SIMPLE_STR_FUNCS`` set names
+* ``scripts/gen_host_members.py``: the reserved host
+  members are derived from the emitter's string constants, leaving out the Pine names the
+  emitter only matches on; the ``_SIMPLE_STR_FUNCS`` set names
   ``str.replace``'s ``replace``, a member of the engine host. A set literal is
-  a lookup, so the derived set stays CG-SESSION-2's, and a script variable
+  a lookup, so the derived set stays as it was, and a script variable
   named ``replace`` keeps its name and reads its own value beside
   ``str.replace``.
 """
@@ -213,10 +213,10 @@ def test_one_evaluator_holds_a_rebound_length_and_a_requested_call(runs):
     subject, apart = ok(outcomes, "evaluator"), ok(outcomes, "evaluator_apart")
     cpp = subject.transpiled["cpp"]
     body = cpp.split("void _eval_security_0(", 1)[1].split("\n    }\n", 1)[0]
-    # K-TA-DYNLEN: the rebound length is read on the call, after the rebind.
+    # The rebound length is read on the call, after the rebind.
     assert re.search(r"pineforge::source::SeriesLowest\s+_sec0__ta_lowest_\d+;", cpp)
     assert body.index("_sec0_n = ") < body.index(".compute(bar.low, pineforge::source::ta_number(_sec0_n))")
-    # CG-SECURITY-2: the user call under nz() reads the requested bar.
+    # The user call under nz() reads the requested bar.
     assert "nz_v = ((bar.close - bar.open))" in body and "f()" not in body
     print("evaluator composition:", assert_same_runs(subject, apart))
 
@@ -307,7 +307,7 @@ def test_a_script_variable_named_like_the_hosts_replace_member_is_renamed(runs):
 
 
 # ---------------------------------------------------------------------------
-# Runs on the session flags' extended-hours bars (CG-SESSION-2's harness)
+# Runs on the session flags' extended-hours bars
 # ---------------------------------------------------------------------------
 
 SESSION_BUILTIN = '''//@version=6
@@ -359,10 +359,10 @@ def test_session_history_under_a_builtin_is_the_direct_read(session_runs):
 
 
 def test_session_history_beside_a_chart_read_is_still_refused(tmp_path: Path) -> None:
-    # CG-SECURITY-2 keeps this evaluator on the chart's terms (the builtin
-    # also reads the per-run global g); there CG-SESSION-2 has no requested
+    # This evaluator stays on the chart's terms (the builtin
+    # also reads the per-run global g); there a flag has no requested
     # history. A global the builder re-evaluates on the requested bar
-    # (``g = close``, CG-OPEN-ITEMS 5b3791d) no longer keeps it there:
+    # (``g = close``, change 5b3791d) no longer keeps it there:
     # tests/test_e2e_cgint4_compositions.py runs that one.
     pine = tmp_path / "strategy.pine"
     pine.write_text(HEAD + 'g = timeframe.multiplier * 1.0\n'
@@ -386,7 +386,7 @@ def test_an_epoch_parameter_beside_a_flags_history(session_runs):
 
 
 # ---------------------------------------------------------------------------
-# The lowering K-TA-DYNLEN and CG-SECURITY-2 give a TA length (no engine)
+# The lowering a TA length gets (no engine)
 # ---------------------------------------------------------------------------
 
 LENGTHS = HEAD + '''mode = input.string("B", "Mode", options=["A", "B"])
@@ -416,13 +416,13 @@ def _line(cpp: str, pattern: str) -> str:
 def test_each_ta_length_takes_its_lanes_lowering() -> None:
     cpp = transpile(LENGTHS)
     choice = 'get_input_string("Mode", std::string("B")) == std::string("A")'
-    # CG-SECURITY-2: the input.string choice keeps the constructor, reset
+    # The input.string choice keeps the constructor, reset
     # from the input, on the chart and in the payload.
     assert _member_type(cpp, "_ta_ema_2") == "pineforge::source::PineEma"
     assert choice in _line(cpp, r"^\s*_ta_ema_2 = pineforge::source::PineEma\(")
     assert _member_type(cpp, "_sec0__ta_sma_1") == "pineforge::source::PineFixedSma"
     assert choice in _line(cpp, r"^\s*_sec0__ta_sma_1 = pineforge::source::PineFixedSma\(")
-    # K-TA-DYNLEN: the syminfo comparison is built on the call's first
+    # The syminfo comparison is built on the call's first
     # execution, the timeframe one in the requested timeframe.
     assert _member_type(cpp, "_sec1__ta_sma_1") == (
         "pineforge::source::FirstCallBound<pineforge::source::PineFixedSma>")
@@ -435,9 +435,9 @@ def test_each_ta_length_takes_its_lanes_lowering() -> None:
 
 
 def test_a_shared_evaluator_refuses_different_simple_lengths() -> None:
-    # K-TA-DYNLEN's rule for a callable's one request.security evaluator:
+    # The rule for a callable's one request.security evaluator:
     # the constructor would size both calls from the first call site's. An
-    # input.string choice (CG-SECURITY-2) no longer shares one: XSYM-A copies
+    # input.string choice no longer shares one: a later change copies
     # the request per value of a payload parameter it can lower, one
     # evaluator per call path (tests/test_e2e_cgint3_compositions.py). A
     # simple syminfo length is no such value and still shares it.
@@ -452,7 +452,7 @@ if a > b
 
 
 def test_a_length_the_lowering_cannot_spell_stays_refused() -> None:
-    # A timeframe comparison reached through a user function: K-TA-DYNLEN
+    # A timeframe comparison reached through a user function: the lowering
     # cannot spell it context-free and refused it; the constructor reset
     # would read the chart's timeframe in the "D" payload.
     src = HEAD + '''f_len() => timeframe.period == "D" ? 9 : 14

@@ -48,6 +48,7 @@ from tests._e2e import (
     REPO_ROOT, build_strategy_library, derive_chart_feed, reference_codegen,
     skip_unless_e2e_env, transpile_json,
 )
+from tests._fixture_range import assert_range_covered
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "drawing_lifetime"
@@ -163,8 +164,8 @@ CASES = (
 # map<int, box> is outside the supported map subset (w9dg-pin-holders); na() of
 # a string does not compile (w9dg-label-collect). Their variants -holders3 /
 # -label-collect2 replay. w9dg-pin-holders2, whose non-var box carried by
-# s := s[1] declared as Series<double> and did not compile before lane
-# CG-UDT-HIST, replays.
+# s := s[1] declared as Series<double> and did not compile before a
+# drawing's history was stored as its handles, replays.
 EVIDENCE_ONLY = ("w9dg-pin-holders", "w9dg-label-collect")
 BUILDS = ("lane", "base")
 
@@ -362,6 +363,6 @@ def test_the_tapes_are_the_recorded_exports():
         pine = hashlib.sha256((FIXTURES / tape / "strategy.pine").read_bytes()).hexdigest()
         assert digest == metrics["tvTradesCsvHash"] == meta["tv_trades_sha256"], tape
         assert pine == meta["pine_sha256"], tape
-        assert metrics["wsProvenance"]["rangeProof"] == "covered", tape
+        assert_range_covered(metrics, tape)
         assert (metrics["symbol"], metrics["interval"]) == ("BINANCE:ETHUSDT.P", "15"), tape
         assert (meta["chart"]["from"], meta["chart"]["to"]) == ("2025-04-01", "2025-05-01"), tape

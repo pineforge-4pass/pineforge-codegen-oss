@@ -1,13 +1,13 @@
-"""Where a lane integrated by CGINT3 meets a rule already on main, or two
-CGINT3 lanes change one function, the integration keeps both rules
+"""Where an integrated change meets a rule already on main, or two
+integrated changes change one function, the integration keeps both rules
 (integration cases on
-main's CGINT2 and CG-SESSION-3). Each case runs the composition end to end --
+main's earlier compositions). Each case runs the composition end to end --
 ``transpile_json``, the built runtime, ``run_strategy.py`` -- and pins the C++
 where the rules decide the lowering. ``MAIN`` is the integration base, the
 build before these lanes, replayed beside each case to show what it missed:
 
-* ``TypeInferer._series_type_for`` / ``_expr_returns_wide_int``: K-RUNERR
-  (on main) widens every name an epoch reaches to ``int64_t``; CG-W9-SEC
+* ``TypeInferer._series_type_for`` / ``_expr_returns_wide_int``: main
+  widens every name an epoch reaches to ``int64_t``; change
   c86c0de ends that provenance at ``/``, a comparison, ``and`` / ``or`` and
   ``not``, and widens only a name whose Pine type is no float, bool or
   string. Main stored ``hours = (time - time[1]) / 3600000.0`` in a
@@ -15,30 +15,30 @@ build before these lanes, replayed beside each case to show what it missed:
   keeps floats and bools at their own types while int names, and a copy of
   one, keep their 64 bits.
 * ``CallVisitor`` ``na(x)``: main reads a string ``na`` as the empty string
-  (``.empty()``, with its warning), CG-W9-MISC asks a drawing's arena whether
+  (``.empty()``, with its warning), another change asks a drawing's arena whether
   it is alive. One TU holds both: a deleted box is ``na`` and a string
   assigned after ``na`` is not; main read the deleted box as live.
-* ``TopLevelEmitter._emit_func_def``: W2-CG-LOWERING-TRIO returns the value
-  of a function's last statement whatever it is (``acc += v``), CG-SESSION-2
+* ``TopLevelEmitter._emit_func_def``: one change returns the value
+  of a function's last statement whatever it is (``acc += v``), another
   emits a function reading a flag at an offset once per call site and pushes
-  the flag at entry, K-RUNERR widens its ``int`` parameter an epoch reaches.
+  the flag at entry, a third widens its ``int`` parameter an epoch reaches.
   A function doing all three equals the same function ending in ``acc``;
   main returned the default 0.0.
-* ``CodeGen._prepare_inline_history_members``: CG-SESSION-2 keeps a flag read
+* ``CodeGen._prepare_inline_history_members``: one change keeps a flag read
   at an offset in a function by the calls of its call site
-  (``_session_call_*``), CG-W9-FN keeps a script variable read through
+  (``_session_call_*``), another keeps a script variable read through
   history there by the chart bars at its call site (``_fn_global_hist_*``).
   A function reading both, called on irregular bars, equals the two reads in
   functions of their own called on the same bars, and each differs from the
   chart's history of the same expression.
-* A callable's ``request.security`` evaluator (XSYM-A x K-TA-DYNLEN x
-  CG-SECURITY-2): XSYM-A copies a helper's request per value of a payload
-  parameter it can lower, CG-SECURITY-2 keeps an ``input.string`` choice of a
-  length on the constructor, and K-TA-DYNLEN refuses one evaluator whose call
+* A callable's ``request.security`` evaluator, where three changes meet:
+  one copies a helper's request per value of a payload
+  parameter it can lower, another keeps an ``input.string`` choice of a
+  length on the constructor, and a third refuses one evaluator whose call
   sites pass different lengths. Two calls passing different input choices now
   get an evaluator each, and each equals its literal twin at the default and
   under an override; main refused them, and a simple ``syminfo`` length, which
-  XSYM-A does not copy, is still refused
+  the first does not copy, is still refused
   (``tests/test_e2e_lane_compositions.py``).
 """
 
@@ -67,7 +67,7 @@ def _values(records: list[dict], name: str) -> list[float]:
 
 
 # ---------------------------------------------------------------------------
-# An epoch's provenance ends at a float or a bool (CG-W9-SEC x K-RUNERR)
+# An epoch's provenance ends at a float or a bool
 # ---------------------------------------------------------------------------
 
 EPOCH = HEAD + '''var int t0 = time
@@ -123,7 +123,7 @@ def test_main_had_widened_them_all(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# na() of a string and of a drawing in one TU (main x CG-W9-MISC)
+# na() of a string and of a drawing in one TU
 # ---------------------------------------------------------------------------
 
 NA_KINDS = HEAD + '''var box b = na
@@ -147,7 +147,7 @@ def _na_kinds_expected(n: int) -> tuple[list[float], list[float]]:
 
 
 # ---------------------------------------------------------------------------
-# One evaluator per call path (XSYM-A x K-TA-DYNLEN x CG-SECURITY-2)
+# One evaluator per call path
 # ---------------------------------------------------------------------------
 
 PER_PATH = HEAD + '''mode = input.string("Slow", "Mode", options=["Fast", "Slow"])
@@ -188,7 +188,7 @@ def runs(tmp_path_factory):
 
 # Compared from the first bar whose history reads are all defined: integer
 # arithmetic on an ``na`` epoch (``time[1] - time[2]`` on bar 1) reads garbage
-# instead of ``na``, a gap that predates these lanes (CG-W9-SEC report).
+# instead of ``na``, a gap that predates these lanes.
 def test_a_float_an_epoch_reaches_keeps_its_fraction(runs):
     records = ok(runs, "epoch").traces["default"]
     h1, ref = _values(records, "h1"), _values(records, "ref")
@@ -215,7 +215,7 @@ def test_na_of_a_string_and_of_a_deleted_box(runs):
     outcome = ok(runs, "na_kinds")
     cpp = outcome.transpiled["cpp"]
     assert ").empty()" in cpp                       # main's string na
-    assert "_pf_drawing_na(" in cpp                 # CG-W9-MISC's liveness
+    assert "_pf_drawing_na(" in cpp                 # the drawing's liveness
     records = outcome.traces["default"]
     boxna, strna = _na_kinds_expected(BARS)
     assert _values(records, "boxna") == boxna
@@ -261,7 +261,7 @@ def test_main_refused_the_two_call_paths(tmp_path: Path) -> None:
 
 # ---------------------------------------------------------------------------
 # A function tail beside a flag's history and an epoch parameter
-# (W2-CG-LOWERING-TRIO x CG-SESSION-2 x K-RUNERR), on the session tapes' bars
+# on the session tapes' bars
 # ---------------------------------------------------------------------------
 
 TAIL = '''//@version=6
@@ -321,7 +321,7 @@ def test_main_returned_the_default(tail_runs):
 
 # ---------------------------------------------------------------------------
 # A flag's and a script variable's history in one function body
-# (CG-SESSION-2 x CG-W9-FN), on the session tapes' bars
+# on the session tapes' bars
 # ---------------------------------------------------------------------------
 
 TWO_CLOCKS = '''//@version=6

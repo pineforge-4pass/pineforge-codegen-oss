@@ -7,27 +7,21 @@ or not) or on `bar_index` reads the history of that call site, not the
 chart's. The chart built-ins (`open`, `high`, `low`, `close`, `volume`,
 `time`, `hl2`, ...) keep the chart's history.
 
-Each directory is one `lab tv` export (channel `ws-report-v1`, `rangeProof`
-covered), byte for byte: `strategy.pine`, `tv_trades.csv` (times at UTC+8),
+Each directory is one TradingView export (the requested and returned ranges
+are equal), byte for byte: `strategy.pine`, `tv_trades.csv` (times at UTC+8),
 `metrics.json`, `meta.json`. `metrics.json` `tvTradesCsvHash` is the sha256
-of `tv_trades.csv`. The probes are synthetic; no closed or scraped strategy is
+of `tv_trades.csv`. The probes are synthetic; no closed or third-party strategy is
 involved. Every probe computes its values on 2025-04-01 and encodes each as
-one later trade: side = sign of the value, quantity = |value| + 1. The
-command, run once per tape on BINANCE:ETHUSDT.P 15 (`--no-note`: no campaign
-note was recorded):
+one later trade: side = sign of the value, quantity = |value| + 1. Each tape
+was exported from a TradingView run on BINANCE:ETHUSDT.P at 15 minutes for
+2025-04-01 to 2025-04-03.
 
-```sh
-source ~/code/pineforge-workflow/campaign/env.sh
-lab tv --pine <probe>.pine --symbol BINANCE:ETHUSDT.P --interval 15 \
-  --from 2025-04-01 --to 2025-04-03 --out <dir>/<tape> --slug <tape> --no-note --json
-```
-
-| tape | lane | trades | tv_trades.csv sha256 |
-|---|---|---:|---|
-| `w8e-r4-fn-global-history` | W8E-EXITS | 4 | `96be3d3fbf6ed865d0758dea6086e87ba48830a82486ceb69d9f1fe754417666` |
-| `w8e-r5-fn-builtin-history` | W8E-EXITS | 6 | `d6ded64b3de4b5d7be78bbc80df8ced2d13844f4258060ea511554ae54ceea16` |
-| `w9-fn-history-model` | CG-W9-FN | 7 | `e3ec407cd47c1eba3602e43bb6eed0da1837645b2ba491897e01b845f7ef184c` |
-| `w9-fn-history-conditional` | CG-W9-FN | 5 | `878d93629818a0b44f3a92e479e8e989869f190558fbdada32d41f9e27db0d63` |
+| tape | trades | tv_trades.csv sha256 |
+|---|---:|---|
+| `w8e-r4-fn-global-history` | 4 | `96be3d3fbf6ed865d0758dea6086e87ba48830a82486ceb69d9f1fe754417666` |
+| `w8e-r5-fn-builtin-history` | 6 | `d6ded64b3de4b5d7be78bbc80df8ced2d13844f4258060ea511554ae54ceea16` |
+| `w9-fn-history-model` | 7 | `e3ec407cd47c1eba3602e43bb6eed0da1837645b2ba491897e01b845f7ef184c` |
+| `w9-fn-history-conditional` | 5 | `878d93629818a0b44f3a92e479e8e989869f190558fbdada32d41f9e27db0d63` |
 
 What TradingView reads (bar index differences; the calls sit 8 bars apart,
 at 10:00 and 12:00 UTC, unless stated):

@@ -196,7 +196,7 @@ def test_input_time_getter_routes_to_int64():
 
 def test_bare_input_takes_its_int_defaults_getter():
     # Pine v6 types a bare input(...) by its default: input(5) is an int
-    # input (lab tv tape te_generic_input, tests/fixtures/tail_e_tv).
+    # input (TradingView tape te_generic_input, tests/fixtures/tail_e_tv).
     cpp = _emit('input(5, "n")')
     assert 'x = get_input_int("n", 5);' in cpp
     assert "get_input_double(" not in cpp

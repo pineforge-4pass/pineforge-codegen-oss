@@ -2,15 +2,12 @@
 
 Synthetic integration probes picked onto codegen main 76a5b26 and their
 unedited TradingView trade exports. They
-contain no closed or scraped source. Each was exported on 2026-09-29 with
-
-```bash
-lab tv --pine <name>.pine --slug pf-<name, underscores as dashes> --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-08
-```
+contain no closed or third-party source. Each was exported on 2026-09-29 from
+a TradingView run on BINANCE:ETHUSDT.P at 15 minutes for 2025-04-01 to
+2025-04-08.
 
 TradingView ran each from 2025-04-01 00:00 UTC (the export's requested and
-returned range, `rangeProof: covered`). Every probe trades a fixed quantity
+returned range). Every probe trades a fixed quantity
 of 1, enters on the bars at minute 0 and 30 and closes on the bars at minute
 15 and 45; each close's comment spells the values the probe reads on that
 bar, so a tape's exit `Signal`s are TradingView's values, one sample per
@@ -32,18 +29,18 @@ Each exit Signal joins these fields with `|`, in this order:
 
 What each tape shows:
 
-- `cgint6_compositions` meets each CG-SILENT-2 item with the main rule it
+- `cgint6_compositions` meets each `silent2_tv` case with the main rule it
   shares a function with. A keyword transparency, fractional or not, reads as
   its positional twin through `color.new` and `color.rgb` (`ca`, `cb`, `cc`:
-  item 1 with CG-SESSION-REPIN's double transparency). A run-time product past
+  met with main's double transparency). A run-time product past
   int32 beside a constant one keeps 64 bits on the chart (`w = q * 7200000 +
   400 * MS`) and in a `request.security` payload (`p = bar_index * 7200000 +
-  400 * step`: item 3 with CGINT5a's constant fold). A helper called on its
+  400 * step`: met with main's constant fold). A helper called on its
   own result whose `var` TA length is a value of each requested bar gives each
-  call its own state (`hh = u(u(close))`: item 5c with CGINT5a's helper var
+  call its own state (`hh = u(u(close))`: met with main's helper var
   lengths). A helper's `var int n` counter reads 1, 2, ... on the requested
   bars while another function binds `n` to a 64-bit product (`cnt`, `gv`:
-  item 3 with CGINT5a's helper state width). Every field but `a0` replays on
+  met with main's helper state width). Every field but `a0` replays on
   every exit; `a0` is the constant transparency below.
 - `cgint6_const_transp` shows how TradingView reads back a fractional
   transparency. A constant one given to `color.new` is truncated: `color.new(
@@ -53,7 +50,7 @@ What each tape shows:
   (`d13`, `d16`) and `color.rgb`'s constant (`d14`) go through the alpha byte
   nearest 255 * (100 - t) / 100 and read 11, as the engine's `new_color` does
   for every transparency the codegen hands it as a double.
-- `cgint6_var_source` re-checks CG-SILENT-2 item 5e on main: a `var` holding
+- `cgint6_var_source` re-checks a `silent2_tv` case on main: a `var` holding
   `input.source(close)` (and one holding `input.source(hl2)`) keeps the first
   bar's value, on the chart (`src`, `s2`, `d = src - src[1]` is 0, `y =
   src[2]`) and on the requested bars (`x = ta.sma(src, 3)`, `z = src[1]` at 60

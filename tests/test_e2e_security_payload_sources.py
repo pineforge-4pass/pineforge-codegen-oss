@@ -1,6 +1,6 @@
 """A ``request.security`` payload reads its source series on the requested bar.
 
-Three shapes read the chart's series instead (W9-CG-SECURITY-PAYLOAD-SOURCES):
+Three shapes read the chart's series instead:
 
 - a name bound to ``input.source(ohlc4, ...)`` resolved to the generic
   visitor's ``get_input_source("title", _src_ohlc4_)[0]``, the chart's

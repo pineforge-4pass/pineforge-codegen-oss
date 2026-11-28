@@ -1,18 +1,15 @@
 # Epochs through request.security: TradingView trade evidence
 
 Synthetic probes for epoch integers and their unedited
-TradingView trade exports. They contain no closed or scraped source.
+TradingView trade exports. They contain no closed or third-party source.
 `w9sec_epoch_var_int_daily` and `w9sec_epoch_int_param_tuple` are the draft's
 two witness scripts, which exported them on
 BINANCE:BTCUSDT); `w9sec_epoch_security` spells the values. Each was exported
-on 2026-09-28 with
+on 2026-09-28 from a TradingView run on BINANCE:ETHUSDT.P at 15 minutes for
+2025-04-01 to 2025-04-08.
 
-```bash
-lab tv --pine <name>.pine --slug pf-<name, underscores as dashes> --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-08
-```
-
-TradingView ran each from 2025-04-01 00:00 UTC (`rangeProof: covered`). The
+TradingView ran each from 2025-04-01 00:00 UTC (the returned range covers
+the requested one). The
 `Date and time` column is Asia/Taipei (UTC+8); an exit with no `Signal` is
 TradingView closing the open trade at the range's end.
 

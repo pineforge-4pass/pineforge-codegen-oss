@@ -1,5 +1,4 @@
-"""A Pine ``int`` holding an epoch a ``request.security`` reads keeps 64 bits
-(W9-CG-EPOCH-INT64).
+"""A Pine ``int`` holding an epoch a ``request.security`` reads keeps 64 bits.
 
 The wide-integer provenance (``types._wide_int_provenance``) followed
 ``time``, copies, casts and user-function returns, but not a

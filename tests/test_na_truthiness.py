@@ -4,9 +4,8 @@ The engine represents floating ``na`` as NaN and integer ``na`` as the type's
 minimum value.  C++ truthiness is different for both values, so these tests
 pin the generated helper at every boolean boundary that used to rely on an
 implicit conversion.  The runtime row is the compact semantic witness for
-``if`` / ternary / ``and`` / ``or``; the TradingView probe used for the lane is
-kept in ``/tmp/CG-NABOOL-scratch`` because campaign tapes are evidence, not
-repository fixtures.
+``if`` / ternary / ``and`` / ``or``; the TradingView probe behind it is
+evidence, not a repository fixture.
 """
 
 from __future__ import annotations
@@ -192,7 +191,7 @@ int main() {
 
 
 def test_color_na_conversions_match_tradingview_rows() -> None:
-    """The covered `lab tv` color probe pins these five observable rows.
+    """The covered TradingView color probe pins these five observable rows.
 
     Missing alpha means transparency 100, a missing RGB channel becomes 0,
     and a missing base color remains `na`.  The sixth row pins the typed
@@ -288,7 +287,7 @@ def test_repeat_with_na_count_warns_about_nullable_string_gap() -> None:
 
 
 def test_repeat_keyword_count_and_invalid_number_spelling() -> None:
-    # TradingView names the count `repeat` (lab tv probe pf-oi-kw-names).
+    # TradingView names the count `repeat` (probe pf-oi-kw-names).
     valid = transpile_full(
         '//@version=6\nstrategy("repeat keyword")\n'
         's = str.repeat("x", repeat=int(na))\n'

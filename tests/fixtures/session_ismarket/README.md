@@ -40,21 +40,21 @@ session day goes on past the window.
 ## Private every-flag tapes
 
 TradingView trade list for a US-listed stock,
-kept in a private repository and overlaid by the lab onto the paired engine tree
+kept in a private repository and overlaid onto the paired engine tree
 at `tests/codegen-fixtures/session_ismarket/`. These session-flag tapes are read
 by `tests/test_e2e_session_ismarket.py`.
 
 ## Private session-market and daily tapes
 
 TradingView trade lists for US futures, forex and spot metals, kept in a private
-repository and overlaid by the lab onto the paired engine tree at
+repository and overlaid onto the paired engine tree at
 `tests/codegen-fixtures/session_ismarket/`. These session-market and
 every-flag tapes are read by `tests/test_e2e_session_ismarket.py`.
 
 ## Private flag-history tapes
 
 TradingView trade list for a US-listed stock,
-kept in a private repository and overlaid by the lab onto the paired engine tree
+kept in a private repository and overlaid onto the paired engine tree
 at `tests/codegen-fixtures/session_ismarket/`. These flag-history tapes are read
 by `tests/test_e2e_session_history.py`; the extended-hours tape also supplies the
 replay bars in `tests/test_e2e_cgint4_compositions.py`.
@@ -62,7 +62,7 @@ replay bars in `tests/test_e2e_cgint4_compositions.py`.
 ### Private function-history tape
 
 TradingView trade list for a US-listed stock,
-kept in a private repository and overlaid by the lab onto the paired engine tree
+kept in a private repository and overlaid onto the paired engine tree
 at `tests/codegen-fixtures/session_ismarket/`. This function-history tape is read
 by `tests/test_e2e_session_history.py`.
 
@@ -109,6 +109,6 @@ at 09:30, 10:00, 11:00, 13:00, 14:00 and 15:00, and TradingView flags both the
 ## Private two-window tapes
 
 TradingView trade lists for US futures, kept in a private repository and
-overlaid by the lab onto the paired engine tree at
+overlaid onto the paired engine tree at
 `tests/codegen-fixtures/session_ismarket/`. These every-flag tapes are read
 by `tests/test_e2e_session_windows.py`.

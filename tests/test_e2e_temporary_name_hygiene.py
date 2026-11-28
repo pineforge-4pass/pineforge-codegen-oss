@@ -19,7 +19,7 @@ declares -- ``CPP_TEMPORARY_NAMES`` and the numbered forms, the templates'
 short locals renamed ``__pf_*`` (C++ reserves double-underscore names) --
 and ``_safe_name`` escapes an authored spelling of one. TradingView's
 tapes of ``fixtures/open_items_tv/temp_names`` and ``temp_names_array``
-(lab tv --no-note) spell every such read on each exit bar; the replay
+spell every such read on each exit bar; the replay
 compares every exit comment. A guard derives the temporaries from emitted
 C++ and requires each to be reserved.
 """

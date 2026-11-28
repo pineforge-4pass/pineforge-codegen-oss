@@ -1,7 +1,7 @@
 """Pine ``int`` is 64-bit: epoch-millisecond arrays and int-literal products.
 
-Round 8 family U (latibonit15 execution-signals-confluence, six lanes; lab tv
-u-lati-levels-nq15 vs the engine, 2026-09-05): the script keeps its level
+The defect came out of comparing one script with TradingView (2026-09-05):
+the script keeps its level
 creation times in ``array.new_int()`` and expires a level when
 ``(time - existingTime) > 90 * 24 * 60 * 60 * 1000``. Emitted as
 ``std::vector<int>`` the stamp truncated and the literal product wrapped to

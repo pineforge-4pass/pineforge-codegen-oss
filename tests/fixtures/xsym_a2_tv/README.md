@@ -1,16 +1,13 @@
-# CG-XSYM-A2 TradingView trade evidence
+# `request.security` payload probes: TradingView trade evidence
 
 Synthetic probes for a `request.security` payload
-defects XSYM-A left open) and their unedited TradingView trade exports. They
-contain no closed or scraped source. Each was exported on 2026-09-28 with
-
-```bash
-lab tv --pine <name>.pine --slug pf-<name, underscores as dashes>-eth15 --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-08
-```
+defects the `xsym_tv` probes left open) and their unedited TradingView trade exports. They
+contain no closed or third-party source. Each was exported on 2026-09-28 from
+a TradingView run on BINANCE:ETHUSDT.P at 15 minutes for 2025-04-01 to
+2025-04-08.
 
 TradingView ran each from 2025-04-01 00:00 UTC to 2025-04-08 00:00 UTC (the
-export's requested and returned range, `rangeProof: covered`). The tapes'
+export's requested and returned range). The tapes'
 `Date and time` column is the exporting account's chart timezone,
 Asia/Taipei (UTC+8). Each probe enters on the bars at minute 0 and 30 and
 closes on the bars at minute 15 and 45 with a fixed 0.01 contract, each

@@ -1,5 +1,5 @@
 {
- "exported": "2026-09-26, lab tv --no-note --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-03",
+ "exported": "a TradingView run on 2026-09-26: BINANCE:ETHUSDT.P, 15 minutes, 2025-04-01 to 2025-04-03",
  "probes": [
   {
    "probe": "get2",

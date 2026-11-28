@@ -7,14 +7,8 @@ carries the level value while the Signal column carries the type and level.
 The first completed period is also exported as `Period-O/H/L/C` and the open of
 the next period as `Anchor-O`.
 
-Export command:
-
-```text
-source <pineforge-workflow checkout>/campaign/env.sh   # private maintainers' tooling
-lab tv --pine tests/fixtures/c7_tv_evidence/pivot_levels_probe.pine \
-  --slug c7-pivot-levels-formula-4 --symbol BINANCE:ETHUSDT.P --interval 15 \
-  --from 2025-04-01 --to 2025-04-08 --out /tmp/c7-tv-pivot4 --no-note --json
-```
+The probe was exported from a TradingView run on BINANCE:ETHUSDT.P at 15
+minutes for 2025-04-01 to 2025-04-08.
 
 The export was covered and returned 55 closed trades (110 CSV rows). The first
 period tape was `O=1821.59, H=1842.57, L=1816.64, C=1837.47`, and the next
@@ -126,8 +120,8 @@ and its band form retain `ta::VWAP` / `ta::VWAPBands`.
 
 ### Private VWAP first-value tape
 
-TradingView trade list for forex, kept in a private repository and overlaid by
-the lab onto the paired engine tree at `tests/codegen-fixtures/c7_tv_evidence/`.
+TradingView trade list for forex, kept in a private repository and overlaid
+onto the paired engine tree at `tests/codegen-fixtures/c7_tv_evidence/`.
 The source is read by the private fixture battery in
 `tests/test_host_member_names.py`. `tests/test_e2e_vwap_anchor.py` checks the
 first-value rule on the public engine feed.

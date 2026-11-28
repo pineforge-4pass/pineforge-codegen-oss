@@ -24,8 +24,8 @@ The v6 packed ARGB inventory used by the input-color manifest is
 `white=0xFFFFFFFF`, and `yellow=0xFFFDD835`. Every value has `t=0`
 and therefore an `0xFF` alpha byte.
 
-Each directory is one `lab tv --no-note` export (channel `ws-report-v1`,
-`rangeProof` covered), byte for byte: `strategy.pine`, `tv_trades.csv` (times
+Each directory is one TradingView export (the requested and returned ranges
+are equal), byte for byte: `strategy.pine`, `tv_trades.csv` (times
 at UTC+8), `metrics.json` and `meta.json`, on BINANCE:ETHUSDT.P 15 from
 2025-04-01 00:00 UTC. Each probe opens positions on even bars and closes them
 on odd bars, and each exit's comment spells what the script read on the bar
