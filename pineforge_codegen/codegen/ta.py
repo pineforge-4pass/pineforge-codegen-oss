@@ -36,7 +36,7 @@ from ..ast_nodes import (
 )
 from ..analyzer.value_bindings import ValueBindings
 from ..collection_history import history_annotation
-from ..errors import Phase
+from ..errors import CompileError, Phase
 from ..limits import iter_ast_nodes, syntax_children
 from ..pine_spelling import blank_string_literals
 from ..security_contexts import GLOBAL_ANNOTATION
@@ -489,7 +489,7 @@ class TaSiteHelper:
     # precalcs. Every other family keeps its existing lowering unchanged
     # (inline compute when reached, in batch and inline runs alike: a site
     # below a lazy edge precalcs only when it is hoisted) until a tape pins
-    # it -- ``_lazy_edge_hoist_plan()["skipped"]`` lists them per script.
+    # it -- ``_lazy_edge_ta_hoist_plan()["skipped"]`` lists them per script.
     LAZY_EVERY_BAR_TA = frozenset({"highest", "lowest", "sma", "ema"})
     LAZY_SOURCE_CLOCK_TA = frozenset({"change", "mom", "roc"})
     LAZY_PER_EXECUTION_TA = frozenset({
@@ -2539,6 +2539,48 @@ class TaSiteHelper:
             if class_name in lowered
         ]
 
+    def _ta_fixed_type_classes(self) -> set[str]:
+        """The class identities whose fixed type (``_ta_fixed_cpp_type``) a
+        member of the translation unit is declared with, as itself or as the
+        type a FirstCallBound builds (``_ta_plan_names_fixed_type``): the
+        feature macro of such a row of ``_TA_PINE_LAYER_CLASSES`` is required
+        after its header (``_ta_pine_layer_include_lines``,
+        codegen/emit_top.py).
+
+        The members are the ones the class declares: a live chart site's and
+        every request.security copy's, a dead chart site's copies included.
+        A dead chart site has no member, and a site declares another type
+        when its length is computed per bar (a series class), when it keeps
+        an execution window (``_PFExecutedExtreme``) and when its Supertrend
+        factor is not fixed (``PineSupertrend``). The plans are read without
+        reporting a refusal, which stays with the first caller that needs the
+        plan (``_ta_dynamic_plan``, ``_ta_security_plan``)."""
+        dead = getattr(self, "_dead_ta_indices", set())
+        named: set[str] = set()
+        for index, site in enumerate(self.ctx.ta_call_sites):
+            if index in dead or site.class_name in named:
+                continue
+            plan = self._ta_cached_plan(site)
+            if plan is not None and plan["kind"] == "refused":
+                plan = None
+            if self._ta_plan_names_fixed_type(site, plan, chart=True):
+                named.add(site.class_name)
+        for info in self._security_eval_info:
+            for index, variants in (info.get("ta_variants") or {}).items():
+                site = self.ctx.ta_call_sites[index]
+                for variant in variants:
+                    if site.class_name in named:
+                        break
+                    try:
+                        plan = self._ta_security_plan(
+                            info["sec_id"], site, variant.get("binding_stack", ()))
+                    except CompileError:
+                        # Reported where the copy is declared.
+                        continue
+                    if self._ta_plan_names_fixed_type(site, plan, chart=False):
+                        named.add(site.class_name)
+        return named
+
     def _ta_security_plan(self, sec_id: int, site: "TACallSite",
                           helper_binding_stack=None) -> dict | None:
         """The lowering of the request.security copy of ``site`` that
@@ -2745,7 +2787,9 @@ class TaSiteHelper:
     #   None. Every one is reserved in ``CPP_STANDARD_MACROS``
     #   (codegen/helpers.py): a script name with that spelling would be
     #   expanded. One with an entry in ``_TA_PINE_LAYER_GUARDS``
-    #   (codegen/emit_top.py) is also required by name after the include.
+    #   (codegen/emit_top.py) is also required by name after the include,
+    #   in a translation unit that declares a member of the type
+    #   (``_ta_fixed_type_classes``).
     # * checked: the type checks an argument on the call's first execution
     #   and can stop the run there, so a replay that reaches it keeps the
     #   invalid-argument handler (``_ta_fixed_type_is_checked``).
@@ -3093,6 +3137,18 @@ class TaSiteHelper:
         if plan["kind"] == "supertrend":
             return "pineforge::source::PineSupertrend"
         return f"pineforge::source::FirstCallBound<{self._ta_kernel_type(site, chart=chart)}>"
+
+    def _ta_plan_names_fixed_type(self, site: "TACallSite", plan: dict | None, *,
+                                  chart: bool) -> bool:
+        """Whether the type ``_ta_plan_cpp_type`` gives a member of ``site``
+        names the site's fixed type (``_ta_fixed_cpp_type``): the type itself
+        (no plan) or the FirstCallBound that builds it (a ``first_call``
+        plan), and not the execution-window type of a chart site
+        (``_ta_kernel_type``). Every other plan declares a class of its
+        own."""
+        if plan is not None and plan["kind"] != "first_call":
+            return False
+        return self._ta_kernel_type(site, chart=chart) == self._ta_fixed_cpp_type(site)
 
     def _ta_member_cpp_type(self, site: "TACallSite") -> str:
         """The C++ type a site's member is declared with."""

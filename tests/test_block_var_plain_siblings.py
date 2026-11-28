@@ -10,6 +10,7 @@ from pineforge_codegen import transpile
 from pineforge_codegen.codegen.run_stops import TIMEZONE_STOP_SHIM_CPP
 from tests._checked_ta_cpp import with_checked_ta, with_pine_source_ta
 from tests._e2e import reference_codegen, transpile_json
+from tests._legacy_cpp import without_loop_watchdog
 from tests.test_e2e_series_var_init import _SHAPES as _SERIES_INITIALIZERS
 from tests.test_runtime_var_initialization import _RUNTIME_PINE, _compile_and_run
 from tests.test_timestamp_zone_switch import OLD_BRANCH_HEADER, STOP_BRANCH_HEADER
@@ -409,13 +410,16 @@ def test_unaffected_scripts_keep_complete_cpp(source, reference, tmp_path, reque
     before = transpile_json(pine, root=reference)
     assert before["ok"], before
     expected = before["cpp"]
+    actual = transpile(source)
     if request.node.callspec.id == "runtime-dependencies":
         expected = with_checked_ta(expected, precalc=True)
+    elif source == _ARGUMENT_HISTORY:
+        actual = without_loop_watchdog(actual)
     # The series-initializer script has a ``ta.sma(close, L)`` call, which is
     # built from the checked fixed-length type today; a reference without
     # such a call is returned as it is.
     expected = with_pine_source_ta(expected)
-    assert transpile(source) == expected
+    assert actual == expected
 
 
 def _undo_timestamp_stop(cpp: str) -> str:

@@ -44,6 +44,7 @@ from pathlib import Path
 import pytest
 
 from pineforge_codegen import _generate, transpile
+from pineforge_codegen.codegen.ta import TaSiteHelper
 from tests import _compile as compile_env
 
 
@@ -245,6 +246,15 @@ PIN_TERN_SMA_BARE = (
     "    strategy.close(\"L\")"
 )
 PIN_TERN_HIGHEST_BARE = PIN_TERN_SMA_BARE.replace("ta.sma(close, 5)", "ta.highest(high, 5)")
+
+
+def test_lazy_edge_skip_comment_names_the_plan_helper():
+    ta_source = Path(__file__).resolve().parents[1] / "pineforge_codegen" / "codegen" / "ta.py"
+    references = re.findall(
+        r'(?m)^    # .*``(\w+)\(\)\["skipped"\]``',
+        ta_source.read_text(encoding="utf-8"),
+    )
+    assert references == [TaSiteHelper._lazy_edge_ta_hoist_plan.__name__]
 
 
 def test_bare_lazy_sma_has_neutral_hoist_skip_reason():

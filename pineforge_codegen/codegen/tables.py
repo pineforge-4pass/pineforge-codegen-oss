@@ -293,6 +293,7 @@ SECURITY_PRICE_LOCAL_NAMES = frozenset({
 # call sites that would otherwise embed it in an f-string. Greppable as
 # ``RUNTIME_REGISTER_SECURITY_EVAL_FN``.
 RUNTIME_REGISTER_SECURITY_EVAL_FN = "register_security_eval"
+RUNTIME_REGISTER_SECURITY_CHART_EVAL_FN = "register_security_chart_eval"
 # ``request.security_lower_tf`` registers via a thin wrapper that pins
 # lookahead/gaps off and tags the eval state with
 # ``lower_tf_array_requested = true`` so the runtime can reject

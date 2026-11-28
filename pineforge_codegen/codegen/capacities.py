@@ -13,10 +13,11 @@ DEFAULT_DYNAMIC_HISTORY_CAPACITY = 5000
 LEGACY_HISTORY_CAPACITY = 500
 
 
-def validate_capacity_options(history_capacity, drawing_capacity, filename):
+def validate_codegen_options(history_capacity, drawing_capacity, loop_timeout_ms, filename):
     for option, value, minimum in (
         ("history_capacity", history_capacity, 2),
         ("drawing_capacity", drawing_capacity, 1),
+        ("loop_timeout_ms", loop_timeout_ms, 1),
     ):
         if value is not None and (type(value) is not int or value < minimum):
             raise CompileError([Diagnostic(
@@ -24,6 +25,12 @@ def validate_capacity_options(history_capacity, drawing_capacity, filename):
                 location=SourceLocation(filename, 1, 1, 1),
                 message=f"Codegen option {option} must be an integer of at least {minimum}, or None.",
             )])
+    if loop_timeout_ms is not None and loop_timeout_ms > 2**31 - 1:
+        raise CompileError([Diagnostic(
+            level=Level.ERROR, phase=Phase.CODEGEN,
+            location=SourceLocation(filename, 1, 1, 1),
+            message="Numeric literal exceeds the generated C++ range.",
+        )])
 
 
 def literal_history_offset(index):

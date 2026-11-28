@@ -7,13 +7,14 @@ import pytest
 from pineforge_codegen.ast_nodes import FuncDef
 from pineforge_codegen.library_modules import parse_library_module
 from tests._e2e import reference_codegen, transpile_json
+from tests._legacy_cpp import without_loop_watchdog
 from tests._pine_libraries import Layout, library_text
 from tests.test_builtin_named_locals_scope import (
     _builtin_history_source, _chart_local_source, _outer_binding_source,
 )
 from tests.test_function_overload_resolution import NAMED_DEFAULTS, PROBE
 from tests.test_method_function_syntax_calls import SCALAR_SOURCE, TUPLE_SOURCE
-from tests.test_udf_series_parameter_history import _SOURCE
+from tests.test_udf_series_parameter_history import _SOURCE as _ARGUMENT_HISTORY
 
 
 CPP_REFERENCE = "a156a7d2785c8729e54da7eb01c5d41ddd03df14"
@@ -29,7 +30,7 @@ def reference():
 _SOURCES = [
     pytest.param(PROBE, (), id="scalar-overloads"),
     pytest.param(NAMED_DEFAULTS, (), id="named-default-overloads"),
-    pytest.param(_SOURCE, (), id="ordinary-history-parameters"),
+    pytest.param(_ARGUMENT_HISTORY, (), id="ordinary-history-parameters"),
     pytest.param(
         TUPLE_SOURCE.format(receiver="self", call="holder.pair(value=x)"),
         (), id="tuple-method",
@@ -94,6 +95,8 @@ def test_scripts_without_builtin_named_parameters_keep_complete_cpp(
     source, paths, reference, tmp_path,
 ):
     before, after = _cpp_pair(source, paths, reference, tmp_path)
+    if source == _ARGUMENT_HISTORY:
+        after = without_loop_watchdog(after)
     assert after == before
 
 

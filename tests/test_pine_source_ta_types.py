@@ -161,6 +161,59 @@ def test_the_types_header_is_followed_by_the_guard_of_its_feature_macro(family):
     assert "\n".join(CodeGen._TA_PINE_LAYER_GUARDS[macro]) + "\n" == guard
 
 
+_GUARD_HEAD = '//@version=6\nstrategy("source type guard")\n'
+# A feature macro is required for a type the translation unit declares, and
+# for no other: a call whose member has another type, or no member, leaves
+# the type of its class-table row undeclared, and an engine header without
+# that type compiles the unit.
+#
+#     row: (family, script body, the C++ types of the family's members)
+_GUARD_ROWS = {
+    # A length the script computes on each bar: the member is the function's
+    # series class, which has a header and a feature macro of its own
+    # (tests/test_ta_series_length_classes.py). ta.cci is the one of the three
+    # that TradingView compiles with such a length.
+    "cci-per-bar-length": (
+        "cci",
+        "n = bar_index % 3 + 2\nfloat value = ta.cci(close, n)\nplot(value)\n",
+        ["pineforge::source::SeriesCci"],
+    ),
+    # A call in a function the script never calls: no member is declared.
+    "sar-dead-site": (
+        "sar", "unused() => ta.sar(0.02, 0.02, 0.2)\nplot(close)\n", [],
+    ),
+    "rci-dead-site": ("rci", "unused() => ta.rci(close, 5)\nplot(close)\n", []),
+    "cci-dead-site": ("cci", "unused() => ta.cci(close, 5)\nplot(close)\n", []),
+    # A simple length, read on the call's first execution: the member is a
+    # FirstCallBound of the type, which names it.
+    "cci-simple-length": (
+        "cci",
+        'simple int simpleLength = syminfo.type == "crypto" ? 3 : 4\n'
+        "value = ta.cci(close, simpleLength)\nplot(value)\n",
+        ["pineforge::source::FirstCallBound<pineforge::source::PineCci>"],
+    ),
+}
+
+
+@pytest.mark.parametrize("row", _GUARD_ROWS)
+def test_a_guard_is_written_only_for_a_type_the_unit_declares(row):
+    family, body, member_types = _GUARD_ROWS[row]
+    selected, kernel, _header, _constant, _from_input, _declaration = _FAMILIES[family]
+    macro = CodeGen._TA_PINE_LAYER_CLASSES[kernel][2]
+    cpp = transpile(_GUARD_HEAD + body)
+    # Precondition, on any emitter: what the script's one call declares.
+    assert [kind for kind, _name in _members(cpp, family)] == member_types
+    declared = any(
+        kind in (selected, f"pineforge::source::FirstCallBound<{selected}>")
+        for kind in member_types
+    )
+    assert (selected in cpp) == declared
+    assert cpp.count(f"#ifndef {macro}\n") == (1 if declared else 0)
+    if row == "cci-per-bar-length":
+        # The series class the unit does declare keeps its own guard.
+        assert cpp.count("#ifndef PINEFORGE_HAS_PINE_SERIES_CCI\n") == 1
+
+
 def test_the_class_table_its_headers_guards_and_reserved_names_agree():
     table = CodeGen._TA_PINE_LAYER_CLASSES
     includes = CodeGen._TA_PINE_LAYER_INCLUDES
