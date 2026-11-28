@@ -880,6 +880,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # frozen records, so speculative evaluator restore is two levels deep.
         self._security_arg_inventory: dict[int, dict] = {}
         self._security_arg_histories: dict[int, dict] = {}
+        self._security_sparse_arg_histories: dict[int, dict] = {}
+        # Written call path -> ordinal of that call's own clock members.
+        self._security_sparse_call_paths: dict[int, dict] = {}
+        self._security_lazy_call_ids: set[int] = set()
+        # The sparse call whose body is being lowered, and the call clocks
+        # the evaluator being emitted has read.
+        self._security_call_clock: dict | None = None
+        self._security_call_clocks: dict | None = None
+        # Evaluator-local tables: TA variants computed inside a sparse call,
+        # and persistent helper cells keyed by written call and declaration.
+        self._security_call_ta: dict | None = None
+        self._security_call_series: dict | None = None
         self._security_arg_history_sec: int | None = None
         self._security_arg_history_discovering = False
         self._security_arg_call_values: dict[tuple, str] = {}
@@ -893,6 +905,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._uses_tv_string_units = False
         self._uses_tv_string_trim = False
         self._uses_case_mapping = False
+        self._timeframe_from_seconds_name: str | None = None
         # Retain each loop node alongside its plan; ids are lookup keys only.
         self._closed_trade_folds: dict[int, tuple[ForStmt, object]] = {}
         self._tuple_assign_counter = 0
@@ -1296,6 +1309,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Reassigned globals a timeframe reads (``_security_tf_replay_prologue``).
         self._security_tf_mutable_reads: set[str] = set()
         self._expand_security_series_timeframes()
+        if self._security_calls and (ctx.func_series_vars or ctx.func_var_members or any(
+                site.owner_func for site in ctx.ta_call_sites)):
+            self._security_lazy_call_ids = self._security_conditional_calls()
         for item in self._security_calls:
             sec_id = item["sec_id"]
             tf_node = item["tf_node"]
@@ -1338,6 +1354,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # A request in an unreachable helper has no payload arguments to
             # bind and needs no requested-context TA buffers or constructors.
             expr_node = None if item.get("dead") else item["expr_node"]
+            self._security_arg_history_sec = sec_id
             inline_helper_ta_indices: set[tuple] = set()
             ta_binding_stacks = self._collect_security_ta_binding_stacks(
                 expr_node,
@@ -1410,6 +1427,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "runtime_context": bool(item.get("runtime_context")),
                 "chart_publication": chart_publication,
             })
+        self._security_arg_history_sec = None
         self._security_selection_local_members = self._security_selection_local_member_names()
         self._global_member_vars.difference_update(self._security_selection_local_members)
         from .array_field_width import prepare_array_widths
@@ -6736,6 +6754,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._settle_tv_string_units(lines)
         self._settle_tv_string_trim(lines)
         self._settle_case_mapping(lines)
+        self._settle_timeframe_from_seconds(lines)
         cpp = "\n".join(lines)
         if self._uses_array_slice_views:
             from .array_slice import lower_storage

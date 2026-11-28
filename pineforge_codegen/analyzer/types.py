@@ -592,6 +592,9 @@ class TypeHelper:
                 return TypeSpec.udt(cal.name)
             func = cal.member if isinstance(cal, MemberAccess) else None
             ns = cal.object.name if isinstance(cal, MemberAccess) and isinstance(cal.object, Identifier) else None
+            if (ns == "timeframe" and func == "from_seconds"
+                    and not ValueBindings.has_value_binding(cal.object)):
+                return TypeSpec.primitive("string")
             targs = self._template_args_from_call(value)
             if isinstance(cal, MemberAccess):
                 typed_receiver_spec = self._type_spec_from_expr(cal.object)
@@ -1744,7 +1747,7 @@ class OperatorTypeQuery(TypeHelper):
         elif isinstance(node, Ternary):
             op, operands = "?:", (node.condition, node.true_val, node.false_val)
         elif isinstance(node, FuncCall):
-            self._analyzer._check_timeframe_string_arguments(node, self._parameter_types)
+            self._analyzer._check_timeframe_arguments(node, self._parameter_types)
             return
         else:
             return

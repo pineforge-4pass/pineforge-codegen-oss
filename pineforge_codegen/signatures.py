@@ -620,6 +620,7 @@ _builtin("string",   _sig([("x", F)], ret=S))
 # Timeframe
 _builtin("timeframe.change", _sig([("timeframe", S)], ret=B), keyword_names_verified=True)
 _builtin("timeframe.in_seconds", _sig([("timeframe", S)], ret=F), keyword_names_verified=True)
+_builtin("timeframe.from_seconds", _sig([("seconds", I)], ret=S), keyword_names_verified=True)
 
 # Plain input() — overloaded on type of defval (PineScript v6)
 _builtin("input",

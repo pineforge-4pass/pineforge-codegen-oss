@@ -149,7 +149,7 @@ SUPPORTED_COLOR_FUNC: frozenset[str] = frozenset({"new", "rgb", "r", "g", "b", "
 # TradingView's) and emits transparent black (0) as a placeholder.
 # color.from_gradient is a charting/plot helper that only tints visual output.
 COSMETIC_COLOR_FUNC: frozenset[str] = frozenset({"from_gradient"})
-SUPPORTED_TIMEFRAME_FUNC: frozenset[str] = frozenset({"change", "in_seconds"})
+SUPPORTED_TIMEFRAME_FUNC: frozenset[str] = frozenset({"change", "from_seconds", "in_seconds"})
 SUPPORTED_RUNTIME_FUNC: frozenset[str] = frozenset({"error"})
 # log.* helpers wired into pine_log_{info,warning,error} by codegen/visit_call.
 # Without this whitelist, codegen silently emits an empty-string literal
@@ -295,9 +295,7 @@ STRATEGY_EXIT_PRICE_PARAMS: frozenset[str] = frozenset({
 # every Series<T> ring buffer to the requested depth via the engine's
 # ``Series<T>(int max_len)`` ctor (include/pineforge/series.hpp). It is no
 # longer rejected — see CodeGen._compute_max_bars_back_cap.
-NOT_YET_FUNC: dict[str, str] = {
-    "timeframe.from_seconds":   "timeframe.from_seconds is not yet implemented; codegen would emit 'false' and silently produce wrong TF strings.",
-}
+NOT_YET_FUNC: dict[str, str] = {}
 
 # Bare (no-namespace) function names that codegen has no handler for.
 # Without a handler, the generic emitter at visit_call.py:912 would produce an
@@ -1736,8 +1734,8 @@ class SupportChecker:
             self._visit_children(node)
             return
 
-        # Not-yet-implemented. Check qualified name (e.g. "timeframe.from_seconds")
-        # first, then bare name (e.g. "max_bars_back") for back-compat entries.
+        # Not-yet-implemented. Check qualified name first, then bare name for
+        # back-compat entries.
         if full in NOT_YET_FUNC:
             self._err(
                 node, f"{full}(...) is not implemented yet.",
@@ -1753,7 +1751,7 @@ class SupportChecker:
             self._visit_children(node)
             return
         positional_func = positional_builtin(full)
-        # Bare builtins and unary math overload families share signature
+        # Bare builtins and registered unary namespace calls share signature
         # validation. Other math records retain their existing arity policy.
         # A name the script binds anywhere (a variable, a parameter, a loop
         # variable, a tuple element) spelled like a namespace, as in
@@ -2757,7 +2755,7 @@ class SupportChecker:
     def _check_builtin_arguments(self, node: FuncCall, name: str, *, func=None) -> bool:
         """Bind an ordinary builtin to its TradingView signatures.
 
-        Registered bare builtins and unary math calls that bind are
+        Registered bare builtins and unary namespace calls that bind are
         rewritten positionally by ``builtin_keywords``; request.currency_rate
         uses the same validation before its runtime currency lookup.
         Returns True when the arguments bind.
@@ -2779,7 +2777,9 @@ class SupportChecker:
             hint="Use the parameters of TradingView's signature.",
             # Preserve the legacy bare-builtin switch policy. Registered
             # namespace signatures must bind even in a non-default arm.
-            allow_switch_warning=func.name in sigs.BUILTIN_FUNCTIONS,
+            allow_switch_warning=(
+                "." not in func.name and func.name in sigs.BUILTIN_FUNCTIONS
+            ),
         )
         return False
 

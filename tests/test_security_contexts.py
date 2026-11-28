@@ -104,7 +104,7 @@ def test_issue_694_case_5_reads_the_engine_chart_publication():
     compile_cpp(cpp, label="issue-694-case-5-chart-publication")
 
 
-def test_issue_694_case_5_publishes_the_final_daily_close_on_every_hour():
+def test_issue_694_case_5_publishes_the_final_daily_close_on_every_hour(monkeypatch):
     cpp = transpile(
         '//@version=6\nstrategy("issue 694 case 5 values")\n'
         'daily = request.security(syminfo.tickerid, "D", close, '
@@ -113,52 +113,83 @@ def test_issue_694_case_5_publishes_the_final_daily_close_on_every_hour():
     )
     # Keep the real batch scheduler; observe the Pine value after each chart body.
     driver = r"""
+#include <iomanip>
 #include <iostream>
 #include <vector>
 
 struct DailyCloseCapture : GeneratedStrategy {
+    int first_hour = 0;
+
     void on_source_bar(const pineforge::Bar& bar) override {
         GeneratedStrategy::on_source_bar(bar);
-        std::cout << bar.timestamp << ' ' << bar.close << ' '
+        std::cout << first_hour << ' ' << bar.timestamp << ' ' << bar.close << ' '
                   << static_cast<double>(daily) << '\n';
     }
 };
 
 int main() {
-    std::vector<pineforge::Bar> bars(72);
-    for (int i = 0; i < 72; ++i) {
+    std::vector<pineforge::Bar> bars(73);
+    for (int i = 0; i < 73; ++i) {
         auto& bar = bars[i];
         bar.timestamp = 1704067200000LL + i * 3600000LL;  // 2024-01-01 00:00 UTC
-        bar.open = bar.high = bar.low = bar.close = 100.0 + i;
+        bar.close = 100.0 + (i * 17 % 73) + 0x1p-30;
+        bar.open = bar.close - 0.25;
+        bar.high = bar.close + 0.5;
+        bar.low = bar.close - 0.75;
         bar.volume = 1.0;
     }
-    DailyCloseCapture strategy;
-    strategy.set_syminfo_session("24x7");  // The engine's default timezone is UTC.
-    strategy.run(bars.data(), bars.size(), "60", "60");
-    if (!strategy.last_error().empty()) {
-        std::cerr << "NOT COMPARED: expected no engine error, got "
-                  << strategy.last_error() << '\n';
-        return 1;
+    std::cout << std::setprecision(17);
+    for (int first_hour : {0, 12}) {
+        DailyCloseCapture strategy;
+        strategy.first_hour = first_hour;
+        strategy.set_syminfo_session("24x7");  // The engine's default timezone is UTC.
+        const int stop_hour = first_hour == 0 ? 73 : 62;
+        strategy.run(bars.data() + first_hour, stop_hour - first_hour, "60", "60");
+        if (!strategy.last_error().empty()) {
+            std::cerr << "NOT COMPARED: starting hour " << first_hour
+                      << ", expected no engine error, got " << strategy.last_error() << '\n';
+            return 1;
+        }
     }
 }
 """
+    monkeypatch.setenv("TZ", "EST5")  # A process-local midnight is 05:00 UTC.
     output = run_emitted_tu(cpp, driver, opt="-O0", label="issue-694-case-5-values")
     rows = [line.split() for line in output.splitlines()]
-    assert len(rows) == 72, (
-        f"NOT COMPARED: expected 72 hourly chart callbacks, got {len(rows)}"
-    )
-    for i, row in enumerate(rows):
-        expected_chart = (1704067200000 + i * 3600000, 100.0 + i)
-        assert len(row) == 3, f"NOT COMPARED: row {i} expected 3 fields, got {row!r}"
-        actual_chart = (int(row[0]), float(row[1]))
-        assert actual_chart == expected_chart, (
-            f"NOT COMPARED: hour {i} expected chart {expected_chart}, got {actual_chart}"
-        )
-    daily_closes = [float(row[2]) for row in rows]
-    assert daily_closes == [close for close in (123.0, 147.0, 171.0) for _ in range(24)]
-    assert [i for i, row in enumerate(rows) if daily_closes[i] == float(row[1])] == [
-        23, 47, 71,
+    offset = 2.0 ** -30
+    # The last supplied close in each UTC day, including both truncated tails.
+    windows = ((0, 73, (126, 169, 139, 156)), (12, 62, (126, 169, 115)))
+    expected_rows = [
+        (start, hour, closes[hour // 24] + offset)
+        for start, stop, closes in windows for hour in range(start, stop)
     ]
+    assert len(rows) == len(expected_rows), (
+        f"NOT COMPARED: expected {len(expected_rows)} hourly chart callbacks "
+        f"(73 from midnight, 50 from noon), got {len(rows)}"
+    )
+    observed_closes = []
+    for (start, hour, _), row in zip(expected_rows, rows, strict=True):
+        expected_chart = (
+            start, 1704067200000 + hour * 3600000, 100.0 + hour * 17 % 73 + offset
+        )
+        assert len(row) == 4, f"NOT COMPARED: expected 4 fields for {expected_chart}, got {row!r}"
+        try:
+            actual_chart = (int(row[0]), int(row[1]), float(row[2]))
+            observed_closes.append((actual_chart[2], float(row[3])))
+        except ValueError:
+            pytest.fail(f"NOT COMPARED: expected chart {expected_chart}, got {row!r}")
+        assert actual_chart == expected_chart, (
+            f"NOT COMPARED: expected chart {expected_chart}, got {actual_chart}"
+        )
+    for (start, hour, expected), (_, actual) in zip(expected_rows, observed_closes, strict=True):
+        assert actual == expected, (
+            f"starting hour {start}, chart hour {hour}: expected daily close {expected}, got {actual}"
+        )
+    assert [
+        (start, hour)
+        for (start, hour, _), (chart, daily) in zip(expected_rows, observed_closes, strict=True)
+        if daily == chart
+    ] == [(0, 23), (0, 47), (0, 71), (0, 72), (12, 23), (12, 47), (12, 61)]
 
 
 def test_issue_694_offset_control_keeps_legacy_cpp_byte_identical(monkeypatch):
