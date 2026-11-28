@@ -1,16 +1,12 @@
 # TAIL-E TradingView trade evidence
 
 Synthetic probes for requested-context evaluation and their unedited TradingView trade
-exports. They contain no closed or scraped source. Each was exported on
-2026-09-28 / 09-29 (UTC) with
+exports. They contain no closed or third-party source. Each was exported on
+2026-09-28 / 09-29 (UTC) from a TradingView run on the chart and range the
+table below gives.
 
-```bash
-lab tv --pine <name>.pine --slug pf-<name, underscores as dashes>-<chart> --no-note \
-  --symbol <symbol> --interval <interval> --from <from> --to <to>
-```
-
-TradingView ran each from the `from` date at 00:00 UTC (the export's
-requested and returned range, `rangeProof: covered`). The tapes' `Date and
+TradingView ran each from its range's first date at 00:00 UTC (the export's
+requested and returned range). The tapes' `Date and
 time` column is the exporting account's chart timezone, Asia/Taipei (UTC+8).
 A probe spells the values under test in its orders: most send an entry named
 by the text on a flat bar and close the position with the text as the comment

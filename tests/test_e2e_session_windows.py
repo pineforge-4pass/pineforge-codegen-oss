@@ -162,7 +162,7 @@ def _recorded_window_tape(slug: str) -> tuple[set[str], set[str]]:
         == metrics["tvTradesCsvHash"], slug
     assert hashlib.sha256(tape_file(slug, "strategy.pine").read_bytes()).hexdigest() \
         == metrics["sourceArtifactHash"], slug
-    assert metrics["wsProvenance"]["rangeProof"] == "covered", slug
+    assert metrics["range"]["covered"] is True, slug
     tape = read_tape(slug)
     assert len(tape) == bars == metrics["trades"], slug
     assert all(flags["M"] and not flags["P"] and not flags["Q"] for _, flags in tape), slug

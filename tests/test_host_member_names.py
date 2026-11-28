@@ -396,7 +396,9 @@ def test_tradingview_keeps_builtins_beside_host_named_variables() -> None:
         == metrics["tvTradesCsvHash"]
     assert hashlib.sha256(tape_file("strategy.pine").read_bytes()).hexdigest() \
         == metrics["sourceArtifactHash"]
-    assert metrics["wsProvenance"]["rangeProof"] == "covered"
+    assert (metrics["range"]["covered"] is True
+            and metrics["range"]["returned"]["from"] <= metrics["range"]["requested"]["from"]
+            and metrics["range"]["returned"]["to"] >= metrics["range"]["requested"]["to"])
     tape = [values for _, values in read_host_tape()]
     assert len(tape) == metrics["trades"] == 260
 

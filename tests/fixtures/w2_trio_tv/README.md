@@ -1,16 +1,14 @@
 # W2 lowering-trio TradingView trade evidence
 
 Synthetic public probes for lowering cases and their
-unedited TradingView trade exports. They contain no closed or scraped source.
-Each was exported with `lab tv --no-note`; the tapes' `Date and time` column is
+unedited TradingView trade exports. They contain no closed or third-party
+source. The tapes' `Date and time` column is
 the exporting account's chart timezone, Asia/Taipei (UTC+8).
 
 ## fixnan over a stateful call
 
-```bash
-lab tv --pine fixnan_adx.pine --slug pf-w2-fixnan_adx --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-05-01
-```
+`fixnan_adx` was exported from a TradingView run on BINANCE:ETHUSDT.P at 15
+minutes for 2025-04-01 to 2025-05-01.
 
 | File | sha256 |
 |---|---|
@@ -27,10 +25,8 @@ days are the indicators' warm-up; the replay compares the trades entered from
 
 ## Argument evaluation counts
 
-```bash
-lab tv --pine eval_counts.pine --slug pf-w2-eval_counts --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-03
-```
+`eval_counts` was exported from a TradingView run on BINANCE:ETHUSDT.P at 15
+minutes for 2025-04-01 to 2025-04-03.
 
 | File | sha256 |
 |---|---|
@@ -50,12 +46,12 @@ array (`6`).
 
 ## A function's last statement
 
-Each probe was exported with `lab tv --no-note --symbol BINANCE:ETHUSDT.P
---interval 15 --from 2025-04-01 --to 2025-04-03` (7 trades each). Every exit
+Each probe was exported from a TradingView run on BINANCE:ETHUSDT.P at 15
+minutes for 2025-04-01 to 2025-04-03 (7 trades each). Every exit
 comment spells what the functions returned on the exit bar, then the bar's
 close (and open).
 
-| Probe (`--slug`) | File | sha256 (source / tape) | Exported |
+| Probe | File | sha256 (source / tape) | Exported |
 |---|---|---|---|
 | `pf-w2-f04_reassign_tails` | `tail_reassign` | `36da06f7c3814d7c82d8d355055b65b9beaf7b87a09b5c23d4249c004b6b2e8e` / `16f790439beb79a1cf4e016a0b7a68578b61896aca44fccfb164554a0e275863` | 2026-09-27 |
 | `pf-w2-f04_decl_tail` | `tail_decl` | `1805668718480ce53e486669aec542f70a923963ee9c3b0ed84775496afc094c` / `a50e1ad3af7c09cc7f67d7aa56f765f66f89cd640b416068a0f96c30cd3504c7` | 2026-09-26 |
@@ -91,10 +87,8 @@ expression cannot be assigned to a variable", CE10098).
 
 ## syminfo.mincontract
 
-```bash
-lab tv --pine mincontract_exit.pine --slug pf-w2-mincontract_exit --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-03
-```
+`mincontract_exit` was exported from a TradingView run on BINANCE:ETHUSDT.P
+at 15 minutes for 2025-04-01 to 2025-04-03.
 
 | File | sha256 |
 |---|---|

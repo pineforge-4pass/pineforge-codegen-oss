@@ -1,8 +1,7 @@
 {
   "title": "w11 color v6",
   "slug": "w11-color-v6-eth15",
-  "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
+  "source": "a TradingView run on 2026-09-28: BINANCE:ETHUSDT.P, 15 minutes, 2025-04-01 to 2025-04-04",
   "exportedAt": "2026-09-28T07:08:13.629Z",
   "chart": {
     "symbol": "BINANCE:ETHUSDT.P",

@@ -3,16 +3,12 @@
 Synthetic probes for a `request.security` payload that
 reads the history of a global bound to a multi-statement user function,
 reached through two helpers' parameters) and their unedited TradingView trade
-exports. They contain no closed or scraped source. Each was exported on
-2026-09-28 with
-
-```bash
-lab tv --pine <name>.pine --slug pf-<name, underscores as dashes>-eth15 --no-note \
-  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-08
-```
+exports. They contain no closed or third-party source. Each was exported on
+2026-09-28 from a TradingView run on BINANCE:ETHUSDT.P at 15 minutes for
+2025-04-01 to 2025-04-08.
 
 TradingView ran each from 2025-04-01 00:00 UTC to 2025-04-08 00:00 UTC (the
-export's requested and returned range, `rangeProof: covered`). The tapes'
+export's requested and returned range). The tapes'
 `Date and time` column is the exporting account's chart timezone,
 Asia/Taipei (UTC+8). Each probe opens a position on every bar and closes the
 previous one with process_orders_on_close, so every chart bar but the first

@@ -1,8 +1,7 @@
 {
   "title": "mi-fx-eth-15",
   "slug": "mi-fx-eth-15",
-  "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
+  "source": "a TradingView run on 2026-09-26: BINANCE:ETHUSDT.P, 15 minutes, 2026-01-29 to 2026-02-01",
   "exportedAt": "2026-09-26T04:59:09.749Z",
   "chart": {
     "symbol": "BINANCE:ETHUSDT.P",

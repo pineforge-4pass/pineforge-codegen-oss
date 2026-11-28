@@ -280,7 +280,9 @@ def test_tapes_are_the_recorded_exports() -> None:
         pine_bytes = tape_file(slug, "strategy.pine").read_bytes()
         assert hashlib.sha256(tape_bytes).hexdigest() == metrics["tvTradesCsvHash"], slug
         assert hashlib.sha256(pine_bytes).hexdigest() == metrics["sourceArtifactHash"], slug
-        assert metrics["wsProvenance"]["rangeProof"] == "covered", slug
+        assert (metrics["range"]["covered"] is True
+                and metrics["range"]["returned"]["from"] <= metrics["range"]["requested"]["from"]
+                and metrics["range"]["returned"]["to"] >= metrics["range"]["requested"]["to"]), slug
         tape = read_tape(slug)
         assert len(tape) == metrics["trades"], slug
         values = [flags for _, flags in tape]
@@ -298,7 +300,9 @@ def test_tapes_are_the_recorded_exports() -> None:
         == metrics["tvTradesCsvHash"]
     assert hashlib.sha256(tape_file(FUNCTIONS, "strategy.pine").read_bytes()).hexdigest() \
         == metrics["sourceArtifactHash"]
-    assert metrics["wsProvenance"]["rangeProof"] == "covered"
+    assert (metrics["range"]["covered"] is True
+            and metrics["range"]["returned"]["from"] <= metrics["range"]["requested"]["from"]
+            and metrics["range"]["returned"]["to"] >= metrics["range"]["requested"]["to"])
     tape = read_function_tape()
     assert len(tape) == metrics["trades"] == 639
     values = [flags for _, flags in tape]
