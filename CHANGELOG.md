@@ -28,6 +28,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   `PINEFORGE_HAS_SECURITY_CHART_PUBLICATION_V1`; offset payloads and other
   request shapes retain their existing route. Regenerate and relink with the
   paired engine.
+- The order-shapes receipt's `host_reads` list gains `tf_change` for scripts
+  that call `timeframe.change()` and `register_security_chart_eval` for the
+  routed daily `request.security()` shape above.
 - In the then body of a top-level chart `if`, a direct reassignment such as
   `x := ta.lowest(src, length)` uses the last `length` executions. This covers
   `ta.lowest` and `ta.highest` with literal, input, simple or series lengths,
